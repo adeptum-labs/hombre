@@ -105,8 +105,10 @@ run: image
 
 check: image image-nokernel
 	tools/boot_check.sh "Hombre loader" "kernel loaded: entry=0xffffffff8010" \
-	    "Hombre kernel booted" "usable memory:"
+	    "Hombre kernel booted" "usable memory:" "lower half unmapped" \
+	    "cpu0 percpu ok" "halting"
 	tools/boot_check.sh --no-kernel "KERNEL.ELF not found"
+	tools/boot_check.sh --no-gop "no framebuffer" "halting"
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.
