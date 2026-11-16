@@ -25,6 +25,7 @@
 #include "../common/serial.hpp"
 #include "framebuffer.hpp"
 #include "gdt.hpp"
+#include "idt.hpp"
 #include "percpu.hpp"
 
 using namespace hombre;
@@ -51,8 +52,7 @@ u64 usable_mib(const BootInfo& info) {
 
 // The loader's identity map is still in the page tables. Clearing the lower
 // half of the PML4 removes it, and reloading CR3 flushes the TLB. Nothing may
-// use a lower-half address afterwards, including the firmware's GDT and IDT
-// (see kmain).
+// use a lower-half address afterwards.
 void unmap_lower_half(u64 direct_map_base) {
     u64 cr3;
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
@@ -77,11 +77,6 @@ void draw_banner(const BootInfo& info) {
 
 }
 
-// Known limitation: the CPU still points at the firmware's GDT and IDT. They
-// live in memory that is unmapped once the lower half is dropped, or that
-// becomes reusable, so an exception or NMI would triple fault. A kernel GDT
-// and IDT must be installed before interrupts are ever enabled. The GDT is now
-// the kernel's own; the IDT is still the firmware's.
 extern "C" [[noreturn]] void kmain(BootInfo* info) {
     serial::init();
     if (info == nullptr || info->magic != boot_info_magic ||
@@ -96,6 +91,20 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         halt();
     }
     serial::write("gdt loaded\n");
+
+    idt_init_bsp();
+    if (!idt_loaded()) {
+        serial::write("idt failed\n");
+        halt();
+    }
+    serial::write("idt loaded\n");
+
+    asm volatile("int3" : : : "memory");
+    if (trap_breakpoint_count() != 1) {
+        serial::write("breakpoint failed\n");
+        halt();
+    }
+    serial::write("breakpoint ok\n");
 
     unmap_lower_half(info->direct_map_base);
     serial::write("lower half unmapped\n");
