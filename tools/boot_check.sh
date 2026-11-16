@@ -30,13 +30,13 @@ ovmf_dir=/usr/share/OVMF
 build_dir="$(dirname "$0")/../build"
 
 image_name=hombre.img
+vga_args=()
 while [[ ${1:-} == --* ]]; do
     case $1 in
         --no-kernel) image_name=hombre-nokernel.img ;;
-        # Parsed so callers can already pass it, but there is no GOP-less
-        # machine yet; failing keeps a caller from trusting a test that
-        # did not run.
-        --no-gop) echo "--no-gop: not implemented" >&2; exit 2 ;;
+        # Without a display adapter the q35 machine has no GOP, so the
+        # loader hands over a BootInfo without a framebuffer.
+        --no-gop) vga_args=(-vga none) ;;
         *) echo "$usage" >&2; exit 2 ;;
     esac
     shift
@@ -53,7 +53,7 @@ cp "$ovmf_dir/OVMF_VARS_4M.fd" "$build_dir/OVMF_VARS.fd"
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
 # error while the firmware is still in 32-bit mode.
 qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
-    -display none -no-reboot -serial "file:$serial_log" \
+    "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
     -drive if=pflash,format=raw,file="$build_dir/OVMF_VARS.fd" \
     -drive format=raw,file="$image" &
