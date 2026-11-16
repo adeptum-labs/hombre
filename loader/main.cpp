@@ -38,7 +38,11 @@ extern "C" EfiStatus efi_main(EfiHandle image, EfiSystemTable* system_table) {
         handoff_to_kernel(image, system_table, kernel);
     }
 
+    // Keep the firmware's watchdog from resetting the machine and wiping the
+    // error message. Firmware without a watchdog fails the call, which is
+    // harmless.
+    system_table->boot_services->set_watchdog_timer(0, 0, 0, nullptr);
     for (;;) {
-        asm volatile("hlt");
+        asm volatile("cli; hlt");
     }
 }
