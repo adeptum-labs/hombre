@@ -39,16 +39,17 @@ enum class EfiMemoryType : u32 {
     LoaderData,
 };
 
-// Only the services up to HandleProtocol are declared; the rest of the table
-// is kept as placeholders so the offsets of the used entries stay right.
+// Services the loader does not call are kept as placeholders so the offsets
+// of the used entries stay right.
 struct EfiBootServices {
     EfiTableHeader header;
     void* raise_tpl;
     void* restore_tpl;
     EfiStatus (*allocate_pages)(EfiAllocateType type, EfiMemoryType memory_type, usize pages,
                                 u64* address);
-    void* free_pages;
-    void* get_memory_map;
+    EfiStatus (*free_pages)(u64 address, usize pages);
+    EfiStatus (*get_memory_map)(usize* map_size, void* map, usize* map_key,
+                                usize* descriptor_size, u32* descriptor_version);
     EfiStatus (*allocate_pool)(EfiMemoryType memory_type, usize size, void** buffer);
     EfiStatus (*free_pool)(void* buffer);
     void* create_event;
@@ -61,6 +62,40 @@ struct EfiBootServices {
     void* reinstall_protocol_interface;
     void* uninstall_protocol_interface;
     EfiStatus (*handle_protocol)(EfiHandle handle, const EfiGuid* protocol, void** interface);
+    void* reserved;
+    void* register_protocol_notify;
+    void* locate_handle;
+    void* locate_device_path;
+    void* install_configuration_table;
+    void* load_image;
+    void* start_image;
+    void* exit;
+    void* unload_image;
+    EfiStatus (*exit_boot_services)(EfiHandle image, usize map_key);
+    void* get_next_monotonic_count;
+    void* stall;
+    EfiStatus (*set_watchdog_timer)(usize timeout, u64 code, usize data_size,
+                                    const char16_t* data);
+    void* connect_controller;
+    void* disconnect_controller;
+    void* open_protocol;
+    void* close_protocol;
+    void* open_protocol_information;
+    void* protocols_per_handle;
+    void* locate_handle_buffer;
+    EfiStatus (*locate_protocol)(const EfiGuid* protocol, void* registration, void** interface);
+};
+
+static_assert(__builtin_offsetof(EfiBootServices, allocate_pages) == 40);
+static_assert(__builtin_offsetof(EfiBootServices, get_memory_map) == 56);
+static_assert(__builtin_offsetof(EfiBootServices, handle_protocol) == 152);
+static_assert(__builtin_offsetof(EfiBootServices, exit_boot_services) == 232);
+static_assert(__builtin_offsetof(EfiBootServices, set_watchdog_timer) == 256);
+static_assert(__builtin_offsetof(EfiBootServices, locate_protocol) == 320);
+
+struct EfiConfigurationTable {
+    EfiGuid vendor_guid;
+    void* vendor_table;
 };
 
 struct EfiSystemTable {
@@ -75,12 +110,19 @@ struct EfiSystemTable {
     void* std_err;
     void* runtime_services;
     EfiBootServices* boot_services;
+    usize number_of_table_entries;
+    EfiConfigurationTable* configuration_table;
 };
+
+static_assert(__builtin_offsetof(EfiSystemTable, boot_services) == 96);
+static_assert(__builtin_offsetof(EfiSystemTable, configuration_table) == 112);
 
 constexpr EfiStatus efi_error_bit = 1ull << 63;
 
 constexpr EfiStatus efi_success = 0;
 constexpr EfiStatus efi_load_error = efi_error_bit | 1;
+constexpr EfiStatus efi_invalid_parameter = efi_error_bit | 2;
+constexpr EfiStatus efi_buffer_too_small = efi_error_bit | 5;
 constexpr EfiStatus efi_out_of_resources = efi_error_bit | 9;
 constexpr EfiStatus efi_not_found = efi_error_bit | 14;
 
@@ -118,5 +160,41 @@ constexpr EfiGuid efi_loaded_image_guid = {
     0x5B1B31A1, 0x9562, 0x11D2, {0x8E, 0x3F, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
 constexpr EfiGuid efi_simple_file_system_guid = {
     0x964E5B22, 0x6459, 0x11D2, {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}};
+constexpr EfiGuid efi_graphics_output_guid = {
+    0x9042A9DE, 0x23DC, 0x4A38, {0x96, 0xFB, 0x7A, 0xDE, 0xD0, 0x80, 0x51, 0x6A}};
+constexpr EfiGuid efi_acpi_20_table_guid = {
+    0x8868E871, 0xE4F1, 0x11D3, {0xBC, 0x22, 0x00, 0x80, 0xC7, 0x3C, 0x88, 0x81}};
+
+enum class EfiPixelFormat : u32 {
+    RedGreenBlueReserved8,
+    BlueGreenRedReserved8,
+    BitMask,
+    BltOnly,
+};
+
+struct EfiGraphicsModeInfo {
+    u32 version;
+    u32 horizontal_resolution;
+    u32 vertical_resolution;
+    EfiPixelFormat pixel_format;
+    u32 pixel_bitmask[4];
+    u32 pixels_per_scan_line;
+};
+
+struct EfiGraphicsMode {
+    u32 max_mode;
+    u32 mode;
+    EfiGraphicsModeInfo* info;
+    usize size_of_info;
+    u64 frame_buffer_base;
+    usize frame_buffer_size;
+};
+
+struct EfiGraphicsOutput {
+    void* query_mode;
+    void* set_mode;
+    void* blt;
+    EfiGraphicsMode* mode;
+};
 
 }

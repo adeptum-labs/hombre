@@ -83,7 +83,8 @@ run: image
 	    -drive format=raw,file=$(IMAGE)
 
 check: image image-nokernel
-	tools/boot_check.sh "Hombre loader" "kernel loaded: entry=0xffffffff8010"
+	tools/boot_check.sh "Hombre loader" "kernel loaded: entry=0xffffffff8010" \
+	    "Hombre kernel booted" "usable memory:"
 	tools/boot_check.sh --no-kernel "KERNEL.ELF not found"
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the

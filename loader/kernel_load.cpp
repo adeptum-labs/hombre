@@ -1,59 +1,13 @@
 #include "kernel_load.hpp"
 
+#include "../common/boot_info.hpp"
 #include "../common/elf.hpp"
 #include "../common/serial.hpp"
+#include "error_line.hpp"
 
 namespace hombre {
 
 namespace {
-
-constexpr usize message_capacity = 160;
-
-// Builds one diagnostic line and sends it to both the serial port and the
-// firmware console.
-class ErrorLine {
-public:
-    explicit ErrorLine(const char* text) { append(text); }
-
-    ErrorLine& append(const char* text) {
-        for (; *text && length_ < message_capacity - 1; ++text) {
-            buffer_[length_++] = *text;
-        }
-        return *this;
-    }
-
-    ErrorLine& append_hex(u64 value) {
-        char digits[16];
-        int count = 0;
-        do {
-            digits[count++] = "0123456789abcdef"[value & 0xF];
-            value >>= 4;
-        } while (value);
-        append("0x");
-        while (count && length_ < message_capacity - 1) {
-            buffer_[length_++] = digits[--count];
-        }
-        return *this;
-    }
-
-    void emit(EfiSystemTable* st) const {
-        char16_t wide[message_capacity + 2];
-        usize i = 0;
-        for (; i < length_; ++i) {
-            serial::write_char(buffer_[i]);
-            wide[i] = static_cast<char16_t>(buffer_[i]);
-        }
-        serial::write_char('\n');
-        wide[i++] = u'\r';
-        wide[i++] = u'\n';
-        wide[i] = u'\0';
-        st->con_out->output_string(st->con_out, wide);
-    }
-
-private:
-    char buffer_[message_capacity];
-    usize length_ = 0;
-};
 
 EfiStatus fail(EfiSystemTable* st, EfiStatus status, const char* text) {
     ErrorLine(text).emit(st);
@@ -190,13 +144,26 @@ EfiStatus load_kernel(EfiHandle image, EfiSystemTable* st, LoadedKernel& out) {
         return fail(st, efi_load_error, "KERNEL.ELF invalid: entry outside loaded segments");
     }
 
-    // Check every range before claiming anything.
+    // Check every range before claiming anything. The kernel is only reachable
+    // through the mapping of kKernelBase + x to x for the first
+    // kKernelWindowSize bytes, so every segment must sit inside it.
     for (u32 i = 0; i < elf.segment_count; ++i) {
+        const Segment& seg = elf.segments[i];
         u64 start = 0;
         u64 end = 0;
-        if (!page_range(elf.segments[i].paddr, elf.segments[i].mem_size, start, end)) {
+        if (!page_range(seg.paddr, seg.mem_size, start, end)) {
             bs->free_pool(file);
             return fail(st, efi_load_error, "KERNEL.ELF invalid: segment address overflow");
+        }
+        if (seg.vaddr - seg.paddr != kKernelBase) {
+            bs->free_pool(file);
+            return fail(st, efi_load_error,
+                        "KERNEL.ELF invalid: segment not at the kernel base offset");
+        }
+        if (end > kKernelWindowSize) {
+            bs->free_pool(file);
+            return fail(st, efi_load_error,
+                        "KERNEL.ELF invalid: segment beyond the kernel window");
         }
     }
 

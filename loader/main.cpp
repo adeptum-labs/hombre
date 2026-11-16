@@ -1,4 +1,5 @@
 #include "../common/serial.hpp"
+#include "handoff.hpp"
 #include "kernel_load.hpp"
 #include "uefi.hpp"
 
@@ -10,7 +11,9 @@ extern "C" EfiStatus efi_main(EfiHandle image, EfiSystemTable* system_table) {
     system_table->con_out->output_string(system_table->con_out, u"Hombre loader\r\n");
 
     LoadedKernel kernel{};
-    load_kernel(image, system_table, kernel);
+    if (load_kernel(image, system_table, kernel) == efi_success) {
+        handoff_to_kernel(image, system_table, kernel);
+    }
 
     for (;;) {
         asm volatile("hlt");
