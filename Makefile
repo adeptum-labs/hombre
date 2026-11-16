@@ -105,7 +105,7 @@ run: image
 
 check: image image-nokernel
 	tools/boot_check.sh "Hombre loader" "kernel loaded: entry=0xffffffff8010" \
-	    "Hombre kernel booted" "usable memory:" "lower half unmapped" \
+	    "Hombre kernel booted" "usable memory:" "gdt loaded" "lower half unmapped" \
 	    "cpu0 percpu ok" "framebuffer: " "halting"
 	tools/boot_check.sh --no-kernel "KERNEL.ELF not found"
 	tools/boot_check.sh --no-gop "no framebuffer" "halting"

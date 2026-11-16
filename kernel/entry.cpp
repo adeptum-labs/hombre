@@ -24,6 +24,7 @@
 #include "../common/boot_info.hpp"
 #include "../common/serial.hpp"
 #include "framebuffer.hpp"
+#include "gdt.hpp"
 #include "percpu.hpp"
 
 using namespace hombre;
@@ -79,7 +80,8 @@ void draw_banner(const BootInfo& info) {
 // Known limitation: the CPU still points at the firmware's GDT and IDT. They
 // live in memory that is unmapped once the lower half is dropped, or that
 // becomes reusable, so an exception or NMI would triple fault. A kernel GDT
-// and IDT must be installed before interrupts are ever enabled.
+// and IDT must be installed before interrupts are ever enabled. The GDT is now
+// the kernel's own; the IDT is still the firmware's.
 extern "C" [[noreturn]] void kmain(BootInfo* info) {
     serial::init();
     if (info == nullptr || info->magic != boot_info_magic ||
@@ -87,6 +89,13 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write("kernel: unexpected boot info\n");
         halt();
     }
+
+    gdt_init_bsp();
+    if (read_cs() != kKernelCodeSelector || read_tr() != kTssSelector) {
+        serial::write("gdt failed\n");
+        halt();
+    }
+    serial::write("gdt loaded\n");
 
     unmap_lower_half(info->direct_map_base);
     serial::write("lower half unmapped\n");
