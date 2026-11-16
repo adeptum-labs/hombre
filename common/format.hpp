@@ -23,10 +23,12 @@
 
 #pragma once
 
-#include "../common/types.hpp"
+#include "types.hpp"
 
 namespace hombre {
 
+// The one number formatter: serial output and loader diagnostics are built on it.
+//
 // Writes `value` in base 10 or 16 (lowercase, no prefix) to buf as a NUL
 // terminated string and returns the number of digits. Returns 0, leaving buf
 // alone, for any other base, a null buf, or a capacity too small for the

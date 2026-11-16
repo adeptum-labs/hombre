@@ -101,6 +101,36 @@ void formats_u64_max_both_bases() {
     CHECK(hex.guards_intact());
 }
 
+// The serial writers and ErrorLine::append_hex print exactly these strings:
+// the shortest form of the value, with no padding and no prefix.
+void formats_what_the_writers_print() {
+    struct Case {
+        u64 value;
+        const char* dec;
+        const char* hex;
+    };
+    const Case cases[] = {
+        {0, "0", "0"},
+        {9, "9", "9"},
+        {10, "10", "a"},
+        {255, "255", "ff"},
+        {0xDEADBEEF, "3735928559", "deadbeef"},
+        {~0ull, "18446744073709551615", "ffffffffffffffff"},
+    };
+    // The buffer sizes the callers use: 21 for decimal, 17 for hex.
+    for (const Case& c : cases) {
+        Guarded dec(21);
+        CHECK_EQ(format(dec, c.value, 10), std::strlen(c.dec));
+        CHECK(std::strcmp(dec.data(), c.dec) == 0);
+        CHECK(dec.guards_intact());
+
+        Guarded hex(17);
+        CHECK_EQ(format(hex, c.value, 16), std::strlen(c.hex));
+        CHECK(std::strcmp(hex.data(), c.hex) == 0);
+        CHECK(hex.guards_intact());
+    }
+}
+
 void rejects_small_buffer() {
     // One byte short of the digits plus the terminator.
     Guarded dec(20);
@@ -139,6 +169,7 @@ int main() {
     formats_decimal();
     formats_hex_lowercase();
     formats_u64_max_both_bases();
+    formats_what_the_writers_print();
     rejects_small_buffer();
     rejects_unsupported_bases();
     return check::finish("test_format");

@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "../common/format.hpp"
 #include "../common/serial.hpp"
 #include "../common/types.hpp"
 #include "uefi.hpp"
@@ -43,17 +44,9 @@ public:
     }
 
     ErrorLine& append_hex(u64 value) {
-        char digits[16];
-        int count = 0;
-        do {
-            digits[count++] = "0123456789abcdef"[value & 0xF];
-            value >>= 4;
-        } while (value);
-        append("0x");
-        while (count && length_ < capacity - 1) {
-            buffer_[length_++] = digits[--count];
-        }
-        return *this;
+        char digits[17];  // 16 hex digits and the terminator
+        format_u64(digits, sizeof(digits), value, 16);
+        return append("0x").append(digits);
     }
 
     // With st == nullptr the line goes to the serial port only, which is all

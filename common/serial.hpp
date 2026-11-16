@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "format.hpp"
 #include "port_io.hpp"
 #include "types.hpp"
 
@@ -53,29 +54,21 @@ inline void write(const char* text) {
     }
 }
 
-// Lowercase, unpadded and without a "0x" prefix; callers print any prefix.
-inline void write_hex(u64 value) {
-    char digits[16];
-    int count = 0;
-    do {
-        digits[count++] = "0123456789abcdef"[value & 0xF];
-        value >>= 4;
-    } while (value);
-    while (count) {
-        write_char(digits[--count]);
+// Both writers print through format_u64: lowercase hex without padding and
+// without a "0x" prefix (callers print any prefix), or plain decimal.
+inline void write_number(u64 value, unsigned base) {
+    char text[21];  // 20 decimal digits for u64 max, plus the terminator
+    if (format_u64(text, sizeof(text), value, base) != 0) {
+        write(text);
     }
 }
 
+inline void write_hex(u64 value) {
+    write_number(value, 16);
+}
+
 inline void write_dec(u64 value) {
-    char digits[20];
-    int count = 0;
-    do {
-        digits[count++] = static_cast<char>('0' + value % 10);
-        value /= 10;
-    } while (value);
-    while (count) {
-        write_char(digits[--count]);
-    }
+    write_number(value, 10);
 }
 
 }
