@@ -173,17 +173,92 @@ void rejects_unknown_flag_bits() {
     CHECK(tables.ok());
 }
 
+// The raw-walk tests below read the tables with literal indices and masks
+// and do not use anything from paging_detail, so a wrong shift or mask in the
+// builder cannot be mirrored by the checker.
+
+// Physical address of the n-th page the arena handed out.
+u64 arena_page(usize n) {
+    return static_cast<u64>(reinterpret_cast<std::uintptr_t>(arena.memory)) + n * 4096;
+}
+
+u64* raw_table(u64 phys) { return Arena::to_ptr(nullptr, phys); }
+
+// Every entry of the table at `phys` except the listed indices must be zero.
+bool zero_except(u64 phys, u64 a, u64 b = 512) {
+    const u64* table = raw_table(phys);
+    for (u64 i = 0; i < 512; ++i) {
+        if (i != a && i != b && table[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void builds_the_expected_higher_half_layout() {
+    arena.reset();
+    PageTables tables(arena.allocator());
+    CHECK(tables.map_2m(0xFFFFFFFF80000000ull, 0, 2 * k2M, Present | Writable));
+
+    // Allocation order: page 0 is the PML4, page 1 the PDPT, page 2 the PD.
+    CHECK_EQ(tables.root(), arena_page(0));
+    const u64* pml4 = raw_table(arena_page(0));
+    const u64* pdpt = raw_table(arena_page(1));
+    const u64* pd = raw_table(arena_page(2));
+    CHECK_EQ(pml4[511], arena_page(1) | 3);  // present, writable, no PS, no NX
+    CHECK_EQ(pdpt[510], arena_page(2) | 3);
+    CHECK_EQ(pd[0], 0x83ull);  // present, writable, 2 MiB page, phys 0
+    CHECK_EQ(pd[1], 0x200083ull);
+    CHECK(zero_except(arena_page(0), 511));
+    CHECK(zero_except(arena_page(1), 510));
+    CHECK(zero_except(arena_page(2), 0, 1));
+}
+
+void builds_the_expected_direct_map_layout() {
+    arena.reset();
+    PageTables tables(arena.allocator());
+    // Direct-map base plus five 2 MiB pages, no-execute, physical 0x40000000.
+    CHECK(tables.map_2m(0xFFFF800000000000ull + 5 * k2M, 0x40000000, k2M,
+                        Present | Writable | NoExecute));
+
+    const u64* pml4 = raw_table(arena_page(0));
+    const u64* pdpt = raw_table(arena_page(1));
+    const u64* pd = raw_table(arena_page(2));
+    CHECK_EQ(pml4[256], arena_page(1) | 3);
+    CHECK_EQ(pdpt[0], arena_page(2) | 3);
+    CHECK_EQ(pd[5], (1ull << 63) | 0x40000000ull | 0x83);
+    CHECK(zero_except(arena_page(0), 256));
+    CHECK(zero_except(arena_page(1), 0));
+    CHECK(zero_except(arena_page(2), 5));
+}
+
+void builds_the_expected_low_layout_with_all_indices_nonzero() {
+    arena.reset();
+    PageTables tables(arena.allocator());
+    // PML4 index 1, PDPT index 3, PD index 7.
+    const u64 virt = (1ull << 39) + 3 * 0x40000000ull + 7 * k2M;
+    CHECK(tables.map_2m(virt, 0x1200000, k2M, Present));
+
+    const u64* pml4 = raw_table(arena_page(0));
+    const u64* pdpt = raw_table(arena_page(1));
+    const u64* pd = raw_table(arena_page(2));
+    CHECK_EQ(pml4[1], arena_page(1) | 3);
+    CHECK_EQ(pdpt[3], arena_page(2) | 3);
+    CHECK_EQ(pd[7], 0x1200000ull | 0x81);  // present, read-only, 2 MiB page
+    CHECK(zero_except(arena_page(0), 1));
+    CHECK(zero_except(arena_page(1), 3));
+    CHECK(zero_except(arena_page(2), 7));
+}
+
 void leaf_entries_carry_the_requested_flags() {
     arena.reset();
     PageTables tables(arena.allocator());
     CHECK(tables.map_2m(0, 0, k2M, Writable));
     CHECK(tables.map_2m(k2M, k2M, k2M, Present | NoExecute));
 
-    const u64* first = paging_detail::find_pd_slot(arena.allocator(), tables.root(), 0);
-    const u64* second = paging_detail::find_pd_slot(arena.allocator(), tables.root(), k2M);
-    CHECK(first != nullptr && second != nullptr);
-    CHECK_EQ(*first, 0x83ull);  // present, writable, 2 MiB page
-    CHECK_EQ(*second, (1ull << 63) | k2M | 0x81);  // present, no-execute, 2 MiB page
+    const u64* pd = raw_table(arena_page(2));
+    CHECK_EQ(pd[0], 0x83ull);  // present, writable, 2 MiB page
+    CHECK_EQ(pd[1], (1ull << 63) | k2M | 0x81);  // present, no-execute, 2 MiB page
 }
 
 void remapping_is_refused_without_touching_the_tables() {
@@ -283,6 +358,9 @@ int main() {
     rejects_ranges_that_cross_the_hole_or_wrap();
     maps_up_to_the_top_of_the_address_space();
     rejects_unknown_flag_bits();
+    builds_the_expected_higher_half_layout();
+    builds_the_expected_direct_map_layout();
+    builds_the_expected_low_layout_with_all_indices_nonzero();
     leaf_entries_carry_the_requested_flags();
     remapping_is_refused_without_touching_the_tables();
     allocation_failure_reports_not_ok();
