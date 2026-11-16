@@ -44,9 +44,23 @@ run: image
 check: image
 	tools/boot_check.sh "Hombre loader"
 
-test:
+# Host unit tests: every tests/test_*.cpp is its own program, built with the
+# host compiler under the sanitizers and run in turn.
+HOSTCXX      := g++
+HOSTCXXFLAGS := -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined \
+                -fno-sanitize-recover=undefined -Icommon -Ikernel -I. -MMD -MP
+TEST_SRC     := $(wildcard tests/test_*.cpp)
+TEST_BIN     := $(TEST_SRC:tests/%.cpp=$(BUILD)/tests/%)
+
+$(BUILD)/tests/%: tests/%.cpp
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
+
+test: $(TEST_BIN)
+	@for t in $(TEST_BIN); do $$t || exit 1; done
 
 clean:
 	rm -rf $(BUILD)
 
 -include $(LOADER_OBJ:.o=.d)
+-include $(TEST_BIN:%=%.d)
