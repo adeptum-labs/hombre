@@ -8,17 +8,22 @@ timeout_seconds=20
 ovmf_dir=/usr/share/OVMF
 build_dir="$(dirname "$0")/../build"
 
-# TODO: select the kernel-less and GOP-less machine variants.
+image_name=hombre.img
 while [[ ${1:-} == --* ]]; do
     case $1 in
-        --no-kernel | --no-gop) ;;
+        --no-kernel) image_name=hombre-nokernel.img ;;
+        # Parsed so callers can already pass it, but there is no GOP-less
+        # machine yet; failing keeps a caller from trusting a test that
+        # did not run.
+        --no-gop) echo "--no-gop: not implemented" >&2; exit 2 ;;
         *) echo "$usage" >&2; exit 2 ;;
     esac
     shift
 done
 [[ $# -gt 0 ]] || { echo "$usage" >&2; exit 2; }
 
-[[ -f $build_dir/hombre.img ]] || { echo "missing $build_dir/hombre.img" >&2; exit 1; }
+image=$build_dir/$image_name
+[[ -f $image ]] || { echo "missing $image (run make image-nokernel or make image)" >&2; exit 1; }
 
 serial_log=$build_dir/serial.log
 : > "$serial_log"
@@ -30,9 +35,9 @@ qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
     -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
     -drive if=pflash,format=raw,file="$build_dir/OVMF_VARS.fd" \
-    -drive format=raw,file="$build_dir/hombre.img" &
+    -drive format=raw,file="$image" &
 qemu_pid=$!
-trap 'kill "$qemu_pid" 2>/dev/null || true' EXIT
+trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true' EXIT
 
 all_markers_present() {
     local marker

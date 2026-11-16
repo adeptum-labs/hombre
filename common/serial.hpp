@@ -43,4 +43,16 @@ inline void write_hex(u64 value) {
     }
 }
 
+inline void write_dec(u64 value) {
+    char digits[20];
+    int count = 0;
+    do {
+        digits[count++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    } while (value);
+    while (count) {
+        write_char(digits[--count]);
+    }
+}
+
 }

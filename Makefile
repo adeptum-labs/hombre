@@ -1,6 +1,10 @@
-BUILD := build
-IMAGE := $(BUILD)/hombre.img
-OVMF  := /usr/share/OVMF
+# A failed recipe must not leave a half-written target behind.
+.DELETE_ON_ERROR:
+
+BUILD        := build
+IMAGE        := $(BUILD)/hombre.img
+IMAGE_NOKERN := $(BUILD)/hombre-nokernel.img
+OVMF         := /usr/share/OVMF
 
 # The loader is a COFF object built by clang for the Windows target and
 # linked into a PE32+ image by GNU ld, which is what UEFI firmware loads.
@@ -12,23 +16,60 @@ CXXFLAGS := -target x86_64-windows-gnu -ffreestanding -fno-exceptions -fno-rtti 
 LDFLAGS  := -m i386pep --subsystem 10 -e efi_main
 
 LOADER_SRC := $(wildcard loader/*.cpp)
-LOADER_OBJ := $(LOADER_SRC:%.cpp=$(BUILD)/%.o)
+LOADER_OBJ := $(LOADER_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/loader/mem.o
 LOADER     := $(BUILD)/BOOTX64.EFI
 
-.PHONY: all image run check test clean
+# The kernel is an ELF64 executable built by g++ and linked at its physical
+# load address mapped into the higher half (see kernel/linker.ld).
+KCXX      := g++
+KLD       := ld.bfd
+KCXXFLAGS := -std=c++23 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector \
+             -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mno-sse -mno-mmx -nostdlib \
+             -Wall -Wextra -Werror -MMD -MP
+KLDFLAGS  := -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
+
+KERNEL_SRC := $(wildcard kernel/*.cpp)
+KERNEL_OBJ := $(KERNEL_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/kernel/mem.o
+KERNEL     := $(BUILD)/KERNEL.ELF
+
+.PHONY: all image image-nokernel run check test clean
 
 all: image
 
 image: $(IMAGE)
 
-$(BUILD)/%.o: %.cpp
+image-nokernel: $(IMAGE_NOKERN)
+
+$(filter-out %/mem.o,$(LOADER_OBJ)): $(BUILD)/%.o: %.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+$(filter-out %/mem.o,$(KERNEL_OBJ)): $(BUILD)/%.o: %.cpp
+	@mkdir -p $(@D)
+	$(KCXX) $(KCXXFLAGS) -c $< -o $@
+
+# The mem* routines are built once per target. -fno-builtin and
+# -fno-tree-loop-distribute-patterns keep the compilers from turning their
+# loops back into calls to the very functions being defined.
+$(BUILD)/loader/mem.o: common/mem.cpp
+	@mkdir -p $(@D)
+	$(CXX) $(CXXFLAGS) -fno-builtin -c $< -o $@
+
+$(BUILD)/kernel/mem.o: common/mem.cpp
+	@mkdir -p $(@D)
+	$(KCXX) $(KCXXFLAGS) -fno-builtin -fno-tree-loop-distribute-patterns -c $< -o $@
 
 $(LOADER): $(LOADER_OBJ)
 	$(LD) $(LDFLAGS) $^ -o $@
 
-$(IMAGE): $(LOADER) tools/make_image.sh
+$(KERNEL): $(KERNEL_OBJ) kernel/linker.ld
+	$(KLD) $(KLDFLAGS) $(KERNEL_OBJ) -o $@
+
+$(IMAGE): $(LOADER) $(KERNEL) tools/make_image.sh
+	tools/make_image.sh $@ $(LOADER) $(KERNEL)
+
+# Same disk without KERNEL.ELF, to exercise the loader's missing-file path.
+$(IMAGE_NOKERN): $(LOADER) tools/make_image.sh
 	tools/make_image.sh $@ $(LOADER)
 
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
@@ -41,8 +82,9 @@ run: image
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
 	    -drive format=raw,file=$(IMAGE)
 
-check: image
-	tools/boot_check.sh "Hombre loader"
+check: image image-nokernel
+	tools/boot_check.sh "Hombre loader" "kernel loaded: entry=0xffffffff8010"
+	tools/boot_check.sh --no-kernel "KERNEL.ELF not found"
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.
@@ -63,4 +105,5 @@ clean:
 	rm -rf $(BUILD)
 
 -include $(LOADER_OBJ:.o=.d)
+-include $(KERNEL_OBJ:.o=.d)
 -include $(TEST_BIN:%=%.d)
