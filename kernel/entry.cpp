@@ -50,7 +50,8 @@ u64 usable_mib(const BootInfo& info) {
 
 // The loader's identity map is still in the page tables. Clearing the lower
 // half of the PML4 removes it, and reloading CR3 flushes the TLB. Nothing may
-// use a lower-half address afterwards.
+// use a lower-half address afterwards, including the firmware's GDT and IDT
+// (see kmain).
 void unmap_lower_half(u64 direct_map_base) {
     u64 cr3;
     asm volatile("mov %%cr3, %0" : "=r"(cr3));
@@ -75,6 +76,10 @@ void draw_banner(const BootInfo& info) {
 
 }
 
+// Known limitation: the CPU still points at the firmware's GDT and IDT. They
+// live in memory that is unmapped once the lower half is dropped, or that
+// becomes reusable, so an exception or NMI would triple fault. A kernel GDT
+// and IDT must be installed before interrupts are ever enabled.
 extern "C" [[noreturn]] void kmain(BootInfo* info) {
     serial::init();
     if (info == nullptr || info->magic != boot_info_magic ||
@@ -103,6 +108,11 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write("\n");
     }
     if (info->fb.phys != 0) {
+        serial::write("framebuffer: ");
+        serial::write_dec(info->fb.width);
+        serial::write("x");
+        serial::write_dec(info->fb.height);
+        serial::write("\n");
         draw_banner(*info);
     } else {
         serial::write("no framebuffer\n");
