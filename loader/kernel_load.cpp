@@ -190,6 +190,11 @@ EfiStatus load_kernel(EfiHandle image, EfiSystemTable* st, LoadedKernel& out) {
         }
     }
 
+    // The kernel is linked for the fixed physical address 1 MiB, so each
+    // segment is claimed at exactly its own address. The free range above
+    // 1 MiB (about 7 MiB on q35 with OVMF) limits the kernel size, not the
+    // 64 MiB window. Placing it at any free physical address is a known
+    // follow-up.
     u64 phys_start = ~0ull;
     u64 phys_end = 0;
     for (u32 i = 0; i < elf.segment_count; ++i) {
@@ -208,7 +213,8 @@ EfiStatus load_kernel(EfiHandle image, EfiSystemTable* st, LoadedKernel& out) {
         if (status != efi_success) {
             bs->free_pool(file);
             ErrorLine("cannot claim memory at ").append_hex(start).append(" status=")
-                .append_hex(status).emit(st);
+                .append_hex(status)
+                .append(": kernel does not fit at its fixed physical address").emit(st);
             return status;
         }
 

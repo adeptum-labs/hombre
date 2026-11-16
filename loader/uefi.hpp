@@ -146,7 +146,6 @@ constexpr EfiStatus efi_success = 0;
 constexpr EfiStatus efi_load_error = efi_error_bit | 1;
 constexpr EfiStatus efi_invalid_parameter = efi_error_bit | 2;
 constexpr EfiStatus efi_buffer_too_small = efi_error_bit | 5;
-constexpr EfiStatus efi_out_of_resources = efi_error_bit | 9;
 constexpr EfiStatus efi_not_found = efi_error_bit | 14;
 
 constexpr usize efi_page_size = 4096;

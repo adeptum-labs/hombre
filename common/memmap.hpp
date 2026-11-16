@@ -46,6 +46,9 @@ namespace memmap_detail {
 
 inline constexpr u64 page_shift = 12;
 
+// EfiLoaderCode and EfiLoaderData become MemType::Loader, which mixes memory
+// that stays live after the handoff with memory that is dead afterwards; see
+// MemType::Loader.
 inline MemType convert_type(u32 efi_type) {
     switch (efi_type) {
     case 1:  // EfiLoaderCode
@@ -72,8 +75,8 @@ inline MemType convert_type(u32 efi_type) {
 // Converts the UEFI memory map in map[0, map_bytes), whose entries are
 // descriptor_size bytes apart, into out[0, capacity) and returns the number
 // of regions written. A trailing partial descriptor is ignored, as are
-// zero-length descriptors and descriptors that run past the top of the
-// address space. A descriptor of the same type that starts exactly where the
+// zero-length descriptors and descriptors whose end, phys + (pages << 12),
+// does not fit in 64 bits, which includes one ending exactly at 2^64. A descriptor of the same type that starts exactly where the
 // previous region ends is merged into it. Regions keep the input order: the
 // firmware sorts its map, and unsorted or overlapping descriptors are passed
 // through without being sorted or merged across. Returns 0 when the arguments
@@ -92,7 +95,8 @@ inline u32 convert_efi_map(const u8* map, u64 map_bytes, u64 descriptor_size, Me
         EfiMemoryDescriptor d;
         __builtin_memcpy(&d, map + offset, sizeof(d));
 
-        // The last byte, phys + (pages << 12) - 1, must not wrap.
+        // The end, phys + (pages << 12), must fit in 64 bits, so a region
+        // ending exactly at 2^64 is dropped too.
         if (d.pages == 0 || d.pages > (~d.phys >> page_shift)) {
             continue;
         }

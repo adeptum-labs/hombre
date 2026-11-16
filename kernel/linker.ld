@@ -21,8 +21,14 @@
  * Contact: info@adeptum.se
  */
 
-/* Loaded at physical 1 MiB and linked into the higher half. Every section
-   starts on its own page so each segment gets its own permissions. */
+/* Loaded at the fixed physical address 1 MiB and linked into the higher half.
+   Every section starts on its own page so each segment gets its own
+   permissions.
+
+   The practical size limit is the free physical range above 1 MiB (about
+   7 MiB on q35 with OVMF, where the first reserved region follows), not the
+   64 MiB kernel window. Loading the kernel at any free physical address is a
+   known follow-up. */
 
 ENTRY(kmain)
 

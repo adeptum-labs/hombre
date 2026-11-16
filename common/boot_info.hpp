@@ -30,6 +30,11 @@ namespace hombre {
 // Virtual address layout shared by the loader and the kernel. All physical
 // memory is mapped at kDirectMapBase + phys, and the first 64 MiB of physical
 // memory, which holds the kernel image, at kKernelBase + phys.
+//
+// The kernel is loaded at the fixed physical address 1 MiB. Its practical size
+// limit is the free physical range above 1 MiB (about 7 MiB on q35 with OVMF,
+// where the first reserved region follows), not this 64 MiB window. Placing
+// the kernel at any free physical address is a known follow-up.
 inline constexpr u64 kDirectMapBase = 0xFFFF800000000000ull;
 inline constexpr u64 kKernelBase = 0xFFFFFFFF80000000ull;
 inline constexpr u64 kKernelWindowSize = 64ull << 20;
@@ -40,8 +45,12 @@ enum class MemType : u32 {
     AcpiReclaimable,
     AcpiNvs,
     Mmio,
-    // Memory the loader handed over in use: the kernel image, this
-    // structure, the region array, the kernel stack and the page tables.
+    // Covers two kinds of memory. Some stays live after the handoff: the
+    // kernel image, the page tables, the kernel stack, BootInfo and the
+    // regions array. The rest is dead afterwards (loader code and data, the
+    // memory map buffer). Both are reported as Loader, so a kernel must not
+    // reclaim Loader regions wholesale until the live ranges are described
+    // separately.
     Loader,
 };
 
