@@ -38,10 +38,10 @@
 // and the suite assumes a 24-bit address bus, so the translator runs with
 // the address mask 0x00FFFFFF and the harness masks every address it loads.
 //
-// The translator keeps SR as plain data and knows a single A7: the harness
-// loads A7 from ssp when S is set and from usp otherwise, compares the
-// final A7 with the stack pointer of the final mode and expects the other
-// one unchanged.
+// The translator keeps SR as plain data and knows a single A7, with usp
+// apart for MOVE USP: the harness loads A7 from ssp when S is set and from
+// usp otherwise, and usp from usp. It compares the final A7 with the stack
+// pointer of the final mode, and usp too when S is set.
 //
 // Memory is zero before every case except for the bytes the initial state
 // gives. Afterwards each byte the final state lists must hold its value,
@@ -55,8 +55,11 @@
 //  - the expected state shows an exception: the final SR has S set, ssp
 //    dropped (a frame was pushed) and the final pc is the long the final
 //    memory holds in one of the vector slots 2-63 (counted by vector);
-//  - the opcode is MOVE to or from SR, MOVE USP, ANDI, ORI or EORI to SR,
-//    RTE, STOP or RESET ("privileged");
+//  - the opcode is RTE, STOP or RESET ("privileged"): with S set the
+//    translator ends the run at them, as they have no meaning while
+//    exceptions are not delivered to the guest; this holds also where the
+//    expected state shows an exception;
+//  - S differs before and after ("stack switch"): A7 is not banked;
 //  - the opcode is an A-line or F-line opcode ("line a/f").
 // The translator still runs those cases; they are only counted, except
 // that an exception other than trace must stop the translated code by the
@@ -124,7 +127,6 @@ struct State {
 
     bool supervisor() const { return (sr & kSupervisor) != 0; }
     u32 stack() const { return supervisor() ? ssp : usp; }
-    u32 other_stack() const { return supervisor() ? usp : ssp; }
 };
 
 struct Case {
@@ -340,12 +342,10 @@ u32 taken_vector(const Case& c) {
     return 0;
 }
 
-bool privileged(u32 op) {
-    return (op & 0xFFC0) == 0x46C0     // MOVE to SR
-           || (op & 0xFFC0) == 0x40C0  // MOVE from SR
-           || (op & 0xFFF0) == 0x4E60  // MOVE USP
-           || op == 0x027C || op == 0x007C || op == 0x0A7C  // ANDI, ORI, EORI to SR
-           || op == 0x4E73 || op == 0x4E72 || op == 0x4E70;  // RTE, STOP, RESET
+// RTE, STOP and RESET: the privileged instructions the translator ends
+// the run at, with S set as well.
+bool untranslated(u32 op) {
+    return op == 0x4E73 || op == 0x4E72 || op == 0x4E70;
 }
 
 // Shifts and rotates of a data register, by an immediate or by a register
@@ -392,8 +392,11 @@ std::string non_gating_reason(const Case& c) {
         return vector_name(v);
     }
     const u32 op = c.initial.prefetch[0];
-    if (privileged(op)) {
+    if (untranslated(op)) {
         return "privileged";
+    }
+    if (c.initial.supervisor() != c.final.supervisor()) {
+        return "stack switch";
     }
     if ((op & 0xF000) == 0xA000 || (op & 0xF000) == 0xF000) {
         return "line a/f";
@@ -471,6 +474,7 @@ public:
             cpu.a[i] = s.a[i];
         }
         cpu.a[7] = s.stack();
+        cpu.usp = s.usp;
         cpu.sr = static_cast<u16>(s.sr);
         cpu.pc = s.pc;
         expected_.clear();
@@ -571,7 +575,9 @@ private:
             check("a" + std::to_string(i), f.a[i], cpu.a[i]);
         }
         check(f.supervisor() ? "a7/ssp" : "a7/usp", f.stack(), cpu.a[7]);
-        check(f.supervisor() ? "usp" : "ssp", f.other_stack(), c.initial.other_stack());
+        if (f.supervisor()) {
+            check("usp", f.usp, cpu.usp);
+        }
         check("sr", f.sr & ~quirk.sr_ignored, cpu.sr & ~quirk.sr_ignored);
         check("pc", f.pc, cpu.pc);
         for (const auto& [addr, want] : expected_) {
@@ -700,7 +706,8 @@ Outcome judge(Harness& h, const Case& c, bool full_scan) {
         strays.push_back("stray byte " + Harness::hex(at) + ", away from the case's bytes");
     }
     const std::string reason = non_gating_reason(c);
-    const bool missed = stops_the_code(c) && !stopped_as_expected(c, why);
+    const bool missed = stops_the_code(c) && !stopped_as_expected(c, why) &&
+                        !untranslated(c.initial.prefetch[0]);
     if (missed && why != ExitReason::Unimplemented) {
         diffs.assign(1, reason + " expected, exit " + exit_name(why));
     }
@@ -897,6 +904,49 @@ int self_test(Harness& h) {
     asl_wrong.final.sr ^= 0x0100;
     expect("the ASL quirk still compares the system byte",
            verdict(asl_wrong).verdict == Verdict::Fail);
+    // MOVE A0,USP gates, with usp compared.
+    Case usp;
+    usp.name = "MOVE A0,USP";
+    usp.initial.a[0] = 0x1234;
+    usp.initial.usp = 0x800;
+    usp.initial.ssp = 0x900;
+    usp.initial.sr = 0x2700;
+    usp.initial.pc = 0xC00;
+    usp.initial.prefetch[0] = 0x4E60;
+    usp.initial.prefetch[1] = 0x4E71;
+    usp.final = usp.initial;
+    usp.final.usp = 0x1234;
+    usp.final.pc = 0xC02;
+    expect("MOVE USP gates and passes", verdict(usp).verdict == Verdict::Pass);
+    Case usp_wrong = usp;
+    usp_wrong.final.usp = 0x800;
+    expect("usp is compared", verdict(usp_wrong).verdict == Verdict::Fail);
+
+    // ANDI #$DFFF,SR leaves supervisor mode: A7 would switch stacks.
+    Case leave = usp;
+    leave.name = "ANDI #$DFFF,SR";
+    leave.initial.prefetch[0] = 0x027C;
+    leave.initial.prefetch[1] = 0xDFFF;
+    leave.final = leave.initial;
+    leave.final.sr = 0x0700;
+    leave.final.pc = 0xC04;
+    const Outcome left = verdict(leave);
+    expect("a switch of stacks does not gate",
+           left.verdict == Verdict::NonGating && left.reason == "stack switch");
+
+    // RTE ends the run; where an address error is expected that is not a
+    // failure either.
+    Case rte = usp;
+    rte.name = "RTE";
+    rte.initial.prefetch[0] = 0x4E73;
+    rte.final = rte.initial;
+    rte.final.ssp = 0x8FA;
+    rte.final.pc = 0x1000;
+    rte.final.ram = {{0x0C, 0x00}, {0x0D, 0x00}, {0x0E, 0x10}, {0x0F, 0x00}};
+    const Outcome rte_out = verdict(rte);
+    expect("RTE with an address error does not gate", rte_out.verdict == Verdict::NonGating);
+    h.clear(true);
+
     expect("memory is clean at the end", h.clean());
     return failures;
 }
