@@ -202,3 +202,4 @@ clean:
 -include $(KERNEL_OBJ:.o=.d)
 -include $(TEST_BIN:%=%.d)
 -include $(ADFTOOL).d
+-include $(MKDISK).d
