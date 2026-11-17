@@ -25,6 +25,7 @@
 
 #include "../common/amiga_fs.hpp"
 #include "../common/dms.hpp"
+#include "../common/printable.hpp"
 #include "../common/serial.hpp"
 #include "mmio.hpp"
 #include "page_alloc.hpp"
@@ -36,9 +37,6 @@ namespace hombre {
 namespace {
 
 // Constant initialised, so they sit in .bss without a constructor run.
-constinit u64 direct_map_base = 0;
-constinit PhysAllocator phys_pages;
-constinit MmioMapper mmio;
 constinit VirtioBlk boot_drive;
 
 constexpr u64 page_size = 4096;
@@ -55,35 +53,6 @@ struct Image {
 
 constexpr u64 pages_for(u64 bytes) {
     return (bytes + page_size - 1) / page_size;
-}
-
-u8* direct_map_ptr(void* ctx, u64 phys) {
-    return reinterpret_cast<u8*>(*static_cast<const u64*>(ctx) + phys);
-}
-
-// Page-table pages for the MMIO window come from the physical allocator.
-u64 alloc_table_page(void* ctx) {
-    return static_cast<PhysAllocator*>(ctx)->alloc_pages(1);
-}
-
-u64* table_page_ptr(void* ctx, u64 phys) {
-    return reinterpret_cast<u64*>(static_cast<PhysAllocator*>(ctx)->to_ptr(phys));
-}
-
-// The MMIO window maps device memory no-execute, which needs EFER.NXE.
-// Returns false when the CPU has no NX bit.
-bool enable_nx() {
-    constexpr u32 efer_msr = 0xC0000080;
-    constexpr u32 efer_nxe = 1u << 11;
-    u32 eax = 0x80000001, ebx, ecx = 0, edx;
-    asm volatile("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
-    if ((edx & (1u << 20)) == 0) {
-        return false;
-    }
-    u32 lo, hi;
-    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(efer_msr));
-    asm volatile("wrmsr" : : "a"(lo | efer_nxe), "d"(hi), "c"(efer_msr));
-    return true;
 }
 
 // Prints value in lowercase hex, zero padded to at least `digits` digits.
@@ -111,23 +80,9 @@ bool log_pci_function(void*, PciAddress address, u16 vendor, u16 device) {
     return false;
 }
 
-// Brings up the allocator, the MMIO window and the drive. Logs one line and
-// returns false when a step fails or there is no drive.
-bool open_drive(const BootInfo& info) {
-    direct_map_base = info.direct_map_base;
-    if (!phys_pages.init(info.regions, info.region_count, &direct_map_ptr, &direct_map_base)) {
-        serial::write("page allocator failed\n");
-        return false;
-    }
-    if (!enable_nx()) {
-        serial::write("no nx support\n");
-        return false;
-    }
-    u64 cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(cr3));
-    const PageAllocator tables{&alloc_table_page, &table_page_ptr, &phys_pages};
-    mmio.init(PageTables::adopt(tables, cr3 & 0x000FFFFFFFFFF000));
-
+// Starts the drive on the PCI bus. Logs one line and returns false when a
+// step fails or there is no drive.
+bool open_drive(PhysAllocator& phys_pages, MmioMapper& mmio) {
     pci_scan(&log_pci_function, nullptr);
 
     PciAddress address;
@@ -148,7 +103,7 @@ bool open_drive(const BootInfo& info) {
 // Reads the whole drive into fresh pages. Logs one line and returns false on
 // failure. The pages are only given back when the device can no longer
 // write to them.
-bool read_drive(Image& drive) {
+bool read_drive(PhysAllocator& phys_pages, Image& drive) {
     const u64 sectors = boot_drive.sector_count();
     if (sectors == 0) {
         serial::write("disk: empty drive\n");
@@ -191,7 +146,7 @@ void write_dms_error(DmsError error, const DmsInfo& info) {
 
 // Unpacks the DMS archive in `drive` into fresh pages. Logs one line and
 // returns false on failure.
-bool unpack_dms(const Image& drive, Image& image) {
+bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, Image& image) {
     DmsInfo info;
     const DmsError header = dms_read_header(drive.data, drive.bytes, info);
     if (header != DmsError::Ok) {
@@ -228,6 +183,13 @@ bool unpack_dms(const Image& drive, Image& image) {
     return true;
 }
 
+// Names come off the disk, so they go through the printable filter.
+void write_name(const char* name, usize max) {
+    char text[40];
+    sanitize_text(text, sizeof(text), name, max);
+    serial::write(text);
+}
+
 struct ListContext {
     u32 count;
 };
@@ -235,7 +197,7 @@ struct ListContext {
 void print_entry(void* ctx, const DirEntry& entry) {
     static_cast<ListContext*>(ctx)->count += 1;
     serial::write("  ");
-    serial::write(entry.name);
+    write_name(entry.name, sizeof(entry.name));
     if (entry.is_dir) {
         serial::write_char('/');
     }
@@ -271,7 +233,7 @@ void print_text(const u8* text, u32 count, bool& at_line_start) {
             serial::write_char('\n');
             at_line_start = true;
         } else {
-            serial::write_char(c >= 0x20 && c < 0x7F ? static_cast<char>(c) : '.');
+            serial::write_char(printable_char(c));
         }
     }
 }
@@ -332,7 +294,7 @@ void mount_and_print(const Image& image) {
         serial::write("disk: bootblock checksum bad\n");
     }
     serial::write("volume: ");
-    serial::write(volume.name);
+    write_name(volume.name, sizeof(volume.name));
     serial::write(volume.ffs ? " (FFS)\n" : " (OFS)\n");
 
     print_root(volume);
@@ -341,18 +303,18 @@ void mount_and_print(const Image& image) {
 
 }
 
-void boot_disk_run(const BootInfo& info) {
-    if (!open_drive(info)) {
+void boot_disk_run(const BootInfo&, PhysAllocator& phys_pages, MmioMapper& mmio) {
+    if (!open_drive(phys_pages, mmio)) {
         return;
     }
     Image drive;
-    if (!read_drive(drive)) {
+    if (!read_drive(phys_pages, drive)) {
         return;
     }
     Image image;
     switch (detect_disk_format(drive.data, drive.bytes)) {
     case DiskFormat::Dms:
-        if (!unpack_dms(drive, image)) {
+        if (!unpack_dms(phys_pages, drive, image)) {
             return;
         }
         break;

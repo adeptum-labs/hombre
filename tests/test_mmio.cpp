@@ -217,6 +217,16 @@ void invalid_requests_return_nullptr() {
     CHECK(idle.map(0xFEBD0000, 0x1000) == nullptr);
 }
 
+void second_init_is_refused() {
+    Fixture f;
+    volatile void* first = f.mapper.map(0xFEBD0000, 0x1000);
+    CHECK(first != nullptr);
+    // A second init would hand out slot 0 again while its entry is present.
+    CHECK(!f.mapper.init(PageTables::adopt(arena.allocator(), f.live.root())));
+    CHECK_EQ(as_u64(f.mapper.map(0xFEBD0000, 0x1000)), as_u64(first));
+    CHECK_EQ(as_u64(f.mapper.map(0xFC000000, 0x1000)), kMmioBase + k2M);
+}
+
 void table_exhaustion_returns_nullptr() {
     // One spare page: the window's PDPT is built, its PD cannot be.
     Fixture starved(1);
@@ -277,6 +287,7 @@ int main() {
     crossing_range_with_first_page_mapped_elsewhere_gets_a_fresh_pair();
     above_4gib_phys();
     invalid_requests_return_nullptr();
+    second_init_is_refused();
     table_exhaustion_returns_nullptr();
     mapping_table_full_returns_nullptr();
     pair_does_not_fit_in_the_last_slot();

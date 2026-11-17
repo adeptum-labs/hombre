@@ -160,7 +160,7 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "kernel loaded: entry=0xffffffff8010" "Hombre kernel booted" "usable memory:" \
 	    "gdt loaded" "idt loaded" "breakpoint ok" "lower half unmapped" "cpu0 percpu ok" \
 	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" \
-	    "disk: DMS SIMPLE" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
+	    "disk: DMS SIMPLE, 80 tracks" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
 	    "S:Startup-Sequence:" "  Hombre test startup" "halting"
 	tools/boot_check.sh --disk $(ZERO_DISK) "virtio-blk: 2 sectors" "disk: unknown format" \
 	    "halting"

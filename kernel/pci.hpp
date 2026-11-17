@@ -71,14 +71,6 @@ inline u8 pci_read8(PciAddress a, u8 offset) {
     return static_cast<u8>(pci_read32(a, offset) >> ((offset & 3u) * 8));
 }
 
-// Turns on memory space decoding and bus mastering. The status register
-// shares the dword and its bits clear when written as 1, so the upper half
-// is written as 0.
-inline void pci_enable(PciAddress a) {
-    const u32 command = pci_read32(a, kPciCommandOffset) & 0xFFFFu;
-    pci_write32(a, kPciCommandOffset, command | kPciCommandMemorySpace | kPciCommandBusMaster);
-}
-
 struct PciBar {
     u64 phys;
     bool is_io;

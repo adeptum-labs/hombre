@@ -27,6 +27,9 @@
 #include "framebuffer.hpp"
 #include "gdt.hpp"
 #include "idt.hpp"
+#include "mem_init.hpp"
+#include "mmio.hpp"
+#include "page_alloc.hpp"
 #include "percpu.hpp"
 
 using namespace hombre;
@@ -34,6 +37,10 @@ using namespace hombre;
 namespace {
 
 PerCpu bsp_cpu;
+
+// Constant initialised, so they sit in .bss without a constructor run.
+constinit PhysAllocator phys_pages;
+constinit MmioMapper mmio;
 
 [[noreturn]] void halt() {
     for (;;) {
@@ -167,7 +174,9 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
     } else {
         serial::write("no framebuffer\n");
     }
-    boot_disk_run(*info);
+    if (mem_init(*info, phys_pages, mmio)) {
+        boot_disk_run(*info, phys_pages, mmio);
+    }
     serial::write("halting\n");
     halt();
 }

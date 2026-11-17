@@ -24,15 +24,18 @@
 #pragma once
 
 #include "../common/boot_info.hpp"
+#include "mmio.hpp"
+#include "page_alloc.hpp"
 
 namespace hombre {
 
-// Brings up the page allocator, the MMIO window and the boot drive, reads
-// the drive, unpacks it when it is a DMS archive, mounts the Amiga volume
-// and prints the root directory and S/Startup-Sequence on the serial
-// console. Every failure logs one line and returns, so boot continues.
+// Finds the boot drive on the PCI bus (the allocator and the MMIO mapper are
+// already running, see mem_init), reads the drive, unpacks it when it is a
+// DMS archive, mounts the Amiga volume and prints the root directory and
+// S/Startup-Sequence on the serial console. Every failure logs one line and
+// returns, so boot continues.
 // Call it after the loader's lower-half mapping is gone: it uses the direct
 // map only.
-void boot_disk_run(const BootInfo& info);
+void boot_disk_run(const BootInfo& info, PhysAllocator& pages, MmioMapper& mmio);
 
 }

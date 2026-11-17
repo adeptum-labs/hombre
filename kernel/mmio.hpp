@@ -46,10 +46,17 @@ inline constexpr u32 kMmioMaxMappings = 16;
 class MmioMapper {
 public:
     // `tables` extends the live tables, as made by PageTables::adopt from the
-    // CR3 root. Mappings made earlier are forgotten.
-    void init(PageTables tables) {
+    // CR3 root. Call it once per boot: the window's first slot is handed out
+    // again by a fresh mapper, but its entry is still present in the tables.
+    // A second call is refused, returns false and changes nothing.
+    bool init(PageTables tables) {
+        if (initialised_) {
+            return false;
+        }
         tables_ = tables;
         count_ = 0;
+        initialised_ = true;
+        return true;
     }
 
     // Maps [phys, phys + bytes) and returns the virtual address of phys, or
@@ -127,6 +134,7 @@ private:
     PageTables tables_;
     Entry entries_[kMmioMaxMappings] = {};
     u32 count_ = 0;
+    bool initialised_ = false;
 };
 
 }
