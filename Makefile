@@ -65,10 +65,11 @@ KLDFLAGS  := -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
 # their loops back into calls to the very functions being defined.
 KMEMFLAGS := -fno-builtin -fno-tree-loop-distribute-patterns
 
-# The shared sources in common/ other than the mem* routines are built once
-# for the kernel, into $(BUILD)/common/, and once for the host, into
-# $(BUILD)/host/common/, where every test program and host tool links them.
-COMMON_SRC  := $(filter-out common/mem.cpp,$(wildcard common/*.cpp))
+# The shared sources in common/ and the native AmigaOS libraries in
+# common/libs/, other than the mem* routines, are built once for the kernel,
+# into $(BUILD)/common/, and once for the host, into $(BUILD)/host/common/,
+# where every test program and host tool links them.
+COMMON_SRC  := $(filter-out common/mem.cpp,$(wildcard common/*.cpp common/libs/*.cpp))
 COMMON_KOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/%.o)
 COMMON_HOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/host/%.o)
 
