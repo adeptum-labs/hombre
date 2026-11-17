@@ -935,11 +935,12 @@ struct DosOps {
         if (f.stream == Dos::Stream::Console) {
             const u32 left = d.input_length_ - d.input_pos_;
             const u32 n = length < left ? length : left;
-            if (n != 0 && !b.span(buffer, n)) {
+            u8* to = n != 0 ? b.bytes_at(buffer, n) : nullptr;
+            if (n != 0 && to == nullptr) {
                 return;
             }
             for (u32 i = 0; i < n; ++i) {
-                m.mem.base[buffer + i] = static_cast<u8>(d.input_[d.input_pos_ + i]);
+                to[i] = static_cast<u8>(d.input_[d.input_pos_ + i]);
             }
             d.input_pos_ += n;
             native::set_result(m, n);
@@ -951,11 +952,12 @@ struct DosOps {
             native::set_result(m, 0);
             return;
         }
-        if (!b.span(buffer, n)) {
+        u8* to = b.bytes_at(buffer, n);
+        if (to == nullptr) {
             return;
         }
         u32 got = 0;
-        if (adf_read(d.volume_, f.entry, f.pos, m.mem.base + buffer, n, got) != FsError::Ok) {
+        if (adf_read(d.volume_, f.entry, f.pos, to, n, got) != FsError::Ok) {
             fail(d, b, ERROR_NOT_A_DOS_DISK, 0xFFFFFFFF);
             return;
         }
@@ -979,10 +981,11 @@ struct DosOps {
             fail(d, b, ERROR_BAD_NUMBER, 0xFFFFFFFF);
             return;
         }
-        if (length != 0 && !b.span(buffer, length)) {
+        const u8* from = length != 0 ? b.bytes_at(buffer, length) : nullptr;
+        if (length != 0 && from == nullptr) {
             return;
         }
-        const bool ok = write_slot(d, b, static_cast<u32>(slot), m.mem.base + buffer, length);
+        const bool ok = write_slot(d, b, static_cast<u32>(slot), from, length);
         native::set_result(m, ok ? length : 0xFFFFFFFF);
     }
 
@@ -1384,7 +1387,8 @@ struct DosOps {
                 ++size;
             }
         }
-        if (!b.ok() || (size != 0 && !b.span(buffer, size))) {
+        const u8* from = b.ok() && size != 0 ? b.bytes_at(buffer, size) : nullptr;
+        if (!b.ok()) {
             return;
         }
         u32 value = 0;
@@ -1394,8 +1398,9 @@ struct DosOps {
                 fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
                 return;
             }
+            // exec handed the block out, so it is guest memory.
             for (u32 i = 0; i < size; ++i) {
-                m.mem.base[value + i] = m.mem.base[buffer + i];
+                m.mem.base[value + i] = from[i];
             }
         }
         if (node == 0) {
@@ -1799,7 +1804,9 @@ struct DosOps {
                     .text(" segments of seglist ").hex(seglist).send();
                 break;
             }
-            const u64 link = static_cast<u64>(bptr) << 2;
+            // The seglist may come from the guest: the link goes through
+            // the address mask as the 68000's would.
+            const u64 link = native::guest_address(*d.m_, bptr << 2);
             u32 size = 0;
             u32 next = 0;
             if (link < 4 || link + 4 > mem.size || !mem.read32(static_cast<u32>(link - 4), size) ||

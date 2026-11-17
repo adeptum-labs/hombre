@@ -1381,6 +1381,61 @@ void paths_resolve_like_amigados() {
     CHECK_EQ(r.dos(dos_lvo::Open), ExitReason::BusError);
 }
 
+// With the 68000's 24-bit mask a pointer with flags in its top byte reaches
+// what its low 24 bits reach, in dos's natives as in translated code.
+void high_byte_pointers_reach_their_24_bit_alias() {
+    Rig r;
+    g_jit.set_address_mask(0x00FFFFFF);
+    const u32 out = r.call(dos_lvo::Output);
+    r.str(kData, "hello");
+    CHECK_EQ(r.call(dos_lvo::Write, out, 0x80000000 | kData, 5), 5u);
+    CHECK_EQ(r.call(dos_lvo::PutStr, 0xFF000000 | kData), 0u);
+    r.str(kData + 0x100, "%s!");
+    r.put32(kData + 0x200, 0x40000000 | kData);
+    CHECK_EQ(r.call(dos_lvo::VPrintf, 0x80000000 | (kData + 0x100), 0x01000000 | (kData + 0x200)),
+             6u);
+    CHECK(g_console == "hellohellohello!");
+
+    // Open and Read through tagged pointers.
+    r.str(kData, "C:Echo");
+    const u32 fh = r.call(dos_lvo::Open, 0x80000000 | kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    for (u32 i = 0; i < 8; ++i) {
+        r.put8(kData + 0x300 + i, 0xEE);
+    }
+    CHECK_EQ(r.call(dos_lvo::Read, fh, 0x80000000 | (kData + 0x300), 4), 4u);
+    const std::vector<u8> echo = echo_bytes();
+    CHECK(r.bytes(kData + 0x300, 4) == std::vector<u8>(echo.begin(), echo.begin() + 4));
+    CHECK_EQ(r.get8(kData + 0x304), 0xEEu);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+
+    // ReadArgs: template, array, RDArgs and its buffer all tagged.
+    r.str(kTemplate, "FROM/A,TO");
+    const u32 rda = kData + 0x800;
+    for (u32 j = 0; j < RDA_SIZEOF; ++j) {
+        r.put8(rda + j, 0);
+    }
+    const std::string line = "a b\n";
+    r.str(kData + 0x1000, line);
+    r.put32(rda + CS_Buffer, 0x80000000 | (kData + 0x1000));
+    r.put32(rda + CS_Length, static_cast<u32>(line.size()));
+    const u32 got =
+        r.call(dos_lvo::ReadArgs, 0x80000000 | kTemplate, 0x80000000 | kArray, 0x80000000 | rda);
+    CHECK_EQ(got, 0x80000000 | rda);
+    CHECK(r.read_str(r.get32(kArray)) == "a");
+    CHECK(r.read_str(r.get32(kArray + 4)) == "b");
+    r.call(dos_lvo::FreeArgs, got);
+
+    // A read that runs past the end of memory still faults, at the first
+    // byte outside, as the pointer was given.
+    r.str(kData, "C:Echo");
+    r.cpu().d[1] = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    r.cpu().d[2] = 0x80000000 | (kGuestBytes - 2);
+    r.cpu().d[3] = 8;
+    CHECK_EQ(r.dos(dos_lvo::Read), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | kGuestBytes);
+}
+
 void file_table_is_bounded() {
     Rig r;
     r.str(kData, "C:Echo");
@@ -2222,6 +2277,7 @@ int main() {
     open_read_seek_close();
     paths_resolve_like_amigados();
     file_table_is_bounded();
+    high_byte_pointers_reach_their_24_bit_alias();
     ffs_volumes_read_too();
     locks_and_the_current_directory();
     examine_and_ex_next();

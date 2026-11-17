@@ -394,7 +394,7 @@ struct ExecOps {
     }
 
     static void free_vec(void* ctx, Machine& m) {
-        const u32 addr = m.cpu.a[1];
+        const u32 addr = native::guest_address(m, m.cpu.a[1]);
         if (addr == 0) {
             return;
         }
@@ -411,17 +411,21 @@ struct ExecOps {
         const u32 src = m.cpu.a[0];
         const u32 dst = m.cpu.a[1];
         const u32 bytes = m.cpu.d[0];
-        if (bytes == 0 || !b.span(src, bytes) || !b.span(dst, bytes)) {
+        if (bytes == 0) {
             return;
         }
-        u8* base = m.mem.base;
-        if (dst < src) {
+        const u8* from = b.bytes_at(src, bytes);
+        u8* to = from != nullptr ? b.bytes_at(dst, bytes) : nullptr;
+        if (to == nullptr) {
+            return;
+        }
+        if (to < from) {
             for (u32 i = 0; i < bytes; ++i) {
-                base[dst + i] = base[src + i];
+                to[i] = from[i];
             }
         } else {
             for (u32 i = bytes; i > 0; --i) {
-                base[dst + i - 1] = base[src + i - 1];
+                to[i - 1] = from[i - 1];
             }
         }
     }
@@ -613,11 +617,12 @@ struct ExecOps {
     static void init_struct(Bus& b, u32 table, u32 memory, u32 size) {
         size &= 0xFFFF;
         if (size != 0) {
-            if (!b.span(memory, size)) {
+            u8* clear = b.bytes_at(memory, size);
+            if (clear == nullptr) {
                 return;
             }
             for (u32 i = 0; i < size; ++i) {
-                b.machine().mem.base[memory + i] = 0;
+                clear[i] = 0;
             }
         }
         u32 it = table;
@@ -1210,7 +1215,11 @@ u32 Exec::alloc(u32 bytes, u32 flags) {
 }
 
 void Exec::free(u32 addr, u32 bytes) {
-    if (m_ == nullptr || addr == 0 || bytes == 0) {
+    if (m_ == nullptr) {
+        return;
+    }
+    addr = native::guest_address(*m_, addr);
+    if (addr == 0 || bytes == 0) {
         return;
     }
     if ((addr & 7) != 0 || bytes > upper_ - lower_ || addr < lower_ ||

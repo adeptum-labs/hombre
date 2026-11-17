@@ -1433,6 +1433,92 @@ void copy_mem() {
     CHECK_EQ(r.exec(exec_lvo::CopyMemQuick), ExitReason::BusError);
 }
 
+// --- the address mask ---------------------------------------------------
+
+// With the 68000's 24-bit mask a pointer with flags in its top byte reaches
+// what its low 24 bits reach, in exec's natives as in translated code.
+void high_byte_pointers_reach_their_24_bit_alias() {
+    Rig r;
+    g_jit.set_address_mask(0x00FFFFFF);
+    const u32 name = r.str(kData, "exec.library");
+    r.cpu().a[1] = 0x80000000 | name;
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], r.base());
+
+    for (u32 i = 0; i < 16; ++i) {
+        r.put8(kData + 0x100 + i, 0xA0 + i);
+    }
+    r.cpu().a[0] = 0x80000000 | (kData + 0x100);
+    r.cpu().a[1] = 0xFF000000 | (kData + 0x200);
+    r.cpu().d[0] = 16;
+    CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::Halt);
+    CHECK_EQ(r.get32(kData + 0x20C), 0xACADAEAFu);
+    // An overlapping copy through two aliases picks its direction from
+    // the addresses guest memory sees.
+    r.cpu().a[0] = 0x01000000 | (kData + 0x200);
+    r.cpu().a[1] = kData + 0x204;
+    r.cpu().d[0] = 12;
+    CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::Halt);
+    CHECK_EQ(r.get32(kData + 0x204), 0xA0A1A2A3u);
+    CHECK_EQ(r.get32(kData + 0x20C), 0xA8A9AAABu);
+
+    // RawDoFmt: format, data stream, %s argument and buffer all tagged.
+    const u32 fmt = r.str(kData + 0x300, "%s=%ld");
+    const u32 data = kData + 0x400;
+    r.put32(data, 0x40000000 | r.str(kData + 0x500, "n"));
+    r.put32(data + 4, 42);
+    r.cpu().a[0] = 0xC0000000 | fmt;
+    r.cpu().a[1] = 0x80000000 | data;
+    r.cpu().a[2] = 0;
+    r.cpu().a[3] = 0x7F000000 | (kData + 0x600);
+    CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::Halt);
+    CHECK(r.read_str(kData + 0x600) == "n=42");
+    CHECK_EQ(r.cpu().d[0], (0x80000000 | data) + 8);
+
+    // FreeMem of a tagged pointer frees the block.
+    const auto before = r.chunks();
+    r.cpu().d[0] = 64;
+    r.cpu().d[1] = MEMF_PUBLIC;
+    CHECK_EQ(r.exec(exec_lvo::AllocMem), ExitReason::Halt);
+    const u32 block = r.cpu().d[0];
+    CHECK(block != 0);
+    r.cpu().a[1] = 0x80000000 | block;
+    r.cpu().d[0] = 64;
+    CHECK_EQ(r.exec(exec_lvo::FreeMem), ExitReason::Halt);
+    CHECK(r.chunks() == before);
+
+    // A range whose masked start is in memory but which runs past the end
+    // still faults, at the first byte outside, as the pointer was given.
+    r.cpu().a[0] = 0x80000000 | (kGuestBytes - 8);
+    r.cpu().a[1] = kData;
+    r.cpu().d[0] = 16;
+    CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | kGuestBytes);
+
+    // Under a wider mask the high bits it keeps still fault cleanly.
+    g_jit.set_address_mask(0x0FFFFFFF);
+    r.cpu().a[1] = 0x81000000 | name;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0x81000000 | name);
+    r.cpu().a[0] = kData;
+    r.cpu().a[1] = 0x02000000;
+    r.cpu().d[0] = 4;
+    CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0x02000000u);
+
+    // Without a mask, the default, a tagged pointer is out of reach.
+    g_jit.set_address_mask(0xFFFFFFFF);
+    r.cpu().a[1] = 0x80000000 | name;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | name);
+    r.cpu().a[0] = 0x80000000 | kData;
+    r.cpu().a[1] = kData + 0x100;
+    r.cpu().d[0] = 4;
+    CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | kData);
+}
+
 // JSR $3000.w ; MOVE.W #$7002,$3000.w ; <two words> ; JSR $3000.w ; JMP $400.w
 // with $3000: MOVEQ #1,D0 ; RTS. The middle words either clear the caches
 // or do nothing.
@@ -1589,6 +1675,7 @@ int main() {
     tasks_and_signals();
     forbid_and_disable_count();
     copy_mem();
+    high_byte_pointers_reach_their_24_bit_alias();
     cache_clear_flushes_the_translations();
     raw_do_fmt_into_a_buffer();
     raw_do_fmt_through_a_character_routine();

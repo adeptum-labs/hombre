@@ -148,6 +148,10 @@ public:
     // after init, which resets it to 0xFFFFFFFF. Drops every block.
     void set_address_mask(u32 mask);
 
+    // The mask set_address_mask set. Natives apply it to the guest
+    // addresses they are given, so that they see what translated code sees.
+    u32 address_mask() const { return address_mask_; }
+
 private:
     static constexpr u32 kSlotBits = 13;
     static constexpr u32 kSlots = 1u << kSlotBits;

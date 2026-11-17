@@ -52,14 +52,24 @@ constexpr u16 kALine = 0xA000;
 constexpr u16 kRts = 0x4E75;
 constexpr u16 kJmpAbsL = 0x4EF9;
 
-// Guest memory for a native. The first access the guest memory cannot hold
-// ends the run as the 68000 would end it, BusError, or AddressError for a
-// word or long at an odd address, with fault_addr set; from then on every
-// access is dropped and reads give 0, so a native can do its work and check
-// ok() once before it writes its result.
+// The offset into guest memory of the guest address addr: addr with the
+// translator's address mask applied, as translated code applies it.
+inline u32 guest_address(const m68k::Machine& m, u32 addr) {
+    return m.jit != nullptr ? addr & m.jit->address_mask() : addr;
+}
+
+// Guest memory for a native. Every address goes through the translator's
+// address mask first, so that a pointer with flags in its top byte reaches
+// what it reaches in translated code. The first access the guest memory
+// cannot hold ends the run as the 68000 would end it, BusError, or
+// AddressError for a word or long at an odd address, with fault_addr set
+// to the address as given; from then on every access is dropped and reads
+// give 0, so a native can do its work and check ok() once before it writes
+// its result.
 class Bus {
 public:
-    explicit Bus(m68k::Machine& m) : m_(m) {}
+    explicit Bus(m68k::Machine& m)
+        : m_(m), mask_(m.jit != nullptr ? m.jit->address_mask() : 0xFFFFFFFF) {}
 
     bool ok() const { return ok_; }
 
@@ -71,7 +81,7 @@ public:
 
     u32 r8(u32 addr) {
         u32 v = 0;
-        if (ok_ && !m_.mem.read8(addr, v)) {
+        if (ok_ && !m_.mem.read8(addr & mask_, v)) {
             fault(addr, false);
         }
         return v;
@@ -79,7 +89,7 @@ public:
 
     u32 r16(u32 addr) {
         u32 v = 0;
-        if (ok_ && !m_.mem.read16(addr, v)) {
+        if (ok_ && ((addr & 1) != 0 || !m_.mem.read16(addr & mask_, v))) {
             fault(addr, true);
         }
         return v;
@@ -87,41 +97,44 @@ public:
 
     u32 r32(u32 addr) {
         u32 v = 0;
-        if (ok_ && !m_.mem.read32(addr, v)) {
+        if (ok_ && ((addr & 1) != 0 || !m_.mem.read32(addr & mask_, v))) {
             fault(addr, true);
         }
         return v;
     }
 
     void w8(u32 addr, u32 v) {
-        if (ok_ && !m_.mem.write8(addr, v)) {
+        if (ok_ && !m_.mem.write8(addr & mask_, v)) {
             fault(addr, false);
         }
     }
 
     void w16(u32 addr, u32 v) {
-        if (ok_ && !m_.mem.write16(addr, v)) {
+        if (ok_ && ((addr & 1) != 0 || !m_.mem.write16(addr & mask_, v))) {
             fault(addr, true);
         }
     }
 
     void w32(u32 addr, u32 v) {
-        if (ok_ && !m_.mem.write32(addr, v)) {
+        if (ok_ && ((addr & 1) != 0 || !m_.mem.write32(addr & mask_, v))) {
             fault(addr, true);
         }
     }
 
-    // True if [addr, addr + bytes) is guest memory; otherwise faults at the
-    // first byte outside it. For bulk work on mem.base after the check.
-    bool span(u32 addr, u32 bytes) {
+    // The bytes [addr, addr + bytes) of guest memory, addr masked, for bulk
+    // work through the pointer returned; null, with a fault at the first
+    // byte outside guest memory, if they are not all in it. Index only the
+    // pointer returned: addr itself may carry bits the mask removes.
+    u8* bytes_at(u32 addr, u32 bytes) {
         if (!ok_) {
-            return false;
+            return nullptr;
         }
-        if (m_.mem.range_ok(addr, bytes)) {
-            return true;
+        const u32 at = addr & mask_;
+        if (m_.mem.range_ok(at, bytes)) {
+            return m_.mem.base + at;
         }
-        fault(addr >= m_.mem.size ? addr : m_.mem.size, false);
-        return false;
+        fault(at >= m_.mem.size ? addr : addr + (m_.mem.size - at), false);
+        return nullptr;
     }
 
     // Copies the NUL-terminated guest string into out. False if it faults
@@ -182,6 +195,7 @@ private:
     }
 
     m68k::Machine& m_;
+    u32 mask_;
     bool ok_ = true;
 };
 
