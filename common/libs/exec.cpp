@@ -52,7 +52,7 @@ constexpr u32 kMaxInitCommands = 1u << 16;
 constexpr u32 kMaxWidth = 10000;
 constexpr u8 NT_MSGPORT = 4;
 constexpr char kExecName[] = "exec.library";
-constexpr char kExecIdString[] = "exec 40.68 (17.11.2026)\r\n";
+constexpr char kExecIdString[] = "exec 60.0 (Hombre)\r\n";
 constexpr char kMemoryName[] = "memory";
 
 constexpr u32 round8(u32 v) {
@@ -756,7 +756,7 @@ struct ExecOps {
         u32 lib = block + neg;
         make_functions(e, b, lib, array, words ? vectors : 0);
         b.w16(lib + LIB_NEGSIZE, neg);
-        b.w16(lib + LIB_POSSIZE, data_size);
+        b.w16(lib + LIB_POSSIZE, pos);
         if (structure != 0) {
             init_struct(b, structure, lib, 0);
         }
@@ -843,7 +843,12 @@ struct ExecOps {
     // guest memory just ends the search.
     static u32 find_resident(const GuestMemory& mem, u32 seglist) {
         u32 bptr = seglist;
-        for (u32 n = 0; n < kMaxSegments && bptr != 0; ++n) {
+        for (u32 n = 0; bptr != 0; ++n) {
+            if (n == kMaxSegments) {
+                LogLine().text("exec: seglist ").hex(seglist).text(" has more than ")
+                    .dec(kMaxSegments).text(" segments").send();
+                return 0;
+            }
             const u64 link = static_cast<u64>(bptr) << 2;
             u32 size = 0;
             u32 next = 0;
@@ -870,7 +875,12 @@ struct ExecOps {
     static void unload(Exec& e, u32 seglist) {
         const GuestMemory& mem = e.m_->mem;
         u32 bptr = seglist;
-        for (u32 n = 0; n < kMaxSegments && bptr != 0; ++n) {
+        for (u32 n = 0; bptr != 0; ++n) {
+            if (n == kMaxSegments) {
+                LogLine().text("exec: unloaded only the first ").dec(kMaxSegments)
+                    .text(" segments of seglist ").hex(seglist).send();
+                break;
+            }
             const u64 link = static_cast<u64>(bptr) << 2;
             u32 size = 0;
             u32 next = 0;
@@ -909,9 +919,11 @@ struct ExecOps {
         for (u32& slot : e.loaded_) {
             if (slot == 0) {
                 slot = seglist;
-                break;
+                return;
             }
         }
+        LogLine().text("exec: loaded library table full, ").text(path)
+            .text(" will not be unloaded").send();
     }
 
     static u32 open_library(Exec& e, Bus& b, u32 name_addr, u32 version) {
@@ -929,7 +941,9 @@ struct ExecOps {
         }
         const u32 list = e.base_ + LibList;
         u32 lib = find_name(b, list, leaf);
-        if (lib == 0 && b.ok() && e.loader_.load != nullptr && e.load_depth_ < kMaxLoadDepth) {
+        if (lib == 0 && b.ok() && e.loader_.load != nullptr && e.load_depth_ >= kMaxLoadDepth) {
+            LogLine().text("exec: libraries nested too deep to load ").text(name).send();
+        } else if (lib == 0 && b.ok() && e.loader_.load != nullptr) {
             char path[kMaxName + 8];
             u32 at = 0;
             if (!has_device) {
@@ -1033,6 +1047,8 @@ struct ExecOps {
 
     // %[-][0][width][.limit][l]type with type d, u, x, X, c, s, b or %.
     // Without l, d, u, x and c take a 16-bit word from the data stream.
+    // x and X both give uppercase hex digits, and a null %s or %b pointer
+    // prints as an empty string, as exec has done since V36.
     // Each character goes to the routine in A2, or into the buffer in A3
     // when A2 is 0, the closing NUL too. D0 returns the data stream
     // pointer past the last argument used.
@@ -1117,7 +1133,7 @@ struct ExecOps {
                     }
                 }
                 format_u64(digits, sizeof digits, v, c == 'x' || c == 'X' ? 16 : 10);
-                if (c == 'X') {
+                if (c == 'x' || c == 'X') {
                     for (char* p = digits; *p != '\0'; ++p) {
                         *p = *p >= 'a' && *p <= 'f' ? static_cast<char>(*p - 'a' + 'A') : *p;
                     }
@@ -1216,7 +1232,12 @@ constexpr ExecFunction kExecFunctions[] = {
 }
 
 bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
+    // The task and the segment loader may be set before init; they stay.
+    const u32 task = task_;
+    const SegmentLoader loader = loader_;
     *this = Exec{};
+    task_ = task;
+    loader_ = loader;
     if (m.jit == nullptr || m.mem.base == nullptr || free_start < kLowestFree ||
         free_end <= free_start || free_end > m.mem.size) {
         return false;
@@ -1261,6 +1282,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     expunge_id_ = jit.add_native(ExecOps::lib_null, this, "Expunge");
     reserved_id_ = jit.add_native(ExecOps::lib_null, this, "Reserved");
     if (trap == 0 || open_id_ == 0 || close_id_ == 0 || expunge_id_ == 0 || reserved_id_ == 0) {
+        LogLine().text("exec: no native ids left for ").text(kExecName).send();
         m_ = nullptr;
         return false;
     }
@@ -1272,6 +1294,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     for (const ExecFunction& f : kExecFunctions) {
         const u16 id = jit.add_native(f.fn, this, f.name);
         if (id == 0) {
+            LogLine().text("exec: no native ids left for ").text(kExecName).send();
             m_ = nullptr;
             return false;
         }
@@ -1290,10 +1313,10 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     b.w8(base_ + LIB_FLAGS, LIBF_SUMUSED);
     b.w16(base_ + LIB_NEGSIZE, kExecNegSize);
     b.w16(base_ + LIB_POSSIZE, SYSBASESIZE);
-    b.w16(base_ + LIB_VERSION, kExecLibVersion);
-    b.w16(base_ + LIB_REVISION, kExecLibRevision);
+    b.w16(base_ + LIB_VERSION, kHombreLibVersion);
+    b.w16(base_ + LIB_REVISION, kHombreLibRevision);
     b.w32(base_ + LIB_IDSTRING, id_string);
-    b.w16(base_ + SoftVer, kExecLibRevision);
+    b.w16(base_ + SoftVer, kHombreLibRevision);  // SoftVer is the revision
     b.w8(base_ + IDNestCnt, 0xFF);
     b.w8(base_ + TDNestCnt, 0xFF);
     b.w16(base_ + AttnFlags, 0);  // a plain 68000
@@ -1313,6 +1336,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     b.w32(header_ + LN_NAME, memory_name);
     add_tail(b, base_ + MemList, header_);
     ExecOps::add_library(*this, b, base_);
+    b.w32(base_ + ThisTask, task_);
     b.w32(4, base_);
     jit.flush();
     if (!b.ok()) {
@@ -1425,13 +1449,23 @@ void Exec::free(u32 addr, u32 bytes) {
 
 u32 Exec::make_native_library(const char* name, u16 version, const NativeVector* fns, u32 count,
                               void* ctx) {
-    if (m_ == nullptr || name == nullptr || (count != 0 && fns == nullptr) ||
-        count > kMaxVectors || library_count_ == kMaxLibraries) {
+    if (m_ == nullptr || name == nullptr || (count != 0 && fns == nullptr)) {
+        return 0;
+    }
+    if (library_count_ == kMaxLibraries) {
+        LogLine().text("exec: native library table full, ").text(name).text(" not made").send();
+        return 0;
+    }
+    if (count > kMaxVectors) {
+        LogLine().text("exec: ").text(name).text(" has more than ").dec(kMaxVectors)
+            .text(" vectors").send();
         return 0;
     }
     u32 name_bytes = 0;
     while (name[name_bytes] != '\0') {
         if (++name_bytes == kMaxName) {
+            LogLine().text("exec: library name longer than ").dec(kMaxName - 1)
+                .text(" bytes").send();
             return 0;
         }
     }
@@ -1449,6 +1483,7 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
     Bus b(*m_);
     const u16 trap = jit.add_native(ExecOps::unimplemented, &info, name);
     if (trap == 0) {
+        LogLine().text("exec: no native ids left for ").text(name).send();
         free(block, neg + LIB_SIZE + name_bytes);
         return 0;
     }
@@ -1459,6 +1494,7 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
         if (v != nullptr && v->fn != nullptr) {
             const u16 id = jit.add_native(v->fn, ctx, v->name != nullptr ? v->name : name);
             if (id == 0) {
+                LogLine().text("exec: no native ids left for ").text(name).send();
                 free(block, neg + LIB_SIZE + name_bytes);
                 return 0;
             }

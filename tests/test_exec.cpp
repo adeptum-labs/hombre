@@ -24,6 +24,7 @@
 #include "libs/exec.hpp"
 #include "check.hpp"
 
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <string>
@@ -101,7 +102,11 @@ public:
         m.cpu.a[7] = kStack;
     }
 
+    // exec keeps the task and the loader across init: the next rig starts
+    // without them.
     ~Rig() {
+        g_exec.set_this_task(0);
+        g_exec.set_segment_loader(SegmentLoader{nullptr, nullptr});
         g_log = nullptr;
         munmap(rw_, kRegion);
         munmap(const_cast<u8*>(rx_), kRegion);
@@ -220,6 +225,11 @@ private:
 };
 
 // --- layout -------------------------------------------------------------
+
+void version_is_hombres_own() {
+    CHECK_EQ(kHombreLibVersion, 60u);
+    CHECK_EQ(kHombreLibRevision, 0u);
+}
 
 void layout_matches_the_ndk() {
     CHECK_EQ(exec_lvo::InitStruct, 78u);
@@ -384,15 +394,15 @@ void exec_base_is_built() {
     CHECK_EQ(r.get32(4), base);
     CHECK_EQ(r.get8(base + LN_TYPE), NT_LIBRARY);
     CHECK(r.read_str(r.get32(base + LN_NAME)) == "exec.library");
-    CHECK_EQ(r.get16(base + LIB_VERSION), 40u);
-    CHECK_EQ(r.get16(base + LIB_REVISION), 68u);
-    CHECK_EQ(r.get16(base + SoftVer), 68u);
+    CHECK_EQ(r.get16(base + LIB_VERSION), 60u);
+    CHECK_EQ(r.get16(base + LIB_REVISION), 0u);
+    CHECK_EQ(r.get16(base + SoftVer), 0u);
     CHECK_EQ(r.get16(base + AttnFlags), 0u);
     CHECK_EQ(r.get16(base + LIB_POSSIZE), SYSBASESIZE);
     CHECK_EQ(r.get8(base + IDNestCnt), 0xFFu);
     CHECK_EQ(r.get8(base + TDNestCnt), 0xFFu);
     CHECK_EQ(r.get32(base + ThisTask), 0u);
-    CHECK(r.read_str(r.get32(base + LIB_IDSTRING)).find("exec 40.68") == 0);
+    CHECK(r.read_str(r.get32(base + LIB_IDSTRING)) == "exec 60.0 (Hombre)\r\n");
 
     // exec is on its own library list, the memory header on the memory list.
     CHECK(r.walk(base + LibList) == std::vector<u32>{base});
@@ -766,15 +776,15 @@ void open_exec_library() {
     CHECK_EQ(r.get16(r.base() + LIB_OPENCNT), 1u);
 
     r.cpu().a[1] = name;
-    r.cpu().d[0] = 40;
+    r.cpu().d[0] = 60;
     CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[0], r.base());
     r.cpu().a[1] = name;
-    r.cpu().d[0] = 41;
+    r.cpu().d[0] = 61;
     CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[0], 0u);
     r.cpu().a[1] = name;
-    r.cpu().d[0] = 0xFFFF0028;  // only the low word is the version
+    r.cpu().d[0] = 0xFFFF003C;  // only the low word is the version
     CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[0], r.base());
     r.cpu().a[1] = name;
@@ -816,11 +826,12 @@ void native_library() {
     const NativeVector fns[] = {{nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
                                 {nullptr, nullptr}, {native_triple, "Triple"},
                                 {nullptr, nullptr}};
-    const u32 lib = g_exec.make_native_library("test.library", 7, fns, 6, &g_native_d1);
+    const u32 lib =
+        g_exec.make_native_library("test.library", kHombreLibVersion, fns, 6, &g_native_d1);
     CHECK(lib != 0);
     CHECK_EQ(lib & 3, 0u);
     CHECK(r.read_str(r.get32(lib + LN_NAME)) == "test.library");
-    CHECK_EQ(r.get16(lib + LIB_VERSION), 7u);
+    CHECK_EQ(r.get16(lib + LIB_VERSION), 60u);
     CHECK_EQ(r.get8(lib + LN_TYPE), NT_LIBRARY);
     CHECK(r.get16(lib + LIB_NEGSIZE) >= 36);
     CHECK_EQ(r.get16(lib - 30) & 0xF000, 0xA000u);
@@ -828,10 +839,10 @@ void native_library() {
 
     // Opened by name from 68000 code, then called through its vector.
     const u32 name = r.str(kNames, "test.library");
-    // MOVEA.L 4.W,A6 ; LEA name,A1 ; MOVEQ #7,D0 ; JSR -552(A6) ; MOVEA.L D0,A6 ;
+    // MOVEA.L 4.W,A6 ; LEA name,A1 ; MOVEQ #60,D0 ; JSR -552(A6) ; MOVEA.L D0,A6 ;
     // MOVEQ #14,D1 ; JSR -30(A6) ; JMP $400.w
     r.code(kCode, {0x2C78, 0x0004, 0x43F9, static_cast<u16>(name >> 16), static_cast<u16>(name),
-                   0x7007, 0x4EAE, disp(exec_lvo::OpenLibrary), 0x2C40, 0x720E, 0x4EAE,
+                   0x703C, 0x4EAE, disp(exec_lvo::OpenLibrary), 0x2C40, 0x720E, 0x4EAE,
                    disp(30), 0x4EF8, 0x0400});
     CHECK_EQ(r.go(), ExitReason::Halt);
     CHECK_EQ(r.cpu().a[6], lib);
@@ -841,7 +852,7 @@ void native_library() {
     CHECK_EQ(r.get16(lib + LIB_OPENCNT), 1u);
 
     r.cpu().a[1] = name;
-    r.cpu().d[0] = 8;
+    r.cpu().d[0] = kHombreLibVersion + 1;
     CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[0], 0u);
 
@@ -963,7 +974,7 @@ bool fake_load(void* ctx, const char* path, u32& seglist) {
     f.path = path;
     std::string name = path;
     if (name != "LIBS:hand.library" && name != "LIBS:self.library" &&
-        name != "LIBS:empty.library") {
+        name != "LIBS:empty.library" && name != "LIBS:loop.library") {
         return false;
     }
     const u32 total = 8 + 192;
@@ -972,13 +983,16 @@ bool fake_load(void* ctx, const char* path, u32& seglist) {
     f.rig->put32(segment, total);
     f.rig->put32(segment + 4, 0);
     const u32 data = segment + 8;
-    if (name != "LIBS:empty.library") {
+    if (name != "LIBS:empty.library" && name != "LIBS:loop.library") {
         const std::vector<u8> image = hand_library(data + 8, name.c_str() + 5, f.self_open);
         for (u32 i = 0; i < image.size(); ++i) {
             f.rig->put8(data + 8 + i, image[i]);
         }
     }
     seglist = (segment + 4) >> 2;
+    if (name == "LIBS:loop.library") {
+        f.rig->put32(segment + 4, seglist);  // the segment is its own successor
+    }
     f.last_seglist = seglist;
     return true;
 }
@@ -1049,6 +1063,12 @@ void library_loaded_through_the_segment_loader() {
     CHECK_EQ(r.cpu().d[0], 0u);
     CHECK(logged("exec: no resident in LIBS:empty.library"));
     CHECK_EQ(r.get32(r.get32(r.base() + MemList) + MH_FREE), free_before);  // unloaded
+    // A seglist that never ends.
+    r.cpu().a[1] = r.str(kNames + 0x80, "loop.library");
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK(logged_containing("exec: seglist $"));
+    CHECK(logged_containing(" has more than 64 segments"));
     r.cpu().a[1] = r.str(kNames + 0x60, "missing.library");
     CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[0], 0u);
@@ -1067,6 +1087,7 @@ void library_that_opens_itself_from_its_init() {
     CHECK_EQ(loader.calls, 3u);
     CHECK(loader.path == "LIBS:self.library");
     CHECK(!logged_containing("cannot load"));
+    CHECK(logged("exec: libraries nested too deep to load self.library"));
     CHECK_EQ(r.walk(r.base() + LibList).size(), 4u);
     CHECK_EQ(r.cpu().a[7], kStack);
 }
@@ -1127,6 +1148,19 @@ void init_resident_and_make_library_through_vectors() {
     CHECK_EQ(r.exec(exec_lvo::SumLibrary), ExitReason::Halt);
     CHECK(logged_containing("exec: checksum"));
 
+    // A data size below the Library structure gets a whole Library, and
+    // lib_PosSize says so.
+    r.put32(table, 0x00123456);
+    r.put32(table + 4, 0xFFFFFFFF);
+    r.cpu().a[0] = table;
+    r.cpu().a[1] = 0;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::MakeLibrary), ExitReason::Halt);
+    CHECK(r.cpu().d[0] != 0);
+    CHECK_EQ(r.get16(r.cpu().d[0] + LIB_POSSIZE), LIB_SIZE);
+
     // MakeFunctions with word offsets from a base; returns the table size.
     const u32 target = kData + 0x300;
     r.put16(table, 0x0010);
@@ -1184,6 +1218,71 @@ void init_resident_and_make_library_through_vectors() {
     r.cpu().a[2] = 0;
     r.cpu().d[0] = 40;
     CHECK_EQ(r.exec(exec_lvo::MakeLibrary), ExitReason::BusError);
+}
+
+char g_library_names[40][16];
+
+void native_library_table_fills() {
+    Rig r;
+    const NativeVector fns[] = {{nullptr, nullptr}};
+    u32 made = 0;
+    for (u32 i = 0; i < 40; ++i) {
+        std::snprintf(g_library_names[i], sizeof g_library_names[i], "n%u.library", i);
+        if (g_exec.make_native_library(g_library_names[i], kHombreLibVersion, fns, 1) != 0) {
+            ++made;
+        }
+    }
+    CHECK_EQ(made, 31u);  // exec takes the first of the 32 entries
+    CHECK(logged("exec: native library table full, n31.library not made"));
+    CHECK(logged("exec: native library table full, n39.library not made"));
+    CHECK_EQ(r.walk(r.base() + LibList).size(), 32u);
+}
+
+void native_library_limits_are_logged() {
+    // Over-long names and vector tables are refused with a line of their own.
+    Rig r;
+    const NativeVector fns[] = {{nullptr, nullptr}};
+    std::string long_name(300, 'x');
+    CHECK_EQ(g_exec.make_native_library(long_name.c_str(), 1, fns, 1), 0u);
+    CHECK(logged("exec: library name longer than 255 bytes"));
+    CHECK_EQ(g_exec.make_native_library("big.library", 1, fns, 20000), 0u);
+    CHECK(logged("exec: big.library has more than 10922 vectors"));
+}
+
+void task_set_before_init_is_kept() {
+    Rig r;
+    const u32 task = kData;
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        r.put8(task + i, 0);
+    }
+    g_exec.set_this_task(task);
+    CHECK(g_exec.init(r.m, kFreeStart, kFreeEnd));
+    CHECK_EQ(r.get32(r.base() + ThisTask), task);
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::FindTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], task);
+    r.cpu().d[0] = 0x10;
+    r.cpu().d[1] = 0x10;
+    CHECK_EQ(r.exec(exec_lvo::SetSignal), ExitReason::Halt);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0x10u);
+}
+
+void raw_do_fmt_hex_case_and_null_strings() {
+    Rig r;
+    const u32 data = kData + 0x200;
+    r.put32(data, 0);
+    r.put32(data + 4, 0);
+    r.put32(data + 8, 0x00ABCDEF);
+    r.put16(data + 12, 0xFF);
+    r.put32(data + 14, 0xBEEF);
+    r.cpu().a[0] = r.str(kData, "[%s][%b][%lx][%x][%lX][%5s]");
+    r.cpu().a[1] = data;
+    r.cpu().a[2] = 0;
+    r.cpu().a[3] = kData + 0x400;
+    r.put32(data + 18, 0);
+    CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::Halt);
+    CHECK(r.read_str(kData + 0x400) == "[][][ABCDEF][FF][BEEF][     ]");
+    CHECK_EQ(r.cpu().d[0], data + 22);
 }
 
 // --- tasks and signals --------------------------------------------------
@@ -1371,7 +1470,7 @@ void raw_do_fmt_into_a_buffer() {
     r.cpu().a[3] = buf;
     CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::Halt);
     CHECK(r.read_str(buf) ==
-          "abc|-42|4000000000|beef|Z|%|-7|65535|ab|q|   42|42   |0001f|abc|xyz|-00042||C0DE!");
+          "abc|-42|4000000000|BEEF|Z|%|-7|65535|AB|q|   42|42   |0001F|abc|xyz|-00042||C0DE!");
     CHECK_EQ(r.cpu().d[0], at);
     CHECK_EQ(r.cpu().a[3], buf);  // A3 is the caller's again
     CHECK_EQ(r.cpu().a[0], fmt);
@@ -1441,6 +1540,7 @@ void raw_do_fmt_on_bad_input() {
 }
 
 int main() {
+    version_is_hombres_own();
     layout_matches_the_ndk();
     exec_base_is_built();
     init_rejects_bad_ranges();
@@ -1458,6 +1558,10 @@ int main() {
     library_loaded_through_the_segment_loader();
     library_that_opens_itself_from_its_init();
     init_resident_and_make_library_through_vectors();
+    native_library_table_fills();
+    native_library_limits_are_logged();
+    task_set_before_init_is_kept();
+    raw_do_fmt_hex_case_and_null_strings();
     tasks_and_signals();
     forbid_and_disable_count();
     copy_mem();

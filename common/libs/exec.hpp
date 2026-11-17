@@ -27,6 +27,7 @@
 #include "../m68k_jit.hpp"
 #include "../types.hpp"
 #include "native.hpp"
+#include "version.hpp"
 
 // exec.library written in C++ for code run by the 68000 translator.
 //
@@ -44,8 +45,6 @@
 // eight deep, and leave every register but the result as it was.
 
 namespace hombre {
-
-constexpr u32 kExecLibVersion = 40, kExecLibRevision = 68;
 
 // Library vector offsets of exec.library, n of LVO -n, as the 3.1 function
 // description numbers them.
@@ -244,16 +243,18 @@ public:
                             void* ctx = nullptr);
 
     // OpenLibrary of a library not in the list asks this for LIBS:<name>.
+    // It may be set before init and is kept across it.
     void set_segment_loader(const SegmentLoader& loader) { loader_ = loader; }
 
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
-    // tc_SigRecvd SetSignal and Wait use.
+    // tc_SigRecvd SetSignal and Wait use. It may be set before init and is
+    // kept across it.
     void set_this_task(u32 task_addr);
 
 private:
     friend struct ExecOps;
 
-    static constexpr u32 kMaxLibraries = 16;
+    static constexpr u32 kMaxLibraries = 32;
     static constexpr u32 kMaxLoaded = 32;
 
     // Context of the native every unimplemented vector of a library runs.
