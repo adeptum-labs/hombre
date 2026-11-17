@@ -62,6 +62,10 @@ void exception_names_for_the_common_faults() {
     CHECK(info_is(13, "#GP", "general protection fault"));
     CHECK(info_is(14, "#PF", "page fault"));
     CHECK(info_is(18, "#MC", "machine check"));
+    CHECK(info_is(19, "#XM", "SIMD floating-point exception"));
+    CHECK(info_is(21, "#CP", "control protection exception"));
+    CHECK(info_is(28, "#HV", "hypervisor injection exception"));
+    CHECK(info_is(30, "#SX", "security exception"));
 }
 
 void reserved_vectors_have_a_placeholder() {

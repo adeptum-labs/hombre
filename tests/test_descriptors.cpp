@@ -21,7 +21,6 @@
  * Contact: info@adeptum.se
  */
 
-
 #include "check.hpp"
 #include "descriptors.hpp"
 
@@ -68,6 +67,17 @@ void tss_limit_above_16_bits_uses_the_high_nibble() {
     CHECK_EQ(d.low.flags_limit_high, 0x01u);
 }
 
+void tss_limit_is_masked_to_20_bits() {
+    const TssDescriptor max = make_tss_descriptor(0, 0xFFFFF);
+    CHECK_EQ(max.low.limit_low, 0xFFFFu);
+    CHECK_EQ(max.low.flags_limit_high, 0x0Fu);
+
+    // Bit 20 and above must not leak into the flags nibble.
+    const TssDescriptor over = make_tss_descriptor(0, 0x1FFFFF);
+    CHECK_EQ(over.low.limit_low, 0xFFFFu);
+    CHECK_EQ(over.low.flags_limit_high, 0x0Fu);
+}
+
 void interrupt_gate_splits_the_handler_address() {
     const IdtGate g = make_interrupt_gate(0xFFFFFFFF80101234ull, 0x08, 1);
 
@@ -89,6 +99,7 @@ void layout_sizes_are_pinned() {
     CHECK_EQ(sizeof(TssDescriptor), 16u);
     CHECK_EQ(sizeof(Tss), 104u);
     CHECK_EQ(sizeof(IdtGate), 16u);
+    CHECK_EQ(sizeof(DescriptorTablePointer), 10u);
 }
 
 void tss_packed_fields_read_back() {
@@ -113,6 +124,7 @@ int main() {
     data_segment_matches();
     tss_descriptor_splits_a_high_base();
     tss_limit_above_16_bits_uses_the_high_nibble();
+    tss_limit_is_masked_to_20_bits();
     interrupt_gate_splits_the_handler_address();
     gate_ist_is_masked_to_three_bits();
     layout_sizes_are_pinned();
