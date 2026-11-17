@@ -80,7 +80,8 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 # HOMBRE_FAULT_TEST. Each is built into its own directory.
 FAULT_TESTS := 1 2 3
 
-.PHONY: all image image-nokernel disk-image run check check-workbench test test-dms clean
+.PHONY: all image image-nokernel disk-image run check check-workbench test test-dms \
+        test-m68k clean
 
 all: image
 
@@ -266,6 +267,31 @@ test-dms: $(ADFTOOL)
 else
 test-dms:
 	@echo "skipping: set DMS_DIR"
+endif
+
+# Runs the 68000 single-step suite (a clone of SingleStepTests/680x0 in
+# M68K_TESTS_DIR) through the translator, over the files of 68000/v1 that
+# match M68K_FILES. Each is unpacked into M68K_SUITE once. Both variables
+# reach the recipe through the environment, so spaces and shell characters
+# in them are safe; M68K_FILES is a glob, expanded there.
+M68K_SUITE := $(BUILD)/m68k-suite
+M68K_FILES ?= *
+export M68K_TESTS_DIR M68K_FILES
+
+ifdef M68K_TESTS_DIR
+test-m68k: $(BUILD)/tests/test_m68k_suite
+	@mkdir -p $(M68K_SUITE)
+	@set -e; set -- ; \
+	for gz in "$$M68K_TESTS_DIR"/68000/v1/$$M68K_FILES.json.gz; do \
+	    [ -f "$$gz" ] || { echo "no suite file matches $$gz" >&2; exit 1; }; \
+	    json="$(M68K_SUITE)/$$(basename "$$gz" .gz)"; \
+	    [ "$$json" -nt "$$gz" ] || { zcat "$$gz" > "$$json.part"; mv "$$json.part" "$$json"; }; \
+	    set -- "$$@" "$$json"; \
+	done; \
+	$< "$$@"
+else
+test-m68k:
+	@echo "skipping: set M68K_TESTS_DIR"
 endif
 
 clean:

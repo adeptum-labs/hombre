@@ -36,10 +36,11 @@
 // address of the instruction being run and RBP the host stack pointer to
 // unwind to when an access faults.
 //
-// Every guest access is checked for 68000 alignment (AddressError) and for
-// addr + size <= mem.size (BusError); either ends the run with fault_addr
-// set and pc at the instruction. The condition codes are computed after
-// every instruction that sets them; X is bit 4 of sr.
+// Every guest access is checked for 68000 alignment (AddressError) and,
+// after the address mask, for addr + size <= mem.size (BusError); either
+// ends the run with fault_addr set and pc at the instruction. The
+// condition codes are computed after every instruction that sets them; X
+// is bit 4 of sr.
 //
 // The code region is one set of pages seen through two views: generated
 // code is written through `write` and run from `exec`. When it is full, or
@@ -120,6 +121,12 @@ public:
     // The most instructions in one block (at least 1). Drops every block.
     void set_block_limit(u32 instructions);
 
+    // ANDed into every guest address before it reaches guest memory, the
+    // instruction fetches included; the address registers and the pc keep
+    // all 32 bits. 0x00FFFFFF gives the 68000's 24-bit address bus. Call
+    // after init, which resets it to 0xFFFFFFFF. Drops every block.
+    void set_address_mask(u32 mask);
+
 private:
     static constexpr u32 kSlotBits = 13;
     static constexpr u32 kSlots = 1u << kSlotBits;
@@ -139,6 +146,7 @@ private:
     detail::Prelude prelude_{};
     usize used_ = 0;
     u32 block_limit_ = 64;
+    u32 address_mask_ = 0xFFFFFFFF;
     u32 blocks_ = 0;
     u32 next_native_ = 2;
     Block cache_[kSlots]{};

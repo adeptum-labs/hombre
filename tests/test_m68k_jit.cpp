@@ -1266,6 +1266,49 @@ void block_limit_hook() {
     CHECK_EQ(r.cpu().d[2], 3u);
 }
 
+void address_mask_hook() {
+    Rig r;
+    // MOVE.L (A0),D0 ; MOVE.L D0,(A1)+
+    const u32 seq = r.place({0x2010, 0x22C0});
+    r.put32(0x4000, 0x12345678);
+    r.cpu().a[0] = 0xFF004000;
+    r.cpu().a[1] = 0x80004010;
+    CHECK_EQ(r.go(seq), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0xFF004000u);
+
+    g_jit.set_address_mask(0x00FFFFFF);
+    CHECK_EQ(r.go(seq), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x12345678u);
+    CHECK_EQ(r.get32(0x4010), 0x12345678u);
+    CHECK_EQ(r.cpu().a[0], 0xFF004000u);
+    CHECK_EQ(r.cpu().a[1], 0x80004014u);  // the register keeps its top byte
+
+    // Instructions are fetched through the mask; the pc keeps all 32 bits.
+    // MOVEQ #7,D2 ; BRA.S +0 runs on to the halt behind it.
+    r.program(kCode, {0x7407, 0x6000, 0x0002});
+    r.cpu().pc = 0x7F000000 | kCode;
+    r.cpu().exit = ExitReason::None;
+    g_jit.set_block_limit(1);
+    CHECK_EQ(g_jit.run(2), ExitReason::Budget);
+    CHECK_EQ(r.cpu().d[2], 7u);
+    CHECK_EQ(r.cpu().pc, 0x7F000000u | (kCode + 6));
+
+    // A masked access still faults past the end of guest memory, and an
+    // odd one still raises an address error.
+    g_jit.set_address_mask(0x01FFFFFF);
+    r.cpu().a[0] = 0xFF000000 | kGuestBytes;
+    CHECK_EQ(r.go(seq), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, 0xFF000000u | kGuestBytes);
+    r.cpu().a[0] = 0xFF004001;
+    CHECK_EQ(r.go(seq), ExitReason::AddressError);
+
+    // init goes back to the whole 32-bit address.
+    Rig fresh;
+    const u32 again = fresh.place({0x2010});
+    fresh.cpu().a[0] = 0xFF004000;
+    CHECK_EQ(fresh.go(again), ExitReason::BusError);
+}
+
 void init_refuses_bad_setups() {
     Machine m{};
     std::vector<u8> small(0x400);
@@ -1305,6 +1348,7 @@ int main() {
     jumps_and_returns();
     unsupported_opcodes_stop_the_run();
     block_limit_hook();
+    address_mask_hook();
     init_refuses_bad_setups();
     return check::finish("test_m68k_jit");
 }

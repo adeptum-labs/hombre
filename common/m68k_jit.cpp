@@ -47,6 +47,8 @@ constexpr usize kMinBlockBytes = 1024;
 // Above this the rel32 jumps inside the region could not reach.
 constexpr usize kMaxRegionBytes = 0x40000000;
 
+constexpr u32 kNoAddressMask = 0xFFFFFFFF;
+
 constexpr u32 kCcrX = 0x10;
 constexpr u32 kCcrZ = 0x04;
 
@@ -209,24 +211,29 @@ usize emit_fault(Emitter& e, const detail::Prelude& p, ExitReason why) {
     return at;
 }
 
-// Alignment, then bounds, of an access of n bytes at R8D. Clobbers RCX.
-void emit_access_check(Emitter& e, const detail::Prelude& p, u32 n) {
+// Alignment, then bounds, of an access of n bytes at R8D. Leaves the masked
+// address, the offset into guest memory, in RCX.
+void emit_access_check(Emitter& e, const detail::Prelude& p, u32 n, u32 mask) {
     if (n > 1) {
         e.mov_rr(RCX, R8, 32);
         e.alu_ri(Alu::And, RCX, 1, 32);
         e.jcc_to(Cc::NE, p.address_error);
     }
-    e.mov_rr(RCX, R8, 64);  // R8 holds a zero-extended 32-bit address
+    e.mov_rr(RCX, R8, 32);
+    if (mask != kNoAddressMask) {
+        e.alu_ri(Alu::And, RCX, static_cast<i32>(mask), 32);
+    }
     e.alu_ri(Alu::Add, RCX, static_cast<i32>(n), 64);
     e.alu_rr(Alu::Cmp, RCX, R13, 64);
     e.jcc_to(Cc::A, p.bus_error);
+    e.alu_ri(Alu::Sub, RCX, static_cast<i32>(n), 64);
 }
 
 // The entry used from C++:
 //   u32 enter(CpuState* cpu, u8* base, u64 size, const u8* block)
 // returns 0, or the A-line opcode the block stopped at. Six pushes keep the
 // stack 16-byte aligned at every call made from block level.
-void emit_prelude(Emitter& e, detail::Prelude& p) {
+void emit_prelude(Emitter& e, detail::Prelude& p, u32 mask) {
     p.enter = e.size();
     e.push(RBX);
     e.push(RBP);
@@ -256,8 +263,8 @@ void emit_prelude(Emitter& e, detail::Prelude& p) {
     for (u32 i = 0; i < 3; ++i) {
         const u32 n = 1u << i;
         p.read[i] = e.size();
-        emit_access_check(e, p, n);
-        e.mov_load_idx(RAX, R12, R8, 8 * n);
+        emit_access_check(e, p, n, mask);
+        e.mov_load_idx(RAX, R12, RCX, 8 * n);
         if (n == 1) {
             e.movzx(RAX, RAX, 8);
         } else if (n == 2) {
@@ -271,11 +278,11 @@ void emit_prelude(Emitter& e, detail::Prelude& p) {
     for (u32 i = 0; i < 3; ++i) {
         const u32 n = 1u << i;
         p.write[i] = e.size();
-        emit_access_check(e, p, n);
+        emit_access_check(e, p, n, mask);
         if (n > 1) {
             e.bswap(RAX, 8 * n);
         }
-        e.mov_store_idx(R12, R8, RAX, 8 * n);
+        e.mov_store_idx(R12, RCX, RAX, 8 * n);
         e.ret();
     }
 
@@ -1106,14 +1113,14 @@ u32 slot_of(u32 pc, u32 bits) {
 
 // The exit for an instruction that cannot be fetched: an odd pc, or the
 // first of its words that lies outside memory.
-void fetch_fault(CpuState& cpu, const GuestMemory& mem, u32 pc) {
+void fetch_fault(CpuState& cpu, const GuestMemory& mem, u32 pc, u32 mask) {
     if ((pc & 1) != 0) {
         cpu.exit = ExitReason::AddressError;
         cpu.fault_addr = pc;
         return;
     }
     u32 at = pc;
-    for (u32 n = 0; n < 5 && mem.range_ok(at, 2); ++n) {
+    for (u32 n = 0; n < 5 && mem.range_ok(at & mask, 2); ++n) {
         at += 2;
     }
     cpu.exit = ExitReason::BusError;
@@ -1132,7 +1139,7 @@ bool Jit::init(const CodeRegion& region, Machine& machine) {
     }
     Emitter e(region.write, region.bytes);
     detail::Prelude prelude{};
-    emit_prelude(e, prelude);
+    emit_prelude(e, prelude, kNoAddressMask);
     if (!e.ok() || region.bytes < prelude.end + kMinBlockBytes) {
         return false;
     }
@@ -1150,6 +1157,7 @@ bool Jit::init(const CodeRegion& region, Machine& machine) {
     }
     next_native_ = 2;
     block_limit_ = 64;
+    address_mask_ = kNoAddressMask;
     flush();
     return true;
 }
@@ -1172,6 +1180,16 @@ void Jit::flush() {
 
 void Jit::set_block_limit(u32 instructions) {
     block_limit_ = instructions == 0 ? 1 : instructions;
+    flush();
+}
+
+// The mask costs at most one instruction in each of the six access
+// routines, far less than the room init keeps beyond the prelude, so the
+// prelude written again always fits.
+void Jit::set_address_mask(u32 mask) {
+    Emitter e(region_.write, region_.bytes);
+    emit_prelude(e, prelude_, mask);
+    address_mask_ = mask;
     flush();
 }
 
@@ -1203,9 +1221,9 @@ const u8* Jit::translate(u32 pc) {
         bool ended = false;
         while (count < block_limit_) {
             Insn in;
-            if (!decode(mem, at, in)) {
+            if (!decode(mem, at & address_mask_, in)) {
                 if (count == 0) {
-                    fetch_fault(cpu, mem, at);
+                    fetch_fault(cpu, mem, at, address_mask_);
                     return nullptr;
                 }
                 break;  // the next block reports it
@@ -1300,7 +1318,7 @@ ExitReason Jit::call_guest(u32 entry, u64 max_blocks) {
     CpuState& cpu = machine_->cpu;
     const u32 caller_pc = cpu.pc;
     const u32 sp = cpu.a[7] - 4;
-    if (!machine_->mem.write32(sp, kReturnStub)) {
+    if (!machine_->mem.write32(sp & address_mask_, kReturnStub)) {
         cpu.exit = (sp & 1) != 0 ? ExitReason::AddressError : ExitReason::BusError;
         cpu.fault_addr = sp;
         return cpu.exit;
