@@ -219,8 +219,10 @@ $(BUILD)/tests/%: tests/%.cpp $(COMMON_HOBJ)
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
-test: $(TEST_BIN)
-	@for t in $(TEST_BIN); do $$t || exit 1; done
+# The test of the test disk needs the disk itself, which it finds through
+# the environment.
+test: $(TEST_BIN) $(TEST_DISK)
+	@for t in $(TEST_BIN); do HOMBRE_TEST_DISK="$(TEST_DISK)" $$t || exit 1; done
 
 # Host tools, built like the tests.
 ADFTOOL := $(BUILD)/tools/adftool
