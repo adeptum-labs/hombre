@@ -106,6 +106,8 @@ trap_common:
     pushq %r15
     movq %rsp, %rdi
     movq %rsp, %rbx
+    # The frame is 176 bytes and long mode already aligns the stack on entry,
+    # so the and is only defensive.
     andq $-16, %rsp
     cld
     call trap_dispatch
@@ -153,11 +155,6 @@ constexpr u64 vector_breakpoint = 3;
 constexpr u64 vector_double_fault = 8;
 constexpr u64 vector_machine_check = 18;
 constexpr u32 vector_count = 256;
-
-struct __attribute__((packed)) DescriptorTablePointer {
-    u16 limit;
-    u64 base;
-};
 
 // In .bss in the higher half, so it stays valid after the lower half is
 // unmapped.
@@ -222,8 +219,8 @@ void write_heading(u64 vector) {
     }
 }
 
-// Only port I/O and a few bytes of stack: a fault in here must not bury the
-// dump already on the wire.
+// Only port I/O and under 1 KiB of stack (0x200 bytes was too little, 0x400
+// enough): a fault in here must not bury the dump already on the wire.
 [[noreturn]] void dump_and_halt(const TrapFrame& frame) {
     write_heading(frame.vector);
     write_fields("error", frame.error_code);

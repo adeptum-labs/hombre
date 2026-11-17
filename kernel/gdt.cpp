@@ -36,11 +36,6 @@ struct Gdt {
     TssDescriptor tss;
 };
 
-struct __attribute__((packed)) DescriptorTablePointer {
-    u16 limit;
-    u64 base;
-};
-
 static_assert(sizeof(Gdt) == 40);
 static_assert(__builtin_offsetof(Gdt, code) == kKernelCodeSelector);
 static_assert(__builtin_offsetof(Gdt, data) == kKernelDataSelector);
@@ -84,7 +79,8 @@ void gdt_init_bsp() {
         : "rax", "memory");
 
     // FS and GS are left alone: loading a selector into GS would clear its
-    // base.
+    // base. SS must be reloaded: iretq after an exception loads SS and
+    // faults with #GP (error 0x30) when it holds a selector outside this GDT.
     const u16 data_selector = kKernelDataSelector;
     asm volatile(
         "mov %0, %%ds\n\t"

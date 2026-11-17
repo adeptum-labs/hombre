@@ -21,7 +21,6 @@
  * Contact: info@adeptum.se
  */
 
-
 #pragma once
 
 #include "../common/types.hpp"
@@ -67,12 +66,19 @@ struct IdtGate {
     u32 reserved;
 };
 
+// The operand of lgdt, lidt, sgdt and sidt.
+struct __attribute__((packed)) DescriptorTablePointer {
+    u16 limit;
+    u64 base;
+};
+
 static_assert(sizeof(GdtEntry) == 8);
 static_assert(sizeof(TssDescriptor) == 16);
 static_assert(sizeof(Tss) == 104);
 static_assert(__builtin_offsetof(Tss, ist) == 36);
 static_assert(__builtin_offsetof(Tss, iomap_base) == 102);
 static_assert(sizeof(IdtGate) == 16);
+static_assert(sizeof(DescriptorTablePointer) == 10);
 
 // Present, DPL 0, 64-bit code segment: access 0x9A, flags L|G, limit 0xFFFF.
 constexpr GdtEntry make_code_segment64() {

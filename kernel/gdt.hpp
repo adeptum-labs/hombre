@@ -31,15 +31,15 @@ inline constexpr u16 kKernelCodeSelector = 0x08;
 inline constexpr u16 kKernelDataSelector = 0x10;
 inline constexpr u16 kTssSelector = 0x18;
 
-// IST slots (1-based, as in an IDT gate) and the stacks behind them.
+// IST slots, numbered from 1 as in an IDT gate.
 inline constexpr u8 kIstDoubleFault = 1;
 inline constexpr u8 kIstNmi = 2;
 inline constexpr u8 kIstMachineCheck = 3;
 
-// Replaces the firmware's GDT on the calling CPU with the kernel's own and
-// loads the TSS. Segment registers are reloaded except FS and GS, so a GS
-// base set before the call survives. Call it once per CPU, with interrupts
-// off.
+// Replaces the firmware's GDT with the kernel's own and loads the TSS.
+// Segment registers are reloaded except FS and GS, so a GS base set before
+// the call survives. The GDT and TSS are shared and a second ltr faults on a
+// busy TSS: call once, on the boot CPU, with interrupts off.
 void gdt_init_bsp();
 
 inline u16 read_cs() {

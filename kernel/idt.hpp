@@ -36,6 +36,7 @@ void idt_init_bsp();
 // True when the CPU's IDT register points at the kernel's table.
 bool idt_loaded();
 
+// How many breakpoint traps the dispatcher has handled so far.
 u64 trap_breakpoint_count();
 
 }
