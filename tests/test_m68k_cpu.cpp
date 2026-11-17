@@ -24,6 +24,8 @@
 #include "check.hpp"
 #include "m68k_cpu.hpp"
 
+#include <string_view>
+
 using namespace hombre;
 using namespace hombre::m68k;
 
@@ -97,6 +99,15 @@ void user_stack_pointer_is_its_own_register() {
           reinterpret_cast<const u8*>(&cpu.usp + 1) <= reinterpret_cast<const u8*>(cpu.a));
 }
 
+void exit_reasons_have_names() {
+    static_assert(exit_reason_name(ExitReason::BusError)[0] == 'B');
+    CHECK(std::string_view(exit_reason_name(ExitReason::None)) == "None");
+    CHECK(std::string_view(exit_reason_name(ExitReason::Budget)) == "Budget");
+    CHECK(std::string_view(exit_reason_name(ExitReason::AddressError)) == "AddressError");
+    CHECK(std::string_view(exit_reason_name(ExitReason::Unimplemented)) == "Unimplemented");
+    CHECK(std::string_view(exit_reason_name(static_cast<ExitReason>(99))) == "?");
+}
+
 }
 
 int main() {
@@ -106,5 +117,6 @@ int main() {
     accesses_stop_at_the_end_of_memory();
     ranges_are_checked_without_wrapping();
     user_stack_pointer_is_its_own_register();
+    exit_reasons_have_names();
     return check::finish("test_m68k_cpu");
 }

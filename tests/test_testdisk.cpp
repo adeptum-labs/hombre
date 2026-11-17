@@ -122,6 +122,7 @@ public:
         m.mem = GuestMemory{memory_.data(), kGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
+        g_jit.set_address_mask(0x00FFFFFF);  // the 68000's 24-bit bus, as the kernel runs it
         g_lines.clear();
         g_console.clear();
         g_log = capture;

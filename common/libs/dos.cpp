@@ -138,24 +138,6 @@ constexpr FaultText kFaults[] = {
     {ERROR_NOT_EXECUTABLE, "file not executable"},
 };
 
-const char* exit_name(ExitReason why) {
-    switch (why) {
-    case ExitReason::None: return "None";
-    case ExitReason::Halt: return "Halt";
-    case ExitReason::Returned: return "Returned";
-    case ExitReason::Budget: return "Budget";
-    case ExitReason::Illegal: return "Illegal";
-    case ExitReason::Trap: return "Trap";
-    case ExitReason::DivideByZero: return "DivideByZero";
-    case ExitReason::Chk: return "Chk";
-    case ExitReason::BusError: return "BusError";
-    case ExitReason::AddressError: return "AddressError";
-    case ExitReason::Privilege: return "Privilege";
-    case ExitReason::Unimplemented: return "Unimplemented";
-    }
-    return "?";
-}
-
 // Ends the run unless it has ended already.
 void end_run(Machine& m, ExitReason why) {
     if (m.cpu.exit == ExitReason::None) {
@@ -2248,7 +2230,7 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
         cpu.exit = ExitReason::None;
         ok = true;
     } else {
-        LogLine().text("dos: ").text(path).text(" ended with ").text(exit_name(why)).send();
+        LogLine().text("dos: ").text(path).text(" ended with ").text(exit_reason_name(why)).send();
     }
     exited_ = false;
     input_length_ = 0;

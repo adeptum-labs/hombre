@@ -27,6 +27,7 @@
 #include "../common/dms.hpp"
 #include "../common/printable.hpp"
 #include "../common/serial.hpp"
+#include "m68k_run.hpp"
 #include "mmio.hpp"
 #include "page_alloc.hpp"
 #include "pci.hpp"
@@ -281,7 +282,9 @@ void print_startup_sequence(const AdfVolume& volume) {
     }
 }
 
-void mount_and_print(const Image& image) {
+// Mounts the volume, prints it and runs C:Version from it. The image stays
+// in memory for good, as dos needs it.
+void mount_and_run(const BootInfo& info, PhysAllocator& phys_pages, const Image& image) {
     AdfVolume volume;
     const FsError error = adf_mount(image.data, image.bytes, volume);
     if (error != FsError::Ok) {
@@ -299,11 +302,12 @@ void mount_and_print(const Image& image) {
 
     print_root(volume);
     print_startup_sequence(volume);
+    m68k_run_command(info, phys_pages, volume, "C:Version", "");
 }
 
 }
 
-void boot_disk_run(const BootInfo&, PhysAllocator& phys_pages, MmioMapper& mmio) {
+void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& mmio) {
     if (!open_drive(phys_pages, mmio)) {
         return;
     }
@@ -326,7 +330,7 @@ void boot_disk_run(const BootInfo&, PhysAllocator& phys_pages, MmioMapper& mmio)
         serial::write("disk: unknown format\n");
         return;
     }
-    mount_and_print(image);
+    mount_and_run(info, phys_pages, image);
 }
 
 }

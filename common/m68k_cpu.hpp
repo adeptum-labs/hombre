@@ -42,6 +42,25 @@ enum class ExitReason : u32 {
     Unimplemented
 };
 
+// The enumerator's name, for logs; "?" for a value outside the enum.
+constexpr const char* exit_reason_name(ExitReason why) {
+    switch (why) {
+    case ExitReason::None: return "None";
+    case ExitReason::Halt: return "Halt";
+    case ExitReason::Returned: return "Returned";
+    case ExitReason::Budget: return "Budget";
+    case ExitReason::Illegal: return "Illegal";
+    case ExitReason::Trap: return "Trap";
+    case ExitReason::DivideByZero: return "DivideByZero";
+    case ExitReason::Chk: return "Chk";
+    case ExitReason::BusError: return "BusError";
+    case ExitReason::AddressError: return "AddressError";
+    case ExitReason::Privilege: return "Privilege";
+    case ExitReason::Unimplemented: return "Unimplemented";
+    }
+    return "?";
+}
+
 // SR is plain data: S (bit 13) only decides whether the privileged
 // instructions run, and A7 is one register whatever S says. usp is the
 // user stack pointer that MOVE USP reads and writes, kept apart from A7.
