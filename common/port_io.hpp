@@ -37,4 +37,14 @@ inline u8 inb(u16 port) {
     return value;
 }
 
+inline void outl(u16 port, u32 value) {
+    asm volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+inline u32 inl(u16 port) {
+    u32 value;
+    asm volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 }
