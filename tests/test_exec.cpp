@@ -872,6 +872,29 @@ void native_library() {
     CHECK(g_exec.make_native_library("x.library", 1, nullptr, 3) == 0);
 }
 
+void native_library_with_fields_past_the_node() {
+    Rig r;
+    // Dirty the memory the library will get, to see that it is cleared.
+    const u32 probe = g_exec.alloc(4096, 0);
+    for (u32 i = 0; i < 4096; ++i) {
+        r.put8(probe + i, 0xEE);
+    }
+    g_exec.free(probe, 4096);
+    const u32 lib = g_exec.make_native_library("wide.library", 1, nullptr, 0, nullptr, 70);
+    CHECK(lib != 0);
+    CHECK_EQ(r.get16(lib + LIB_POSSIZE), 70u);
+    CHECK_EQ(r.get32(lib + LN_NAME), lib + 70);
+    CHECK(r.read_str(lib + 70) == "wide.library");
+    for (u32 at = LIB_SIZE; at < 70; ++at) {
+        CHECK_EQ(r.get8(lib + at), 0u);
+    }
+    // Less than a Library node gives a Library node; more than a UWORD fails.
+    const u32 small = g_exec.make_native_library("small.library", 1, nullptr, 0, nullptr, 4);
+    CHECK_EQ(r.get16(small + LIB_POSSIZE), LIB_SIZE);
+    CHECK_EQ(r.get32(small + LN_NAME), small + LIB_SIZE);
+    CHECK_EQ(g_exec.make_native_library("huge.library", 1, nullptr, 0, nullptr, 0x10000), 0u);
+}
+
 void unknown_exec_vector() {
     Rig r;
     // MOVEA.L 4.W,A6 ; JSR -2000(A6) ; JMP $400.w
@@ -1554,6 +1577,7 @@ int main() {
     open_exec_library();
     unknown_library_without_loader();
     native_library();
+    native_library_with_fields_past_the_node();
     unknown_exec_vector();
     library_loaded_through_the_segment_loader();
     library_that_opens_itself_from_its_init();

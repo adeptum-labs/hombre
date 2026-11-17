@@ -49,7 +49,6 @@ constexpr u32 kMaxVectors = 0xFFFC / LIB_VECTSIZE;  // lib_NegSize is a UWORD
 constexpr u32 kMaxName = 256;
 constexpr u32 kMaxSegments = 64;
 constexpr u32 kMaxInitCommands = 1u << 16;
-constexpr u32 kMaxWidth = 10000;
 constexpr u8 NT_MSGPORT = 4;
 constexpr char kExecName[] = "exec.library";
 constexpr char kExecIdString[] = "exec 60.0 (Hombre)\r\n";
@@ -300,60 +299,7 @@ struct FormatOutput {
         data = call.a3();
         return true;
     }
-
-    bool repeat(u32 c, u32 count) {
-        for (u32 i = 0; i < count; ++i) {
-            if (!put(c)) {
-                return false;
-            }
-        }
-        return true;
-    }
 };
-
-struct FieldFormat {
-    u32 width;
-    bool left;
-    bool zero;
-};
-
-bool put_number(FormatOutput& out, const FieldFormat& f, bool negative, const char* digits) {
-    u32 length = negative ? 1 : 0;
-    for (const char* p = digits; *p != '\0'; ++p) {
-        ++length;
-    }
-    const u32 pad = f.width > length ? f.width - length : 0;
-    if (!f.left && !f.zero && !out.repeat(' ', pad)) {
-        return false;
-    }
-    if (negative && !out.put('-')) {
-        return false;
-    }
-    if (!f.left && f.zero && !out.repeat('0', pad)) {
-        return false;
-    }
-    for (const char* p = digits; *p != '\0'; ++p) {
-        if (!out.put(static_cast<u8>(*p))) {
-            return false;
-        }
-    }
-    return !f.left || out.repeat(' ', pad);
-}
-
-// count guest bytes from addr, padded to the field.
-bool put_guest_text(FormatOutput& out, const FieldFormat& f, u32 addr, u32 count) {
-    const u32 pad = f.width > count ? f.width - count : 0;
-    if (!f.left && !out.repeat(f.zero ? '0' : ' ', pad)) {
-        return false;
-    }
-    for (u32 i = 0; i < count; ++i) {
-        const u32 c = out.bus.r8(addr + i);
-        if (!out.bus.ok() || !out.put(c)) {
-            return false;
-        }
-    }
-    return !f.left || out.repeat(' ', pad);
-}
 
 }
 
@@ -1045,140 +991,15 @@ struct ExecOps {
 
     // --- RawDoFmt --------------------------------------------------------
 
-    // %[-][0][width][.limit][l]type with type d, u, x, X, c, s, b or %.
-    // Without l, d, u, x and c take a 16-bit word from the data stream.
-    // x and X both give uppercase hex digits, and a null %s or %b pointer
-    // prints as an empty string, as exec has done since V36.
-    // Each character goes to the routine in A2, or into the buffer in A3
-    // when A2 is 0, the closing NUL too. D0 returns the data stream
-    // pointer past the last argument used.
+    // Formats as native::raw_format describes. Each character goes to the
+    // routine in A2, or into the buffer in A3 when A2 is 0, the closing NUL
+    // too. D0 returns the data stream pointer past the last argument used.
     static void raw_do_fmt(void* ctx, Machine& m) {
         Exec& e = of(ctx);
         Bus b(m);
-        u32 fmt = m.cpu.a[0];
         u32 data = m.cpu.a[1];
         FormatOutput out{e.call_depth_, b, m.cpu.a[2], m.cpu.a[3]};
-        for (;;) {
-            u32 c = b.r8(fmt++);
-            if (!b.ok()) {
-                return;
-            }
-            if (c == 0) {
-                break;
-            }
-            if (c != '%') {
-                if (!out.put(c)) {
-                    return;
-                }
-                continue;
-            }
-            FieldFormat f{0, false, false};
-            u32 limit = 0xFFFFFFFF;
-            bool is_long = false;
-            c = b.r8(fmt++);
-            if (c == '-') {
-                f.left = true;
-                c = b.r8(fmt++);
-            }
-            if (c == '0') {
-                f.zero = true;
-                c = b.r8(fmt++);
-            }
-            while (c >= '0' && c <= '9' && b.ok()) {
-                f.width = f.width < kMaxWidth ? f.width * 10 + (c - '0') : f.width;
-                c = b.r8(fmt++);
-            }
-            if (c == '.') {
-                limit = 0;
-                c = b.r8(fmt++);
-                while (c >= '0' && c <= '9' && b.ok()) {
-                    limit = limit < kMaxWidth ? limit * 10 + (c - '0') : limit;
-                    c = b.r8(fmt++);
-                }
-            }
-            if (c == 'l') {
-                is_long = true;
-                c = b.r8(fmt++);
-            }
-            if (!b.ok()) {
-                return;
-            }
-            bool ok = true;
-            switch (c) {
-            case 'd':
-            case 'u':
-            case 'x':
-            case 'X':
-            case 'c': {
-                u32 v = is_long ? b.r32(data) : b.r16(data);
-                data += is_long ? 4 : 2;
-                if (!b.ok()) {
-                    return;
-                }
-                if (c == 'c') {
-                    const u32 pad = f.width > 1 ? f.width - 1 : 0;
-                    ok = (f.left || out.repeat(' ', pad)) && out.put(v & 0xFF) &&
-                         (!f.left || out.repeat(' ', pad));
-                    break;
-                }
-                char digits[12];
-                bool negative = false;
-                if (c == 'd') {
-                    if (!is_long && (v & 0x8000) != 0) {
-                        v |= 0xFFFF0000;
-                    }
-                    if ((v & 0x80000000) != 0) {
-                        negative = true;
-                        v = 0u - v;
-                    }
-                }
-                format_u64(digits, sizeof digits, v, c == 'x' || c == 'X' ? 16 : 10);
-                if (c == 'x' || c == 'X') {
-                    for (char* p = digits; *p != '\0'; ++p) {
-                        *p = *p >= 'a' && *p <= 'f' ? static_cast<char>(*p - 'a' + 'A') : *p;
-                    }
-                }
-                ok = put_number(out, f, negative, digits);
-                break;
-            }
-            case 's':
-            case 'b': {
-                const u32 ptr = b.r32(data);
-                data += 4;
-                if (!b.ok()) {
-                    return;
-                }
-                u32 text = 0;
-                u32 length = 0;
-                if (ptr != 0 && c == 's') {
-                    text = ptr;
-                    while (length < limit && b.r8(text + length) != 0 && b.ok()) {
-                        ++length;
-                    }
-                } else if (ptr != 0) {
-                    const u32 bstr = ptr << 2;
-                    text = bstr + 1;
-                    length = b.r8(bstr);
-                    length = length < limit ? length : limit;
-                }
-                ok = b.ok() && put_guest_text(out, f, text, length);
-                break;
-            }
-            case '%':
-                ok = out.put('%');
-                break;
-            case 0:
-                --fmt;  // the format ends inside the conversion
-                break;
-            default:
-                ok = out.put(c);
-                break;
-            }
-            if (!ok) {
-                return;
-            }
-        }
-        if (out.put(0)) {
+        if (native::raw_format(b, m.cpu.a[0], data, out) && out.put(0)) {
             native::set_result(m, data);
         }
     }
@@ -1448,10 +1269,11 @@ void Exec::free(u32 addr, u32 bytes) {
 }
 
 u32 Exec::make_native_library(const char* name, u16 version, const NativeVector* fns, u32 count,
-                              void* ctx) {
-    if (m_ == nullptr || name == nullptr || (count != 0 && fns == nullptr)) {
+                              void* ctx, u32 pos_size) {
+    if (m_ == nullptr || name == nullptr || (count != 0 && fns == nullptr) || pos_size > 0xFFFF) {
         return 0;
     }
+    const u32 pos = pos_size < LIB_SIZE ? LIB_SIZE : pos_size;
     if (library_count_ == kMaxLibraries) {
         LogLine().text("exec: native library table full, ").text(name).text(" not made").send();
         return 0;
@@ -1472,7 +1294,7 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
     ++name_bytes;
     const u32 vectors = count < 4 ? 4 : count;
     const u32 neg = (vectors * LIB_VECTSIZE + 3) & ~3u;
-    const u32 block = alloc(neg + LIB_SIZE + name_bytes, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 block = alloc(neg + pos + name_bytes, MEMF_PUBLIC | MEMF_CLEAR);
     if (block == 0) {
         return 0;
     }
@@ -1484,7 +1306,7 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
     const u16 trap = jit.add_native(ExecOps::unimplemented, &info, name);
     if (trap == 0) {
         LogLine().text("exec: no native ids left for ").text(name).send();
-        free(block, neg + LIB_SIZE + name_bytes);
+        free(block, neg + pos + name_bytes);
         return 0;
     }
     native::fill_with_native(b, lib, neg, trap);
@@ -1495,7 +1317,7 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
             const u16 id = jit.add_native(v->fn, ctx, v->name != nullptr ? v->name : name);
             if (id == 0) {
                 LogLine().text("exec: no native ids left for ").text(name).send();
-                free(block, neg + LIB_SIZE + name_bytes);
+                free(block, neg + pos + name_bytes);
                 return 0;
             }
             native::put_native_vector(b, lib, LIB_VECTSIZE * n, id);
@@ -1503,11 +1325,11 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
             native::put_native_vector(b, lib, LIB_VECTSIZE * n, standard[n - 1]);
         }
     }
-    put_string(b, lib + LIB_SIZE, name);
-    b.w32(lib + LN_NAME, lib + LIB_SIZE);
+    put_string(b, lib + pos, name);
+    b.w32(lib + LN_NAME, lib + pos);
     b.w8(lib + LIB_FLAGS, LIBF_SUMUSED);
     b.w16(lib + LIB_NEGSIZE, neg);
-    b.w16(lib + LIB_POSSIZE, LIB_SIZE);
+    b.w16(lib + LIB_POSSIZE, pos);
     b.w16(lib + LIB_VERSION, version);
     ExecOps::add_library(*this, b, lib);
     jit.flush();

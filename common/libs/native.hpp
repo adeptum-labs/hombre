@@ -255,6 +255,207 @@ inline void fill_with_native(Bus& bus, u32 base, u32 neg_size, u16 id) {
     }
 }
 
+// --- RawDoFmt formatting --------------------------------------------------
+
+namespace format_detail {
+
+constexpr u32 kMaxWidth = 10000;
+
+struct Field {
+    u32 width;
+    bool left;
+    bool zero;
+};
+
+template <typename Out>
+bool repeat(Out& out, u32 c, u32 count) {
+    for (u32 i = 0; i < count; ++i) {
+        if (!out.put(c)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+template <typename Out>
+bool put_number(Out& out, const Field& f, bool negative, const char* digits) {
+    u32 length = negative ? 1 : 0;
+    for (const char* p = digits; *p != '\0'; ++p) {
+        ++length;
+    }
+    const u32 pad = f.width > length ? f.width - length : 0;
+    if (!f.left && !f.zero && !repeat(out, ' ', pad)) {
+        return false;
+    }
+    if (negative && !out.put('-')) {
+        return false;
+    }
+    if (!f.left && f.zero && !repeat(out, '0', pad)) {
+        return false;
+    }
+    for (const char* p = digits; *p != '\0'; ++p) {
+        if (!out.put(static_cast<u8>(*p))) {
+            return false;
+        }
+    }
+    return !f.left || repeat(out, ' ', pad);
+}
+
+// count guest bytes from addr, padded to the field.
+template <typename Out>
+bool put_guest_text(Bus& b, Out& out, const Field& f, u32 addr, u32 count) {
+    const u32 pad = f.width > count ? f.width - count : 0;
+    if (!f.left && !repeat(out, f.zero ? '0' : ' ', pad)) {
+        return false;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        const u32 c = b.r8(addr + i);
+        if (!b.ok() || !out.put(c)) {
+            return false;
+        }
+    }
+    return !f.left || repeat(out, ' ', pad);
+}
+
+}
+
+// Formats the guest string at fmt as exec's RawDoFmt does, taking the
+// arguments from the data stream at data, and hands every character to
+// out.put(c), which returns false to stop. The closing NUL is not passed.
+//
+// %[-][0][width][.limit][l]type with type d, u, x, X, c, s, b or %.
+// Without l, d, u, x and c take a 16-bit word from the data stream.
+// x and X both give uppercase hex digits, and a null %s or %b pointer
+// prints as an empty string, as exec has done since V36.
+//
+// Returns false if a guest access faulted (b.ok() is then false) or out
+// stopped; data is left past the last argument used.
+template <typename Out>
+bool raw_format(Bus& b, u32 fmt, u32& data, Out& out) {
+    using format_detail::Field;
+    using format_detail::kMaxWidth;
+    for (;;) {
+        u32 c = b.r8(fmt++);
+        if (!b.ok()) {
+            return false;
+        }
+        if (c == 0) {
+            return true;
+        }
+        if (c != '%') {
+            if (!out.put(c)) {
+                return false;
+            }
+            continue;
+        }
+        Field f{0, false, false};
+        u32 limit = 0xFFFFFFFF;
+        bool is_long = false;
+        c = b.r8(fmt++);
+        if (c == '-') {
+            f.left = true;
+            c = b.r8(fmt++);
+        }
+        if (c == '0') {
+            f.zero = true;
+            c = b.r8(fmt++);
+        }
+        while (c >= '0' && c <= '9' && b.ok()) {
+            f.width = f.width < kMaxWidth ? f.width * 10 + (c - '0') : f.width;
+            c = b.r8(fmt++);
+        }
+        if (c == '.') {
+            limit = 0;
+            c = b.r8(fmt++);
+            while (c >= '0' && c <= '9' && b.ok()) {
+                limit = limit < kMaxWidth ? limit * 10 + (c - '0') : limit;
+                c = b.r8(fmt++);
+            }
+        }
+        if (c == 'l') {
+            is_long = true;
+            c = b.r8(fmt++);
+        }
+        if (!b.ok()) {
+            return false;
+        }
+        bool ok = true;
+        switch (c) {
+        case 'd':
+        case 'u':
+        case 'x':
+        case 'X':
+        case 'c': {
+            u32 v = is_long ? b.r32(data) : b.r16(data);
+            data += is_long ? 4 : 2;
+            if (!b.ok()) {
+                return false;
+            }
+            if (c == 'c') {
+                const u32 pad = f.width > 1 ? f.width - 1 : 0;
+                ok = (f.left || format_detail::repeat(out, ' ', pad)) && out.put(v & 0xFF) &&
+                     (!f.left || format_detail::repeat(out, ' ', pad));
+                break;
+            }
+            char digits[12];
+            bool negative = false;
+            if (c == 'd') {
+                if (!is_long && (v & 0x8000) != 0) {
+                    v |= 0xFFFF0000;
+                }
+                if ((v & 0x80000000) != 0) {
+                    negative = true;
+                    v = 0u - v;
+                }
+            }
+            format_u64(digits, sizeof digits, v, c == 'x' || c == 'X' ? 16 : 10);
+            if (c == 'x' || c == 'X') {
+                for (char* p = digits; *p != '\0'; ++p) {
+                    *p = *p >= 'a' && *p <= 'f' ? static_cast<char>(*p - 'a' + 'A') : *p;
+                }
+            }
+            ok = format_detail::put_number(out, f, negative, digits);
+            break;
+        }
+        case 's':
+        case 'b': {
+            const u32 ptr = b.r32(data);
+            data += 4;
+            if (!b.ok()) {
+                return false;
+            }
+            u32 text = 0;
+            u32 length = 0;
+            if (ptr != 0 && c == 's') {
+                text = ptr;
+                while (length < limit && b.r8(text + length) != 0 && b.ok()) {
+                    ++length;
+                }
+            } else if (ptr != 0) {
+                const u32 bstr = ptr << 2;
+                text = bstr + 1;
+                length = b.r8(bstr);
+                length = length < limit ? length : limit;
+            }
+            ok = b.ok() && format_detail::put_guest_text(b, out, f, text, length);
+            break;
+        }
+        case '%':
+            ok = out.put('%');
+            break;
+        case 0:
+            --fmt;  // the format ends inside the conversion
+            break;
+        default:
+            ok = out.put(c);
+            break;
+        }
+        if (!ok) {
+            return false;
+        }
+    }
+}
+
 }
 
 }

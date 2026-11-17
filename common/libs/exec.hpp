@@ -237,10 +237,12 @@ public:
     // reserved vectors (1 to 4) get exec's own, which count the opens in
     // lib_OpenCnt, and any other vector ends the run as unimplemented.
     // The name is copied into guest memory, but it and the vector names
-    // are also kept as pointers for the log, so they must stay valid.
-    // Returns the library base, 0 on failure.
+    // are also kept as pointers for the log, so they must stay valid. The
+    // positive part of the base is pos_size bytes (at least LIB_SIZE, at
+    // most 0xFFFF), cleared, for a library with fields past the Library
+    // node; the name follows it. Returns the library base, 0 on failure.
     u32 make_native_library(const char* name, u16 version, const NativeVector* fns, u32 count,
-                            void* ctx = nullptr);
+                            void* ctx = nullptr, u32 pos_size = ndk::LIB_SIZE);
 
     // OpenLibrary of a library not in the list asks this for LIBS:<name>.
     // It may be set before init and is kept across it.
