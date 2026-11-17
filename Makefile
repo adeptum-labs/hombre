@@ -27,6 +27,12 @@ IMAGE        := $(BUILD)/hombre.img
 IMAGE_NOKERN := $(BUILD)/hombre-nokernel.img
 OVMF         := /usr/share/OVMF
 
+# The drive make run attaches as a virtio-blk disk. DISK may be any path,
+# spaces and & included, and defaults to the generated test disk.
+TEST_DISK := $(BUILD)/test-disk.dms
+DISK      ?= $(TEST_DISK)
+DISK_IMG  := $(BUILD)/disk.img
+
 # The loader is a COFF object built by clang for the Windows target and
 # linked into a PE32+ image by GNU ld, which is what UEFI firmware loads.
 CXX      := clang++
@@ -60,7 +66,7 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 # HOMBRE_FAULT_TEST. Each is built into its own directory.
 FAULT_TESTS := 1 2 3
 
-.PHONY: all image image-nokernel run check test test-dms clean
+.PHONY: all image image-nokernel disk-image run check test test-dms clean
 
 all: image
 
@@ -129,26 +135,36 @@ $(foreach n,$(FAULT_TESTS),$(eval $(call FAULT_VARIANT,$(n))))
 
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
 # error while the firmware is still in 32-bit mode.
-run: image
+run: image disk-image
 	cp $(OVMF)/OVMF_VARS_4M.fd $(BUILD)/OVMF_VARS.fd
 	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M -no-reboot \
 	    -serial stdio \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF)/OVMF_CODE_4M.fd \
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
-	    -drive format=raw,file=$(IMAGE)
+	    -drive format=raw,file=$(IMAGE) \
+	    -drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG) \
+	    -device virtio-blk-pci,disable-legacy=on,drive=disk0
 
-check: image image-nokernel $(FAULT_TESTS:%=image-fault%)
-	tools/boot_check.sh "Hombre loader" "kernel loaded: entry=0xffffffff8010" \
-	    "Hombre kernel booted" "usable memory:" "gdt loaded" "idt loaded" "breakpoint ok" \
-	    "lower half unmapped" "cpu0 percpu ok" "framebuffer: " "halting"
-	tools/boot_check.sh --no-kernel "KERNEL.ELF not found"
-	tools/boot_check.sh --no-gop "no framebuffer" "halting"
-	tools/boot_check.sh --fault-test 1 "fault test: 1" "*** exception 14 #PF (page fault)" \
-	    "error: 0x0" "cs: 0x8 rflags: 0x" "ss: 0x10" "cr2: 0x1000 cr3" "halting"
-	tools/boot_check.sh --fault-test 2 "fault test: 2" "*** exception 8 #DF (double fault)" \
-	    "cs: 0x8 rflags: 0x" "rsp: 0x1000 ss: 0x10" "halting"
-	tools/boot_check.sh --fault-test 3 "fault test: 3" "*** unexpected interrupt 128" \
-	    "cs: 0x8 rflags: 0x" "halting"
+# The boots attach the generated test disk whatever DISK says, so they stay
+# hermetic. The main boot expects its size in 512-byte sectors, rounded up.
+check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK)
+	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
+	tools/boot_check.sh --disk $(TEST_DISK) "Hombre loader" \
+	    "kernel loaded: entry=0xffffffff8010" "Hombre kernel booted" "usable memory:" \
+	    "gdt loaded" "idt loaded" "breakpoint ok" "lower half unmapped" "cpu0 percpu ok" \
+	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" "halting"
+	tools/boot_check.sh --no-disk "Hombre kernel booted" "framebuffer: " "pci: " \
+	    "no boot disk" "halting"
+	tools/boot_check.sh --no-disk --no-kernel "KERNEL.ELF not found"
+	tools/boot_check.sh --no-disk --no-gop "no framebuffer" "halting"
+	tools/boot_check.sh --no-disk --fault-test 1 "fault test: 1" \
+	    "*** exception 14 #PF (page fault)" "error: 0x0" "cs: 0x8 rflags: 0x" "ss: 0x10" \
+	    "cr2: 0x1000 cr3" "halting"
+	tools/boot_check.sh --no-disk --fault-test 2 "fault test: 2" \
+	    "*** exception 8 #DF (double fault)" "cs: 0x8 rflags: 0x" "rsp: 0x1000 ss: 0x10" \
+	    "halting"
+	tools/boot_check.sh --no-disk --fault-test 3 "fault test: 3" \
+	    "*** unexpected interrupt 128" "cs: 0x8 rflags: 0x" "halting"
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.
@@ -173,7 +189,6 @@ $(ADFTOOL): tools/adftool.cpp
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
 
 MKDISK    := $(BUILD)/tools/mkdisk
-TEST_DISK := $(BUILD)/test-disk.dms
 
 $(MKDISK): tools/mkdisk.cpp
 	@mkdir -p $(@D)
@@ -183,6 +198,15 @@ $(MKDISK): tools/mkdisk.cpp
 # It is rebuilt whenever the tool changes, and the output is reproducible.
 $(TEST_DISK): $(MKDISK)
 	$(MKDISK) $@
+
+# disk-image pads DISK to whole 512-byte sectors in DISK_IMG. When DISK is
+# the default test disk, that is built first.
+ifeq ($(origin DISK),file)
+disk-image: $(TEST_DISK)
+endif
+
+disk-image:
+	tools/make_disk.sh "$(DISK)" $(DISK_IMG)
 
 # Unpacks every DMS archive below DMS_DIR with both xdms and adftool and
 # compares the images. The path reaches the script through the environment,

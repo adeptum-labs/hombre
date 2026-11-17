@@ -187,6 +187,10 @@ public:
 
     u64 free_page_count() const { return free_pages_; }
 
+    // The pointer for a physical address, through the ToPtr given to init,
+    // so the owner of an allocation can fill it. nullptr before init.
+    u8* to_ptr(u64 phys) const { return to_ptr_ != nullptr ? to_ptr_(ctx_, phys) : nullptr; }
+
 private:
     static constexpr u64 page_shift = 12;
     static constexpr u64 page_size = 1ull << page_shift;

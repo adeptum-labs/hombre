@@ -121,6 +121,10 @@ void alloc_is_zeroed() {
     CHECK_EQ(ram.at(phys - 1)[0], 0xAAu);
     CHECK_EQ(alloc.free_page_count(), kFreeAfterInit - 4);
 
+    // The owner reaches its pages through the same mapping.
+    CHECK(alloc.to_ptr(phys) == ram.at(phys));
+    CHECK(PhysAllocator{}.to_ptr(phys) == nullptr);
+
     // A freed page comes back zeroed even after the owner wrote to it.
     ram.at(phys)[17] = 0x55;
     alloc.free_pages(phys, 4);

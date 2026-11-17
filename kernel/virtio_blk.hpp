@@ -24,6 +24,9 @@
 #pragma once
 
 #include "../common/types.hpp"
+#include "mmio.hpp"
+#include "page_alloc.hpp"
+#include "pci.hpp"
 
 // A polled virtio-blk driver for modern (1.x) virtio over PCI. This header
 // holds the layouts and the ring logic, which touch no hardware; the parts
@@ -309,5 +312,46 @@ inline VirtioPciCaps virtio_find_caps(PciConfigRead32 read32, void* ctx) {
     }
     return caps;
 }
+
+// One virtio-blk device driven through queue 0 without interrupts. Only one
+// request is in flight at a time.
+class VirtioBlk {
+public:
+    // Brings the device up: maps its common, notify and device regions,
+    // negotiates VIRTIO_F_VERSION_1 only and sets up queue 0 in pages from
+    // `pages`. Returns false, with the device reset and the pages given
+    // back, when a region is missing or the device refuses a step.
+    bool init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages);
+
+    // The drive's size in 512-byte sectors, read from the device
+    // configuration at init.
+    u64 sector_count() const { return capacity_; }
+
+    // Reads `sectors` sectors from `sector` on into physical memory at
+    // dest_phys, in requests of at most 64 KiB. Returns false for an empty
+    // range or one past the end of the drive, an error status from the
+    // device, or a request that does not complete in time. A timeout or a
+    // used entry for an unknown request resets the device, so every later
+    // read fails too.
+    bool read(u64 sector, u32 sectors, u64 dest_phys);
+
+private:
+    bool read_chunk(u64 sector, u32 sectors, u64 dest_phys);
+    bool fail(PhysAllocator& pages);
+    bool stop();
+
+    volatile VirtioPciCommonCfg* common_ = nullptr;
+    volatile u16* notify_ = nullptr;
+    VirtqRing ring_{};
+    u64 ring_phys_ = 0;
+    u8* request_ = nullptr;  // the request header, then the status byte
+    u64 request_phys_ = 0;
+    u64 capacity_ = 0;
+    bool ready_ = false;
+};
+
+// Finds the first virtio-blk function on the PCI buses: vendor 0x1AF4 with
+// device 0x1042 (modern) or 0x1001 (transitional).
+bool virtio_blk_find(PciAddress& found);
 
 }

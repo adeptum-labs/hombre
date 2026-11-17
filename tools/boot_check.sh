@@ -23,17 +23,31 @@
 # Boots build/hombre.img headless under KVM and succeeds only when every
 # marker given on the command line shows up on the serial console. With
 # --fault-test <n> it boots build/hombre-fault<n>.img instead.
+#
+# build/disk.img (made by make disk-image) is attached as a read-only
+# virtio-blk drive. --disk <file> attaches a copy of that file padded to
+# whole sectors instead, and --no-disk attaches no drive.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
-build_dir="$(dirname "$0")/../build"
+tools_dir="$(dirname "$0")"
+build_dir="$tools_dir/../build"
 
 image_name=hombre.img
 vga_args=()
+disk_mode=default
+disk_source=
 while [[ ${1:-} == --* ]]; do
     case $1 in
+        --disk)
+            [[ $# -ge 2 ]] || { echo "$usage" >&2; exit 2; }
+            disk_mode=file
+            disk_source=$2
+            shift
+            ;;
+        --no-disk) disk_mode=none ;;
         --no-kernel) image_name=hombre-nokernel.img ;;
         # Without a display adapter the q35 machine has no GOP, so the
         # loader hands over a BootInfo without a framebuffer.
@@ -52,6 +66,23 @@ done
 image=$build_dir/$image_name
 [[ -f $image ]] || { echo "missing $image (run make image, image-nokernel or image-fault<n>)" >&2; exit 1; }
 
+disk_args=()
+case $disk_mode in
+    default)
+        disk=$build_dir/disk.img
+        [[ -f $disk ]] || { echo "missing $disk (run make disk-image)" >&2; exit 1; }
+        ;;
+    file)
+        disk=$build_dir/boot-check-disk.img
+        "$tools_dir/make_disk.sh" "$disk_source" "$disk"
+        ;;
+    none) disk= ;;
+esac
+if [[ -n $disk ]]; then
+    disk_args=(-drive "if=none,id=disk0,format=raw,readonly=on,file=$disk"
+               -device virtio-blk-pci,disable-legacy=on,drive=disk0)
+fi
+
 serial_log=$build_dir/serial.log
 : > "$serial_log"
 cp "$ovmf_dir/OVMF_VARS_4M.fd" "$build_dir/OVMF_VARS.fd"
@@ -62,7 +93,7 @@ qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
     "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
     -drive if=pflash,format=raw,file="$build_dir/OVMF_VARS.fd" \
-    -drive format=raw,file="$image" &
+    -drive format=raw,file="$image" "${disk_args[@]}" &
 qemu_pid=$!
 trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true' EXIT
 
