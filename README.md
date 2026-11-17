@@ -32,7 +32,8 @@ Targets:
   terminal, which is wired to the serial port COM1.
 - `make check` boots the image headless and verifies the messages on the
   serial port, including a boot with the kernel missing and a boot without a
-  framebuffer.
+  framebuffer. It also boots kernels that trigger a page fault, a double fault
+  and an unexpected interrupt on purpose.
 - `make test` builds and runs the host unit tests under the address and
   undefined behaviour sanitizers.
 
@@ -44,9 +45,10 @@ Early development. The machine boots as follows:
 2. It builds page tables, with all memory mapped in the higher half, and
    passes the kernel a `BootInfo` structure holding the memory map, the
    framebuffer and the ACPI RSDP.
-3. The kernel reports on serial port COM1, drops the loader's identity
-   mapping, sets up per-CPU data for the boot processor and draws the
-   `Hombre` banner on the framebuffer.
+3. The kernel reports on serial port COM1 and installs its own GDT, TSS and
+   IDT. A CPU exception prints a register dump on the serial port. The kernel
+   then drops the loader's identity mapping, sets up per-CPU data for the boot
+   processor and draws the `Hombre` banner on the framebuffer.
 4. The kernel halts.
 
 ## The name

@@ -53,6 +53,10 @@ KERNEL_SRC := $(wildcard kernel/*.cpp)
 KERNEL_OBJ := $(KERNEL_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/kernel/mem.o
 KERNEL     := $(BUILD)/KERNEL.ELF
 
+# Kernels that provoke a CPU fault on purpose, one per value of
+# HOMBRE_FAULT_TEST. Each is built into its own directory.
+FAULT_TESTS := 1 2 3
+
 .PHONY: all image image-nokernel run check test clean
 
 all: image
@@ -93,6 +97,34 @@ $(IMAGE): $(LOADER) $(KERNEL) tools/make_image.sh
 $(IMAGE_NOKERN): $(LOADER) tools/make_image.sh
 	tools/make_image.sh $@ $(LOADER)
 
+# One fault-test image from the normal loader and a kernel built with
+# -DHOMBRE_FAULT_TEST=<n> into build/fault<n>/. Called with the value n.
+define FAULT_VARIANT
+FAULT$(1)_DIR := $(BUILD)/fault$(1)
+FAULT$(1)_OBJ := $(KERNEL_SRC:%.cpp=$$(FAULT$(1)_DIR)/%.o) $$(FAULT$(1)_DIR)/kernel/mem.o
+
+.PHONY: image-fault$(1)
+image-fault$(1): $(BUILD)/hombre-fault$(1).img
+
+$$(filter-out %/mem.o,$$(FAULT$(1)_OBJ)): $$(FAULT$(1)_DIR)/%.o: %.cpp
+	@mkdir -p $$(@D)
+	$$(KCXX) $$(KCXXFLAGS) -DHOMBRE_FAULT_TEST=$(1) -c $$< -o $$@
+
+$$(FAULT$(1)_DIR)/kernel/mem.o: common/mem.cpp
+	@mkdir -p $$(@D)
+	$$(KCXX) $$(KCXXFLAGS) -fno-builtin -fno-tree-loop-distribute-patterns -c $$< -o $$@
+
+$$(FAULT$(1)_DIR)/KERNEL.ELF: $$(FAULT$(1)_OBJ) kernel/linker.ld
+	$$(KLD) $$(KLDFLAGS) $$(FAULT$(1)_OBJ) -o $$@
+
+$(BUILD)/hombre-fault$(1).img: $$(LOADER) $$(FAULT$(1)_DIR)/KERNEL.ELF tools/make_image.sh
+	tools/make_image.sh $$@ $$(LOADER) $$(FAULT$(1)_DIR)/KERNEL.ELF
+
+-include $$(FAULT$(1)_OBJ:.o=.d)
+endef
+
+$(foreach n,$(FAULT_TESTS),$(eval $(call FAULT_VARIANT,$(n))))
+
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
 # error while the firmware is still in 32-bit mode.
 run: image
@@ -103,12 +135,17 @@ run: image
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
 	    -drive format=raw,file=$(IMAGE)
 
-check: image image-nokernel
+check: image image-nokernel $(FAULT_TESTS:%=image-fault%)
 	tools/boot_check.sh "Hombre loader" "kernel loaded: entry=0xffffffff8010" \
 	    "Hombre kernel booted" "usable memory:" "gdt loaded" "idt loaded" "breakpoint ok" \
 	    "lower half unmapped" "cpu0 percpu ok" "framebuffer: " "halting"
 	tools/boot_check.sh --no-kernel "KERNEL.ELF not found"
 	tools/boot_check.sh --no-gop "no framebuffer" "halting"
+	tools/boot_check.sh --fault-test 1 "fault test: 1" "*** exception 14 #PF (page fault)" \
+	    "cr2: 0x1000" "halting"
+	tools/boot_check.sh --fault-test 2 "fault test: 2" "*** exception 8 #DF (double fault)" \
+	    "halting"
+	tools/boot_check.sh --fault-test 3 "fault test: 3" "*** unexpected interrupt 128" "halting"
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.

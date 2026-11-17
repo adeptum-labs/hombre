@@ -75,6 +75,30 @@ void draw_banner(const BootInfo& info) {
     fb.draw_text(x, info.fb.height / 4, text, 0xE0E0FF, scale);
 }
 
+#if defined(HOMBRE_FAULT_TEST)
+// Provokes one deliberate CPU fault so the boot check can look for its dump.
+// The exception handler halts, so this never returns.
+[[noreturn]] void fault_test() {
+    serial::write("fault test: ");
+    serial::write_dec(HOMBRE_FAULT_TEST);
+    serial::write("\n");
+#if HOMBRE_FAULT_TEST == 1
+    // The lower half is unmapped, so this read raises a page fault.
+    *reinterpret_cast<volatile u64*>(0x1000);
+#elif HOMBRE_FAULT_TEST == 2
+    // Delivering the breakpoint pushes its frame onto the unmapped stack,
+    // which faults; that escalates to a double fault on its own IST stack.
+    asm volatile("mov %0, %%rsp; int3" : : "r"(u64{0x1000}) : "memory");
+#elif HOMBRE_FAULT_TEST == 3
+    // Vector 128 is not an exception, so it gets the unexpected-interrupt dump.
+    asm volatile("int $0x80");
+#else
+#error "HOMBRE_FAULT_TEST must be 1, 2 or 3"
+#endif
+    halt();
+}
+#endif
+
 }
 
 extern "C" [[noreturn]] void kmain(BootInfo* info) {
@@ -113,6 +137,10 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
     if (this_cpu().cpu_id == 0) {
         serial::write("cpu0 percpu ok\n");
     }
+
+#if defined(HOMBRE_FAULT_TEST)
+    fault_test();
+#endif
 
     serial::write("Hombre kernel booted\n");
     serial::write("usable memory: ");

@@ -21,10 +21,11 @@
 # Contact: info@adeptum.se
 
 # Boots build/hombre.img headless under KVM and succeeds only when every
-# marker given on the command line shows up on the serial console.
+# marker given on the command line shows up on the serial console. With
+# --fault-test <n> it boots build/hombre-fault<n>.img instead.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] <marker>..."
 timeout_seconds=20
 ovmf_dir=/usr/share/OVMF
 build_dir="$(dirname "$0")/../build"
@@ -37,6 +38,11 @@ while [[ ${1:-} == --* ]]; do
         # Without a display adapter the q35 machine has no GOP, so the
         # loader hands over a BootInfo without a framebuffer.
         --no-gop) vga_args=(-vga none) ;;
+        --fault-test)
+            [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "$usage" >&2; exit 2; }
+            image_name=hombre-fault$2.img
+            shift
+            ;;
         *) echo "$usage" >&2; exit 2 ;;
     esac
     shift
@@ -44,7 +50,7 @@ done
 [[ $# -gt 0 ]] || { echo "$usage" >&2; exit 2; }
 
 image=$build_dir/$image_name
-[[ -f $image ]] || { echo "missing $image (run make image-nokernel or make image)" >&2; exit 1; }
+[[ -f $image ]] || { echo "missing $image (run make image, image-nokernel or image-fault<n>)" >&2; exit 1; }
 
 serial_log=$build_dir/serial.log
 : > "$serial_log"
