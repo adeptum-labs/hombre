@@ -28,9 +28,11 @@ IMAGE_NOKERN := $(BUILD)/hombre-nokernel.img
 OVMF         := /usr/share/OVMF
 
 # The drive make run attaches as a virtio-blk disk. DISK may be any path,
-# spaces and & included, and defaults to the generated test disk.
+# spaces and & included, and defaults to the generated test disk. It reaches
+# the recipe through the environment, so no character in it is shell syntax.
 TEST_DISK := $(BUILD)/test-disk.dms
 DISK      ?= $(TEST_DISK)
+export DISK
 DISK_IMG  := $(BUILD)/disk.img
 
 # The loader is a COFF object built by clang for the Windows target and
@@ -206,7 +208,7 @@ disk-image: $(TEST_DISK)
 endif
 
 disk-image:
-	tools/make_disk.sh "$(DISK)" $(DISK_IMG)
+	tools/make_disk.sh "$$DISK" $(DISK_IMG)
 
 # Unpacks every DMS archive below DMS_DIR with both xdms and adftool and
 # compares the images. The path reaches the script through the environment,

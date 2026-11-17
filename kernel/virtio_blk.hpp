@@ -139,6 +139,13 @@ constexpr bool virtio_blk_range_ok(u64 sector, u64 sectors, u64 capacity) {
     return sectors != 0 && sector < capacity && sectors <= capacity - sector;
 }
 
+// True when a buffer of `sectors` sectors at dest_phys is not at address 0
+// and does not run past the end of the 64-bit address space.
+constexpr bool virtio_blk_dest_ok(u64 dest_phys, u32 sectors) {
+    const u64 bytes = static_cast<u64>(sectors) * kVirtioBlkSectorSize;
+    return dest_phys != 0 && (bytes == 0 || bytes - 1 <= ~dest_phys);
+}
+
 constexpr u32 virtio_blk_chunk_sectors(u32 remaining) {
     return remaining < kVirtioBlkMaxChunkSectors ? remaining : kVirtioBlkMaxChunkSectors;
 }
@@ -329,17 +336,26 @@ public:
 
     // Reads `sectors` sectors from `sector` on into physical memory at
     // dest_phys, in requests of at most 64 KiB. Returns false for an empty
-    // range or one past the end of the drive, an error status from the
-    // device, or a request that does not complete in time. A timeout or a
-    // used entry for an unknown request resets the device, so every later
-    // read fails too.
+    // range or one past the end of the drive, a destination at 0 or one
+    // that wraps, an error status from the device, or a request that does
+    // not complete in time. A timeout or a used entry for an unknown
+    // request resets the device, so every later read fails too.
+    //
+    // After a false return with quiesced() false, the device could not be
+    // reset and may still write to dest_phys: the caller must not free or
+    // reuse that memory.
     bool read(u64 sector, u32 sectors, u64 dest_phys);
+
+    // False once a reset the driver asked for did not complete: the device
+    // may still write to memory it was given.
+    bool quiesced() const { return !wedged_; }
 
 private:
     bool read_chunk(u64 sector, u32 sectors, u64 dest_phys);
     bool fail(PhysAllocator& pages);
     bool stop();
 
+    PciAddress address_{0, 0, 0};
     volatile VirtioPciCommonCfg* common_ = nullptr;
     volatile u16* notify_ = nullptr;
     VirtqRing ring_{};
@@ -348,6 +364,7 @@ private:
     u64 request_phys_ = 0;
     u64 capacity_ = 0;
     bool ready_ = false;
+    bool wedged_ = false;
 };
 
 // Finds the first virtio-blk function on the PCI buses: vendor 0x1AF4 with

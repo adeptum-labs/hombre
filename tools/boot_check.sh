@@ -42,7 +42,7 @@ disk_source=
 while [[ ${1:-} == --* ]]; do
     case $1 in
         --disk)
-            [[ $# -ge 2 ]] || { echo "$usage" >&2; exit 2; }
+            [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
             disk_mode=file
             disk_source=$2
             shift

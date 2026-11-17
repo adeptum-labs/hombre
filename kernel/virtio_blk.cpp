@@ -82,6 +82,14 @@ volatile u8* map_region(PciAddress address, const VirtioCapRegion& region, u32 m
     return static_cast<volatile u8*>(mmio.map(bar.phys + region.offset, region.length));
 }
 
+// Sets and clears bits in the PCI command register. The status register
+// shares the dword and its bits clear when written as 1, so the upper half
+// is written as 0.
+void set_command(PciAddress address, u32 set, u32 clear) {
+    const u32 command = pci_read32(address, kPciCommandOffset) & 0xFFFFu;
+    pci_write32(address, kPciCommandOffset, (command & ~clear) | set);
+}
+
 void write_queue_address(volatile u32& lo, volatile u32& hi, u64 phys) {
     lo = static_cast<u32>(phys);
     hi = static_cast<u32>(phys >> 32);
@@ -123,10 +131,12 @@ bool VirtioBlk::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages)
 
     const VirtioPciCaps caps = virtio_find_caps(&config_read32, &address);
 
-    pci_enable(address);
-    // The driver polls, so the legacy interrupt line stays quiet.
-    pci_write32(address, kPciCommandOffset,
-                (pci_read32(address, kPciCommandOffset) & 0xFFFFu) | kPciCommandInterruptDisable);
+    // Memory decoding on, so the registers can be reached, but bus mastering
+    // off: the device must not DMA before it has been reset and given rings.
+    // The driver polls, so the legacy interrupt line stays quiet too.
+    address_ = address;
+    set_command(address, kPciCommandMemorySpace | kPciCommandInterruptDisable,
+                kPciCommandBusMaster);
 
     common_ = reinterpret_cast<volatile VirtioPciCommonCfg*>(
         map_region(address, caps.common, sizeof(VirtioPciCommonCfg), mmio));
@@ -190,6 +200,9 @@ bool VirtioBlk::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages)
     }
     notify_ = reinterpret_cast<volatile u16*>(notify_base + notify_offset);
 
+    // Everything the driver can check up front has passed: let the device
+    // reach the rings.
+    set_command(address, kPciCommandBusMaster, 0);
     common_->queue_enable = 1;
     memory_fence();
     status |= kVirtioStatusDriverOk;
@@ -217,11 +230,13 @@ bool VirtioBlk::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages)
     return true;
 }
 
-// Tells the device it failed, resets it so it stops using the queue and
-// gives the pages back. Returns false for the caller to pass on.
+// Tells the device it failed, resets it so it stops using the queue, turns
+// bus mastering off and gives the pages back. Returns false for the caller
+// to pass on.
 bool VirtioBlk::fail(PhysAllocator& pages) {
     common_->device_status = common_->device_status | kVirtioStatusFailed;
     const bool quiet = reset_device(common_);
+    set_command(address_, 0, kPciCommandBusMaster);
     // A device that does not finish its reset may still write to the
     // rings, so their pages are then never handed out again.
     if (quiet) {
@@ -233,11 +248,13 @@ bool VirtioBlk::fail(PhysAllocator& pages) {
         }
     }
     *this = VirtioBlk{};
+    wedged_ = !quiet;
     return false;
 }
 
 bool VirtioBlk::read(u64 sector, u32 sectors, u64 dest_phys) {
-    if (!ready_ || !virtio_blk_range_ok(sector, sectors, capacity_)) {
+    if (!ready_ || !virtio_blk_range_ok(sector, sectors, capacity_) ||
+        !virtio_blk_dest_ok(dest_phys, sectors)) {
         return false;
     }
     while (sectors != 0) {
@@ -283,11 +300,14 @@ bool VirtioBlk::read_chunk(u64 sector, u32 sectors, u64 dest_phys) {
 }
 
 // The queue is out of step with the device. Resetting the device keeps a
-// late completion from writing into a buffer the caller has moved on from.
-// The ring pages stay allocated, as the reset may not have taken.
+// late completion from writing into a buffer the caller has moved on from;
+// when the reset does not complete, the driver is wedged and quiesced()
+// tells the caller to keep the buffer. Bus mastering goes off either way.
+// The ring pages stay allocated, as the device may still use them.
 bool VirtioBlk::stop() {
     ready_ = false;
-    reset_device(common_);
+    wedged_ = !reset_device(common_);
+    set_command(address_, 0, kPciCommandBusMaster);
     return false;
 }
 

@@ -128,11 +128,29 @@ void range_checks() {
     CHECK(!virtio_blk_range_ok(~0ull, 2, ~0ull));
     CHECK(!virtio_blk_range_ok(~0ull - 1, 0xFFFFFFFFu, 100));
 
+    CHECK(virtio_blk_dest_ok(0x200000, 1));
+    CHECK(virtio_blk_dest_ok(0x200000, 0xFFFFFFFFu));
+    CHECK(!virtio_blk_dest_ok(0, 1));
+    // The last byte may sit at the top of the address space, not past it.
+    CHECK(virtio_blk_dest_ok(~0ull - 511, 1));
+    CHECK(!virtio_blk_dest_ok(~0ull - 510, 1));
+    CHECK(!virtio_blk_dest_ok(~0ull - 511, 2));
+    CHECK(virtio_blk_dest_ok(~0ull - (0xFFFFFFFFull * 512 - 1), 0xFFFFFFFFu));
+    CHECK(!virtio_blk_dest_ok(~0ull - (0xFFFFFFFFull * 512 - 2), 0xFFFFFFFFu));
+
     CHECK_EQ(kVirtioBlkMaxChunkSectors * 512u, 65536u);
     CHECK_EQ(virtio_blk_chunk_sectors(1), 1u);
     CHECK_EQ(virtio_blk_chunk_sectors(128), 128u);
     CHECK_EQ(virtio_blk_chunk_sectors(129), 128u);
     CHECK_EQ(virtio_blk_chunk_sectors(0xFFFFFFFFu), 128u);
+}
+
+void driver_starts_quiesced() {
+    // A driver that never touched a device has nothing that could still
+    // write to memory, and no drive.
+    VirtioBlk blk;
+    CHECK(blk.quiesced());
+    CHECK_EQ(blk.sector_count(), 0u);
 }
 
 // A device that completes every request it finds in the available ring, in
@@ -398,6 +416,7 @@ int main() {
     queue_size_choice();
     ring_layout();
     range_checks();
+    driver_starts_quiesced();
     ring_init_suppresses_interrupts();
     used_entry_completes_request();
     indices_wrap_over_u16();

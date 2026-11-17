@@ -185,8 +185,16 @@ void boot_disk_check(const BootInfo& info) {
         serial::write("virtio-blk: no memory\n");
         return;
     }
-    serial::write(boot_disk.read(0, sectors, buffer) ? "virtio-blk: read ok\n"
-                                                     : "virtio-blk: read failed\n");
+    if (boot_disk.read(0, sectors, buffer)) {
+        serial::write("virtio-blk: read ok\n");
+    } else {
+        serial::write("virtio-blk: read failed\n");
+        // The device may still write there, so the pages are never reused.
+        if (!boot_disk.quiesced()) {
+            serial::write("virtio-blk: device not reset, buffer kept\n");
+            return;
+        }
+    }
     phys_pages.free_pages(buffer, page_count);
 }
 

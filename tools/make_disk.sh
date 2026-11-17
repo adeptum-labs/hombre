@@ -37,6 +37,7 @@ padded=$(( (size + 511) / 512 * 512 ))
 
 # Built next to the destination and renamed, so a failure never leaves a
 # half-written drive behind.
+mkdir -p -- "$(dirname -- "$dst")"
 tmp="$dst.tmp"
 trap 'rm -f -- "$tmp"' EXIT
 cp -- "$src" "$tmp"
