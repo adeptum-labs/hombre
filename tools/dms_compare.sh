@@ -61,9 +61,13 @@ fi
 mkdir -p "$tmp"
 
 # The names in an unadf listing: the part after the date and the time, which
-# is preceded by a size for a file and by blanks only for a directory.
+# is preceded by a size for a file and by blanks only for a directory. unadf
+# appends ", <comment>" to the name of a file that has a comment, so
+# everything from the first ", " on is dropped (a name that itself contains
+# a comma and a blank is cut too, which can only show as a false DIFF).
 unadf_names() {
     LC_ALL=C sed -n 's|^ *\([0-9][0-9]* \+\)\?[0-9]\{4\}/[0-9][0-9]/[0-9][0-9] \+[0-9]\{1,2\}:[0-9][0-9]:[0-9][0-9]  ||p' "$1" |
+        LC_ALL=C sed 's|, .*$||' |
         LC_ALL=C sort
 }
 
@@ -123,6 +127,7 @@ compare_fs() {
     largest=$(LC_ALL=C sed -n 's|^ *\([0-9][0-9]*\) \+[0-9]\{4\}/[0-9][0-9]/[0-9][0-9] \+[0-9]\{1,2\}:[0-9][0-9]:[0-9][0-9]  |\1 |p' "$tree" |
               LC_ALL=C sort -n -r | head -n 1)
     largest=${largest#* }
+    largest=${largest%%, *}  # the comment unadf appends to a name
     local path
     for path in S/Startup-Sequence "$largest"; do
         [ -n "$path" ] || continue
