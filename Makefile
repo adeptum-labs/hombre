@@ -205,7 +205,8 @@ check-workbench: image
 	tools/boot_check.sh --disk "$$DISK" "Hombre kernel booted" "pci: " \
 	    "virtio-blk: read ok" "disk: DMS HEAVY2, 80 tracks" \
 	    "volume: Workbench3.1 (FFS)" "  S/" "  C/" "S:Startup-Sequence:" \
-	    "; Startup-Sequence for low-density floppies" "halting"
+	    "; Startup-Sequence for low-density floppies" "m68k: running C:Version" \
+	    "Kickstart 60.0, Workbench 40.42" "m68k: C:Version returned 0" "halting"
 else
 check-workbench:
 	@echo "set DISK=<path to a Workbench .dms or .adf>" >&2; exit 1

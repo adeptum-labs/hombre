@@ -37,17 +37,23 @@ Targets:
   a DMS archive or a raw ADF image, and its path may contain spaces.
 - `make check` boots the image headless and verifies the messages on the
   serial port. The main boot attaches the generated test disk and verifies
-  the volume, the root directory and the startup sequence read from it. It
-  also boots a drive filled with zero bytes, a test disk with a corrupt
-  track and a machine without a disk, a boot with the kernel missing and a
-  boot without a framebuffer. It also boots kernels that trigger a page
+  the volume, the root directory and the startup sequence read from it, and
+  what its `C:Version` prints when the kernel runs it. It also boots a
+  drive filled with zero bytes, a test disk with a corrupt track and a
+  machine without a disk, a boot with the kernel missing and a boot without
+  a framebuffer. It also boots kernels that trigger a page
   fault, a double fault and an unexpected interrupt on purpose.
 - `make check-workbench DISK="path/to/Workbench.dms"` boots a real
   Workbench 3.1 boot disk and verifies its volume, root directory and
-  startup sequence. `DISK=` is required and the markers fit the 3.1
-  Workbench disk only.
+  startup sequence, and that the disk's own `C:Version` runs and returns 0.
+  `DISK=` is required and the markers fit the 3.1 Workbench disk only.
 - `make test` builds and runs the host unit tests under the address and
   undefined behaviour sanitizers.
+- `make test-m68k M68K_TESTS_DIR=<directory>` runs the 68000 cases of the
+  SingleStepTests/680x0 suite through the 68000 translator and compares the
+  registers and memory each case leaves. The suite is not part of the
+  repository: check it out elsewhere and give its directory.
+  `M68K_FILES=<glob>` picks some of its files, for example `M68K_FILES=ADD*`.
 - `make test-dms DMS_DIR=<directory>` unpacks every DMS archive below the
   directory with both `xdms` and the project's own unpacker and compares the
   disk images and what `unadf` reads from them.
@@ -69,7 +75,14 @@ Early development. The machine boots as follows:
    mounts the OFS or FFS volume read-only and prints the volume name, the
    root directory and `S:Startup-Sequence` on the serial port. Without a
    disk, or with a disk it cannot read, it logs why and carries on.
-5. The kernel halts.
+5. The kernel runs `C:Version` from the boot disk as translated 68000 code.
+   A hunk loader loads it, a 68000 JIT translates it block by block into
+   x86-64 code in a write-xor-execute code region, and native exec,
+   utility and dos libraries, written in C++ under `common/libs/`, answer
+   its library calls. A library the program opens from the disk's `LIBS:`
+   loads and runs as 68000 code too. The program's output and its return
+   code appear on the serial port.
+6. The kernel halts.
 
 ## The name
 
