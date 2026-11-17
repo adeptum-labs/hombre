@@ -1646,6 +1646,64 @@ void raw_do_fmt_on_bad_input() {
     CHECK(logged("exec: calls into 68000 code nested too deep"));
 }
 
+// RawDoFmt of 50 characters through a routine that runs 100 blocks for
+// each, from a run allowed max_blocks.
+ExitReason raw_do_fmt_with_a_slow_routine(Rig& r, u64 max_blocks) {
+    r.code(kSub, {0x7263, 0x51C9, 0xFFFE, 0x4E75});  // MOVEQ #99,D1 ; DBRA D1,* ; RTS
+    r.cpu().a[0] = r.str(kData, std::string(50, 'x').c_str());
+    r.cpu().a[1] = kData + 0x200;
+    r.cpu().a[2] = kSub;
+    r.cpu().a[3] = kData + 0x400;
+    r.code(kCall, {0x4EAE, disp(exec_lvo::RawDoFmt), 0x4EF8, 0x0400});
+    g_jit.flush();
+    r.cpu().a[6] = r.base();
+    r.cpu().a[7] = kStack;
+    return r.go(kCall, max_blocks);
+}
+
+// The blocks a character routine runs count against the budget of the run
+// that called RawDoFmt: nested calls cannot multiply it.
+void calls_from_natives_share_the_block_budget() {
+    Rig r;
+    CHECK_EQ(raw_do_fmt_with_a_slow_routine(r, 100000), ExitReason::Halt);
+    CHECK(g_lines.empty());
+    CHECK_EQ(raw_do_fmt_with_a_slow_routine(r, 2000), ExitReason::Budget);
+    CHECK(logged("m68k: block budget used up in a call from a native"));
+    // The next run starts with a budget of its own.
+    g_lines.clear();
+    CHECK_EQ(raw_do_fmt_with_a_slow_routine(r, 100000), ExitReason::Halt);
+    CHECK(g_lines.empty());
+}
+
+// A format's output is capped: twelve %99999d would give 1199988
+// characters, and the buffer gets the first MiB of them and no NUL.
+void raw_do_fmt_output_is_capped() {
+    Rig r;
+    constexpr u32 kBuffer = 0x500000;  // above exec's memory
+    constexpr u32 kCap = 1u << 20;
+    std::string fmt;
+    for (u32 i = 0; i < 12; ++i) {
+        fmt += "%99999d";
+    }
+    const u32 data = kData + 0x200;
+    for (u32 i = 0; i < 12; ++i) {
+        r.put16(data + 2 * i, i);
+    }
+    r.put8(kBuffer + kCap, 0xEE);
+    r.cpu().a[0] = r.str(kData, fmt.c_str());
+    r.cpu().a[1] = data;
+    r.cpu().a[2] = 0;
+    r.cpu().a[3] = kBuffer;
+    r.cpu().d[0] = 0x5A5A5A5A;
+    CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::Halt);
+    CHECK(logged("RawDoFmt: format output limit of 1048576 characters reached"));
+    CHECK_EQ(r.get8(kBuffer), static_cast<u32>(' '));
+    CHECK_EQ(r.get8(kBuffer + 99998), static_cast<u32>('0'));
+    CHECK_EQ(r.get8(kBuffer + kCap - 1), static_cast<u32>(' '));
+    CHECK_EQ(r.get8(kBuffer + kCap), 0xEEu);
+    CHECK_EQ(r.cpu().d[0], 0x5A5A5A5Au);  // stopped: no result
+}
+
 }
 
 int main() {
@@ -1680,5 +1738,7 @@ int main() {
     raw_do_fmt_into_a_buffer();
     raw_do_fmt_through_a_character_routine();
     raw_do_fmt_on_bad_input();
+    calls_from_natives_share_the_block_budget();
+    raw_do_fmt_output_is_capped();
     return check::finish("test_exec");
 }

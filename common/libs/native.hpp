@@ -232,6 +232,25 @@ inline void fill_with_native(Bus& bus, u32 base, u32 neg_size, u16 id) {
 namespace format_detail {
 
 constexpr u32 kMaxWidth = 10000;
+constexpr u32 kMaxOutput = 1u << 20;  // characters one format gives at most
+
+// Passes at most kMaxOutput characters on to out. The one after them is
+// logged and stops the formatting.
+template <typename Out>
+struct Capped {
+    Out& out;
+    u32 left;
+
+    bool put(u32 c) {
+        if (left == 0) {
+            LogLine().text("RawDoFmt: format output limit of ").dec(kMaxOutput)
+                .text(" characters reached").send();
+            return false;
+        }
+        --left;
+        return out.put(c);
+    }
+};
 
 struct Field {
     u32 width;
@@ -300,12 +319,18 @@ bool put_guest_text(Bus& b, Out& out, const Field& f, u32 addr, u32 count) {
 // x and X both give uppercase hex digits, and a null %s or %b pointer
 // prints as an empty string, as exec has done since V36.
 //
-// Returns false if a guest access faulted (b.ok() is then false) or out
-// stopped; data is left past the last argument used.
+// One format gives at most format_detail::kMaxOutput characters: past them
+// it stops, logged, as if out had stopped, so that a format such as many
+// %99999d cannot keep a native busy without end.
+//
+// Returns false if a guest access faulted (b.ok() is then false), out
+// stopped or the output limit was reached; data is left past the last
+// argument used.
 template <typename Out>
-bool raw_format(Bus& b, u32 fmt, u32& data, Out& out) {
+bool raw_format(Bus& b, u32 fmt, u32& data, Out& sink) {
     using format_detail::Field;
     using format_detail::kMaxWidth;
+    format_detail::Capped<Out> out{sink, format_detail::kMaxOutput};
     for (;;) {
         u32 c = b.r8(fmt++);
         if (!b.ok()) {

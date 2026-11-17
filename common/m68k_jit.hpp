@@ -131,7 +131,10 @@ public:
     void flush();
 
     // Runs from cpu.pc until cpu.exit != None, or until max_blocks blocks
-    // have run (Budget). Clears cpu.exit first.
+    // have run (Budget). Clears cpu.exit first. The outermost run sets the
+    // budget; a run inside a native (through call_guest) draws on what is
+    // left of it as well as on its own max_blocks, so that calls nested
+    // in natives cannot multiply it. A Budget there is logged.
     ExitReason run(u64 max_blocks);
 
     // Pushes kReturnStub, runs from entry until the code returns there and
@@ -172,6 +175,8 @@ private:
     usize used_ = 0;
     u32 block_limit_ = 64;
     u32 address_mask_ = 0xFFFFFFFF;
+    u64 budget_left_ = 0;  // blocks the outermost run has left
+    u32 run_depth_ = 0;
     u32 blocks_ = 0;
     u32 next_native_ = 2;
     Block cache_[kSlots]{};

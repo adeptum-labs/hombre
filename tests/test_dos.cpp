@@ -928,6 +928,18 @@ void console_output_functions() {
     CHECK_EQ(r.call(dos_lvo::VPrintf, kData, kData + 0x200), 301u);
     CHECK_EQ(g_console.size(), 301u);
     CHECK(g_console.substr(298) == " x|");
+    // The output of one format is capped at a MiB; past it VPrintf fails.
+    g_console.clear();
+    g_lines.clear();
+    std::string many;
+    for (u32 i = 0; i < 12; ++i) {
+        many += "%99999d";
+        r.put16(kData + 0x200 + 2 * i, 0);
+    }
+    r.str(kData, many);
+    CHECK_EQ(as_signed(r.call(dos_lvo::VPrintf, kData, kData + 0x200)), -1);
+    CHECK_EQ(g_console.size(), 1u << 20);
+    CHECK(logged_containing("format output limit"));
 }
 
 void select_input_and_output() {

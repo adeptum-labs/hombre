@@ -44,10 +44,11 @@ constexpr u32 kSecondsPerDay = 86400;
 // The next item of the list at item that is no control tag: TAG_IGNORE is
 // passed over, TAG_MORE continues at the list in its ti_Data, TAG_SKIP
 // passes over itself and ti_Data more items, and TAG_DONE or a null list
-// ends it. item is left after the item returned. 0 at the end, if a guest
-// access faults, or after Utility::kMaxTagItems items, which is logged.
-u32 next_tag(Bus& b, u32& item) {
-    for (u32 n = 0; n < Utility::kMaxTagItems; ++n) {
+// ends it. item is left after the item returned. Every item visited takes
+// one from budget, which the whole walk shares. 0 at the end, if a guest
+// access faults, or when the budget runs out, which is logged.
+u32 next_tag(Bus& b, u32& item, u32& budget) {
+    for (; budget != 0; --budget) {
         if (item == 0) {
             return 0;
         }
@@ -70,6 +71,7 @@ u32 next_tag(Bus& b, u32& item) {
         default: {
             const u32 found = item;
             item += ti_SIZEOF;
+            --budget;
             return found;
         }
         }
@@ -78,9 +80,12 @@ u32 next_tag(Bus& b, u32& item) {
     return 0;
 }
 
+// The first item of the list with the tag, within one walk of at most
+// Utility::kMaxTagItems items.
 u32 find_tag(Bus& b, u32 tag, u32 list) {
-    for (u32 n = 0; n < Utility::kMaxTagItems; ++n) {
-        const u32 item = next_tag(b, list);
+    u32 budget = Utility::kMaxTagItems;
+    for (;;) {
+        const u32 item = next_tag(b, list, budget);
         if (item == 0) {
             return 0;
         }
@@ -88,7 +93,6 @@ u32 find_tag(Bus& b, u32 tag, u32 list) {
             return b.ok() ? item : 0;
         }
     }
-    return 0;
 }
 
 // --- dates -------------------------------------------------------------------
@@ -172,7 +176,8 @@ void next_tag_item(void*, Machine& m) {
     Bus b(m);
     const u32 at = m.cpu.a[0];
     u32 item = b.r32(at);
-    const u32 found = next_tag(b, item);
+    u32 budget = Utility::kMaxTagItems;
+    const u32 found = next_tag(b, item, budget);
     b.w32(at, found != 0 ? item : 0);
     if (b.ok()) {
         native::set_result(m, found);

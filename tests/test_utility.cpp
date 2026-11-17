@@ -65,6 +65,15 @@ bool logged(const std::string& text) {
     return false;
 }
 
+bool logged_containing(const std::string& text) {
+    for (const std::string& line : g_lines) {
+        if (line.find(text) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 u16 disp(u32 offset) {
     return static_cast<u16>(0x10000 - offset);
 }
@@ -314,6 +323,41 @@ void tag_walks_are_bounded() {
     const u32 loop = r.tags(kData, {{TAG_MORE, kData}});
     CHECK_EQ(r.get_tag_data(kTagUser + 1, 5, loop), 5u);
     CHECK(logged("utility: tag list at $9000 has no end"));
+
+    // The whole walk of one search shares one budget: a loop of control
+    // tags around a tag that does not match ends after kMaxTagItems items,
+    // not after kMaxTagItems for every item found.
+    constexpr u32 kLong = 0x500000;  // above exec's memory
+    constexpr u32 kIgnores = 1000;
+    u32 at = kLong;
+    for (u32 i = 0; i < kIgnores; ++i, at += ti_SIZEOF) {
+        r.put32(at + ti_Tag, TAG_IGNORE);
+    }
+    r.put32(at + ti_Tag, kTagUser + 1);
+    r.put32(at + ti_SIZEOF + ti_Tag, TAG_MORE);
+    r.put32(at + ti_SIZEOF + ti_Data, kLong);
+    g_lines.clear();
+    CHECK_EQ(r.find_tag_item(kTagUser + 5, kLong), 0u);
+    CHECK(logged_containing("has no end"));
+    // A tag past kMaxTagItems items in all is not found, though no part of
+    // the list between two items is that long.
+    const u32 half = Utility::kMaxTagItems / 2 + 1;
+    at = kLong;
+    for (u32 part = 0; part < 2; ++part) {
+        for (u32 i = 0; i < half; ++i, at += ti_SIZEOF) {
+            r.put32(at + ti_Tag, TAG_IGNORE);
+        }
+        r.put32(at + ti_Tag, kTagUser + 1 + part);
+        r.put32(at + ti_Data, 7);
+        at += ti_SIZEOF;
+    }
+    r.put32(at + ti_Tag, TAG_DONE);
+    g_lines.clear();
+    CHECK_EQ(r.get_tag_data(kTagUser + 1, 5, kLong), 7u);
+    CHECK(g_lines.empty());
+    CHECK_EQ(r.get_tag_data(kTagUser + 2, 5, kLong), 5u);
+    CHECK(logged_containing("has no end"));
+
     // A list that leaves guest memory ends the run.
     CHECK_EQ(r.find_tag_item(kTagUser + 1, kGuestBytes - 4), 0u);
     r.cpu().d[0] = kTagUser + 1;

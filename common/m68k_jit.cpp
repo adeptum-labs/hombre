@@ -1539,6 +1539,8 @@ bool Jit::init(const CodeRegion& region, Machine& machine) {
     next_native_ = 2;
     block_limit_ = 64;
     address_mask_ = kNoAddressMask;
+    budget_left_ = 0;
+    run_depth_ = 0;
     flush();
     return true;
 }
@@ -1683,10 +1685,17 @@ ExitReason Jit::run(u64 max_blocks) {
     CpuState& cpu = machine_->cpu;
     const Enter enter =
         reinterpret_cast<Enter>(reinterpret_cast<usize>(region_.exec + prelude_.enter));
+    if (run_depth_ == 0) {
+        budget_left_ = max_blocks;
+    }
+    ++run_depth_;
     cpu.exit = ExitReason::None;
     u64 count = 0;
     while (cpu.exit == ExitReason::None) {
-        if (count == max_blocks) {
+        if (count == max_blocks || budget_left_ == 0) {
+            if (run_depth_ > 1) {
+                LogLine().text("m68k: block budget used up in a call from a native").send();
+            }
             cpu.exit = ExitReason::Budget;
             break;
         }
@@ -1698,11 +1707,13 @@ ExitReason Jit::run(u64 max_blocks) {
             }
         }
         ++count;
+        --budget_left_;
         const u32 aline = enter(&cpu, machine_->mem.base, machine_->mem.size, code);
         if (aline != 0 && cpu.exit == ExitReason::None) {
             dispatch(aline);
         }
     }
+    --run_depth_;
     return cpu.exit;
 }
 
