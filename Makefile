@@ -154,7 +154,7 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%)
 # host compiler under the sanitizers and run in turn.
 HOSTCXX      := g++
 HOSTCXXFLAGS := -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined \
-                -fno-sanitize-recover=undefined -Icommon -Ikernel -I. -MMD -MP
+                -fno-sanitize-recover=undefined -Icommon -Ikernel -I. -Itools -MMD -MP
 TEST_SRC     := $(wildcard tests/test_*.cpp)
 TEST_BIN     := $(TEST_SRC:tests/%.cpp=$(BUILD)/tests/%)
 
