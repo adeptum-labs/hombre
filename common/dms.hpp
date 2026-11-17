@@ -35,7 +35,7 @@ enum class DmsError : u32 {
     Ok,
     NotDms,           // the first bytes are not "DMS!"
     HeaderCrc,        // the archive header fails its CRC
-    Truncated,        // the archive ends inside a header or a track, or holds no disk track
+    Truncated,        // shorter than its header says, ends inside a track, or has no disk track
     TrackHeader,      // a track record has no "TR", a bad header CRC or a stray number
     TrackCrc,         // a track's packed data fails its CRC
     TrackChecksum,    // a track's unpacked bytes fail their checksum
@@ -43,7 +43,7 @@ enum class DmsError : u32 {
     UnsupportedMode,  // a track uses a mode other than NOCOMP, SIMPLE or HEAVY2
     BadTrackSize,     // a track is not a whole DD or HD cylinder, or differs from the first
     OutputTooSmall,   // the image does not fit the output buffer
-    Corrupt,          // the packed data of a track does not decode
+    Corrupt,          // a track's packed data does not decode, or a track appears twice
 };
 
 struct DmsInfo {
@@ -215,9 +215,10 @@ inline u16 checksum16(const u8* data, usize length) {
 }
 
 // Reads the record at in[pos]; on success pos moves past its packed data.
-// failed_track is set to the record's number once that is readable.
+// failed_track is set to the record's number once its header CRC has passed.
 inline DmsError read_record(const u8* in, usize in_len, usize& pos, TrackRecord& rec,
                             u32& failed_track) {
+    failed_track = no_track;
     if (in_len - pos < record_len) {
         return DmsError::Truncated;
     }
@@ -225,11 +226,11 @@ inline DmsError read_record(const u8* in, usize in_len, usize& pos, TrackRecord&
     if (h[0] != 'T' || h[1] != 'R') {
         return DmsError::TrackHeader;
     }
-    rec.number = be16(h + 2);
-    failed_track = rec.number;
     if (be16(h + 18) != dms_crc16(h, 18)) {
         return DmsError::TrackHeader;
     }
+    rec.number = be16(h + 2);
+    failed_track = rec.number;
     rec.packed_len = be16(h + 6);
     rec.unpacked_len = be16(h + 10);
     rec.mode = h[13];
@@ -330,8 +331,19 @@ inline DmsError dms_unpack(const u8* in, usize in_len, u8* out, usize out_cap, D
         return DmsError::Corrupt;
     }
 
+    // The header states how much packed data follows it. Real archives
+    // disagree with the records' own lengths by a few bytes, so this is only
+    // a lower bound: a file shorter than that has been cut off, and one with
+    // extra bytes at the end is let through.
+    if (in_len - header_len < be32(in + 20)) {
+        return DmsError::Truncated;
+    }
+
+    // Fewer bytes than a record header at the end are not a record, whatever
+    // they hold; the check above has already caught a cut-off file.
+    u8 seen[max_disk_track] = {};
     usize pos = header_len;
-    while (pos < in_len) {
+    while (in_len - pos >= record_len) {
         TrackRecord rec{};
         const DmsError read = read_record(in, in_len, pos, rec, info.failed_track);
         if (read != DmsError::Ok) {
@@ -346,6 +358,9 @@ inline DmsError dms_unpack(const u8* in, usize in_len, u8* out, usize out_cap, D
 
         if (rec.number > info.last_track) {
             return DmsError::TrackHeader;
+        }
+        if (seen[rec.number] != 0) {
+            return DmsError::Corrupt;
         }
         if (info.track_bytes == 0) {
             if (rec.unpacked_len != dd_track_bytes && rec.unpacked_len != hd_track_bytes) {
@@ -370,6 +385,7 @@ inline DmsError dms_unpack(const u8* in, usize in_len, u8* out, usize out_cap, D
         }
         __builtin_memcpy(out + static_cast<usize>(rec.number) * info.track_bytes, work.track,
                          rec.unpacked_len);
+        seen[rec.number] = 1;
         ++info.tracks_unpacked;
     }
 

@@ -130,13 +130,15 @@ inline std::vector<u8> build_dms(const std::vector<u8>& adf, u16 mode, u16 track
     padded.resize(tracks * track_bytes, 0);
 
     std::vector<u8> body;
+    usize packed_bytes = 0;  // the packed data only, as the header counts it
     for (usize t = 0; t < tracks; ++t) {
         const auto rec =
             dms_track_record(static_cast<u16>(t), mode, padded.data() + t * track_bytes, track_bytes);
+        packed_bytes += rec.size() - dms_detail::record_len;
         body.insert(body.end(), rec.begin(), rec.end());
     }
     std::vector<u8> dms = dms_header(mode, 0, static_cast<u16>(tracks - 1),
-                                     static_cast<u32>(body.size()),
+                                     static_cast<u32>(packed_bytes),
                                      static_cast<u32>(padded.size()));
     dms.insert(dms.end(), body.begin(), body.end());
     return dms;

@@ -119,6 +119,18 @@ void refresh_header_crc(std::vector<u8>& v) {
     put16(v, 54, dms_crc16(v.data() + 4, 50));
 }
 
+// After records are inserted or removed: states the packed size the records
+// now add up to, and signs the header again.
+void fix_packed_size(std::vector<u8>& v) {
+    u32 total = 0;
+    for (usize at = kHeader; at + kRecord <= v.size(); at += kRecord + get16(v, at + 6)) {
+        total += get16(v, at + 6);
+    }
+    put16(v, 20, static_cast<u16>(total >> 16));
+    put16(v, 22, static_cast<u16>(total));
+    refresh_header_crc(v);
+}
+
 void refresh_track_crc(std::vector<u8>& v, usize at) {
     put16(v, at + 18, dms_crc16(v.data() + at, 18));
 }
@@ -195,6 +207,7 @@ void missing_track_zero_filled() {
     const auto adf = make_adf();
     auto dms = build_dms(adf, 0, kDd);
     dms.erase(dms.begin() + nocomp_track_at(2), dms.begin() + nocomp_track_at(3));
+    fix_packed_size(dms);
     const Result r = run(dms);
     CHECK_EQ(r.error, DmsError::Ok);
     CHECK_EQ(r.info.tracks_unpacked, 4u);
@@ -211,6 +224,7 @@ void missing_leading_and_trailing_tracks_zero_filled() {
     // Last track gone too: the header still says the image has five.
     dms.resize(nocomp_track_at(4));
     dms.erase(dms.begin() + nocomp_track_at(0), dms.begin() + nocomp_track_at(1));
+    fix_packed_size(dms);
     const Result r = run(dms);
     CHECK_EQ(r.error, DmsError::Ok);
     CHECK_EQ(r.info.tracks_unpacked, 3u);
@@ -235,6 +249,7 @@ void banner_track_skipped() {
     std::vector<u8> extra(kDd, 0x55);
     const auto back = dms_track_record(80, 0, extra.data(), extra.size());
     dms.insert(dms.end(), back.begin(), back.end());
+    fix_packed_size(dms);
 
     const Result r = run(dms);
     CHECK_EQ(r.error, DmsError::Ok);
@@ -251,6 +266,7 @@ void skipped_track_with_unsupported_mode_is_ignored() {
     front[13] = 6;  // a compressed banner we never decode
     put16(front, 18, dms_crc16(front.data(), 18));
     dms.insert(dms.begin() + kHeader, front.begin(), front.end());
+    fix_packed_size(dms);
     const Result r = run(dms);
     CHECK_EQ(r.error, DmsError::Ok);
     CHECK(same_prefix(r.out, adf));
@@ -290,20 +306,88 @@ void truncated_mid_track() {
             std::vector<u8> cut(dms.begin(), dms.begin() + n);
             const Result r = run(cut);
             CHECK_EQ(r.error, DmsError::Truncated);
+            // The header size check catches a cut that removes more than the
+            // record headers' worth of slack; a smaller one the walk finds.
+            CHECK_EQ(r.info.failed_track, n == last - 5000 ? 0xFFFFFFFFu : 4u);
+        }
+
+        // The header may understate the packed size; then the walk itself
+        // finds the cut and names the track.
+        auto understated = dms;
+        put16(understated, 20, 0);
+        put16(understated, 22, 0);
+        refresh_header_crc(understated);
+        for (usize n : {last - 1, last - 100, last - 5000}) {
+            std::vector<u8> cut(understated.begin(), understated.begin() + n);
+            const Result r = run(cut);
+            CHECK_EQ(r.error, DmsError::Truncated);
             CHECK_EQ(r.info.failed_track, 4u);
         }
     }
 }
 
-void cut_at_a_track_boundary_keeps_the_earlier_tracks() {
+void cut_at_a_track_boundary_is_truncated() {
     const auto adf = make_adf();
-    auto dms = build_dms(adf, 0, kDd);
-    dms.resize(nocomp_track_at(3));
+    for (u16 mode : {u16{0}, u16{1}}) {
+        auto dms = build_dms(adf, mode, kDd);
+        usize end = kHeader;
+        for (int i = 0; i < 3; ++i) {
+            end += kRecord + get16(dms, end + 6);
+        }
+        dms.resize(end);  // three whole records, the header still promises five
+        CHECK_EQ(run(dms).error, DmsError::Truncated);
+        dms.resize(end + 7);  // and no better with part of a header after them
+        CHECK_EQ(run(dms).error, DmsError::Truncated);
+    }
+}
+
+void header_packed_size_matches_the_records() {
+    for (u16 mode : {u16{0}, u16{1}}) {
+        const auto dms = build_dms(make_adf(), mode, kDd);
+        u32 sum = 0;
+        for (usize at = kHeader; at < dms.size(); at += kRecord + get16(dms, at + 6)) {
+            sum += get16(dms, at + 6);
+        }
+        CHECK_EQ(static_cast<u32>(get16(dms, 20)) << 16 | get16(dms, 22), sum);
+        CHECK_EQ(dms.size() - kHeader, sum + 5u * kRecord);
+    }
+    // Stored tracks pack to their own size.
+    const auto stored = build_dms(make_adf(), 0, kDd);
+    CHECK_EQ(get16(stored, 22), 5u * kDd);
+    CHECK_EQ(get16(stored, 20), 0);
+}
+
+void bytes_after_the_last_record_are_tolerated() {
+    const auto adf = make_adf();
+    for (u16 mode : {u16{0}, u16{1}}) {
+        for (usize extra : {usize{1}, usize{7}, usize{19}}) {
+            auto dms = build_dms(adf, mode, kDd);
+            dms.insert(dms.end(), extra, 0x5A);
+            const Result r = run(dms);
+            CHECK_EQ(r.error, DmsError::Ok);
+            CHECK(same_prefix(r.out, adf));
+            CHECK_EQ(r.info.tracks_unpacked, 5u);
+        }
+    }
+}
+
+void duplicate_track_is_corrupt() {
+    auto dms = build_dms(make_adf(), 0, kDd);
+    const auto again(std::vector<u8>(dms.begin() + nocomp_track_at(1),
+                                     dms.begin() + nocomp_track_at(2)));
+    dms.insert(dms.end(), again.begin(), again.end());
+    fix_packed_size(dms);
     const Result r = run(dms);
-    CHECK_EQ(r.error, DmsError::Ok);
-    CHECK_EQ(r.info.tracks_unpacked, 3u);
-    CHECK(std::equal(adf.begin(), adf.begin() + 3 * kDd, r.out.begin()));
-    CHECK_EQ(r.out[3u * kDd], 0);
+    CHECK_EQ(r.error, DmsError::Corrupt);
+    CHECK_EQ(r.info.failed_track, 1u);
+}
+
+void track_checksum_is_the_16_bit_byte_sum() {
+    // 300 * 255 = 76500 = 0x12AD4, kept to 16 bits.
+    const std::vector<u8> ff(300, 0xFF);
+    CHECK_EQ(get16(dms_track_record(0, 0, ff.data(), ff.size()), 14), 0x2AD4);
+    const u8 small[] = {1, 2, 3, 250};
+    CHECK_EQ(get16(dms_track_record(0, 0, small, sizeof(small)), 14), 256);
 }
 
 void track_header_errors() {
@@ -318,7 +402,7 @@ void track_header_errors() {
     bad_crc[nocomp_track_at(1) + 7] ^= 0x01;  // header CRC left stale
     r = run(bad_crc);
     CHECK_EQ(r.error, DmsError::TrackHeader);
-    CHECK_EQ(r.info.failed_track, 1u);
+    CHECK_EQ(r.info.failed_track, 0xFFFFFFFFu);  // a bad header names no track
 }
 
 void track_data_crc() {
@@ -398,7 +482,7 @@ std::vector<u8> raw_simple_archive(const std::vector<u8>& packed) {
     put16(rec, 16, dms_crc16(packed.data(), packed.size()));
     refresh_track_crc(rec, 0);
     rec.insert(rec.end(), packed.begin(), packed.end());
-    auto dms = dms_header(1, 0, 0, static_cast<u32>(rec.size()), kDd);
+    auto dms = dms_header(1, 0, 0, static_cast<u32>(packed.size()), kDd);
     dms.insert(dms.end(), rec.begin(), rec.end());
     return dms;
 }
@@ -488,7 +572,11 @@ int main() {
     header_crc();
     truncated_everywhere_in_the_front();
     truncated_mid_track();
-    cut_at_a_track_boundary_keeps_the_earlier_tracks();
+    cut_at_a_track_boundary_is_truncated();
+    header_packed_size_matches_the_records();
+    bytes_after_the_last_record_are_tolerated();
+    duplicate_track_is_corrupt();
+    track_checksum_is_the_16_bit_byte_sum();
     track_header_errors();
     track_data_crc();
     track_checksum();
