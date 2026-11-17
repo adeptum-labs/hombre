@@ -277,6 +277,10 @@ $(BUILD)/m68k/%.elf: $(BUILD)/m68k/%.o tools/m68k/hunk.ld
 $(BUILD)/m68k/%.hunk: $(BUILD)/m68k/%.elf $(ELF2HUNK)
 	$(ELF2HUNK) $< $@
 
+# The object and ELF files of the chain are kept, not removed after the
+# build as intermediates.
+.SECONDARY: $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.o) $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.elf)
+
 # The disk the boot check mounts: an OFS volume packed with SIMPLE tracks.
 # It is rebuilt whenever a tool or a program on it changes, and the output
 # is reproducible.

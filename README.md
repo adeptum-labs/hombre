@@ -20,7 +20,8 @@ Requirements:
 - clang 14 or newer (builds the UEFI loader)
 - g++ 12 or newer (builds the kernel and the host tests)
 - GNU binutils with the i386pep target (links the loader)
-- `binutils-m68k-linux-gnu` (assembles the 68000 programs of the test disk)
+- `binutils-m68k-linux-gnu` (assembles the 68000 programs of the test disk,
+  for `make run`, `make check` and `make test`)
 - GNU make
 - mtools and sgdisk (build the boot disk image)
 - QEMU with KVM, and OVMF installed at `/usr/share/OVMF`
@@ -48,7 +49,8 @@ Targets:
   startup sequence, and that the disk's own `C:Version` runs and returns 0.
   `DISK=` is required and the markers fit the 3.1 Workbench disk only.
 - `make test` builds and runs the host unit tests under the address and
-  undefined behaviour sanitizers.
+  undefined behaviour sanitizers. It builds the test disk as well, so it
+  needs `binutils-m68k-linux-gnu` too.
 - `make test-m68k M68K_TESTS_DIR=<directory>` runs the 68000 cases of the
   SingleStepTests/680x0 suite through the 68000 translator and compares the
   registers and memory each case leaves. The suite is not part of the

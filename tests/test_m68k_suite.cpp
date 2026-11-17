@@ -65,7 +65,7 @@
 // that an exception other than trace must stop the translated code by the
 // end of the next block (a jump to an odd address faults at the fetch
 // there), with the matching exit for a bus or address error: a case where
-// it did not fails, unless it ended with Unimplemented.
+// it did not fails, Unimplemented included.
 //
 // In two kinds of data register shift the suite's expected state cannot be
 // what the CPU does. These cases gate, are counted as quirks and leave out
@@ -78,10 +78,11 @@
 //    shifted out, sets them (a count equal to the size gives the sign bit
 //    in the suite as well): C and X.
 //
-// A gating case that ends with Unimplemented is counted as pending: the
-// instruction is not translated yet. Any other gating case that ends in a
-// different state, or leaves a stray store, is a failure, and any failure
-// makes the exit status non-zero.
+// Every 68000 instruction is translated, so a gating case that ends with
+// Unimplemented is a failure like any gating case that ends in a different
+// state or leaves a stray store; any failure makes the exit status
+// non-zero. RTE, STOP and RESET, which end the run with Unimplemented by
+// design, do not gate.
 
 #include "m68k_jit.hpp"
 
@@ -425,13 +426,6 @@ bool stopped_as_expected(const Case& c, ExitReason why) {
 
 // --- running a case -------------------------------------------------------
 
-const char* exit_name(ExitReason why) {
-    static const char* const names[] = {"None",    "Halt",         "Returned", "Budget",
-                                        "Illegal", "Trap",         "DivideByZero", "Chk",
-                                        "BusError", "AddressError", "Privilege", "Unimplemented"};
-    return names[static_cast<u32>(why)];
-}
-
 class Harness {
 public:
     Harness() : memory_(kGuestBytes) {
@@ -496,8 +490,8 @@ public:
             // fetches there, at the start of the next block.
             why = jit_.run(1);
         }
-        if (why != ExitReason::Budget && why != ExitReason::Unimplemented) {
-            diffs.push_back(std::string("exit ") + exit_name(why) + " fault_addr " +
+        if (why != ExitReason::Budget) {
+            diffs.push_back(std::string("exit ") + exit_reason_name(why) + " fault_addr " +
                             hex(cpu.fault_addr));
         }
         if (why == ExitReason::Budget) {
@@ -626,7 +620,6 @@ struct Tally {
     u64 cases = 0;
     u64 passed = 0;
     u64 failed = 0;
-    u64 pending = 0;
     std::map<std::string, u64> non_gating;
     std::map<std::string, u64> quirks;
     u64 non_gating_strays = 0;
@@ -644,7 +637,6 @@ struct Tally {
         cases += t.cases;
         passed += t.passed;
         failed += t.failed;
-        pending += t.pending;
         non_gating_strays += t.non_gating_strays;
         for (const auto& [why, count] : t.non_gating) {
             non_gating[why] += count;
@@ -668,10 +660,9 @@ struct Tally {
         for (const std::string& line : shown) {
             std::printf("%s\n", line.c_str());
         }
-        std::printf("%-20s cases %6llu passed %6llu failed %4llu pending %6llu", name.c_str(),
+        std::printf("%-20s cases %6llu passed %6llu failed %4llu", name.c_str(),
                     static_cast<unsigned long long>(cases), static_cast<unsigned long long>(passed),
-                    static_cast<unsigned long long>(failed),
-                    static_cast<unsigned long long>(pending));
+                    static_cast<unsigned long long>(failed));
         print_counts("non-gating", non_gating);
         if (!quirks.empty()) {
             print_counts("quirks", quirks);
@@ -683,7 +674,7 @@ struct Tally {
     }
 };
 
-enum class Verdict { Pass, Fail, Pending, NonGating };
+enum class Verdict { Pass, Fail, NonGating };
 
 struct Outcome {
     Verdict verdict;
@@ -708,8 +699,8 @@ Outcome judge(Harness& h, const Case& c, bool full_scan) {
     const std::string reason = non_gating_reason(c);
     const bool missed = stops_the_code(c) && !stopped_as_expected(c, why) &&
                         !untranslated(c.initial.prefetch[0]);
-    if (missed && why != ExitReason::Unimplemented) {
-        diffs.assign(1, reason + " expected, exit " + exit_name(why));
+    if (missed) {
+        diffs.assign(1, reason + " expected, exit " + exit_reason_name(why));
     }
     const bool gating = reason.empty() || missed;
     if (gating) {
@@ -723,8 +714,6 @@ Outcome judge(Harness& h, const Case& c, bool full_scan) {
         out.verdict = Verdict::NonGating;
     } else if (!out.diffs.empty()) {
         out.verdict = Verdict::Fail;
-    } else if (why == ExitReason::Unimplemented) {
-        out.verdict = Verdict::Pending;
     }
     return out;
 }
@@ -739,9 +728,6 @@ void count(const Case& c, const Outcome& out, const std::string& file, Tally& t)
     case Verdict::NonGating:
         ++t.non_gating[out.reason];
         t.non_gating_strays += out.stray ? 1 : 0;
-        return;
-    case Verdict::Pending:
-        ++t.pending;
         return;
     case Verdict::Pass:
         ++t.passed;
@@ -945,6 +931,20 @@ int self_test(Harness& h) {
     rte.final.ram = {{0x0C, 0x00}, {0x0D, 0x00}, {0x0E, 0x10}, {0x0F, 0x00}};
     const Outcome rte_out = verdict(rte);
     expect("RTE with an address error does not gate", rte_out.verdict == Verdict::NonGating);
+    h.clear(true);
+
+    // A case that expects a bus error, run on an opcode the translator
+    // stops at with Unimplemented, gates and fails.
+    Case stopped = rte;
+    stopped.name = "A-line expecting a bus error";
+    stopped.initial.prefetch[0] = 0xA123;
+    stopped.final = stopped.initial;
+    stopped.final.ssp = 0x8F2;
+    stopped.final.pc = 0x1000;
+    stopped.final.ram = {{0x08, 0x00}, {0x09, 0x00}, {0x0A, 0x10}, {0x0B, 0x00}};
+    const Outcome stopped_out = verdict(stopped);
+    expect("an Unimplemented stop where a bus error is expected fails",
+           stopped_out.verdict == Verdict::Fail);
     h.clear(true);
 
     expect("memory is clean at the end", h.clean());
