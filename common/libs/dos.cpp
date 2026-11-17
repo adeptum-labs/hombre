@@ -50,6 +50,7 @@ constexpr u32 kChunk = 128;
 constexpr u32 kMaxComponent = 30;
 constexpr u32 kFaultText = 256;
 constexpr u32 kFailLevel = 10;
+constexpr u32 kMaxVars = 1u << 16;  // nodes a walk of pr_LocalVars visits at most
 constexpr u8 SIGB_DOS = 8;
 constexpr char kDosName[] = "dos.library";
 constexpr char kIdString[] = "dos 60.0 (Hombre)\r\n";
@@ -192,6 +193,21 @@ void new_list(Bus& b, u32 list) {
     b.w32(list + LH_HEAD, list + LH_TAIL);
     b.w32(list + LH_TAIL, 0);
     b.w32(list + LH_TAILPRED, list + LH_HEAD);
+}
+
+void add_tail(Bus& b, u32 list, u32 node) {
+    const u32 pred = b.r32(list + LH_TAILPRED);
+    b.w32(node + LN_SUCC, list + LH_TAIL);
+    b.w32(node + LN_PRED, pred);
+    b.w32(pred + LN_SUCC, node);
+    b.w32(list + LH_TAILPRED, node);
+}
+
+void remove(Bus& b, u32 node) {
+    const u32 succ = b.r32(node + LN_SUCC);
+    const u32 pred = b.r32(node + LN_PRED);
+    b.w32(pred + LN_SUCC, succ);
+    b.w32(succ + LN_PRED, pred);
 }
 
 void init_semaphore(Bus& b, u32 ss) {
@@ -1259,16 +1275,238 @@ struct DosOps {
         native::set_result(m, ok ? DOSTRUE : DOSFALSE);
     }
 
-    // There are no variables.
+    // --- variables -------------------------------------------------------------
+
+    // The name of a variable, in D1, into name. False if it is null or too
+    // long (IoErr and D0 are then set to code and result) or if reading it
+    // faulted.
+    static bool var_name(Dos& d, Bus& b, char (&name)[kMaxName], u32 result) {
+        const u32 at = b.machine().cpu.d[1];
+        if (at == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, result);
+            return false;
+        }
+        if (!b.string(at, name, kMaxName)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_INVALID_COMPONENT_NAME, result);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    // The local variable of the type with the name, compared without regard
+    // to case; 0 if there is none. A node marked LVF_IGNORE has another
+    // type, so it never matches.
+    static u32 find_var(Dos& d, Bus& b, const char* name, u32 type) {
+        u32 node = b.r32(d.process_ + pr_LocalVars + LH_HEAD);
+        for (u32 n = 0; n < kMaxVars; ++n) {
+            const u32 succ = b.r32(node + LN_SUCC);
+            if (!b.ok() || succ == 0) {
+                return 0;
+            }
+            if (b.r8(node + LN_TYPE) == type) {
+                char other[kMaxName];
+                if (b.string(b.r32(node + LN_NAME), other, kMaxName) &&
+                    same_name(other, length_of(other), name)) {
+                    return node;
+                }
+                if (!b.ok()) {
+                    return 0;
+                }
+            }
+            node = succ;
+        }
+        LogLine().text("dos: the local variable list has no end").send();
+        return 0;
+    }
+
+    // Frees what a variable's value takes.
+    static void free_value(Dos& d, Bus& b, u32 node) {
+        const u32 value = b.r32(node + lv_Value);
+        const u32 length = b.r32(node + lv_Len);
+        if (b.ok() && value != 0) {
+            d.exec_->free(value, length);
+        }
+    }
+
+    // Takes a variable off the list and frees it: the node, with its name
+    // after it, and the value.
+    static void delete_var(Dos& d, Bus& b, u32 node) {
+        char name[kMaxName];
+        if (!b.string(node + LocalVar_SIZEOF, name, kMaxName)) {
+            return;
+        }
+        remove(b, node);
+        free_value(d, b, node);
+        if (b.ok()) {
+            d.exec_->free(node, LocalVar_SIZEOF + length_of(name) + 1);
+        }
+    }
+
+    // SetVar(name, buffer, size, flags): sets the local variable of the
+    // type in the low byte of flags to size bytes from buffer (up to its
+    // NUL for a size of -1), replacing one of the same name and type; a
+    // null buffer deletes it. Local is the default; GVF_GLOBAL_ONLY fails.
+    static void set_var(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 buffer = m.cpu.d[2];
+        u32 size = m.cpu.d[3];
+        const u32 flags = m.cpu.d[4];
+        const u32 type = flags & 0xFF;
+        char name[kMaxName];
+        if (!var_name(d, b, name, DOSFALSE)) {
+            return;
+        }
+        if ((flags & GVF_GLOBAL_ONLY) != 0) {
+            fail(d, b, ERROR_DEVICE_NOT_MOUNTED, DOSFALSE);  // ENV:
+            return;
+        }
+        u32 node = find_var(d, b, name, type);
+        if (!b.ok()) {
+            return;
+        }
+        if (buffer == 0) {
+            if (node == 0) {
+                fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+                return;
+            }
+            delete_var(d, b, node);
+            if (b.ok()) {
+                native::set_result(m, DOSTRUE);
+            }
+            return;
+        }
+        if (size == 0xFFFFFFFF) {
+            size = 0;
+            while (b.r8(buffer + size) != 0 && b.ok()) {
+                ++size;
+            }
+        }
+        if (!b.ok() || (size != 0 && !b.span(buffer, size))) {
+            return;
+        }
+        u32 value = 0;
+        if (size != 0) {
+            value = d.exec_->alloc(size, MEMF_PUBLIC);
+            if (value == 0) {
+                fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+                return;
+            }
+            for (u32 i = 0; i < size; ++i) {
+                m.mem.base[value + i] = m.mem.base[buffer + i];
+            }
+        }
+        if (node == 0) {
+            const u32 bytes = LocalVar_SIZEOF + length_of(name) + 1;
+            node = d.exec_->alloc(bytes, MEMF_PUBLIC | MEMF_CLEAR);
+            if (node == 0) {
+                d.exec_->free(value, size);
+                fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+                return;
+            }
+            put_string(b, node + LocalVar_SIZEOF, name);
+            b.w8(node + LN_TYPE, type);
+            b.w32(node + LN_NAME, node + LocalVar_SIZEOF);
+            add_tail(b, d.process_ + pr_LocalVars, node);
+        } else {
+            free_value(d, b, node);
+        }
+        b.w16(node + lv_Flags, flags & (GVF_BINARY_VAR | GVF_DONT_NULL_TERM));
+        b.w32(node + lv_Value, value);
+        b.w32(node + lv_Len, size);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    // GetVar(name, buffer, size, flags): copies the local variable of the
+    // type in the low byte of flags into buffer, up to its first newline
+    // unless GVF_BINARY_VAR is set, and ends it with a NUL unless
+    // GVF_DONT_NULL_TERM is set. D0 is the number of bytes copied, the NUL
+    // left out, and IoErr the size of the whole variable. A variable that
+    // does not exist gives -1 and an empty buffer; a null buffer or a size
+    // that is not positive gives -1 and ERROR_BAD_NUMBER.
     static void get_var(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
         const u32 buffer = m.cpu.d[2];
         const u32 size = m.cpu.d[3];
-        if (buffer != 0 && size != 0 && (size & 0x80000000) == 0) {
-            b.w8(buffer, 0);
+        const u32 flags = m.cpu.d[4];
+        if (buffer == 0 || size == 0 || (size & 0x80000000) != 0) {
+            fail(d, b, ERROR_BAD_NUMBER, 0xFFFFFFFF);
+            return;
         }
-        fail(d, b, ERROR_OBJECT_NOT_FOUND, 0xFFFFFFFF);
+        char name[kMaxName];
+        const bool named = var_name(d, b, name, 0xFFFFFFFF);
+        if (!b.ok()) {
+            return;
+        }
+        const u32 node = named && (flags & GVF_GLOBAL_ONLY) == 0 ? find_var(d, b, name, flags & 0xFF)
+                                                                 : 0;
+        if (!b.ok()) {
+            return;
+        }
+        if (node == 0) {
+            b.w8(buffer, 0);
+            if (named) {
+                fail(d, b, ERROR_OBJECT_NOT_FOUND, 0xFFFFFFFF);
+            }
+            return;
+        }
+        const u32 value = b.r32(node + lv_Value);
+        const u32 length = b.r32(node + lv_Len);
+        const bool terminate = (flags & GVF_DONT_NULL_TERM) == 0;
+        const u32 room = terminate ? size - 1 : size;
+        u32 n = 0;
+        for (; n < length && n < room; ++n) {
+            const u32 c = b.r8(value + n);
+            if (!b.ok() || ((flags & GVF_BINARY_VAR) == 0 && c == '\n')) {
+                break;
+            }
+            b.w8(buffer + n, c);
+        }
+        if (terminate) {
+            b.w8(buffer + n, 0);
+        }
+        set_io_err(d, b, length);
+        if (b.ok()) {
+            native::set_result(m, n);
+        }
+    }
+
+    // StrToLong(string, value): the decimal number at the start of string,
+    // after spaces and tabs and an optional sign, into the long at value.
+    // D0 is the number of characters it took, the blanks included, or -1,
+    // with 0 stored, if no digit follows them. The value wraps modulo 2^32.
+    static void str_to_long(void*, Machine& m) {
+        Bus b(m);
+        const u32 s = m.cpu.d[1];
+        const u32 out = m.cpu.d[2];
+        u32 at = 0;
+        u32 c = b.r8(s);
+        while ((c == ' ' || c == '\t') && b.ok()) {
+            c = b.r8(s + ++at);
+        }
+        const bool negative = c == '-';
+        if (c == '-' || c == '+') {
+            c = b.r8(s + ++at);
+        }
+        u32 value = 0;
+        u32 digits = 0;
+        while (c >= '0' && c <= '9' && b.ok()) {
+            value = value * 10 + (c - '0');
+            ++digits;
+            c = b.r8(s + ++at);
+        }
+        if (!b.ok()) {
+            return;
+        }
+        b.w32(out, digits == 0 ? 0 : negative ? 0u - value : value);
+        if (b.ok()) {
+            native::set_result(m, digits == 0 ? 0xFFFFFFFF : at);
+        }
     }
 
     static void cli(void* ctx, Machine& m) {
@@ -1929,7 +2167,9 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::Cli, DosOps::cli, "Cli"},
     {dos_lvo::NewLoadSeg, DosOps::load_seg_lvo, "NewLoadSeg"},
     {dos_lvo::ReadArgs, DosOps::read_args, "ReadArgs"},
+    {dos_lvo::StrToLong, DosOps::str_to_long, "StrToLong"},
     {dos_lvo::FreeArgs, DosOps::free_args, "FreeArgs"},
+    {dos_lvo::SetVar, DosOps::set_var, "SetVar"},
     {dos_lvo::GetVar, DosOps::get_var, "GetVar"},
     {dos_lvo::PutStr, DosOps::put_str, "PutStr"},
     {dos_lvo::VPrintf, DosOps::vprintf, "VPrintf"},

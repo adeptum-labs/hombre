@@ -473,7 +473,9 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::Cli, 492u);
     CHECK_EQ(dos_lvo::NewLoadSeg, 768u);
     CHECK_EQ(dos_lvo::ReadArgs, 798u);
+    CHECK_EQ(dos_lvo::StrToLong, 816u);
     CHECK_EQ(dos_lvo::FreeArgs, 858u);
+    CHECK_EQ(dos_lvo::SetVar, 900u);
     CHECK_EQ(dos_lvo::GetVar, 906u);
     CHECK_EQ(dos_lvo::PutStr, 948u);
     CHECK_EQ(dos_lvo::VPrintf, 954u);
@@ -544,6 +546,17 @@ void layout_matches_the_ndk() {
         CHECK_EQ(fl[i], i * 4);
     }
     CHECK_EQ(fl_SIZEOF, 20u);
+    // LocalVar: a Node, a UWORD, a pointer and a length.
+    CHECK_EQ(lv_Node, 0u);
+    CHECK_EQ(lv_Flags, LN_SIZE);
+    CHECK_EQ(lv_Value, LN_SIZE + 2);
+    CHECK_EQ(lv_Len, LN_SIZE + 6);
+    CHECK_EQ(LocalVar_SIZEOF, LN_SIZE + 10);
+    CHECK_EQ(GVF_GLOBAL_ONLY, 1u << 8);
+    CHECK_EQ(GVF_LOCAL_ONLY, 1u << 9);
+    CHECK_EQ(GVF_BINARY_VAR, 1u << 10);
+    CHECK_EQ(GVF_DONT_NULL_TERM, 1u << 11);
+    CHECK_EQ(GVF_SAVE_VAR, 1u << 12);
 
     // DosLibrary: a Library, then longwords.
     const u32 dl[] = {dl_Root,   dl_GV,      dl_A2,          dl_A5,           dl_A6,
@@ -1048,6 +1061,183 @@ void get_var_finds_nothing() {
     CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
     CHECK_EQ(r.get8(kData + 0x100), 0u);
     CHECK_EQ(as_signed(r.call(dos_lvo::GetVar, kData, 0, 0, 0)), -1);
+}
+
+// GetVar into kData + 0x100 with 0xEE beyond what it writes.
+i32 get_var(Rig& r, const std::string& name, u32 size, u32 flags = 0) {
+    r.str(kData, name);
+    for (u32 i = 0; i < 64; ++i) {
+        r.put8(kData + 0x100 + i, 0xEE);
+    }
+    return as_signed(r.call(dos_lvo::GetVar, kData, kData + 0x100, size, flags));
+}
+
+// SetVar of the text in kData + 0x200, its length or -1 as given.
+u32 set_var(Rig& r, const std::string& name, const std::string& value, u32 flags = 0,
+            u32 size = 0xFFFFFFFF) {
+    r.str(kData, name);
+    r.str(kData + 0x200, value);
+    return r.call(dos_lvo::SetVar, kData, kData + 0x200, size, flags);
+}
+
+// The names on pr_LocalVars, in order, with their types.
+std::vector<std::pair<std::string, u32>> local_vars(Rig& r) {
+    std::vector<std::pair<std::string, u32>> out;
+    const u32 list = r.proc() + pr_LocalVars;
+    for (u32 n = r.get32(list + LH_HEAD); r.get32(n + LN_SUCC) != 0 && out.size() < 100;
+         n = r.get32(n + LN_SUCC)) {
+        out.emplace_back(r.read_str(r.get32(n + LN_NAME)), r.get8(n + LN_TYPE));
+    }
+    return out;
+}
+
+void local_variables() {
+    Rig r;
+    const auto before = r.chunks();
+    CHECK_EQ(set_var(r, "Planet", "Mars"), DOSTRUE);
+    CHECK(g_lines.empty());
+    CHECK_EQ(get_var(r, "planet", 32), 4);
+    CHECK(r.read_str(kData + 0x100) == "Mars");
+    CHECK_EQ(r.io_err(), 4u);
+    CHECK_EQ(get_var(r, "PLANET", 32, GVF_LOCAL_ONLY), 4);
+
+    // The node is a LocalVar on the Process's list.
+    const u32 node = r.get32(r.proc() + pr_LocalVars + LH_HEAD);
+    CHECK(r.read_str(r.get32(node + LN_NAME)) == "Planet");
+    CHECK_EQ(r.get8(node + LN_TYPE), LV_VAR);
+    CHECK_EQ(r.get32(node + lv_Len), 4u);
+    CHECK(r.bytes(r.get32(node + lv_Value), 4) == text("Mars"));
+    CHECK_EQ(r.get32(node + LN_SUCC), r.proc() + pr_LocalVars + LH_TAIL);
+
+    // A short buffer takes what fits and a NUL; IoErr is the whole size.
+    CHECK_EQ(set_var(r, "planet", "Jupiter"), DOSTRUE);
+    CHECK_EQ(local_vars(r).size(), 1u);
+    CHECK_EQ(get_var(r, "Planet", 4), 3);
+    CHECK(r.read_str(kData + 0x100) == "Jup");
+    CHECK_EQ(r.get8(kData + 0x104), 0xEEu);
+    CHECK_EQ(r.io_err(), 7u);
+    CHECK_EQ(get_var(r, "Planet", 4, GVF_DONT_NULL_TERM), 4);
+    CHECK(r.bytes(kData + 0x100, 5) == (std::vector<u8>{'J', 'u', 'p', 'i', 0xEE}));
+    CHECK_EQ(get_var(r, "Planet", 1), 0);
+    CHECK_EQ(r.get8(kData + 0x100), 0u);
+
+    // A newline ends the value unless it is binary; the size is given.
+    CHECK_EQ(set_var(r, "Two", "one\ntwo", 0, 7), DOSTRUE);
+    CHECK_EQ(get_var(r, "two", 32), 3);
+    CHECK(r.read_str(kData + 0x100) == "one");
+    CHECK_EQ(r.io_err(), 7u);
+    CHECK_EQ(get_var(r, "two", 32, GVF_BINARY_VAR), 7);
+    CHECK(r.read_str(kData + 0x100) == "one\ntwo");
+    CHECK_EQ(set_var(r, "Part", "abcdef", 0, 2), DOSTRUE);
+    CHECK_EQ(get_var(r, "Part", 32), 2);
+    CHECK(r.read_str(kData + 0x100) == "ab");
+    CHECK_EQ(set_var(r, "Empty", "", 0, 0), DOSTRUE);
+    CHECK_EQ(get_var(r, "Empty", 32), 0);
+    CHECK_EQ(r.get8(kData + 0x100), 0u);
+
+    // An alias is another type of the same name.
+    CHECK_EQ(set_var(r, "Planet", "Venus", LV_ALIAS), DOSTRUE);
+    CHECK_EQ(get_var(r, "Planet", 32), 7);
+    CHECK_EQ(get_var(r, "Planet", 32, LV_ALIAS), 5);
+    CHECK(r.read_str(kData + 0x100) == "Venus");
+    CHECK((local_vars(r) == std::vector<std::pair<std::string, u32>>{
+                                {"Planet", LV_VAR}, {"Two", LV_VAR}, {"Part", LV_VAR},
+                                {"Empty", LV_VAR}, {"Planet", LV_ALIAS}}));
+    // A node marked LVF_IGNORE is passed over.
+    const u32 alias = r.get32(r.proc() + pr_LocalVars + LH_TAILPRED);
+    r.put8(alias + LN_TYPE, LV_ALIAS | LVF_IGNORE);
+    CHECK_EQ(get_var(r, "Planet", 32, LV_ALIAS), -1);
+    r.put8(alias + LN_TYPE, LV_ALIAS);
+
+    // There are no global variables.
+    CHECK_EQ(get_var(r, "Planet", 32, GVF_GLOBAL_ONLY), -1);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(r.get8(kData + 0x100), 0u);
+    CHECK_EQ(set_var(r, "Moon", "Io", GVF_GLOBAL_ONLY), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+    CHECK_EQ(get_var(r, "Moon", 32), -1);
+
+    // A null buffer deletes, and every block goes back to exec.
+    for (const char* name : {"planet", "TWO", "Part", "Empty"}) {
+        r.str(kData, name);
+        CHECK_EQ(r.call(dos_lvo::SetVar, kData, 0, 0, 0), DOSTRUE);
+    }
+    r.str(kData, "Planet");
+    CHECK_EQ(r.call(dos_lvo::SetVar, kData, 0, 0, LV_ALIAS), DOSTRUE);
+    CHECK(local_vars(r).empty());
+    CHECK(r.chunks() == before);
+    CHECK_EQ(r.call(dos_lvo::SetVar, kData, 0, 0, 0), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(get_var(r, "Planet", 32), -1);
+    CHECK(g_lines.empty());
+}
+
+void variable_arguments_are_checked() {
+    Rig r;
+    CHECK_EQ(set_var(r, "Name", "value"), DOSTRUE);
+    // No buffer or no room: ERROR_BAD_NUMBER, and nothing written.
+    r.str(kData, "Name");
+    CHECK_EQ(as_signed(r.call(dos_lvo::GetVar, kData, 0, 32, 0)), -1);
+    CHECK_EQ(r.io_err(), ERROR_BAD_NUMBER);
+    CHECK_EQ(get_var(r, "Name", 0), -1);
+    CHECK_EQ(r.io_err(), ERROR_BAD_NUMBER);
+    CHECK_EQ(get_var(r, "Name", 0x80000000), -1);
+    CHECK_EQ(r.get8(kData + 0x100), 0xEEu);
+    // No name, or one too long.
+    CHECK_EQ(as_signed(r.call(dos_lvo::GetVar, 0, kData + 0x100, 32, 0)), -1);
+    CHECK_EQ(r.io_err(), ERROR_REQUIRED_ARG_MISSING);
+    CHECK_EQ(r.call(dos_lvo::SetVar, 0, kData + 0x200, 1, 0), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_REQUIRED_ARG_MISSING);
+    const std::string long_name(300, 'n');
+    CHECK_EQ(set_var(r, long_name, "x"), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_INVALID_COMPONENT_NAME);
+    CHECK_EQ(get_var(r, long_name, 32), -1);
+    CHECK_EQ(r.io_err(), ERROR_INVALID_COMPONENT_NAME);
+    // Bad pointers end the run.
+    r.str(kData, "Name");
+    r.cpu().d[1] = kData;
+    r.cpu().d[2] = kGuestBytes - 2;
+    r.cpu().d[3] = 4;
+    r.cpu().d[4] = 0;
+    CHECK_EQ(r.dos(dos_lvo::SetVar), ExitReason::BusError);
+    r.cpu().d[1] = kGuestBytes;
+    r.cpu().d[2] = kData + 0x100;
+    r.cpu().d[3] = 32;
+    CHECK_EQ(r.dos(dos_lvo::GetVar), ExitReason::BusError);
+    // A list that loops is walked a bounded number of steps.
+    const u32 list = r.proc() + pr_LocalVars;
+    const u32 node = r.get32(list + LH_HEAD);
+    r.put32(node + LN_SUCC, node);
+    CHECK_EQ(get_var(r, "Other", 32), -1);
+    CHECK(logged("dos: the local variable list has no end"));
+}
+
+void str_to_long() {
+    Rig r;
+    const struct {
+        const char* text;
+        i32 taken;
+        u32 value;
+    } cases[] = {
+        {"1234", 4, 1234},        {"  \t42 rest", 5, 42},   {"-17", 3, 0xFFFFFFEF},
+        {"+8x", 2, 8},            {"007", 3, 7},            {"", -1, 0},
+        {"   ", -1, 0},           {"-", -1, 0},             {"x12", -1, 0},
+        {"- 5", -1, 0},           {"4294967297", 10, 1},    {"2147483648", 10, 0x80000000},
+    };
+    for (const auto& c : cases) {
+        r.str(kData, c.text);
+        r.put32(kData + 0x100, 0xDEADBEEF);
+        CHECK_EQ(as_signed(r.call(dos_lvo::StrToLong, kData, kData + 0x100)), c.taken);
+        CHECK_EQ(r.get32(kData + 0x100), c.value);
+    }
+    r.str(kData, "12");
+    r.cpu().d[1] = kData;
+    r.cpu().d[2] = kData + 0x101;
+    CHECK_EQ(r.dos(dos_lvo::StrToLong), ExitReason::AddressError);
+    r.put8(kGuestBytes - 1, '5');
+    r.cpu().d[1] = kGuestBytes - 1;
+    r.cpu().d[2] = kData + 0x100;
+    CHECK_EQ(r.dos(dos_lvo::StrToLong), ExitReason::BusError);
 }
 
 void time_and_waiting() {
@@ -2025,6 +2215,9 @@ int main() {
     output_to_bad_handles();
     io_err_and_faults();
     get_var_finds_nothing();
+    local_variables();
+    variable_arguments_are_checked();
+    str_to_long();
     time_and_waiting();
     open_read_seek_close();
     paths_resolve_like_amigados();

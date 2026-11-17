@@ -47,6 +47,10 @@
 // opened, read and seeked in; anything that would write to the volume
 // fails with ERROR_DISK_WRITE_PROTECTED.
 //
+// Variables are the Process's local ones, LocalVar nodes on pr_LocalVars
+// as SetVar makes them. There are no global variables: ENV: is not
+// mounted.
+//
 // Paths are AmigaDOS paths: C:, LIBS:, S:, SYS:, the volume name and ":"
 // name the volume's C, LIBS and S directories and its root; any other
 // device is not mounted. A path without a device is relative to the
@@ -100,7 +104,9 @@ constexpr u32 PrintFault = 474;
 constexpr u32 Cli = 492;
 constexpr u32 NewLoadSeg = 768;
 constexpr u32 ReadArgs = 798;
+constexpr u32 StrToLong = 816;
 constexpr u32 FreeArgs = 858;
+constexpr u32 SetVar = 900;
 constexpr u32 GetVar = 906;
 constexpr u32 PutStr = 948;
 constexpr u32 VPrintf = 954;
@@ -310,6 +316,21 @@ constexpr u32 RDA_BufSiz = 20;
 constexpr u32 RDA_ExtHelp = 24;
 constexpr u32 RDA_Flags = 28;
 constexpr u32 RDA_SIZEOF = 32;
+
+// struct LocalVar and the variable types and flags
+constexpr u32 lv_Node = 0;
+constexpr u32 lv_Flags = 14;
+constexpr u32 lv_Value = 16;
+constexpr u32 lv_Len = 20;
+constexpr u32 LocalVar_SIZEOF = 24;
+constexpr u32 LV_VAR = 0;
+constexpr u32 LV_ALIAS = 1;
+constexpr u32 LVF_IGNORE = 0x80;
+constexpr u32 GVF_GLOBAL_ONLY = 0x100;
+constexpr u32 GVF_LOCAL_ONLY = 0x200;
+constexpr u32 GVF_BINARY_VAR = 0x400;
+constexpr u32 GVF_DONT_NULL_TERM = 0x800;
+constexpr u32 GVF_SAVE_VAR = 0x1000;
 
 constexpr u32 DOSTRUE = 0xFFFFFFFF;
 constexpr u32 DOSFALSE = 0;
