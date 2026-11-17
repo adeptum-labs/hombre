@@ -28,8 +28,9 @@
 namespace hombre {
 
 // Unpacker for DMS disk archives: the container (a 56 byte header and one
-// record per track) plus the NOCOMP and SIMPLE track modes. The result is the
-// raw disk image the archive was made from.
+// record per track) plus the NOCOMP, SIMPLE and HEAVY2 track modes. The
+// result is the raw disk image the archive was made from, byte for byte what
+// xDMS 1.3.2 (the format reference) writes for the same archive.
 
 enum class DmsError : u32 {
     Ok,
@@ -60,10 +61,39 @@ struct DmsInfo {
     u32 failed_track;     // number of the track an error came from, else 0xFFFFFFFF
 };
 
+namespace dms_detail {
+
+inline constexpr unsigned max_code_bits = 31;  // code lengths are 5 bit fields
+inline constexpr u16 heavy_literal_symbols = 510;  // 256 bytes, then match lengths 3 to 256
+inline constexpr u16 heavy2_offset_symbols = 15;   // 14 offset classes, then "the last offset"
+inline constexpr usize heavy2_window = 8192;
+
+// A canonical prefix code: shorter codes first, equal lengths in symbol
+// order, read most significant bit first. A code with no coded symbols stands
+// for `single`, sent in zero bits.
+template <u16 Symbols>
+struct PrefixCode {
+    u16 count[max_code_bits + 1];  // number of codes of each length
+    u16 symbol[Symbols];           // the coded symbols, ordered by code
+    u16 coded;
+    u16 single;
+};
+
+}
+
 // Decoder state; the caller zero-fills it before the first use. It is large,
-// so it does not belong on a small stack.
+// so it does not belong on a small stack. dms_unpack resets the HEAVY2 state
+// at the start of every archive.
 struct DmsWork {
     u8 track[22528];  // one unpacked HD track
+
+    // HEAVY2 state, which tracks may carry over to the next track.
+    u8 window[dms_detail::heavy2_window];  // the last bytes the first stage produced
+    u16 window_pos;                        // where the next byte goes, modulo the window
+    u16 last_offset;                       // for the "repeat the last offset" symbol
+    bool have_codes;                       // a track has sent the two codes
+    dms_detail::PrefixCode<dms_detail::heavy_literal_symbols> literals;
+    dms_detail::PrefixCode<dms_detail::heavy2_offset_symbols> offsets;
 };
 
 namespace dms_detail {
@@ -75,11 +105,18 @@ inline constexpr u16 max_disk_track = 80;    // numbers from here up are not dis
 inline constexpr u16 min_disk_bytes = 2048;  // tracks up to this long are banners and notes
 inline constexpr u16 dd_track_bytes = 11264;
 inline constexpr u16 hd_track_bytes = 22528;
+// The only general info bit that marks an encrypted archive. 0x40 is set by
+// DMS device archives ("DMS_DEV_Fixed") and is not encryption.
 inline constexpr u16 info_encrypted = 0x02;
-inline constexpr u16 info_dev_encrypted = 0x40;
 inline constexpr u8 rle_escape = 0x90;
 
+// Track flag bits.
+inline constexpr u8 track_keep_state = 0x01;  // clear: reset the window after this track
+inline constexpr u8 track_new_codes = 0x02;   // HEAVY: new prefix codes precede the data
+inline constexpr u8 track_rle = 0x04;         // HEAVY: the first stage output is run-length coded
+
 static_assert(sizeof(DmsWork::track) == hd_track_bytes);
+static_assert(sizeof(DmsWork) <= 32768, "DmsWork is meant to fit in eight 4 KiB pages");
 
 inline u16 be16(const u8* p) { return static_cast<u16>(p[0] << 8 | p[1]); }
 
@@ -199,7 +236,9 @@ namespace dms_detail {
 struct TrackRecord {
     u16 number;
     u16 packed_len;
+    u16 stage_len;  // HEAVY: bytes out of the first stage, before run-length decoding
     u16 unpacked_len;
+    u8 flags;
     u8 mode;
     u16 checksum;
     u16 data_crc;
@@ -232,7 +271,9 @@ inline DmsError read_record(const u8* in, usize in_len, usize& pos, TrackRecord&
     rec.number = be16(h + 2);
     failed_track = rec.number;
     rec.packed_len = be16(h + 6);
+    rec.stage_len = be16(h + 8);
     rec.unpacked_len = be16(h + 10);
+    rec.flags = h[12];
     rec.mode = h[13];
     rec.checksum = be16(h + 14);
     rec.data_crc = be16(h + 16);
@@ -244,47 +285,286 @@ inline DmsError read_record(const u8* in, usize in_len, usize& pos, TrackRecord&
     return DmsError::Ok;
 }
 
+// Run-length decoder fed one byte at a time, so it can sit behind the HEAVY
+// first stage without a buffer between them. The coding: 0x90 0x00 is the
+// byte 0x90 itself; 0x90 n b repeats b n times; 0x90 0xFF b hi lo repeats b
+// (hi << 8 | lo) times; any other byte is itself. Once `out` is full, further
+// input is ignored.
+struct RleSink {
+    enum State : u8 { Literal, Count, Fill, RunHigh, RunLow };
+
+    u8* out;
+    usize length;
+    usize at = 0;
+    State state = Literal;
+    u8 count = 0;
+    u8 fill = 0;
+    u16 run = 0;
+    bool failed = false;  // a run would overflow out
+
+    bool done() const { return at == length; }
+
+    void put(u8 byte) {
+        if (failed || done()) {
+            return;
+        }
+        switch (state) {
+        case Literal:
+            if (byte == rle_escape) {
+                state = Count;
+            } else {
+                out[at++] = byte;
+            }
+            return;
+        case Count:
+            count = byte;
+            if (count == 0) {  // an escape byte that is just itself
+                out[at++] = rle_escape;
+                state = Literal;
+            } else {
+                state = Fill;
+            }
+            return;
+        case Fill:
+            fill = byte;
+            if (count == 0xFF) {  // long run: a 16 bit count follows
+                state = RunHigh;
+            } else {
+                emit(count);
+            }
+            return;
+        case RunHigh:
+            run = static_cast<u16>(byte << 8);
+            state = RunLow;
+            return;
+        case RunLow:
+            emit(static_cast<u16>(run | byte));
+            return;
+        }
+    }
+
+    void emit(usize n) {
+        state = Literal;
+        if (n > length - at) {
+            failed = true;
+            return;
+        }
+        __builtin_memset(out + at, fill, n);
+        at += n;
+    }
+};
+
 // Run-length decoder for SIMPLE tracks. out gets exactly out_len bytes. False
 // if the input ends early or a run would overflow out.
 inline bool rle_decode(const u8* in, usize in_len, u8* out, usize out_len) {
-    usize i = 0;
-    usize o = 0;
-    while (o < out_len) {
-        if (i >= in_len) {
+    RleSink sink{out, out_len};
+    for (usize i = 0; i < in_len && !sink.done() && !sink.failed; ++i) {
+        sink.put(in[i]);
+    }
+    return sink.done() && !sink.failed;
+}
+
+// Reads a track's packed data most significant bit first. Reading past the
+// end yields zero bits and sets `overrun`.
+struct BitReader {
+    const u8* data;
+    usize bit_count;
+    usize pos = 0;
+    bool overrun = false;
+
+    u32 bit() {
+        if (pos >= bit_count) {
+            overrun = true;
+            return 0;
+        }
+        const u32 b = (data[pos >> 3] >> (7 - (pos & 7))) & 1u;
+        ++pos;
+        return b;
+    }
+
+    u32 bits(unsigned n) {
+        u32 value = 0;
+        while (n-- > 0) {
+            value = value << 1 | bit();
+        }
+        return value;
+    }
+};
+
+// Reads a prefix code as HEAVY tracks send it: a count n in count_bits bits,
+// then the code lengths of symbols 0 to n-1 in length_bits bits each (0: no
+// code). n = 0 instead sends a single symbol in count_bits bits, coded in
+// zero bits. False unless the lengths make a complete code over at most
+// Symbols symbols.
+template <u16 Symbols>
+inline bool read_code(BitReader& in, PrefixCode<Symbols>& code, unsigned count_bits,
+                      unsigned length_bits) {
+    const u32 n = in.bits(count_bits);
+    if (n == 0) {
+        const u32 single = in.bits(count_bits);
+        if (single >= Symbols) {
             return false;
         }
-        const u8 byte = in[i++];
-        if (byte != rle_escape) {
-            out[o++] = byte;
-            continue;
-        }
-        if (i >= in_len) {
+        code.coded = 0;
+        code.single = static_cast<u16>(single);
+        return !in.overrun;
+    }
+    if (n > Symbols) {
+        return false;
+    }
+
+    u8 length[Symbols];
+    for (u16 i = 0; i < max_code_bits + 1; ++i) {
+        code.count[i] = 0;
+    }
+    for (u32 s = 0; s < n; ++s) {
+        length[s] = static_cast<u8>(in.bits(length_bits));
+        ++code.count[length[s]];
+    }
+    if (in.overrun) {
+        return false;
+    }
+    code.count[0] = 0;
+
+    // The lengths must fill the code space exactly: no code is a prefix of
+    // another and every bit string decodes.
+    i64 left = 1;
+    for (unsigned len = 1; len <= max_code_bits; ++len) {
+        left = left * 2 - code.count[len];
+        if (left < 0) {
             return false;
         }
-        const u8 count = in[i++];
-        if (count == 0) {  // an escape byte that is just itself
-            out[o++] = rle_escape;
-            continue;
+    }
+    if (left != 0) {
+        return false;
+    }
+
+    u16 next[max_code_bits + 1];
+    next[1] = 0;
+    for (unsigned len = 1; len < max_code_bits; ++len) {
+        next[len + 1] = static_cast<u16>(next[len] + code.count[len]);
+    }
+    code.coded = 0;
+    for (u32 s = 0; s < n; ++s) {
+        if (length[s] != 0) {
+            code.symbol[next[length[s]]++] = static_cast<u16>(s);
+            ++code.coded;
         }
-        if (i >= in_len) {
-            return false;
-        }
-        const u8 fill = in[i++];
-        usize run = count;
-        if (count == 0xFF) {  // long run: a 16 bit count follows
-            if (in_len - i < 2) {
-                return false;
-            }
-            run = be16(in + i);
-            i += 2;
-        }
-        if (run > out_len - o) {
-            return false;
-        }
-        __builtin_memset(out + o, fill, run);
-        o += run;
     }
     return true;
+}
+
+// Reads one symbol of a code that read_code accepted.
+template <u16 Symbols>
+inline u16 read_symbol(BitReader& in, const PrefixCode<Symbols>& code) {
+    if (code.coded == 0) {
+        return code.single;
+    }
+    u32 value = 0;  // the bits read so far
+    u32 first = 0;  // the first code of the current length
+    u32 index = 0;  // the position of that code in symbol[]
+    for (unsigned len = 1; len <= max_code_bits; ++len) {
+        value |= in.bit();
+        const u32 count = code.count[len];
+        if (value - first < count) {
+            return code.symbol[index + (value - first)];
+        }
+        index += count;
+        first = (first + count) << 1;
+        value <<= 1;
+    }
+    return code.symbol[0];  // not reached: the code is complete
+}
+
+// Window distance of a match: an offset class, then for class c > 0 the c-1
+// low bits below an implied top bit. The last class repeats the previous
+// distance, which survives from track to track.
+inline u16 read_offset(BitReader& in, DmsWork& work) {
+    const u16 cls = read_symbol(in, work.offsets);
+    if (cls == heavy2_offset_symbols - 1) {
+        return work.last_offset;
+    }
+    if (cls == 0) {
+        work.last_offset = 0;
+    } else {
+        work.last_offset = static_cast<u16>(in.bits(cls - 1u) | 1u << (cls - 1u));
+    }
+    return work.last_offset;
+}
+
+inline void reset_window(DmsWork& work) {
+    __builtin_memset(work.window, 0, sizeof(work.window));
+    work.window_pos = 0;
+}
+
+// The state a fresh archive starts from.
+inline void reset_decoder(DmsWork& work) {
+    reset_window(work);
+    work.last_offset = 0;
+    work.have_codes = false;
+}
+
+// HEAVY2: LZ77 over an 8 KiB window with prefix-coded literals, match
+// lengths and match offsets. The first stage yields stage_len bytes; when the
+// track says so they are run-length decoded to the track bytes. Either way
+// the stage output counts as followed by zero bytes up to unpacked_len: some
+// archives leave the trailing zeros of a track out of the first stage.
+inline DmsError decode_heavy2(const TrackRecord& rec, DmsWork& work) {
+    BitReader in{rec.data, usize{rec.packed_len} * 8};
+    if ((rec.flags & track_new_codes) != 0) {
+        if (!read_code(in, work.literals, 9, 5) || !read_code(in, work.offsets, 5, 4)) {
+            return DmsError::Corrupt;
+        }
+        work.have_codes = true;
+    }
+    if (!work.have_codes) {
+        return DmsError::Corrupt;
+    }
+    const bool rle = (rec.flags & track_rle) != 0;
+    if (!rle) {
+        __builtin_memset(work.track, 0, rec.unpacked_len);
+    }
+
+    constexpr u16 mask = heavy2_window - 1;
+    RleSink sink{work.track, rec.unpacked_len};
+    usize produced = 0;
+    auto put = [&](u8 byte) {
+        work.window[work.window_pos++ & mask] = byte;
+        if (rle) {
+            sink.put(byte);
+        } else if (produced < rec.unpacked_len) {
+            work.track[produced] = byte;
+        }
+        ++produced;
+    };
+
+    while (produced < rec.stage_len) {
+        const u16 symbol = read_symbol(in, work.literals);
+        if (symbol < 256) {
+            put(static_cast<u8>(symbol));
+        } else {
+            const usize length = symbol - 253u;
+            if (length > rec.stage_len - produced) {
+                return DmsError::Corrupt;
+            }
+            u16 from = static_cast<u16>(work.window_pos - read_offset(in, work) - 1u);
+            for (usize i = 0; i < length; ++i) {
+                put(work.window[from++ & mask]);
+            }
+        }
+        if (in.overrun || sink.failed) {
+            return DmsError::Corrupt;
+        }
+    }
+    if (rle) {
+        for (; produced < rec.unpacked_len && !sink.done() && !sink.failed; ++produced) {
+            sink.put(0);
+        }
+        if (!sink.done() || sink.failed) {
+            return DmsError::Corrupt;
+        }
+    }
+    return DmsError::Ok;
 }
 
 // Decodes one disk track into work.track (unpacked_len bytes).
@@ -301,7 +581,7 @@ inline DmsError decode_track(const TrackRecord& rec, DmsWork& work) {
                    ? DmsError::Ok
                    : DmsError::Corrupt;
     case 6:  // HEAVY2
-        return DmsError::UnsupportedMode;
+        return decode_heavy2(rec, work);
     default:
         return DmsError::UnsupportedMode;
     }
@@ -324,7 +604,7 @@ inline DmsError dms_unpack(const u8* in, usize in_len, u8* out, usize out_cap, D
     if (header != DmsError::Ok) {
         return header;
     }
-    if ((info.general_info & (info_encrypted | info_dev_encrypted)) != 0) {
+    if ((info.general_info & info_encrypted) != 0) {
         return DmsError::Encrypted;
     }
     if (info.last_track >= max_disk_track || info.first_track > info.last_track) {
@@ -335,20 +615,30 @@ inline DmsError dms_unpack(const u8* in, usize in_len, u8* out, usize out_cap, D
     // disagree with the records' own lengths by a few bytes, so this is only
     // a lower bound: a file shorter than that has been cut off, and one with
     // extra bytes at the end is let through.
-    if (in_len - header_len < be32(in + 20)) {
+    const u32 stated_packed = be32(in + 20);
+    if (in_len - header_len < stated_packed) {
         return DmsError::Truncated;
     }
 
     // Fewer bytes than a record header at the end are not a record, whatever
-    // they hold; the check above has already caught a cut-off file.
+    // they hold; the check above has already caught a cut-off file. Some
+    // archives carry text or padding after their tracks: bytes without the
+    // "TR" mark end the archive once the records hold as much packed data as
+    // the header states, and are a damaged record before that.
+    reset_decoder(work);
     u8 seen[max_disk_track] = {};
+    u64 packed_seen = 0;
     usize pos = header_len;
     while (in_len - pos >= record_len) {
+        if ((in[pos] != 'T' || in[pos + 1] != 'R') && packed_seen >= stated_packed) {
+            break;
+        }
         TrackRecord rec{};
         const DmsError read = read_record(in, in_len, pos, rec, info.failed_track);
         if (read != DmsError::Ok) {
             return read;
         }
+        packed_seen += rec.packed_len;
         if (dms_crc16(rec.data, rec.packed_len) != rec.data_crc) {
             return DmsError::TrackCrc;
         }
@@ -376,9 +666,14 @@ inline DmsError dms_unpack(const u8* in, usize in_len, u8* out, usize out_cap, D
             return DmsError::BadTrackSize;
         }
 
+        // Banners and other skipped records leave the decoder state alone;
+        // every disk track, whatever its mode, may reset the window.
         const DmsError decoded = decode_track(rec, work);
         if (decoded != DmsError::Ok) {
             return decoded;
+        }
+        if ((rec.flags & track_keep_state) == 0) {
+            reset_window(work);
         }
         if (checksum16(work.track, rec.unpacked_len) != rec.checksum) {
             return DmsError::TrackChecksum;

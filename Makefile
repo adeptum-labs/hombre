@@ -60,7 +60,7 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 # HOMBRE_FAULT_TEST. Each is built into its own directory.
 FAULT_TESTS := 1 2 3
 
-.PHONY: all image image-nokernel run check test clean
+.PHONY: all image image-nokernel run check test test-dms clean
 
 all: image
 
@@ -165,9 +165,28 @@ $(BUILD)/tests/%: tests/%.cpp
 test: $(TEST_BIN)
 	@for t in $(TEST_BIN); do $$t || exit 1; done
 
+# Host tools, built like the tests.
+ADFTOOL := $(BUILD)/tools/adftool
+
+$(ADFTOOL): tools/adftool.cpp
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
+
+# Unpacks every DMS archive below DMS_DIR with both xdms and adftool and
+# compares the images. The path reaches the script through the environment,
+# so spaces and shell characters in it are safe.
+ifdef DMS_DIR
+test-dms: $(ADFTOOL)
+	tools/dms_compare.sh "$$DMS_DIR"
+else
+test-dms:
+	@echo "skipping: set DMS_DIR"
+endif
+
 clean:
 	rm -rf $(BUILD)
 
 -include $(LOADER_OBJ:.o=.d)
 -include $(KERNEL_OBJ:.o=.d)
 -include $(TEST_BIN:%=%.d)
+-include $(ADFTOOL).d

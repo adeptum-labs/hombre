@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 using namespace hombre;
@@ -371,6 +372,37 @@ void bytes_after_the_last_record_are_tolerated() {
     }
 }
 
+// Text or padding after the last record ends the archive once the records
+// hold the packed size the header states; before that it is a bad record.
+void unmarked_bytes_after_the_records_end_the_archive() {
+    const auto adf = make_adf();
+    for (u16 mode : {u16{0}, u16{1}}) {
+        for (usize extra : {usize{20}, usize{21}, usize{5000}}) {
+            for (u8 fill : {u8{0x00}, u8{'D'}}) {
+                auto dms = build_dms(adf, mode, kDd);
+                dms.insert(dms.end(), extra, fill);
+                const Result r = run(dms);
+                CHECK_EQ(r.error, DmsError::Ok);
+                CHECK(same_prefix(r.out, adf));
+                CHECK_EQ(r.info.tracks_unpacked, 5u);
+            }
+        }
+    }
+
+    // The header promises one byte more than the records hold.
+    auto dms = build_dms(adf, 0, kDd);
+    put16(dms, 22, static_cast<u16>(get16(dms, 22) + 1));
+    refresh_header_crc(dms);
+    dms.insert(dms.end(), 64, 0x00);
+    CHECK_EQ(run(dms).error, DmsError::TrackHeader);
+
+    // A record that claims to be one still has to be valid.
+    dms = build_dms(adf, 0, kDd);
+    const u8 junk[kRecord] = {'T', 'R'};
+    dms.insert(dms.end(), junk, junk + kRecord);
+    CHECK_EQ(run(dms).error, DmsError::TrackHeader);
+}
+
 void duplicate_track_is_corrupt() {
     auto dms = build_dms(make_adf(), 0, kDd);
     const auto again(std::vector<u8>(dms.begin() + nocomp_track_at(1),
@@ -433,7 +465,7 @@ void track_checksum() {
 void unsupported_mode() {
     auto dms = build_dms(make_adf(), 0, kDd);
     const usize at = nocomp_track_at(1);
-    for (u8 mode : {u8{2}, u8{3}, u8{4}, u8{5}, u8{6}, u8{9}, u8{255}}) {
+    for (u8 mode : {u8{2}, u8{3}, u8{4}, u8{5}, u8{7}, u8{9}, u8{255}}) {
         dms[at + 13] = mode;
         refresh_track_crc(dms, at);
         const Result r = run(dms);
@@ -447,10 +479,11 @@ void encrypted() {
     dms[11] |= 0x02;
     refresh_header_crc(dms);
     CHECK_EQ(run(dms).error, DmsError::Encrypted);
+    // 0x40 marks a DMS device archive, not encryption.
     dms[11] &= static_cast<u8>(~0x02);
     dms[11] |= 0x40;
     refresh_header_crc(dms);
-    CHECK_EQ(run(dms).error, DmsError::Encrypted);
+    CHECK_EQ(run(dms).error, DmsError::Ok);
 }
 
 void bad_track_size() {
@@ -498,6 +531,347 @@ void damaged_run_length_data() {
     CHECK_EQ(run(raw_simple_archive({0x90, 0xFF, 0x00, 0x01})).error, DmsError::Corrupt);
     // A valid single run fills the track exactly; the checksum of zeros is 0.
     CHECK_EQ(run(raw_simple_archive({0x90, 0xFF, 0x00, 0x2C, 0x00})).error, DmsError::Ok);
+}
+
+// HEAVY2 streams are written by hand: there is no encoder here. Codes are
+// given as bit strings, most significant bit first.
+class BitWriter {
+public:
+    void put(u32 value, unsigned bits) {
+        while (bits-- > 0) {
+            if (used_ % 8 == 0) {
+                bytes_.push_back(0);
+            }
+            if ((value >> bits & 1u) != 0) {
+                bytes_.back() |= static_cast<u8>(0x80u >> (used_ % 8));
+            }
+            ++used_;
+        }
+    }
+
+    void code(const char* bits) {
+        for (; *bits != '\0'; ++bits) {
+            put(*bits == '1' ? 1 : 0, 1);
+        }
+    }
+
+    const std::vector<u8>& bytes() const { return bytes_; }
+
+private:
+    std::vector<u8> bytes_;
+    usize used_ = 0;
+};
+
+constexpr u8 kKeep = 0x01;
+constexpr u8 kNewCodes = 0x02;
+constexpr u8 kRle = 0x04;
+
+std::vector<u8> heavy_record(u16 number, u8 flags, usize stage_len, const std::vector<u8>& packed,
+                             const std::vector<u8>& track) {
+    std::vector<u8> rec(kRecord, 0);
+    rec[0] = 'T';
+    rec[1] = 'R';
+    put16(rec, 2, number);
+    put16(rec, 6, static_cast<u16>(packed.size()));
+    put16(rec, 8, static_cast<u16>(stage_len));
+    put16(rec, 10, static_cast<u16>(track.size()));
+    rec[12] = flags;
+    rec[13] = 6;
+    put16(rec, 14, dms_detail::checksum16(track.data(), track.size()));
+    put16(rec, 16, dms_crc16(packed.data(), packed.size()));
+    refresh_track_crc(rec, 0);
+    rec.insert(rec.end(), packed.begin(), packed.end());
+    return rec;
+}
+
+std::vector<u8> heavy_archive(const std::vector<std::vector<u8>>& records) {
+    std::vector<u8> body;
+    u32 packed = 0;
+    for (const auto& rec : records) {
+        packed += get16(rec, 6);
+        body.insert(body.end(), rec.begin(), rec.end());
+    }
+    const u16 last = static_cast<u16>(records.size() - 1);
+    auto dms = dms_header(6, 0, last, packed, (last + 1u) * kDd);
+    dms.insert(dms.end(), body.begin(), body.end());
+    return dms;
+}
+
+// The codes of the hand-packed tracks.
+//   literals: 'a' 00, 0x2B 010, 'b' 011, 0x90 100, 0xF3 101, 0xFF 110,
+//             257 (a match of 4) 111
+//   offsets:  class 0 (distance 0) 0, class 2 (distance 2 or 3) 10,
+//             class 14 (the last distance) 11
+void put_codes(BitWriter& w) {
+    w.put(258, 9);
+    for (u32 s = 0; s < 258; ++s) {
+        const bool three = s == 0x2B || s == 'b' || s == 0x90 || s == 0xF3 || s == 0xFF || s == 257;
+        w.put(s == 'a' ? 2 : three ? 3 : 0, 5);
+    }
+    w.put(15, 5);
+    for (u32 s = 0; s < 15; ++s) {
+        w.put(s == 0 ? 1 : (s == 2 || s == 14) ? 2 : 0, 4);
+    }
+}
+
+// The run that ends both hand-packed tracks: 0x90 0xFF 'a' 0x2B 0xF3 is
+// 11251 bytes of 'a'.
+void put_long_run_of_a(BitWriter& w) { w.code("100" "110" "00" "010" "101"); }
+
+// "abaab", a match of 4 at distance 2, a match of 4 at the last distance,
+// then the long run: 18 bytes out of the first stage.
+std::vector<u8> first_track_bits() {
+    BitWriter w;
+    put_codes(w);
+    w.code("00" "011" "00" "00" "011");
+    w.code("111" "10" "0");  // class 2 with low bit 0: distance 2
+    w.code("111" "11");
+    put_long_run_of_a(w);
+    return w.bytes();
+}
+
+std::vector<u8> first_track() {
+    std::vector<u8> t;
+    for (char c : std::string_view("abaabaabaabaa")) {
+        t.push_back(static_cast<u8>(c));
+    }
+    t.resize(kDd, 'a');
+    return t;
+}
+
+// No codes of its own: a match of 4 at the last distance, two matches of 4
+// at distance 0, 'b', then the long run. 18 bytes out of the first stage.
+std::vector<u8> second_track_bits() {
+    BitWriter w;
+    w.code("111" "11" "111" "0" "111" "0" "011");
+    put_long_run_of_a(w);
+    return w.bytes();
+}
+
+// The second track as decoded after the first: with the window kept, the
+// first match copies the first track's last three stage bytes (a 0x2B 0xF3)
+// and then its own first byte; with it reset, everything before 'b' is zero.
+std::vector<u8> second_track(bool kept) {
+    std::vector<u8> t;
+    if (kept) {
+        t = {'a', 0x2B, 0xF3, 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a'};
+    } else {
+        t.assign(12, 0);
+    }
+    t.push_back('b');
+    t.resize(kDd, 'a');
+    return t;
+}
+
+void heavy2_hand_packed_track() {
+    const auto track = first_track();
+    const auto dms =
+        heavy_archive({heavy_record(0, kNewCodes | kRle | kKeep, 18, first_track_bits(), track)});
+    const Result r = run(dms);
+    CHECK_EQ(r.error, DmsError::Ok);
+    CHECK(same_prefix(r.out, track));
+    CHECK_EQ(r.info.mode, 6u);
+    CHECK_EQ(r.info.image_bytes, u32{kDd});
+}
+
+// Flag bit 0 keeps the window for the next track, a clear bit 0 resets it.
+// The codes and the last distance survive either way.
+void heavy2_track_flags() {
+    for (bool kept : {true, false}) {
+        const u8 keep = kept ? kKeep : 0;
+        const auto dms = heavy_archive({
+            heavy_record(0, kNewCodes | kRle | keep, 18, first_track_bits(), first_track()),
+            heavy_record(1, kRle | kKeep, 18, second_track_bits(), second_track(kept)),
+        });
+        const Result r = run(dms);
+        CHECK_EQ(r.error, DmsError::Ok);
+        auto image = first_track();
+        const auto second = second_track(kept);
+        image.insert(image.end(), second.begin(), second.end());
+        CHECK(same_prefix(r.out, image));
+    }
+
+    // A NOCOMP track in between resets the window unless it keeps it too.
+    for (bool kept : {true, false}) {
+        const std::vector<u8> plain(kDd, 0x11);
+        auto middle = dms_track_record(1, 0, plain.data(), plain.size());
+        middle[12] = kept ? kKeep : 0;
+        refresh_track_crc(middle, 0);
+        const auto dms = heavy_archive({
+            heavy_record(0, kNewCodes | kRle | kKeep, 18, first_track_bits(), first_track()),
+            middle,
+            heavy_record(2, kRle | kKeep, 18, second_track_bits(), second_track(kept)),
+        });
+        const Result r = run(dms);
+        CHECK_EQ(r.error, DmsError::Ok);
+        CHECK(std::equal(plain.begin(), plain.end(), r.out.begin() + kDd));
+        const auto second = second_track(kept);
+        CHECK(std::equal(second.begin(), second.end(), r.out.begin() + 2 * kDd));
+    }
+
+    // A second archive in the same work area starts from a clean state.
+    auto work = std::make_unique<DmsWork>();
+    std::vector<u8> out(2u * kDd);
+    DmsInfo info{};
+    const auto first = heavy_archive(
+        {heavy_record(0, kNewCodes | kRle | kKeep, 18, first_track_bits(), first_track())});
+    CHECK_EQ(dms_unpack(first.data(), first.size(), out.data(), out.size(), *work, info),
+             DmsError::Ok);
+    const auto alone = heavy_archive({heavy_record(0, kRle | kKeep, 18, second_track_bits(),
+                                                   second_track(false))});
+    CHECK_EQ(dms_unpack(alone.data(), alone.size(), out.data(), out.size(), *work, info),
+             DmsError::Corrupt);  // no codes yet
+
+    // "abaab", then a match at the last distance, which is 0 in a fresh
+    // archive (2 is left over from the first), then a match at distance 0.
+    BitWriter w;
+    put_codes(w);
+    w.code("00" "011" "00" "00" "011" "111" "11" "111" "0");
+    put_long_run_of_a(w);
+    std::vector<u8> expected;
+    for (char c : std::string_view("abaabbbbbbbbb")) {
+        expected.push_back(static_cast<u8>(c));
+    }
+    expected.resize(kDd, 'a');
+    const auto fresh =
+        heavy_archive({heavy_record(0, kNewCodes | kRle | kKeep, 18, w.bytes(), expected)});
+    CHECK_EQ(dms_unpack(first.data(), first.size(), out.data(), out.size(), *work, info),
+             DmsError::Ok);
+    CHECK_EQ(dms_unpack(fresh.data(), fresh.size(), out.data(), out.size(), *work, info),
+             DmsError::Ok);
+    CHECK(std::equal(expected.begin(), expected.end(), out.begin()));
+}
+
+// Single-symbol codes: every symbol is sent in zero bits.
+std::vector<u8> single_codes(u16 literal, u16 offset_class) {
+    BitWriter w;
+    w.put(0, 9);
+    w.put(literal, 9);
+    w.put(0, 5);
+    w.put(offset_class, 5);
+    return w.bytes();
+}
+
+// A first stage shorter than the track is followed by zeros, with or without
+// run-length decoding.
+void heavy2_short_stage_is_zero_filled() {
+    std::vector<u8> track(100, 'A');
+    track.resize(kDd, 0);
+    for (u8 flags : {kNewCodes, u8{kNewCodes | kRle}}) {
+        const auto dms = heavy_archive({heavy_record(0, flags, 100, single_codes('A', 0), track)});
+        const Result r = run(dms);
+        CHECK_EQ(r.error, DmsError::Ok);
+        CHECK(same_prefix(r.out, track));
+    }
+    // Run-length decoding reads into the zeros: 0x90 0x90 0x00 is a run of
+    // 144 zero bytes.
+    const std::vector<u8> zeros(kDd, 0);
+    auto dms = heavy_archive({heavy_record(0, kNewCodes | kRle, 2, single_codes(0x90, 0), zeros)});
+    Result r = run(dms);
+    CHECK_EQ(r.error, DmsError::Ok);
+    CHECK(same_prefix(r.out, zeros));
+    // The zeros end at the track length: 0x90 0x00 and 11262 zeros leave the
+    // track one byte short.
+    std::vector<u8> escaped(1, 0x90);
+    escaped.resize(kDd, 0);
+    dms = heavy_archive({heavy_record(0, kNewCodes | kRle, 1, single_codes(0x90, 0), escaped)});
+    r = run(dms);
+    CHECK_EQ(r.error, DmsError::Corrupt);
+}
+
+void heavy2_errors() {
+    const std::vector<u8> zeros(kDd, 0);
+    auto corrupt = [&](u8 flags, usize stage_len, std::vector<u8> packed) {
+        packed.resize(packed.size() + 400, 0);  // so that running out of bits is not the cause
+        const Result r = run(heavy_archive({heavy_record(0, flags, stage_len, packed, zeros)}));
+        CHECK_EQ(r.error, DmsError::Corrupt);
+        CHECK_EQ(r.info.failed_track, 0u);
+    };
+
+    // No codes have been sent yet.
+    corrupt(kRle, kDd, {});
+    corrupt(0, kDd, {});
+    // A single symbol outside either alphabet.
+    corrupt(kNewCodes, kDd, single_codes(510, 0));
+    corrupt(kNewCodes, kDd, single_codes(511, 0));
+    corrupt(kNewCodes, kDd, single_codes(0, 15));
+    corrupt(kNewCodes, kDd, single_codes(0, 31));
+    // More code lengths than symbols.
+    {
+        BitWriter w;
+        w.put(511, 9);
+        corrupt(kNewCodes, kDd, w.bytes());
+        BitWriter p;
+        p.put(0, 9);
+        p.put(0, 9);
+        p.put(16, 5);
+        corrupt(kNewCodes, kDd, p.bytes());
+    }
+    // Incomplete and oversubscribed codes, and a code with no symbol.
+    for (std::vector<u32> lengths : {std::vector<u32>{1, 0}, std::vector<u32>{1, 1, 1},
+                                     std::vector<u32>{2, 2, 2}, std::vector<u32>{0, 0, 0}}) {
+        BitWriter w;
+        w.put(static_cast<u32>(lengths.size()), 9);
+        for (u32 len : lengths) {
+            w.put(len, 5);
+        }
+        w.put(0, 5);
+        w.put(0, 5);
+        corrupt(kNewCodes, kDd, w.bytes());
+    }
+    // A match of 256 bytes that runs past the 100 byte first stage.
+    corrupt(kNewCodes, 100, single_codes(509, 0));
+    // A run past the end of the track: 0x90 0xFF 0xFF 0xFF 0xFF.
+    {
+        BitWriter w;
+        put_codes(w);
+        w.code("100" "110" "110" "110" "110");
+        corrupt(kNewCodes | kRle, 5, w.bytes());
+    }
+
+    // The packed data ends early, wherever it is cut.
+    auto bits = first_track_bits();
+    for (usize cut = 0; cut < bits.size(); ++cut) {
+        const std::vector<u8> packed(bits.begin(), bits.begin() + static_cast<long>(cut));
+        const Result r = run(
+            heavy_archive({heavy_record(0, kNewCodes | kRle, 18, packed, first_track())}));
+        CHECK_EQ(r.error, DmsError::Corrupt);
+    }
+}
+
+// Random packed data with a valid CRC never decodes, and never reads or
+// writes outside its buffers.
+void heavy2_rejects_garbage() {
+    Prng rng;
+    const std::vector<u8> zeros(kDd, 0);
+    for (u32 seed = 0; seed < 1000; ++seed) {
+        rng.state = 0x9E3779B9u * (seed + 1);
+        std::vector<u8> packed(1 + (rng.next() << 4 | (rng.next() & 0x0F)));
+        for (u8& b : packed) {
+            b = rng.next();
+        }
+        const u8 flags = static_cast<u8>(seed & 7);
+        const usize stage_len = (static_cast<usize>(rng.next()) << 8 | rng.next()) % (2 * kDd);
+        const Result r = run(heavy_archive({heavy_record(0, flags, stage_len, packed, zeros)}));
+        CHECK(r.error == DmsError::Corrupt || r.error == DmsError::Truncated);
+    }
+
+    // Random data behind valid codes runs the match and run-length paths.
+    // It can decode, so a wrong checksum is a valid outcome as well.
+    for (u32 seed = 0; seed < 1000; ++seed) {
+        rng.state = 0x85EBCA6Bu * (seed + 1);
+        BitWriter w;
+        put_codes(w);
+        std::vector<u8> packed = w.bytes();
+        packed.resize(packed.size() + 1 + (rng.next() << 4 | (rng.next() & 0x0F)));
+        for (usize i = w.bytes().size(); i < packed.size(); ++i) {
+            packed[i] = rng.next();
+        }
+        const u8 flags = static_cast<u8>(kNewCodes | (seed & (kRle | kKeep)));
+        const usize stage_len = (static_cast<usize>(rng.next()) << 8 | rng.next()) % (2 * kDd);
+        const Result r = run(heavy_archive({heavy_record(0, flags, stage_len, packed, zeros)}));
+        CHECK(r.error == DmsError::Corrupt || r.error == DmsError::TrackChecksum);
+    }
 }
 
 void output_too_small() {
@@ -575,6 +949,7 @@ int main() {
     cut_at_a_track_boundary_is_truncated();
     header_packed_size_matches_the_records();
     bytes_after_the_last_record_are_tolerated();
+    unmarked_bytes_after_the_records_end_the_archive();
     duplicate_track_is_corrupt();
     track_checksum_is_the_16_bit_byte_sum();
     track_header_errors();
@@ -584,6 +959,11 @@ int main() {
     encrypted();
     bad_track_size();
     damaged_run_length_data();
+    heavy2_hand_packed_track();
+    heavy2_track_flags();
+    heavy2_short_stage_is_zero_filled();
+    heavy2_errors();
+    heavy2_rejects_garbage();
     output_too_small();
     bad_track_range();
     failed_track_is_none_on_success();
