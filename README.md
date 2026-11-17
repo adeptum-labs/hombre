@@ -20,6 +20,7 @@ Requirements:
 - clang 14 or newer (builds the UEFI loader)
 - g++ 12 or newer (builds the kernel and the host tests)
 - GNU binutils with the i386pep target (links the loader)
+- `binutils-m68k-linux-gnu` (assembles the 68000 programs of the test disk)
 - GNU make
 - mtools and sgdisk (build the boot disk image)
 - QEMU with KVM, and OVMF installed at `/usr/share/OVMF`

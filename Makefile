@@ -235,17 +235,50 @@ $(MKDISK): tools/mkdisk.cpp $(COMMON_HOBJ)
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
+ELF2HUNK := $(BUILD)/tools/elf2hunk
+
+$(ELF2HUNK): tools/elf2hunk.cpp
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
+
+# The 68000 programs of the test disk: tools/m68k/<name>.s is assembled and
+# linked with tools/m68k/hunk.ld, keeping the relocations, and elf2hunk
+# turns the ELF executable into a hunk file.
+M68K_AS       := m68k-linux-gnu-as
+M68K_LD       := m68k-linux-gnu-ld
+M68K_PROGRAMS := version hombretest
+M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
+
+define require_tool
+@command -v $(1) >/dev/null || { \
+    echo "make: $(1) not found: install binutils-m68k-linux-gnu" >&2; exit 1; }
+endef
+
+$(BUILD)/m68k/%.o: tools/m68k/%.s
+	$(call require_tool,$(M68K_AS))
+	@mkdir -p $(@D)
+	$(M68K_AS) -m68000 $< -o $@
+
+$(BUILD)/m68k/%.elf: $(BUILD)/m68k/%.o tools/m68k/hunk.ld
+	$(call require_tool,$(M68K_LD))
+	$(M68K_LD) -nostdlib -T tools/m68k/hunk.ld --emit-relocs $< -o $@
+
+$(BUILD)/m68k/%.hunk: $(BUILD)/m68k/%.elf $(ELF2HUNK)
+	$(ELF2HUNK) $< $@
+
 # The disk the boot check mounts: an OFS volume packed with SIMPLE tracks.
-# It is rebuilt whenever the tool changes, and the output is reproducible.
-$(TEST_DISK): $(MKDISK)
-	$(MKDISK) $@
+# It is rebuilt whenever a tool or a program on it changes, and the output
+# is reproducible.
+$(TEST_DISK): $(MKDISK) $(M68K_HUNKS)
+	$(MKDISK) $@ $(M68K_HUNKS)
 
 $(ZERO_DISK):
 	@mkdir -p $(@D)
 	head -c 1000 /dev/zero > $@
 
 # The octal escape is what every sh printf understands. Byte 100 lies inside
-# the first track's packed data, and the test disk has no 0xff there.
+# the first track's packed data, and the test disk has no 0xff there;
+# test_testdisk checks both.
 $(CORRUPT_DISK): $(TEST_DISK)
 	cp $< $@
 	printf '\377' | dd of=$@ bs=1 seek=100 conv=notrunc
@@ -303,4 +336,5 @@ clean:
 -include $(TEST_BIN:%=%.d)
 -include $(ADFTOOL).d
 -include $(MKDISK).d
+-include $(ELF2HUNK).d
 -include $(COMMON_HOBJ:.o=.d)
