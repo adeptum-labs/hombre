@@ -172,6 +172,18 @@ $(ADFTOOL): tools/adftool.cpp
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
 
+MKDISK    := $(BUILD)/tools/mkdisk
+TEST_DISK := $(BUILD)/test-disk.dms
+
+$(MKDISK): tools/mkdisk.cpp
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
+
+# The disk the boot check mounts: an OFS volume packed with SIMPLE tracks.
+# It is rebuilt whenever the tool changes, and the output is reproducible.
+$(TEST_DISK): $(MKDISK)
+	$(MKDISK) $@
+
 # Unpacks every DMS archive below DMS_DIR with both xdms and adftool and
 # compares the images. The path reaches the script through the environment,
 # so spaces and shell characters in it are safe.
