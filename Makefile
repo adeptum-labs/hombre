@@ -73,7 +73,7 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 # HOMBRE_FAULT_TEST. Each is built into its own directory.
 FAULT_TESTS := 1 2 3
 
-.PHONY: all image image-nokernel disk-image run check test test-dms clean
+.PHONY: all image image-nokernel disk-image run check check-workbench test test-dms clean
 
 all: image
 
@@ -178,6 +178,20 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "halting"
 	tools/boot_check.sh --no-disk --fault-test 3 "fault test: 3" \
 	    "*** unexpected interrupt 128" "cs: 0x8 rflags: 0x" "halting"
+
+# Boots a real Workbench 3.1 disk, given as DISK=<path to a .dms or .adf> on
+# the command line or in the environment. The default test disk does not
+# count. The markers are those of the Workbench disk and are pinned to it.
+ifneq ($(and $(filter command line environment override,$(origin DISK)),$(strip $(DISK))),)
+check-workbench: image
+	tools/boot_check.sh --disk "$$DISK" "Hombre kernel booted" "pci: " \
+	    "virtio-blk: read ok" "disk: DMS HEAVY2, 80 tracks" \
+	    "volume: Workbench3.1 (FFS)" "  S/" "  C/" "S:Startup-Sequence:" \
+	    "; Startup-Sequence for low-density floppies" "halting"
+else
+check-workbench:
+	@echo "set DISK=<path to a Workbench .dms or .adf>" >&2; exit 1
+endif
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.

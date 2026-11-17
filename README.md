@@ -23,19 +23,33 @@ Requirements:
 - GNU make
 - mtools and sgdisk (build the boot disk image)
 - QEMU with KVM, and OVMF installed at `/usr/share/OVMF`
+- `xdms` and `unadf`, only for `make test-dms`
 
 Targets:
 
 - `make` builds the loader, the kernel and the bootable disk image
   `build/hombre.img`.
 - `make run` boots the image in QEMU with KVM. Kernel messages appear on the
-  terminal, which is wired to the serial port COM1.
+  terminal, which is wired to the serial port COM1. The kernel gets a
+  virtio-blk disk: a generated test disk by default, or the file given as
+  `DISK=`, for example `make run DISK="path/to/disk.dms"`. The file may be
+  a DMS archive or a raw ADF image, and its path may contain spaces.
 - `make check` boots the image headless and verifies the messages on the
-  serial port, including a boot with the kernel missing and a boot without a
-  framebuffer. It also boots kernels that trigger a page fault, a double fault
-  and an unexpected interrupt on purpose.
+  serial port. The main boot attaches the generated test disk and verifies
+  the volume, the root directory and the startup sequence read from it. It
+  also boots a drive filled with zero bytes, a test disk with a corrupt
+  track and a machine without a disk, a boot with the kernel missing and a
+  boot without a framebuffer. It also boots kernels that trigger a page
+  fault, a double fault and an unexpected interrupt on purpose.
+- `make check-workbench DISK="path/to/Workbench.dms"` boots a real
+  Workbench 3.1 boot disk and verifies its volume, root directory and
+  startup sequence. `DISK=` is required and the markers fit the 3.1
+  Workbench disk only.
 - `make test` builds and runs the host unit tests under the address and
   undefined behaviour sanitizers.
+- `make test-dms DMS_DIR=<directory>` unpacks every DMS archive below the
+  directory with both `xdms` and the project's own unpacker and compares the
+  disk images and what `unadf` reads from them.
 
 ## Status
 
@@ -49,7 +63,12 @@ Early development. The machine boots as follows:
    IDT. A CPU exception prints a register dump on the serial port. The kernel
    then drops the loader's identity mapping, sets up per-CPU data for the boot
    processor and draws the `Hombre` banner on the framebuffer.
-4. The kernel halts.
+4. The kernel scans the PCI bus and drives a virtio-blk disk by polling. It
+   unpacks a DMS archive natively (no compression, SIMPLE and HEAVY2),
+   mounts the OFS or FFS volume read-only and prints the volume name, the
+   root directory and `S:Startup-Sequence` on the serial port. Without a
+   disk, or with a disk it cannot read, it logs why and carries on.
+5. The kernel halts.
 
 ## The name
 
