@@ -86,6 +86,17 @@ void ranges_are_checked_without_wrapping() {
     CHECK(guest.range_ok(64, 0));
 }
 
+void user_stack_pointer_is_its_own_register() {
+    CpuState cpu{};
+    CHECK_EQ(cpu.usp, 0u);
+    cpu.a[7] = 0x8000;
+    cpu.usp = 0x4000;
+    CHECK_EQ(cpu.a[7], 0x8000u);
+    CHECK(&cpu.usp != &cpu.a[7]);
+    CHECK(reinterpret_cast<const u8*>(&cpu.usp) >= reinterpret_cast<const u8*>(cpu.a + 8) ||
+          reinterpret_cast<const u8*>(&cpu.usp + 1) <= reinterpret_cast<const u8*>(cpu.a));
+}
+
 }
 
 int main() {
@@ -94,5 +105,6 @@ int main() {
     misaligned_accesses_fail_without_touching_anything();
     accesses_stop_at_the_end_of_memory();
     ranges_are_checked_without_wrapping();
+    user_stack_pointer_is_its_own_register();
     return check::finish("test_m68k_cpu");
 }

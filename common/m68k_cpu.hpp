@@ -42,14 +42,18 @@ enum class ExitReason : u32 {
     Unimplemented
 };
 
+// SR is plain data: S (bit 13) only decides whether the privileged
+// instructions run, and A7 is one register whatever S says. usp is the
+// user stack pointer that MOVE USP reads and writes, kept apart from A7.
 struct CpuState {
     u32 d[8];
     u32 a[8];
+    u32 usp;
     u32 pc;
     u16 sr;  // the CCR is its low byte; X is bit 4
     ExitReason exit;
     u32 fault_addr;
-    u32 trap_number;
+    u32 trap_number;  // the 68000 vector of the exception the run ended at
 };
 
 // Big-endian, as the 68000 sees it; word and long accesses need an even address.

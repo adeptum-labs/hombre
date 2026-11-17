@@ -38,6 +38,8 @@ constexpr i32 kOffPc = __builtin_offsetof(CpuState, pc);
 constexpr i32 kOffSr = __builtin_offsetof(CpuState, sr);
 constexpr i32 kOffExit = __builtin_offsetof(CpuState, exit);
 constexpr i32 kOffFault = __builtin_offsetof(CpuState, fault_addr);
+constexpr i32 kOffTrap = __builtin_offsetof(CpuState, trap_number);
+constexpr i32 kOffUsp = __builtin_offsetof(CpuState, usp);
 
 // Room kept free for the code that ends a block, and the least room a
 // region must have for blocks beyond the shared routines.
@@ -51,6 +53,8 @@ constexpr u32 kNoAddressMask = 0xFFFFFFFF;
 
 constexpr u32 kCcrX = 0x10;
 constexpr u32 kCcrZ = 0x04;
+// T, S, the interrupt mask and the CCR: the bits of SR a 68000 has.
+constexpr u32 kSrBits = 0xA71F;
 
 i32 dreg(u32 n) {
     return kOffD + static_cast<i32>(4 * n);
@@ -199,11 +203,13 @@ usize emit_ccr_shift(Emitter& e, bool set_x) {
 // Ends the run with a fault at the address in R8D, for the instruction at
 // R15D. Reached by a jump from any depth of calls: the stack is unwound
 // from RBP.
-usize emit_fault(Emitter& e, const detail::Prelude& p, ExitReason why) {
+usize emit_fault(Emitter& e, const detail::Prelude& p, ExitReason why, u32 vector) {
     const usize at = e.size();
     e.mov_rr(RSP, RBP, 64);
     e.mov_store(RBX, kOffFault, R8, 32);
     e.mov_store(RBX, kOffPc, R15, 32);
+    e.mov_ri(RAX, vector, 32);
+    e.mov_store(RBX, kOffTrap, RAX, 32);
     e.mov_ri(RAX, static_cast<u32>(why), 32);
     e.mov_store(RBX, kOffExit, RAX, 32);
     e.alu_rr(Alu::Xor, RAX, RAX, 32);
@@ -255,8 +261,14 @@ void emit_prelude(Emitter& e, detail::Prelude& p, u32 mask) {
     e.pop(RBX);
     e.ret();
 
-    p.bus_error = emit_fault(e, p, ExitReason::BusError);
-    p.address_error = emit_fault(e, p, ExitReason::AddressError);
+    p.bus_error = emit_fault(e, p, ExitReason::BusError, 2);
+    p.address_error = emit_fault(e, p, ExitReason::AddressError, 3);
+
+    // A helper that ended the run has set the exit already.
+    p.helper_exit = e.size();
+    e.mov_rr(RSP, RBP, 64);
+    e.alu_rr(Alu::Xor, RAX, RAX, 32);
+    e.jmp_to(p.leave);
 
     // Reads return the value zero-extended in EAX; writes store EAX. Both
     // take the address in R8D and clobber RCX.
@@ -292,6 +304,154 @@ void emit_prelude(Emitter& e, detail::Prelude& p, u32 mask) {
     p.ccr_shift = emit_ccr_shift(e, false);
     p.ccr_shift_x = emit_ccr_shift(e, true);
     p.end = e.size();
+}
+
+// --- helpers called from generated code -------------------------------
+//
+// Plain SysV functions: the CpuState comes first and the result is in EAX.
+// Generated code calls them from block level through mov rax, imm64; call
+// rax, with the stack 16-byte aligned. They touch no guest memory; the
+// translated code reads and writes the operands through the checked
+// access routines.
+
+constexpr u32 kCcrN = 0x08;
+constexpr u32 kCcrV = 0x02;
+constexpr u32 kCcrC = 0x01;
+
+void set_ccr(CpuState* cpu, u32 ccr) {
+    cpu->sr = static_cast<u16>((cpu->sr & ~0x1Fu) | ccr);
+}
+
+// The exception exits that stop after the instruction, as the 68000 stacks
+// the address of the next one.
+u32 take_exception(CpuState* cpu, ExitReason why, u32 vector, u32 next_pc) {
+    cpu->exit = why;
+    cpu->trap_number = vector;
+    cpu->pc = next_pc;
+    return 1;
+}
+
+// ABCD: dst + src + X. SBCD: dst - src - X; NBCD is SBCD from 0. The
+// binary result is corrected by 6 in each digit that carried (or, adding,
+// came out above 9). V is set where the correction turned bit 7 on
+// (adding) or off (subtracting), N is bit 7 of the result, and Z is only
+// ever cleared.
+u32 helper_bcd(CpuState* cpu, u32 src, u32 dst, u32 subtract) {
+    const u32 x = (cpu->sr & kCcrX) != 0 ? 1 : 0;
+    src &= 0xFF;
+    dst &= 0xFF;
+    u32 result;
+    u32 carry;
+    u32 overflow;
+    if (subtract == 0) {
+        const u32 sum = dst + src + x;
+        const u32 binary_carry = ((dst & src) | (~sum & dst) | (~sum & src)) & 0x88;
+        const u32 decimal_carry = (((sum + 0x66) ^ sum) & 0x110) >> 1;
+        const u32 digits = binary_carry | decimal_carry;
+        result = sum + (digits - (digits >> 2));
+        carry = (binary_carry | (sum & ~result)) >> 7 & 1;
+        overflow = (~sum & result) >> 7 & 1;
+    } else {
+        const u32 diff = dst - src - x;
+        const u32 borrow = ((~dst & src) | (diff & ~dst) | (diff & src)) & 0x88;
+        result = diff - (borrow - (borrow >> 2));
+        carry = (borrow | (~diff & result)) >> 7 & 1;
+        overflow = (diff & ~result) >> 7 & 1;
+    }
+    result &= 0xFF;
+    u32 ccr = (carry != 0 ? kCcrX | kCcrC : 0) | (overflow != 0 ? kCcrV : 0) |
+              ((result & 0x80) != 0 ? kCcrN : 0);
+    if (result == 0) {
+        ccr |= cpu->sr & kCcrZ;
+    }
+    set_ccr(cpu, ccr);
+    return result;
+}
+
+// ROXL and ROXR of a bits-wide value (kind: bits, plus 0x100 for left)
+// through X, by count modulo 64. C is the last bit out, or X for a count
+// of 0; X takes the last bit out; V is cleared.
+u32 helper_rox(CpuState* cpu, u32 value, u32 count, u32 kind) {
+    const u32 bits = kind & 0xFF;
+    const bool left = (kind & 0x100) != 0;
+    const u32 mask = bits == 32 ? 0xFFFFFFFFu : (1u << bits) - 1;
+    const u32 msb = 1u << (bits - 1);
+    u32 v = value & mask;
+    u32 x = (cpu->sr & kCcrX) != 0 ? 1 : 0;
+    // A rotation through X comes back round after bits + 1 single turns.
+    const u32 turns = (count & 63) % (bits + 1);
+    for (u32 i = 0; i < turns; ++i) {
+        const u32 out = left ? (v & msb) != 0 : v & 1;
+        v = left ? ((v << 1) | x) & mask : (v >> 1) | (x != 0 ? msb : 0);
+        x = out;
+    }
+    set_ccr(cpu, (x != 0 ? kCcrX | kCcrC : 0) | ((v & msb) != 0 ? kCcrN : 0) |
+                     (v == 0 ? kCcrZ : 0));
+    return v;
+}
+
+// DIVU and DIVS of D[kind & 7] by a word (kind bit 8: signed). The
+// quotient goes to the low word and the remainder, with the sign of the
+// dividend, to the high word. A quotient too large for 16 bits leaves the
+// register alone, sets V, clears C and keeps N and Z. Division by zero
+// ends the run.
+u32 helper_divide(CpuState* cpu, u32 divisor, u32 kind, u32 next_pc) {
+    const u32 reg = kind & 7;
+    const bool is_signed = (kind & 0x100) != 0;
+    const u32 dividend = cpu->d[reg];
+    const u32 x = cpu->sr & kCcrX;
+    divisor &= 0xFFFF;
+    if (divisor == 0) {
+        set_ccr(cpu, x);
+        return take_exception(cpu, ExitReason::DivideByZero, 5, next_pc);
+    }
+    u32 quotient;
+    u32 remainder;
+    bool overflow;
+    if (is_signed) {
+        const i64 n = static_cast<__INT32_TYPE__>(dividend);
+        const i64 d = static_cast<__INT16_TYPE__>(divisor);
+        const i64 q = n / d;
+        overflow = q < -32768 || q > 32767;
+        quotient = static_cast<u32>(q);
+        remainder = static_cast<u32>(n % d);
+    } else {
+        quotient = dividend / divisor;
+        remainder = dividend % divisor;
+        overflow = quotient > 0xFFFF;
+    }
+    if (overflow) {
+        set_ccr(cpu, (cpu->sr & (kCcrX | kCcrN | kCcrZ)) | kCcrV);
+        return 0;
+    }
+    quotient &= 0xFFFF;
+    cpu->d[reg] = (remainder << 16) | quotient;
+    set_ccr(cpu, x | ((quotient & 0x8000) != 0 ? kCcrN : 0) | (quotient == 0 ? kCcrZ : 0));
+    return 0;
+}
+
+// CHK: the run ends when the word in D[reg] is below 0 (N set) or above
+// the bound (N cleared).
+u32 helper_chk(CpuState* cpu, u32 bound, u32 reg, u32 next_pc) {
+    const i64 value = static_cast<__INT16_TYPE__>(cpu->d[reg & 7]);
+    const i64 limit = static_cast<__INT16_TYPE__>(bound);
+    const u32 kept = cpu->sr & (kCcrX | kCcrN);
+    const u32 zero = value == 0 ? kCcrZ : 0;
+    if (value < 0) {
+        set_ccr(cpu, (kept & kCcrX) | kCcrN | zero);
+        return take_exception(cpu, ExitReason::Chk, 6, next_pc);
+    }
+    if (value > limit) {
+        set_ccr(cpu, (kept & kCcrX) | zero);
+        return take_exception(cpu, ExitReason::Chk, 6, next_pc);
+    }
+    set_ccr(cpu, kept | zero);
+    return 0;
+}
+
+template <typename F>
+u64 helper_address(F* fn) {
+    return reinterpret_cast<u64>(fn);
 }
 
 // --- one instruction --------------------------------------------------
@@ -364,9 +524,13 @@ private:
         e_.ret();
     }
 
-    bool stop(ExitReason why) {
-        e_.mov_ri(RAX, pc_, 32);
+    // Ends the run with pc at the given address and the vector of the
+    // exception the 68000 would take (0 for none) in trap_number.
+    bool stop(ExitReason why, u32 at, u32 vector) {
+        e_.mov_ri(RAX, at, 32);
         e_.mov_store(RBX, kOffPc, RAX, 32);
+        e_.mov_ri(RAX, vector, 32);
+        e_.mov_store(RBX, kOffTrap, RAX, 32);
         e_.mov_ri(RAX, static_cast<u32>(why), 32);
         e_.mov_store(RBX, kOffExit, RAX, 32);
         e_.alu_rr(Alu::Xor, RAX, RAX, 32);
@@ -878,6 +1042,123 @@ private:
         }
     }
 
+    void call_helper(u64 fn) {
+        e_.mov_rr(RDI, RBX, 64);
+        e_.call_abs(fn);
+    }
+
+    // After a helper that may end the run.
+    void leave_if_stopped() {
+        e_.alu_rr(Alu::Or, RAX, RAX, 32);
+        e_.jcc_to(Cc::NE, p_.helper_exit);
+    }
+
+    // The privileged instructions end the run with S clear.
+    void require_supervisor() {
+        e_.mov_load(RCX, RBX, kOffSr, 16);
+        e_.alu_ri(Alu::And, RCX, 0x2000, 32);
+        const usize supervisor = e_.jcc_rel32(Cc::NE);
+        stop(ExitReason::Privilege, pc_, 8);
+        e_.patch(supervisor);
+    }
+
+    // ABCD, SBCD and NBCD. A memory destination's address survives the
+    // helper call in R14.
+    void decimal(const Insn& in) {
+        if (in.op == Op::NBCD) {
+            read(in.dst, Size::Byte, RSI, dst_pc_);
+            e_.mov_ri(RDX, 0, 32);
+        } else {
+            read(in.src, Size::Byte, RSI, src_pc_);
+            read(in.dst, Size::Byte, RDX, dst_pc_);
+        }
+        e_.mov_rr(R14, R8, 32);
+        e_.mov_ri(RCX, in.op == Op::ABCD ? 0 : 1, 32);
+        call_helper(helper_address(helper_bcd));
+        e_.mov_rr(RDI, RAX, 32);
+        e_.mov_rr(R8, R14, 32);
+        write(in.dst, Size::Byte, RDI, dst_pc_, true);
+    }
+
+    void rotate_extend(const Insn& in) {
+        read(in.dst, in.size, RSI, dst_pc_);
+        if (in.src.mode == Mode::Dn) {
+            e_.mov_load(RDX, RBX, dreg(in.src.reg), 32);
+        } else {
+            e_.mov_ri(RDX, in.src.mode == Mode::Imm ? in.src.value : 1, 32);
+        }
+        e_.mov_rr(R14, R8, 32);
+        e_.mov_ri(RCX, bits_of(in.size) | (in.op == Op::ROXL ? 0x100u : 0u), 32);
+        call_helper(helper_address(helper_rox));
+        e_.mov_rr(RDI, RAX, 32);
+        e_.mov_rr(R8, R14, 32);
+        write(in.dst, in.size, RDI, dst_pc_, true);
+    }
+
+    void divide(const Insn& in) {
+        read(in.src, Size::Word, RSI, src_pc_);
+        e_.mov_ri(RDX, in.dst.reg | (in.op == Op::DIVS ? 0x100u : 0u), 32);
+        e_.mov_ri(RCX, next_, 32);
+        call_helper(helper_address(helper_divide));
+        leave_if_stopped();
+    }
+
+    void check(const Insn& in) {
+        read(in.src, Size::Word, RSI, src_pc_);
+        e_.mov_ri(RDX, in.dst.reg, 32);
+        e_.mov_ri(RCX, next_, 32);
+        call_helper(helper_address(helper_chk));
+        leave_if_stopped();
+    }
+
+    // MOVEP: every other byte from the address on, high byte first.
+    void move_peripheral(const Insn& in) {
+        const u32 n = bytes_of(in.size);
+        if (in.dst.mode == Mode::Dn) {
+            address(in.src, in.size, src_pc_);
+            for (u32 i = 0; i < n; ++i) {
+                read_mem(Size::Byte);
+                if (i == 0) {
+                    e_.mov_rr(R10, RAX, 32);
+                } else {
+                    e_.shift_i(Shift::Shl, R10, 8, 32);
+                    e_.alu_rr(Alu::Or, R10, RAX, 32);
+                }
+                add_r8(2);
+            }
+            e_.mov_store(RBX, dreg(in.dst.reg), R10, bits_of(in.size));
+            return;
+        }
+        address(in.dst, in.size, dst_pc_);
+        e_.mov_load(R10, RBX, dreg(in.src.reg), 32);
+        for (u32 i = 0; i < n; ++i) {
+            e_.mov_rr(RAX, R10, 32);
+            if (i + 1 < n) {
+                e_.shift_i(Shift::Shr, RAX, static_cast<u8>(8 * (n - 1 - i)), 32);
+            }
+            write_mem(Size::Byte);
+            add_r8(2);
+        }
+    }
+
+    // ORI, ANDI and EORI to CCR and to SR. Only the bits a 68000 has in SR
+    // can be set.
+    void status_immediate(const Insn& in) {
+        u32 value = in.src.value;
+        Alu op = Alu::Or;
+        switch (in.op) {
+        case Op::ANDI_CCR: op = Alu::And; value = (value & 0x1F) | 0xFF00; break;
+        case Op::EORI_CCR: op = Alu::Xor; value &= 0x1F; break;
+        case Op::ORI_CCR: value &= 0x1F; break;
+        case Op::ANDI_SR: op = Alu::And; value &= kSrBits; break;
+        case Op::EORI_SR: op = Alu::Xor; value &= kSrBits; break;
+        default: value &= kSrBits; break;
+        }
+        e_.mov_load(RDX, RBX, kOffSr, 16);
+        e_.alu_ri(op, RDX, static_cast<i32>(value), 32);
+        e_.mov_store(RBX, kOffSr, RDX, 16);
+    }
+
     Emitter& e_;
     const detail::Prelude& p_;
     u32 pc_ = 0;
@@ -1096,12 +1377,92 @@ bool Translator::insn(const Insn& in, u32 pc) {
         e_.ret();
         return true;
 
-    case Op::Illegal:
+    case Op::ABCD:
+    case Op::SBCD:
+    case Op::NBCD:
+        decimal(in);
+        return false;
+    case Op::ROXL:
+    case Op::ROXR:
+        rotate_extend(in);
+        return false;
+    case Op::DIVU:
+    case Op::DIVS:
+        divide(in);
+        return false;
+    case Op::CHK:
+        check(in);
+        return false;
+    case Op::TAS:
+        read(in.dst, Size::Byte, RDI, dst_pc_);
+        logic_flags(RDI, Size::Byte);
+        e_.alu_ri(Alu::Or, RDI, 0x80, 32);
+        write(in.dst, Size::Byte, RDI, dst_pc_, true);
+        return false;
+    case Op::MOVEP:
+        move_peripheral(in);
+        return false;
+    case Op::MOVE_FROM_SR:
+        // Not privileged on the 68000.
+        e_.mov_load(RSI, RBX, kOffSr, 16);
+        e_.movzx(RSI, RSI, 16);
+        write(in.dst, Size::Word, RSI, dst_pc_, false);
+        return false;
+    case Op::MOVE_CCR:
+        read(in.src, Size::Word, RSI, src_pc_);
+        e_.alu_ri(Alu::And, RSI, 0x1F, 32);
+        e_.mov_load(RDX, RBX, kOffSr, 16);
+        e_.alu_ri(Alu::And, RDX, 0xFF00, 32);
+        e_.alu_rr(Alu::Or, RDX, RSI, 32);
+        e_.mov_store(RBX, kOffSr, RDX, 16);
+        return false;
+    case Op::MOVE_SR:
+        require_supervisor();
+        read(in.src, Size::Word, RSI, src_pc_);
+        e_.alu_ri(Alu::And, RSI, static_cast<i32>(kSrBits), 32);
+        e_.mov_store(RBX, kOffSr, RSI, 16);
+        return false;
+    case Op::ORI_CCR:
+    case Op::ANDI_CCR:
+    case Op::EORI_CCR:
+        status_immediate(in);
+        return false;
+    case Op::ORI_SR:
+    case Op::ANDI_SR:
+    case Op::EORI_SR:
+        require_supervisor();
+        status_immediate(in);
+        return false;
+    case Op::MOVE_USP:
+        require_supervisor();
+        if (in.src.mode == Mode::An) {
+            e_.mov_load(RAX, RBX, areg(in.src.reg), 32);
+            e_.mov_store(RBX, kOffUsp, RAX, 32);
+        } else {
+            e_.mov_load(RAX, RBX, kOffUsp, 32);
+            e_.mov_store(RBX, areg(in.dst.reg), RAX, 32);
+        }
+        return false;
+    case Op::TRAP:
+        return stop(ExitReason::Trap, next_, 32 + in.count);
+    case Op::TRAPV: {
+        e_.mov_load(RCX, RBX, kOffSr, 16);
+        e_.alu_ri(Alu::And, RCX, 2, 32);
+        const usize clear = e_.jcc_rel32(Cc::E);
+        stop(ExitReason::Trap, next_, 7);
+        e_.patch(clear);
+        return false;
+    }
+    case Op::RESET:
+    case Op::STOP:
+    case Op::RTE:
+        // Without exceptions delivered to the guest these mean nothing.
+        require_supervisor();
+        return stop(ExitReason::Unimplemented, pc_, 0);
     case Op::FLine:
-        return stop(ExitReason::Illegal);
-    default:
-        // Instructions that need a C++ helper are not translated yet.
-        return stop(ExitReason::Unimplemented);
+        return stop(ExitReason::Illegal, pc_, 11);
+    default:  // Op::Illegal: ILLEGAL and every 68010 and later opcode
+        return stop(ExitReason::Illegal, pc_, 4);
     }
 }
 
@@ -1116,6 +1477,7 @@ u32 slot_of(u32 pc, u32 bits) {
 void fetch_fault(CpuState& cpu, const GuestMemory& mem, u32 pc, u32 mask) {
     if ((pc & 1) != 0) {
         cpu.exit = ExitReason::AddressError;
+        cpu.trap_number = 3;
         cpu.fault_addr = pc;
         return;
     }
@@ -1124,6 +1486,7 @@ void fetch_fault(CpuState& cpu, const GuestMemory& mem, u32 pc, u32 mask) {
         at += 2;
     }
     cpu.exit = ExitReason::BusError;
+    cpu.trap_number = 2;
     cpu.fault_addr = at;
 }
 
@@ -1187,6 +1550,9 @@ void Jit::set_block_limit(u32 instructions) {
 // routines, far less than the room init keeps beyond the prelude, so the
 // prelude written again always fits.
 void Jit::set_address_mask(u32 mask) {
+    if (machine_ == nullptr) {
+        return;  // before init there is no prelude to rewrite
+    }
     Emitter e(region_.write, region_.bytes);
     emit_prelude(e, prelude_, mask);
     address_mask_ = mask;
@@ -1279,6 +1645,7 @@ void Jit::dispatch(u32 opcode) {
     if (slot.fn == nullptr) {
         cpu.pc = resume - 2;
         cpu.exit = ExitReason::Unimplemented;
+        cpu.trap_number = 10;
         return;
     }
     slot.fn(slot.ctx, *machine_);
@@ -1288,6 +1655,9 @@ void Jit::dispatch(u32 opcode) {
 }
 
 ExitReason Jit::run(u64 max_blocks) {
+    if (machine_ == nullptr) {
+        return ExitReason::Unimplemented;  // not initialised
+    }
     CpuState& cpu = machine_->cpu;
     const Enter enter =
         reinterpret_cast<Enter>(reinterpret_cast<usize>(region_.exec + prelude_.enter));
@@ -1315,11 +1685,15 @@ ExitReason Jit::run(u64 max_blocks) {
 }
 
 ExitReason Jit::call_guest(u32 entry, u64 max_blocks) {
+    if (machine_ == nullptr) {
+        return ExitReason::Unimplemented;  // not initialised
+    }
     CpuState& cpu = machine_->cpu;
     const u32 caller_pc = cpu.pc;
     const u32 sp = cpu.a[7] - 4;
     if (!machine_->mem.write32(sp & address_mask_, kReturnStub)) {
         cpu.exit = (sp & 1) != 0 ? ExitReason::AddressError : ExitReason::BusError;
+        cpu.trap_number = (sp & 1) != 0 ? 3 : 2;
         cpu.fault_addr = sp;
         return cpu.exit;
     }

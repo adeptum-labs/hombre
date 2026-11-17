@@ -1226,30 +1226,509 @@ void jumps_and_returns() {
     CHECK_EQ(r.cpu().fault_addr, 0x2001u);
 }
 
-void unsupported_opcodes_stop_the_run() {
+// The instructions that end the run where the 68000 takes an exception.
+void exits_and_privilege() {
     Rig r;
-    // The instructions that call out to helpers are not translated yet.
-    const std::initializer_list<u16> later[] = {
-        {0x80FC, 0x0000}, {0x81FC, 0x0001}, {0x40C0}, {0x4E41}, {0x4AC0},
-        {0x41BC, 0x0005}, {0x0188, 0x0000}, {0xE4D0}, {0xE330}, {0x4800},
-        {0x8300},         {0xC101},         {0x4E60}, {0x4E72, 0x2000}, {0x4E73},
-        {0x4E70},         {0x4E76},         {0x003C, 0x0001}, {0x44C0}, {0x027C, 0xF8FF}};
-    for (const auto& op : later) {
-        const u32 at = r.place({0x7003});
-        r.code(at + 2, op);
+    // TRAP #0 and TRAP #15 stop after the instruction, as the 68000 stacks
+    // it, with the vector in trap_number.
+    for (u16 n : {u16(0), u16(15)}) {
+        const u32 at = r.place({0x7003, static_cast<u16>(0x4E40 | n), 0x7005});
         r.cpu().d[0] = 0;
-        CHECK_EQ(r.go(at), ExitReason::Unimplemented);
-        CHECK_EQ(r.cpu().pc, at + 2);
+        CHECK_EQ(r.go(at), ExitReason::Trap);
+        CHECK_EQ(r.cpu().trap_number, 32u + n);
+        CHECK_EQ(r.cpu().pc, at + 4);
         CHECK_EQ(r.cpu().d[0], 3u);
     }
-    // ILLEGAL, an F-line opcode and a 68010 MOVEC.
-    for (u16 op : {u16(0x4AFC), u16(0xF000), u16(0x4E7A)}) {
+    // TRAPV only traps with V set.
+    const u32 trapv = r.place({0x4E76, 0x7006});
+    r.cpu().sr = kX | kN | kZ | kC;
+    CHECK_EQ(r.go(trapv), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 6u);
+    r.cpu().sr = kV;
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.go(trapv), ExitReason::Trap);
+    CHECK_EQ(r.cpu().trap_number, 7u);
+    CHECK_EQ(r.cpu().pc, trapv + 2);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    // ILLEGAL, an F-line opcode and a 68010 MOVEC stop at the opcode.
+    const struct {
+        u16 op;
+        u32 vector;
+    } illegal[] = {{0x4AFC, 4}, {0xF000, 11}, {0x4E7A, 4}};
+    for (const auto& i : illegal) {
         const u32 at = r.place({0x7004});
-        r.code(at + 2, {op, 0x0801});
+        r.code(at + 2, {i.op, 0x0801});
         CHECK_EQ(r.go(at), ExitReason::Illegal);
         CHECK_EQ(r.cpu().pc, at + 2);
+        CHECK_EQ(r.cpu().trap_number, i.vector);
         CHECK_EQ(r.cpu().d[0], 4u);
     }
+
+    // Faults name their vector too.
+    const u32 fault = r.place({0x2010});
+    r.cpu().a[0] = 1;
+    CHECK_EQ(r.go(fault), ExitReason::AddressError);
+    CHECK_EQ(r.cpu().trap_number, 3u);
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.go(fault), ExitReason::BusError);
+    CHECK_EQ(r.cpu().trap_number, 2u);
+    CHECK_EQ(r.go(0x1001), ExitReason::AddressError);
+    CHECK_EQ(r.cpu().trap_number, 3u);
+
+    // The privileged instructions stop at the opcode when S is clear, and
+    // leave SR, A7 and USP alone.
+    const std::initializer_list<u16> privileged[] = {
+        {0x46C0},         {0x46D0},         {0x027C, 0xDFFF}, {0x007C, 0x0700},
+        {0x0A7C, 0x8000}, {0x4E61},         {0x4E6A},         {0x4E70},
+        {0x4E72, 0x2700}, {0x4E73}};
+    for (const auto& op : privileged) {
+        const u32 at = r.place({0x7007});
+        r.code(at + 2, op);
+        r.cpu().sr = 0x0700 | kX | kC;
+        r.cpu().d[0] = 0;
+        r.cpu().a[0] = 1;  // MOVE (A0),SR must not get as far as the read
+        r.cpu().usp = 0x1234;
+        r.cpu().a[2] = 0x5678;
+        CHECK_EQ(r.go(at), ExitReason::Privilege);
+        CHECK_EQ(r.cpu().trap_number, 8u);
+        CHECK_EQ(r.cpu().pc, at + 2);
+        CHECK_EQ(r.cpu().d[0], 7u);
+        CHECK_EQ(r.cpu().sr, 0x0700 | kX);  // MOVEQ cleared C
+        CHECK_EQ(r.cpu().usp, 0x1234u);
+        CHECK_EQ(r.cpu().a[2], 0x5678u);
+    }
+    // With S set, RESET, STOP and RTE mean nothing without exceptions
+    // being delivered, so the run stops there.
+    for (const auto& op : {std::initializer_list<u16>{0x4E70}, std::initializer_list<u16>{0x4E72, 0x2700},
+                           std::initializer_list<u16>{0x4E73}}) {
+        const u32 at = r.place({0x7008});
+        r.code(at + 2, op);
+        r.cpu().sr = 0x2700;
+        CHECK_EQ(r.go(at), ExitReason::Unimplemented);
+        CHECK_EQ(r.cpu().pc, at + 2);
+        CHECK_EQ(r.cpu().d[0], 8u);
+        CHECK_EQ(r.cpu().sr, 0x2700u);
+    }
+}
+
+void status_register_moves() {
+    Rig r;
+    // MOVE SR,D0 ; MOVE SR,(A0): not privileged on the 68000.
+    const u32 from = r.place({0x40C0, 0x40D0});
+    for (u16 sr : {u16(0x0015), u16(0xA71F)}) {
+        r.cpu().sr = sr;
+        r.cpu().d[0] = 0xFFFFFFFF;
+        r.cpu().a[0] = 0x4000;
+        CHECK_EQ(r.go(from), ExitReason::Halt);
+        CHECK_EQ(r.cpu().d[0], 0xFFFF0000u | sr);
+        CHECK_EQ(r.get16(0x4000), sr);
+        CHECK_EQ(r.cpu().sr, sr);
+    }
+    r.cpu().a[0] = 0x4001;
+    CHECK_EQ(r.go(from), ExitReason::AddressError);
+    CHECK_EQ(r.cpu().fault_addr, 0x4001u);
+
+    // MOVE D0,SR keeps only the bits a 68000 has.
+    const u32 to = r.place({0x46C0});
+    r.cpu().sr = 0x2700;
+    r.cpu().d[0] = 0xFFFFFFFF;
+    CHECK_EQ(r.go(to), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0xA71Fu);
+    // MOVE (A0),SR reads a word, and faults on an odd address.
+    const u32 to_mem = r.place({0x46D0});
+    r.put16(0x4000, 0x2015);
+    r.cpu().a[0] = 0x4000;
+    r.cpu().sr = 0x2700;
+    CHECK_EQ(r.go(to_mem), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x2015u);
+    r.cpu().a[0] = 0x4001;
+    r.cpu().sr = 0x2700;
+    CHECK_EQ(r.go(to_mem), ExitReason::AddressError);
+    CHECK_EQ(r.cpu().sr, 0x2700u);
+
+    // MOVE D0,CCR ; MOVE #$1F,CCR: the low five bits, the system byte kept.
+    const u32 ccr = r.place({0x44C0});
+    r.cpu().sr = 0x2700;
+    r.cpu().d[0] = 0xFFFFFFEA;
+    CHECK_EQ(r.go(ccr), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x270Au);
+    const u32 ccr_imm = r.place({0x44FC, 0x001F});
+    r.cpu().sr = 0;
+    CHECK_EQ(r.go(ccr_imm), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x001Fu);
+
+    // ANDI, ORI and EORI to CCR, with S clear: not privileged.
+    const u32 andi = r.place({0x023C, 0x00F0});
+    r.cpu().sr = 0x271F;
+    CHECK_EQ(r.go(andi), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x2710u);
+    const u32 ori = r.place({0x003C, 0x00FF});
+    r.cpu().sr = 0x0001;
+    CHECK_EQ(r.go(ori), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x001Fu);
+    const u32 eori = r.place({0x0A3C, 0x00FF});
+    r.cpu().sr = 0x0715;
+    CHECK_EQ(r.go(eori), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x070Au);
+
+    // ANDI, ORI and EORI to SR, with S set.
+    const u32 andi_sr = r.place({0x027C, 0xF8FF});
+    r.cpu().sr = 0x271F;
+    CHECK_EQ(r.go(andi_sr), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x201Fu);
+    const u32 ori_sr = r.place({0x007C, 0xFFFF});
+    r.cpu().sr = 0x2000;
+    CHECK_EQ(r.go(ori_sr), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0xA71Fu);
+    const u32 eori_sr = r.place({0x0A7C, 0xFFFF});
+    r.cpu().sr = 0x2715;
+    CHECK_EQ(r.go(eori_sr), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, 0x800Au);
+
+    // MOVE A1,USP ; MOVE USP,A2 with S set: A7 is not involved.
+    const u32 usp = r.place({0x4E61, 0x4E6A});
+    r.cpu().sr = 0x2000;
+    r.cpu().a[1] = 0x12345678;
+    r.cpu().usp = 0;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.go(usp), ExitReason::Halt);
+    CHECK_EQ(r.cpu().usp, 0x12345678u);
+    CHECK_EQ(r.cpu().a[2], 0x12345678u);
+    CHECK_EQ(r.cpu().a[7], kStack);
+    const u32 usp_a7 = r.place({0x4E6F});  // MOVE USP,A7
+    r.cpu().usp = 0x6000;
+    CHECK_EQ(r.go(usp_a7), ExitReason::Halt);
+    CHECK_EQ(r.cpu().a[7], 0x6000u);
+}
+
+// ABCD, SBCD and NBCD worked out digit by digit. The binary sum or
+// difference is corrected by 6 in each digit that carried or borrowed, or
+// (adding) came to more than 9. V is set when the correction flips bit 7
+// from 0 to 1 (adding) or from 1 to 0 (subtracting); N is bit 7.
+Result ref_bcd(bool subtract, u32 d, u32 s, u16 ccr) {
+    const u32 x = (ccr & kX) != 0 ? 1 : 0;
+    u32 binary;
+    u32 result;
+    bool carry;
+    if (!subtract) {
+        binary = d + s + x;
+        const u32 low = (d & 0x0F) + (s & 0x0F) + x;
+        u32 correction = low > 9 ? 0x06 : 0;
+        const bool high = binary > 0xFF || (binary & 0xFF) > 0x99;
+        correction |= high ? 0x60 : 0;
+        result = binary + correction;
+        carry = high || result > 0xFF;
+    } else {
+        binary = (d - s - x) & 0x1FF;
+        const bool low = (d & 0x0F) < (s & 0x0F) + x;
+        const bool high = d < s + x;
+        const u32 correction = (low ? 0x06u : 0u) + (high ? 0x60u : 0u);
+        result = (binary & 0xFF) - correction;
+        carry = high || (binary & 0xFF) < correction;
+    }
+    const u32 r = result & 0xFF;
+    const bool v = subtract ? ((binary & ~r & 0x80) != 0) : ((~binary & r & 0x80) != 0);
+    u16 out = static_cast<u16>((carry ? kX | kC : 0) | ((r & 0x80) != 0 ? kN : 0) | (v ? kV : 0));
+    if (r == 0) {
+        out |= ccr & kZ;
+    }
+    return {r, out};
+}
+
+void bcd_matches_the_reference() {
+    Rig r;
+    const u32 abcd = r.place({0xC101});
+    const u32 sbcd = r.place({0x8101});
+    const u32 nbcd = r.place({0x4800});
+    for (u32 d = 0; d < 256; ++d) {
+        for (u32 s = 0; s < 256; ++s) {
+            for (u16 ccr : {u16(0), u16(kX), u16(kZ), u16(kX | kZ | kN | kV | kC)}) {
+                for (bool sub : {false, true}) {
+                    r.cpu().d[0] = 0xABCDEF00 | d;
+                    r.cpu().d[1] = 0x12345600 | s;
+                    r.cpu().sr = static_cast<u16>(0x2700 | ccr);
+                    CHECK_EQ(r.go(sub ? sbcd : abcd), ExitReason::Halt);
+                    const Result want = ref_bcd(sub, d, s, ccr);
+                    if (r.cpu().d[0] != (0xABCDEF00 | want.value) || r.cpu().sr != (0x2700 | want.ccr)) {
+                        std::fprintf(stderr, "%s %02x,%02x ccr %02x: got %02x/%02x want %02x/%02x\n",
+                                     sub ? "SBCD" : "ABCD", s, d, ccr, r.cpu().d[0] & 0xFF,
+                                     r.cpu().sr & 0xFF, want.value, want.ccr);
+                    }
+                    CHECK_EQ(r.cpu().d[0], 0xABCDEF00 | want.value);
+                    CHECK_EQ(r.cpu().sr, 0x2700 | want.ccr);
+                }
+            }
+        }
+        for (u16 ccr : {u16(0), u16(kX), u16(kZ), u16(kX | kZ)}) {
+            r.cpu().d[0] = 0xABCDEF00 | d;
+            r.cpu().sr = ccr;
+            CHECK_EQ(r.go(nbcd), ExitReason::Halt);
+            const Result want = ref_bcd(true, 0, d, ccr);
+            CHECK_EQ(r.cpu().d[0], 0xABCDEF00 | want.value);
+            CHECK_EQ(r.cpu().sr, want.ccr);
+        }
+    }
+    // ABCD -(A0),-(A1) ; SBCD -(A7),-(A7) ; NBCD (A0)+
+    const u32 mem = r.place({0xC308});
+    r.cpu().a[0] = 0x4001;
+    r.cpu().a[1] = 0x4101;
+    r.put8(0x4000, 0x19);
+    r.put8(0x4100, 0x23);
+    r.cpu().sr = kX | kZ;
+    CHECK_EQ(r.go(mem), ExitReason::Halt);
+    CHECK_EQ(r.get8(0x4100), 0x43u);
+    CHECK_EQ(r.cpu().a[0], 0x4000u);
+    CHECK_EQ(r.cpu().a[1], 0x4100u);
+    CHECK_EQ(r.cpu().sr, 0u);
+    const u32 stack = r.place({0x8F0F});
+    r.put8(kStack - 2, 0x10);
+    r.put8(kStack - 4, 0x01);
+    r.cpu().sr = 0;
+    CHECK_EQ(r.go(stack), ExitReason::Halt);
+    CHECK_EQ(r.cpu().a[7], kStack - 4);
+    CHECK_EQ(r.get8(kStack - 4), 0x91u);  // 0x01 - 0x10
+    CHECK_EQ(r.cpu().sr, kX | kN | kC);
+    const u32 post = r.place({0x4818});
+    r.cpu().a[0] = 0x4000;
+    r.put8(0x4000, 0x01);
+    r.cpu().sr = 0;
+    CHECK_EQ(r.go(post), ExitReason::Halt);
+    CHECK_EQ(r.get8(0x4000), 0x99u);
+    CHECK_EQ(r.cpu().a[0], 0x4001u);
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.go(post), ExitReason::BusError);
+}
+
+// ROXL and ROXR one bit at a time through X.
+Result ref_rox(bool left, u32 v, u32 count, u16 ccr, int bits) {
+    const u32 m = mask_of(bits);
+    const u32 msb = msb_of(bits);
+    v &= m;
+    bool x = (ccr & kX) != 0;
+    for (u32 i = 0; i < count; ++i) {
+        const bool out = left ? (v & msb) != 0 : (v & 1) != 0;
+        v = left ? ((v << 1) | (x ? 1 : 0)) & m : (v >> 1) | (x ? msb : 0);
+        x = out;
+    }
+    return {v, static_cast<u16>((x ? kX | kC : 0) | nz(v, bits))};
+}
+
+void rotates_through_x() {
+    Rig r;
+    Lcg lcg;
+    for (bool left : {true, false}) {
+        for (int bits : {8, 16, 32}) {
+            const u16 sz = static_cast<u16>(size_bits(bits) << 6);
+            const u16 dir = left ? 0x0100 : 0;
+            const u32 reg = r.place({static_cast<u16>(0xE230 | dir | sz)});  // ROXd D1,D0
+            auto one = [&](u32 at, u32 v, u32 count_reg, u32 count, u16 ccr) {
+                r.cpu().d[0] = v;
+                r.cpu().d[1] = count_reg;
+                r.cpu().sr = static_cast<u16>(0x2700 | ccr);
+                CHECK_EQ(r.go(at), ExitReason::Halt);
+                const Result want = ref_rox(left, v, count, ccr, bits);
+                CHECK_EQ(r.cpu().d[0], merge(v, want.value, bits));
+                CHECK_EQ(r.cpu().sr, 0x2700 | want.ccr);
+            };
+            for (u32 count = 0; count < 70; ++count) {
+                for (u32 v : kEdges) {
+                    const u32 count_reg = (lcg.next() & ~63u) | (count & 63);
+                    one(reg, v, count_reg, count & 63, kX | kV | kZ);
+                    one(reg, v, count_reg, count & 63, kN | kC);
+                }
+            }
+            for (u32 n = 1; n <= 8; ++n) {
+                const u32 imm = r.place({static_cast<u16>(0xE010 | ((n & 7) << 9) | dir | sz)});
+                for (u32 v : kEdges) {
+                    one(imm, v, 0, n, static_cast<u16>(lcg.next() & 0x1F));
+                }
+            }
+        }
+        const u32 mem = r.place({static_cast<u16>(left ? 0xE5D0 : 0xE4D0)});
+        for (u32 v : kEdges) {
+            const u16 ccr = static_cast<u16>(lcg.next() & 0x1F);
+            r.cpu().a[0] = 0x4000;
+            r.put16(0x4000, v);
+            r.cpu().sr = ccr;
+            CHECK_EQ(r.go(mem), ExitReason::Halt);
+            const Result want = ref_rox(left, v, 1, ccr, 16);
+            CHECK_EQ(r.get16(0x4000), want.value);
+            CHECK_EQ(r.cpu().sr, want.ccr);
+        }
+        r.cpu().a[0] = 0x4001;
+        CHECK_EQ(r.go(mem), ExitReason::AddressError);
+    }
+}
+
+// DIVU and DIVS. On overflow the register stays as it was, V is set, C
+// cleared, and N and Z keep their values.
+struct Division {
+    bool overflow;
+    Result r;
+};
+
+Division ref_div(bool is_signed, u32 dividend, u32 divisor, u16 ccr) {
+    const u16 x = static_cast<u16>(ccr & kX);
+    u32 q;
+    u32 rem;
+    bool overflow;
+    if (is_signed) {
+        const i64 n = static_cast<__INT32_TYPE__>(dividend);
+        const i64 dv = static_cast<__INT16_TYPE__>(divisor);
+        const i64 quotient = n / dv;
+        overflow = quotient < -32768 || quotient > 32767;
+        q = static_cast<u32>(quotient) & 0xFFFF;
+        rem = static_cast<u32>(n % dv) & 0xFFFF;
+    } else {
+        const u32 quotient = dividend / (divisor & 0xFFFF);
+        overflow = quotient > 0xFFFF;
+        q = quotient & 0xFFFF;
+        rem = dividend % (divisor & 0xFFFF);
+    }
+    if (overflow) {
+        return {true, {dividend, static_cast<u16>((ccr & (kX | kN | kZ)) | kV)}};
+    }
+    return {false, {rem << 16 | q, static_cast<u16>(x | nz(q, 16))}};
+}
+
+void divides_match_the_reference() {
+    Rig r;
+    // DIVU #0,D0 stops after the instruction with D0 as it was.
+    const u32 zero = r.place({0x80FC, 0x0000});
+    r.cpu().d[0] = 0x12345678;
+    CHECK_EQ(r.go(zero), ExitReason::DivideByZero);
+    CHECK_EQ(r.cpu().trap_number, 5u);
+    CHECK_EQ(r.cpu().pc, zero + 4);
+    CHECK_EQ(r.cpu().d[0], 0x12345678u);
+    const u32 zero_s = r.place({0x81C1});  // DIVS D1,D0
+    r.cpu().d[1] = 0xFFFF0000;
+    CHECK_EQ(r.go(zero_s), ExitReason::DivideByZero);
+    CHECK_EQ(r.cpu().pc, zero_s + 2);
+
+    Lcg lcg;
+    for (bool is_signed : {false, true}) {
+        const u32 at = r.place({static_cast<u16>(is_signed ? 0x81C1 : 0x80C1)});
+        auto one = [&](u32 dividend, u32 divisor, u16 ccr) {
+            if ((divisor & 0xFFFF) == 0) {
+                return;
+            }
+            r.cpu().d[0] = dividend;
+            r.cpu().d[1] = divisor;
+            r.cpu().sr = static_cast<u16>(0x2700 | ccr);
+            CHECK_EQ(r.go(at), ExitReason::Halt);
+            const Division want = ref_div(is_signed, dividend, divisor, ccr);
+            if (r.cpu().d[0] != want.r.value || r.cpu().sr != (0x2700 | want.r.ccr)) {
+                std::fprintf(stderr, "%s %08x / %04x ccr %02x: got %08x/%02x want %08x/%02x\n",
+                             is_signed ? "DIVS" : "DIVU", dividend, divisor & 0xFFFF, ccr,
+                             r.cpu().d[0], r.cpu().sr & 0xFF, want.r.value, want.r.ccr);
+            }
+            CHECK_EQ(r.cpu().d[0], want.r.value);
+            CHECK_EQ(r.cpu().sr, 0x2700 | want.r.ccr);
+        };
+        for (u32 d : kEdges) {
+            for (u32 s : kEdges) {
+                one(d, s, kX | kV | kC);
+                one(d, s, kZ | kN);
+            }
+        }
+        for (int n = 0; n < 20000; ++n) {
+            const u32 d = lcg.next() >> (lcg.next() & 31);
+            one(n & 1 ? d : static_cast<u32>(-static_cast<i64>(d)), lcg.next() >> (lcg.next() & 15),
+                static_cast<u16>(lcg.next() & 0x1F));
+        }
+        one(0x80000000, 0xFFFF, 0);  // the quotient 2^31 does not fit
+        one(0xFFFF8000, 0xFFFF, 0);  // -32768 / -1 = 32768 does not fit
+        one(0xFFFF8001, 0xFFFF, 0);  // 32767 fits
+    }
+    // DIVU (A0),D0 at an odd address.
+    const u32 mem = r.place({0x80D0});
+    r.cpu().a[0] = 0x4001;
+    CHECK_EQ(r.go(mem), ExitReason::AddressError);
+    CHECK_EQ(r.cpu().fault_addr, 0x4001u);
+}
+
+void check_bounds() {
+    Rig r;
+    const u32 at = r.place({0x4181, 0x7409});  // CHK D1,D0 ; MOVEQ #9,D2
+    r.cpu().d[1] = 100;
+    for (u32 v : {0u, 1u, 100u}) {
+        r.cpu().d[0] = 0xABCD0000 | v;
+        r.cpu().d[2] = 0;
+        r.cpu().sr = kX;
+        CHECK_EQ(r.go(at), ExitReason::Halt);
+        CHECK_EQ(r.cpu().d[2], 9u);
+        CHECK_EQ(r.cpu().sr & kX, kX);
+    }
+    r.cpu().d[0] = 0x0000FFFF;  // -1
+    r.cpu().sr = 0;
+    CHECK_EQ(r.go(at), ExitReason::Chk);
+    CHECK_EQ(r.cpu().trap_number, 6u);
+    CHECK_EQ(r.cpu().pc, at + 2);
+    CHECK_EQ(r.cpu().sr & kN, kN);
+    r.cpu().d[0] = 101;
+    r.cpu().sr = kN;
+    CHECK_EQ(r.go(at), ExitReason::Chk);
+    CHECK_EQ(r.cpu().sr & kN, 0);
+    // CHK (A0),D0 at an odd address.
+    const u32 mem = r.place({0x4190});
+    r.cpu().a[0] = 0x4001;
+    CHECK_EQ(r.go(mem), ExitReason::AddressError);
+}
+
+void test_and_set() {
+    Rig r;
+    const u32 reg = r.place({0x4AC0});  // TAS D0
+    r.cpu().d[0] = 0x12345600;
+    r.cpu().sr = kX | kV | kC;
+    CHECK_EQ(r.go(reg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x12345680u);
+    CHECK_EQ(r.cpu().sr, kX | kZ);
+    CHECK_EQ(r.go(reg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().sr, kX | kN);
+    const u32 mem = r.place({0x4AD8});  // TAS (A0)+
+    r.cpu().a[0] = 0x4000;
+    r.put8(0x4000, 0x7F);
+    CHECK_EQ(r.go(mem), ExitReason::Halt);
+    CHECK_EQ(r.get8(0x4000), 0xFFu);
+    CHECK_EQ(r.cpu().a[0], 0x4001u);
+    CHECK_EQ(r.cpu().sr, kX);
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.go(mem), ExitReason::BusError);
+}
+
+void move_peripheral() {
+    Rig r;
+    // MOVEP.W D0,2(A0) ; MOVEP.L D0,0(A0) on an odd base, every other byte.
+    const u32 to_w = r.place({0x0188, 0x0002});
+    const u32 to_l = r.place({0x01C8, 0x0000});
+    r.cpu().d[0] = 0x11223344;
+    r.cpu().a[0] = 0x4001;
+    r.cpu().sr = kZ | kC;
+    CHECK_EQ(r.go(to_w), ExitReason::Halt);
+    CHECK_EQ(r.get8(0x4003), 0x33u);
+    CHECK_EQ(r.get8(0x4004), 0u);
+    CHECK_EQ(r.get8(0x4005), 0x44u);
+    CHECK_EQ(r.go(to_l), ExitReason::Halt);
+    CHECK_EQ(r.get8(0x4001), 0x11u);
+    CHECK_EQ(r.get8(0x4003), 0x22u);
+    CHECK_EQ(r.get8(0x4005), 0x33u);
+    CHECK_EQ(r.get8(0x4007), 0x44u);
+    CHECK_EQ(r.get8(0x4002), 0u);
+    CHECK_EQ(r.cpu().sr, kZ | kC);
+    // MOVEP.W 2(A0),D1 ; MOVEP.L -4(A0),D1
+    const u32 from_w = r.place({0x0308, 0x0002});
+    const u32 from_l = r.place({0x0348, 0xFFFC});
+    r.cpu().a[0] = 0x4001;
+    r.cpu().d[1] = 0xAAAAAAAA;
+    CHECK_EQ(r.go(from_w), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[1], 0xAAAA2233u);
+    r.cpu().a[0] = 0x4005;
+    CHECK_EQ(r.go(from_l), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[1], 0x11223344u);
+    r.cpu().a[0] = kGuestBytes - 3;
+    CHECK_EQ(r.go(to_l), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, kGuestBytes + 1);
 }
 
 void block_limit_hook() {
@@ -1346,7 +1825,14 @@ int main() {
     link_and_unlink();
     conditions();
     jumps_and_returns();
-    unsupported_opcodes_stop_the_run();
+    exits_and_privilege();
+    status_register_moves();
+    bcd_matches_the_reference();
+    rotates_through_x();
+    divides_match_the_reference();
+    check_bounds();
+    test_and_set();
+    move_peripheral();
     block_limit_hook();
     address_mask_hook();
     init_refuses_bad_setups();

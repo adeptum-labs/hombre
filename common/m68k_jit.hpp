@@ -34,13 +34,33 @@
 // CpuState and loads them per instruction. While it runs, RBX holds the
 // CpuState, R12 the guest memory base, R13 the guest memory size, R15 the
 // address of the instruction being run and RBP the host stack pointer to
-// unwind to when an access faults.
+// unwind to when an access faults. R14 keeps an address across the calls
+// to the C++ helpers (BCD, ROXL/ROXR, DIVU/DIVS, CHK), which generated
+// code makes from block level with the stack 16-byte aligned.
 //
 // Every guest access is checked for 68000 alignment (AddressError) and,
 // after the address mask, for addr + size <= mem.size (BusError); either
 // ends the run with fault_addr set and pc at the instruction. The
 // condition codes are computed after every instruction that sets them; X
 // is bit 4 of sr.
+//
+// Exceptions are not delivered to the guest: where the 68000 would take
+// one, the run ends with trap_number set to its vector.
+//  - TRAP #n (Trap, vector 32 + n), TRAPV with V set (Trap, 7), CHK out
+//    of bounds (Chk, 6) and division by zero (DivideByZero, 5) leave pc at
+//    the next instruction, as the 68000 stacks it.
+//  - Bus and address errors (2, 3), ILLEGAL and 68010+ opcodes (Illegal,
+//    4), F-line opcodes (Illegal, 11), A-line opcodes without a native
+//    (Unimplemented, 10) and privilege violations (Privilege, 8) leave pc
+//    at the instruction.
+//
+// SR is plain data and there is one A7. The S bit only decides whether
+// the privileged instructions run: with S clear MOVE to SR, ANDI/ORI/EORI
+// to SR, MOVE USP, RESET, STOP and RTE end the run with Privilege. With S
+// set the SR writes write SR (only the bits a 68000 has) and MOVE USP
+// moves between An and cpu.usp, which A7 never sees. RESET, STOP and RTE
+// mean nothing while exceptions are not delivered and end the run with
+// Unimplemented. MOVE from SR is not privileged on the 68000.
 //
 // The code region is one set of pages seen through two views: generated
 // code is written through `write` and run from `exec`. When it is full, or
@@ -83,6 +103,7 @@ struct Prelude {
     usize leave;
     usize bus_error;
     usize address_error;
+    usize helper_exit;
     usize read[3];   // byte, word, long
     usize write[3];
     usize ccr_nzvc;
