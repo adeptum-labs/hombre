@@ -55,11 +55,18 @@ LOADER     := $(BUILD)/BOOTX64.EFI
 
 # The kernel is an ELF64 executable built by g++ and linked at its physical
 # load address mapped into the higher half (see kernel/linker.ld).
+#
+# KCXXEXTRA adds flags to the kernel build, its copy of common/ included,
+# and is empty by default. The objects do not depend on it, so change it
+# only after make clean. make clean && make KCXXEXTRA=-DHOMBRE_M68K_TRACE
+# builds a kernel that logs every translated 68000 block, its guest pc and
+# first four opcode words, on the serial console.
+KCXXEXTRA ?=
 KCXX      := g++
 KLD       := ld.bfd
 KCXXFLAGS := -std=c++23 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector \
              -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mno-sse -mno-mmx -nostdlib \
-             -Wall -Wextra -Werror -MMD -MP
+             -Wall -Wextra -Werror -MMD -MP $(KCXXEXTRA)
 KLDFLAGS  := -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
 # The mem* routines are built with these: they keep the compiler from turning
 # their loops back into calls to the very functions being defined.

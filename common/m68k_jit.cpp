@@ -26,6 +26,10 @@
 #include "m68k_decode.hpp"
 #include "x86_emit.hpp"
 
+#if defined(HOMBRE_M68K_TRACE)
+#include "libs/native.hpp"
+#endif
+
 namespace hombre::m68k {
 
 namespace {
@@ -1490,6 +1494,23 @@ void fetch_fault(CpuState& cpu, const GuestMemory& mem, u32 pc, u32 mask) {
     cpu.fault_addr = at;
 }
 
+#if defined(HOMBRE_M68K_TRACE)
+// Logs a translated block: its guest pc and its first four opcode words, as
+// far as guest memory holds them.
+void trace_block(const GuestMemory& mem, u32 pc, u32 mask) {
+    native::LogLine line;
+    line.text("m68k: block ").hex(pc).text(":");
+    for (u32 n = 0; n < 4; ++n) {
+        u32 word = 0;
+        if (!mem.read16((pc + 2 * n) & mask, word)) {
+            break;
+        }
+        line.text(" ").hex(word);
+    }
+    line.send();
+}
+#endif
+
 }
 
 bool Jit::init(const CodeRegion& region, Machine& machine) {
@@ -1627,6 +1648,9 @@ const u8* Jit::translate(u32 pc) {
         }
         cache_[i] = Block{pc, static_cast<u32>(begin)};
         ++blocks_;
+#if defined(HOMBRE_M68K_TRACE)
+        trace_block(mem, pc, address_mask_);
+#endif
         return region_.exec + begin;
     }
     return nullptr;
