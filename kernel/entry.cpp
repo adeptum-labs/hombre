@@ -23,26 +23,17 @@
 
 #include "../common/boot_info.hpp"
 #include "../common/serial.hpp"
+#include "boot_disk.hpp"
 #include "framebuffer.hpp"
 #include "gdt.hpp"
 #include "idt.hpp"
-#include "mmio.hpp"
-#include "page_alloc.hpp"
-#include "pci.hpp"
 #include "percpu.hpp"
-#include "virtio_blk.hpp"
 
 using namespace hombre;
 
 namespace {
 
 PerCpu bsp_cpu;
-
-// Constant initialised, so they sit in .bss without a constructor run.
-constinit u64 direct_map_base = 0;
-constinit PhysAllocator phys_pages;
-constinit MmioMapper mmio;
-constinit VirtioBlk boot_disk;
 
 [[noreturn]] void halt() {
     for (;;) {
@@ -83,119 +74,6 @@ void draw_banner(const BootInfo& info) {
     fb.fill(0x000040);
     const u32 x = info.fb.width > text_width ? (info.fb.width - text_width) / 2 : 0;
     fb.draw_text(x, info.fb.height / 4, text, 0xE0E0FF, scale);
-}
-
-u8* direct_map_ptr(void* ctx, u64 phys) {
-    return reinterpret_cast<u8*>(*static_cast<const u64*>(ctx) + phys);
-}
-
-// Page-table pages for the MMIO window come from the physical allocator.
-u64 alloc_table_page(void* ctx) {
-    return static_cast<PhysAllocator*>(ctx)->alloc_pages(1);
-}
-
-u64* table_page_ptr(void* ctx, u64 phys) {
-    return reinterpret_cast<u64*>(static_cast<PhysAllocator*>(ctx)->to_ptr(phys));
-}
-
-// The MMIO window maps device memory no-execute, which needs EFER.NXE.
-// Returns false when the CPU has no NX bit.
-bool enable_nx() {
-    constexpr u32 efer_msr = 0xC0000080;
-    constexpr u32 efer_nxe = 1u << 11;
-    u32 eax = 0x80000001, ebx, ecx = 0, edx;
-    asm volatile("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
-    if ((edx & (1u << 20)) == 0) {
-        return false;
-    }
-    u32 lo, hi;
-    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(efer_msr));
-    asm volatile("wrmsr" : : "a"(lo | efer_nxe), "d"(hi), "c"(efer_msr));
-    return true;
-}
-
-// Prints value in lowercase hex, zero padded to at least `digits` digits.
-void write_hex_padded(u64 value, u32 digits) {
-    char text[17];  // 16 hex digits for u64 max, plus the terminator
-    const usize count = format_u64(text, sizeof(text), value, 16);
-    for (usize i = count; i < digits; ++i) {
-        serial::write_char('0');
-    }
-    serial::write(text);
-}
-
-bool log_pci_function(void*, PciAddress address, u16 vendor, u16 device) {
-    serial::write("pci: ");
-    write_hex_padded(address.bus, 2);
-    serial::write(":");
-    write_hex_padded(address.device, 2);
-    serial::write(".");
-    write_hex_padded(address.function, 1);
-    serial::write(" ");
-    write_hex_padded(vendor, 4);
-    serial::write(":");
-    write_hex_padded(device, 4);
-    serial::write("\n");
-    return false;
-}
-
-// Brings up the page allocator, the MMIO window and the boot disk, and
-// reads the start of the drive. Every failure logs one line and returns.
-void boot_disk_check(const BootInfo& info) {
-    direct_map_base = info.direct_map_base;
-    if (!phys_pages.init(info.regions, info.region_count, &direct_map_ptr, &direct_map_base)) {
-        serial::write("page allocator failed\n");
-        return;
-    }
-    if (!enable_nx()) {
-        serial::write("no nx support\n");
-        return;
-    }
-    u64 cr3;
-    asm volatile("mov %%cr3, %0" : "=r"(cr3));
-    const PageAllocator tables{&alloc_table_page, &table_page_ptr, &phys_pages};
-    mmio.init(PageTables::adopt(tables, cr3 & 0x000FFFFFFFFFF000));
-
-    pci_scan(&log_pci_function, nullptr);
-
-    PciAddress disk;
-    if (!virtio_blk_find(disk)) {
-        serial::write("no boot disk\n");
-        return;
-    }
-    if (!boot_disk.init(disk, mmio, phys_pages)) {
-        serial::write("virtio-blk: init failed\n");
-        return;
-    }
-    serial::write("virtio-blk: ");
-    serial::write_dec(boot_disk.sector_count());
-    serial::write(" sectors\n");
-
-    // Reads up to the first 8 MiB of the drive.
-    constexpr u64 max_sectors = (8ull << 20) / kVirtioBlkSectorSize;
-    const u32 sectors = static_cast<u32>(
-        boot_disk.sector_count() < max_sectors ? boot_disk.sector_count() : max_sectors);
-    if (sectors == 0) {
-        return;
-    }
-    const u64 bytes = static_cast<u64>(sectors) * kVirtioBlkSectorSize;
-    const u64 page_count = (bytes + 4095) / 4096;
-    const u64 buffer = phys_pages.alloc_pages(page_count);
-    if (buffer == 0) {
-        serial::write("virtio-blk: no memory\n");
-        return;
-    }
-    if (boot_disk.read(0, sectors, buffer)) {
-        serial::write("virtio-blk: read ok\n");
-    } else {
-        serial::write("virtio-blk: read failed\n");
-        // The device may still write there, so the pages are never reused.
-        if (!boot_disk.quiesced()) {
-            serial::write("virtio-blk: device not reset, buffer kept\n");
-            return;
-        }
-    }
-    phys_pages.free_pages(buffer, page_count);
 }
 
 #if defined(HOMBRE_FAULT_TEST)
@@ -289,7 +167,7 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
     } else {
         serial::write("no framebuffer\n");
     }
-    boot_disk_check(*info);
+    boot_disk_run(*info);
     serial::write("halting\n");
     halt();
 }

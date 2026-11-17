@@ -35,6 +35,11 @@ DISK      ?= $(TEST_DISK)
 export DISK
 DISK_IMG  := $(BUILD)/disk.img
 
+# Drives for the negative boots: 1000 zero bytes, and the test disk with one
+# byte changed inside the packed data of its first track.
+ZERO_DISK    := $(BUILD)/zero-disk.bin
+CORRUPT_DISK := $(BUILD)/corrupt-disk.dms
+
 # The loader is a COFF object built by clang for the Windows target and
 # linked into a PE32+ image by GNU ld, which is what UEFI firmware loads.
 CXX      := clang++
@@ -149,12 +154,18 @@ run: image disk-image
 
 # The boots attach the generated test disk whatever DISK says, so they stay
 # hermetic. The main boot expects its size in 512-byte sectors, rounded up.
-check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK)
+check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DISK) $(CORRUPT_DISK)
 	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
 	tools/boot_check.sh --disk $(TEST_DISK) "Hombre loader" \
 	    "kernel loaded: entry=0xffffffff8010" "Hombre kernel booted" "usable memory:" \
 	    "gdt loaded" "idt loaded" "breakpoint ok" "lower half unmapped" "cpu0 percpu ok" \
-	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" "halting"
+	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" \
+	    "disk: DMS SIMPLE" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
+	    "S:Startup-Sequence:" "  Hombre test startup" "halting"
+	tools/boot_check.sh --disk $(ZERO_DISK) "virtio-blk: 2 sectors" "disk: unknown format" \
+	    "halting"
+	tools/boot_check.sh --disk $(CORRUPT_DISK) "disk: dms error: TrackCrc track 0" \
+	    "halting"
 	tools/boot_check.sh --no-disk "Hombre kernel booted" "framebuffer: " "pci: " \
 	    "no boot disk" "halting"
 	tools/boot_check.sh --no-disk --no-kernel "KERNEL.ELF not found"
@@ -200,6 +211,16 @@ $(MKDISK): tools/mkdisk.cpp
 # It is rebuilt whenever the tool changes, and the output is reproducible.
 $(TEST_DISK): $(MKDISK)
 	$(MKDISK) $@
+
+$(ZERO_DISK):
+	@mkdir -p $(@D)
+	head -c 1000 /dev/zero > $@
+
+# The octal escape is what every sh printf understands. Byte 100 lies inside
+# the first track's packed data, and the test disk has no 0xff there.
+$(CORRUPT_DISK): $(TEST_DISK)
+	cp $< $@
+	printf '\377' | dd of=$@ bs=1 seek=100 conv=notrunc
 
 # disk-image pads DISK to whole 512-byte sectors in DISK_IMG. When DISK is
 # the default test disk, that is built first.
