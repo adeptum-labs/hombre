@@ -109,14 +109,17 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         halt();
     }
 
+    // The firmware's IDT gates use selectors outside the new GDT, so no
+    // exception can be taken between loading the GDT and loading the IDT.
     gdt_init_bsp();
+    idt_init_bsp();
+
     if (read_cs() != kKernelCodeSelector || read_tr() != kTssSelector) {
         serial::write("gdt failed\n");
         halt();
     }
     serial::write("gdt loaded\n");
 
-    idt_init_bsp();
     if (!idt_loaded()) {
         serial::write("idt failed\n");
         halt();
