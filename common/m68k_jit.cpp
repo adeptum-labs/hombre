@@ -23,12 +23,9 @@
 
 #include "m68k_jit.hpp"
 
+#include "log.hpp"
 #include "m68k_decode.hpp"
 #include "x86_emit.hpp"
-
-#if defined(HOMBRE_M68K_TRACE)
-#include "libs/native.hpp"
-#endif
 
 namespace hombre::m68k {
 
@@ -1498,7 +1495,7 @@ void fetch_fault(CpuState& cpu, const GuestMemory& mem, u32 pc, u32 mask) {
 // Logs a translated block: its guest pc and its first four opcode words, as
 // far as guest memory holds them.
 void trace_block(const GuestMemory& mem, u32 pc, u32 mask) {
-    native::LogLine line;
+    LogLine line;
     line.text("m68k: block ").hex(pc).text(":");
     for (u32 n = 0; n < 4; ++n) {
         u32 word = 0;
@@ -1667,6 +1664,7 @@ void Jit::dispatch(u32 opcode) {
     }
     const NativeSlot slot = natives_[id];
     if (slot.fn == nullptr) {
+        LogLine().text("native: unknown A-line id ").dec(id).send();
         cpu.pc = resume - 2;
         cpu.exit = ExitReason::Unimplemented;
         cpu.trap_number = 10;

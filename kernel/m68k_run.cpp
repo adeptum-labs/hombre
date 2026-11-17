@@ -173,6 +173,14 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
                                                      : m68k::exit_reason_name(cpu.exit));
         serial::write(" at pc=0x");
         serial::write_hex(cpu.pc);
+        // An untranslated or illegal opcode, or an A-line call without a
+        // native: the word at pc tells them apart.
+        u32 op = 0;
+        if ((cpu.exit == ExitReason::Unimplemented || cpu.exit == ExitReason::Illegal) &&
+            machine.mem.read16(cpu.pc & address_mask, op)) {
+            serial::write(" op=0x");
+            serial::write_hex(op);
+        }
     }
     serial::write("\n");
 }

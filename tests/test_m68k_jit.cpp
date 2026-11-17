@@ -22,9 +22,11 @@
  */
 
 #include "check.hpp"
+#include "log.hpp"
 #include "m68k_jit.hpp"
 
 #include <initializer_list>
+#include <string>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
@@ -33,6 +35,12 @@ using namespace hombre;
 using namespace hombre::m68k;
 
 namespace {
+
+std::vector<std::string> g_lines;
+
+void capture(const char* line) {
+    g_lines.push_back(line);
+}
 
 constexpr u32 kCode = 0x1000;
 constexpr u32 kData = 0x4000;
@@ -423,11 +431,16 @@ void natives_are_called_by_their_aline_opcode() {
     CHECK_EQ(r.cpu().d[1], 7u);
     CHECK_EQ(r.cpu().a[7], kStack);
 
-    // An id nobody registered stops the run at its opcode.
+    // An id nobody registered stops the run at its opcode, logged.
+    g_lines.clear();
+    g_log = capture;
     r.program(0x1100, {0x7001, 0xA064});
     CHECK_EQ(r.go(0x1100), ExitReason::Unimplemented);
     CHECK_EQ(r.cpu().pc, 0x1102u);
     CHECK_EQ(r.cpu().d[0], 1u);
+    g_log = nullptr;
+    CHECK_EQ(g_lines.size(), 1u);
+    CHECK(!g_lines.empty() && g_lines[0] == "native: unknown A-line id 100");
     // The reserved ids.
     r.code(0x1200, {0xA001});
     CHECK_EQ(r.go(0x1200), ExitReason::Returned);

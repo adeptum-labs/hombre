@@ -24,22 +24,20 @@
 #pragma once
 
 #include "../format.hpp"
+#include "../log.hpp"
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
 #include "../types.hpp"
 
-// What the native AmigaOS libraries share: the log sink, guest memory as a
-// native sees it, and the words their vectors are made of.
+// What the native AmigaOS libraries share: guest memory as a native sees
+// it and the words their vectors are made of. They log through g_log
+// (log.hpp).
 //
 // A native reads its arguments from the 68000 registers as the AmigaOS
 // calling convention passes them (cpu.d[n], cpu.a[n], A6 the library base)
 // and leaves its result in D0.
 
 namespace hombre {
-
-// Where the native libraries write their diagnostics, one line per call
-// without a newline. Null drops them.
-inline void (*g_log)(const char*) = nullptr;
 
 struct NativeVector {
     m68k::NativeFn fn;
@@ -48,51 +46,11 @@ struct NativeVector {
 
 namespace native {
 
+using hombre::LogLine;
+
 constexpr u16 kALine = 0xA000;
 constexpr u16 kRts = 0x4E75;
 constexpr u16 kJmpAbsL = 0x4EF9;
-
-// Builds one log line in a fixed buffer and hands it to g_log; text that
-// does not fit is cut off.
-class LogLine {
-public:
-    LogLine& text(const char* s) {
-        while (s != nullptr && *s != '\0' && length_ + 1 < sizeof buffer_) {
-            buffer_[length_++] = *s++;
-        }
-        return *this;
-    }
-
-    // The text up to the first '.', so "dos.library" gives "dos".
-    LogLine& stem(const char* s) {
-        while (s != nullptr && *s != '\0' && *s != '.' && length_ + 1 < sizeof buffer_) {
-            buffer_[length_++] = *s++;
-        }
-        return *this;
-    }
-
-    LogLine& dec(u32 value) { return number(value, 10); }
-    LogLine& hex(u32 value) { return text("$").number(value, 16); }
-
-    void send() {
-        buffer_[length_] = '\0';
-        if (g_log != nullptr) {
-            g_log(buffer_);
-        }
-    }
-
-private:
-    LogLine& number(u32 value, unsigned base) {
-        char digits[12];
-        if (format_u64(digits, sizeof digits, value, base) != 0) {
-            text(digits);
-        }
-        return *this;
-    }
-
-    char buffer_[160];
-    usize length_ = 0;
-};
 
 // Guest memory for a native. The first access the guest memory cannot hold
 // ends the run as the 68000 would end it, BusError, or AddressError for a
