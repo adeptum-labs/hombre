@@ -26,6 +26,7 @@
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
 #include "../common/libs/native.hpp"
+#include "../common/libs/utility.hpp"
 #include "../common/m68k_decode.hpp"
 #include "../common/m68k_jit.hpp"
 #include "../common/printable.hpp"
@@ -57,6 +58,7 @@ constexpr u64 block_budget = 1ull << 24;
 constinit m68k::Machine machine{};
 constinit m68k::Jit jit{};
 constinit Exec exec{};
+constinit Utility utility{};
 constinit Dos dos{};
 
 // Whether the console output so far ends a line.
@@ -94,8 +96,8 @@ void fail(const char* reason) {
     serial::write("\n");
 }
 
-// Prepares guest memory, the translator, exec and dos. Logs one line and
-// returns false when a step fails.
+// Prepares guest memory, the translator, exec, utility and dos. Logs one
+// line and returns false when a step fails.
 bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) {
     constexpr u64 guest_pages = m68k::kGuestBytes / page_size;
     const u64 guest = pages.alloc_pages(guest_pages);
@@ -122,6 +124,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
     g_log = &log_line;
     if (!exec.init(machine, free_start, m68k::kGuestBytes)) {
         fail("exec init failed");
+        return false;
+    }
+    if (!utility.init(machine, exec)) {
+        fail("utility init failed");
         return false;
     }
     if (!dos.init(machine, exec, volume, &console_write, nullptr)) {

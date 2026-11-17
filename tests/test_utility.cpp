@@ -1,0 +1,418 @@
+/*
+ * The Hombre Operating System.
+ * Copyright © 2026 Adam Waldenberg and Adeptum AB.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.adeptum.se
+ * Contact: info@adeptum.se
+ */
+
+#include "libs/utility.hpp"
+#include "check.hpp"
+
+#include <cstring>
+#include <initializer_list>
+#include <string>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <utility>
+#include <vector>
+
+using namespace hombre;
+using namespace hombre::m68k;
+using namespace hombre::ndk;
+
+namespace {
+
+constexpr u32 kCode = 0x1000;
+constexpr u32 kCall = 0x1800;
+constexpr u32 kStack = 0x8000;
+constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
+constexpr u32 kFreeStart = 0x10000;
+constexpr u32 kFreeEnd = 0x400000;
+constexpr u32 kTagUser = 0x80000000;
+
+// Static storage, as the kernel keeps them.
+Jit g_jit;
+Exec g_exec;
+Utility g_utility;
+std::vector<std::string> g_lines;
+
+void capture(const char* line) {
+    g_lines.push_back(line);
+}
+
+bool logged(const std::string& text) {
+    for (const std::string& line : g_lines) {
+        if (line == text) {
+            return true;
+        }
+    }
+    return false;
+}
+
+u16 disp(u32 offset) {
+    return static_cast<u16>(0x10000 - offset);
+}
+
+// One memfd mapped twice for the code region, 16 MiB of guest memory, the
+// Jit, exec and utility initialised over them, the log captured.
+class Rig {
+public:
+    Rig() : memory_(kGuestBytes) {
+        fd_ = memfd_create("utility", 0);
+        CHECK(fd_ >= 0);
+        CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
+        void* rw = mmap(nullptr, kRegion, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+        void* rx = mmap(nullptr, kRegion, PROT_READ | PROT_EXEC, MAP_SHARED, fd_, 0);
+        CHECK(rw != MAP_FAILED);
+        CHECK(rx != MAP_FAILED);
+        rw_ = static_cast<u8*>(rw);
+        rx_ = static_cast<const u8*>(rx);
+        m.cpu = CpuState{};
+        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.jit = nullptr;
+        CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
+        g_lines.clear();
+        g_log = capture;
+        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_utility.init(m, g_exec));
+        m.cpu.a[7] = kStack;
+    }
+
+    ~Rig() {
+        g_log = nullptr;
+        munmap(rw_, kRegion);
+        munmap(const_cast<u8*>(rx_), kRegion);
+        close(fd_);
+    }
+
+    Rig(const Rig&) = delete;
+    Rig& operator=(const Rig&) = delete;
+
+    Machine m;
+
+    CpuState& cpu() { return m.cpu; }
+    u32 base() const { return g_utility.utility_base(); }
+
+    void put8(u32 at, u32 v) { memory_[at] = static_cast<u8>(v); }
+
+    void put16(u32 at, u32 v) {
+        put8(at, v >> 8);
+        put8(at + 1, v);
+    }
+
+    void put32(u32 at, u32 v) {
+        put16(at, v >> 16);
+        put16(at + 2, v);
+    }
+
+    u32 get8(u32 at) const { return memory_[at]; }
+    u32 get16(u32 at) const { return (get8(at) << 8) | get8(at + 1); }
+    u32 get32(u32 at) const { return (get16(at) << 16) | get16(at + 2); }
+
+    u32 str(u32 at, const char* s) {
+        for (usize i = 0; i <= std::strlen(s); ++i) {
+            put8(at + static_cast<u32>(i), static_cast<u8>(s[i]));
+        }
+        return at;
+    }
+
+    std::string read_str(u32 at) const {
+        std::string s;
+        while (memory_[at] != 0) {
+            s += static_cast<char>(memory_[at++]);
+        }
+        return s;
+    }
+
+    // Tag items (tag, data) from at on.
+    u32 tags(u32 at, std::initializer_list<std::pair<u32, u32>> items) {
+        u32 p = at;
+        for (const auto& [tag, data] : items) {
+            put32(p, tag);
+            put32(p + 4, data);
+            p += 8;
+        }
+        return at;
+    }
+
+    // JSR -offset(A6) with A6 = UtilityBase, from hand-written 68000 code.
+    ExitReason call(u32 offset) {
+        put16(kCall, 0x4EAE);
+        put16(kCall + 2, disp(offset));
+        put16(kCall + 4, 0x4EF8);  // JMP $400.w
+        put16(kCall + 6, 0x0400);
+        g_jit.flush();
+        m.cpu.a[6] = base();
+        m.cpu.a[7] = kStack;
+        m.cpu.pc = kCall;
+        return g_jit.run(1000000);
+    }
+
+    // Calls the vector, which must return; D0 is what it gave.
+    u32 result(u32 offset) {
+        CHECK_EQ(call(offset), ExitReason::Halt);
+        return m.cpu.d[0];
+    }
+
+    u32 get_tag_data(u32 tag, u32 fallback, u32 list) {
+        m.cpu.d[0] = tag;
+        m.cpu.d[1] = fallback;
+        m.cpu.a[0] = list;
+        return result(utility_lvo::GetTagData);
+    }
+
+    u32 find_tag_item(u32 tag, u32 list) {
+        m.cpu.d[0] = tag;
+        m.cpu.a[0] = list;
+        return result(utility_lvo::FindTagItem);
+    }
+
+    void clock(u32 at, u32 y, u32 mo, u32 d, u32 h, u32 mi, u32 s) {
+        put16(at + cd_sec, s);
+        put16(at + cd_min, mi);
+        put16(at + cd_hour, h);
+        put16(at + cd_mday, d);
+        put16(at + cd_month, mo);
+        put16(at + cd_year, y);
+        put16(at + cd_wday, 0);
+    }
+
+    u32 date2amiga(u32 y, u32 mo, u32 d, u32 h, u32 mi, u32 s) {
+        clock(kData, y, mo, d, h, mi, s);
+        m.cpu.a[0] = kData;
+        return result(utility_lvo::Date2Amiga);
+    }
+
+    u32 compare(const char* a, const char* b, u32 lvo = utility_lvo::Stricmp, u32 count = 0) {
+        m.cpu.a[0] = str(kData, a);
+        m.cpu.a[1] = str(kData + 0x100, b);
+        m.cpu.d[0] = count;
+        return result(lvo);
+    }
+
+private:
+    static constexpr usize kRegion = 1 << 20;
+
+    std::vector<u8> memory_;
+    int fd_ = -1;
+    u8* rw_ = nullptr;
+    const u8* rx_ = nullptr;
+};
+
+void utility_base_is_built() {
+    Rig r;
+    const u32 lib = r.base();
+    CHECK(lib != 0);
+    CHECK_EQ(lib % 2, 0u);
+    CHECK(r.read_str(r.get32(lib + LN_NAME)) == "utility.library");
+    CHECK_EQ(r.get8(lib + LN_TYPE), static_cast<u32>(NT_LIBRARY));
+    CHECK_EQ(r.get16(lib + LIB_VERSION), kHombreLibVersion);
+    CHECK_EQ(r.get16(lib + LIB_REVISION), kHombreLibRevision);
+    CHECK(r.read_str(r.get32(lib + LIB_IDSTRING)) == "utility 60.0 (Hombre)\r\n");
+    CHECK_EQ(r.get16(lib + LIB_POSSIZE), UtilityBase_SIZEOF);
+    CHECK_EQ(r.get16(lib + LIB_NEGSIZE), (utility_lvo::GetUniqueID + 3) & ~3u);
+    CHECK(g_lines.empty());
+
+    // OpenLibrary finds it in exec's list.
+    r.str(kData, "utility.library");
+    r.cpu().a[1] = kData;
+    r.cpu().d[0] = 37;
+    r.put16(kCall, 0x4EAE);
+    r.put16(kCall + 2, disp(exec_lvo::OpenLibrary));
+    r.put16(kCall + 4, 0x4EF8);
+    r.put16(kCall + 6, 0x0400);
+    g_jit.flush();
+    r.cpu().a[6] = g_exec.exec_base();
+    r.cpu().pc = kCall;
+    CHECK_EQ(g_jit.run(1000000), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], lib);
+    CHECK_EQ(r.get16(lib + LIB_OPENCNT), 1u);
+}
+
+void unimplemented_vectors_are_logged() {
+    Rig r;
+    CHECK_EQ(r.call(42), ExitReason::Unimplemented);  // PackBoolTags
+    CHECK(logged("utility: unimplemented LVO -42"));
+    CHECK_EQ(r.cpu().pc, r.base() - 42);
+    g_lines.clear();
+    CHECK_EQ(r.call(utility_lvo::GetUniqueID), ExitReason::Unimplemented);
+    CHECK(logged("utility: unimplemented LVO -270"));
+}
+
+void get_tag_data_and_find_tag_item() {
+    Rig r;
+    const u32 more = r.tags(kData + 0x200, {{kTagUser + 7, 70}, {TAG_DONE, 0}});
+    const u32 list = r.tags(kData, {{kTagUser + 1, 10},
+                                    {TAG_IGNORE, kTagUser + 2},
+                                    {TAG_SKIP, 1},
+                                    {kTagUser + 3, 30},  // skipped
+                                    {kTagUser + 4, 40},
+                                    {TAG_MORE, more},
+                                    {kTagUser + 9, 90}});  // never reached
+    CHECK_EQ(r.get_tag_data(kTagUser + 1, 5, list), 10u);
+    CHECK_EQ(r.get_tag_data(kTagUser + 4, 5, list), 40u);
+    CHECK_EQ(r.get_tag_data(kTagUser + 7, 5, list), 70u);
+    CHECK_EQ(r.get_tag_data(kTagUser + 3, 5, list), 5u);
+    CHECK_EQ(r.get_tag_data(kTagUser + 9, 5, list), 5u);
+    // The ti_Data of TAG_IGNORE is no tag; a control tag is never found.
+    CHECK_EQ(r.get_tag_data(kTagUser + 2, 5, list), 5u);
+    CHECK_EQ(r.get_tag_data(TAG_IGNORE, 5, list), 5u);
+    CHECK_EQ(r.get_tag_data(kTagUser + 1, 6, 0), 6u);
+
+    CHECK_EQ(r.find_tag_item(kTagUser + 4, list), list + 32);
+    CHECK_EQ(r.find_tag_item(kTagUser + 7, list), more);
+    CHECK_EQ(r.find_tag_item(kTagUser + 3, list), 0u);
+    CHECK_EQ(r.find_tag_item(kTagUser + 1, 0), 0u);
+    // A TAG_MORE to a null list ends the walk.
+    const u32 cut = r.tags(kData + 0x300, {{kTagUser + 1, 11}, {TAG_MORE, 0}});
+    CHECK_EQ(r.get_tag_data(kTagUser + 7, 5, cut), 5u);
+    CHECK_EQ(r.get_tag_data(kTagUser + 1, 5, cut), 11u);
+    CHECK(g_lines.empty());
+}
+
+void next_tag_item_moves_the_walk_on() {
+    Rig r;
+    const u32 more = r.tags(kData + 0x200, {{kTagUser + 7, 70}, {TAG_DONE, 0}});
+    const u32 list = r.tags(kData, {{TAG_IGNORE, 0},
+                                    {kTagUser + 1, 10},
+                                    {TAG_SKIP, 0},
+                                    {TAG_MORE, more}});
+    const u32 walk = kData + 0x400;
+    r.put32(walk, list);
+    r.cpu().a[0] = walk;
+    CHECK_EQ(r.result(utility_lvo::NextTagItem), list + 8);
+    CHECK_EQ(r.get32(walk), list + 16);
+    r.cpu().a[0] = walk;
+    CHECK_EQ(r.result(utility_lvo::NextTagItem), more);
+    CHECK_EQ(r.get32(walk), more + 8);
+    r.cpu().a[0] = walk;
+    CHECK_EQ(r.result(utility_lvo::NextTagItem), 0u);
+    CHECK_EQ(r.get32(walk), 0u);
+    r.cpu().a[0] = walk;
+    CHECK_EQ(r.result(utility_lvo::NextTagItem), 0u);
+}
+
+void tag_walks_are_bounded() {
+    Rig r;
+    // A TAG_MORE that points back at itself.
+    const u32 loop = r.tags(kData, {{TAG_MORE, kData}});
+    CHECK_EQ(r.get_tag_data(kTagUser + 1, 5, loop), 5u);
+    CHECK(logged("utility: tag list at $9000 has no end"));
+    // A list that leaves guest memory ends the run.
+    CHECK_EQ(r.find_tag_item(kTagUser + 1, kGuestBytes - 4), 0u);
+    r.cpu().d[0] = kTagUser + 1;
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.call(utility_lvo::FindTagItem), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    r.cpu().d[0] = kTagUser + 1;
+    r.cpu().a[0] = kData + 1;
+    CHECK_EQ(r.call(utility_lvo::GetTagData), ExitReason::AddressError);
+}
+
+void dates() {
+    Rig r;
+    CHECK_EQ(r.date2amiga(1978, 1, 1, 0, 0, 0), 0u);
+    CHECK_EQ(r.date2amiga(1978, 1, 1, 23, 59, 59), 86399u);
+    CHECK_EQ(r.date2amiga(1979, 1, 1, 0, 0, 0), 365u * 86400);
+    CHECK_EQ(r.date2amiga(2000, 1, 1, 0, 0, 0), 694224000u);
+    CHECK_EQ(r.date2amiga(2000, 3, 1, 0, 0, 0), 694224000u + 60 * 86400);  // a leap year
+    CHECK_EQ(r.date2amiga(2100, 3, 1, 0, 0, 0) - r.date2amiga(2100, 2, 28, 0, 0, 0),
+             86400u);  // and a century that is not one
+    CHECK_EQ(r.date2amiga(1977, 12, 31, 0, 0, 0), static_cast<u32>(-86400));
+
+    const struct {
+        u32 seconds, y, mo, d, h, mi, s, wday;
+    } cases[] = {
+        {0, 1978, 1, 1, 0, 0, 0, 0},
+        {86399, 1978, 1, 1, 23, 59, 59, 0},
+        {86400, 1978, 1, 2, 0, 0, 0, 1},
+        {694224000, 2000, 1, 1, 0, 0, 0, 6},
+        {694224000 + 59 * 86400 + 45296, 2000, 2, 29, 12, 34, 56, 2},
+        {0xFFFFFFFF, 2114, 2, 7, 6, 28, 15, 3},
+    };
+    for (const auto& c : cases) {
+        for (u32 i = 0; i < CD_SIZE; ++i) {
+            r.put8(kData + i, 0xAA);
+        }
+        r.cpu().d[0] = c.seconds;
+        r.cpu().a[0] = kData;
+        CHECK_EQ(r.call(utility_lvo::Amiga2Date), ExitReason::Halt);
+        CHECK_EQ(r.get16(kData + cd_year), c.y);
+        CHECK_EQ(r.get16(kData + cd_month), c.mo);
+        CHECK_EQ(r.get16(kData + cd_mday), c.d);
+        CHECK_EQ(r.get16(kData + cd_hour), c.h);
+        CHECK_EQ(r.get16(kData + cd_min), c.mi);
+        CHECK_EQ(r.get16(kData + cd_sec), c.s);
+        CHECK_EQ(r.get16(kData + cd_wday), c.wday);
+        CHECK_EQ(r.date2amiga(c.y, c.mo, c.d, c.h, c.mi, c.s), c.seconds);
+    }
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.call(utility_lvo::Date2Amiga), ExitReason::BusError);
+}
+
+void strings_without_regard_to_case() {
+    Rig r;
+    CHECK_EQ(r.compare("Hombre", "hOMBRE"), 0u);
+    CHECK_EQ(r.compare("", ""), 0u);
+    CHECK(static_cast<i64>(static_cast<__INT32_TYPE__>(r.compare("abc", "abd"))) < 0);
+    CHECK(static_cast<i64>(static_cast<__INT32_TYPE__>(r.compare("abd", "ABC"))) > 0);
+    CHECK(static_cast<i64>(static_cast<__INT32_TYPE__>(r.compare("ab", "abc"))) < 0);
+    CHECK(static_cast<i64>(static_cast<__INT32_TYPE__>(r.compare("abc", "ab"))) > 0);
+    CHECK_EQ(r.compare("\xE9t\xE9", "\xC9T\xC9"), 0u);
+    CHECK(r.compare("\xF7", "\xD7") != 0);  // the division and multiplication signs
+
+    CHECK_EQ(r.compare("abcX", "ABCy", utility_lvo::Strnicmp, 3), 0u);
+    CHECK(r.compare("abcX", "ABCy", utility_lvo::Strnicmp, 4) != 0);
+    CHECK_EQ(r.compare("abc", "xyz", utility_lvo::Strnicmp, 0), 0u);
+    CHECK_EQ(r.compare("same", "SAME", utility_lvo::Strnicmp, 100), 0u);
+
+    const struct {
+        u32 in, up, low;
+    } chars[] = {
+        {'a', 'A', 'a'},   {'Z', 'Z', 'z'},   {'0', '0', '0'},   {0xE9, 0xC9, 0xE9},
+        {0xC9, 0xC9, 0xE9}, {0xF7, 0xF7, 0xF7}, {0xD7, 0xD7, 0xD7}, {0xFF, 0xFF, 0xFF},
+        {0xDF, 0xDF, 0xDF}, {0x1E0, 0xC0, 0xE0},
+    };
+    for (const auto& c : chars) {
+        r.cpu().d[0] = c.in;
+        CHECK_EQ(r.result(utility_lvo::ToUpper), c.up);
+        r.cpu().d[0] = c.in;
+        CHECK_EQ(r.result(utility_lvo::ToLower), c.low);
+    }
+
+    // A string that runs off the end of guest memory ends the run.
+    r.put8(kGuestBytes - 1, 'x');
+    r.cpu().a[0] = kGuestBytes - 1;
+    r.cpu().a[1] = kGuestBytes - 1;
+    CHECK_EQ(r.call(utility_lvo::Stricmp), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+}
+
+}
+
+int main() {
+    utility_base_is_built();
+    unimplemented_vectors_are_logged();
+    get_tag_data_and_find_tag_item();
+    next_tag_item_moves_the_walk_on();
+    tag_walks_are_bounded();
+    dates();
+    strings_without_regard_to_case();
+    return check::finish("test_utility");
+}
