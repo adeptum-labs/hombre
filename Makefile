@@ -65,8 +65,15 @@ KLDFLAGS  := -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
 # their loops back into calls to the very functions being defined.
 KMEMFLAGS := -fno-builtin -fno-tree-loop-distribute-patterns
 
+# The shared sources in common/ other than the mem* routines are built once
+# for the kernel, into $(BUILD)/common/, and once for the host, into
+# $(BUILD)/host/common/, where every test program and host tool links them.
+COMMON_SRC  := $(filter-out common/mem.cpp,$(wildcard common/*.cpp))
+COMMON_KOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/%.o)
+COMMON_HOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/host/%.o)
+
 KERNEL_SRC := $(wildcard kernel/*.cpp)
-KERNEL_OBJ := $(KERNEL_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/kernel/mem.o
+KERNEL_OBJ := $(KERNEL_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/kernel/mem.o $(COMMON_KOBJ)
 KERNEL     := $(BUILD)/KERNEL.ELF
 
 # Kernels that provoke a CPU fault on purpose, one per value of
@@ -116,12 +123,13 @@ $(IMAGE_NOKERN): $(LOADER) tools/make_image.sh
 # -DHOMBRE_FAULT_TEST=<n> into build/fault<n>/. Called with the value n.
 define FAULT_VARIANT
 FAULT$(1)_DIR := $(BUILD)/fault$(1)
-FAULT$(1)_OBJ := $(KERNEL_SRC:%.cpp=$$(FAULT$(1)_DIR)/%.o) $$(FAULT$(1)_DIR)/kernel/mem.o
+FAULT$(1)_OBJ := $(KERNEL_SRC:%.cpp=$$(FAULT$(1)_DIR)/%.o) $$(FAULT$(1)_DIR)/kernel/mem.o \
+                 $$(COMMON_KOBJ)
 
 .PHONY: image-fault$(1)
 image-fault$(1): $(BUILD)/hombre-fault$(1).img
 
-$$(filter-out %/mem.o,$$(FAULT$(1)_OBJ)): $$(FAULT$(1)_DIR)/%.o: %.cpp
+$$(filter-out %/mem.o $$(COMMON_KOBJ),$$(FAULT$(1)_OBJ)): $$(FAULT$(1)_DIR)/%.o: %.cpp
 	@mkdir -p $$(@D)
 	$$(KCXX) $$(KCXXFLAGS) -DHOMBRE_FAULT_TEST=$(1) -c $$< -o $$@
 
@@ -201,9 +209,13 @@ HOSTCXXFLAGS := -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined \
 TEST_SRC     := $(wildcard tests/test_*.cpp)
 TEST_BIN     := $(TEST_SRC:tests/%.cpp=$(BUILD)/tests/%)
 
-$(BUILD)/tests/%: tests/%.cpp
+$(BUILD)/host/common/%.o: common/%.cpp
 	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
+	$(HOSTCXX) $(HOSTCXXFLAGS) -c $< -o $@
+
+$(BUILD)/tests/%: tests/%.cpp $(COMMON_HOBJ)
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
 test: $(TEST_BIN)
 	@for t in $(TEST_BIN); do $$t || exit 1; done
@@ -211,15 +223,15 @@ test: $(TEST_BIN)
 # Host tools, built like the tests.
 ADFTOOL := $(BUILD)/tools/adftool
 
-$(ADFTOOL): tools/adftool.cpp
+$(ADFTOOL): tools/adftool.cpp $(COMMON_HOBJ)
 	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
 MKDISK    := $(BUILD)/tools/mkdisk
 
-$(MKDISK): tools/mkdisk.cpp
+$(MKDISK): tools/mkdisk.cpp $(COMMON_HOBJ)
 	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< -o $@
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
 # The disk the boot check mounts: an OFS volume packed with SIMPLE tracks.
 # It is rebuilt whenever the tool changes, and the output is reproducible.
@@ -264,3 +276,4 @@ clean:
 -include $(TEST_BIN:%=%.d)
 -include $(ADFTOOL).d
 -include $(MKDISK).d
+-include $(COMMON_HOBJ:.o=.d)
