@@ -40,6 +40,8 @@ struct PageAllocator {
 enum PageFlags : u64 {
     Present = 1,
     Writable = 2,
+    WriteThrough = 1ull << 3,
+    CacheDisable = 1ull << 4,
     NoExecute = 1ull << 63,
 };
 
@@ -52,7 +54,8 @@ inline constexpr u64 entry_large = 1ull << 7;
 inline constexpr u64 table_addr_mask = 0x000FFFFFFFFFF000ull;
 inline constexpr u64 large_addr_mask = 0x000FFFFFFFE00000ull;
 inline constexpr u64 phys_limit = 1ull << 52;
-inline constexpr u64 allowed_flags = Present | Writable | NoExecute;
+inline constexpr u64 allowed_flags =
+    Present | Writable | WriteThrough | CacheDisable | NoExecute;
 
 // Levels count down from the root: 3 is the PML4, 2 the PDPT, 1 the PD.
 inline constexpr unsigned level_pml4 = 3;
@@ -106,11 +109,37 @@ inline u64* find_pd_slot(const PageAllocator& allocator, u64 root, u64 virt) {
 // good and every later map_2m call is refused.
 class PageTables {
 public:
+    // A builder with no tables: ok() is false and every map_2m call is
+    // refused. It exists so a PageTables can be a member that is filled in
+    // later.
+    PageTables() = default;
+
     explicit PageTables(const PageAllocator& allocator) {
         allocator_.alloc_zeroed_page = allocator.alloc_zeroed_page;
         allocator_.phys_to_ptr = allocator.phys_to_ptr;
         allocator_.ctx = allocator.ctx;
         root_ = new_table();
+    }
+
+    // A builder that extends the tables already at `root`, such as the ones
+    // in CR3, without allocating a new root. The result is not ok() unless
+    // root is a non-zero, 4 KiB-aligned address below 2^52 that the
+    // allocator's phys_to_ptr resolves. The existing mappings are kept and
+    // count as occupied; only new table pages come from the allocator.
+    static PageTables adopt(const PageAllocator& allocator, u64 root) {
+        using namespace paging_detail;
+
+        PageTables tables;
+        tables.allocator_.alloc_zeroed_page = allocator.alloc_zeroed_page;
+        tables.allocator_.phys_to_ptr = allocator.phys_to_ptr;
+        tables.allocator_.ctx = allocator.ctx;
+        if (root == 0 || (root & (page_size - 1)) != 0 || root >= phys_limit ||
+            table_at(tables.allocator_, root) == nullptr) {
+            tables.failed_ = true;
+            return tables;
+        }
+        tables.root_ = root;
+        return tables;
     }
 
     bool ok() const { return root_ != 0 && !failed_; }
@@ -212,7 +241,7 @@ private:
         return &table[index_at(virt, level_pd)];
     }
 
-    PageAllocator allocator_;
+    PageAllocator allocator_{nullptr, nullptr, nullptr};
     u64 root_ = 0;
     bool failed_ = false;
 };

@@ -22,6 +22,7 @@
  */
 
 #include "check.hpp"
+#include "fake_pages.hpp"
 #include "paging.hpp"
 
 #include <cstdint>
@@ -36,37 +37,7 @@ constexpr u64 kMiB = 0x100000;
 constexpr u64 kHigherHalf = 0xFFFFFFFF80000000ull;
 constexpr u64 kDirectMap = 0xFFFF800000000000ull;
 
-constexpr usize kArenaPages = 128;
-
-// Hands out 4 KiB-aligned pages from a static arena. Host pointers stand in
-// for physical addresses, so phys_to_ptr is a plain cast.
-struct Arena {
-    alignas(4096) u8 memory[kArenaPages * 4096];
-    usize allocated = 0;
-    usize limit = kArenaPages;
-
-    void reset(usize new_limit = kArenaPages) {
-        allocated = 0;
-        limit = new_limit;
-    }
-
-    static u64 alloc(void* ctx) {
-        Arena* arena = static_cast<Arena*>(ctx);
-        if (arena->allocated == arena->limit) {
-            return 0;
-        }
-        u8* page = arena->memory + arena->allocated * 4096;
-        ++arena->allocated;
-        std::memset(page, 0, 4096);
-        return reinterpret_cast<std::uintptr_t>(page);
-    }
-
-    static u64* to_ptr(void*, u64 phys) {
-        return reinterpret_cast<u64*>(static_cast<std::uintptr_t>(phys));
-    }
-
-    PageAllocator allocator() { return PageAllocator{&Arena::alloc, &Arena::to_ptr, this}; }
-};
+using fake_pages::Arena;
 
 Arena arena;
 
@@ -369,6 +340,79 @@ void ranges_spanning_a_gigabyte_boundary_use_two_directories() {
     CHECK(!is_mapped(tables, 0x40000000 + 2 * k2M));
 }
 
+void adopt_extends_existing_root() {
+    arena.reset();
+    PageTables built(arena.allocator());
+    CHECK(built.map_2m(kHigherHalf, 0, 4 * kMiB, Present | Writable));
+    const usize pages_before = arena.allocated;
+
+    PageTables adopted = PageTables::adopt(arena.allocator(), built.root());
+    CHECK(adopted.ok());
+    CHECK_EQ(adopted.root(), built.root());
+    CHECK_EQ(arena.allocated, pages_before);  // adopting allocates nothing
+
+    // Same PD: no new table. Another half of the address space: new tables.
+    CHECK(adopted.map_2m(kHigherHalf + 4 * kMiB, 0x40000000, k2M, Present | Writable));
+    CHECK_EQ(arena.allocated, pages_before);
+    CHECK(adopted.map_2m(kDirectMap, 0x1000000, k2M, Present | Writable | NoExecute));
+    CHECK_EQ(arena.allocated, pages_before + 2);
+
+    // Old and new mappings are visible through either builder's root.
+    CHECK(translates_to(adopted, kHigherHalf + 0x1234, 0x1234));
+    CHECK(translates_to(adopted, kHigherHalf + 4 * kMiB + 0x10, 0x40000010));
+    CHECK(translates_to(adopted, kDirectMap + 0x20, 0x1000020));
+    CHECK(translates_to(built, kDirectMap + 0x20, 0x1000020));
+    CHECK(translates_to(built, kHigherHalf + 4 * kMiB + 0x10, 0x40000010));
+
+    // The existing mappings count as occupied.
+    CHECK(!adopted.map_2m(kHigherHalf, 8 * kMiB, k2M, Present));
+    CHECK(translates_to(adopted, kHigherHalf, 0));
+    CHECK(adopted.ok());
+}
+
+void adopt_rejects_zero_root() {
+    arena.reset();
+    PageTables built(arena.allocator());
+    CHECK(built.ok());
+
+    PageTables zero = PageTables::adopt(arena.allocator(), 0);
+    CHECK(!zero.ok());
+    CHECK_EQ(zero.root(), 0ull);
+    CHECK(!zero.map_2m(0, 0, k2M, Present));
+    CHECK(!is_mapped(zero, 0));
+
+    // Unaligned, beyond 52 bits, or not reachable through phys_to_ptr.
+    CHECK(!PageTables::adopt(arena.allocator(), built.root() + 8).ok());
+    CHECK(!PageTables::adopt(arena.allocator(), 1ull << 52).ok());
+    PageAllocator unreachable{&Arena::alloc, [](void*, u64) -> u64* { return nullptr; }, &arena};
+    CHECK(!PageTables::adopt(unreachable, built.root()).ok());
+    PageAllocator no_translation{&Arena::alloc, nullptr, &arena};
+    CHECK(!PageTables::adopt(no_translation, built.root()).ok());
+
+    // A rejected adopt allocates nothing and leaves the tables alone.
+    CHECK_EQ(arena.allocated, 1ull);
+    CHECK(built.ok());
+}
+
+void cache_flags_are_encoded() {
+    arena.reset();
+    PageTables tables(arena.allocator());
+    const u64 uncached = Present | Writable | WriteThrough | CacheDisable | NoExecute;
+    CHECK(tables.map_2m(0, 0, k2M, Present | Writable | WriteThrough));
+    CHECK(tables.map_2m(k2M, k2M, k2M, Present | CacheDisable));
+    CHECK(tables.map_2m(2 * k2M, 2 * k2M, k2M, uncached));
+    CHECK(tables.ok());
+
+    const u64* pd = raw_table(arena_page(2));
+    CHECK_EQ(pd[0], 0x8Bull);  // present, writable, bit 3, 2 MiB page
+    CHECK_EQ(pd[1], k2M | 0x91);  // present, bit 4, 2 MiB page
+    CHECK_EQ(pd[2], (1ull << 63) | (2 * k2M) | 0x9B);
+    CHECK_EQ(WriteThrough, 1ull << 3);
+    CHECK_EQ(CacheDisable, 1ull << 4);
+    // Other bits stay refused.
+    CHECK(!tables.map_2m(3 * k2M, 0, k2M, Present | (1ull << 5)));
+}
+
 }
 
 int main() {
@@ -390,5 +434,8 @@ int main() {
     rejects_a_misbehaving_allocator();
     shared_upper_tables_are_reused();
     ranges_spanning_a_gigabyte_boundary_use_two_directories();
+    adopt_extends_existing_root();
+    adopt_rejects_zero_root();
+    cache_flags_are_encoded();
     return check::finish("test_paging");
 }
