@@ -82,61 +82,61 @@ constexpr u32 kArgsAt = kLocksAt + Dos::kMaxLocks * fl_SIZEOF;
 constexpr u32 kStackAt = (kArgsAt + Dos::kMaxArgs + 2 + 7) & ~7u;
 constexpr u32 kBlockBytes = kStackAt + Dos::kStackBytes;
 
-// The messages Fault and PrintFault give.
+// The messages Fault and PrintFault give, in Hombre's own words.
 struct FaultText {
     u32 code;
     const char* text;
 };
 
 constexpr FaultText kFaults[] = {
-    {ERROR_NO_FREE_STORE, "not enough memory available"},
-    {ERROR_TASK_TABLE_FULL, "process table full"},
-    {ERROR_BAD_TEMPLATE, "bad template"},
-    {ERROR_BAD_NUMBER, "bad number"},
-    {ERROR_REQUIRED_ARG_MISSING, "required argument missing"},
-    {ERROR_KEY_NEEDS_ARG, "value after keyword missing"},
-    {ERROR_TOO_MANY_ARGS, "wrong number of arguments"},
-    {ERROR_UNMATCHED_QUOTES, "unmatched quotes"},
-    {ERROR_LINE_TOO_LONG, "argument line invalid or too long"},
-    {ERROR_FILE_NOT_OBJECT, "file is not executable"},
-    {ERROR_INVALID_RESIDENT_LIBRARY, "invalid resident library"},
-    {ERROR_NO_DEFAULT_DIR, "no default directory"},
-    {ERROR_OBJECT_IN_USE, "object is in use"},
-    {ERROR_OBJECT_EXISTS, "object already exists"},
-    {ERROR_DIR_NOT_FOUND, "directory not found"},
-    {ERROR_OBJECT_NOT_FOUND, "object not found"},
-    {ERROR_BAD_STREAM_NAME, "invalid window description"},
-    {ERROR_OBJECT_TOO_LARGE, "object too large"},
-    {ERROR_ACTION_NOT_KNOWN, "packet request type unknown"},
-    {ERROR_INVALID_COMPONENT_NAME, "object name invalid"},
-    {ERROR_INVALID_LOCK, "invalid object lock"},
-    {ERROR_OBJECT_WRONG_TYPE, "object is not of required type"},
-    {ERROR_DISK_NOT_VALIDATED, "disk not validated"},
-    {ERROR_DISK_WRITE_PROTECTED, "disk is write-protected"},
-    {ERROR_RENAME_ACROSS_DEVICES, "rename across devices attempted"},
-    {ERROR_DIRECTORY_NOT_EMPTY, "directory not empty"},
-    {ERROR_TOO_MANY_LEVELS, "too many levels"},
-    {ERROR_DEVICE_NOT_MOUNTED, "device (or volume) is not mounted"},
-    {ERROR_SEEK_ERROR, "seek failure"},
-    {ERROR_COMMENT_TOO_BIG, "comment is too long"},
-    {ERROR_DISK_FULL, "disk is full"},
-    {ERROR_DELETE_PROTECTED, "object is protected from deletion"},
-    {ERROR_WRITE_PROTECTED, "file is write protected"},
-    {ERROR_READ_PROTECTED, "file is read protected"},
-    {ERROR_NOT_A_DOS_DISK, "not a valid DOS disk"},
-    {ERROR_NO_DISK, "no disk in drive"},
-    {ERROR_NO_MORE_ENTRIES, "no more entries in directory"},
-    {ERROR_IS_SOFT_LINK, "object is soft link"},
-    {ERROR_OBJECT_LINKED, "object is linked"},
-    {ERROR_BAD_HUNK, "bad loadfile hunk"},
-    {ERROR_NOT_IMPLEMENTED, "function not implemented"},
-    {ERROR_RECORD_NOT_LOCKED, "record not locked"},
-    {ERROR_LOCK_COLLISION, "lock collision"},
-    {ERROR_LOCK_TIMEOUT, "lock timeout"},
-    {ERROR_UNLOCK_ERROR, "unlock error"},
-    {ERROR_BUFFER_OVERFLOW, "buffer overflow"},
-    {ERROR_BREAK, "***Break"},
-    {ERROR_NOT_EXECUTABLE, "file not executable"},
+    {ERROR_NO_FREE_STORE, "out of memory"},
+    {ERROR_TASK_TABLE_FULL, "no room for another process"},
+    {ERROR_BAD_TEMPLATE, "malformed template"},
+    {ERROR_BAD_NUMBER, "not a valid number"},
+    {ERROR_REQUIRED_ARG_MISSING, "mandatory argument not given"},
+    {ERROR_KEY_NEEDS_ARG, "keyword given without its value"},
+    {ERROR_TOO_MANY_ARGS, "too many arguments"},
+    {ERROR_UNMATCHED_QUOTES, "quote left open"},
+    {ERROR_LINE_TOO_LONG, "command line too long or malformed"},
+    {ERROR_FILE_NOT_OBJECT, "not a loadable program"},
+    {ERROR_INVALID_RESIDENT_LIBRARY, "resident library is unusable"},
+    {ERROR_NO_DEFAULT_DIR, "no current directory"},
+    {ERROR_OBJECT_IN_USE, "busy, in use elsewhere"},
+    {ERROR_OBJECT_EXISTS, "name already taken"},
+    {ERROR_DIR_NOT_FOUND, "no such directory"},
+    {ERROR_OBJECT_NOT_FOUND, "no such file or directory"},
+    {ERROR_BAD_STREAM_NAME, "bad console window specification"},
+    {ERROR_OBJECT_TOO_LARGE, "exceeds the size limit"},
+    {ERROR_ACTION_NOT_KNOWN, "operation not supported here"},
+    {ERROR_INVALID_COMPONENT_NAME, "bad name in path"},
+    {ERROR_INVALID_LOCK, "not a valid lock or handle"},
+    {ERROR_OBJECT_WRONG_TYPE, "file or directory of the wrong kind"},
+    {ERROR_DISK_NOT_VALIDATED, "volume needs validating"},
+    {ERROR_DISK_WRITE_PROTECTED, "volume is read-only"},
+    {ERROR_RENAME_ACROSS_DEVICES, "cannot rename onto another volume"},
+    {ERROR_DIRECTORY_NOT_EMPTY, "directory still has entries"},
+    {ERROR_TOO_MANY_LEVELS, "path nests too deep"},
+    {ERROR_DEVICE_NOT_MOUNTED, "no such device or volume"},
+    {ERROR_SEEK_ERROR, "position outside the file"},
+    {ERROR_COMMENT_TOO_BIG, "comment exceeds its limit"},
+    {ERROR_DISK_FULL, "no space left on the volume"},
+    {ERROR_DELETE_PROTECTED, "deleting not allowed"},
+    {ERROR_WRITE_PROTECTED, "writing not allowed"},
+    {ERROR_READ_PROTECTED, "reading not allowed"},
+    {ERROR_NOT_A_DOS_DISK, "volume format not recognised"},
+    {ERROR_NO_DISK, "drive is empty"},
+    {ERROR_NO_MORE_ENTRIES, "end of the directory"},
+    {ERROR_IS_SOFT_LINK, "name is a soft link"},
+    {ERROR_OBJECT_LINKED, "name has hard links"},
+    {ERROR_BAD_HUNK, "program file is corrupt"},
+    {ERROR_NOT_IMPLEMENTED, "operation not available"},
+    {ERROR_RECORD_NOT_LOCKED, "record was not locked"},
+    {ERROR_LOCK_COLLISION, "record locked by another"},
+    {ERROR_LOCK_TIMEOUT, "gave up waiting for a record lock"},
+    {ERROR_UNLOCK_ERROR, "record unlock failed"},
+    {ERROR_BUFFER_OVERFLOW, "data does not fit the buffer"},
+    {ERROR_BREAK, "interrupted"},
+    {ERROR_NOT_EXECUTABLE, "not marked executable"},
 };
 
 // Ends the run unless it has ended already.
@@ -645,6 +645,13 @@ struct DosOps {
         return -1;
     }
 
+    // Fails with ERROR_NO_FREE_STORE because a table of dos is full.
+    static void table_full(Dos& d, Bus& b, const char* what, u32 entries) {
+        LogLine().text("dos: ").text(what).text(" table full, ").dec(entries)
+            .text(" entries in use").send();
+        fail(d, b, ERROR_NO_FREE_STORE, 0);
+    }
+
     static void log_bad_handle(const char* what, u32 bptr) {
         LogLine().text("dos: ").text(what).text(" a bad file handle ").hex(bptr).send();
     }
@@ -856,7 +863,7 @@ struct DosOps {
         const i64 slot = free_handle(d);
         if (is_console(name)) {
             if (slot < 0) {
-                fail(d, b, ERROR_NO_FREE_STORE, 0);
+                table_full(d, b, "file handle", Dos::kMaxFiles);
                 return;
             }
             d.files_[slot] = Dos::FileSlot{Dos::Stream::Console, DirEntry{}, 0};
@@ -886,7 +893,7 @@ struct DosOps {
             return;
         }
         if (slot < 0) {
-            fail(d, b, ERROR_NO_FREE_STORE, 0);
+            table_full(d, b, "file handle", Dos::kMaxFiles);
             return;
         }
         d.files_[slot] = Dos::FileSlot{Dos::Stream::File, entry, 0};
@@ -1587,7 +1594,7 @@ struct DosOps {
         }
         const i64 slot = free_lock(d);
         if (slot < 0) {
-            fail(d, b, ERROR_NO_FREE_STORE, 0);
+            table_full(d, b, "lock", Dos::kMaxLocks);
             return;
         }
         Dos::LockSlot& l = d.lock_slots_[slot];
@@ -1632,7 +1639,7 @@ struct DosOps {
         }
         const i64 slot = free_lock(d);
         if (slot < 0) {
-            fail(d, b, ERROR_NO_FREE_STORE, 0);
+            table_full(d, b, "lock", Dos::kMaxLocks);
             return;
         }
         d.lock_slots_[slot] = d.lock_slots_[from];
@@ -2028,7 +2035,7 @@ struct DosOps {
 
         const i64 table = free_arg_block(d);
         if (table < 0) {
-            fail(d, b, ERROR_NO_FREE_STORE, 0);
+            table_full(d, b, "ReadArgs result", Dos::kMaxArgBlocks);
             return;
         }
         const bool make_rdargs = rdargs == 0;

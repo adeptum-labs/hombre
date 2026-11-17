@@ -1023,10 +1023,10 @@ void io_err_and_faults() {
 
     // Fault: header, ": ", message, cut to the buffer.
     r.str(kData, "Copy");
-    CHECK_EQ(r.call(dos_lvo::Fault, 205, kData, kData + 0x100, 80), 22u);
-    CHECK(r.read_str(kData + 0x100) == "Copy: object not found");
-    CHECK_EQ(r.call(dos_lvo::Fault, 118, 0, kData + 0x100, 80), 25u);
-    CHECK(r.read_str(kData + 0x100) == "wrong number of arguments");
+    CHECK_EQ(r.call(dos_lvo::Fault, 205, kData, kData + 0x100, 80), 31u);
+    CHECK(r.read_str(kData + 0x100) == "Copy: no such file or directory");
+    CHECK_EQ(r.call(dos_lvo::Fault, 118, 0, kData + 0x100, 80), 18u);
+    CHECK(r.read_str(kData + 0x100) == "too many arguments");
     CHECK_EQ(r.call(dos_lvo::Fault, 205, kData, kData + 0x100, 7), 6u);
     CHECK(r.read_str(kData + 0x100) == "Copy: ");
     r.put8(kData + 0x100, 0xEE);
@@ -1045,11 +1045,11 @@ void io_err_and_faults() {
 
     // PrintFault prints to Output() and leaves the code in IoErr.
     CHECK_EQ(r.call(dos_lvo::PrintFault, 214, kData), DOSTRUE);
-    CHECK(g_console == "Copy: disk is write-protected\n");
+    CHECK(g_console == "Copy: volume is read-only\n");
     CHECK_EQ(r.io_err(), 214u);
     g_console.clear();
     CHECK_EQ(r.call(dos_lvo::PrintFault, 116, 0), DOSTRUE);
-    CHECK(g_console == "required argument missing\n");
+    CHECK(g_console == "mandatory argument not given\n");
     g_console.clear();
     CHECK_EQ(r.call(dos_lvo::PrintFault, 0, kData), DOSTRUE);
     CHECK(g_console.empty());
@@ -1457,8 +1457,16 @@ void file_table_is_bounded() {
         CHECK(fh != 0);
         handles.push_back(fh);
     }
+    g_lines.clear();
     CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
     CHECK_EQ(r.io_err(), ERROR_NO_FREE_STORE);
+    CHECK(logged("dos: file handle table full, 16 entries in use"));
+    // The console takes a slot too.
+    g_lines.clear();
+    r.str(kData + 0x200, "*");
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x200, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_NO_FREE_STORE);
+    CHECK(logged("dos: file handle table full, 16 entries in use"));
     // Each handle reads on its own.
     CHECK_EQ(r.call(dos_lvo::Read, handles[0], kData + 0x100, 10), 10u);
     CHECK_EQ(r.call(dos_lvo::Read, handles[1], kData + 0x100, 1), 1u);
@@ -1584,11 +1592,19 @@ void locks_and_the_current_directory() {
     r.call(dos_lvo::UnLock, root);
     r.call(dos_lvo::UnLock, dup);
     r.str(kData, "C:");
+    u32 held = 0;
     for (u32 i = 0; i < Dos::kMaxLocks; ++i) {
-        CHECK(r.call(dos_lvo::Lock, kData, SHARED_LOCK) != 0);
+        held = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(held != 0);
     }
+    g_lines.clear();
     CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
     CHECK_EQ(r.io_err(), ERROR_NO_FREE_STORE);
+    CHECK(logged("dos: lock table full, 32 entries in use"));
+    g_lines.clear();
+    CHECK_EQ(r.call(dos_lvo::DupLock, held), 0u);
+    CHECK_EQ(r.io_err(), ERROR_NO_FREE_STORE);
+    CHECK(logged("dos: lock table full, 32 entries in use"));
 }
 
 struct Fib {
@@ -2216,9 +2232,11 @@ void free_args_returns_the_memory() {
     for (u32 i = 0; i < Dos::kMaxArgBlocks; ++i) {
         CHECK(read_args(r, "X", "a\n").rdargs != 0);
     }
+    g_lines.clear();
     p = read_args(r, "X", "a\n");
     CHECK_EQ(p.rdargs, 0u);
     CHECK_EQ(p.error, ERROR_NO_FREE_STORE);
+    CHECK(logged("dos: ReadArgs result table full, 16 entries in use"));
     r.call(dos_lvo::FreeArgs, kData + 0x800);
     CHECK(r.chunks() == before);
 }
