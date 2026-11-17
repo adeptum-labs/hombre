@@ -198,6 +198,15 @@ const Step kSteps[] = {
     {"setg sil", [](Emitter& e) { e.setcc(Cc::G, RSI); }},
     {"movabs rax,0x1122334455667788", [](Emitter& e) { e.call_abs(0x1122334455667788ull); },
      "call rax"},
+    {"call rcx", [](Emitter& e) { e.call_r(RCX); }},
+    {"call r11", [](Emitter& e) { e.call_r(R11); }},
+    {"imul eax,ecx", [](Emitter& e) { e.imul_rr(RAX, RCX, 32); }},
+    {"imul r11,r8", [](Emitter& e) { e.imul_rr(R11, R8, 64); }},
+    {"imul esi,r13d", [](Emitter& e) { e.imul_rr(RSI, R13, 32); }},
+    {"pushf", [](Emitter& e) { e.pushfq(); }},
+    {"call 0x0", [](Emitter& e) { e.call_to(0); }},
+    {"jmp 0x0", [](Emitter& e) { e.jmp_to(0); }},
+    {"jne 0x0", [](Emitter& e) { e.jcc_to(Cc::NE, 0); }},
     {"push rax", [](Emitter& e) { e.push(RAX); }},
     {"push r12", [](Emitter& e) { e.push(R12); }},
     {"pop r15", [](Emitter& e) { e.pop(R15); }},
@@ -248,6 +257,23 @@ void relative_fields() {
 
     Emitter j(bytes, sizeof bytes);
     CHECK_EQ(j.jmp_rel32(), usize(1));
+
+    // Continuing at offset 8, a call to offset 20 and a jump back to 0.
+    u8 code[32] = {};
+    Emitter k(code, sizeof code, 8);
+    CHECK(k.ok());
+    CHECK_EQ(k.size(), usize(8));
+    k.call_to(20);
+    k.jmp_to(0);
+    CHECK_EQ(k.size(), usize(18));
+    const u8 calls[] = {0xE8, 0x07, 0x00, 0x00, 0x00, 0xE9, 0xEE, 0xFF, 0xFF, 0xFF};
+    CHECK(same_bytes(code + 8, calls, sizeof calls));
+    k.jcc_to(Cc::B, 30);
+    const u8 jb[] = {0x0F, 0x82, 0x06, 0x00, 0x00, 0x00};
+    CHECK(same_bytes(code + 18, jb, sizeof jb));
+
+    Emitter past(code, 4, 8);
+    CHECK(!past.ok());
 }
 
 void overflow_is_sticky() {

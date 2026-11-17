@@ -41,6 +41,11 @@ class Emitter {
 public:
     Emitter(u8* out, usize capacity) : out_(out), capacity_(capacity) {}
 
+    // Continues in a buffer that already holds start bytes, so offsets and
+    // the targets of jmp_to, jcc_to and call_to count from out.
+    Emitter(u8* out, usize capacity, usize start)
+        : out_(out), capacity_(capacity), size_(start), ok_(start <= capacity) {}
+
     bool ok() const { return ok_; }
     usize size() const { return size_; }
     u8* cursor() const { return out_ + size_; }
@@ -174,11 +179,46 @@ public:
         immediate_at(at, static_cast<u32>(size_ - (at + 4)), 4);
     }
 
+    // Jumps and calls to an offset already known in this buffer, backwards
+    // or forwards.
+    void jcc_to(Cc cc, usize target) {
+        byte(0x0F);
+        byte(static_cast<u8>(0x80 + static_cast<unsigned>(cc)));
+        relative_to(target);
+    }
+
+    void jmp_to(usize target) {
+        byte(0xE9);
+        relative_to(target);
+    }
+
+    void call_to(usize target) {
+        byte(0xE8);
+        relative_to(target);
+    }
+
     void call_abs(u64 target) {
         mov_ri(RAX, target, 64);
         byte(0xFF);
         byte(0xD0);
     }
+
+    void call_r(Reg r) {
+        if (r >= 8) {
+            byte(0x41);
+        }
+        byte(0xFF);
+        modrm_reg(2, r);
+    }
+
+    void imul_rr(Reg d, Reg s, unsigned bits) {
+        prefix_rr(bits, d, s);
+        byte(0x0F);
+        byte(0xAF);
+        modrm_reg(d, s);
+    }
+
+    void pushfq() { byte(0x9C); }
 
     void push(Reg r) {
         if (r >= 8) {
@@ -211,6 +251,12 @@ private:
         for (unsigned i = 0; i < count; ++i) {
             byte(static_cast<u8>(value >> (8 * i)));
         }
+    }
+
+    // The rel32 field that ends the instruction, counted from its end.
+    void relative_to(usize target) {
+        const usize end = size_ + 4;
+        immediate(static_cast<u32>(static_cast<u64>(target) - static_cast<u64>(end)), 4);
     }
 
     void immediate_at(usize at, u32 value, unsigned count) {
