@@ -394,6 +394,56 @@ void adopt_rejects_zero_root() {
     CHECK(built.ok());
 }
 
+void protect_changes_flags_of_mapped_pages() {
+    arena.reset();
+    PageTables tables(arena.allocator());
+    CHECK(tables.map_2m(0, 0, 4 * k2M, Present | Writable));
+    const usize pages_before = arena.allocated;
+
+    // Pages 1 and 2 become no-execute and read-only; 0 and 3 stay.
+    CHECK(tables.protect_2m(k2M, 2 * k2M, NoExecute, Writable));
+    const u64* pd = raw_table(arena_page(2));
+    CHECK_EQ(pd[0], 0x83ull);
+    CHECK_EQ(pd[1], (1ull << 63) | k2M | 0x81);
+    CHECK_EQ(pd[2], (1ull << 63) | (2 * k2M) | 0x81);
+    CHECK_EQ(pd[3], (3 * k2M) | 0x83);
+    CHECK(translates_to(tables, k2M + 0x10, k2M + 0x10));
+    CHECK_EQ(arena.allocated, pages_before);  // no table is allocated
+
+    // And back again.
+    CHECK(tables.protect_2m(k2M, k2M, Writable, NoExecute));
+    CHECK_EQ(pd[1], k2M | 0x83);
+    CHECK(tables.ok());
+}
+
+void protect_is_refused_without_touching_the_tables() {
+    arena.reset();
+    PageTables tables(arena.allocator());
+    CHECK(tables.map_2m(0, 0, 2 * k2M, Present | Writable));
+    const u64* pd = raw_table(arena_page(2));
+
+    // The last page of the range is not mapped: nothing changes.
+    CHECK(!tables.protect_2m(0, 3 * k2M, NoExecute, 0));
+    CHECK_EQ(pd[0], 0x83ull);
+    CHECK_EQ(pd[1], k2M | 0x83);
+    // No tables at all for the address.
+    CHECK(!tables.protect_2m(kHigherHalf, k2M, NoExecute, 0));
+    // Unaligned or empty ranges, Present, unknown bits.
+    CHECK(!tables.protect_2m(0x1000, k2M, NoExecute, 0));
+    CHECK(!tables.protect_2m(0, k2M + 0x1000, NoExecute, 0));
+    CHECK(!tables.protect_2m(0, 0, NoExecute, 0));
+    CHECK(!tables.protect_2m(0, k2M, 0, Present));
+    CHECK(!tables.protect_2m(0, k2M, Present, 0));
+    CHECK(!tables.protect_2m(0, k2M, 1ull << 5, 0));
+    CHECK(!tables.protect_2m(0, k2M, 0, 1ull << 7));
+    CHECK(!tables.protect_2m(~(k2M - 1), 2 * k2M, NoExecute, 0));  // wraps
+    CHECK_EQ(pd[0], 0x83ull);
+    CHECK_EQ(pd[1], k2M | 0x83);
+    // A builder without tables refuses too.
+    PageTables none;
+    CHECK(!none.protect_2m(0, k2M, NoExecute, 0));
+}
+
 void cache_flags_are_encoded() {
     arena.reset();
     PageTables tables(arena.allocator());
@@ -437,5 +487,7 @@ int main() {
     adopt_extends_existing_root();
     adopt_rejects_zero_root();
     cache_flags_are_encoded();
+    protect_changes_flags_of_mapped_pages();
+    protect_is_refused_without_touching_the_tables();
     return check::finish("test_paging");
 }

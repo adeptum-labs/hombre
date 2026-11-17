@@ -198,6 +198,38 @@ public:
         return true;
     }
 
+    // Sets the flags in `set` and clears those in `clear` on every 2 MiB
+    // page of [virt, virt + bytes). virt and bytes must be 2 MiB aligned,
+    // bytes non-zero, and Present is not one of the flags. Unless every page
+    // of the range is mapped as a present 2 MiB page, the call is refused
+    // before any entry is changed. No table is allocated. The caller flushes
+    // the old translations from the TLB.
+    bool protect_2m(u64 virt, u64 bytes, u64 set, u64 clear) {
+        using namespace paging_detail;
+
+        if (!ok() || bytes == 0 || ((virt | bytes) & large_page_mask) != 0) {
+            return false;
+        }
+        const u64 changeable = allowed_flags & ~u64{Present};
+        if (((set | clear) & ~changeable) != 0) {
+            return false;
+        }
+        if (bytes - 1 > ~virt) {
+            return false;
+        }
+        for (u64 offset = 0; offset < bytes; offset += large_page_size) {
+            const u64* slot = find_pd_slot(allocator_, root_, virt + offset);
+            if (slot == nullptr || (*slot & (Present | entry_large)) != (Present | entry_large)) {
+                return false;
+            }
+        }
+        for (u64 offset = 0; offset < bytes; offset += large_page_size) {
+            u64* slot = find_pd_slot(allocator_, root_, virt + offset);
+            *slot = (*slot & ~clear) | set;
+        }
+        return true;
+    }
+
 private:
     // Returns the physical address of a fresh table, or 0 after marking the
     // builder as failed.

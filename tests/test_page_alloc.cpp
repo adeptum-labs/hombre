@@ -174,6 +174,60 @@ void alloc_fills_runs_exactly() {
     CHECK_EQ(alloc.free_page_count(), 0u);
 }
 
+void aligned_alloc_takes_the_lowest_aligned_run() {
+    Ram ram;
+    ram.fill(0xAA);
+    PhysAllocator alloc;
+    CHECK(init_default(alloc, ram));
+
+    // 1 MiB alignment: 0x100000 holds the bitmap and the run at 0x200000
+    // ends at the Reserved page 0x2FF000, so 256 pages land at 0x300000,
+    // where alloc_pages would have taken 0x190000.
+    CHECK_EQ(alloc.alloc_pages_aligned(256, 256), 0x300000u);
+    for (u64 i = 0; i < 256 * kPage; ++i) {
+        CHECK_EQ(ram.at(0x300000)[i], 0u);
+    }
+    CHECK_EQ(alloc.free_page_count(), kFreeAfterInit - 256);
+    CHECK_EQ(alloc.alloc_pages_aligned(256, 256), 0u);
+    // A shorter run fits at 0x200000.
+    CHECK_EQ(alloc.alloc_pages_aligned(16, 256), 0x200000u);
+    // 256 KiB alignment: the first candidate with room is 0x140000.
+    CHECK_EQ(alloc.alloc_pages_aligned(64, 64), 0x140000u);
+    CHECK_EQ(alloc.free_page_count(), kFreeAfterInit - 256 - 16 - 64);
+
+    // The pages free like any others and come back zeroed.
+    ram.at(0x140000)[5] = 0x55;
+    alloc.free_pages(0x140000, 64);
+    CHECK_EQ(alloc.alloc_pages_aligned(64, 64), 0x140000u);
+    CHECK_EQ(ram.at(0x140000)[5], 0u);
+}
+
+void aligned_alloc_with_alignment_one_is_alloc_pages() {
+    Ram ram;
+    PhysAllocator alloc;
+    CHECK(init_default(alloc, ram));
+    CHECK_EQ(alloc.alloc_pages_aligned(1, 1), 0x101000u);
+    CHECK_EQ(alloc.alloc_pages_aligned(367, 1), 0x190000u);
+}
+
+void aligned_alloc_rejects_bad_arguments() {
+    Ram ram;
+    PhysAllocator alloc;
+    CHECK_EQ(alloc.alloc_pages_aligned(1, 1), 0u);  // before init
+    CHECK(init_default(alloc, ram));
+
+    CHECK_EQ(alloc.alloc_pages_aligned(0, 1), 0u);
+    CHECK_EQ(alloc.alloc_pages_aligned(1, 0), 0u);
+    CHECK_EQ(alloc.alloc_pages_aligned(1, 3), 0u);    // not a power of two
+    CHECK_EQ(alloc.alloc_pages_aligned(1, 768), 0u);  // nor this
+    CHECK_EQ(alloc.alloc_pages_aligned(~0ull, 1), 0u);
+    CHECK_EQ(alloc.alloc_pages_aligned(1ull << 52, 1), 0u);
+    // Alignments past the end of memory, up to the largest one.
+    CHECK_EQ(alloc.alloc_pages_aligned(1, 2048), 0u);
+    CHECK_EQ(alloc.alloc_pages_aligned(1, 1ull << 63), 0u);
+    CHECK_EQ(alloc.free_page_count(), kFreeAfterInit);
+}
+
 void alloc_never_returns_below_1mib_or_in_reserved() {
     Ram ram;
     PhysAllocator alloc;
@@ -454,6 +508,9 @@ int main() {
     alloc_is_zeroed();
     alloc_contiguous_across_free_holes();
     alloc_fills_runs_exactly();
+    aligned_alloc_takes_the_lowest_aligned_run();
+    aligned_alloc_with_alignment_one_is_alloc_pages();
+    aligned_alloc_rejects_bad_arguments();
     alloc_never_returns_below_1mib_or_in_reserved();
     free_then_realloc_same_page();
     double_free_ignored();

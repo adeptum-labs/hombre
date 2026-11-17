@@ -150,15 +150,33 @@ public:
             if (test_bit(used_, page)) {
                 run = 0;
             } else if (++run == count) {
-                const u64 first = page + 1 - count;
-                for (u64 p = first; p <= page; ++p) {
-                    set_bit(used_, p);
-                    __builtin_memset(to_ptr_(ctx_, p << page_shift), 0, page_size);
-                }
-                free_pages_ -= count;
-                return first << page_shift;
+                return claim(page + 1 - count, count);
             }
             ++page;
+        }
+        return 0;
+    }
+
+    // Like alloc_pages, but the first page number is a multiple of
+    // align_pages, which must be a power of two: 512 gives a run that
+    // starts on a 2 MiB boundary. Takes the lowest such run that fits.
+    // Returns 0 when count is 0, the alignment is not a power of two or no
+    // aligned free run is long enough.
+    u64 alloc_pages_aligned(u64 count, u64 align_pages) {
+        if (count == 0 || count > free_pages_ || align_pages == 0 ||
+            (align_pages & (align_pages - 1)) != 0) {
+            return 0;
+        }
+        // first < total_pages_ <= 2^52, so the next candidate cannot wrap.
+        for (u64 first = 0; first < total_pages_ && count <= total_pages_ - first;) {
+            u64 page = first;
+            while (page < first + count && !test_bit(used_, page)) {
+                ++page;
+            }
+            if (page == first + count) {
+                return claim(first, count);
+            }
+            first = (page + align_pages) & ~(align_pages - 1);
         }
         return 0;
     }
@@ -261,6 +279,17 @@ private:
             }
         }
         return next;
+    }
+
+    // Marks the free pages [first, first + count) used, zeroes them and
+    // returns the address of the first.
+    u64 claim(u64 first, u64 count) {
+        for (u64 p = first; p < first + count; ++p) {
+            set_bit(used_, p);
+            __builtin_memset(to_ptr_(ctx_, p << page_shift), 0, page_size);
+        }
+        free_pages_ -= count;
+        return first << page_shift;
     }
 
     static bool test_bit(const u8* bits, u64 index) { return (bits[index >> 3] >> (index & 7)) & 1; }
