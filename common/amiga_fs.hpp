@@ -481,10 +481,22 @@ inline FsError next_pointer_block(const AdfVolume& v, PointerBlocks& w) {
 // Reads up to `capacity` bytes of a file from `offset`. `read` is the number
 // of bytes stored, less than `capacity` only at the end of the file. The
 // entry is looked at again, so a stale or damaged one is an error.
+//
+// An OFS data block must say it is a data block, or the read fails with
+// BadBlock. Its checksum, its header key, its sequence number and its data
+// size (at most 488) are only counted: real disks carry blocks that fail
+// each of the first three on their own (a patched block, a file made of
+// another file's tail, a copy that kept an old key) and still read right.
+// `inconsistent`, when given, receives the number of blocks read that failed
+// any of the four, so a caller can warn or refuse.
 inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offset, u8* out,
-                        u32 capacity, u32& read) {
+                        u32 capacity, u32& read, u32* inconsistent = nullptr) {
     using namespace amiga_fs_detail;
     read = 0;
+    u32 suspect = 0;
+    if (inconsistent != nullptr) {
+        *inconsistent = 0;
+    }
     FsError error = FsError::Ok;
     const u8* header = load_header(volume, file.header_block, error);
     if (header == nullptr) {
@@ -515,6 +527,7 @@ inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offse
     }
     u32 slot = first_block % hash_slots;
     u32 skip_bytes = offset % payload;
+    u32 index = first_block;  // the block's place in the file, from 0
     u32 done = 0;
     while (done < want) {
         if (slot == hash_slots) {
@@ -528,8 +541,19 @@ inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offse
             return FsError::BadBlock;  // the size claims more data than the pointers cover
         }
         const u8* data = block_at(volume, long_at(blocks.table, l_last_pointer - slot));
-        if (data == nullptr || (!volume.ffs && long_at(data, l_type) != t_data)) {
+        if (data == nullptr) {
             return FsError::BadBlock;
+        }
+        if (!volume.ffs) {
+            // An OFS data block names its file, its place in it and how
+            // much of it is data.
+            if (long_at(data, l_type) != t_data) {
+                return FsError::BadBlock;
+            }
+            if (!block_sums_to_zero(data) || long_at(data, l_own) != file.header_block ||
+                long_at(data, 2) != index + 1 || long_at(data, 3) > payload) {
+                ++suspect;
+            }
         }
         u32 chunk = payload - skip_bytes;
         if (want - done < chunk) {
@@ -539,8 +563,12 @@ inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offse
         done += chunk;
         skip_bytes = 0;
         ++slot;
+        ++index;
     }
     read = done;
+    if (inconsistent != nullptr) {
+        *inconsistent = suspect;
+    }
     return FsError::Ok;
 }
 

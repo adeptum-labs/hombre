@@ -188,16 +188,21 @@ int cat(const char* image_path, const char* path) {
     if (error == FsError::Ok && file.is_dir) {
         error = FsError::NotFile;
     }
-    u8 chunk[65536];
+    // A multiple of both block payloads, so no block is read twice.
+    constexpr u32 kChunk = 488u * 512u;
+    std::vector<u8> chunk(kChunk);
     u32 offset = 0;
+    u32 inconsistent = 0;
     while (error == FsError::Ok && offset < file.size) {
         u32 got = 0;
-        error = adf_read(volume, file, offset, chunk, sizeof(chunk), got);
+        u32 suspect = 0;
+        error = adf_read(volume, file, offset, chunk.data(), kChunk, got, &suspect);
+        inconsistent += suspect;
         if (error == FsError::Ok && got == 0) {
             error = FsError::BadBlock;
         }
         if (error == FsError::Ok) {
-            if (std::fwrite(chunk, 1, got, stdout) != got) {
+            if (std::fwrite(chunk.data(), 1, got, stdout) != got) {
                 std::fprintf(stderr, "write error\n");
                 return 1;
             }
@@ -207,6 +212,10 @@ int cat(const char* image_path, const char* path) {
     if (error != FsError::Ok) {
         std::fprintf(stderr, "%s: %s: %s\n", image_path, path, fs_error_name(error));
         return 1;
+    }
+    if (inconsistent != 0) {
+        std::fprintf(stderr, "%s: %s: warning: %u data blocks fail their checksum, key or sequence\n",
+                     image_path, path, inconsistent);
     }
     return std::fflush(stdout) == 0 ? 0 : 1;
 }

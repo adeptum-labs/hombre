@@ -23,18 +23,29 @@
 # Unpacks every DMS archive below a directory with both xdms and adftool and
 # compares the two images byte for byte. Then, for an image unadf can mount,
 # compares what adftool's file system reader says with unadf: the volume name
-# and file system type, the names in the root directory, and
-# S/Startup-Sequence when the disk has one. Prints OK or DIFF (with the
+# and file system type, the names in the root directory, and the contents of
+# S/Startup-Sequence (when the disk has one) and of its largest file. Needs
+# xdms and unadf on the path. Prints OK or DIFF (with the
 # reason) per archive and exits non-zero if any archive differs.
 #
 #   tools/dms_compare.sh <dir>
 
 set -u
+set -o pipefail
 
 if [ $# -ne 1 ] || [ ! -d "$1" ]; then
     echo "usage: $0 <directory with .dms files>" >&2
     exit 2
 fi
+
+# The comparison is only worth anything with both reference tools, so a
+# missing one stops the run instead of skipping the check.
+for tool in xdms unadf; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "$0: $tool is missing; it is the reference for this comparison" >&2
+        exit 2
+    fi
+done
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 adftool="$root/build/tools/adftool"
@@ -90,21 +101,44 @@ compare_fs() {
         fs_reason="adftool ls: $(tr '\n' ' ' <"$log")"
         return
     fi
-    if ! unadf_names "$theirs" | cmp -s - "$names"; then
+    unadf_names "$theirs" >"$tmp/unadf.names"
+    if [ ! -s "$names" ] || [ ! -s "$tmp/unadf.names" ]; then
+        fs_reason="no root directory names to compare"
+        return
+    fi
+    if ! cmp -s "$tmp/unadf.names" "$names"; then
         fs_reason="root directory names differ from unadf"
         return
     fi
 
-    # Only a disk that has the file, according to unadf, is asked for it.
-    if unadf -r -l "$reference" 2>/dev/null >"$tree" && grep -q '  S/Startup-Sequence$' "$tree"; then
-        if ! unadf -p "$reference" S/Startup-Sequence 2>/dev/null >"$tmp/startup.unadf"; then
-            fs_note="startup sequence not compared, unadf failed to extract it"
-        elif ! "$adftool" cat "$file" S/Startup-Sequence >"$tmp/startup.ours" 2>"$log"; then
-            fs_reason="adftool cat: $(tr '\n' ' ' <"$log")"
-        elif ! cmp -s "$tmp/startup.unadf" "$tmp/startup.ours"; then
-            fs_reason="S/Startup-Sequence differs from unadf"
-        fi
+    # Whole files, read through the same paths as the kernel will: the one
+    # named S/Startup-Sequence when unadf lists it, and the largest file on
+    # the disk, which on a full disk runs through extension blocks. Only
+    # what unadf lists is asked for.
+    if ! unadf -r -l "$reference" 2>/dev/null >"$tree"; then
+        fs_note="files not compared, unadf cannot list the tree"
+        return
     fi
+    local largest=
+    largest=$(LC_ALL=C sed -n 's|^ *\([0-9][0-9]*\) \+[0-9]\{4\}/[0-9][0-9]/[0-9][0-9] \+[0-9]\{1,2\}:[0-9][0-9]:[0-9][0-9]  |\1 |p' "$tree" |
+              LC_ALL=C sort -n -r | head -n 1)
+    largest=${largest#* }
+    local path
+    for path in S/Startup-Sequence "$largest"; do
+        [ -n "$path" ] || continue
+        if [ "$path" = S/Startup-Sequence ] && ! grep -q '  S/Startup-Sequence$' "$tree"; then
+            continue
+        fi
+        if ! unadf -p "$reference" "$path" 2>/dev/null >"$tmp/file.unadf"; then
+            fs_note="$path not compared, unadf failed to extract it"
+        elif ! "$adftool" cat "$file" "$path" >"$tmp/file.ours" 2>"$log"; then
+            fs_reason="adftool cat $path: $(tr '\n' ' ' <"$log")"
+            return
+        elif ! cmp -s "$tmp/file.unadf" "$tmp/file.ours"; then
+            fs_reason="$path differs from unadf"
+            return
+        fi
+    done
 }
 
 total=0
@@ -136,6 +170,6 @@ while IFS= read -r -d '' file; do
 done < <(find "$1" -type f -iname '*.dms' -print0 | sort -z)
 
 rm -f "$reference" "$ours" "$log" "$tmp"/unadf.list "$tmp"/unadf.tree "$tmp"/names \
-    "$tmp"/startup.unadf "$tmp"/startup.ours
+    "$tmp"/unadf.names "$tmp"/file.unadf "$tmp"/file.ours
 echo "$total archives, $differ differ"
 [ "$total" -gt 0 ] && [ "$differ" -eq 0 ]

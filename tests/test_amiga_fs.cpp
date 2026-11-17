@@ -639,19 +639,115 @@ void bad_block_pointers() {
         DirEntry e{};
         CHECK_EQ(adf_find(v, "f", e), FsError::BadBlock);
     }
-    // An OFS data block that is not a data block.
-    {
-        const auto ofs = build_adf("Work", false, {{"f", pattern(2000, 1)}});
-        AdfVolume ov = mount_ok(ofs);
-        DirEntry e{};
-        CHECK_EQ(adf_find(ov, "f", e), FsError::Ok);
-        auto image = ofs;
-        const u32 data0 = get32(image, e.header_block, 77);
-        set32(image, data0, 0, 2);
+}
+
+void ofs_data_block_checks() {
+    // 2000 bytes: five OFS data blocks, the last one short.
+    const auto good = build_adf("Work", false, {{"f", pattern(2000, 1)}, {"g", pattern(900, 2)}});
+    AdfVolume gv = mount_ok(good);
+    DirEntry f{};
+    DirEntry g{};
+    CHECK_EQ(adf_find(gv, "f", f), FsError::Ok);
+    CHECK_EQ(adf_find(gv, "g", g), FsError::Ok);
+    std::vector<u8> out(2000);
+    u32 got = 0;
+    CHECK_EQ(adf_read(gv, f, 0, out.data(), 2000, got), FsError::Ok);
+
+    // Data block k (from 0) of "f", with the damage applied and the block
+    // checksum made good again unless the test is about the checksum.
+    auto damaged = [&](u32 k, u32 index, u32 value, bool fix) {
+        auto image = good;
+        const u32 block = get32(image, f.header_block, 77 - k);
+        set32(image, block, index, value);
+        if (fix) {
+            adf_fix_checksum(image, block);
+        }
+        return image;
+    };
+    u32 suspect = 99;
+    auto read_f = [&](const std::vector<u8>& image, u32 offset) {
         AdfVolume v = mount_ok(image);
-        std::vector<u8> out(2000);
-        u32 got = 0;
-        CHECK_EQ(adf_read(v, e, 0, out.data(), 2000, got), FsError::BadBlock);
+        return adf_read(v, f, offset, out.data(), 2000 - offset, got, &suspect);
+    };
+    // A clean file reports nothing, and the count is optional.
+    CHECK_EQ(read_f(good, 0), FsError::Ok);
+    CHECK_EQ(suspect, 0u);
+    CHECK_EQ(adf_read(gv, f, 0, out.data(), 2000, got), FsError::Ok);
+
+    for (u32 k = 0; k < 5; ++k) {
+        const u32 at = k * 488;
+        // A block that is not a data block is refused. Only a read that
+        // reaches the block sees it.
+        CHECK_EQ(read_f(damaged(k, 0, 2, true), at), FsError::BadBlock);
+        CHECK_EQ(read_f(damaged(k, 0, 0, true), at), FsError::BadBlock);
+        CHECK_EQ(read_f(damaged(k, 3, 488, true), at), FsError::Ok);
+        CHECK_EQ(suspect, 0u);
+        CHECK_EQ(read_f(damaged(k, 3, 0, true), at), FsError::Ok);  // a smaller size is not enforced
+        CHECK_EQ(suspect, 0u);
+
+        // A wrong checksum, header key, sequence number or data size is
+        // counted and the data is still returned.
+        CHECK_EQ(read_f(damaged(k, 3, 489, true), at), FsError::Ok);  // size
+        CHECK_EQ(suspect, 1u);
+        CHECK_EQ(read_f(damaged(k, 3, 0xFFFFFFFFu, true), at), FsError::Ok);
+        CHECK_EQ(suspect, 1u);
+        CHECK_EQ(read_f(damaged(k, 1, g.header_block, true), at), FsError::Ok);  // key
+        CHECK_EQ(suspect, 1u);
+        CHECK_EQ(read_f(damaged(k, 2, k + 2, true), at), FsError::Ok);  // sequence
+        CHECK_EQ(suspect, 1u);
+        CHECK_EQ(read_f(damaged(k, 2, 0, true), at), FsError::Ok);
+        CHECK_EQ(suspect, 1u);
+        CHECK_EQ(read_f(damaged(k, 5, 0x12345678u, false), at), FsError::Ok);  // checksum
+        CHECK_EQ(suspect, 1u);
+        CHECK(std::equal(out.begin(), out.begin() + std::min<u32>(got, 488),
+                         pattern(2000, 1).begin() + at));
+        auto flipped = good;
+        const u32 block = get32(flipped, f.header_block, 77 - k);
+        flipped[static_cast<usize>(block) * kBlock + 300] ^= 0x40;  // a data byte
+        CHECK_EQ(read_f(flipped, at), FsError::Ok);
+        CHECK_EQ(suspect, 1u);
+        // Blocks before the damaged one are not counted.
+        CHECK_EQ(read_f(damaged(k, 2, 0, true), 0), FsError::Ok);
+        CHECK_EQ(suspect, 1u);
+        if (k > 0) {
+            const auto image = damaged(k, 2, 0, true);
+            AdfVolume v = mount_ok(image);
+            CHECK_EQ(adf_read(v, f, 0, out.data(), at, got, &suspect), FsError::Ok);  // stops before it
+            CHECK_EQ(suspect, 0u);
+        }
+    }
+
+    // Two blocks of one file swapped: every block is fine alone, but both
+    // are in the wrong place, which the count shows.
+    {
+        auto image = good;
+        const u32 a = get32(image, f.header_block, 77);
+        const u32 b = get32(image, f.header_block, 76);
+        set32(image, f.header_block, 77, b);
+        set32(image, f.header_block, 76, a);
+        adf_fix_checksum(image, f.header_block);
+        CHECK_EQ(read_f(image, 0), FsError::Ok);
+        CHECK_EQ(suspect, 2u);
+        CHECK_EQ(read_f(image, 488), FsError::Ok);
+        CHECK_EQ(suspect, 1u);
+        CHECK_EQ(read_f(image, 976), FsError::Ok);
+        CHECK_EQ(suspect, 0u);
+    }
+    // A block of another file in the pointer table: wrong key, wrong place.
+    {
+        auto image = good;
+        set32(image, f.header_block, 77, get32(image, g.header_block, 77));
+        adf_fix_checksum(image, f.header_block);
+        CHECK_EQ(read_f(image, 0), FsError::Ok);
+        CHECK_EQ(suspect, 1u);
+    }
+    // FFS has none of these fields: its blocks are all data.
+    {
+        const auto ffs = build_adf("Work", true, {{"f", pattern(2000, 1)}});
+        AdfVolume v = mount_ok(ffs);
+        DirEntry e{};
+        CHECK_EQ(adf_find(v, "f", e), FsError::Ok);
+        CHECK_EQ(adf_read(v, e, 0, out.data(), 2000, got), FsError::Ok);
     }
 }
 
@@ -891,6 +987,7 @@ int main() {
     mount_errors();
     bad_header_checksum_in_a_file();
     bad_block_pointers();
+    ofs_data_block_checks();
     hash_chain_loop();
     hash_chain_loop_of_two();
     extension_chain_loop();
