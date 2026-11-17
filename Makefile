@@ -48,6 +48,9 @@ KCXXFLAGS := -std=c++23 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-prot
              -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mno-sse -mno-mmx -nostdlib \
              -Wall -Wextra -Werror -MMD -MP
 KLDFLAGS  := -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
+# The mem* routines are built with these: they keep the compiler from turning
+# their loops back into calls to the very functions being defined.
+KMEMFLAGS := -fno-builtin -fno-tree-loop-distribute-patterns
 
 KERNEL_SRC := $(wildcard kernel/*.cpp)
 KERNEL_OBJ := $(KERNEL_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/kernel/mem.o
@@ -73,16 +76,15 @@ $(filter-out %/mem.o,$(KERNEL_OBJ)): $(BUILD)/%.o: %.cpp
 	@mkdir -p $(@D)
 	$(KCXX) $(KCXXFLAGS) -c $< -o $@
 
-# The mem* routines are built once per target. -fno-builtin and
-# -fno-tree-loop-distribute-patterns keep the compilers from turning their
-# loops back into calls to the very functions being defined.
+# The mem* routines are built once per target, without builtins (see
+# KMEMFLAGS for the kernel).
 $(BUILD)/loader/mem.o: common/mem.cpp
 	@mkdir -p $(@D)
 	$(CXX) $(CXXFLAGS) -fno-builtin -c $< -o $@
 
 $(BUILD)/kernel/mem.o: common/mem.cpp
 	@mkdir -p $(@D)
-	$(KCXX) $(KCXXFLAGS) -fno-builtin -fno-tree-loop-distribute-patterns -c $< -o $@
+	$(KCXX) $(KCXXFLAGS) $(KMEMFLAGS) -c $< -o $@
 
 $(LOADER): $(LOADER_OBJ)
 	$(LD) $(LDFLAGS) $^ -o $@
@@ -112,7 +114,7 @@ $$(filter-out %/mem.o,$$(FAULT$(1)_OBJ)): $$(FAULT$(1)_DIR)/%.o: %.cpp
 
 $$(FAULT$(1)_DIR)/kernel/mem.o: common/mem.cpp
 	@mkdir -p $$(@D)
-	$$(KCXX) $$(KCXXFLAGS) -fno-builtin -fno-tree-loop-distribute-patterns -c $$< -o $$@
+	$$(KCXX) $$(KCXXFLAGS) $$(KMEMFLAGS) -c $$< -o $$@
 
 $$(FAULT$(1)_DIR)/KERNEL.ELF: $$(FAULT$(1)_OBJ) kernel/linker.ld
 	$$(KLD) $$(KLDFLAGS) $$(FAULT$(1)_OBJ) -o $$@
@@ -142,10 +144,11 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%)
 	tools/boot_check.sh --no-kernel "KERNEL.ELF not found"
 	tools/boot_check.sh --no-gop "no framebuffer" "halting"
 	tools/boot_check.sh --fault-test 1 "fault test: 1" "*** exception 14 #PF (page fault)" \
-	    "cr2: 0x1000" "halting"
+	    "error: 0x0" "cs: 0x8 rflags: 0x" "ss: 0x10" "cr2: 0x1000 cr3" "halting"
 	tools/boot_check.sh --fault-test 2 "fault test: 2" "*** exception 8 #DF (double fault)" \
-	    "halting"
-	tools/boot_check.sh --fault-test 3 "fault test: 3" "*** unexpected interrupt 128" "halting"
+	    "cs: 0x8 rflags: 0x" "rsp: 0x1000 ss: 0x10" "halting"
+	tools/boot_check.sh --fault-test 3 "fault test: 3" "*** unexpected interrupt 128" \
+	    "cs: 0x8 rflags: 0x" "halting"
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.

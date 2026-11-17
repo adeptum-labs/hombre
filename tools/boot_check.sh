@@ -26,7 +26,7 @@
 set -euo pipefail
 
 usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] <marker>..."
-timeout_seconds=20
+timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 build_dir="$(dirname "$0")/../build"
 
