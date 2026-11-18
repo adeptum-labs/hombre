@@ -33,11 +33,13 @@
 #include "../common/m68k_jit.hpp"
 #include "../common/printable.hpp"
 #include "../common/hid_keyboard.hpp"
+#include "../common/hid_mouse.hpp"
 #include "../common/serial.hpp"
 #include "../common/shell.hpp"
 #include "../common/shell_window.hpp"
 #include "amiga_display.hpp"
 #include "boot_framebuffer.hpp"
+#include "clock.hpp"
 #include "code_region.hpp"
 #include "usb_keyboard.hpp"
 
@@ -60,6 +62,9 @@ constexpr u32 boot_stack = 0x8000;
 // stack.
 constexpr u32 free_start = 0x10000;
 constexpr u64 block_budget = 1ull << 24;
+constexpr u32 poll_budget = 64;
+constexpr u8 usage_key_c = 0x06;
+constexpr u32 sigbreakf_ctrl_c = 1u << 12;
 
 // Constant initialised, so they sit in .bss (or .data) without a
 // constructor run.
@@ -72,9 +77,12 @@ constinit Graphics graphics{};
 constinit Intuition intuition{};
 constinit DisplayState display{};
 constinit AmigaDisplay amiga_display{};
+constinit PointerState pointer{};
 constinit ShellWindow shell{};
 // The default Amiga screen; 0 until it is open.
 constinit u32 amiga_screen = 0;
+// The key slots of the last keyboard report seen while a command waited.
+constinit u8 prev_key_slots[KeyDecoder::kKeySlots]{};
 
 // Whether the console output so far ends a line.
 constinit bool console_at_line_start = true;
@@ -126,6 +134,7 @@ void open_amiga_screen(const BootInfo& info) {
         fail("graphics init failed");
         return;
     }
+    intuition.set_clock(&clock_us);
     constexpr char title[] = "Amiga Workbench";
     const u32 new_screen = exec.alloc(ndk::NewScreen_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     const u32 title_at = exec.alloc(sizeof(title), ndk::MEMF_PUBLIC);
@@ -157,8 +166,79 @@ void open_amiga_screen(const BootInfo& info) {
 void show_amiga_screen(const BootInfo& info) {
     serial::mirror = nullptr;
     amiga_display.init(make_framebuffer(info));
+    pointer.init(640, 400, 320, 200);
+    amiga_display.move_pointer(machine, amiga_screen, pointer.x(), pointer.y());
     display.sink = amiga_display.sink();
     intuition.screen_to_front(amiga_screen);
+    if (usb_mouse_present()) {
+        amiga_display.set_pointer_visible(machine, amiga_screen, true);
+    }
+}
+
+void log_mouse_buttons(const char* prefix, u8 mask, i32 x, i32 y) {
+    for (u32 bit = 0; bit < 3; ++bit) {
+        if ((mask & (1u << bit)) == 0) {
+            continue;
+        }
+        serial::write(prefix);
+        serial::write_dec(bit + 1);
+        serial::write(" at ");
+        serial::write_dec(static_cast<u64>(x));
+        serial::write(",");
+        serial::write_dec(static_cast<u64>(y));
+        serial::write("\n");
+    }
+}
+
+void poll_mouse() {
+    u8 report[4];
+    for (u32 i = 0; i < poll_budget && usb_mouse_poll(report); ++i) {
+        MouseSample sample{};
+        if (!decode_mouse_report(report, sizeof(report), sample)) {
+            continue;
+        }
+        const PointerState::Update update = pointer.apply(sample);
+        if (update.moved) {
+            amiga_display.move_pointer(machine, amiga_screen, pointer.x(), pointer.y());
+        }
+        if (update.moved || update.pressed != 0 || update.released != 0) {
+            intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), update.pressed,
+                                    update.released, update.moved);
+        }
+        log_mouse_buttons("mouse: down ", update.pressed, pointer.x(), pointer.y());
+        log_mouse_buttons("mouse: up ", update.released, pointer.x(), pointer.y());
+    }
+}
+
+bool slots_have_key(const u8* slots, u8 usage) {
+    for (usize i = 0; i < KeyDecoder::kKeySlots; ++i) {
+        if (slots[i] == usage) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool poll_input_while_running() {
+    poll_mouse();
+    u8 report[KeyDecoder::kReportBytes];
+    for (u32 i = 0; i < poll_budget && usb_keyboard_poll(report); ++i) {
+        const bool ctrl = (report[0] & (kModLCtrl | kModRCtrl)) != 0;
+        const u8* slots = report + 2;
+        if (ctrl && slots_have_key(slots, usage_key_c) &&
+            !slots_have_key(prev_key_slots, usage_key_c)) {
+            exec.signal_current_task(sigbreakf_ctrl_c);
+        }
+        for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
+            prev_key_slots[s] = slots[s];
+        }
+    }
+    asm volatile("pause");
+    return usb_keyboard_status() == UsbStatus::Ready || usb_mouse_present();
+}
+
+bool hook_trampoline(void*) {
+    return poll_input_while_running();
 }
 
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
@@ -191,6 +271,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         fail("exec init failed");
         return false;
     }
+    exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
     if (!utility.init(machine, exec)) {
         fail("utility init failed");
         return false;
@@ -278,6 +359,9 @@ bool typed_run(void*, const char* path, const char* args) {
     const bool loaded = execute(path, args);
     usb_keyboard_drain();
     typed_decoder.release_all();
+    for (usize i = 0; i < KeyDecoder::kKeySlots; ++i) {
+        prev_key_slots[i] = 0;
+    }
     return loaded;
 }
 
@@ -291,6 +375,7 @@ bool typed_run(void*, const char* path, const char* args) {
                                &typed_message, &typed_prompt, &typed_log, &typed});
     serial::write("shell: ready\n");
     while (usb_keyboard_status() == UsbStatus::Ready) {
+        poll_mouse();
         u8 report[8];
         if (usb_keyboard_poll(report)) {
             u8 chars[8];
