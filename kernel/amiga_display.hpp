@@ -25,6 +25,7 @@
 
 #include "../common/libs/gfx.hpp"
 #include "../common/libs/native.hpp"
+#include "../common/pointer_image.hpp"
 #include "../common/types.hpp"
 #include "framebuffer.hpp"
 
@@ -101,6 +102,70 @@ public:
                 display.fb_.fill_rect(left, top, display.scale_, display.scale_, palette[pen]);
             }
         }
+        if (display.pointer_visible_) {
+            const i32 ptr_first_x = display.pointer_x_ > first_x ? display.pointer_x_ : first_x;
+            const i32 ptr_first_y = display.pointer_y_ > first_y ? display.pointer_y_ : first_y;
+            const i32 ptr_end_x = display.pointer_x_ + static_cast<i32>(kPointerWidth) - 1;
+            const i32 ptr_end_y = display.pointer_y_ + static_cast<i32>(kPointerHeight) - 1;
+            const i32 ptr_last_x = ptr_end_x < last_x ? ptr_end_x : last_x;
+            const i32 ptr_last_y = ptr_end_y < last_y ? ptr_end_y : last_y;
+            if (ptr_first_x <= ptr_last_x && ptr_first_y <= ptr_last_y) {
+                for (i32 y = ptr_first_y; y <= ptr_last_y; ++y) {
+                    const u32 py = static_cast<u32>(y - display.pointer_y_);
+                    for (i32 x = ptr_first_x; x <= ptr_last_x; ++x) {
+                        const u32 px = static_cast<u32>(x - display.pointer_x_);
+                        const u32 pixel = pointer_pixel(px, py);
+                        if (pixel == 0) {
+                            continue;
+                        }
+                        const u32 colour = pixel == 1 ? kPointerOutlineColour : kPointerFillColour;
+                        const u64 left = display.origin_x_ + static_cast<u64>(x) * display.scale_;
+                        const u64 top = display.origin_y_ + static_cast<u64>(y) * display.scale_;
+                        display.fb_.fill_rect(left, top, display.scale_, display.scale_, colour);
+                    }
+                }
+            }
+        }
+    }
+
+    void set_pointer_visible(m68k::Machine& m, u32 screen, bool visible) {
+        pointer_visible_ = visible;
+        if (screen == 0) {
+            return;
+        }
+        native::Bus b(m);
+        const u32 width = b.r16(screen + ndk::sc_Width);
+        const u32 height = b.r16(screen + ndk::sc_Height);
+        if (!b.ok() || width > kMaxSide || height > kMaxSide) {
+            return;
+        }
+        const Rect dirty =
+            pointer_union(pointer_x_, pointer_y_, pointer_x_, pointer_y_, width, height);
+        refresh(this, m, screen, dirty);
+    }
+
+    void set_pointer_visible(bool visible) { pointer_visible_ = visible; }
+
+    bool pointer_visible() const { return pointer_visible_; }
+    i32 pointer_x() const { return pointer_x_; }
+    i32 pointer_y() const { return pointer_y_; }
+
+    void move_pointer(m68k::Machine& m, u32 screen, i32 x, i32 y) {
+        const i32 old_x = pointer_x_;
+        const i32 old_y = pointer_y_;
+        pointer_x_ = x;
+        pointer_y_ = y;
+        if (!pointer_visible_ || screen == 0) {
+            return;
+        }
+        native::Bus b(m);
+        const u32 width = b.r16(screen + ndk::sc_Width);
+        const u32 height = b.r16(screen + ndk::sc_Height);
+        if (!b.ok() || width > kMaxSide || height > kMaxSide) {
+            return;
+        }
+        const Rect dirty = pointer_union(old_x, old_y, x, y, width, height);
+        refresh(this, m, screen, dirty);
     }
 
     u32 scale() const { return scale_; }
@@ -116,6 +181,21 @@ private:
     static constexpr u32 kPlanes = 2;
     static constexpr u32 kColours = 1 << kPlanes;
     static constexpr u32 kBorder = 0xAAAAAA;
+    static constexpr u32 kPointerOutlineColour = 0x000000;
+    static constexpr u32 kPointerFillColour = 0xFFFFFF;
+
+    // The union of two pointer rectangles clipped to the screen.
+    static Rect pointer_union(i32 x0, i32 y0, i32 x1, i32 y1, u32 width, u32 height) {
+        const i32 min_x = x0 < x1 ? x0 : x1;
+        const i32 min_y = y0 < y1 ? y0 : y1;
+        const i32 max_x = (x0 > x1 ? x0 : x1) + static_cast<i32>(kPointerWidth) - 1;
+        const i32 max_y = (y0 > y1 ? y0 : y1) + static_cast<i32>(kPointerHeight) - 1;
+        const i32 first_x = min_x > 0 ? min_x : 0;
+        const i32 first_y = min_y > 0 ? min_y : 0;
+        const i32 last_x = at_most(max_x, width);
+        const i32 last_y = at_most(max_y, height);
+        return Rect{first_x, first_y, last_x, last_y};
+    }
 
     // The offset of a screen that fits wholly in the framebuffer, 0 when it
     // does not and is clipped at the top left.
@@ -158,6 +238,9 @@ private:
     u32 scale_ = 1;
     u32 origin_x_ = 0;
     u32 origin_y_ = 0;
+    i32 pointer_x_ = 0;
+    i32 pointer_y_ = 0;
+    bool pointer_visible_ = false;
 };
 
 }
