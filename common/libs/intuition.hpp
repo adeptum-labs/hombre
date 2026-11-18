@@ -29,11 +29,15 @@
 
 // intuition.library written in C++ for code run by the 68000 translator.
 //
-// It owns the screens: OpenScreen and OpenScreenTagList build a Screen with
-// its BitMap, RastPort, ViewPort and ColorMap in guest memory, CloseScreen
-// frees it, and ScreenToFront and ScreenToBack order the list. The chrome
-// is drawn with the Graphics C++ methods. Every other vector logs
-// "intuition: unimplemented LVO -<n>" and ends the run with Unimplemented.
+// It owns the screens and windows: OpenScreen and OpenScreenTagList build a
+// Screen with its BitMap, RastPort, ViewPort, ColorMap and a private backdrop
+// BitMap in guest memory, and each window gets its own planar BitMap. The
+// screen's sc_BitMap is composed from the backdrop and the windows from back
+// to front whenever a backdrop or window bitmap is damaged or windows change
+// order or close. A guest that draws through sc_RastPort still writes
+// sc_BitMap directly; that content is overwritten by the next composition of
+// that area. Every unimplemented vector logs "intuition: unimplemented LVO
+// -<n>" and ends the run with Unimplemented.
 
 namespace hombre {
 
@@ -66,6 +70,8 @@ constexpr u32 Last = 828;
 
 class Intuition {
 public:
+    using WindowHook = void (*)(void* ctx, u32 window);
+
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
     static constexpr u32 kMaxTagItems = 256;
@@ -101,6 +107,9 @@ public:
     void window_to_front(u32 window);
     void window_to_back(u32 window);
     bool window_open(u32 window) const;
+    void set_size_hook(u32 window, WindowHook hook, void* ctx);
+    void begin_batch();
+    void end_batch();
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
     void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
@@ -118,6 +127,12 @@ private:
         u32 screen_bytes = 0;
         u32 planes = 0;
         u32 planes_bytes = 0;
+        u32 backdrop_bitmap = 0;
+        u32 backdrop_bitmap_bytes = 0;
+        u32 backdrop_planes = 0;
+        u32 backdrop_planes_bytes = 0;
+        u32 backdrop_rp = 0;
+        u32 backdrop_rp_bytes = 0;
         u32 colormap = 0;
         u32 colormap_bytes = 0;
         u32 colors = 0;
@@ -127,6 +142,7 @@ private:
         u32 width = 0;
         u32 height = 0;
         u32 first_window = 0;
+        Rect pending = {0, 0, -1, -1};
     };
 
     // What a window owns, with its place in the screen's window list.
@@ -139,20 +155,34 @@ private:
         i32 top = 0;
         i32 width = 0;
         i32 height = 0;
+        i32 max_w = 0;
+        i32 max_h = 0;
+        i32 min_w = 0;
+        i32 min_h = 0;
+        i32 lim_w = 0;
+        i32 lim_h = 0;
         u32 rp = 0;
         u32 rp_bytes = 0;
         u32 layer = 0;
         u32 layer_bytes = 0;
+        u32 bitmap = 0;
+        u32 bitmap_bytes = 0;
+        u32 planes = 0;
+        u32 planes_bytes = 0;
         u32 title = 0;
         u32 title_bytes = 0;
         u32 user_port = 0;
         bool user_port_owned = false;
+        WindowHook size_hook = nullptr;
+        void* size_ctx = nullptr;
     };
 
     enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2 };
 
     static void reply_message(void* ctx, u32 message);
+    static void on_damage(void* ctx, m68k::Machine& m, u32 bitmap, const Rect& rect);
 
+    void compose(u32 screen, Rect r);
     u32 find_screen(u32 screen) const;
     ScreenRecord* find_screen_record(u32 screen);
     ScreenRecord* free_screen_record();
@@ -188,6 +218,7 @@ private:
     i32 mouse_x_ = 0;
     i32 mouse_y_ = 0;
     u32 dropped_messages_ = 0;
+    u32 batch_depth_ = 0;
     u32 screens_[kMaxScreens]{};
     u32 windows_[kMaxWindows]{};
     u32 messages_[kMaxMessages]{};

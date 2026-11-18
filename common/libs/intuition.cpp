@@ -26,6 +26,7 @@
 #include "../hid_mouse.hpp"
 #include "exec.hpp"
 #include "graphics.hpp"
+#include "raster.hpp"
 #include "utility.hpp"
 #include "version.hpp"
 
@@ -314,10 +315,61 @@ void read_window_tags(Bus& b, u32 tags, WindowArgs& a) {
     }
 }
 
+void init_planar_bitmap(Bus& b, u32 bitmap, u32 bpr, u32 rows, u32 depth, u32 planes) {
+    b.w16(bitmap + ndk::bm_BytesPerRow, bpr);
+    b.w16(bitmap + ndk::bm_Rows, rows);
+    b.w8(bitmap + ndk::bm_Flags, 0);
+    b.w8(bitmap + ndk::bm_Depth, depth);
+    const u32 plane_bytes = bpr * rows;
+    for (u32 plane = 0; plane < 8; ++plane) {
+        const u32 addr = plane < depth ? planes + plane * plane_bytes : 0;
+        b.w32(bitmap + ndk::bm_Planes + plane * 4, addr);
+    }
+}
+
+Rect unite_rect(Rect a, const Rect& b) {
+    if (b.x1 < b.x0 || b.y1 < b.y0) {
+        return a;
+    }
+    if (a.x1 < a.x0 || a.y1 < a.y0) {
+        return b;
+    }
+    if (b.x0 < a.x0) {
+        a.x0 = b.x0;
+    }
+    if (b.y0 < a.y0) {
+        a.y0 = b.y0;
+    }
+    if (b.x1 > a.x1) {
+        a.x1 = b.x1;
+    }
+    if (b.y1 > a.y1) {
+        a.y1 = b.y1;
+    }
+    return a;
+}
+
+void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
+    if (rp == 0 || width == 0) {
+        return;
+    }
+    const i32 right = static_cast<i32>(width) - 1;
+    graphics.set_pens(rp, 2, 1, ndk::JAM2);
+    graphics.rect_fill(rp, 0, 0, right, static_cast<i32>(kBarHeight) - 1);
+    graphics.set_pens(rp, 1, 1, ndk::JAM2);
+    graphics.rect_fill(rp, 0, static_cast<i32>(kBarHeight), right,
+                       static_cast<i32>(kBarHeight));
+    if (title != 0) {
+        graphics.set_pens(rp, 1, 2, ndk::JAM1);
+        draw_title(graphics, b, rp, title, 1, 7, right);
+    }
+}
+
 // The Window fields a draw or a free needs.
 struct WindowView {
     u32 window = 0;
     u32 screen = 0;
+    u32 rp = 0;
     i32 left = 0;
     i32 top = 0;
     i32 width = 0;
@@ -341,6 +393,7 @@ WindowView load_window(Bus& b, u32 window) {
     w.flags = b.r32(window + ndk::wd_Flags);
     w.title = b.r32(window + ndk::wd_Title);
     w.screen = b.r32(window + ndk::wd_WScreen);
+    w.rp = b.r32(window + ndk::wd_RPort);
     w.border_top = b.r8(window + ndk::wd_BorderTop);
     w.ok = b.ok();
     return w;
@@ -360,46 +413,72 @@ void draw_gadget(Graphics& graphics, u32 rp, const Rect& box) {
     graphics.rect_fill(rp, box.x1, box.y0, box.x1, box.y1);
 }
 
-// The 10-row title bar of a window with its gadgets, line and title.
+// The 10-row title bar of a window with its gadgets, line and title, drawn in
+// window-relative coordinates through the window's RastPort.
 void draw_window_bar(Graphics& graphics, Bus& b, const WindowView& w) {
-    const u32 rp = w.screen + ndk::sc_RastPort;
-    const i32 left = w.left + 1;
-    const i32 right = w.left + w.width - 2;
-    const i32 top = w.top + 1;
-    const i32 line = w.top + static_cast<i32>(kBarHeight);
+    const u32 rp = w.rp;
+    if (rp == 0 || w.width < 2 || w.height <= static_cast<i32>(kBarHeight)) {
+        return;
+    }
+    const u8 fg = static_cast<u8>(b.r8(rp + ndk::rp_FgPen));
+    const u8 bg = static_cast<u8>(b.r8(rp + ndk::rp_BgPen));
+    const u8 mode = static_cast<u8>(b.r8(rp + ndk::rp_DrawMode));
+    const u16 cx = static_cast<u16>(b.r16(rp + ndk::rp_cp_x));
+    const u16 cy = static_cast<u16>(b.r16(rp + ndk::rp_cp_y));
+    const i32 left = 1;
+    const i32 right = w.width - 2;
+    const i32 top = 1;
+    const i32 line = static_cast<i32>(kBarHeight);
     graphics.set_pens(rp, 2, 1, ndk::JAM2);
     graphics.rect_fill(rp, left, top, right, line);
     if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        draw_gadget(graphics, rp, Intuition::close_box_rect(w.left, w.top));
+        draw_gadget(graphics, rp, Intuition::close_box_rect(0, 0));
     }
     if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
-        draw_gadget(graphics, rp, Intuition::depth_box_rect(w.left, w.top, w.width));
+        draw_gadget(graphics, rp, Intuition::depth_box_rect(0, 0, w.width));
     }
     graphics.set_pens(rp, 1, 0, ndk::JAM2);
     graphics.rect_fill(rp, left, line, right, line);
-    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0 ? w.left + 11 : w.left + 2;
+    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0 ? 11 : 2;
     const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0 ? right - 8 : right;
     graphics.set_pens(rp, 1, 2, ndk::JAM1);
-    draw_title(graphics, b, rp, w.title, text_x, w.top + 7, text_x1);
+    draw_title(graphics, b, rp, w.title, text_x, 7, text_x1);
+    b.w8(rp + ndk::rp_FgPen, fg);
+    b.w8(rp + ndk::rp_BgPen, bg);
+    b.w8(rp + ndk::rp_DrawMode, mode);
+    b.w16(rp + ndk::rp_cp_x, cx);
+    b.w16(rp + ndk::rp_cp_y, cy);
 }
 
 void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w) {
-    const u32 rp = w.screen + ndk::sc_RastPort;
-    const i32 right = w.left + w.width - 1;
-    const i32 bottom = w.top + w.height - 1;
+    const u32 rp = w.rp;
+    if (rp == 0 || w.width <= 0 || w.height <= 0) {
+        return;
+    }
+    const u8 fg = static_cast<u8>(b.r8(rp + ndk::rp_FgPen));
+    const u8 bg = static_cast<u8>(b.r8(rp + ndk::rp_BgPen));
+    const u8 mode = static_cast<u8>(b.r8(rp + ndk::rp_DrawMode));
+    const u16 cx = static_cast<u16>(b.r16(rp + ndk::rp_cp_x));
+    const u16 cy = static_cast<u16>(b.r16(rp + ndk::rp_cp_y));
+    const i32 right = w.width - 1;
+    const i32 bottom = w.height - 1;
     graphics.set_pens(rp, 0, 0, ndk::JAM2);
-    graphics.rect_fill(rp, w.left, w.top, right, bottom);
+    graphics.rect_fill(rp, 0, 0, right, bottom);
     graphics.set_pens(rp, 1, 0, ndk::JAM2);
-    graphics.rect_fill(rp, w.left, w.top, right, w.top);
-    graphics.rect_fill(rp, w.left, bottom, right, bottom);
-    graphics.rect_fill(rp, w.left, w.top, w.left, bottom);
-    graphics.rect_fill(rp, right, w.top, right, bottom);
+    graphics.rect_fill(rp, 0, 0, right, 0);
+    graphics.rect_fill(rp, 0, bottom, right, bottom);
+    graphics.rect_fill(rp, 0, 0, 0, bottom);
+    graphics.rect_fill(rp, right, 0, right, bottom);
     if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
         draw_window_bar(graphics, b, w);
     }
     graphics.set_pens(rp, 0, 0, ndk::JAM2);
-    graphics.rect_fill(rp, w.left + 1, w.top + static_cast<i32>(w.border_top), right - 1,
-                       bottom - 1);
+    graphics.rect_fill(rp, 1, static_cast<i32>(w.border_top), right - 1, bottom - 1);
+    b.w8(rp + ndk::rp_FgPen, fg);
+    b.w8(rp + ndk::rp_BgPen, bg);
+    b.w8(rp + ndk::rp_DrawMode, mode);
+    b.w16(rp + ndk::rp_cp_x, cx);
+    b.w16(rp + ndk::rp_cp_y, cy);
 }
 
 }
@@ -531,6 +610,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     mouse_x_ = 0;
     mouse_y_ = 0;
     dropped_messages_ = 0;
+    batch_depth_ = 0;
     display.front_screen = 0;
     for (u32& screen : screens_) {
         screen = 0;
@@ -565,8 +645,121 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     }
     reply_port_ = reply_port;
     exec.set_reply_handler(reply_port_, reply_message, this);
+    display.damage = DamageSink{on_damage, this};
     base_ = base;
     return true;
+}
+
+void Intuition::begin_batch() { ++batch_depth_; }
+
+void Intuition::end_batch() {
+    if (batch_depth_ == 0) {
+        return;
+    }
+    --batch_depth_;
+    if (batch_depth_ != 0) {
+        return;
+    }
+    for (ScreenRecord& srec : screen_records_) {
+        if (srec.addr != 0 && srec.pending.x0 <= srec.pending.x1 &&
+            srec.pending.y0 <= srec.pending.y1) {
+            const Rect r = srec.pending;
+            srec.pending = Rect{0, 0, -1, -1};
+            compose(srec.addr, r);
+        }
+    }
+}
+
+void Intuition::compose(u32 screen, Rect r) {
+    if (screen == 0 || machine_ == nullptr) {
+        return;
+    }
+    ScreenRecord* srec = find_screen_record(screen);
+    if (srec == nullptr || srec->width == 0 || srec->height == 0) {
+        return;
+    }
+    const i32 sw = static_cast<i32>(srec->width);
+    const i32 sh = static_cast<i32>(srec->height);
+    if (r.x0 < 0) {
+        r.x0 = 0;
+    }
+    if (r.y0 < 0) {
+        r.y0 = 0;
+    }
+    if (r.x1 >= sw) {
+        r.x1 = sw - 1;
+    }
+    if (r.y1 >= sh) {
+        r.y1 = sh - 1;
+    }
+    if (r.x1 < r.x0 || r.y1 < r.y0) {
+        return;
+    }
+    if (batch_depth_ > 0) {
+        srec->pending = unite_rect(srec->pending, r);
+        return;
+    }
+    Bus b(*machine_);
+    raster::Bitmap dst{};
+    raster::Bitmap backdrop{};
+    if (!raster::load_bitmap(b, screen + ndk::sc_BitMap, dst) ||
+        !raster::load_bitmap(b, srec->backdrop_bitmap, backdrop)) {
+        return;
+    }
+    raster::copy_rect(b, backdrop, r.x0, r.y0, dst, r.x0, r.y0, r.x1 - r.x0 + 1, r.y1 - r.y0 + 1);
+
+    const WindowRecord* order[kMaxWindows]{};
+    u32 count = 0;
+    u32 win = srec->first_window;
+    while (win != 0 && count < kMaxWindows) {
+        const WindowRecord* wrec = find_window_record(win);
+        if (wrec == nullptr) {
+            break;
+        }
+        order[count++] = wrec;
+        win = wrec->next_window;
+    }
+    for (u32 i = count; i > 0; --i) {
+        const WindowRecord* wrec = order[i - 1];
+        const i32 wx0 = r.x0 > wrec->left ? r.x0 : wrec->left;
+        const i32 wy0 = r.y0 > wrec->top ? r.y0 : wrec->top;
+        const i32 wx1 =
+            r.x1 < wrec->left + wrec->width - 1 ? r.x1 : wrec->left + wrec->width - 1;
+        const i32 wy1 =
+            r.y1 < wrec->top + wrec->height - 1 ? r.y1 : wrec->top + wrec->height - 1;
+        if (wx0 <= wx1 && wy0 <= wy1) {
+            raster::Bitmap wbm{};
+            if (raster::load_bitmap(b, wrec->bitmap, wbm)) {
+                raster::copy_rect(b, wbm, wx0 - wrec->left, wy0 - wrec->top, dst, wx0, wy0,
+                                  wx1 - wx0 + 1, wy1 - wy0 + 1);
+            }
+        }
+    }
+    if (b.ok() && display_ != nullptr && display_->front_screen == screen &&
+        display_->sink.refresh != nullptr) {
+        display_->sink.refresh(display_->sink.ctx, *machine_, screen, r);
+    }
+}
+
+void Intuition::on_damage(void* ctx, Machine&, u32 bitmap, const Rect& rect) {
+    if (ctx == nullptr || bitmap == 0 || rect.x1 < rect.x0 || rect.y1 < rect.y0) {
+        return;
+    }
+    Intuition& self = *static_cast<Intuition*>(ctx);
+    for (const WindowRecord& wrec : self.window_records_) {
+        if (wrec.addr != 0 && wrec.bitmap == bitmap) {
+            const Rect screen_rect{rect.x0 + wrec.left, rect.y0 + wrec.top,
+                                   rect.x1 + wrec.left, rect.y1 + wrec.top};
+            self.compose(wrec.screen, screen_rect);
+            return;
+        }
+    }
+    for (const ScreenRecord& srec : self.screen_records_) {
+        if (srec.addr != 0 && srec.backdrop_bitmap == bitmap) {
+            self.compose(srec.addr, rect);
+            return;
+        }
+    }
 }
 
 u32 Intuition::find_screen(u32 screen) const {
@@ -699,45 +892,78 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
         return 0;
     }
     const u32 bpr = static_cast<u32>(bytes_per_row);
+    const u32 pbytes = static_cast<u32>(planes_bytes);
 
-    const u32 screen = exec_->alloc(ndk::Screen_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (screen == 0) {
-        LogLine().text("intuition: no memory for a screen").send();
-        return 0;
-    }
-    const u32 planes = exec_->alloc(static_cast<u32>(planes_bytes),
-                                    ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (planes == 0) {
-        exec_->free(screen, ndk::Screen_SIZEOF);
-        LogLine().text("intuition: no memory for a screen").send();
-        return 0;
-    }
-    const u32 map = exec_->alloc(ndk::ColorMap_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (map == 0) {
-        exec_->free(planes, static_cast<u32>(planes_bytes));
-        exec_->free(screen, ndk::Screen_SIZEOF);
-        LogLine().text("intuition: no memory for a screen").send();
-        return 0;
-    }
-    const u32 colors = exec_->alloc(8, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (colors == 0) {
-        exec_->free(map, ndk::ColorMap_SIZEOF);
-        exec_->free(planes, static_cast<u32>(planes_bytes));
-        exec_->free(screen, ndk::Screen_SIZEOF);
-        LogLine().text("intuition: no memory for a screen").send();
-        return 0;
-    }
+    u32 screen = 0;
+    u32 planes = 0;
+    u32 backdrop_bitmap = 0;
+    u32 backdrop_planes = 0;
+    u32 backdrop_rp = 0;
+    u32 map = 0;
+    u32 colors = 0;
     u32 title = 0;
     u32 title_bytes = 0;
+    auto fail = [&]() -> u32 {
+        if (title != 0) {
+            exec_->free(title, title_bytes);
+        }
+        if (colors != 0) {
+            exec_->free(colors, 8);
+        }
+        if (map != 0) {
+            exec_->free(map, ndk::ColorMap_SIZEOF);
+        }
+        if (backdrop_rp != 0) {
+            exec_->free(backdrop_rp, ndk::RastPort_SIZEOF);
+        }
+        if (backdrop_planes != 0) {
+            exec_->free(backdrop_planes, pbytes);
+        }
+        if (backdrop_bitmap != 0) {
+            exec_->free(backdrop_bitmap, ndk::BitMap_SIZEOF);
+        }
+        if (planes != 0) {
+            exec_->free(planes, pbytes);
+        }
+        if (screen != 0) {
+            exec_->free(screen, ndk::Screen_SIZEOF);
+        }
+        LogLine().text("intuition: no memory for a screen").send();
+        return 0;
+    };
+
+    screen = exec_->alloc(ndk::Screen_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (screen == 0) {
+        return fail();
+    }
+    planes = exec_->alloc(pbytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (planes == 0) {
+        return fail();
+    }
+    backdrop_bitmap = exec_->alloc(ndk::BitMap_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (backdrop_bitmap == 0) {
+        return fail();
+    }
+    backdrop_planes = exec_->alloc(pbytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (backdrop_planes == 0) {
+        return fail();
+    }
+    backdrop_rp = exec_->alloc(ndk::RastPort_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (backdrop_rp == 0) {
+        return fail();
+    }
+    map = exec_->alloc(ndk::ColorMap_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (map == 0) {
+        return fail();
+    }
+    colors = exec_->alloc(8, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (colors == 0) {
+        return fail();
+    }
     if (a.title != 0) {
         title = copy_title(b, *exec_, a.title, title_bytes);
         if (title == 0) {
-            exec_->free(colors, 8);
-            exec_->free(map, ndk::ColorMap_SIZEOF);
-            exec_->free(planes, static_cast<u32>(planes_bytes));
-            exec_->free(screen, ndk::Screen_SIZEOF);
-            LogLine().text("intuition: no memory for a screen").send();
-            return 0;
+            return fail();
         }
     }
 
@@ -760,18 +986,13 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w32(screen + ndk::sc_Font, graphics_->topaz_attr());
     b.w32(screen + kScNextScreen, 0);
 
-    b.w16(bitmap + ndk::bm_BytesPerRow, bpr);
-    b.w16(bitmap + ndk::bm_Rows, a.height);
-    b.w8(bitmap + ndk::bm_Flags, 0);
-    b.w8(bitmap + ndk::bm_Depth, a.depth);
-    b.w32(bitmap + ndk::bm_Planes, planes);
-    b.w32(bitmap + ndk::bm_Planes + 4, planes + bpr * a.height);
-    for (u32 plane = 2; plane < 8; ++plane) {
-        b.w32(bitmap + ndk::bm_Planes + plane * 4, 0);
-    }
+    init_planar_bitmap(b, bitmap, bpr, a.height, a.depth, planes);
+    init_planar_bitmap(b, backdrop_bitmap, bpr, a.height, a.depth, backdrop_planes);
 
     graphics_->init_rastport(rp);
     b.w32(rp + ndk::rp_BitMap, bitmap);
+    graphics_->init_rastport(backdrop_rp);
+    b.w32(backdrop_rp + ndk::rp_BitMap, backdrop_bitmap);
 
     b.w32(vp + ndk::vp_ColorMap, map);
     b.w16(vp + ndk::vp_DWidth, a.width);
@@ -792,7 +1013,13 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     rec->addr = screen;
     rec->screen_bytes = ndk::Screen_SIZEOF;
     rec->planes = planes;
-    rec->planes_bytes = static_cast<u32>(planes_bytes);
+    rec->planes_bytes = pbytes;
+    rec->backdrop_bitmap = backdrop_bitmap;
+    rec->backdrop_bitmap_bytes = ndk::BitMap_SIZEOF;
+    rec->backdrop_planes = backdrop_planes;
+    rec->backdrop_planes_bytes = pbytes;
+    rec->backdrop_rp = backdrop_rp;
+    rec->backdrop_rp_bytes = ndk::RastPort_SIZEOF;
     rec->colormap = map;
     rec->colormap_bytes = ndk::ColorMap_SIZEOF;
     rec->colors = colors;
@@ -802,20 +1029,16 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     rec->width = a.width;
     rec->height = a.height;
     rec->first_window = 0;
+    rec->pending = Rect{0, 0, -1, -1};
 
     const i32 right = static_cast<i32>(a.width) - 1;
     const i32 bottom = static_cast<i32>(a.height) - 1;
-    graphics_->set_pens(rp, 0, 0, ndk::JAM2);
-    graphics_->rect_fill(rp, 0, 0, right, bottom);
-    graphics_->set_pens(rp, 2, 1, ndk::JAM2);
-    graphics_->rect_fill(rp, 0, 0, right, static_cast<i32>(kBarHeight) - 1);
-    graphics_->set_pens(rp, 1, 1, ndk::JAM2);
-    graphics_->rect_fill(rp, 0, static_cast<i32>(kBarHeight), right,
-                         static_cast<i32>(kBarHeight));
-    if (title != 0) {
-        graphics_->set_pens(rp, 1, 2, ndk::JAM1);
-        draw_title(*graphics_, b, rp, title, 1, 7, right);
-    }
+    begin_batch();
+    graphics_->set_pens(backdrop_rp, 0, 0, ndk::JAM2);
+    graphics_->rect_fill(backdrop_rp, 0, 0, right, bottom);
+    draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title);
+    compose(screen, Rect{0, 0, right, bottom});
+    end_batch();
     return screen;
 }
 
@@ -839,6 +1062,15 @@ bool Intuition::close_screen(u32 screen) {
 
     remove_at(index);
     write_links();
+    if (rec->backdrop_rp != 0) {
+        exec_->free(rec->backdrop_rp, rec->backdrop_rp_bytes);
+    }
+    if (rec->backdrop_planes != 0) {
+        exec_->free(rec->backdrop_planes, rec->backdrop_planes_bytes);
+    }
+    if (rec->backdrop_bitmap != 0) {
+        exec_->free(rec->backdrop_bitmap, rec->backdrop_bitmap_bytes);
+    }
     if (rec->planes != 0) {
         exec_->free(rec->planes, rec->planes_bytes);
     }
@@ -1144,7 +1376,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     }
     const i32 screen_w = static_cast<i32>(b.r16(screen + ndk::sc_Width));
     const i32 screen_h = static_cast<i32>(b.r16(screen + ndk::sc_Height));
-    if (!b.ok() || screen_w <= 0 || screen_h <= 0) {
+    const u32 depth = b.r8(screen + ndk::sc_BitMap + ndk::bm_Depth);
+    if (!b.ok() || screen_w <= 0 || screen_h <= 0 || depth == 0 || depth > 8) {
         return 0;
     }
 
@@ -1179,60 +1412,95 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         a.width == 0 || a.width > room_x ? static_cast<i32>(room_x) : static_cast<i32>(a.width);
     const i32 height =
         a.height == 0 || a.height > room_y ? static_cast<i32>(room_y) : static_cast<i32>(a.height);
+    const i32 max_w = width;
+    const i32 max_h = height;
     const bool borderless = (a.flags & ndk::WFLG_BORDERLESS) != 0;
     const u32 border_top = borderless ? 1 : 11;
 
-    const u32 window = exec_->alloc(ndk::Window_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-    if (window == 0) {
+    const u64 bytes_per_row = (static_cast<u64>(max_w) + 15) / 16 * 2;
+    const u64 total_planes_bytes =
+        static_cast<u64>(depth) * bytes_per_row * static_cast<u64>(max_h);
+    if (total_planes_bytes == 0 || total_planes_bytes > 0xFFFFFFFF) {
         LogLine().text("intuition: no memory for a window").send();
         return 0;
     }
-    const u32 rp = exec_->alloc(ndk::RastPort_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-    if (rp == 0) {
-        exec_->free(window, ndk::Window_SIZEOF);
-        LogLine().text("intuition: no memory for a window").send();
-        return 0;
-    }
-    const u32 layer = exec_->alloc(ndk::Layer_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-    if (layer == 0) {
-        exec_->free(rp, ndk::RastPort_SIZEOF);
-        exec_->free(window, ndk::Window_SIZEOF);
-        LogLine().text("intuition: no memory for a window").send();
-        return 0;
-    }
+    const u32 bpr = static_cast<u32>(bytes_per_row);
+    const u32 planes_bytes = static_cast<u32>(total_planes_bytes);
+
+    u32 window = 0;
+    u32 rp = 0;
+    u32 layer = 0;
+    u32 bitmap = 0;
+    u32 planes = 0;
     u32 title = 0;
     u32 title_bytes = 0;
+    u32 user_port = 0;
+    bool user_port_owned = false;
+    auto fail = [&]() -> u32 {
+        if (user_port_owned && user_port != 0) {
+            exec_->delete_port(user_port);
+        }
+        if (title != 0) {
+            exec_->free(title, title_bytes);
+        }
+        if (planes != 0) {
+            exec_->free(planes, planes_bytes);
+        }
+        if (bitmap != 0) {
+            exec_->free(bitmap, ndk::BitMap_SIZEOF);
+        }
+        if (layer != 0) {
+            exec_->free(layer, ndk::Layer_SIZEOF);
+        }
+        if (rp != 0) {
+            exec_->free(rp, ndk::RastPort_SIZEOF);
+        }
+        if (window != 0) {
+            exec_->free(window, ndk::Window_SIZEOF);
+        }
+        LogLine().text("intuition: no memory for a window").send();
+        return 0;
+    };
+
+    window = exec_->alloc(ndk::Window_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (window == 0) {
+        return fail();
+    }
+    rp = exec_->alloc(ndk::RastPort_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (rp == 0) {
+        return fail();
+    }
+    layer = exec_->alloc(ndk::Layer_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (layer == 0) {
+        return fail();
+    }
+    bitmap = exec_->alloc(ndk::BitMap_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (bitmap == 0) {
+        return fail();
+    }
+    planes = exec_->alloc(planes_bytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (planes == 0) {
+        return fail();
+    }
     if (a.title != 0) {
         title = copy_title(b, *exec_, a.title, title_bytes);
         if (title == 0) {
-            exec_->free(layer, ndk::Layer_SIZEOF);
-            exec_->free(rp, ndk::RastPort_SIZEOF);
-            exec_->free(window, ndk::Window_SIZEOF);
-            LogLine().text("intuition: no memory for a window").send();
-            return 0;
+            return fail();
         }
     }
-    u32 user_port = 0;
-    bool user_port_owned = false;
     if (a.idcmp != 0) {
         user_port = b.r32(window + ndk::wd_UserPort);
         if (user_port == 0) {
             user_port = exec_->create_port();
             if (user_port == 0) {
-                if (title != 0) {
-                    exec_->free(title, title_bytes);
-                }
-                exec_->free(layer, ndk::Layer_SIZEOF);
-                exec_->free(rp, ndk::RastPort_SIZEOF);
-                exec_->free(window, ndk::Window_SIZEOF);
-                LogLine().text("intuition: no memory for a window").send();
-                return 0;
+                return fail();
             }
             user_port_owned = true;
         }
     }
 
-    const u32 bitmap = screen + ndk::sc_BitMap;
+    init_planar_bitmap(b, bitmap, bpr, static_cast<u32>(max_h), depth, planes);
+
     b.w16(window + ndk::wd_LeftEdge, static_cast<u32>(left));
     b.w16(window + ndk::wd_TopEdge, static_cast<u32>(top));
     b.w16(window + ndk::wd_Width, static_cast<u32>(width));
@@ -1273,6 +1541,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w16(layer + ndk::ly_MinY, static_cast<u32>(top));
     b.w16(layer + ndk::ly_MaxX, static_cast<u32>(right));
     b.w16(layer + ndk::ly_MaxY, static_cast<u32>(bottom));
+    b.w32(layer + ndk::ly_SuperBitMap, bitmap);
     b.w32(layer + ndk::ly_Window, window);
 
     rec->addr = window;
@@ -1283,14 +1552,26 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->top = top;
     rec->width = width;
     rec->height = height;
+    rec->max_w = max_w;
+    rec->max_h = max_h;
+    rec->min_w = width;
+    rec->min_h = height;
+    rec->lim_w = width;
+    rec->lim_h = height;
     rec->rp = rp;
     rec->rp_bytes = ndk::RastPort_SIZEOF;
     rec->layer = layer;
     rec->layer_bytes = ndk::Layer_SIZEOF;
+    rec->bitmap = bitmap;
+    rec->bitmap_bytes = ndk::BitMap_SIZEOF;
+    rec->planes = planes;
+    rec->planes_bytes = planes_bytes;
     rec->title = title;
     rec->title_bytes = title_bytes;
     rec->user_port = user_port;
     rec->user_port_owned = user_port_owned;
+    rec->size_hook = nullptr;
+    rec->size_ctx = nullptr;
     srec->first_window = window;
     write_window_links(screen);
     for (u32& slot : windows_) {
@@ -1300,7 +1581,12 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         }
     }
 
-    draw_window_chrome(*graphics_, b, load_window(b, window));
+    begin_batch();
+    WindowView w = load_window(b, window);
+    w.rp = rp;
+    draw_window_chrome(*graphics_, b, w);
+    compose(screen, Rect{left, top, right, bottom});
+    end_batch();
     if ((a.flags & ndk::WFLG_ACTIVATE) != 0) {
         activate_window(window);
     }
@@ -1349,9 +1635,6 @@ void Intuition::close_window(u32 window) {
             }
         }
         write_window_links(screen);
-        const u32 rp = screen + ndk::sc_RastPort;
-        graphics_->set_pens(rp, 0, 0, ndk::JAM2);
-        graphics_->rect_fill(rp, left, top, left + width - 1, top + height - 1);
     }
 
     remove_window_at(index);
@@ -1367,6 +1650,12 @@ void Intuition::close_window(u32 window) {
     if (rec->title != 0) {
         exec_->free(rec->title, rec->title_bytes);
     }
+    if (rec->planes != 0) {
+        exec_->free(rec->planes, rec->planes_bytes);
+    }
+    if (rec->bitmap != 0) {
+        exec_->free(rec->bitmap, rec->bitmap_bytes);
+    }
     if (rec->layer != 0) {
         exec_->free(rec->layer, rec->layer_bytes);
     }
@@ -1375,6 +1664,10 @@ void Intuition::close_window(u32 window) {
     }
     exec_->free(window, rec->window_bytes);
     *rec = WindowRecord{};
+
+    if (srec != nullptr) {
+        compose(screen, Rect{left, top, left + width - 1, top + height - 1});
+    }
 }
 
 bool Intuition::modify_idcmp(u32 window, u32 flags) {
@@ -1479,12 +1772,18 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
             srec->title_bytes = bytes;
             b.w32(rec->screen + ndk::sc_Title, copy);
             b.w32(rec->screen + ndk::sc_DefaultTitle, copy);
+            begin_batch();
+            draw_screen_bar(*graphics_, b, srec->backdrop_rp, srec->width, srec->title);
+            end_batch();
         }
     }
     if (redraw) {
-        const WindowView w = load_window(b, window);
+        WindowView w = load_window(b, window);
+        w.rp = rec->rp;
         if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
+            begin_batch();
             draw_window_bar(*graphics_, b, w);
+            end_batch();
         }
     }
 }
@@ -1513,6 +1812,9 @@ void Intuition::window_to_front(u32 window) {
             rec->next_window = srec->first_window;
             srec->first_window = window;
             write_window_links(rec->screen);
+            compose(rec->screen,
+                    Rect{rec->left, rec->top, rec->left + rec->width - 1,
+                         rec->top + rec->height - 1});
             return;
         }
         prev = prec->next_window;
@@ -1563,10 +1865,25 @@ void Intuition::window_to_back(u32 window) {
             trec->next_window = window;
             rec->next_window = 0;
             write_window_links(rec->screen);
+            compose(rec->screen,
+                    Rect{rec->left, rec->top, rec->left + rec->width - 1,
+                         rec->top + rec->height - 1});
             return;
         }
         tail = trec->next_window;
     }
+}
+
+void Intuition::set_size_hook(u32 window, WindowHook hook, void* ctx) {
+    if (find_window(window) >= kMaxWindows) {
+        return;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return;
+    }
+    rec->size_hook = hook;
+    rec->size_ctx = ctx;
 }
 
 void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {

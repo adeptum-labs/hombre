@@ -493,7 +493,10 @@ void open_window_builds_struct_rastport_and_layer() {
     const u32 rp = r.get32(window + wd_RPort);
     const u32 layer = r.get32(window + wd_WLayer);
     CHECK(rp != 0 && layer != 0);
-    CHECK_EQ(r.get32(rp + rp_BitMap), screen + sc_BitMap);
+    const u32 win_bm = r.get32(rp + rp_BitMap);
+    CHECK(win_bm != 0);
+    CHECK(win_bm != screen + sc_BitMap);
+    CHECK_EQ(r.get32(layer + ly_SuperBitMap), win_bm);
     CHECK_EQ(r.get32(rp + rp_Layer), layer);
     CHECK_EQ(r.get8(rp + rp_FgPen), 1u);
     CHECK_EQ(r.get8(rp + rp_BgPen), 0u);
@@ -2200,6 +2203,195 @@ void reclaim_restores_the_front_screen() {
     CHECK_EQ(r.get32(keep_scr), 0u);
 }
 
+void window_draws_into_private_bitmap() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    const u32 rp = r.get32(window + wd_RPort);
+    const u32 layer = r.get32(window + wd_WLayer);
+    CHECK(rp != 0 && layer != 0);
+    const u32 win_bm = r.get32(rp + rp_BitMap);
+    CHECK(win_bm != 0);
+    CHECK(win_bm != screen + sc_BitMap);
+    CHECK_EQ(r.get32(layer + ly_SuperBitMap), win_bm);
+    CHECK_EQ(r.get16(layer + ly_MinX), 50u);
+    CHECK_EQ(r.get16(layer + ly_MinY), 60u);
+    CHECK_EQ(r.get16(layer + ly_MaxX), 249u);
+    CHECK_EQ(r.get16(layer + ly_MaxY), 159u);
+}
+
+void rectfill_in_window_shows_on_screen() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 100, 50, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 5;
+    r.cpu().d[1] = 15;
+    r.cpu().d[2] = 9;
+    r.cpu().d[3] = 19;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+
+    for (i32 y = 65; y <= 69; ++y) {
+        for (i32 x = 105; x <= 109; ++x) {
+            CHECK_EQ(screen_pixel(r, screen, x, y), 3u);
+        }
+    }
+    CHECK_EQ(screen_pixel(r, screen, 104, 65), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 110, 65), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 105, 64), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 105, 70), 0u);
+}
+
+void upper_window_covers_lower_after_draw() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
+    const u32 win_a = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 100, 80, 200, 100, 0, 0, 0, 0);
+    const u32 win_b = open_win(r, kNewWindow);
+    CHECK(win_a != 0 && win_b != 0);
+
+    const u32 rp_a = r.get32(win_a + wd_RPort);
+    r.cpu().a[1] = rp_a;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp_a;
+    r.cpu().d[0] = 1;
+    r.cpu().d[1] = 11;
+    r.cpu().d[2] = 198;
+    r.cpu().d[3] = 98;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+
+    CHECK_EQ(screen_pixel(r, screen, 60, 70), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 150, 120), 0u);
+}
+
+void close_reveals_lower_window() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
+    const u32 win_a = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 100, 80, 200, 100, 0, 0, 0, 0);
+    const u32 win_b = open_win(r, kNewWindow);
+    CHECK(win_a != 0 && win_b != 0);
+
+    const u32 rp_a = r.get32(win_a + wd_RPort);
+    r.cpu().a[1] = rp_a;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp_a;
+    r.cpu().d[0] = 1;
+    r.cpu().d[1] = 11;
+    r.cpu().d[2] = 198;
+    r.cpu().d[3] = 98;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+    CHECK_EQ(screen_pixel(r, screen, 150, 120), 0u);
+
+    r.cpu().a[0] = win_b;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK_EQ(screen_pixel(r, screen, 150, 120), 3u);
+}
+
+void depth_gadget_repaints() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_DEPTHGADGET, 0, 0, 0);
+    const u32 win_a = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 100, 80, 200, 100, WFLG_DEPTHGADGET, 0, 0, 0);
+    const u32 win_b = open_win(r, kNewWindow);
+    CHECK(win_a != 0 && win_b != 0);
+
+    const u32 rp_a = r.get32(win_a + wd_RPort);
+    r.cpu().a[1] = rp_a;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp_a;
+    r.cpu().d[0] = 1;
+    r.cpu().d[1] = 11;
+    r.cpu().d[2] = 198;
+    r.cpu().d[3] = 98;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+    CHECK_EQ(screen_pixel(r, screen, 150, 120), 0u);
+
+    r.intuition.window_to_front(win_a);
+    CHECK_EQ(screen_pixel(r, screen, 150, 120), 3u);
+
+    r.intuition.window_to_back(win_a);
+    CHECK_EQ(screen_pixel(r, screen, 150, 120), 0u);
+}
+
+void screen_bar_survives_window_close() {
+    GfxRig r;
+    r.str(kTitle, "Workbench");
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, kTitle);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const std::vector<u8> before = screen_planes(r, screen);
+
+    put_new_window(r, kNewWindow, 0, 0, 200, 60, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK(screen_planes(r, screen) != before);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK(screen_planes(r, screen) == before);
+}
+
+void batch_composes_once() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+
+    r.refreshes.clear();
+    r.refreshed_screens.clear();
+    r.intuition.begin_batch();
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    for (u32 i = 0; i < 10; ++i) {
+        r.cpu().a[1] = rp;
+        r.cpu().d[0] = 5 + i * 4;
+        r.cpu().d[1] = 15 + i * 2;
+        r.cpu().d[2] = 8 + i * 4;
+        r.cpu().d[3] = 18 + i * 2;
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+    }
+    CHECK_EQ(r.refreshes.size(), 0u);
+    r.intuition.end_batch();
+    CHECK_EQ(r.refreshes.size(), 1u);
+    CHECK_EQ(r.refreshed_screens[0], screen);
+    CHECK_EQ(r.refreshes[0].x0, 55);
+    CHECK_EQ(r.refreshes[0].y0, 75);
+    CHECK_EQ(r.refreshes[0].x1, 94);
+    CHECK_EQ(r.refreshes[0].y1, 96);
+}
+
 }
 
 int main() {
@@ -2274,5 +2466,12 @@ int main() {
     reclaim_frees_delivered_unreplied_messages_and_balances_memory();
     reclaim_clears_a_closed_active_window();
     reclaim_restores_the_front_screen();
+    window_draws_into_private_bitmap();
+    rectfill_in_window_shows_on_screen();
+    upper_window_covers_lower_after_draw();
+    close_reveals_lower_window();
+    depth_gadget_repaints();
+    screen_bar_survives_window_close();
+    batch_composes_once();
     return check::finish("test_intuition");
 }
