@@ -96,6 +96,7 @@ constexpr u32 ParentDir = 210;
 constexpr u32 IsInteractive = 216;
 constexpr u32 AllocDosObject = 228;
 constexpr u32 FreeDosObject = 234;
+constexpr u32 DoPkt = 240;
 constexpr u32 SelectInput = 294;
 constexpr u32 SelectOutput = 300;
 constexpr u32 FGetC = 306;
@@ -123,6 +124,8 @@ constexpr u32 Fault = 468;
 constexpr u32 PrintFault = 474;
 constexpr u32 ErrorReport = 480;
 constexpr u32 Cli = 492;
+constexpr u32 GetFileSysTask = 522;
+constexpr u32 SetFileSysTask = 528;
 constexpr u32 GetArgStr = 534;
 constexpr u32 SetArgStr = 540;
 constexpr u32 FindCliProc = 546;
@@ -169,6 +172,7 @@ constexpr u32 SetVar = 900;
 constexpr u32 GetVar = 906;
 constexpr u32 DeleteVar = 912;
 constexpr u32 FindVar = 918;
+constexpr u32 WriteChars = 942;
 constexpr u32 PutStr = 948;
 constexpr u32 VPrintf = 954;
 constexpr u32 ParsePatternNoCase = 966;
@@ -365,13 +369,13 @@ constexpr u32 al_Lock = 4;
 constexpr u32 AssignList_SIZEOF = 8;
 
 // LockDosList, NextDosEntry and FindDosEntry flags
-constexpr u32 LDF_DEVICES = 1u << 0;
-constexpr u32 LDF_VOLUMES = 1u << 1;
-constexpr u32 LDF_ASSIGNS = 1u << 2;
-constexpr u32 LDF_ENTRY = 1u << 3;
-constexpr u32 LDF_DELETE = 1u << 4;
-constexpr u32 LDF_READ = 1u << 5;
-constexpr u32 LDF_WRITE = 1u << 6;
+constexpr u32 LDF_READ = 1u << 0;
+constexpr u32 LDF_WRITE = 1u << 1;
+constexpr u32 LDF_DEVICES = 1u << 2;
+constexpr u32 LDF_VOLUMES = 1u << 3;
+constexpr u32 LDF_ASSIGNS = 1u << 4;
+constexpr u32 LDF_ENTRY = 1u << 5;
+constexpr u32 LDF_DELETE = 1u << 6;
 constexpr u32 LDF_ALL = LDF_DEVICES | LDF_VOLUMES | LDF_ASSIGNS;
 
 // struct DevProc and dvp_Flags
@@ -493,7 +497,7 @@ constexpr u32 eac_MatchString = 8;
 constexpr u32 eac_MatchFunc = 12;
 constexpr u32 eac_SIZEOF = 16;
 
-// struct DosPacket and struct StandardPacket
+// struct DosPacket, struct StandardPacket and packet action numbers
 constexpr u32 dp_Link = 0;
 constexpr u32 dp_Port = 4;
 constexpr u32 dp_Type = 8;
@@ -504,9 +508,22 @@ constexpr u32 sp_Msg = 0;
 constexpr u32 sp_Pkt = MN_SIZE;
 constexpr u32 sp_SIZEOF = MN_SIZE + dp_SIZEOF;
 
-// struct AnchorPath and ap_Flags bits (dos/dosasl.h)
+constexpr u32 ACTION_CURRENT_VOLUME = 7;
+constexpr u32 ACTION_LOCATE_OBJECT = 8;
+constexpr u32 ACTION_FREE_LOCK = 15;
+constexpr u32 ACTION_COPY_DIR = 19;
+constexpr u32 ACTION_EXAMINE_OBJECT = 23;
+constexpr u32 ACTION_EXAMINE_NEXT = 24;
+constexpr u32 ACTION_DISK_INFO = 25;
+constexpr u32 ACTION_INFO = 26;
+constexpr u32 ACTION_PARENT = 29;
+constexpr u32 ACTION_SAME_LOCK = 40;
+constexpr u32 ACTION_IS_FILESYSTEM = 1027;
+
+// struct AnchorPath, struct AChain and their flag bits (dos/dosasl.h)
 constexpr u32 ap_Base = 0;
 constexpr u32 ap_Last = 4;
+constexpr u32 ap_Current = 4;
 constexpr u32 ap_BreakBits = 8;
 constexpr u32 ap_FoundBreak = 12;
 constexpr u32 ap_Flags = 16;
@@ -521,6 +538,20 @@ constexpr u32 APF_DIDDIR = 8;
 constexpr u32 APF_NOMEMERR = 16;
 constexpr u32 APF_DODOT = 32;
 constexpr u32 APF_DirChanged = 64;
+constexpr u32 APF_FollowHLinks = 128;
+
+constexpr u32 an_Child = 0;
+constexpr u32 an_Parent = 4;
+constexpr u32 an_Lock = 8;
+constexpr u32 an_Info = 12;
+constexpr u32 an_Flags = 272;
+constexpr u32 an_String = 273;
+constexpr u32 AChain_SIZEOF = 274;
+constexpr u32 DDF_PatternBit = 1;
+constexpr u32 DDF_ExaminedBit = 2;
+constexpr u32 DDF_Completed = 4;
+constexpr u32 DDF_AllBit = 8;
+constexpr u32 DDF_Single = 16;
 
 // IoErr() codes
 constexpr u32 ERROR_NO_FREE_STORE = 103;
@@ -590,6 +621,8 @@ public:
     static constexpr u32 kMaxAssignLocks = 64;
     static constexpr u32 kMaxArgBlocks = 16;  // ReadArgs results not yet freed
     static constexpr u32 kMaxAnchors = 8;     // active MatchFirst/MatchNext anchors
+    static constexpr u32 kMaxAnchorDepth = 8;
+    static constexpr u32 kMaxLoggedActions = 32;
 
     // Makes dos.library over the volume, which must stay mounted, with its
     // structures and the shell Process, registers the Process as exec's
@@ -651,16 +684,28 @@ private:
         bool owns_rdargs;
     };
 
+    struct AnchorLevel {
+        u32 chain_addr;
+        u32 chain_bytes;
+        u32 lock_bptr;
+        DirEntry dir;
+        char dir_path[kMaxPath];
+        char dir_label[32];
+        u32 after;
+        bool first;
+        bool exhausted;
+    };
+
     struct AnchorSlot {
         bool used;
         u32 anchor_addr;  // masked guest AnchorPath address
         bool is_wild;
-        bool done;
-        DirEntry dir;
-        char dir_path[kMaxPath];
+        bool leaf_empty;
+        u32 depth;
+        DirEntry cur_entry;
         char prefix[detail::kDosPatMaxPat + 1];
-        u32 after;
         u8 tokens[detail::kDosPatMaxTokens + 1];
+        AnchorLevel levels[kMaxAnchorDepth];
     };
 
     struct AssignEntry {
@@ -704,6 +749,8 @@ private:
     AssignEntry assigns_[kMaxAssigns]{};
     ArgBlock arg_blocks_[kMaxArgBlocks]{};
     AnchorSlot anchors_[kMaxAnchors]{};
+    u32 unknown_pkt_actions_[kMaxLoggedActions]{};
+    u32 unknown_pkt_count_ = 0;
     NativeVector vectors_[kVectors]{};
     u64 (*now_ticks_)() = nullptr;
 

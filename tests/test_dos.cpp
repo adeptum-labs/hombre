@@ -465,6 +465,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::IsInteractive, 216u);
     CHECK_EQ(dos_lvo::AllocDosObject, 228u);
     CHECK_EQ(dos_lvo::FreeDosObject, 234u);
+    CHECK_EQ(dos_lvo::DoPkt, 240u);
     CHECK_EQ(dos_lvo::SelectInput, 294u);
     CHECK_EQ(dos_lvo::SelectOutput, 300u);
     CHECK_EQ(dos_lvo::FGetC, 306u);
@@ -492,6 +493,8 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::PrintFault, 474u);
     CHECK_EQ(dos_lvo::ErrorReport, 480u);
     CHECK_EQ(dos_lvo::Cli, 492u);
+    CHECK_EQ(dos_lvo::GetFileSysTask, 522u);
+    CHECK_EQ(dos_lvo::SetFileSysTask, 528u);
     CHECK_EQ(dos_lvo::GetArgStr, 534u);
     CHECK_EQ(dos_lvo::SetArgStr, 540u);
     CHECK_EQ(dos_lvo::FindCliProc, 546u);
@@ -538,6 +541,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::GetVar, 906u);
     CHECK_EQ(dos_lvo::DeleteVar, 912u);
     CHECK_EQ(dos_lvo::FindVar, 918u);
+    CHECK_EQ(dos_lvo::WriteChars, 942u);
     CHECK_EQ(dos_lvo::PutStr, 948u);
     CHECK_EQ(dos_lvo::VPrintf, 954u);
     CHECK_EQ(dos_lvo::ParsePatternNoCase, 966u);
@@ -673,14 +677,14 @@ void layout_matches_the_ndk() {
     CHECK_EQ(DevProc_SIZEOF, 16u);
     CHECK_EQ(DVPF_UNLOCK, 1u);
     CHECK_EQ(DVPF_ASSIGN, 2u);
-    CHECK_EQ(LDF_DEVICES, 1u);
-    CHECK_EQ(LDF_VOLUMES, 2u);
-    CHECK_EQ(LDF_ASSIGNS, 4u);
-    CHECK_EQ(LDF_ENTRY, 8u);
-    CHECK_EQ(LDF_DELETE, 16u);
-    CHECK_EQ(LDF_READ, 32u);
-    CHECK_EQ(LDF_WRITE, 64u);
-    CHECK_EQ(LDF_ALL, 7u);
+    CHECK_EQ(LDF_READ, 1u);
+    CHECK_EQ(LDF_WRITE, 2u);
+    CHECK_EQ(LDF_DEVICES, 4u);
+    CHECK_EQ(LDF_VOLUMES, 8u);
+    CHECK_EQ(LDF_ASSIGNS, 16u);
+    CHECK_EQ(LDF_ENTRY, 32u);
+    CHECK_EQ(LDF_DELETE, 64u);
+    CHECK_EQ(LDF_ALL, 28u);
     CHECK_EQ(DLT_DEVICE, 0u);
     CHECK_EQ(DLT_DIRECTORY, 1u);
     CHECK_EQ(DLT_VOLUME, 2u);
@@ -802,6 +806,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dat_SIZEOF, 26u);
     CHECK_EQ(ap_Base, 0u);
     CHECK_EQ(ap_Last, 4u);
+    CHECK_EQ(ap_Current, 4u);
     CHECK_EQ(ap_BreakBits, 8u);
     CHECK_EQ(ap_FoundBreak, 12u);
     CHECK_EQ(ap_Flags, 16u);
@@ -813,7 +818,33 @@ void layout_matches_the_ndk() {
     CHECK_EQ(APF_ITSWILD, 2u);
     CHECK_EQ(APF_DODIR, 4u);
     CHECK_EQ(APF_DIDDIR, 8u);
+    CHECK_EQ(APF_NOMEMERR, 16u);
+    CHECK_EQ(APF_DODOT, 32u);
     CHECK_EQ(APF_DirChanged, 64u);
+    CHECK_EQ(APF_FollowHLinks, 128u);
+    CHECK_EQ(an_Child, 0u);
+    CHECK_EQ(an_Parent, 4u);
+    CHECK_EQ(an_Lock, 8u);
+    CHECK_EQ(an_Info, 12u);
+    CHECK_EQ(an_Flags, 272u);
+    CHECK_EQ(an_String, 273u);
+    CHECK_EQ(AChain_SIZEOF, 274u);
+    CHECK_EQ(DDF_PatternBit, 1u);
+    CHECK_EQ(DDF_ExaminedBit, 2u);
+    CHECK_EQ(DDF_Completed, 4u);
+    CHECK_EQ(DDF_AllBit, 8u);
+    CHECK_EQ(DDF_Single, 16u);
+    CHECK_EQ(ACTION_CURRENT_VOLUME, 7u);
+    CHECK_EQ(ACTION_LOCATE_OBJECT, 8u);
+    CHECK_EQ(ACTION_FREE_LOCK, 15u);
+    CHECK_EQ(ACTION_COPY_DIR, 19u);
+    CHECK_EQ(ACTION_EXAMINE_OBJECT, 23u);
+    CHECK_EQ(ACTION_EXAMINE_NEXT, 24u);
+    CHECK_EQ(ACTION_DISK_INFO, 25u);
+    CHECK_EQ(ACTION_INFO, 26u);
+    CHECK_EQ(ACTION_PARENT, 29u);
+    CHECK_EQ(ACTION_SAME_LOCK, 40u);
+    CHECK_EQ(ACTION_IS_FILESYSTEM, 1027u);
 }
 
 // --- the library and its structures -------------------------------------
@@ -3124,6 +3155,295 @@ void match_end_releases_anchor() {
     r.call(dos_lvo::MatchEnd, extra);
 }
 
+void match_dodir_enters_directory() {
+    Rig r;
+    const u32 pat = kData;
+    const u32 anchor = kData + 0x200;
+
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "C");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK_EQ(r.get8(anchor + ap_Flags) & APF_ITSWILD, 0u);
+    const Fib c_fib = read_fib(r, anchor + ap_Info);
+    CHECK(c_fib.name == "C");
+    CHECK(c_fib.type > 0);
+    const u32 base_chain = r.get32(anchor + ap_Base);
+    CHECK(base_chain != 0);
+    CHECK_EQ(r.get32(anchor + ap_Current), base_chain);
+
+    // Ask MatchNext to enter C.
+    r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+    std::vector<std::string> entries;
+    bool saw_diddir = false;
+    for (u32 i = 0; i < 20; ++i) {
+        const u32 rc = r.call(dos_lvo::MatchNext, anchor);
+        if (rc != 0) {
+            CHECK_EQ(rc, ERROR_NO_MORE_ENTRIES);
+            break;
+        }
+        const u32 flags = r.get8(anchor + ap_Flags);
+        CHECK_EQ(flags & APF_DODIR, 0u);
+        if ((flags & APF_DIDDIR) != 0) {
+            CHECK(!saw_diddir);
+            saw_diddir = true;
+            CHECK(read_fib(r, anchor + ap_Info).name == "C");
+            CHECK_EQ(r.get32(anchor + ap_Current), base_chain);
+            r.put8(anchor + ap_Flags, flags & ~APF_DIDDIR);
+            continue;
+        }
+        if (entries.empty()) {
+            CHECK((flags & APF_DirChanged) != 0);
+            const u32 cur_chain = r.get32(anchor + ap_Current);
+            CHECK(cur_chain != base_chain);
+            CHECK_EQ(r.get32(cur_chain + an_Parent), base_chain);
+            CHECK_EQ(r.get32(base_chain + an_Child), cur_chain);
+        } else {
+            CHECK_EQ(flags & APF_DirChanged, 0u);
+        }
+        entries.push_back(read_fib(r, anchor + ap_Info).name);
+    }
+    CHECK(saw_diddir);
+    std::sort(entries.begin(), entries.end());
+    CHECK(entries ==
+          (std::vector<std::string>{"Args", "Echo", "Empty", "Entry", "Exit", "Hello", "Unknown"}));
+    r.call(dos_lvo::MatchEnd, anchor);
+    CHECK_EQ(r.get32(anchor + ap_Base), 0u);
+    CHECK_EQ(r.get32(anchor + ap_Current), 0u);
+
+    // Wild pattern entering a subdirectory keeps the wild pattern at depth 1.
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "Devs/#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK(read_fib(r, anchor + ap_Info).name == "Sub");
+    r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), 0u);
+    CHECK((r.get8(anchor + ap_Flags) & APF_DirChanged) != 0);
+    CHECK(read_fib(r, anchor + ap_Info).name == "Deep");
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), 0u);
+    CHECK((r.get8(anchor + ap_Flags) & APF_DIDDIR) != 0);
+    CHECK(read_fib(r, anchor + ap_Info).name == "Sub");
+    r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) & ~APF_DIDDIR);
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), ERROR_NO_MORE_ENTRIES);
+    r.call(dos_lvo::MatchEnd, anchor);
+}
+
+void match_wild_sets_achain_lock() {
+    Rig r;
+    const u32 pat = kData;
+    const u32 anchor = kData + 0x200;
+    const u32 name_buf = kData + 0x500;
+    const u32 read_buf = kData + 0x600;
+
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "S:#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    const u32 cur = r.get32(anchor + ap_Current);
+    CHECK(cur != 0);
+    CHECK_EQ(cur, r.get32(anchor + ap_Base));
+    const u32 dir_lock = r.get32(cur + an_Lock);
+    CHECK(dir_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, dir_lock, name_buf, 64), DOSTRUE);
+    CHECK(r.read_str(name_buf) == "HombreTest:S");
+    CHECK(read_fib(r, cur + an_Info).name == "S");
+
+    // CurrentDir to an_Lock + Open(fib_FileName) opens the matched file.
+    const u32 old_dir = r.call(dos_lvo::CurrentDir, dir_lock);
+    const u32 fh = r.call(dos_lvo::Open, anchor + ap_Info + fib_FileName, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::Read, fh, read_buf, 11), 11u);
+    CHECK(r.read_str(read_buf) == "echo hello\n");
+    r.call(dos_lvo::Close, fh);
+    r.call(dos_lvo::CurrentDir, old_dir);
+    r.call(dos_lvo::MatchEnd, anchor);
+}
+
+void match_buf_has_full_path_after_dodir() {
+    Rig r;
+    const u32 pat = kData;
+    const u32 anchor = kData + 0x200;
+
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "C");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK(r.read_str(anchor + ap_Buf) == "C");
+
+    r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+    std::vector<std::string> paths;
+    for (u32 i = 0; i < 20; ++i) {
+        const u32 rc = r.call(dos_lvo::MatchNext, anchor);
+        if (rc != 0) {
+            CHECK_EQ(rc, ERROR_NO_MORE_ENTRIES);
+            break;
+        }
+        const u32 flags = r.get8(anchor + ap_Flags);
+        if ((flags & APF_DIDDIR) != 0) {
+            CHECK(r.read_str(anchor + ap_Buf) == "C");
+            r.put8(anchor + ap_Flags, flags & ~APF_DIDDIR);
+            continue;
+        }
+        paths.push_back(r.read_str(anchor + ap_Buf));
+    }
+    std::sort(paths.begin(), paths.end());
+    CHECK(paths == (std::vector<std::string>{"C/Args", "C/Echo", "C/Empty", "C/Entry", "C/Exit",
+                                            "C/Hello", "C/Unknown"}));
+    r.call(dos_lvo::MatchEnd, anchor);
+}
+
+void match_end_frees_everything() {
+    Rig r;
+    const u32 pat = kData;
+    const u32 anchor = kData + 0x200;
+    const auto chunks_before = r.chunks();
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+
+    // Complete walk with APF_DODIR.
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "C");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+    for (u32 i = 0; i < 20; ++i) {
+        const u32 rc = r.call(dos_lvo::MatchNext, anchor);
+        if (rc != 0) {
+            CHECK_EQ(rc, ERROR_NO_MORE_ENTRIES);
+            break;
+        }
+        const u32 flags = r.get8(anchor + ap_Flags);
+        if ((flags & APF_DIDDIR) != 0) {
+            r.put8(anchor + ap_Flags, flags & ~APF_DIDDIR);
+        }
+    }
+    r.call(dos_lvo::MatchEnd, anchor);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == chunks_before);
+
+    // Aborted walk inside a subdirectory still frees all AChains and locks.
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "C");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), 0u);
+    CHECK(r.get32(anchor + ap_Current) != r.get32(anchor + ap_Base));
+    r.call(dos_lvo::MatchEnd, anchor);
+    CHECK_EQ(r.get32(anchor + ap_Base), 0u);
+    CHECK_EQ(r.get32(anchor + ap_Current), 0u);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == chunks_before);
+
+    // Garbage ap_Base on an anchor not in the host table is ignored safely.
+    clear_anchor(r, anchor, 64);
+    r.put32(anchor + ap_Base, 0xDEAD0001u);
+    r.str(pat, "C:Missing");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(r.get32(anchor + ap_Base), 0u);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == chunks_before);
+}
+
+void put_bstr_at(Rig& r, u32 at, const std::string& s) {
+    r.put8(at, static_cast<u8>(s.size()));
+    for (usize i = 0; i < s.size(); ++i) {
+        r.put8(at + 1 + static_cast<u32>(i), static_cast<u8>(s[i]));
+    }
+    r.put8(at + 1 + static_cast<u32>(s.size()), 0);
+}
+
+void dopkt_disk_info_and_unknown_action() {
+    Rig r;
+    const u32 port = r.call(dos_lvo::GetFileSysTask);
+    CHECK(port != 0);
+
+    const u32 id = kData + 0x100;
+    const u32 id2 = kData + 0x200;
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_DISK_INFO, id >> 2), DOSTRUE);
+    CHECK_EQ(r.io_err(), 0u);
+    CHECK_EQ(r.call(dos_lvo::Info, 0, id2), DOSTRUE);
+    for (u32 off = 0; off < id_SIZEOF; off += 4) {
+        CHECK_EQ(r.get32(id + off), r.get32(id2 + off));
+    }
+
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_IS_FILESYSTEM), DOSTRUE);
+    CHECK_EQ(r.io_err(), 0u);
+    const u32 root = r.get32(r.base() + dl_Root);
+    const u32 vol_bptr = r.get32((r.get32(root + rn_Info) << 2) + di_DevInfo);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_CURRENT_VOLUME), vol_bptr);
+    CHECK_EQ(r.io_err(), 0u);
+
+    // Locate, Info, CopyDir, SameLock, Parent, Examine, ExamineNext, FreeLock.
+    const u32 bstr1 = kData + 0x300;
+    const u32 bstr2 = kData + 0x340;
+    const u32 fib = kData + 0x400;
+    put_bstr_at(r, bstr1, "Devs");
+    put_bstr_at(r, bstr2, "Sub");
+    const u32 devs = r.call(dos_lvo::DoPkt, port, ACTION_LOCATE_OBJECT, 0, bstr1 >> 2, SHARED_LOCK);
+    CHECK(devs != 0);
+    const u32 sub =
+        r.call(dos_lvo::DoPkt, port, ACTION_LOCATE_OBJECT, devs, bstr2 >> 2, SHARED_LOCK);
+    CHECK(sub != 0);
+
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_INFO, devs, id >> 2), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_DiskState), ID_WRITE_PROTECTED);
+
+    const u32 dup = r.call(dos_lvo::DoPkt, port, ACTION_COPY_DIR, devs);
+    CHECK(dup != 0);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_SAME_LOCK, devs, dup), LOCK_SAME);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_SAME_LOCK, devs, sub), LOCK_SAME_VOLUME);
+
+    const u32 parent = r.call(dos_lvo::DoPkt, port, ACTION_PARENT, sub);
+    CHECK(parent != 0);
+    CHECK_EQ(r.call(dos_lvo::SameLock, parent, devs), LOCK_SAME);
+
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_EXAMINE_OBJECT, sub, fib >> 2), DOSTRUE);
+    CHECK(read_fib(r, fib).name == "Sub");
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_EXAMINE_NEXT, sub, fib >> 2), DOSTRUE);
+    CHECK(read_fib(r, fib).name == "Deep");
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_EXAMINE_NEXT, sub, fib >> 2), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, parent), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, dup), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, sub), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, devs), DOSTRUE);
+
+    // Unknown action fails with ERROR_ACTION_NOT_KNOWN and logs once.
+    g_lines.clear();
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, 999), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_ACTION_NOT_KNOWN);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, 999), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_ACTION_NOT_KNOWN);
+    u32 count = 0;
+    for (const std::string& line : g_lines) {
+        if (line == "dos: DoPkt action 999 not handled") {
+            ++count;
+        }
+    }
+    CHECK_EQ(count, 1u);
+
+    // Another port fails with ERROR_ACTION_NOT_KNOWN.
+    CHECK_EQ(r.call(dos_lvo::DoPkt, kData + 0x10, ACTION_DISK_INFO, id >> 2), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_ACTION_NOT_KNOWN);
+}
+
+void write_chars_and_get_file_sys_task() {
+    Rig r;
+    g_console.clear();
+    r.str(kData, "hello world");
+    CHECK_EQ(r.call(dos_lvo::WriteChars, kData, 5), 5u);
+    CHECK(g_console == "hello");
+    CHECK_EQ(r.call(dos_lvo::WriteChars, kData + 6, 5), 5u);
+    CHECK(g_console == "helloworld");
+    CHECK_EQ(r.call(dos_lvo::WriteChars, kData, 0), 0u);
+    CHECK_EQ(r.call(dos_lvo::WriteChars, kData, 0xFFFFFFFFu), 0xFFFFFFFFu);
+    CHECK_EQ(r.io_err(), ERROR_BAD_NUMBER);
+
+    const u32 port = r.call(dos_lvo::GetFileSysTask);
+    CHECK(port != 0);
+    CHECK_EQ(port, r.get32(r.proc() + pr_FileSystemTask));
+    const u32 fake_port = kData + 0x100;
+    CHECK_EQ(r.call(dos_lvo::SetFileSysTask, fake_port), port);
+    CHECK_EQ(r.call(dos_lvo::GetFileSysTask), fake_port);
+    CHECK_EQ(r.call(dos_lvo::SetFileSysTask, port), fake_port);
+}
+
 void exall_honours_match_string() {
     Rig r;
     r.str(kData, "C:");
@@ -3694,7 +4014,13 @@ int main() {
     match_first_lists_wild_entries();
     match_first_plain_name();
     match_end_releases_anchor();
+    match_dodir_enters_directory();
+    match_wild_sets_achain_lock();
+    match_buf_has_full_path_after_dodir();
+    match_end_frees_everything();
     exall_honours_match_string();
+    dopkt_disk_info_and_unknown_action();
+    write_chars_and_get_file_sys_task();
     date_stamp_uses_the_clock();
     date_to_str_and_str_to_date();
     compare_dates_sign();
