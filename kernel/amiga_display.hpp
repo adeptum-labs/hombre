@@ -1,0 +1,163 @@
+/*
+ * The Hombre Operating System.
+ * Copyright © 2026 Adam Waldenberg and Adeptum AB.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.adeptum.se
+ * Contact: info@adeptum.se
+ */
+
+#pragma once
+
+#include "../common/libs/gfx.hpp"
+#include "../common/libs/native.hpp"
+#include "../common/types.hpp"
+#include "framebuffer.hpp"
+
+namespace hombre {
+
+// Draws the front screen's bitplanes into the framebuffer: the 640x400
+// logical screen at the largest whole scale that fits, centred, and the rest
+// of the framebuffer in the border colour.
+class AmigaDisplay {
+public:
+    constexpr AmigaDisplay() = default;
+
+    // Sizes the screen for the framebuffer and clears it to the border
+    // colour.
+    void init(Framebuffer fb) {
+        fb_ = fb;
+        const u64 width = fb_.width();
+        const u64 height = fb_.height();
+        const u64 fit_x = width / kScreenWidth;
+        const u64 fit_y = height / kScreenHeight;
+        const u64 fit = fit_x < fit_y ? fit_x : fit_y;
+        scale_ = static_cast<u32>(fit > 0 ? fit : 1);
+        origin_x_ = centred(width, kScreenWidth * scale_);
+        origin_y_ = centred(height, kScreenHeight * scale_);
+        fb_.fill(kBorder);
+    }
+
+    DisplaySink sink() { return DisplaySink{&AmigaDisplay::refresh, this}; }
+
+    // Draws the pixels of dirty, clipped to the screen, as scale x scale
+    // blocks. Screen 0 clears the framebuffer to the border colour, and a
+    // screen larger than 4096 pixels on a side is ignored.
+    static void refresh(void* ctx, m68k::Machine& m, u32 screen, const Rect& dirty) {
+        AmigaDisplay& display = *static_cast<AmigaDisplay*>(ctx);
+        if (screen == 0) {
+            display.fb_.fill(kBorder);
+            return;
+        }
+        native::Bus b(m);
+        const u32 width = b.r16(screen + ndk::sc_Width);
+        const u32 height = b.r16(screen + ndk::sc_Height);
+        if (!b.ok() || width > kMaxSide || height > kMaxSide) {
+            return;
+        }
+        const u32 bitmap = screen + ndk::sc_BitMap;
+        const u32 bytes_per_row = b.r16(bitmap + ndk::bm_BytesPerRow);
+        const u32 depth = b.r8(bitmap + ndk::bm_Depth);
+        u32 planes[kPlanes];
+        for (u32 plane = 0; plane < kPlanes; ++plane) {
+            planes[plane] = b.r32(bitmap + ndk::bm_Planes + plane * 4);
+        }
+        const u32 colour_map = b.r32(screen + ndk::sc_ViewPort + ndk::vp_ColorMap);
+        const u32 table = b.r32(colour_map + ndk::cm_ColorTable);
+        u32 palette[kColours];
+        for (u32 pen = 0; pen < kColours; ++pen) {
+            palette[pen] = colour(b.r16(table + pen * 2));
+        }
+        if (!b.ok()) {
+            return;
+        }
+        const i32 last_x = at_most(dirty.x1, width);
+        const i32 last_y = at_most(dirty.y1, height);
+        const i32 first_x = dirty.x0 > 0 ? dirty.x0 : 0;
+        const i32 first_y = dirty.y0 > 0 ? dirty.y0 : 0;
+        for (i32 y = first_y; y <= last_y; ++y) {
+            for (i32 x = first_x; x <= last_x; ++x) {
+                const u32 pen = pen_at(b, planes, depth, bytes_per_row, static_cast<u32>(x),
+                                       static_cast<u32>(y));
+                if (!b.ok()) {
+                    return;
+                }
+                const u64 left = display.origin_x_ + static_cast<u64>(x) * display.scale_;
+                const u64 top = display.origin_y_ + static_cast<u64>(y) * display.scale_;
+                display.fb_.fill_rect(left, top, display.scale_, display.scale_, palette[pen]);
+            }
+        }
+    }
+
+    u32 scale() const { return scale_; }
+    u32 origin_x() const { return origin_x_; }
+    u32 origin_y() const { return origin_y_; }
+
+private:
+    static constexpr u32 kScreenWidth = 640;
+    static constexpr u32 kScreenHeight = 400;
+    static constexpr u32 kMaxSide = 4096;
+    // The colour table holds four entries, so the first two planes choose a
+    // pen and the rest of a deeper bitmap is not drawn.
+    static constexpr u32 kPlanes = 2;
+    static constexpr u32 kColours = 1 << kPlanes;
+    static constexpr u32 kBorder = 0xAAAAAA;
+
+    // The offset of a screen that fits wholly in the framebuffer, 0 when it
+    // does not and is clipped at the top left.
+    static u32 centred(u64 framebuffer_side, u64 screen_side) {
+        return screen_side < framebuffer_side
+                   ? static_cast<u32>((framebuffer_side - screen_side) / 2)
+                   : 0;
+    }
+
+    static i32 at_most(i32 value, u32 side) {
+        const i32 maximum = static_cast<i32>(side) - 1;
+        return value < maximum ? value : maximum;
+    }
+
+    // The pen of screen pixel (x, y): one bit from each plane, the first
+    // plane the lowest.
+    static u32 pen_at(native::Bus& b, const u32 (&planes)[kPlanes], u32 depth, u32 bytes_per_row,
+                      u32 x, u32 y) {
+        const u32 mask = 0x80 >> (x & 7);
+        const u32 at = y * bytes_per_row + (x >> 3);
+        const u32 used = depth < kPlanes ? depth : kPlanes;
+        u32 pen = 0;
+        for (u32 plane = 0; plane < used && b.ok(); ++plane) {
+            if ((b.r8(planes[plane] + at) & mask) != 0) {
+                pen |= 1u << plane;
+            }
+        }
+        return pen;
+    }
+
+    // The 0xRRGGBB colour of a colour table word, a nibble times 17.
+    static u32 colour(u32 rgb) {
+        const u32 red = ((rgb >> 8) & 0xF) * 17;
+        const u32 green = ((rgb >> 4) & 0xF) * 17;
+        const u32 blue = (rgb & 0xF) * 17;
+        return (red << 16) | (green << 8) | blue;
+    }
+
+    Framebuffer fb_{};
+    u32 scale_ = 1;
+    u32 origin_x_ = 0;
+    u32 origin_y_ = 0;
+};
+
+}
