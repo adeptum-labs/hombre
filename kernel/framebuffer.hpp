@@ -100,6 +100,28 @@ public:
         }
     }
 
+    // Draws count 0xRRGGBB pixels starting at (left, top), each as a
+    // scale x scale block, clipped to the screen.
+    void put_row(u64 left, u64 top, const u32* rgb, u32 count, u32 scale) {
+        if (rgb == nullptr || count == 0 || scale == 0 || left >= width_ || top >= height_) {
+            return;
+        }
+        const u64 bottom = scale > height_ - top ? height_ : top + scale;
+        u8* first_row = base_ + top * pitch_;
+        u64 x = left;
+        for (u32 i = 0; i < count && x < width_; ++i) {
+            const u64 span = scale > width_ - x ? width_ - x : scale;
+            const u32 value = pixel_value(rgb[i]);
+            for (u64 s = 0; s < span; ++s, ++x) {
+                __builtin_memcpy(first_row + x * 4, &value, sizeof(value));
+            }
+        }
+        const u64 row_bytes = (x - left) * 4;
+        for (u64 y = top + 1; y < bottom; ++y) {
+            __builtin_memcpy(base_ + y * pitch_ + left * 4, first_row + left * 4, row_bytes);
+        }
+    }
+
 private:
     // The pixel value whose little endian bytes are in the framebuffer's order.
     u32 pixel_value(u32 rgb) const {

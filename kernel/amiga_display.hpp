@@ -90,16 +90,37 @@ public:
         const i32 last_y = at_most(dirty.y1, height);
         const i32 first_x = dirty.x0 > 0 ? dirty.x0 : 0;
         const i32 first_y = dirty.y0 > 0 ? dirty.y0 : 0;
-        for (i32 y = first_y; y <= last_y; ++y) {
-            for (i32 x = first_x; x <= last_x; ++x) {
-                const u32 pen = pen_at(b, planes, depth, bytes_per_row, static_cast<u32>(x),
-                                       static_cast<u32>(y));
-                if (!b.ok()) {
-                    return;
+        if (first_x <= last_x && first_y <= last_y) {
+            const u32 raw_count = static_cast<u32>(last_x - first_x + 1);
+            const u32 count = raw_count < kScreenWidth ? raw_count : kScreenWidth;
+            const u32 used = depth < kPlanes ? depth : kPlanes;
+            const u64 left = display.origin_x_ + static_cast<u64>(first_x) * display.scale_;
+            u32 row[kScreenWidth];
+            for (i32 y = first_y; y <= last_y; ++y) {
+                const u32 row_offset = static_cast<u32>(y) * bytes_per_row;
+                u8 plane_bytes[kPlanes] = {};
+                for (u32 i = 0; i < count; ++i) {
+                    const u32 x = static_cast<u32>(first_x) + i;
+                    if (i == 0 || (x & 7) == 0) {
+                        const u32 at = row_offset + (x >> 3);
+                        for (u32 plane = 0; plane < used && b.ok(); ++plane) {
+                            plane_bytes[plane] = b.r8(planes[plane] + at);
+                        }
+                        if (!b.ok()) {
+                            return;
+                        }
+                    }
+                    const u32 mask = 0x80 >> (x & 7);
+                    u32 pen = 0;
+                    for (u32 plane = 0; plane < used; ++plane) {
+                        if ((plane_bytes[plane] & mask) != 0) {
+                            pen |= 1u << plane;
+                        }
+                    }
+                    row[i] = palette[pen];
                 }
-                const u64 left = display.origin_x_ + static_cast<u64>(x) * display.scale_;
                 const u64 top = display.origin_y_ + static_cast<u64>(y) * display.scale_;
-                display.fb_.fill_rect(left, top, display.scale_, display.scale_, palette[pen]);
+                display.fb_.put_row(left, top, row, count, display.scale_);
             }
         }
         if (display.pointer_visible_) {
@@ -208,22 +229,6 @@ private:
     static i32 at_most(i32 value, u32 side) {
         const i32 maximum = static_cast<i32>(side) - 1;
         return value < maximum ? value : maximum;
-    }
-
-    // The pen of screen pixel (x, y): one bit from each plane, the first
-    // plane the lowest.
-    static u32 pen_at(native::Bus& b, const u32 (&planes)[kPlanes], u32 depth, u32 bytes_per_row,
-                      u32 x, u32 y) {
-        const u32 mask = 0x80 >> (x & 7);
-        const u32 at = y * bytes_per_row + (x >> 3);
-        const u32 used = depth < kPlanes ? depth : kPlanes;
-        u32 pen = 0;
-        for (u32 plane = 0; plane < used && b.ok(); ++plane) {
-            if ((b.r8(planes[plane] + at) & mask) != 0) {
-                pen |= 1u << plane;
-            }
-        }
-        return pen;
     }
 
     // The 0xRRGGBB colour of a colour table word, a nibble times 17.

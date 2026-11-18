@@ -508,6 +508,54 @@ void pointer_overlay_respects_scale_and_origin() {
     CHECK(fb.guards_intact());
 }
 
+void refresh_matches_pixel_reference() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest;
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    CHECK_EQ(display.scale(), 2u);
+
+    u8* mem = guest.machine().mem.base;
+    u32 rng = 0x13579BDFu;
+    for (u32 i = 0; i < kPlanesBytes; ++i) {
+        rng = rng * 1664525u + 1013904223u;
+        mem[kPlaneBase + i] = static_cast<u8>(rng >> 24);
+    }
+
+    refresh(display, guest.machine(), kScreen, Rect{3, 5, 77, 41});
+
+    u32 palette[4];
+    for (u32 pen = 0; pen < 4; ++pen) {
+        const u32 word =
+            (static_cast<u32>(mem[kColourTable + pen * 2]) << 8) | mem[kColourTable + pen * 2 + 1];
+        const u32 r = ((word >> 8) & 0xF) * 17;
+        const u32 g = ((word >> 4) & 0xF) * 17;
+        const u32 b = (word & 0xF) * 17;
+        palette[pen] = (r << 16) | (g << 8) | b;
+    }
+
+    for (u32 fy = 0; fy < 100; ++fy) {
+        for (u32 fx = 0; fx < 170; ++fx) {
+            const u32 lx = fx / 2;
+            const u32 ly = fy / 2;
+            u32 expected = kBorder;
+            if (lx >= 3 && lx <= 77 && ly >= 5 && ly <= 41) {
+                const u32 at = ly * kBytesPerRow + (lx >> 3);
+                const u32 mask = 0x80u >> (lx & 7);
+                u32 pen = 0;
+                for (u32 plane = 0; plane < kPlanes; ++plane) {
+                    if ((mem[kPlaneBase + plane * kPlaneBytes + at] & mask) != 0) {
+                        pen |= 1u << plane;
+                    }
+                }
+                expected = palette[pen];
+            }
+            CHECK_EQ(fb.pixel(fx, fy), expected);
+        }
+    }
+    CHECK(fb.guards_intact());
+}
+
 }
 
 int main() {
@@ -527,5 +575,6 @@ int main() {
     refresh_of_a_rectangle_not_touching_the_pointer_leaves_it_untouched();
     hiding_the_pointer_erases_it();
     pointer_overlay_respects_scale_and_origin();
+    refresh_matches_pixel_reference();
     return check::finish("test_amiga_display");
 }

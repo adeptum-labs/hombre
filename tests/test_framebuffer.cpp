@@ -370,6 +370,50 @@ void pitch_larger_than_width_is_respected() {
     CHECK(t.guards_intact());
 }
 
+void put_row_scales_and_clips() {
+    const u32 row[3] = {0x112233, 0x445566, 0x778899};
+
+    // 3 pixels at scale 2 give a 6x2 block at (2, 1) in BGRX.
+    Screen bgrx(10, 6, 40, kBgrx);
+    bgrx.framebuffer().fill(kBlack);
+    bgrx.framebuffer().put_row(2, 1, row, 3, 2);
+    for (u32 y = 0; y < 6; ++y) {
+        for (u32 x = 0; x < 10; ++x) {
+            const bool inside = x >= 2 && x < 8 && y >= 1 && y < 3;
+            const u32 expected = inside ? row[(x - 2) / 2] : kBlack;
+            CHECK_EQ(bgrx.pixel(x, y), expected);
+        }
+    }
+    CHECK(bgrx.guards_intact());
+
+    // The same row in RGBX swaps red and blue bytes in memory.
+    const u32 expected_rgbx[3] = {0x332211, 0x665544, 0x998877};
+    Screen rgbx(10, 6, 40, kRgbx);
+    rgbx.framebuffer().fill(kBlack);
+    rgbx.framebuffer().put_row(2, 1, row, 3, 2);
+    for (u32 y = 0; y < 6; ++y) {
+        for (u32 x = 0; x < 10; ++x) {
+            const bool inside = x >= 2 && x < 8 && y >= 1 && y < 3;
+            const u32 expected = inside ? expected_rgbx[(x - 2) / 2] : kBlack;
+            CHECK_EQ(rgbx.pixel(x, y), expected);
+        }
+    }
+    CHECK(rgbx.guards_intact());
+
+    // A row running off the right and bottom edges is clipped without touching padding.
+    Screen clipped(5, 3, 32, kBgrx);
+    clipped.framebuffer().fill(kBlack);
+    clipped.framebuffer().put_row(2, 2, row, 3, 2);
+    for (u32 y = 0; y < 3; ++y) {
+        for (u32 x = 0; x < 5; ++x) {
+            const u32 expected = (y == 2 && x >= 2) ? row[(x - 2) / 2] : kBlack;
+            CHECK_EQ(clipped.pixel(x, y), expected);
+        }
+    }
+    CHECK(clipped.padding_is(0x11));
+    CHECK(clipped.guards_intact());
+}
+
 void font_has_the_hombre_letters() {
     CHECK(glyph_is('H', kGlyphH));
     CHECK(glyph_is('O', kGlyphO));
@@ -425,6 +469,7 @@ int main() {
     degenerate_arguments_draw_nothing();
     out_of_range_char_draws_question_mark();
     pitch_larger_than_width_is_respected();
+    put_row_scales_and_clips();
     font_has_the_hombre_letters();
     font_glyphs_are_present_and_distinct();
     return check::finish("test_framebuffer");
