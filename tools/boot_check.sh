@@ -27,9 +27,16 @@
 # build/disk.img (made by make disk-image) is attached as a read-only
 # virtio-blk drive. --disk <file> attaches a copy of that file padded to
 # whole sectors instead, and --no-disk attaches no drive.
+#
+# --usb-kbd attaches an xHCI controller with a USB keyboard. --keys "<names>"
+# implies it and, once "shell: ready" shows on the serial console, types the
+# space-separated QEMU key names (for example "v e r s i o n ret") through
+# the QEMU monitor, which needs socat. Key names are key positions: on the
+# Swedish layout the keys to the right of p, l and the apostrophe key are
+# bracket_left (å), semicolon (ö) and apostrophe (ä).
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--usb-kbd] [--keys <names>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -37,6 +44,8 @@ build_dir="$tools_dir/../build"
 
 image_name=hombre.img
 vga_args=()
+usb_args=()
+keys=
 disk_mode=default
 disk_source=
 while [[ ${1:-} == --* ]]; do
@@ -48,6 +57,13 @@ while [[ ${1:-} == --* ]]; do
             shift
             ;;
         --no-disk) disk_mode=none ;;
+        --usb-kbd) usb_args=(-device qemu-xhci -device usb-kbd) ;;
+        --keys)
+            [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
+            usb_args=(-device qemu-xhci -device usb-kbd)
+            keys=$2
+            shift
+            ;;
         --no-kernel) image_name=hombre-nokernel.img ;;
         # Without a display adapter the q35 machine has no GOP, so the
         # loader hands over a BootInfo without a framebuffer.
@@ -84,6 +100,13 @@ if [[ -n $disk ]]; then
 fi
 
 serial_log=$build_dir/serial.log
+monitor_socket=
+monitor_args=()
+if [[ -n $keys ]]; then
+    command -v socat > /dev/null || { echo "$0: --keys needs socat" >&2; exit 1; }
+    monitor_socket=$build_dir/monitor.$$.sock
+    monitor_args=(-monitor "unix:$monitor_socket,server,nowait")
+fi
 : > "$serial_log"
 cp "$ovmf_dir/OVMF_VARS_4M.fd" "$build_dir/OVMF_VARS.fd"
 
@@ -93,9 +116,20 @@ qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
     "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
     -drive if=pflash,format=raw,file="$build_dir/OVMF_VARS.fd" \
-    -drive format=raw,file="$image" "${disk_args[@]}" &
+    -drive format=raw,file="$image" "${disk_args[@]}" "${usb_args[@]}" "${monitor_args[@]}" &
 qemu_pid=$!
-trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true' EXIT
+trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; rm -f "$monitor_socket"' EXIT
+
+# Types the keys once the shell reads the keyboard. Best effort: a missing
+# marker is reported with the others at the end.
+send_keys() {
+    local key
+    for key in $keys; do
+        echo "sendkey $key" | socat - "UNIX-CONNECT:$monitor_socket" > /dev/null || return 1
+        sleep 0.25
+    done
+}
+keys_sent=false
 
 all_markers_present() {
     local marker
@@ -106,6 +140,10 @@ all_markers_present() {
 
 for ((i = 0; i < timeout_seconds * 4; i++)); do
     all_markers_present "$@" && exit 0
+    if [[ -n $keys && $keys_sent == false ]] && grep -qF -- "shell: ready" "$serial_log"; then
+        keys_sent=true
+        send_keys || true
+    fi
     kill -0 "$qemu_pid" 2>/dev/null || break
     sleep 0.25
 done

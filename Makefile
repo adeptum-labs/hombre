@@ -167,7 +167,8 @@ run: image disk-image
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
 	    -drive format=raw,file=$(IMAGE) \
 	    -drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG) \
-	    -device virtio-blk-pci,disable-legacy=on,drive=disk0
+	    -device virtio-blk-pci,disable-legacy=on,drive=disk0 \
+	    -device qemu-xhci -device usb-kbd
 
 # The boots attach the generated test disk whatever DISK says, so they stay
 # hermetic. The main boot expects its size in 512-byte sectors, rounded up.
@@ -178,9 +179,15 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "gdt loaded" "idt loaded" "breakpoint ok" "lower half unmapped" "cpu0 percpu ok" \
 	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" \
 	    "disk: DMS SIMPLE, 80 tracks" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
-	    "S:Startup-Sequence:" "  Hombre test startup" "intuition: screen opened 640x400" \
+	    "S:Startup-Sequence:" "  Hombre test startup" "usb: no controller" \
+	    "intuition: screen opened 640x400" \
 	    "intuition: window opened AmigaShell" "m68k: running C:Version" \
 	    "Hombre test version 1" "m68k: C:Version returned 0" "halting"
+	tools/boot_check.sh --disk $(TEST_DISK) \
+	    --keys "v e r s i o n ret z z z ret bracket_left apostrophe semicolon ret" \
+	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
+	    "m68k: C:version returned 0" "shell: line: zzz" "shell: unknown command zzz" \
+	    "shell: line: \\xe5\\xe4\\xf6"
 	tools/boot_check.sh --disk $(ZERO_DISK) "virtio-blk: 2 sectors" "disk: unknown format" \
 	    "halting"
 	tools/boot_check.sh --disk $(CORRUPT_DISK) "disk: dms error: TrackCrc track 0" \
@@ -206,7 +213,8 @@ check-workbench: image
 	tools/boot_check.sh --disk "$$DISK" "Hombre kernel booted" "pci: " \
 	    "virtio-blk: read ok" "disk: DMS HEAVY2, 80 tracks" \
 	    "volume: Workbench3.1 (FFS)" "  S/" "  C/" "S:Startup-Sequence:" \
-	    "; Startup-Sequence for low-density floppies" "intuition: screen opened 640x400" \
+	    "; Startup-Sequence for low-density floppies" "usb: no controller" \
+	    "intuition: screen opened 640x400" \
 	    "intuition: window opened AmigaShell" "m68k: running C:Version" \
 	    "Kickstart 60.0, Workbench 40.42" "m68k: C:Version returned 0" "halting"
 else

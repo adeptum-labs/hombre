@@ -25,6 +25,7 @@ Requirements:
 - GNU make
 - mtools and sgdisk (build the boot disk image)
 - QEMU with KVM, and OVMF installed at `/usr/share/OVMF`
+- `socat`, only for the `make check` boot that types on the USB keyboard
 - `xdms` and `unadf`, only for `make test-dms`
 
 Targets:
@@ -38,7 +39,13 @@ Targets:
   a DMS archive or a raw ADF image, and its path may contain spaces.
   The QEMU window shows an Amiga screen with an AmigaShell window that
   holds what the disk's `C:Version` prints and a `1.<volume>:>` prompt; the
-  kernel's own messages stay on the serial port.
+  kernel's own messages stay on the serial port. The QEMU window's keyboard
+  is a USB keyboard on an xHCI controller (Swedish layout): type at the
+  prompt, and Enter runs `C:<word>` from the disk with the rest of the line
+  as its arguments (`version` runs `C:Version`; an unknown word prints
+  `Unknown command <word>`). Input needs the controller and keyboard; without
+  them the window says why and the boot ends. The serial port logs `usb:` and
+  `shell:` lines, with each submitted line as `shell: line: <text>`.
 - `make check` boots the image headless and verifies the messages on the
   serial port. The main boot attaches the generated test disk and verifies
   the volume, the root directory and the startup sequence read from it, and
