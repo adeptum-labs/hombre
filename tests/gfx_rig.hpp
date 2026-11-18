@@ -25,6 +25,7 @@
 
 #include "libs/exec.hpp"
 #include "libs/graphics.hpp"
+#include "libs/intuition.hpp"
 #include "check.hpp"
 
 #include <cstring>
@@ -45,6 +46,7 @@ using hombre::DisplaySink;
 using hombre::DisplayState;
 using hombre::Exec;
 using hombre::Graphics;
+using hombre::Intuition;
 using hombre::Rect;
 using hombre::u16;
 using hombre::u32;
@@ -66,7 +68,7 @@ constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
 constexpr u32 kFreeEnd = 0x400000;
 
-enum class Base { Exec, Graphics };
+enum class Base { Exec, Graphics, Intuition };
 
 inline std::vector<std::string> g_lines;
 
@@ -103,6 +105,7 @@ public:
         display.sink = DisplaySink{record, this};
         display.front_screen = 0;
         CHECK(graphics.init(machine, exec, display));
+        CHECK(intuition.init(machine, exec, graphics, display));
         machine.cpu.a[7] = kStack;
     }
 
@@ -120,6 +123,7 @@ public:
     Jit jit;
     Exec exec;
     Graphics graphics;
+    Intuition intuition;
     DisplayState display;
     std::vector<Rect> refreshes;
     std::vector<u32> refreshed_screens;
@@ -127,7 +131,15 @@ public:
     CpuState& cpu() { return machine.cpu; }
 
     u32 base(Base which) const {
-        return which == Base::Exec ? exec.exec_base() : graphics.graphics_base();
+        switch (which) {
+        case Base::Exec:
+            return exec.exec_base();
+        case Base::Graphics:
+            return graphics.graphics_base();
+        case Base::Intuition:
+            return intuition.intuition_base();
+        }
+        return 0;
     }
 
     void put8(u32 at, u32 v) { memory_[at] = static_cast<u8>(v); }
