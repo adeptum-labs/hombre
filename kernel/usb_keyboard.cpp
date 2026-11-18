@@ -23,6 +23,8 @@
 
 #include "usb_keyboard.hpp"
 
+#include "clock.hpp"
+
 #include "../common/format.hpp"
 #include "../common/serial.hpp"
 #include "pci.hpp"
@@ -38,6 +40,7 @@ constinit Xhci controllers[kMaxControllers];
 constinit u32 active_controller = 0;
 constinit UsbStatus status = UsbStatus::NoController;
 constinit char failure_text[64] = {};
+constinit const char* last_message = nullptr;
 
 void write_hex4(u32 value) {
     char text[5];
@@ -50,6 +53,7 @@ void write_hex4(u32 value) {
 
 UsbResult publish(UsbStatus result, const char* message) {
     status = result;
+    last_message = message;
     serial::write(message);
     serial::write_char('\n');
     return UsbResult{result, message};
@@ -77,6 +81,10 @@ const char* with_prefix(const char* error) {
 UsbResult usb_keyboard_start(MmioMapper& mmio, PhysAllocator& pages) {
     status = UsbStatus::NoController;
     active_controller = 0;
+
+    if (!clock_init()) {
+        return publish(UsbStatus::Failed, "usb: no usable clock");
+    }
 
     PciAddress addresses[kMaxControllers];
     const u32 found = xhci_find(addresses, kMaxControllers);
@@ -131,6 +139,10 @@ UsbResult usb_keyboard_start(MmioMapper& mmio, PhysAllocator& pages) {
 
 UsbStatus usb_keyboard_status() {
     return status;
+}
+
+UsbResult usb_keyboard_result() {
+    return UsbResult{status, last_message != nullptr ? last_message : "usb: not started"};
 }
 
 bool usb_keyboard_poll(u8 report[8]) {

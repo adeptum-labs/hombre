@@ -22,6 +22,7 @@
  */
 
 #include "boot_disk.hpp"
+#include "usb_keyboard.hpp"
 
 #include "../common/amiga_fs.hpp"
 #include "../common/dms.hpp"
@@ -330,6 +331,7 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
         serial::write("disk: unknown format\n");
         return;
     }
+    usb_keyboard_start(mmio, phys_pages);
     mount_and_run(info, phys_pages, image);
 }
 

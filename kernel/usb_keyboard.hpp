@@ -49,6 +49,10 @@ UsbResult usb_keyboard_start(MmioMapper& mmio, PhysAllocator& pages);
 
 UsbStatus usb_keyboard_status();
 
+// The outcome of usb_keyboard_start, or of the keyboard since: its status
+// and the "usb: ..." line that says why. Before a start, the line says so.
+UsbResult usb_keyboard_result();
+
 // Returns true when a new report arrived. A failed transfer or a device that
 // went away marks the keyboard Failed. Returns false when nothing is pending.
 bool usb_keyboard_poll(u8 report[8]);

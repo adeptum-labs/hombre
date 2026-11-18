@@ -32,11 +32,14 @@
 #include "../common/m68k_decode.hpp"
 #include "../common/m68k_jit.hpp"
 #include "../common/printable.hpp"
+#include "../common/hid_keyboard.hpp"
 #include "../common/serial.hpp"
+#include "../common/shell.hpp"
 #include "../common/shell_window.hpp"
 #include "amiga_display.hpp"
 #include "boot_framebuffer.hpp"
 #include "code_region.hpp"
+#include "usb_keyboard.hpp"
 
 namespace hombre {
 
@@ -201,6 +204,105 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
     return true;
 }
 
+
+// Runs the command and reports on serial how it went. False when the
+// program cannot be loaded; any other end is reported and counts as run.
+bool execute(const char* path, const char* args) {
+    serial::write("m68k: running ");
+    write_filtered(path);
+    serial::write("\n");
+
+    machine.cpu.exit = ExitReason::None;
+    u32 result = 0;
+    const bool ok = dos.run_command(path, args, result, block_budget);
+    if (!console_at_line_start) {
+        serial::write_char('\n');
+        console_at_line_start = true;
+    }
+
+    const m68k::CpuState& cpu = machine.cpu;
+    serial::write("m68k: ");
+    bool loaded = true;
+    if (ok) {
+        write_filtered(path);
+        serial::write(" returned ");
+        serial::write_dec(result);
+    } else if (cpu.exit == ExitReason::None) {
+        // run_command fails without running anything only when it cannot
+        // load the program.
+        serial::write("could not load ");
+        write_filtered(path);
+        loaded = false;
+    } else {
+        serial::write(cpu.exit == ExitReason::Budget ? "budget exhausted"
+                                                     : m68k::exit_reason_name(cpu.exit));
+        serial::write(" at pc=0x");
+        serial::write_hex(cpu.pc);
+        // An untranslated or illegal opcode, or an A-line call without a
+        // native: the word at pc tells them apart.
+        u32 op = 0;
+        if ((cpu.exit == ExitReason::Unimplemented || cpu.exit == ExitReason::Illegal) &&
+            machine.mem.read16(cpu.pc & address_mask, op)) {
+            serial::write(" op=0x");
+            serial::write_hex(op);
+        }
+    }
+    serial::write("\n");
+    return loaded;
+}
+
+// The shell's view of the window, the log and the commands.
+struct TypedShell {
+    const AdfVolume* volume;
+};
+
+void typed_echo(void*, u8 ch) { shell.echo(ch); }
+void typed_erase(void*) { shell.erase_last(); }
+void typed_end_line(void*) { shell.end_line(); }
+void typed_message(void*, const char* text) { shell.print_line(text); }
+void typed_prompt(void* ctx) {
+    shell.write_prompt(1, static_cast<const TypedShell*>(ctx)->volume->name);
+}
+void typed_log(void*, const char* text) {
+    write_filtered(text);
+    serial::write_char('\n');
+}
+
+// A typed command may fault like any other; the next one starts clean. What
+// the keyboard queued while it ran is dropped.
+bool typed_run(void*, const char* path, const char* args) {
+    const bool loaded = execute(path, args);
+    usb_keyboard_drain();
+    return loaded;
+}
+
+// Reads the keyboard for good: keys go to the line editor, Enter runs the
+// line. Never returns; a lost keyboard leaves the window as it is.
+[[noreturn]] void run_shell_loop(const AdfVolume& volume) {
+    static constinit TypedShell typed{};
+    typed.volume = &volume;
+    static constinit Shell line_editor;
+    line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
+                               &typed_message, &typed_prompt, &typed_log, &typed});
+    KeyDecoder decoder;
+    serial::write("shell: ready\n");
+    while (usb_keyboard_status() == UsbStatus::Ready) {
+        u8 report[8];
+        if (usb_keyboard_poll(report)) {
+            u8 chars[8];
+            const usize count = decoder.feed(report, chars, sizeof(chars));
+            for (usize i = 0; i < count; ++i) {
+                line_editor.key(chars[i]);
+            }
+        }
+        asm volatile("pause");
+    }
+    shell.print_line(usb_keyboard_result().message);
+    for (;;) {
+        asm volatile("cli; hlt");
+    }
+}
+
 }
 
 void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume,
@@ -219,46 +321,14 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
             amiga_screen = 0;
         }
     }
-    serial::write("m68k: running ");
-    write_filtered(path);
-    serial::write("\n");
-
-    machine.cpu.exit = ExitReason::None;
-    u32 result = 0;
-    const bool ok = dos.run_command(path, args, result, block_budget);
-    if (!console_at_line_start) {
-        serial::write_char('\n');
-        console_at_line_start = true;
-    }
-
-    const m68k::CpuState& cpu = machine.cpu;
-    serial::write("m68k: ");
-    if (ok) {
-        write_filtered(path);
-        serial::write(" returned ");
-        serial::write_dec(result);
-    } else if (cpu.exit == ExitReason::None) {
-        // run_command fails without running anything only when it cannot
-        // load the program.
-        serial::write("could not load ");
-        write_filtered(path);
-    } else {
-        serial::write(cpu.exit == ExitReason::Budget ? "budget exhausted"
-                                                     : m68k::exit_reason_name(cpu.exit));
-        serial::write(" at pc=0x");
-        serial::write_hex(cpu.pc);
-        // An untranslated or illegal opcode, or an A-line call without a
-        // native: the word at pc tells them apart.
-        u32 op = 0;
-        if ((cpu.exit == ExitReason::Unimplemented || cpu.exit == ExitReason::Illegal) &&
-            machine.mem.read16(cpu.pc & address_mask, op)) {
-            serial::write(" op=0x");
-            serial::write_hex(op);
-        }
-    }
-    serial::write("\n");
+    execute(path, args);
     if (shell.is_open()) {
         shell.write_prompt(1, volume.name);
+        if (usb_keyboard_status() == UsbStatus::Ready) {
+            run_shell_loop(volume);
+        }
+        // No keyboard: the window says why, and the boot ends as it always did.
+        shell.print_line(usb_keyboard_result().message);
     }
 }
 
