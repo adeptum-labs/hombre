@@ -161,7 +161,8 @@ void open_gives_a_window_on_the_front_screen() {
     CHECK(r.read_str(r.get32(window + wd_Title)) == "AmigaShell");
     CHECK_EQ(r.get32(layer_of(r, window) + ly_Window), window);
     CHECK_EQ(inner_x(r, window), 1);
-    CHECK_EQ(inner_y(r, window), 11);
+    // Below the screen title bar (10 rows and its line), as a real shell window.
+    CHECK_EQ(inner_y(r, window), 22);
 }
 
 void open_without_a_screen_returns_false() {

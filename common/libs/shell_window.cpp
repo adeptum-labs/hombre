@@ -64,7 +64,8 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
         b.w8(title + i, static_cast<u8>(kTitle[i]));
     }
     b.w16(nw + ndk::nw_LeftEdge, 0);
-    b.w16(nw + ndk::nw_TopEdge, 0);
+    // Below the screen's title bar and the line under it.
+    b.w16(nw + ndk::nw_TopEdge, b.r8(display.front_screen + ndk::sc_BarHeight) + 1);
     b.w16(nw + ndk::nw_Width, 0);
     b.w16(nw + ndk::nw_Height, 0);
     b.w8(nw + ndk::nw_DetailPen, 0);
