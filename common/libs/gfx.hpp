@@ -246,6 +246,8 @@ constexpr u32 WFLG_SIZEGADGET = 1;
 constexpr u32 WFLG_DRAGBAR = 2;
 constexpr u32 WFLG_DEPTHGADGET = 4;
 constexpr u32 WFLG_CLOSEGADGET = 8;
+constexpr u32 WFLG_SIZEBRIGHT = 0x10;
+constexpr u32 WFLG_SIZEBBOTTOM = 0x20;
 constexpr u32 WFLG_REPORTMOUSE = 0x200;
 constexpr u32 WFLG_BORDERLESS = 0x800;
 constexpr u32 WFLG_ACTIVATE = 0x1000;
@@ -257,6 +259,7 @@ constexpr u32 IDCMP_MOUSEMOVE = 0x10;
 constexpr u32 IDCMP_CLOSEWINDOW = 0x200;
 constexpr u32 IDCMP_ACTIVEWINDOW = 0x40000;
 constexpr u32 IDCMP_INACTIVEWINDOW = 0x80000;
+constexpr u32 IDCMP_CHANGEWINDOW = 0x02000000;
 
 // Input codes
 constexpr u32 SELECTDOWN = 0x68;
@@ -278,6 +281,18 @@ constexpr u32 WA_Flags = 0x8000006B;
 constexpr u32 WA_Title = 0x8000006E;
 constexpr u32 WA_ScreenTitle = 0x8000006F;
 constexpr u32 WA_CustomScreen = 0x80000070;
+constexpr u32 WA_MinWidth = 0x80000072;
+constexpr u32 WA_MinHeight = 0x80000073;
+constexpr u32 WA_MaxWidth = 0x80000074;
+constexpr u32 WA_MaxHeight = 0x80000075;
+constexpr u32 WA_SizeGadget = 0x80000081;
+constexpr u32 WA_DragBar = 0x80000082;
+constexpr u32 WA_DepthGadget = 0x80000083;
+constexpr u32 WA_CloseGadget = 0x80000084;
+constexpr u32 WA_ReportMouse = 0x80000086;
+constexpr u32 WA_Activate = 0x80000089;
+constexpr u32 WA_SizeBRight = 0x8000008E;
+constexpr u32 WA_SizeBBottom = 0x8000008F;
 
 constexpr u32 SA_Left = 0x80000021;
 constexpr u32 SA_Top = 0x80000022;

@@ -79,6 +79,7 @@ public:
 
     static Rect close_box_rect(i32 left, i32 top);
     static Rect depth_box_rect(i32 left, i32 top, i32 width);
+    static Rect size_box_rect(i32 left, i32 top, i32 width, i32 height);
 
     // Makes intuition.library over graphics, which must be initialised.
     // False if exec runs out of memory or native ids.

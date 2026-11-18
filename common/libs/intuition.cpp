@@ -247,6 +247,14 @@ void read_new_window(Bus& b, u32 nw, WindowArgs& a) {
     a.type = b.r16(nw + ndk::nw_Type);
 }
 
+void set_window_flag(u32& flags, u32 bit, u32 data) {
+    if (data != 0) {
+        flags |= bit;
+    } else {
+        flags &= ~bit;
+    }
+}
+
 void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
     switch (tag) {
     case ndk::WA_Left:
@@ -279,6 +287,42 @@ void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
     case ndk::WA_CustomScreen:
         a.screen = data;
         a.custom_screen = true;
+        break;
+    case ndk::WA_MinWidth:
+        a.min_width = data;
+        break;
+    case ndk::WA_MinHeight:
+        a.min_height = data;
+        break;
+    case ndk::WA_MaxWidth:
+        a.max_width = data;
+        break;
+    case ndk::WA_MaxHeight:
+        a.max_height = data;
+        break;
+    case ndk::WA_SizeGadget:
+        set_window_flag(a.flags, ndk::WFLG_SIZEGADGET, data);
+        break;
+    case ndk::WA_DragBar:
+        set_window_flag(a.flags, ndk::WFLG_DRAGBAR, data);
+        break;
+    case ndk::WA_DepthGadget:
+        set_window_flag(a.flags, ndk::WFLG_DEPTHGADGET, data);
+        break;
+    case ndk::WA_CloseGadget:
+        set_window_flag(a.flags, ndk::WFLG_CLOSEGADGET, data);
+        break;
+    case ndk::WA_ReportMouse:
+        set_window_flag(a.flags, ndk::WFLG_REPORTMOUSE, data);
+        break;
+    case ndk::WA_Activate:
+        set_window_flag(a.flags, ndk::WFLG_ACTIVATE, data);
+        break;
+    case ndk::WA_SizeBRight:
+        set_window_flag(a.flags, ndk::WFLG_SIZEBRIGHT, data);
+        break;
+    case ndk::WA_SizeBBottom:
+        set_window_flag(a.flags, ndk::WFLG_SIZEBBOTTOM, data);
         break;
     default:
         break;
@@ -376,7 +420,10 @@ struct WindowView {
     i32 height = 0;
     u32 flags = 0;
     u32 title = 0;
+    u32 border_left = 0;
     u32 border_top = 0;
+    u32 border_right = 0;
+    u32 border_bottom = 0;
     bool ok = false;
 };
 
@@ -394,7 +441,10 @@ WindowView load_window(Bus& b, u32 window) {
     w.title = b.r32(window + ndk::wd_Title);
     w.screen = b.r32(window + ndk::wd_WScreen);
     w.rp = b.r32(window + ndk::wd_RPort);
+    w.border_left = b.r8(window + ndk::wd_BorderLeft);
     w.border_top = b.r8(window + ndk::wd_BorderTop);
+    w.border_right = b.r8(window + ndk::wd_BorderRight);
+    w.border_bottom = b.r8(window + ndk::wd_BorderBottom);
     w.ok = b.ok();
     return w;
 }
@@ -471,9 +521,27 @@ void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w) {
     graphics.rect_fill(rp, right, 0, right, bottom);
     if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
         draw_window_bar(graphics, b, w);
+        graphics.set_pens(rp, 1, 0, ndk::JAM2);
+        if (w.border_right == 10 && w.width >= 10) {
+            const i32 x = w.width - 10;
+            graphics.rect_fill(rp, x, static_cast<i32>(w.border_top), x, bottom);
+        }
+        if (w.border_bottom == 10 && w.height >= 10) {
+            const i32 y = w.height - 10;
+            graphics.rect_fill(rp, 0, y, right, y);
+        }
+        if ((w.flags & ndk::WFLG_SIZEGADGET) != 0) {
+            draw_gadget(graphics, rp, Intuition::size_box_rect(0, 0, w.width, w.height));
+        }
     }
-    graphics.set_pens(rp, 0, 0, ndk::JAM2);
-    graphics.rect_fill(rp, 1, static_cast<i32>(w.border_top), right - 1, bottom - 1);
+    const i32 ix0 = static_cast<i32>(w.border_left);
+    const i32 iy0 = static_cast<i32>(w.border_top);
+    const i32 ix1 = w.width - static_cast<i32>(w.border_right) - 1;
+    const i32 iy1 = w.height - static_cast<i32>(w.border_bottom) - 1;
+    if (ix0 <= ix1 && iy0 <= iy1) {
+        graphics.set_pens(rp, 0, 0, ndk::JAM2);
+        graphics.rect_fill(rp, ix0, iy0, ix1, iy1);
+    }
     b.w8(rp + ndk::rp_FgPen, fg);
     b.w8(rp + ndk::rp_BgPen, bg);
     b.w8(rp + ndk::rp_DrawMode, mode);
@@ -593,6 +661,12 @@ Rect Intuition::close_box_rect(i32 left, i32 top) {
 Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width) {
     const i32 right = left + width - 2;
     return Rect{right - 7, top + 1, right, top + 8};
+}
+
+Rect Intuition::size_box_rect(i32 left, i32 top, i32 width, i32 height) {
+    const i32 right = left + width - 1;
+    const i32 bottom = top + height - 1;
+    return Rect{right - 8, bottom - 8, right - 1, bottom - 1};
 }
 
 bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& display) {
@@ -1412,10 +1486,70 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         a.width == 0 || a.width > room_x ? static_cast<i32>(room_x) : static_cast<i32>(a.width);
     const i32 height =
         a.height == 0 || a.height > room_y ? static_cast<i32>(room_y) : static_cast<i32>(a.height);
-    const i32 max_w = width;
-    const i32 max_h = height;
     const bool borderless = (a.flags & ndk::WFLG_BORDERLESS) != 0;
     const u32 border_top = borderless ? 1 : 11;
+    const bool size_right = !borderless &&
+                            ((a.flags & ndk::WFLG_SIZEBRIGHT) != 0 ||
+                             ((a.flags & ndk::WFLG_SIZEGADGET) != 0 &&
+                              (a.flags & ndk::WFLG_SIZEBBOTTOM) == 0));
+    const bool size_bottom = !borderless && (a.flags & ndk::WFLG_SIZEBBOTTOM) != 0;
+    const u32 border_right = size_right ? 10 : 1;
+    const u32 border_bottom = size_bottom ? 10 : 1;
+
+    const i32 floor_w = 40;
+    const i32 floor_h = static_cast<i32>(border_top) + 10;
+    i32 min_w = a.min_width == 0 ? width
+                : a.min_width > static_cast<u32>(screen_w) ? screen_w
+                : static_cast<i32>(a.min_width);
+    i32 min_h = a.min_height == 0 ? height
+                : a.min_height > static_cast<u32>(screen_h) ? screen_h
+                : static_cast<i32>(a.min_height);
+    i32 lim_w = a.max_width == 0 ? width
+                : a.max_width >= 0xFFFF || a.max_width > static_cast<u32>(screen_w)
+                    ? screen_w
+                    : static_cast<i32>(a.max_width);
+    i32 lim_h = a.max_height == 0 ? height
+                : a.max_height >= 0xFFFF || a.max_height > static_cast<u32>(screen_h)
+                    ? screen_h
+                    : static_cast<i32>(a.max_height);
+    if (min_w < floor_w) {
+        min_w = floor_w;
+    }
+    if (min_w > screen_w) {
+        min_w = screen_w;
+    }
+    if (lim_w < floor_w) {
+        lim_w = floor_w;
+    }
+    if (lim_w > screen_w) {
+        lim_w = screen_w;
+    }
+    if (min_h < floor_h) {
+        min_h = floor_h;
+    }
+    if (min_h > screen_h) {
+        min_h = screen_h;
+    }
+    if (lim_h < floor_h) {
+        lim_h = floor_h;
+    }
+    if (lim_h > screen_h) {
+        lim_h = screen_h;
+    }
+    if (min_w > width) {
+        min_w = width;
+    }
+    if (lim_w < width) {
+        lim_w = width;
+    }
+    if (min_h > height) {
+        min_h = height;
+    }
+    if (lim_h < height) {
+        lim_h = height;
+    }
+    const i32 max_w = lim_w;
+    const i32 max_h = lim_h;
 
     const u64 bytes_per_row = (static_cast<u64>(max_w) + 15) / 16 * 2;
     const u64 total_planes_bytes =
@@ -1505,18 +1639,18 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w16(window + ndk::wd_TopEdge, static_cast<u32>(top));
     b.w16(window + ndk::wd_Width, static_cast<u32>(width));
     b.w16(window + ndk::wd_Height, static_cast<u32>(height));
-    b.w16(window + ndk::wd_MinWidth, a.min_width);
-    b.w16(window + ndk::wd_MinHeight, a.min_height);
-    b.w16(window + ndk::wd_MaxWidth, a.max_width);
-    b.w16(window + ndk::wd_MaxHeight, a.max_height);
+    b.w16(window + ndk::wd_MinWidth, static_cast<u32>(min_w));
+    b.w16(window + ndk::wd_MinHeight, static_cast<u32>(min_h));
+    b.w16(window + ndk::wd_MaxWidth, static_cast<u32>(lim_w));
+    b.w16(window + ndk::wd_MaxHeight, static_cast<u32>(lim_h));
     b.w32(window + ndk::wd_Flags, a.flags);
     b.w32(window + ndk::wd_Title, title);
     b.w32(window + ndk::wd_WScreen, screen);
     b.w32(window + ndk::wd_RPort, rp);
     b.w8(window + ndk::wd_BorderLeft, 1);
     b.w8(window + ndk::wd_BorderTop, border_top);
-    b.w8(window + ndk::wd_BorderRight, 1);
-    b.w8(window + ndk::wd_BorderBottom, 1);
+    b.w8(window + ndk::wd_BorderRight, border_right);
+    b.w8(window + ndk::wd_BorderBottom, border_bottom);
     b.w32(window + ndk::wd_IDCMPFlags, a.idcmp);
     b.w32(window + ndk::wd_UserPort, user_port);
     b.w8(window + ndk::wd_DetailPen, a.detail);
@@ -1554,10 +1688,10 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->height = height;
     rec->max_w = max_w;
     rec->max_h = max_h;
-    rec->min_w = width;
-    rec->min_h = height;
-    rec->lim_w = width;
-    rec->lim_h = height;
+    rec->min_w = min_w;
+    rec->min_h = min_h;
+    rec->lim_w = lim_w;
+    rec->lim_h = lim_h;
     rec->rp = rp;
     rec->rp_bytes = ndk::RastPort_SIZEOF;
     rec->layer = layer;

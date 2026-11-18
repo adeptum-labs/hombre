@@ -2392,6 +2392,99 @@ void batch_composes_once() {
     CHECK_EQ(r.refreshes[0].y1, 96);
 }
 
+void size_gadget_sets_right_border() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_SIZEGADGET, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 10u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 1u);
+    CHECK_EQ(window_pixel(r, window, 195, 95), 2u);
+    CHECK_EQ(window_pixel(r, window, 191, 91), 1u);
+    CHECK_EQ(window_pixel(r, window, 190, 50), 1u);
+    CHECK_EQ(window_pixel(r, window, 189, 50), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 245, 155), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 151), 1u);
+}
+
+void size_bbottom_sets_bottom_border() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 1u);
+    CHECK_EQ(window_pixel(r, window, 100, 90), 1u);
+    CHECK_EQ(window_pixel(r, window, 100, 89), 0u);
+}
+
+void limits_zero_mean_initial() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_MinWidth), 200u);
+    CHECK_EQ(r.get16(window + wd_MaxWidth), 200u);
+    CHECK_EQ(r.get16(window + wd_MinHeight), 100u);
+    CHECK_EQ(r.get16(window + wd_MaxHeight), 100u);
+}
+
+void limits_ffff_mean_screen() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    r.put16(kNewWindow + nw_MaxWidth, 0xFFFF);
+    r.put16(kNewWindow + nw_MaxHeight, 0xFFFF);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_MaxWidth), 640u);
+    CHECK_EQ(r.get16(window + wd_MaxHeight), 400u);
+    const u32 rp = r.get32(window + wd_RPort);
+    const u32 win_bm = r.get32(rp + rp_BitMap);
+    CHECK_EQ(r.get16(win_bm + bm_BytesPerRow), 80u);
+}
+
+void limits_clamp_to_floor() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    r.put16(kNewWindow + nw_MinWidth, 5);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_MinWidth), 40u);
+}
+
+void tags_set_gadgets_and_limits() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 tags = r.tags(
+        kTagList, {{WA_Left, 50}, {WA_Top, 60}, {WA_Width, 200}, {WA_Height, 100},
+                   {WA_SizeGadget, 1}, {WA_DragBar, 1}, {WA_MinWidth, 100},
+                   {WA_MaxWidth, ~0u}, {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, 0, tags);
+    CHECK(window != 0);
+    const u32 flags = r.get32(window + wd_Flags);
+    CHECK((flags & WFLG_SIZEGADGET) != 0);
+    CHECK((flags & WFLG_DRAGBAR) != 0);
+    CHECK_EQ(r.get16(window + wd_MinWidth), 100u);
+    CHECK_EQ(r.get16(window + wd_MaxWidth), 640u);
+}
+
 }
 
 int main() {
@@ -2473,5 +2566,11 @@ int main() {
     depth_gadget_repaints();
     screen_bar_survives_window_close();
     batch_composes_once();
+    size_gadget_sets_right_border();
+    size_bbottom_sets_bottom_border();
+    limits_zero_mean_initial();
+    limits_ffff_mean_screen();
+    limits_clamp_to_floor();
+    tags_set_gadgets_and_limits();
     return check::finish("test_intuition");
 }
