@@ -162,6 +162,10 @@ constexpr u32 wd_BorderLeft = 54;
 constexpr u32 wd_BorderTop = 55;
 constexpr u32 wd_BorderRight = 56;
 constexpr u32 wd_BorderBottom = 57;
+constexpr u32 wd_IDCMPFlags = 82;
+constexpr u32 wd_UserPort = 86;
+constexpr u32 wd_WindowPort = 90;
+constexpr u32 wd_MessageKey = 94;
 constexpr u32 wd_DetailPen = 98;
 constexpr u32 wd_BlockPen = 99;
 constexpr u32 wd_WLayer = 124;
@@ -188,6 +192,20 @@ constexpr u32 nw_MaxHeight = 44;
 constexpr u32 nw_Type = 46;
 constexpr u32 NewWindow_SIZEOF = 48;
 static_assert(NewWindow_SIZEOF == 48);
+
+// struct IntuiMessage
+constexpr u32 im_Class = 20;
+constexpr u32 im_Code = 24;
+constexpr u32 im_Qualifier = 26;
+constexpr u32 im_IAddress = 28;
+constexpr u32 im_MouseX = 32;
+constexpr u32 im_MouseY = 34;
+constexpr u32 im_Seconds = 36;
+constexpr u32 im_Micros = 40;
+constexpr u32 im_IDCMPWindow = 44;
+constexpr u32 im_SpecialLink = 48;
+constexpr u32 IntuiMessage_SIZEOF = 52;
+static_assert(IntuiMessage_SIZEOF == 52);
 
 // struct TextAttr and struct TextFont
 constexpr u32 ta_Name = 0;
@@ -219,8 +237,25 @@ constexpr u32 WFLG_SIZEGADGET = 1;
 constexpr u32 WFLG_DRAGBAR = 2;
 constexpr u32 WFLG_DEPTHGADGET = 4;
 constexpr u32 WFLG_CLOSEGADGET = 8;
+constexpr u32 WFLG_REPORTMOUSE = 0x200;
 constexpr u32 WFLG_BORDERLESS = 0x800;
 constexpr u32 WFLG_ACTIVATE = 0x1000;
+
+// IDCMP flags
+constexpr u32 IDCMP_NEWSIZE = 0x2;
+constexpr u32 IDCMP_MOUSEBUTTONS = 0x8;
+constexpr u32 IDCMP_MOUSEMOVE = 0x10;
+constexpr u32 IDCMP_CLOSEWINDOW = 0x200;
+constexpr u32 IDCMP_ACTIVEWINDOW = 0x40000;
+constexpr u32 IDCMP_INACTIVEWINDOW = 0x80000;
+
+// Input codes
+constexpr u32 SELECTDOWN = 0x68;
+constexpr u32 SELECTUP = 0xE8;
+constexpr u32 MENUDOWN = 0x69;
+constexpr u32 MENUUP = 0xE9;
+constexpr u32 MIDDLEDOWN = 0x6A;
+constexpr u32 MIDDLEUP = 0xEA;
 
 // Window and screen tags
 constexpr u32 WA_Left = 0x80000064;
@@ -229,6 +264,7 @@ constexpr u32 WA_Width = 0x80000066;
 constexpr u32 WA_Height = 0x80000067;
 constexpr u32 WA_DetailPen = 0x80000068;
 constexpr u32 WA_BlockPen = 0x80000069;
+constexpr u32 WA_IDCMP = 0x8000006A;
 constexpr u32 WA_Flags = 0x8000006B;
 constexpr u32 WA_Title = 0x8000006E;
 constexpr u32 WA_ScreenTitle = 0x8000006F;

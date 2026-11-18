@@ -46,6 +46,7 @@ namespace intuition_lvo {
 
 constexpr u32 CloseScreen = 66;
 constexpr u32 CloseWindow = 72;
+constexpr u32 ModifyIDCMP = 150;
 constexpr u32 OpenScreen = 198;
 constexpr u32 OpenWindow = 204;
 constexpr u32 ScreenToBack = 246;
@@ -68,10 +69,16 @@ public:
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
     static constexpr u32 kMaxTagItems = 256;
+    static constexpr u32 kMaxMessages = 128;
+
+    static Rect close_box_rect(i32 left, i32 top);
+    static Rect depth_box_rect(i32 left, i32 top, i32 width);
 
     // Makes intuition.library over graphics, which must be initialised.
     // False if exec runs out of memory or native ids.
     bool init(m68k::Machine& m, Exec& exec, Graphics& graphics, DisplayState& display);
+
+    void set_clock(u64 (*now_us)()) { clock_ = now_us; }
 
     u32 intuition_base() const { return base_; }
 
@@ -89,9 +96,14 @@ public:
     // with a log.
     u32 open_window(u32 new_window, u32 tags);
     void close_window(u32 window);
+    bool modify_idcmp(u32 window, u32 flags);
     void set_window_titles(u32 window, u32 title, u32 screen_title);
     void window_to_front(u32 window);
+    void window_to_back(u32 window);
     bool window_open(u32 window) const;
+    u32 active_window() const { return active_window_; }
+    u32 dropped_messages() const { return dropped_messages_; }
+    void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
 
 private:
     friend struct IntuitionNatives;
@@ -132,7 +144,12 @@ private:
         u32 layer_bytes = 0;
         u32 title = 0;
         u32 title_bytes = 0;
+        u32 user_port = 0;
     };
+
+    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2 };
+
+    static void reply_message(void* ctx, u32 message);
 
     u32 find_screen(u32 screen) const;
     ScreenRecord* find_screen_record(u32 screen);
@@ -144,17 +161,32 @@ private:
     void refresh_screen(u32 screen);
     u32 find_window(u32 window) const;
     WindowRecord* find_window_record(u32 window);
+    const WindowRecord* find_window_record(u32 window) const;
     WindowRecord* free_window_record();
     void remove_window_at(u32 index);
+    void activate_window(u32 window);
+    void post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
+    void flush_window_messages(u32 port);
+    void free_tracked_message(u32 message);
+    u32 window_at(i32 x, i32 y) const;
 
     m68k::Machine* machine_ = nullptr;
     Exec* exec_ = nullptr;
     Graphics* graphics_ = nullptr;
     DisplayState* display_ = nullptr;
+    u64 (*clock_)() = nullptr;
     u32 base_ = 0;
     u32 front_ = 0;
+    u32 reply_port_ = 0;
+    u32 active_window_ = 0;
+    u32 pressed_gadget_window_ = 0;
+    GadgetKind pressed_gadget_ = GadgetKind::None;
+    i32 mouse_x_ = 0;
+    i32 mouse_y_ = 0;
+    u32 dropped_messages_ = 0;
     u32 screens_[kMaxScreens]{};
     u32 windows_[kMaxWindows]{};
+    u32 messages_[kMaxMessages]{};
     ScreenRecord screen_records_[kMaxScreens]{};
     WindowRecord window_records_[kMaxWindows]{};
     NativeVector vectors_[kVectors]{};

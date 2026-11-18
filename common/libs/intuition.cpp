@@ -23,6 +23,7 @@
 
 #include "intuition.hpp"
 
+#include "../hid_mouse.hpp"
 #include "exec.hpp"
 #include "graphics.hpp"
 #include "utility.hpp"
@@ -212,6 +213,7 @@ struct WindowArgs {
     u32 height = 0;
     u32 detail = 0;
     u32 block = 1;
+    u32 idcmp = 0;
     u32 flags = 0;
     u32 title = 0;
     u32 screen = 0;
@@ -233,6 +235,7 @@ void read_new_window(Bus& b, u32 nw, WindowArgs& a) {
     a.height = b.r16(nw + ndk::nw_Height);
     a.detail = b.r8(nw + ndk::nw_DetailPen);
     a.block = b.r8(nw + ndk::nw_BlockPen);
+    a.idcmp = b.r32(nw + ndk::nw_IDCMPFlags);
     a.flags = b.r32(nw + ndk::nw_Flags);
     a.title = b.r32(nw + ndk::nw_Title);
     a.screen = b.r32(nw + ndk::nw_Screen);
@@ -262,6 +265,9 @@ void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
         break;
     case ndk::WA_BlockPen:
         a.block = data & 0xFF;
+        break;
+    case ndk::WA_IDCMP:
+        a.idcmp = data;
         break;
     case ndk::WA_Flags:
         a.flags = data;
@@ -340,14 +346,18 @@ WindowView load_window(Bus& b, u32 window) {
     return w;
 }
 
-void draw_gadget(Graphics& graphics, u32 rp, i32 x, i32 y) {
+constexpr bool in_rect(const Rect& r, i32 x, i32 y) {
+    return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
+}
+
+void draw_gadget(Graphics& graphics, u32 rp, const Rect& box) {
     graphics.set_pens(rp, 2, 1, ndk::JAM2);
-    graphics.rect_fill(rp, x, y, x + 7, y + 7);
+    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
     graphics.set_pens(rp, 1, 0, ndk::JAM2);
-    graphics.rect_fill(rp, x, y, x + 7, y);
-    graphics.rect_fill(rp, x, y + 7, x + 7, y + 7);
-    graphics.rect_fill(rp, x, y, x, y + 7);
-    graphics.rect_fill(rp, x + 7, y, x + 7, y + 7);
+    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y0);
+    graphics.rect_fill(rp, box.x0, box.y1, box.x1, box.y1);
+    graphics.rect_fill(rp, box.x0, box.y0, box.x0, box.y1);
+    graphics.rect_fill(rp, box.x1, box.y0, box.x1, box.y1);
 }
 
 // The 10-row title bar of a window with its gadgets, line and title.
@@ -360,10 +370,10 @@ void draw_window_bar(Graphics& graphics, Bus& b, const WindowView& w) {
     graphics.set_pens(rp, 2, 1, ndk::JAM2);
     graphics.rect_fill(rp, left, top, right, line);
     if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        draw_gadget(graphics, rp, left, top);
+        draw_gadget(graphics, rp, Intuition::close_box_rect(w.left, w.top));
     }
     if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
-        draw_gadget(graphics, rp, right - 7, top);
+        draw_gadget(graphics, rp, Intuition::depth_box_rect(w.left, w.top, w.width));
     }
     graphics.set_pens(rp, 1, 0, ndk::JAM2);
     graphics.rect_fill(rp, left, line, right, line);
@@ -446,6 +456,10 @@ struct IntuitionNatives {
 
     static void close_window(void* ctx, Machine& m) { of(ctx).close_window(m.cpu.a[0]); }
 
+    static void modify_idcmp(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).modify_idcmp(m.cpu.a[0], m.cpu.d[0]) ? 1 : 0);
+    }
+
     static void open_window(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).open_window(m.cpu.a[0], 0));
     }
@@ -458,7 +472,7 @@ struct IntuitionNatives {
         of(ctx).set_window_titles(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2]);
     }
 
-    static void window_to_back(void*, Machine&) {}
+    static void window_to_back(void* ctx, Machine& m) { of(ctx).window_to_back(m.cpu.a[0]); }
 
     static void window_to_front(void* ctx, Machine& m) { of(ctx).window_to_front(m.cpu.a[0]); }
 };
@@ -474,6 +488,7 @@ struct IntuitionFunction {
 constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::CloseScreen, IntuitionNatives::close_screen, "CloseScreen"},
     {intuition_lvo::CloseWindow, IntuitionNatives::close_window, "CloseWindow"},
+    {intuition_lvo::ModifyIDCMP, IntuitionNatives::modify_idcmp, "ModifyIDCMP"},
     {intuition_lvo::OpenScreen, IntuitionNatives::open_screen, "OpenScreen"},
     {intuition_lvo::OpenWindow, IntuitionNatives::open_window, "OpenWindow"},
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
@@ -492,19 +507,39 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
 
 }
 
+Rect Intuition::close_box_rect(i32 left, i32 top) {
+    return Rect{left + 1, top + 1, left + 8, top + 8};
+}
+
+Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width) {
+    const i32 right = left + width - 2;
+    return Rect{right - 7, top + 1, right, top + 8};
+}
+
 bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& display) {
     machine_ = &m;
     exec_ = &exec;
     graphics_ = &graphics;
     display_ = &display;
+    clock_ = nullptr;
     base_ = 0;
     front_ = 0;
+    reply_port_ = 0;
+    active_window_ = 0;
+    pressed_gadget_window_ = 0;
+    pressed_gadget_ = GadgetKind::None;
+    mouse_x_ = 0;
+    mouse_y_ = 0;
+    dropped_messages_ = 0;
     display.front_screen = 0;
     for (u32& screen : screens_) {
         screen = 0;
     }
     for (u32& window : windows_) {
         window = 0;
+    }
+    for (u32& msg : messages_) {
+        msg = 0;
     }
     for (ScreenRecord& rec : screen_records_) {
         rec = ScreenRecord{};
@@ -518,11 +553,18 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     for (const IntuitionFunction& f : kIntuitionFunctions) {
         vectors_[f.lvo / ndk::LIB_VECTSIZE - 1] = NativeVector{f.fn, f.name};
     }
+    const u32 reply_port = exec.create_port();
+    if (reply_port == 0) {
+        return false;
+    }
     const u32 base = exec.make_native_library(kIntuitionName, kHombreLibVersion, vectors_, kVectors,
                                               this);
     if (base == 0) {
+        exec.delete_port(reply_port);
         return false;
     }
+    reply_port_ = reply_port;
+    exec.set_reply_handler(reply_port_, reply_message, this);
     base_ = base;
     return true;
 }
@@ -881,6 +923,140 @@ Intuition::WindowRecord* Intuition::find_window_record(u32 window) {
     return nullptr;
 }
 
+const Intuition::WindowRecord* Intuition::find_window_record(u32 window) const {
+    for (const WindowRecord& rec : window_records_) {
+        if (rec.addr == window) {
+            return &rec;
+        }
+    }
+    return nullptr;
+}
+
+void Intuition::reply_message(void* ctx, u32 message) {
+    static_cast<Intuition*>(ctx)->free_tracked_message(message);
+}
+
+void Intuition::free_tracked_message(u32 message) {
+    if (exec_ == nullptr || machine_ == nullptr) {
+        return;
+    }
+    const u32 addr = native::guest_address(*machine_, message);
+    if (addr == 0) {
+        return;
+    }
+    for (u32& slot : messages_) {
+        if (slot == addr) {
+            slot = 0;
+            exec_->free(addr, ndk::IntuiMessage_SIZEOF);
+            return;
+        }
+    }
+}
+
+void Intuition::flush_window_messages(u32 port) {
+    if (port == 0 || exec_ == nullptr) {
+        return;
+    }
+    for (u32 i = 0; i < kMaxMessages; ++i) {
+        const u32 msg = exec_->get_message(port);
+        if (msg == 0) {
+            break;
+        }
+        free_tracked_message(msg);
+    }
+}
+
+void Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress) {
+    if (window == 0 || find_window(window) >= kMaxWindows) {
+        return;
+    }
+    const WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr || rec->screen != front_ || rec->user_port == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 idcmp = b.r32(window + ndk::wd_IDCMPFlags);
+    if (!b.ok() || (idcmp & idcmp_class) == 0) {
+        return;
+    }
+    u32* slot = nullptr;
+    for (u32& entry : messages_) {
+        if (entry == 0) {
+            slot = &entry;
+            break;
+        }
+    }
+    if (slot == nullptr) {
+        ++dropped_messages_;
+        return;
+    }
+    const u32 msg = exec_->alloc(ndk::IntuiMessage_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (msg == 0) {
+        return;
+    }
+    const u64 us = clock_ != nullptr ? clock_() : 0;
+    const u32 seconds = static_cast<u32>(us / 1000000);
+    const u32 micros = static_cast<u32>(us % 1000000);
+    const i16 rel_x = static_cast<i16>(mouse_x_ - rec->left);
+    const i16 rel_y = static_cast<i16>(mouse_y_ - rec->top);
+    b.w32(msg + ndk::mn_ReplyPort, reply_port_);
+    b.w16(msg + ndk::mn_Length, ndk::IntuiMessage_SIZEOF);
+    b.w32(msg + ndk::im_Class, idcmp_class);
+    b.w16(msg + ndk::im_Code, code);
+    b.w16(msg + ndk::im_Qualifier, 0);
+    b.w32(msg + ndk::im_IAddress, iaddress);
+    b.w16(msg + ndk::im_MouseX, static_cast<u16>(rel_x));
+    b.w16(msg + ndk::im_MouseY, static_cast<u16>(rel_y));
+    b.w32(msg + ndk::im_Seconds, seconds);
+    b.w32(msg + ndk::im_Micros, micros);
+    b.w32(msg + ndk::im_IDCMPWindow, window);
+    b.w32(msg + ndk::im_SpecialLink, 0);
+    if (!b.ok() || !exec_->post_message(rec->user_port, msg)) {
+        exec_->free(msg, ndk::IntuiMessage_SIZEOF);
+        return;
+    }
+    *slot = msg;
+}
+
+void Intuition::activate_window(u32 window) {
+    if (window == active_window_) {
+        return;
+    }
+    const u32 prev = active_window_;
+    active_window_ = window;
+    if (prev != 0) {
+        post_intuimessage(prev, ndk::IDCMP_INACTIVEWINDOW, 0);
+    }
+    if (window != 0) {
+        post_intuimessage(window, ndk::IDCMP_ACTIVEWINDOW, 0);
+    }
+}
+
+u32 Intuition::window_at(i32 x, i32 y) const {
+    if (front_ == 0) {
+        return 0;
+    }
+    for (const ScreenRecord& srec : screen_records_) {
+        if (srec.addr != front_) {
+            continue;
+        }
+        u32 window = srec.first_window;
+        for (u32 step = 0; step < kMaxWindows && window != 0; ++step) {
+            const WindowRecord* rec = find_window_record(window);
+            if (rec == nullptr) {
+                return 0;
+            }
+            if (x >= rec->left && x < rec->left + rec->width && y >= rec->top &&
+                y < rec->top + rec->height) {
+                return window;
+            }
+            window = rec->next_window;
+        }
+        return 0;
+    }
+    return 0;
+}
+
 Intuition::WindowRecord* Intuition::free_window_record() {
     for (WindowRecord& rec : window_records_) {
         if (rec.addr == 0) {
@@ -992,6 +1168,20 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
             return 0;
         }
     }
+    u32 user_port = 0;
+    if (a.idcmp != 0) {
+        user_port = exec_->create_port();
+        if (user_port == 0) {
+            if (title != 0) {
+                exec_->free(title, title_bytes);
+            }
+            exec_->free(layer, ndk::Layer_SIZEOF);
+            exec_->free(rp, ndk::RastPort_SIZEOF);
+            exec_->free(window, ndk::Window_SIZEOF);
+            LogLine().text("intuition: no memory for a window").send();
+            return 0;
+        }
+    }
 
     const u32 bitmap = screen + ndk::sc_BitMap;
     b.w16(window + ndk::wd_LeftEdge, static_cast<u32>(left));
@@ -1010,6 +1200,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w8(window + ndk::wd_BorderTop, border_top);
     b.w8(window + ndk::wd_BorderRight, 1);
     b.w8(window + ndk::wd_BorderBottom, 1);
+    b.w32(window + ndk::wd_IDCMPFlags, a.idcmp);
+    b.w32(window + ndk::wd_UserPort, user_port);
     b.w8(window + ndk::wd_DetailPen, a.detail);
     b.w8(window + ndk::wd_BlockPen, a.block);
     b.w32(window + ndk::wd_WLayer, layer);
@@ -1048,6 +1240,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->layer_bytes = ndk::Layer_SIZEOF;
     rec->title = title;
     rec->title_bytes = title_bytes;
+    rec->user_port = user_port;
     srec->first_window = window;
     write_window_links(screen);
     for (u32& slot : windows_) {
@@ -1058,6 +1251,9 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     }
 
     draw_window_chrome(*graphics_, b, load_window(b, window));
+    if ((a.flags & ndk::WFLG_ACTIVATE) != 0) {
+        activate_window(window);
+    }
     return window;
 }
 
@@ -1065,6 +1261,13 @@ void Intuition::close_window(u32 window) {
     const u32 index = find_window(window);
     if (index >= kMaxWindows) {
         return;
+    }
+    if (active_window_ == window) {
+        active_window_ = 0;
+    }
+    if (pressed_gadget_window_ == window) {
+        pressed_gadget_window_ = 0;
+        pressed_gadget_ = GadgetKind::None;
     }
     WindowRecord* rec = find_window_record(window);
     if (rec == nullptr) {
@@ -1102,6 +1305,10 @@ void Intuition::close_window(u32 window) {
     }
 
     remove_window_at(index);
+    if (rec->user_port != 0) {
+        flush_window_messages(rec->user_port);
+        exec_->delete_port(rec->user_port);
+    }
     if (rec->title != 0) {
         exec_->free(rec->title, rec->title_bytes);
     }
@@ -1113,6 +1320,37 @@ void Intuition::close_window(u32 window) {
     }
     exec_->free(window, rec->window_bytes);
     *rec = WindowRecord{};
+}
+
+bool Intuition::modify_idcmp(u32 window, u32 flags) {
+    if (find_window(window) >= kMaxWindows) {
+        return false;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return false;
+    }
+    Bus b(*machine_);
+    if (flags == 0) {
+        if (rec->user_port != 0) {
+            flush_window_messages(rec->user_port);
+            exec_->delete_port(rec->user_port);
+            rec->user_port = 0;
+        }
+        b.w32(window + ndk::wd_IDCMPFlags, 0);
+        b.w32(window + ndk::wd_UserPort, 0);
+        return b.ok();
+    }
+    if (rec->user_port == 0) {
+        const u32 port = exec_->create_port();
+        if (port == 0) {
+            return false;
+        }
+        rec->user_port = port;
+        b.w32(window + ndk::wd_UserPort, port);
+    }
+    b.w32(window + ndk::wd_IDCMPFlags, flags);
+    return b.ok();
 }
 
 void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
@@ -1198,6 +1436,147 @@ void Intuition::window_to_front(u32 window) {
             return;
         }
         prev = prec->next_window;
+    }
+}
+
+void Intuition::window_to_back(u32 window) {
+    const u32 index = find_window(window);
+    if (index >= kMaxWindows) {
+        return;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr || rec->next_window == 0) {
+        return;
+    }
+    ScreenRecord* srec = find_screen_record(rec->screen);
+    if (srec == nullptr || srec->first_window == 0) {
+        return;
+    }
+    if (srec->first_window == window) {
+        srec->first_window = rec->next_window;
+    } else {
+        u32 prev = srec->first_window;
+        bool unlinked = false;
+        for (u32 step = 0; step < kMaxWindows && prev != 0; ++step) {
+            WindowRecord* prec = find_window_record(prev);
+            if (prec == nullptr) {
+                return;
+            }
+            if (prec->next_window == window) {
+                prec->next_window = rec->next_window;
+                unlinked = true;
+                break;
+            }
+            prev = prec->next_window;
+        }
+        if (!unlinked) {
+            return;
+        }
+    }
+    u32 tail = srec->first_window;
+    for (u32 step = 0; step < kMaxWindows && tail != 0; ++step) {
+        WindowRecord* trec = find_window_record(tail);
+        if (trec == nullptr) {
+            return;
+        }
+        if (trec->next_window == 0) {
+            trec->next_window = window;
+            rec->next_window = 0;
+            write_window_links(rec->screen);
+            return;
+        }
+        tail = trec->next_window;
+    }
+}
+
+void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
+    (void)buttons;
+    mouse_x_ = x;
+    mouse_y_ = y;
+    if (front_ == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 hit = window_at(x, y);
+    bool left_press_consumed = false;
+    bool left_release_consumed = false;
+
+    if ((pressed & kMouseLeft) != 0) {
+        if (hit != 0) {
+            activate_window(hit);
+            const WindowView w = load_window(b, hit);
+            if (w.ok && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
+                if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
+                    in_rect(close_box_rect(w.left, w.top), x, y)) {
+                    pressed_gadget_window_ = hit;
+                    pressed_gadget_ = GadgetKind::Close;
+                    left_press_consumed = true;
+                } else if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
+                           in_rect(depth_box_rect(w.left, w.top, w.width), x, y)) {
+                    pressed_gadget_window_ = hit;
+                    pressed_gadget_ = GadgetKind::Depth;
+                    left_press_consumed = true;
+                }
+            }
+        }
+        if (!left_press_consumed) {
+            pressed_gadget_window_ = 0;
+            pressed_gadget_ = GadgetKind::None;
+        }
+    }
+
+    if ((released & kMouseLeft) != 0 && pressed_gadget_ != GadgetKind::None) {
+        const u32 gad_window = pressed_gadget_window_;
+        const GadgetKind gad_kind = pressed_gadget_;
+        pressed_gadget_window_ = 0;
+        pressed_gadget_ = GadgetKind::None;
+        left_release_consumed = true;
+        if (gad_window != 0 && hit == gad_window) {
+            const WindowView w = load_window(b, gad_window);
+            if (w.ok && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
+                if (gad_kind == GadgetKind::Close && (w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
+                    in_rect(close_box_rect(w.left, w.top), x, y)) {
+                    post_intuimessage(gad_window, ndk::IDCMP_CLOSEWINDOW, 0);
+                } else if (gad_kind == GadgetKind::Depth &&
+                           (w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
+                           in_rect(depth_box_rect(w.left, w.top, w.width), x, y)) {
+                    const ScreenRecord* srec = find_screen_record(front_);
+                    if (srec != nullptr && srec->first_window == gad_window) {
+                        window_to_back(gad_window);
+                    } else {
+                        window_to_front(gad_window);
+                    }
+                }
+            }
+        }
+    }
+
+    if (hit != 0) {
+        if ((pressed & kMouseLeft) != 0 && !left_press_consumed) {
+            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTDOWN);
+        }
+        if ((released & kMouseLeft) != 0 && !left_release_consumed) {
+            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTUP);
+        }
+        if ((pressed & kMouseRight) != 0) {
+            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUDOWN);
+        }
+        if ((released & kMouseRight) != 0) {
+            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUUP);
+        }
+        if ((pressed & kMouseMiddle) != 0) {
+            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEDOWN);
+        }
+        if ((released & kMouseMiddle) != 0) {
+            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEUP);
+        }
+    }
+
+    if (moved && active_window_ != 0) {
+        const WindowView w = load_window(b, active_window_);
+        if (w.ok && (w.flags & ndk::WFLG_REPORTMOUSE) != 0) {
+            post_intuimessage(active_window_, ndk::IDCMP_MOUSEMOVE, 0);
+        }
     }
 }
 

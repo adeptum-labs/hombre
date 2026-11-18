@@ -23,13 +23,13 @@
 
 // Host only: writes the test disk the boot check mounts.
 //
-//   mkdisk <out.dms> <version.hunk> <hombretest.hunk>
+//   mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk>
 //
 // The disk is an OFS volume named HombreTest, packed as a DMS archive with
-// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the two
-// hunk files, as C/Version and LIBS/hombretest.library. The output depends
-// on nothing but this source and the hunk files, so two runs give
-// identical files.
+// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the three
+// hunk files, as C/Version, LIBS/hombretest.library and C/mousetest. The
+// output depends on nothing but this source and the hunk files, so two runs
+// give identical files.
 
 #include "dms.hpp"
 #include "dms_writer.hpp"
@@ -52,7 +52,8 @@ std::vector<u8> text(const std::string& s) {
     return std::vector<u8>(s.begin(), s.end());
 }
 
-std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vector<u8>& library) {
+std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vector<u8>& library,
+                                const std::vector<u8>& mousetest) {
     std::vector<u8> echo(kEchoBytes);
     for (usize i = 0; i < echo.size(); ++i) {
         // A repeating run A..Z that shows where a block boundary was crossed.
@@ -64,6 +65,7 @@ std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vecto
         {"Hello", text("Hello from the Hombre test disk.\n")},
         {"C/Version", version},
         {"LIBS/hombretest.library", library},
+        {"C/mousetest", mousetest},
     };
 }
 
@@ -106,17 +108,21 @@ bool write_file(const char* path, const std::vector<u8>& data) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::fprintf(stderr, "usage: mkdisk <out.dms> <version.hunk> <hombretest.hunk>\n");
+    if (argc != 5) {
+        std::fprintf(stderr,
+                     "usage: mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk>\n");
         return 2;
     }
     std::vector<u8> version;
     std::vector<u8> library;
-    if (!read_file(argv[2], version) || !read_file(argv[3], library)) {
+    std::vector<u8> mousetest;
+    if (!read_file(argv[2], version) || !read_file(argv[3], library) ||
+        !read_file(argv[4], mousetest)) {
         return 1;
     }
     try {
-        const std::vector<u8> adf = build_adf("HombreTest", false, test_files(version, library));
+        const std::vector<u8> adf =
+            build_adf("HombreTest", false, test_files(version, library, mousetest));
         const std::vector<u8> dms = build_dms(adf, kSimple, kDdTrackBytes);
         return write_file(argv[1], dms) ? 0 : 1;
     } catch (const std::exception& e) {
