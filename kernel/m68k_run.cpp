@@ -25,12 +25,17 @@
 
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
+#include "../common/libs/graphics.hpp"
+#include "../common/libs/intuition.hpp"
 #include "../common/libs/native.hpp"
+#include "../common/libs/shell_window.hpp"
 #include "../common/libs/utility.hpp"
 #include "../common/m68k_decode.hpp"
 #include "../common/m68k_jit.hpp"
 #include "../common/printable.hpp"
 #include "../common/serial.hpp"
+#include "amiga_display.hpp"
+#include "boot_framebuffer.hpp"
 #include "code_region.hpp"
 
 namespace hombre {
@@ -60,6 +65,13 @@ constinit m68k::Jit jit{};
 constinit Exec exec{};
 constinit Utility utility{};
 constinit Dos dos{};
+constinit Graphics graphics{};
+constinit Intuition intuition{};
+constinit DisplayState display{};
+constinit AmigaDisplay amiga_display{};
+constinit ShellWindow shell{};
+// The default Amiga screen; 0 until it is open.
+constinit u32 amiga_screen = 0;
 
 // Whether the console output so far ends a line.
 constinit bool console_at_line_start = true;
@@ -88,12 +100,59 @@ void console_write(void*, const u8* data, u32 bytes) {
         serial::write_char(c == '\n' || c == '\t' ? static_cast<char>(c) : printable_char(c));
         console_at_line_start = c == '\n';
     }
+    if (shell.is_open()) {
+        shell.write(data, bytes);
+    }
 }
 
 void fail(const char* reason) {
     serial::write("m68k: ");
     serial::write(reason);
     serial::write("\n");
+}
+
+// Opens the default Amiga screen on the framebuffer, when there is one, and
+// hands the framebuffer to it. A failure is logged and leaves the kernel's
+// text console as it was.
+void open_amiga_screen(const BootInfo& info) {
+    if (info.fb.phys == 0) {
+        return;
+    }
+    if (!graphics.init(machine, exec, display) ||
+        !intuition.init(machine, exec, graphics, display)) {
+        fail("graphics init failed");
+        return;
+    }
+    constexpr char title[] = "Amiga Workbench";
+    const u32 new_screen = exec.alloc(ndk::NewScreen_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    const u32 title_at = exec.alloc(sizeof(title), ndk::MEMF_PUBLIC);
+    if (new_screen == 0 || title_at == 0) {
+        fail("no memory for the screen");
+        return;
+    }
+    native::Bus bus(machine);
+    for (u32 i = 0; i < sizeof(title); ++i) {
+        bus.w8(title_at + i, static_cast<u8>(title[i]));
+    }
+    bus.w16(new_screen + ndk::ns_Width, 640);
+    bus.w16(new_screen + ndk::ns_Height, 400);
+    bus.w16(new_screen + ndk::ns_Depth, 2);
+    bus.w16(new_screen + ndk::ns_Type, ndk::CUSTOMSCREEN);
+    bus.w32(new_screen + ndk::ns_DefaultTitle, title_at);
+    amiga_screen = bus.ok() ? intuition.open_screen(new_screen, 0) : 0;
+    exec.free(new_screen, ndk::NewScreen_SIZEOF);
+    exec.free(title_at, sizeof(title));
+    if (amiga_screen == 0) {
+        fail("could not open the screen");
+        return;
+    }
+    serial::write("intuition: screen opened 640x400\n");
+    // The screen takes over the framebuffer: the kernel's text console stops
+    // and the screen is painted in full.
+    serial::mirror = nullptr;
+    amiga_display.init(make_framebuffer(info));
+    display.sink = amiga_display.sink();
+    intuition.screen_to_front(amiga_screen);
 }
 
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
@@ -135,6 +194,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         return false;
     }
     machine.cpu.a[7] = boot_stack;
+    open_amiga_screen(info);
     return true;
 }
 
@@ -144,6 +204,9 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
                       const char* path, const char* args) {
     if (!start(info, pages, volume)) {
         return;
+    }
+    if (amiga_screen != 0 && shell.open(machine, exec, graphics, intuition, display)) {
+        serial::write("intuition: window opened AmigaShell\n");
     }
     serial::write("m68k: running ");
     write_filtered(path);
@@ -183,6 +246,9 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
         }
     }
     serial::write("\n");
+    if (shell.is_open()) {
+        shell.write_prompt(1, volume.name);
+    }
 }
 
 }

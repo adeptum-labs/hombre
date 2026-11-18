@@ -24,6 +24,7 @@
 #include "../common/boot_info.hpp"
 #include "../common/serial.hpp"
 #include "boot_disk.hpp"
+#include "boot_framebuffer.hpp"
 #include "framebuffer.hpp"
 #include "gdt.hpp"
 #include "idt.hpp"
@@ -72,11 +73,6 @@ void unmap_lower_half(u64 direct_map_base) {
         pml4[i] = 0;
     }
     asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
-}
-
-Framebuffer make_framebuffer(const BootInfo& info) {
-    return Framebuffer(reinterpret_cast<u8*>(info.direct_map_base + info.fb.phys), info.fb.width,
-                       info.fb.height, info.fb.pitch_bytes, info.fb.format);
 }
 
 void draw_banner(Framebuffer& fb) {

@@ -178,7 +178,8 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "gdt loaded" "idt loaded" "breakpoint ok" "lower half unmapped" "cpu0 percpu ok" \
 	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" \
 	    "disk: DMS SIMPLE, 80 tracks" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
-	    "S:Startup-Sequence:" "  Hombre test startup" "m68k: running C:Version" \
+	    "S:Startup-Sequence:" "  Hombre test startup" "intuition: screen opened 640x400" \
+	    "intuition: window opened AmigaShell" "m68k: running C:Version" \
 	    "Hombre test version 1" "m68k: C:Version returned 0" "halting"
 	tools/boot_check.sh --disk $(ZERO_DISK) "virtio-blk: 2 sectors" "disk: unknown format" \
 	    "halting"
@@ -205,7 +206,8 @@ check-workbench: image
 	tools/boot_check.sh --disk "$$DISK" "Hombre kernel booted" "pci: " \
 	    "virtio-blk: read ok" "disk: DMS HEAVY2, 80 tracks" \
 	    "volume: Workbench3.1 (FFS)" "  S/" "  C/" "S:Startup-Sequence:" \
-	    "; Startup-Sequence for low-density floppies" "m68k: running C:Version" \
+	    "; Startup-Sequence for low-density floppies" "intuition: screen opened 640x400" \
+	    "intuition: window opened AmigaShell" "m68k: running C:Version" \
 	    "Kickstart 60.0, Workbench 40.42" "m68k: C:Version returned 0" "halting"
 else
 check-workbench:
