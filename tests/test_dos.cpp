@@ -502,6 +502,18 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::GetProgramName, 576u);
     CHECK_EQ(dos_lvo::SetPrompt, 582u);
     CHECK_EQ(dos_lvo::GetPrompt, 588u);
+    CHECK_EQ(dos_lvo::AssignLock, 612u);
+    CHECK_EQ(dos_lvo::AssignLate, 618u);
+    CHECK_EQ(dos_lvo::AssignPath, 624u);
+    CHECK_EQ(dos_lvo::AssignAdd, 630u);
+    CHECK_EQ(dos_lvo::RemAssignList, 636u);
+    CHECK_EQ(dos_lvo::GetDeviceProc, 642u);
+    CHECK_EQ(dos_lvo::FreeDeviceProc, 648u);
+    CHECK_EQ(dos_lvo::LockDosList, 654u);
+    CHECK_EQ(dos_lvo::UnLockDosList, 660u);
+    CHECK_EQ(dos_lvo::AttemptLockDosList, 666u);
+    CHECK_EQ(dos_lvo::FindDosEntry, 684u);
+    CHECK_EQ(dos_lvo::NextDosEntry, 690u);
     CHECK_EQ(dos_lvo::IsFileSystem, 708u);
     CHECK_EQ(dos_lvo::CompareDates, 738u);
     CHECK_EQ(dos_lvo::DateToStr, 744u);
@@ -647,8 +659,33 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dol_VolumeDate, 16u);
     CHECK_EQ(dol_LockList, dol_VolumeDate + ds_SIZEOF);
     CHECK_EQ(dol_DiskType, dol_LockList + 4);
+    CHECK_EQ(dol_AssignName, 16u);
+    CHECK_EQ(dol_List, 20u);
     CHECK_EQ(dol_Name, dol_VolumeDate + 6 * 4);
     CHECK_EQ(DosList_SIZEOF, dol_Name + 4);
+    CHECK_EQ(al_Next, 0u);
+    CHECK_EQ(al_Lock, 4u);
+    CHECK_EQ(AssignList_SIZEOF, 8u);
+    CHECK_EQ(dvp_Port, 0u);
+    CHECK_EQ(dvp_Lock, 4u);
+    CHECK_EQ(dvp_Flags, 8u);
+    CHECK_EQ(dvp_DevNode, 12u);
+    CHECK_EQ(DevProc_SIZEOF, 16u);
+    CHECK_EQ(DVPF_UNLOCK, 1u);
+    CHECK_EQ(DVPF_ASSIGN, 2u);
+    CHECK_EQ(LDF_DEVICES, 1u);
+    CHECK_EQ(LDF_VOLUMES, 2u);
+    CHECK_EQ(LDF_ASSIGNS, 4u);
+    CHECK_EQ(LDF_ENTRY, 8u);
+    CHECK_EQ(LDF_DELETE, 16u);
+    CHECK_EQ(LDF_READ, 32u);
+    CHECK_EQ(LDF_WRITE, 64u);
+    CHECK_EQ(LDF_ALL, 7u);
+    CHECK_EQ(DLT_DEVICE, 0u);
+    CHECK_EQ(DLT_DIRECTORY, 1u);
+    CHECK_EQ(DLT_VOLUME, 2u);
+    CHECK_EQ(DLT_LATE, 3u);
+    CHECK_EQ(DLT_NONBINDING, 4u);
 
     // FileInfoBlock and InfoData.
     CHECK_EQ(fib_DiskKey, 0u);
@@ -816,9 +853,12 @@ void dos_library_is_built() {
     const u32 vol = r.get32(info + di_DevInfo) << 2;
     CHECK(vol != 0);
     CHECK_EQ(r.get32(vol + dol_Type), DLT_VOLUME);
-    CHECK_EQ(r.get32(vol + dol_Next), 0u);
     CHECK(r.read_bstr(r.get32(vol + dol_Name)) == "HombreTest");
     CHECK_EQ(r.get32(vol + dol_DiskType), ID_DOS_DISK);
+    const u32 dev = r.get32(vol + dol_Next) << 2;
+    CHECK(dev != 0);
+    CHECK_EQ(r.get32(dev + dol_Type), DLT_DEVICE);
+    CHECK(r.read_bstr(r.get32(dev + dol_Name)) == "DF0");
     const u32 tasks = r.get32(root + rn_TaskArray) << 2;
     CHECK_EQ(r.get32(tasks), 1u);
     CHECK_EQ(r.get32(tasks + 4), r.proc() + pr_MsgPort);
@@ -3245,6 +3285,359 @@ void compare_dates_sign() {
     CHECK(as_signed(r.call(dos_lvo::CompareDates, a, b)) < 0);
 }
 
+// --- assigns and DosList --------------------------------------------------
+
+void default_assigns_resolve() {
+    {
+        Rig r;
+        const u32 fib = kData + 0x200;
+        const u32 buf = kData + 0x400;
+
+        struct Expected {
+            const char* path;
+            const char* name;
+            i32 type;
+        };
+        const Expected present[] = {
+            {"SYS:", "HombreTest", 1},
+            {"DF0:", "HombreTest", 1},
+            {"C:", "C", 2},
+            {"S:", "S", 2},
+            {"LIBS:", "LIBS", 2},
+            {"DEVS:", "Devs", 2},
+        };
+        for (const Expected& e : present) {
+            r.str(kData, e.path);
+            const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+            CHECK(lock != 0);
+            CHECK_EQ(r.call(dos_lvo::Examine, lock, fib), DOSTRUE);
+            const Fib f = read_fib(r, fib);
+            CHECK(f.name == e.name);
+            CHECK_EQ(f.type, e.type);
+            r.call(dos_lvo::UnLock, lock);
+        }
+
+        // Info and NameFromLock work on DF0: and inside an assigned directory.
+        r.str(kData, "DF0:C/Echo");
+        const u32 df0_echo = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(df0_echo != 0);
+        CHECK_EQ(r.call(dos_lvo::NameFromLock, df0_echo, buf, 64), DOSTRUE);
+        CHECK(r.read_str(buf) == "HombreTest:C/Echo");
+        CHECK_EQ(r.call(dos_lvo::Info, df0_echo, buf), DOSTRUE);
+        CHECK_EQ(r.get32(buf + id_DiskState), ID_WRITE_PROTECTED);
+        r.call(dos_lvo::UnLock, df0_echo);
+
+        r.str(kData, "C:Echo");
+        const u32 c_echo = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(c_echo != 0);
+        CHECK_EQ(r.call(dos_lvo::NameFromLock, c_echo, buf, 64), DOSTRUE);
+        CHECK(r.read_str(buf) == "HombreTest:C/Echo");
+        r.call(dos_lvo::UnLock, c_echo);
+
+        // Absent directories and ENV/T have no assigns.
+        for (const char* missing : {"FONTS:", "L:", "ENV:", "T:", "ENVARC:"}) {
+            r.str(kData, missing);
+            CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+            CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+        }
+    }
+
+    // ENVARC and other standard directories appear when present on the volume.
+    std::vector<AdfFile> wb_files = standard_files();
+    wb_files.push_back({"Prefs/Env-Archive/sys.prefs", text("ok")});
+    wb_files.push_back({"FONTS/topaz.font", text("font")});
+    wb_files.push_back({"ENV/var", text("1")});
+    wb_files.push_back({"T/tmp", text("1")});
+    Rig wb(wb_files);
+    const u32 buf = kData + 0x400;
+    wb.str(kData, "ENVARC:sys.prefs");
+    const u32 envarc = wb.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(envarc != 0);
+    CHECK_EQ(wb.call(dos_lvo::NameFromLock, envarc, buf, 64), DOSTRUE);
+    CHECK(wb.read_str(buf) == "HombreTest:Prefs/Env-Archive/sys.prefs");
+    wb.call(dos_lvo::UnLock, envarc);
+    wb.str(kData, "FONTS:topaz.font");
+    const u32 font = wb.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(font != 0);
+    wb.call(dos_lvo::UnLock, font);
+    for (const char* skipped : {"ENV:", "T:"}) {
+        wb.str(kData, skipped);
+        CHECK_EQ(wb.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+        CHECK_EQ(wb.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+    }
+}
+
+void assign_lock_and_remove() {
+    Rig r;
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+    const auto before = r.chunks();
+
+    r.str(kData, "C:");
+    const u32 lock_c = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(lock_c != 0);
+    r.str(kData, "FOO");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, lock_c), DOSTRUE);
+
+    r.str(kData + 0x40, "FOO:Echo");
+    const u32 echo_lock = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK(echo_lock != 0);
+    const u32 buf = kData + 0x200;
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, echo_lock, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C/Echo");
+    r.call(dos_lvo::UnLock, echo_lock);
+
+    // Removing the assign frees its node and restores AvailMem.
+    r.str(kData, "FOO");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+
+    r.str(kData + 0x40, "FOO:Echo");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+}
+
+void assign_add_multi_directory() {
+    Rig r;
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+    const auto before = r.chunks();
+
+    r.str(kData, "C:");
+    const u32 lock_c = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    r.str(kData + 0x40, "S:");
+    const u32 lock_s = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK(lock_c != 0 && lock_s != 0);
+
+    r.str(kData, "FOO");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, lock_c), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::AssignAdd, kData, lock_s), DOSTRUE);
+
+    // First directory and second directory both resolve.
+    r.str(kData + 0x80, "FOO:Echo");
+    const u32 l1 = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(l1 != 0);
+    r.call(dos_lvo::UnLock, l1);
+
+    r.str(kData + 0x80, "FOO:Startup-Sequence");
+    const u32 l2 = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(l2 != 0);
+    const u32 buf = kData + 0x200;
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, l2, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:S/Startup-Sequence");
+    r.call(dos_lvo::UnLock, l2);
+
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x80, MODE_OLDFILE);
+    CHECK(fh != 0);
+    r.call(dos_lvo::Close, fh);
+
+    // RemAssignList removes one directory by lock match.
+    r.str(kData + 0x40, "C:");
+    const u32 cmp_c = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK(cmp_c != 0);
+    CHECK_EQ(r.call(dos_lvo::RemAssignList, kData, cmp_c), DOSTRUE);
+    r.call(dos_lvo::UnLock, cmp_c);
+
+    r.str(kData + 0x80, "FOO:Echo");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    r.str(kData + 0x80, "FOO:Startup-Sequence");
+    const u32 l3 = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(l3 != 0);
+    r.call(dos_lvo::UnLock, l3);
+
+    // Removing the last directory removes the assign itself.
+    r.str(kData + 0x40, "S:");
+    const u32 cmp_s = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::RemAssignList, kData, cmp_s), DOSTRUE);
+    r.call(dos_lvo::UnLock, cmp_s);
+    CHECK_EQ(r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+}
+
+void assign_late_and_path() {
+    Rig r;
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+
+    // Late assign stays DLT_LATE until first use, then resolves to DLT_DIRECTORY.
+    r.str(kData, "LATE");
+    r.str(kData + 0x40, "SYS:S");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+
+    u32 dl = r.call(dos_lvo::LockDosList, LDF_ASSIGNS | LDF_READ);
+    u32 node = r.call(dos_lvo::FindDosEntry, dl, kData, LDF_ASSIGNS);
+    CHECK(node != 0);
+    CHECK_EQ(r.get32(node + dol_Type), DLT_LATE);
+    CHECK(r.read_str(r.get32(node + dol_AssignName)) == "SYS:S");
+    r.call(dos_lvo::UnLockDosList, LDF_ASSIGNS | LDF_READ);
+
+    r.str(kData + 0x80, "LATE:Startup-Sequence");
+    const u32 late_lock = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(late_lock != 0);
+    r.call(dos_lvo::UnLock, late_lock);
+
+    dl = r.call(dos_lvo::LockDosList, LDF_ASSIGNS | LDF_READ);
+    node = r.call(dos_lvo::FindDosEntry, dl, kData, LDF_ASSIGNS);
+    CHECK(node != 0);
+    CHECK_EQ(r.get32(node + dol_Type), DLT_DIRECTORY);
+    CHECK(r.get32(node + dol_Lock) != 0);
+    r.call(dos_lvo::UnLockDosList, LDF_ASSIGNS | LDF_READ);
+
+    // Non-binding path assign re-evaluates its target path on each use.
+    r.str(kData, "TARGET");
+    r.str(kData + 0x40, "C:");
+    const u32 c_lock = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, c_lock), DOSTRUE);
+
+    r.str(kData + 0x20, "PATH");
+    r.str(kData + 0x60, "TARGET:");
+    CHECK_EQ(r.call(dos_lvo::AssignPath, kData + 0x20, kData + 0x60), DOSTRUE);
+
+    r.str(kData + 0x80, "PATH:Echo");
+    const u32 p1 = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(p1 != 0);
+    r.call(dos_lvo::UnLock, p1);
+
+    // Redirecting TARGET: redirects PATH: too, while PATH stays DLT_NONBINDING.
+    r.str(kData + 0x40, "S:");
+    const u32 s_lock = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, s_lock), DOSTRUE);
+    r.str(kData + 0x80, "PATH:Startup-Sequence");
+    const u32 p2 = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(p2 != 0);
+    r.call(dos_lvo::UnLock, p2);
+
+    dl = r.call(dos_lvo::LockDosList, LDF_ASSIGNS | LDF_READ);
+    node = r.call(dos_lvo::FindDosEntry, dl, kData + 0x20, LDF_ASSIGNS);
+    CHECK(node != 0);
+    CHECK_EQ(r.get32(node + dol_Type), DLT_NONBINDING);
+    r.call(dos_lvo::UnLockDosList, LDF_ASSIGNS | LDF_READ);
+
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData + 0x20, 0), DOSTRUE);
+    r.str(kData, "LATE");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+}
+
+void dos_list_walk() {
+    Rig r;
+    const u32 head = r.call(dos_lvo::LockDosList, LDF_ALL | LDF_READ);
+    CHECK(head != 0);
+    CHECK_EQ(r.call(dos_lvo::AttemptLockDosList, LDF_ALL | LDF_READ), head);
+
+    std::vector<std::pair<u32, std::string>> entries;
+    u32 cur = head;
+    for (u32 i = 0; i < 64; ++i) {
+        cur = r.call(dos_lvo::NextDosEntry, cur, LDF_ALL);
+        if (cur == 0) {
+            break;
+        }
+        entries.emplace_back(r.get32(cur + dol_Type), r.read_bstr(r.get32(cur + dol_Name)));
+    }
+    CHECK_EQ(cur, 0u);
+    CHECK(entries == (std::vector<std::pair<u32, std::string>>{
+                         {DLT_VOLUME, "HombreTest"},
+                         {DLT_DEVICE, "DF0"},
+                         {DLT_DIRECTORY, "SYS"},
+                         {DLT_DIRECTORY, "C"},
+                         {DLT_DIRECTORY, "S"},
+                         {DLT_DIRECTORY, "LIBS"},
+                         {DLT_DIRECTORY, "DEVS"},
+                     }));
+
+    // FindDosEntry is case-insensitive and respects flags.
+    r.str(kData, "c");
+    const u32 c_node = r.call(dos_lvo::FindDosEntry, head, kData, LDF_ASSIGNS);
+    CHECK(c_node != 0);
+    CHECK_EQ(r.get32(c_node + dol_Type), DLT_DIRECTORY);
+    CHECK(r.read_bstr(r.get32(c_node + dol_Name)) == "C");
+    CHECK_EQ(r.call(dos_lvo::FindDosEntry, head, kData, LDF_DEVICES), 0u);
+
+    r.str(kData, "df0");
+    const u32 df0 = r.call(dos_lvo::FindDosEntry, head, kData, LDF_DEVICES);
+    CHECK(df0 != 0);
+    CHECK_EQ(r.get32(df0 + dol_Type), DLT_DEVICE);
+
+    r.str(kData, "hombretest");
+    const u32 vol = r.call(dos_lvo::FindDosEntry, head, kData, LDF_VOLUMES);
+    CHECK(vol != 0);
+    CHECK_EQ(r.get32(vol + dol_Type), DLT_VOLUME);
+
+    r.call(dos_lvo::UnLockDosList, LDF_ALL | LDF_READ);
+}
+
+void get_device_proc_walks_assign_list() {
+    Rig r;
+    r.str(kData, "C:");
+    const u32 lock_c = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    r.str(kData + 0x40, "S:");
+    const u32 lock_s = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    r.str(kData, "FOO");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, lock_c), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::AssignAdd, kData, lock_s), DOSTRUE);
+
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+    const auto before = r.chunks();
+    const u32 buf = kData + 0x200;
+
+    // Walk every directory of FOO: using the previous DevProc.
+    r.str(kData + 0x80, "FOO:Missing");
+    u32 dp = r.call(dos_lvo::GetDeviceProc, kData + 0x80, 0);
+    CHECK(dp != 0);
+    CHECK((r.get32(dp + dvp_Flags) & DVPF_ASSIGN) != 0);
+    CHECK(r.get32(dp + dvp_Port) != 0);
+    CHECK(r.get32(dp + dvp_DevNode) != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, r.get32(dp + dvp_Lock), buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C");
+
+    dp = r.call(dos_lvo::GetDeviceProc, kData + 0x80, dp);
+    CHECK(dp != 0);
+    CHECK((r.get32(dp + dvp_Flags) & DVPF_ASSIGN) != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, r.get32(dp + dvp_Lock), buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:S");
+
+    CHECK_EQ(r.call(dos_lvo::GetDeviceProc, kData + 0x80, dp), 0u);
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+
+    // FreeDeviceProc releases a DevProc freed early too.
+    r.str(kData + 0x80, "DF0:C/Echo");
+    const u32 df0_dp = r.call(dos_lvo::GetDeviceProc, kData + 0x80, 0);
+    CHECK(df0_dp != 0);
+    CHECK_EQ(r.get32(df0_dp + dvp_Flags), 0u);
+    r.call(dos_lvo::FreeDeviceProc, df0_dp);
+    r.call(dos_lvo::FreeDeviceProc, 0);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+}
+
+void is_file_system_for_assigns_and_df0() {
+    Rig r;
+    for (const char* name : {"DF0:", "df0:C/Echo", "DEVS:", "C:", "SYS:", "HombreTest:"}) {
+        r.str(kData, name);
+        CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData), DOSTRUE);
+    }
+    for (const char* name : {"FONTS:", "FOO:", "CONSOLE:", "*"}) {
+        r.str(kData, name);
+        CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData), DOSFALSE);
+    }
+
+    r.str(kData, "C:");
+    const u32 lock_c = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    r.str(kData, "FOO");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, lock_c), DOSTRUE);
+    r.str(kData + 0x40, "FOO:");
+    CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData + 0x40), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData + 0x40), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+}
+
 }
 
 int main() {
@@ -3305,5 +3698,12 @@ int main() {
     date_stamp_uses_the_clock();
     date_to_str_and_str_to_date();
     compare_dates_sign();
+    default_assigns_resolve();
+    assign_lock_and_remove();
+    assign_add_multi_directory();
+    assign_late_and_path();
+    dos_list_walk();
+    get_device_proc_walks_assign_list();
+    is_file_system_for_assigns_and_df0();
     return check::finish("test_dos");
 }

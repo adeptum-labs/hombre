@@ -53,11 +53,10 @@
 // as SetVar makes them. There are no global variables: ENV: is not
 // mounted.
 //
-// Paths are AmigaDOS paths: C:, LIBS:, S:, SYS:, the volume name and ":"
-// name the volume's C, LIBS and S directories and its root; any other
-// device is not mounted. A path without a device is relative to the
-// current directory, a leading or doubled '/' goes up one level, and names
-// compare without regard to case.
+// Paths are AmigaDOS paths: DF0:, C:, LIBS:, S:, SYS:, the volume name, ":"
+// and any active assign; any other device is not mounted. A path without a
+// device is relative to the current directory, a leading or doubled '/' goes
+// up one level, and names compare without regard to case.
 //
 // Every guest pointer a native takes goes through native::Bus, so a bad
 // one ends the run with BusError or AddressError; walks over guest strings
@@ -134,6 +133,18 @@ constexpr u32 SetProgramName = 570;
 constexpr u32 GetProgramName = 576;
 constexpr u32 SetPrompt = 582;
 constexpr u32 GetPrompt = 588;
+constexpr u32 AssignLock = 612;
+constexpr u32 AssignLate = 618;
+constexpr u32 AssignPath = 624;
+constexpr u32 AssignAdd = 630;
+constexpr u32 RemAssignList = 636;
+constexpr u32 GetDeviceProc = 642;
+constexpr u32 FreeDeviceProc = 648;
+constexpr u32 LockDosList = 654;
+constexpr u32 UnLockDosList = 660;
+constexpr u32 AttemptLockDosList = 666;
+constexpr u32 FindDosEntry = 684;
+constexpr u32 NextDosEntry = 690;
 constexpr u32 IsFileSystem = 708;
 constexpr u32 CompareDates = 738;
 constexpr u32 DateToStr = 744;
@@ -324,17 +335,53 @@ constexpr u32 di_EntryLock = 66;
 constexpr u32 di_DeleteLock = 112;
 constexpr u32 di_SIZEOF = 158;
 
-// struct DosList, for a volume
+// struct DosList, for devices, volumes and assigns
 constexpr u32 dol_Next = 0;
 constexpr u32 dol_Type = 4;
 constexpr u32 dol_Task = 8;
 constexpr u32 dol_Lock = 12;
+constexpr u32 dol_Handler = 16;
+constexpr u32 dol_StackSize = 20;
+constexpr u32 dol_Priority = 24;
+constexpr u32 dol_Startup = 28;
+constexpr u32 dol_SegList = 32;
+constexpr u32 dol_GlobVec = 36;
 constexpr u32 dol_VolumeDate = 16;
 constexpr u32 dol_LockList = 28;
 constexpr u32 dol_DiskType = 32;
+constexpr u32 dol_AssignName = 16;
+constexpr u32 dol_List = 20;
 constexpr u32 dol_Name = 40;
 constexpr u32 DosList_SIZEOF = 44;
+constexpr u32 DLT_DEVICE = 0;
+constexpr u32 DLT_DIRECTORY = 1;
 constexpr u32 DLT_VOLUME = 2;
+constexpr u32 DLT_LATE = 3;
+constexpr u32 DLT_NONBINDING = 4;
+
+// struct AssignList
+constexpr u32 al_Next = 0;
+constexpr u32 al_Lock = 4;
+constexpr u32 AssignList_SIZEOF = 8;
+
+// LockDosList, NextDosEntry and FindDosEntry flags
+constexpr u32 LDF_DEVICES = 1u << 0;
+constexpr u32 LDF_VOLUMES = 1u << 1;
+constexpr u32 LDF_ASSIGNS = 1u << 2;
+constexpr u32 LDF_ENTRY = 1u << 3;
+constexpr u32 LDF_DELETE = 1u << 4;
+constexpr u32 LDF_READ = 1u << 5;
+constexpr u32 LDF_WRITE = 1u << 6;
+constexpr u32 LDF_ALL = LDF_DEVICES | LDF_VOLUMES | LDF_ASSIGNS;
+
+// struct DevProc and dvp_Flags
+constexpr u32 dvp_Port = 0;
+constexpr u32 dvp_Lock = 4;
+constexpr u32 dvp_Flags = 8;
+constexpr u32 dvp_DevNode = 12;
+constexpr u32 DevProc_SIZEOF = 16;
+constexpr u32 DVPF_UNLOCK = 1u << 0;
+constexpr u32 DVPF_ASSIGN = 1u << 1;
 
 // struct FileInfoBlock
 constexpr u32 fib_DiskKey = 0;
@@ -538,6 +585,9 @@ public:
     static constexpr u32 kMaxPath = 256;    // bytes of a resolved path, NUL included
     static constexpr u32 kMaxFiles = 16;    // files and console streams a program opens
     static constexpr u32 kMaxLocks = 32;
+    static constexpr u32 kMaxAssigns = 32;
+    static constexpr u32 kMaxAssignDirs = 4;
+    static constexpr u32 kMaxAssignLocks = 64;
     static constexpr u32 kMaxArgBlocks = 16;  // ReadArgs results not yet freed
     static constexpr u32 kMaxAnchors = 8;     // active MatchFirst/MatchNext anchors
 
@@ -613,6 +663,17 @@ private:
         u8 tokens[detail::kDosPatMaxTokens + 1];
     };
 
+    struct AssignEntry {
+        bool used;
+        u32 type;
+        char name[32];
+        u32 locks[kMaxAssignDirs];
+        u32 dir_count;
+        char path[kMaxPath];
+        u32 node;
+        u32 node_bytes;
+    };
+
     m68k::Machine* m_ = nullptr;
     Exec* exec_ = nullptr;
     AdfVolume volume_{};
@@ -624,6 +685,7 @@ private:
     u32 block_ = 0;
     u32 root_ = 0;
     u32 volume_node_ = 0;
+    u32 device_node_ = 0;
     u32 port_ = 0;  // the file system's MsgPort
     u32 process_ = 0;
     u32 cli_ = 0;
@@ -632,11 +694,14 @@ private:
     u32 command_name_ = 0;
     u32 handles_ = 0;
     u32 locks_ = 0;
+    u32 assign_locks_ = 0;
     u32 args_ = 0;
     u32 stack_ = 0;
 
     FileSlot files_[kHandles]{};
     LockSlot lock_slots_[kMaxLocks]{};
+    LockSlot assign_lock_slots_[kMaxAssignLocks]{};
+    AssignEntry assigns_[kMaxAssigns]{};
     ArgBlock arg_blocks_[kMaxArgBlocks]{};
     AnchorSlot anchors_[kMaxAnchors]{};
     NativeVector vectors_[kVectors]{};

@@ -51,6 +51,8 @@ constexpr u32 kMaxComponent = 30;
 constexpr u32 kFaultText = 256;
 constexpr u32 kFailLevel = 10;
 constexpr u32 kMaxVars = 1u << 16;  // nodes a walk of pr_LocalVars visits at most
+constexpr u32 kMaxDosEntries = 256;
+constexpr u32 kMaxAssignDepth = 8;
 constexpr u8 SIGB_DOS = 8;
 constexpr char kDosName[] = "dos.library";
 constexpr char kIdString[] = "dos 60.0 (Hombre)\r\n";
@@ -67,7 +69,9 @@ constexpr u32 kInfoAt = kRootAt + rn_SIZEOF;
 constexpr u32 kTaskArrayAt = align4(kInfoAt + di_SIZEOF);
 constexpr u32 kVolumeAt = kTaskArrayAt + 8;
 constexpr u32 kVolumeNameAt = kVolumeAt + DosList_SIZEOF;  // a BSTR of up to 30 characters
-constexpr u32 kPortAt = kVolumeNameAt + 32;
+constexpr u32 kDeviceAt = kVolumeNameAt + 32;
+constexpr u32 kDeviceNameAt = kDeviceAt + DosList_SIZEOF;  // "DF0" BSTR
+constexpr u32 kPortAt = kDeviceNameAt + 8;
 constexpr u32 kProcessAt = align4(kPortAt + MP_SIZE);
 constexpr u32 kProcessNameAt = kProcessAt + pr_SIZEOF;
 constexpr u32 kCliAt = align4(kProcessNameAt + sizeof kProcessName);
@@ -78,7 +82,8 @@ constexpr u32 kCommandNameAt = kCommandFileAt + 4;         // up to 255 characte
 constexpr u32 kIdStringAt = kCommandNameAt + 260;
 constexpr u32 kHandlesAt = align4(kIdStringAt + sizeof kIdString);
 constexpr u32 kLocksAt = kHandlesAt + kHandles * fh_SIZEOF;
-constexpr u32 kArgsAt = kLocksAt + Dos::kMaxLocks * fl_SIZEOF;
+constexpr u32 kAssignLocksAt = kLocksAt + Dos::kMaxLocks * fl_SIZEOF;
+constexpr u32 kArgsAt = kAssignLocksAt + Dos::kMaxAssignLocks * fl_SIZEOF;
 constexpr u32 kStackAt = (kArgsAt + Dos::kMaxArgs + 2 + 7) & ~7u;
 constexpr u32 kBlockBytes = kStackAt + Dos::kStackBytes;
 
@@ -630,8 +635,35 @@ struct DosOps {
         return static_cast<i64>(slot);
     }
 
+    static i64 assign_lock_slot(const Dos& d, u32 bptr) {
+        const u64 at = static_cast<u64>(bptr) << 2;
+        if (at < d.assign_locks_ || (at - d.assign_locks_) % fl_SIZEOF != 0) {
+            return -1;
+        }
+        const u64 slot = (at - d.assign_locks_) / fl_SIZEOF;
+        if (slot >= Dos::kMaxAssignLocks || !d.assign_lock_slots_[slot].used) {
+            return -1;
+        }
+        return static_cast<i64>(slot);
+    }
+
+    static Dos::LockSlot* find_lock_slot(Dos& d, u32 bptr) {
+        const i64 user = lock_slot(d, bptr);
+        if (user >= 0) {
+            return &d.lock_slots_[user];
+        }
+        const i64 assign = assign_lock_slot(d, bptr);
+        if (assign >= 0) {
+            return &d.assign_lock_slots_[assign];
+        }
+        return nullptr;
+    }
+
     static u32 handle_bptr(const Dos& d, u32 slot) { return (d.handles_ + slot * fh_SIZEOF) >> 2; }
     static u32 lock_bptr(const Dos& d, u32 slot) { return (d.locks_ + slot * fl_SIZEOF) >> 2; }
+    static u32 assign_lock_bptr(const Dos& d, u32 slot) {
+        return (d.assign_locks_ + slot * fl_SIZEOF) >> 2;
+    }
 
     static void init_handle(Dos& d, Bus& b, u32 slot, bool interactive) {
         const u32 at = d.handles_ + slot * fh_SIZEOF;
@@ -754,9 +786,160 @@ struct DosOps {
     }
 
     static bool is_mounted_device(const Dos& d, const char* name, u32 colon) {
-        return colon == 0 || same_name(name, colon, "SYS") ||
-               same_name(name, colon, d.volume_.name) || same_name(name, colon, "C") ||
-               same_name(name, colon, "LIBS") || same_name(name, colon, "S");
+        if (colon == 0 || same_name(name, colon, d.volume_.name) ||
+            same_name(name, colon, "DF0")) {
+            return true;
+        }
+        return find_assign(d, name, colon) >= 0;
+    }
+
+    static i64 find_assign(const Dos& d, const char* name, u32 count) {
+        for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
+            if (d.assigns_[i].used && same_name(name, count, d.assigns_[i].name)) {
+                return static_cast<i64>(i);
+            }
+        }
+        return -1;
+    }
+
+    static i64 free_assign_slot(const Dos& d) {
+        for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
+            if (!d.assigns_[i].used) {
+                return static_cast<i64>(i);
+            }
+        }
+        return -1;
+    }
+
+    static void release_lock(Dos& d, u32 bptr) {
+        if (bptr == 0) {
+            return;
+        }
+        const i64 user = lock_slot(d, bptr);
+        if (user >= 0) {
+            d.lock_slots_[user].used = false;
+            return;
+        }
+        const i64 assign = assign_lock_slot(d, bptr);
+        if (assign >= 0) {
+            d.assign_lock_slots_[assign].used = false;
+        }
+    }
+
+    static bool alloc_assign_lock(Dos& d, Bus& b, const char* path, const DirEntry& entry,
+                                  u32& out_bptr) {
+        for (u32 i = 0; i < Dos::kMaxAssignLocks; ++i) {
+            if (!d.assign_lock_slots_[i].used) {
+                Dos::LockSlot& l = d.assign_lock_slots_[i];
+                l.used = true;
+                l.entry = entry;
+                copy_cstr(l.path, path, Dos::kMaxPath);
+                init_lock_at(d, b, d.assign_locks_ + i * fl_SIZEOF, entry.header_block,
+                             SHARED_LOCK);
+                out_bptr = assign_lock_bptr(d, i);
+                return b.ok();
+            }
+        }
+        return false;
+    }
+
+    static void relink_dos_list(Dos& d, Bus& b) {
+        b.w32(d.volume_node_ + dol_Next, d.device_node_ >> 2);
+        u32 prev = d.device_node_;
+        for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
+            if (d.assigns_[i].used && d.assigns_[i].node != 0) {
+                b.w32(prev + dol_Next, d.assigns_[i].node >> 2);
+                prev = d.assigns_[i].node;
+            }
+        }
+        b.w32(prev + dol_Next, 0);
+    }
+
+    static bool build_assign_node(Dos& d, Bus& b, Dos::AssignEntry& e) {
+        const u32 name_len = length_of(e.name);
+        const u32 bstr_bytes = align4(1 + name_len + 1);
+        u32 extra_bytes = 0;
+        if (e.type == DLT_LATE || e.type == DLT_NONBINDING) {
+            extra_bytes = align4(length_of(e.path) + 1);
+        } else if (e.type == DLT_DIRECTORY && e.dir_count > 1) {
+            extra_bytes = (e.dir_count - 1) * AssignList_SIZEOF;
+        }
+        const u32 total = DosList_SIZEOF + bstr_bytes + extra_bytes;
+        const u32 node = d.exec_->alloc(total, MEMF_PUBLIC | MEMF_CLEAR);
+        if (node == 0) {
+            return false;
+        }
+        b.w32(node + dol_Next, 0);
+        b.w32(node + dol_Type, e.type);
+        b.w32(node + dol_Task, d.port_);
+        const u32 bstr_at = node + DosList_SIZEOF;
+        put_bstr(b, bstr_at, e.name, kMaxComponent);
+        b.w32(node + dol_Name, bstr_at >> 2);
+        if (e.type == DLT_LATE || e.type == DLT_NONBINDING) {
+            const u32 path_at = bstr_at + bstr_bytes;
+            put_string(b, path_at, e.path);
+            b.w32(node + dol_AssignName, path_at);
+        } else {
+            b.w32(node + dol_Lock, e.locks[0]);
+            if (e.dir_count > 1) {
+                const u32 list_at = bstr_at + bstr_bytes;
+                b.w32(node + dol_List, list_at);
+                for (u32 i = 1; i < e.dir_count; ++i) {
+                    const u32 al_at = list_at + (i - 1) * AssignList_SIZEOF;
+                    const u32 next_al = (i + 1 < e.dir_count) ? (al_at + AssignList_SIZEOF) : 0;
+                    b.w32(al_at + al_Next, next_al);
+                    b.w32(al_at + al_Lock, e.locks[i]);
+                }
+            }
+        }
+        if (!b.ok()) {
+            d.exec_->free(node, total);
+            return false;
+        }
+        if (e.node != 0) {
+            d.exec_->free(e.node, e.node_bytes);
+        }
+        e.node = node;
+        e.node_bytes = total;
+        return true;
+    }
+
+    static bool resolve_late_assign(Dos& d, Bus& b, Dos::AssignEntry& e, u32& error, u32 depth) {
+        char resolved[Dos::kMaxPath];
+        if (!resolve(d, b, e.path, resolved, error, depth)) {
+            return false;
+        }
+        DirEntry entry{};
+        const FsError found = adf_find(d.volume_, resolved, entry);
+        if (found != FsError::Ok) {
+            error = io_error_of(found);
+            return false;
+        }
+        if (!entry.is_dir) {
+            error = ERROR_OBJECT_WRONG_TYPE;
+            return false;
+        }
+        u32 lock_bptr = 0;
+        if (!alloc_assign_lock(d, b, resolved, entry, lock_bptr)) {
+            error = ERROR_NO_FREE_STORE;
+            return false;
+        }
+        char saved_path[Dos::kMaxPath];
+        copy_cstr(saved_path, e.path, Dos::kMaxPath);
+        e.type = DLT_DIRECTORY;
+        e.dir_count = 1;
+        e.locks[0] = lock_bptr;
+        e.path[0] = '\0';
+        if (!build_assign_node(d, b, e)) {
+            release_lock(d, lock_bptr);
+            e.type = DLT_LATE;
+            e.dir_count = 0;
+            copy_cstr(e.path, saved_path, Dos::kMaxPath);
+            error = ERROR_NO_FREE_STORE;
+            return false;
+        }
+        relink_dos_list(d, b);
+        return b.ok();
     }
 
     static void file_part(void*, Machine& m) {
@@ -919,51 +1102,15 @@ struct DosOps {
         fail(d, b, ERROR_DEVICE_NOT_MOUNTED, DOSFALSE);
     }
 
-    // Turns an AmigaDOS name into a path from the volume's root, its
-    // components separated by '/'. A name with a device starts where the
-    // device points; one without starts at the current directory.
-    static bool resolve(Dos& d, Bus& b, const char* name, char (&out)[Dos::kMaxPath], u32& error) {
+    static bool apply_relative_path(const char* base, const char* rest,
+                                    char (&out)[Dos::kMaxPath], u32& error) {
         u32 at = 0;
-        const char* rest = name;
-        u32 colon = 0;
-        while (name[colon] != '\0' && name[colon] != ':') {
-            ++colon;
-        }
-        if (name[colon] == ':') {
-            const char* start = "";
-            if (colon == 0 || same_name(name, colon, "SYS") ||
-                same_name(name, colon, d.volume_.name)) {
-                start = "";
-            } else if (same_name(name, colon, "C")) {
-                start = "C";
-            } else if (same_name(name, colon, "LIBS")) {
-                start = "LIBS";
-            } else if (same_name(name, colon, "S")) {
-                start = "S";
-            } else {
-                error = ERROR_DEVICE_NOT_MOUNTED;
+        for (; base[at] != '\0'; ++at) {
+            if (at + 1 >= Dos::kMaxPath) {
+                error = ERROR_INVALID_COMPONENT_NAME;
                 return false;
             }
-            for (; start[at] != '\0'; ++at) {
-                out[at] = start[at];
-            }
-            rest = name + colon + 1;
-        } else {
-            const u32 current = b.r32(d.process_ + pr_CurrentDir);
-            if (!b.ok()) {
-                return false;
-            }
-            if (current != 0) {
-                const i64 slot = lock_slot(d, current);
-                if (slot < 0) {
-                    error = ERROR_INVALID_LOCK;
-                    return false;
-                }
-                const char* base = d.lock_slots_[slot].path;
-                for (; base[at] != '\0'; ++at) {
-                    out[at] = base[at];
-                }
-            }
+            out[at] = base[at];
         }
         // Each '/' that does not end a name goes up one level.
         u32 i = 0;
@@ -1007,6 +1154,98 @@ struct DosOps {
         }
         out[at] = '\0';
         return true;
+    }
+
+    // Turns an AmigaDOS name into a path from the volume's root, its
+    // components separated by '/'. A name with a device starts where the
+    // volume, device or assign points; one without starts at the current
+    // directory.
+    static bool resolve(Dos& d, Bus& b, const char* name, char (&out)[Dos::kMaxPath], u32& error,
+                        u32 depth = 0) {
+        if (depth >= kMaxAssignDepth) {
+            error = ERROR_TOO_MANY_LEVELS;
+            return false;
+        }
+        u32 colon = 0;
+        while (name[colon] != '\0' && name[colon] != ':') {
+            ++colon;
+        }
+        if (name[colon] == ':') {
+            const char* rest = name + colon + 1;
+            if (colon == 0 || same_name(name, colon, d.volume_.name) ||
+                same_name(name, colon, "DF0")) {
+                return apply_relative_path("", rest, out, error);
+            }
+            const i64 idx = find_assign(d, name, colon);
+            if (idx < 0) {
+                error = ERROR_DEVICE_NOT_MOUNTED;
+                return false;
+            }
+            Dos::AssignEntry& e = d.assigns_[idx];
+            if (e.type == DLT_LATE) {
+                if (!resolve_late_assign(d, b, e, error, depth + 1)) {
+                    return false;
+                }
+            } else if (e.type == DLT_NONBINDING) {
+                char base[Dos::kMaxPath];
+                if (!resolve(d, b, e.path, base, error, depth + 1)) {
+                    return false;
+                }
+                return apply_relative_path(base, rest, out, error);
+            }
+            if (e.dir_count == 0) {
+                error = ERROR_DEVICE_NOT_MOUNTED;
+                return false;
+            }
+            if (e.dir_count == 1) {
+                const Dos::LockSlot* slot = find_lock_slot(d, e.locks[0]);
+                if (slot == nullptr) {
+                    error = ERROR_INVALID_LOCK;
+                    return false;
+                }
+                return apply_relative_path(slot->path, rest, out, error);
+            }
+            for (u32 i = 0; i < e.dir_count; ++i) {
+                const Dos::LockSlot* slot = find_lock_slot(d, e.locks[i]);
+                if (slot == nullptr) {
+                    continue;
+                }
+                char cand[Dos::kMaxPath];
+                u32 cand_err = 0;
+                if (!apply_relative_path(slot->path, rest, cand, cand_err)) {
+                    if (cand_err == ERROR_INVALID_COMPONENT_NAME) {
+                        error = cand_err;
+                        return false;
+                    }
+                    continue;
+                }
+                DirEntry tmp{};
+                if (adf_find(d.volume_, cand, tmp) == FsError::Ok) {
+                    copy_cstr(out, cand, Dos::kMaxPath);
+                    return true;
+                }
+            }
+            const Dos::LockSlot* slot0 = find_lock_slot(d, e.locks[0]);
+            if (slot0 == nullptr) {
+                error = ERROR_INVALID_LOCK;
+                return false;
+            }
+            return apply_relative_path(slot0->path, rest, out, error);
+        }
+        const u32 current = b.r32(d.process_ + pr_CurrentDir);
+        if (!b.ok()) {
+            return false;
+        }
+        const char* base = "";
+        if (current != 0) {
+            const Dos::LockSlot* slot = find_lock_slot(d, current);
+            if (slot == nullptr) {
+                error = ERROR_INVALID_LOCK;
+                return false;
+            }
+            base = slot->path;
+        }
+        return apply_relative_path(base, name, out, error);
     }
 
     // Resolves a name and looks it up on the volume.
@@ -2531,13 +2770,16 @@ struct DosOps {
 
     // --- locks -----------------------------------------------------------------
 
-    static void init_lock(Dos& d, Bus& b, u32 slot, u32 key, u32 access) {
-        const u32 at = d.locks_ + slot * fl_SIZEOF;
+    static void init_lock_at(Dos& d, Bus& b, u32 at, u32 key, u32 access) {
         b.w32(at + fl_Link, 0);
         b.w32(at + fl_Key, key);
         b.w32(at + fl_Access, access == EXCLUSIVE_LOCK ? EXCLUSIVE_LOCK : SHARED_LOCK);
         b.w32(at + fl_Task, d.port_);
         b.w32(at + fl_Volume, d.volume_node_ >> 2);
+    }
+
+    static void init_lock(Dos& d, Bus& b, u32 slot, u32 key, u32 access) {
+        init_lock_at(d, b, d.locks_ + slot * fl_SIZEOF, key, access);
     }
 
     static i64 free_lock(const Dos& d) {
@@ -2597,8 +2839,8 @@ struct DosOps {
             native::set_result(m, 0);
             return;
         }
-        const i64 from = lock_slot(d, bptr);
-        if (from < 0) {
+        const Dos::LockSlot* from = find_lock_slot(d, bptr);
+        if (from == nullptr) {
             fail(d, b, ERROR_INVALID_LOCK, 0);
             return;
         }
@@ -2607,7 +2849,7 @@ struct DosOps {
             table_full(d, b, "lock", Dos::kMaxLocks);
             return;
         }
-        d.lock_slots_[slot] = d.lock_slots_[from];
+        d.lock_slots_[slot] = *from;
         init_lock(d, b, static_cast<u32>(slot), d.lock_slots_[slot].entry.header_block,
                   SHARED_LOCK);
         native::set_result(m, lock_bptr(d, static_cast<u32>(slot)));
@@ -2705,12 +2947,12 @@ struct DosOps {
             native::set_result(m, 0);
             return;
         }
-        const i64 from = lock_slot(d, bptr);
-        if (from < 0) {
+        const Dos::LockSlot* from = find_lock_slot(d, bptr);
+        if (from == nullptr) {
             fail(d, b, ERROR_INVALID_LOCK, 0);
             return;
         }
-        const char* path = d.lock_slots_[from].path;
+        const char* path = from->path;
         if (path[0] == '\0') {
             set_io_err(d, b, 0);
             native::set_result(m, 0);
@@ -2822,14 +3064,560 @@ struct DosOps {
             }
             return true;
         }
-        const i64 slot = lock_slot(d, bptr);
-        if (slot < 0) {
+        const Dos::LockSlot* slot = find_lock_slot(d, bptr);
+        if (slot == nullptr) {
             set_io_err(d, b, ERROR_INVALID_LOCK);
             return false;
         }
-        entry = d.lock_slots_[slot].entry;
-        path = d.lock_slots_[slot].path;
+        entry = slot->entry;
+        path = slot->path;
         return true;
+    }
+
+    // --- assigns and DosList -------------------------------------------------
+
+    static bool read_assign_name(Dos& d, Bus& b, u32 addr, char (&name)[32]) {
+        if (addr == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return false;
+        }
+        char buf[kMaxName];
+        if (!read_name(d, b, addr, buf)) {
+            if (b.ok()) {
+                native::set_result(b.machine(), DOSFALSE);
+            }
+            return false;
+        }
+        const u32 len = length_of(buf);
+        if (len == 0 || len > kMaxComponent) {
+            fail(d, b, ERROR_INVALID_COMPONENT_NAME, DOSFALSE);
+            return false;
+        }
+        for (u32 i = 0; i < len; ++i) {
+            if (buf[i] == ':' || buf[i] == '/') {
+                fail(d, b, ERROR_INVALID_COMPONENT_NAME, DOSFALSE);
+                return false;
+            }
+        }
+        copy_cstr(name, buf, sizeof name);
+        return true;
+    }
+
+    static void assign_lock(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        char name[32];
+        if (!read_assign_name(d, b, m.cpu.d[1], name)) {
+            return;
+        }
+        const u32 lock_bptr = m.cpu.d[2];
+        const u32 name_len = length_of(name);
+        const i64 existing = find_assign(d, name, name_len);
+        if (lock_bptr == 0) {
+            if (existing >= 0) {
+                Dos::AssignEntry& e = d.assigns_[existing];
+                for (u32 i = 0; i < e.dir_count; ++i) {
+                    release_lock(d, e.locks[i]);
+                }
+                if (e.node != 0) {
+                    d.exec_->free(e.node, e.node_bytes);
+                }
+                e = Dos::AssignEntry{};
+                relink_dos_list(d, b);
+            }
+            if (b.ok()) {
+                native::set_result(m, DOSTRUE);
+            }
+            return;
+        }
+        if (same_name(name, name_len, "DF0") || same_name(name, name_len, d.volume_.name)) {
+            fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
+            return;
+        }
+        const Dos::LockSlot* slot = find_lock_slot(d, lock_bptr);
+        if (slot == nullptr) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        if (!slot->entry.is_dir) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return;
+        }
+        const i64 target_idx = existing >= 0 ? existing : free_assign_slot(d);
+        if (target_idx < 0) {
+            table_full(d, b, "assign", Dos::kMaxAssigns);
+            return;
+        }
+        Dos::AssignEntry& e = d.assigns_[target_idx];
+        const Dos::AssignEntry saved = e;
+        e.used = true;
+        e.type = DLT_DIRECTORY;
+        copy_cstr(e.name, name, sizeof e.name);
+        e.dir_count = 1;
+        e.locks[0] = lock_bptr;
+        e.path[0] = '\0';
+        if (!build_assign_node(d, b, e)) {
+            e = saved;
+            fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+            return;
+        }
+        if (saved.used) {
+            for (u32 i = 0; i < saved.dir_count; ++i) {
+                if (saved.locks[i] != lock_bptr) {
+                    release_lock(d, saved.locks[i]);
+                }
+            }
+        }
+        relink_dos_list(d, b);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    static void assign_path_impl(Dos& d, Machine& m, u32 type) {
+        Bus b(m);
+        char name[32];
+        if (!read_assign_name(d, b, m.cpu.d[1], name)) {
+            return;
+        }
+        const u32 path_addr = m.cpu.d[2];
+        if (path_addr == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char path[Dos::kMaxPath];
+        if (!b.string(path_addr, path, sizeof path)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_INVALID_COMPONENT_NAME, DOSFALSE);
+            }
+            return;
+        }
+        const u32 name_len = length_of(name);
+        if (same_name(name, name_len, "DF0") || same_name(name, name_len, d.volume_.name)) {
+            fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
+            return;
+        }
+        const i64 existing = find_assign(d, name, name_len);
+        const i64 target_idx = existing >= 0 ? existing : free_assign_slot(d);
+        if (target_idx < 0) {
+            table_full(d, b, "assign", Dos::kMaxAssigns);
+            return;
+        }
+        Dos::AssignEntry& e = d.assigns_[target_idx];
+        const Dos::AssignEntry saved = e;
+        e.used = true;
+        e.type = type;
+        copy_cstr(e.name, name, sizeof e.name);
+        e.dir_count = 0;
+        copy_cstr(e.path, path, sizeof e.path);
+        if (!build_assign_node(d, b, e)) {
+            e = saved;
+            fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+            return;
+        }
+        if (saved.used) {
+            for (u32 i = 0; i < saved.dir_count; ++i) {
+                release_lock(d, saved.locks[i]);
+            }
+        }
+        relink_dos_list(d, b);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    static void assign_late(void* ctx, Machine& m) {
+        assign_path_impl(of(ctx), m, DLT_LATE);
+    }
+
+    static void assign_path(void* ctx, Machine& m) {
+        assign_path_impl(of(ctx), m, DLT_NONBINDING);
+    }
+
+    static void assign_add(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        char name[32];
+        if (!read_assign_name(d, b, m.cpu.d[1], name)) {
+            return;
+        }
+        const u32 lock_bptr = m.cpu.d[2];
+        const Dos::LockSlot* slot = find_lock_slot(d, lock_bptr);
+        if (slot == nullptr) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        if (!slot->entry.is_dir) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return;
+        }
+        const i64 idx = find_assign(d, name, length_of(name));
+        if (idx < 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
+        Dos::AssignEntry& e = d.assigns_[idx];
+        if (e.type == DLT_LATE) {
+            u32 error = 0;
+            if (!resolve_late_assign(d, b, e, error, 1)) {
+                if (b.ok()) {
+                    fail(d, b, error, DOSFALSE);
+                }
+                return;
+            }
+        }
+        if (e.type != DLT_DIRECTORY) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return;
+        }
+        for (u32 i = 0; i < e.dir_count; ++i) {
+            if (e.locks[i] == lock_bptr) {
+                native::set_result(m, DOSTRUE);
+                return;
+            }
+        }
+        if (e.dir_count >= Dos::kMaxAssignDirs) {
+            table_full(d, b, "assign directory", Dos::kMaxAssignDirs);
+            return;
+        }
+        e.locks[e.dir_count++] = lock_bptr;
+        if (!build_assign_node(d, b, e)) {
+            --e.dir_count;
+            fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+            return;
+        }
+        relink_dos_list(d, b);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    static void rem_assign_list(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        char name[32];
+        if (!read_assign_name(d, b, m.cpu.d[1], name)) {
+            return;
+        }
+        const Dos::LockSlot* target = find_lock_slot(d, m.cpu.d[2]);
+        if (target == nullptr) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        const u32 target_key = target->entry.header_block;
+        const i64 idx = find_assign(d, name, length_of(name));
+        if (idx < 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
+        Dos::AssignEntry& e = d.assigns_[idx];
+        if (e.type != DLT_DIRECTORY) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return;
+        }
+        i64 match = -1;
+        for (u32 i = 0; i < e.dir_count; ++i) {
+            const Dos::LockSlot* s = find_lock_slot(d, e.locks[i]);
+            if (s != nullptr && s->entry.header_block == target_key) {
+                match = static_cast<i64>(i);
+                break;
+            }
+        }
+        if (match < 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
+        const u32 removed_lock = e.locks[match];
+        if (e.dir_count == 1) {
+            release_lock(d, removed_lock);
+            if (e.node != 0) {
+                d.exec_->free(e.node, e.node_bytes);
+            }
+            e = Dos::AssignEntry{};
+            relink_dos_list(d, b);
+            if (b.ok()) {
+                native::set_result(m, DOSTRUE);
+            }
+            return;
+        }
+        const Dos::AssignEntry saved = e;
+        for (u32 i = static_cast<u32>(match); i + 1 < e.dir_count; ++i) {
+            e.locks[i] = e.locks[i + 1];
+        }
+        --e.dir_count;
+        if (!build_assign_node(d, b, e)) {
+            e = saved;
+            fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+            return;
+        }
+        release_lock(d, removed_lock);
+        relink_dos_list(d, b);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    static void free_dev_proc_ptr(Dos& d, Bus& b, u32 dvp) {
+        if (dvp == 0) {
+            return;
+        }
+        const u32 flags = b.r32(dvp + dvp_Flags);
+        const u32 lock = b.r32(dvp + dvp_Lock);
+        if (!b.ok()) {
+            return;
+        }
+        if ((flags & DVPF_UNLOCK) != 0 && lock != 0) {
+            release_lock(d, lock);
+        }
+        d.exec_->free(native::guest_address(b.machine(), dvp), DevProc_SIZEOF);
+    }
+
+    static void free_device_proc(void* ctx, Machine& m) {
+        Bus b(m);
+        free_dev_proc_ptr(of(ctx), b, m.cpu.d[1]);
+    }
+
+    static void get_device_proc(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 last = m.cpu.d[2];
+        if (last != 0) {
+            const u32 flags = b.r32(last + dvp_Flags);
+            const u32 lock = b.r32(last + dvp_Lock);
+            const u32 dev_node = b.r32(last + dvp_DevNode);
+            if (!b.ok()) {
+                return;
+            }
+            if ((flags & DVPF_ASSIGN) != 0) {
+                for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
+                    const Dos::AssignEntry& e = d.assigns_[i];
+                    if (!e.used || e.node != dev_node || e.type != DLT_DIRECTORY) {
+                        continue;
+                    }
+                    for (u32 k = 0; k + 1 < e.dir_count; ++k) {
+                        if (e.locks[k] == lock) {
+                            b.w32(last + dvp_Lock, e.locks[k + 1]);
+                            if (b.ok()) {
+                                native::set_result(m, last);
+                            }
+                            return;
+                        }
+                    }
+                    break;
+                }
+            }
+            free_dev_proc_ptr(d, b, last);
+            if (b.ok()) {
+                fail(d, b, ERROR_NO_MORE_ENTRIES, 0);
+            }
+            return;
+        }
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, 0);
+            return;
+        }
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, 0);
+            }
+            return;
+        }
+        u32 colon = 0;
+        while (name[colon] != '\0' && name[colon] != ':') {
+            ++colon;
+        }
+        u32 dvp_lock = 0;
+        u32 dvp_flags = 0;
+        u32 dvp_node = 0;
+        if (name[colon] != ':') {
+            const u32 current = b.r32(d.process_ + pr_CurrentDir);
+            if (!b.ok()) {
+                return;
+            }
+            if (current != 0 && find_lock_slot(d, current) == nullptr) {
+                fail(d, b, ERROR_INVALID_LOCK, 0);
+                return;
+            }
+            dvp_lock = current;
+            dvp_node = d.volume_node_;
+        } else if (is_console(name)) {
+            fail(d, b, ERROR_DEVICE_NOT_MOUNTED, 0);
+            return;
+        } else if (colon == 0 || same_name(name, colon, d.volume_.name)) {
+            dvp_node = d.volume_node_;
+        } else if (same_name(name, colon, "DF0")) {
+            dvp_node = d.device_node_;
+        } else {
+            const i64 idx = find_assign(d, name, colon);
+            if (idx < 0) {
+                fail(d, b, ERROR_DEVICE_NOT_MOUNTED, 0);
+                return;
+            }
+            Dos::AssignEntry& e = d.assigns_[idx];
+            if (e.type == DLT_LATE) {
+                u32 error = 0;
+                if (!resolve_late_assign(d, b, e, error, 1)) {
+                    if (b.ok()) {
+                        fail(d, b, error, 0);
+                    }
+                    return;
+                }
+            }
+            if (e.type == DLT_NONBINDING) {
+                char resolved[Dos::kMaxPath];
+                u32 error = 0;
+                if (!resolve(d, b, e.path, resolved, error, 1)) {
+                    if (b.ok()) {
+                        fail(d, b, error, 0);
+                    }
+                    return;
+                }
+                DirEntry entry{};
+                const FsError found = adf_find(d.volume_, resolved, entry);
+                if (found != FsError::Ok) {
+                    fail(d, b, io_error_of(found), 0);
+                    return;
+                }
+                if (!entry.is_dir) {
+                    fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
+                    return;
+                }
+                if (!alloc_assign_lock(d, b, resolved, entry, dvp_lock)) {
+                    fail(d, b, ERROR_NO_FREE_STORE, 0);
+                    return;
+                }
+                dvp_flags = DVPF_ASSIGN | DVPF_UNLOCK;
+                dvp_node = e.node;
+            } else {
+                dvp_lock = e.locks[0];
+                dvp_flags = DVPF_ASSIGN;
+                dvp_node = e.node;
+            }
+        }
+        const u32 dvp = d.exec_->alloc(DevProc_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+        if (dvp == 0) {
+            if ((dvp_flags & DVPF_UNLOCK) != 0) {
+                release_lock(d, dvp_lock);
+            }
+            fail(d, b, ERROR_NO_FREE_STORE, 0);
+            return;
+        }
+        b.w32(dvp + dvp_Port, d.port_);
+        b.w32(dvp + dvp_Lock, dvp_lock);
+        b.w32(dvp + dvp_Flags, dvp_flags);
+        b.w32(dvp + dvp_DevNode, dvp_node);
+        if (!b.ok()) {
+            if ((dvp_flags & DVPF_UNLOCK) != 0) {
+                release_lock(d, dvp_lock);
+            }
+            d.exec_->free(dvp, DevProc_SIZEOF);
+            return;
+        }
+        native::set_result(m, dvp);
+    }
+
+    static u32 dos_list_head(const Dos& d) { return d.block_ + kInfoAt + di_DevInfo; }
+
+    static bool dos_type_matches(u32 type, u32 flags) {
+        switch (type) {
+        case DLT_DEVICE: return (flags & LDF_DEVICES) != 0;
+        case DLT_VOLUME: return (flags & LDF_VOLUMES) != 0;
+        case DLT_DIRECTORY:
+        case DLT_LATE:
+        case DLT_NONBINDING: return (flags & LDF_ASSIGNS) != 0;
+        default: return false;
+        }
+    }
+
+    static u32 step_dos_entry(Bus& b, u32 dlist, u32 flags) {
+        if (dlist == 0) {
+            return 0;
+        }
+        u32 cur = dlist;
+        for (u32 n = 0; n < kMaxDosEntries; ++n) {
+            const u32 next_bptr = b.r32(cur + dol_Next);
+            if (!b.ok() || next_bptr == 0) {
+                return 0;
+            }
+            cur = next_bptr << 2;
+            const u32 type = b.r32(cur + dol_Type);
+            if (!b.ok()) {
+                return 0;
+            }
+            if (dos_type_matches(type, flags)) {
+                return cur;
+            }
+        }
+        LogLine().text("dos: DosList has no end").send();
+        return 0;
+    }
+
+    static void lock_dos_list(void* ctx, Machine& m) {
+        native::set_result(m, dos_list_head(of(ctx)));
+    }
+
+    static void unlock_dos_list(void*, Machine&) {}
+
+    static void next_dos_entry(void*, Machine& m) {
+        Bus b(m);
+        const u32 next = step_dos_entry(b, m.cpu.d[1], m.cpu.d[2]);
+        if (b.ok()) {
+            native::set_result(m, next);
+        }
+    }
+
+    static void find_dos_entry(void*, Machine& m) {
+        Bus b(m);
+        u32 cur = m.cpu.d[1];
+        const u32 name_addr = m.cpu.d[2];
+        const u32 flags = m.cpu.d[3];
+        if (cur == 0 || name_addr == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        char target[kMaxName];
+        if (!b.string(name_addr, target, sizeof target)) {
+            if (b.ok()) {
+                native::set_result(m, 0);
+            }
+            return;
+        }
+        for (u32 n = 0; n < kMaxDosEntries; ++n) {
+            cur = step_dos_entry(b, cur, flags);
+            if (!b.ok() || cur == 0) {
+                break;
+            }
+            const u32 bstr_bptr = b.r32(cur + dol_Name);
+            if (!b.ok()) {
+                return;
+            }
+            if (bstr_bptr == 0) {
+                continue;
+            }
+            const u32 bstr = bstr_bptr << 2;
+            const u32 len = b.r8(bstr);
+            if (!b.ok()) {
+                return;
+            }
+            if (len >= kMaxName) {
+                continue;
+            }
+            char entry_name[kMaxName];
+            for (u32 i = 0; i < len; ++i) {
+                entry_name[i] = static_cast<char>(b.r8(bstr + 1 + i));
+            }
+            if (!b.ok()) {
+                return;
+            }
+            if (same_name(entry_name, len, target)) {
+                native::set_result(m, cur);
+                return;
+            }
+        }
+        if (b.ok()) {
+            native::set_result(m, 0);
+        }
     }
 
     // Fills a FileInfoBlock from an entry and its header block.
@@ -4201,6 +4989,18 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::GetProgramName, DosOps::get_program_name, "GetProgramName"},
     {dos_lvo::SetPrompt, DosOps::set_prompt, "SetPrompt"},
     {dos_lvo::GetPrompt, DosOps::get_prompt, "GetPrompt"},
+    {dos_lvo::AssignLock, DosOps::assign_lock, "AssignLock"},
+    {dos_lvo::AssignLate, DosOps::assign_late, "AssignLate"},
+    {dos_lvo::AssignPath, DosOps::assign_path, "AssignPath"},
+    {dos_lvo::AssignAdd, DosOps::assign_add, "AssignAdd"},
+    {dos_lvo::RemAssignList, DosOps::rem_assign_list, "RemAssignList"},
+    {dos_lvo::GetDeviceProc, DosOps::get_device_proc, "GetDeviceProc"},
+    {dos_lvo::FreeDeviceProc, DosOps::free_device_proc, "FreeDeviceProc"},
+    {dos_lvo::LockDosList, DosOps::lock_dos_list, "LockDosList"},
+    {dos_lvo::UnLockDosList, DosOps::unlock_dos_list, "UnLockDosList"},
+    {dos_lvo::AttemptLockDosList, DosOps::lock_dos_list, "AttemptLockDosList"},
+    {dos_lvo::FindDosEntry, DosOps::find_dos_entry, "FindDosEntry"},
+    {dos_lvo::NextDosEntry, DosOps::next_dos_entry, "NextDosEntry"},
     {dos_lvo::IsFileSystem, DosOps::is_file_system, "IsFileSystem"},
     {dos_lvo::CompareDates, DosOps::compare_dates, "CompareDates"},
     {dos_lvo::DateToStr, DosOps::date_to_str, "DateToStr"},
@@ -4248,6 +5048,12 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     for (LockSlot& l : lock_slots_) {
         l.used = false;
     }
+    for (LockSlot& l : assign_lock_slots_) {
+        l.used = false;
+    }
+    for (AssignEntry& a : assigns_) {
+        a = AssignEntry{};
+    }
     for (ArgBlock& a : arg_blocks_) {
         a = ArgBlock{0, 0, 0, false};
     }
@@ -4271,6 +5077,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     m_ = &m;
     root_ = block_ + kRootAt;
     volume_node_ = block_ + kVolumeAt;
+    device_node_ = block_ + kDeviceAt;
     port_ = block_ + kPortAt;
     process_ = block_ + kProcessAt;
     cli_ = block_ + kCliAt;
@@ -4279,6 +5086,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     command_name_ = block_ + kCommandNameAt;
     handles_ = block_ + kHandlesAt;
     locks_ = block_ + kLocksAt;
+    assign_locks_ = block_ + kAssignLocksAt;
     args_ = block_ + kArgsAt;
     stack_ = block_ + kStackAt;
 
@@ -4324,6 +5132,11 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     b.w32(volume_node_ + dol_DiskType, ID_DOS_DISK | volume.image[3]);
     put_bstr(b, block_ + kVolumeNameAt, volume.name, 30);
     b.w32(volume_node_ + dol_Name, (block_ + kVolumeNameAt) >> 2);
+    b.w32(volume_node_ + dol_Next, device_node_ >> 2);
+    b.w32(device_node_ + dol_Type, DLT_DEVICE);
+    b.w32(device_node_ + dol_Task, port_);
+    put_bstr(b, block_ + kDeviceNameAt, "DF0", 30);
+    b.w32(device_node_ + dol_Name, (block_ + kDeviceNameAt) >> 2);
 
     // The file system's port, which nothing sends to.
     b.w8(port_ + LN_TYPE, NT_MSGPORT);
@@ -4380,6 +5193,66 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     files_[kConsoleOut] = DosOps::make_file_slot(Stream::Console, DirEntry{}, "");
     DosOps::init_handle(*this, b, kConsoleIn, true);
     DosOps::init_handle(*this, b, kConsoleOut, true);
+
+    // Default assigns for the standard directories present on the volume.
+    struct DefaultAssign {
+        const char* name;
+        const char* path;
+    };
+    constexpr DefaultAssign kDefaultAssigns[] = {
+        {"SYS", ""},           {"C", "C"},               {"S", "S"},
+        {"L", "L"},            {"LIBS", "LIBS"},         {"DEVS", "DEVS"},
+        {"FONTS", "FONTS"},    {"LOCALE", "LOCALE"},     {"KEYMAPS", "KEYMAPS"},
+        {"PRINTERS", "PRINTERS"}, {"ENVARC", "Prefs/Env-Archive"},
+    };
+    for (const DefaultAssign& def : kDefaultAssigns) {
+        DirEntry entry{};
+        if (adf_find(volume_, def.path, entry) != FsError::Ok || !entry.is_dir) {
+            continue;
+        }
+        char lock_path[kMaxPath];
+        if (def.path[0] == '\0') {
+            lock_path[0] = '\0';
+        } else if (same_name(def.name, length_of(def.name), "ENVARC")) {
+            DirEntry prefs{};
+            if (adf_find(volume_, "Prefs", prefs) == FsError::Ok && prefs.is_dir) {
+                u32 p = 0;
+                for (u32 i = 0; prefs.name[i] != '\0' && p + 2 < kMaxPath; ++i) {
+                    lock_path[p++] = prefs.name[i];
+                }
+                lock_path[p++] = '/';
+                for (u32 i = 0; entry.name[i] != '\0' && p + 1 < kMaxPath; ++i) {
+                    lock_path[p++] = entry.name[i];
+                }
+                lock_path[p] = '\0';
+            } else {
+                copy_cstr(lock_path, def.path, kMaxPath);
+            }
+        } else {
+            copy_cstr(lock_path, entry.name, kMaxPath);
+        }
+        const i64 idx = DosOps::free_assign_slot(*this);
+        if (idx < 0) {
+            break;
+        }
+        u32 lock_bptr = 0;
+        if (!DosOps::alloc_assign_lock(*this, b, lock_path, entry, lock_bptr)) {
+            m_ = nullptr;
+            return false;
+        }
+        AssignEntry& e = assigns_[idx];
+        e.used = true;
+        e.type = DLT_DIRECTORY;
+        copy_cstr(e.name, def.name, sizeof e.name);
+        e.dir_count = 1;
+        e.locks[0] = lock_bptr;
+        if (!DosOps::build_assign_node(*this, b, e)) {
+            m_ = nullptr;
+            return false;
+        }
+    }
+    DosOps::relink_dos_list(*this, b);
+
     if (!b.ok()) {
         m_ = nullptr;
         return false;
