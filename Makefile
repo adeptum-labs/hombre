@@ -208,6 +208,15 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "mousetest: change at 250,120 size 240x160" "mousetest: newsize 200x130" \
 	    "mousetest: change at 250,120 size 200x130" "mousetest: break" \
 	    "m68k: C:mousetest returned 0"
+# Scrollback boot check: the full-screen shell shows 47 rows, so PageUp
+# steps 46 rows. Enough empty lines pass one page; Shift+Up, PageUp and one
+# wheel notch up (QEMU's mouse_move dz 1) scroll back, and a typed key
+# returns to the bottom.
+	tools/boot_check.sh --disk $(TEST_DISK) \
+	    --keys "$(shell awk 'BEGIN { for (i = 0; i < 100; i++) printf "ret " }')shift-up pgup" \
+	    --mouse-after "shell: view 47" \
+	    --mouse "mouse_move 0 0 1;sendkey x" \
+	    "shell: view 1" "shell: view 47" "shell: view 50" "shell: view 0"
 	tools/boot_check.sh --disk $(ZERO_DISK) "virtio-blk: 2 sectors" "disk: unknown format" \
 	    "halting"
 	tools/boot_check.sh --disk $(CORRUPT_DISK) "disk: dms error: TrackCrc track 0" \

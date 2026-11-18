@@ -814,9 +814,16 @@ void shell_has_scroll_gadget() {
     CHECK_EQ(static_cast<i16>(r.get16(gad + gg_LeftEdge)), static_cast<i16>(-8));
     CHECK_EQ(r.get16(gad + gg_TopEdge), static_cast<u32>(r.get8(window + wd_BorderTop)));
     CHECK_EQ(r.get16(gad + gg_Width), 8u);
-    const i32 expected_h = -(static_cast<i32>(r.get8(window + wd_BorderTop)) +
-                             static_cast<i32>(r.get8(window + wd_BorderBottom)));
+    // The bar ends above the size gadget, which takes the last 10 rows.
+    const i32 expected_h = -(static_cast<i32>(r.get8(window + wd_BorderTop)) + 10);
     CHECK_EQ(static_cast<i16>(r.get16(gad + gg_Height)), static_cast<i16>(expected_h));
+    // The size gadget keeps its look: pen 2 inside, on screen.
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const i32 wl = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 wt = static_cast<i16>(r.get16(window + wd_TopEdge));
+    const i32 ww = r.get16(window + wd_Width);
+    const i32 wh = r.get16(window + wd_Height);
+    CHECK_EQ(pixel(r, bm, wl + ww - 5, wt + wh - 5), 2u);
     CHECK_EQ(r.get16(gad + gg_Flags), GFLG_RELRIGHT | GFLG_RELHEIGHT);
     CHECK_EQ(r.get16(gad + gg_Activation),
              GACT_RIGHTBORDER | GACT_IMMEDIATE | GACT_FOLLOWMOUSE | GACT_RELVERIFY);

@@ -63,6 +63,12 @@ Targets:
   Windows can be dragged by their title bar and resized live by the size
   gadget in the bottom-right corner. The HombreShell window rewraps its text
   when resized; it opens full screen, so shrink it first to move it.
+  The HombreShell window keeps up to 1024 lines of scrollback and has a
+  proportional scroll bar in its right border. Drag the knob, roll the mouse
+  wheel over the window, or press Shift+Up/Down, Page Up/Page Down or
+  Shift+Home/End to scroll through history; typing returns to the bottom, and
+  scrolling the mouse wheel over another window sends NewMouse wheel events to
+  its IDCMP port.
 - `make check` boots the image headless and verifies the messages on the
   serial port. The main boot attaches the generated test disk and verifies
   the volume, the root directory and the startup sequence read from it, and

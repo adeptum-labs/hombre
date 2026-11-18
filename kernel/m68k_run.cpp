@@ -23,6 +23,7 @@
 
 #include "m68k_run.hpp"
 
+#include "../common/console_keys.hpp"
 #include "../common/dos_date.hpp"
 #include "../common/format.hpp"
 #include "../common/libs/dos.hpp"
@@ -91,8 +92,10 @@ constinit ShellWindow shell{};
 constinit u32 amiga_screen = 0;
 // The key slots of the last keyboard report seen while a command waited.
 constinit u8 prev_key_slots[KeyDecoder::kKeySlots]{};
-// The key decoder of the shell and running-command input paths.
+// The key decoder and console sequence filter of the shell and
+// running-command input paths.
 constinit KeyDecoder typed_decoder{};
+constinit CsiFilter console_filter{};
 constinit u8 key_queue[key_queue_cap]{};
 constinit u32 key_queue_head = 0;
 constinit u32 key_queue_count = 0;
@@ -217,6 +220,32 @@ void flush_mouse_move() {
     intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), 0, 0, true);
 }
 
+void on_shell_view(void*, u32 view) {
+    if (!console_at_line_start) {
+        serial::write_char('\n');
+        console_at_line_start = true;
+    }
+    serial::write("shell: view ");
+    serial::write_dec(view);
+    serial::write("\n");
+}
+
+u32 shell_visible_rows() {
+    const u32 win = shell.window();
+    if (win == 0) {
+        return 0;
+    }
+    native::Bus bus(machine);
+    const i32 win_h = static_cast<__INT16_TYPE__>(bus.r16(win + ndk::wd_Height));
+    const i32 border_top = static_cast<i32>(bus.r8(win + ndk::wd_BorderTop));
+    const i32 border_bottom = static_cast<i32>(bus.r8(win + ndk::wd_BorderBottom));
+    if (!bus.ok()) {
+        return 0;
+    }
+    const i32 inner_h = win_h - border_top - border_bottom;
+    return inner_h > 0 ? static_cast<u32>(inner_h) / 8 : 0;
+}
+
 // The AmigaDOS time: the real-time clock read once, advanced by the TSC
 // clock. Without a readable clock DateStamp stays at the start of 1978.
 u64 boot_dos_ticks = 0;
@@ -249,9 +278,22 @@ void start_dos_clock() {
     serial::write("\n");
 }
 
+void flush_wheel(i32 wheel) {
+    if (wheel == 0) {
+        return;
+    }
+    const u32 win = shell.window();
+    if (win != 0 && intuition.window_under(pointer.x(), pointer.y()) == win) {
+        shell.scroll_by(3 * wheel);
+    } else {
+        intuition.wheel_event(wheel);
+    }
+}
+
 void poll_mouse() {
     u8 report[4];
     bool moved = false;
+    i32 wheel = 0;
     for (u32 i = 0; i < poll_budget && usb_mouse_poll(report); ++i) {
         MouseSample sample{};
         if (!decode_mouse_report(report, sizeof(report), sample)) {
@@ -261,10 +303,15 @@ void poll_mouse() {
         if (update.moved) {
             moved = true;
         }
+        wheel += update.wheel;
         if (update.pressed != 0 || update.released != 0) {
             if (moved) {
                 flush_mouse_move();
                 moved = false;
+            }
+            if (wheel != 0) {
+                flush_wheel(wheel);
+                wheel = 0;
             }
             intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), update.pressed,
                                     update.released, false);
@@ -274,6 +321,9 @@ void poll_mouse() {
     }
     if (moved) {
         flush_mouse_move();
+    }
+    if (wheel != 0) {
+        flush_wheel(wheel);
     }
 }
 
@@ -300,6 +350,47 @@ bool key_queue_pop(u8& out) {
     return true;
 }
 
+void handle_decoded_byte(u8 raw, Shell* line_editor) {
+    u8 out = 0;
+    const ConsoleKey key = console_filter.feed(raw, out);
+    switch (key) {
+    case ConsoleKey::Byte:
+        if (line_editor != nullptr) {
+            line_editor->key(out);
+        } else {
+            key_queue_push(out);
+        }
+        break;
+    case ConsoleKey::RowUp:
+        shell.scroll_by(1);
+        break;
+    case ConsoleKey::RowDown:
+        shell.scroll_by(-1);
+        break;
+    case ConsoleKey::PageUp: {
+        const u32 rows = shell_visible_rows();
+        const i32 step = rows > 1 ? static_cast<i32>(rows - 1) : 0;
+        shell.scroll_by(step);
+        break;
+    }
+    case ConsoleKey::PageDown: {
+        const u32 rows = shell_visible_rows();
+        const i32 step = rows > 1 ? static_cast<i32>(rows - 1) : 0;
+        shell.scroll_by(-step);
+        break;
+    }
+    case ConsoleKey::Top:
+        shell.scroll_to_top();
+        break;
+    case ConsoleKey::Bottom:
+        shell.scroll_to_bottom();
+        break;
+    case ConsoleKey::None:
+    case ConsoleKey::Swallowed:
+        break;
+    }
+}
+
 bool slots_have_key(const u8* slots, u8 usage) {
     for (usize i = 0; i < KeyDecoder::kKeySlots; ++i) {
         if (slots[i] == usage) {
@@ -319,7 +410,7 @@ void poll_keys_while_running() {
     for (u32 i = 0; i < poll_budget && usb_keyboard_poll(report); ++i) {
         const bool ctrl = (report[0] & (kModLCtrl | kModRCtrl)) != 0;
         const u8* slots = report + 2;
-        u8 chars[KeyDecoder::kKeySlots];
+        u8 chars[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey];
         const usize count = typed_decoder.feed(report, chars, sizeof(chars));
         if (ctrl) {
             for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
@@ -337,7 +428,7 @@ void poll_keys_while_running() {
             }
         } else {
             for (usize k = 0; k < count; ++k) {
-                key_queue_push(chars[k]);
+                handle_decoded_byte(chars[k], nullptr);
             }
         }
         for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
@@ -497,6 +588,7 @@ bool execute(const char* path, const char* args) {
     command_running = true;
     const bool ok = dos.run_command(path, args, result, block_budget);
     command_running = false;
+    console_filter.reset();
     reclaim_after_program();
     if (!console_at_line_start) {
         serial::write_char('\n');
@@ -634,15 +726,15 @@ bool typed_run(void*, const char* path, const char* args) {
                 line_editor.key(queued);
             }
         }
-        u8 report[8];
+        u8 report[KeyDecoder::kReportBytes];
         if (usb_keyboard_poll(report)) {
-            u8 chars[8];
+            u8 chars[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey];
             const usize count = typed_decoder.feed(report, chars, sizeof(chars));
             for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
                 prev_key_slots[s] = report[2 + s];
             }
             for (usize i = 0; i < count; ++i) {
-                line_editor.key(chars[i]);
+                handle_decoded_byte(chars[i], &line_editor);
             }
         }
         asm volatile("pause");
@@ -662,6 +754,7 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
     }
     if (amiga_screen != 0) {
         if (shell.open(machine, exec, graphics, intuition, display)) {
+            shell.set_view_listener(&on_shell_view, nullptr);
             serial::write("intuition: window opened HombreShell\n");
             show_amiga_screen(info);
         } else {
