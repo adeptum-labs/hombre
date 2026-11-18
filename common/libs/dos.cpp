@@ -71,10 +71,10 @@ constexpr u32 kPortAt = kVolumeNameAt + 32;
 constexpr u32 kProcessAt = align4(kPortAt + MP_SIZE);
 constexpr u32 kProcessNameAt = kProcessAt + pr_SIZEOF;
 constexpr u32 kCliAt = align4(kProcessNameAt + sizeof kProcessName);
-constexpr u32 kSetNameAt = kCliAt + cli_SIZEOF;  // the volume name and ':'
-constexpr u32 kPromptAt = kSetNameAt + 36;
-constexpr u32 kCommandFileAt = kPromptAt + 8;
-constexpr u32 kCommandNameAt = kCommandFileAt + 4;  // up to 255 characters
+constexpr u32 kSetNameAt = kCliAt + cli_SIZEOF;            // up to 255 characters
+constexpr u32 kPromptAt = kSetNameAt + 260;                // up to 255 characters
+constexpr u32 kCommandFileAt = kPromptAt + 260;
+constexpr u32 kCommandNameAt = kCommandFileAt + 4;         // up to 255 characters
 constexpr u32 kIdStringAt = kCommandNameAt + 260;
 constexpr u32 kHandlesAt = align4(kIdStringAt + sizeof kIdString);
 constexpr u32 kLocksAt = kHandlesAt + kHandles * fh_SIZEOF;
@@ -166,6 +166,14 @@ u32 length_of(const char* s) {
         ++n;
     }
     return n;
+}
+
+void copy_cstr(char* dst, const char* src, u32 capacity) {
+    u32 i = 0;
+    for (; i + 1 < capacity && src[i] != '\0'; ++i) {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
 }
 
 void put_string(Bus& b, u32 at, const char* s) {
@@ -745,6 +753,172 @@ struct DosOps {
                same_name(name, length_of(name), "CONSOLE:");
     }
 
+    static bool is_mounted_device(const Dos& d, const char* name, u32 colon) {
+        return colon == 0 || same_name(name, colon, "SYS") ||
+               same_name(name, colon, d.volume_.name) || same_name(name, colon, "C") ||
+               same_name(name, colon, "LIBS") || same_name(name, colon, "S");
+    }
+
+    static void file_part(void*, Machine& m) {
+        Bus b(m);
+        const u32 path = m.cpu.d[1];
+        if (path == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        u32 last = path;
+        for (u32 i = 0; i < kMaxName * 4; ++i) {
+            const u32 c = b.r8(path + i);
+            if (!b.ok()) {
+                return;
+            }
+            if (c == 0) {
+                break;
+            }
+            if (c == '/' || c == ':') {
+                last = path + i + 1;
+            }
+        }
+        native::set_result(m, last);
+    }
+
+    static void path_part(void*, Machine& m) {
+        Bus b(m);
+        const u32 path = m.cpu.d[1];
+        if (path == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        u32 last = path;
+        for (u32 i = 0; i < kMaxName * 4; ++i) {
+            const u32 c = b.r8(path + i);
+            if (!b.ok()) {
+                return;
+            }
+            if (c == 0) {
+                break;
+            }
+            if (c == ':') {
+                last = path + i + 1;
+            } else if (c == '/') {
+                last = path + i;
+            }
+        }
+        native::set_result(m, last);
+    }
+
+    static void add_part(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 dirname = m.cpu.d[1];
+        const u32 filename = m.cpu.d[2];
+        const u32 size = m.cpu.d[3];
+        if (dirname == 0 || filename == 0 || size == 0 || (size & 0x80000000) != 0) {
+            fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            return;
+        }
+        constexpr u32 kAddPartMax = 1024;
+        const u32 limit = size < kAddPartMax ? size : kAddPartMax;
+        char fn[kAddPartMax];
+        u32 fn_len = 0;
+        bool has_colon = false;
+        for (;;) {
+            if (fn_len >= limit) {
+                fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+                return;
+            }
+            const u32 c = b.r8(filename + fn_len);
+            if (!b.ok()) {
+                return;
+            }
+            fn[fn_len] = static_cast<char>(c);
+            if (c == 0) {
+                break;
+            }
+            if (c == ':') {
+                has_colon = true;
+            }
+            ++fn_len;
+        }
+        if (has_colon) {
+            for (u32 i = 0; i <= fn_len; ++i) {
+                b.w8(dirname + i, static_cast<u8>(fn[i]));
+            }
+            if (b.ok()) {
+                native::set_result(m, DOSTRUE);
+            }
+            return;
+        }
+        u32 dir_len = 0;
+        u32 last_ch = 0;
+        for (;;) {
+            if (dir_len >= limit) {
+                fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+                return;
+            }
+            const u32 c = b.r8(dirname + dir_len);
+            if (!b.ok()) {
+                return;
+            }
+            if (c == 0) {
+                break;
+            }
+            last_ch = c;
+            ++dir_len;
+        }
+        if (fn_len == 0) {
+            native::set_result(m, DOSTRUE);
+            return;
+        }
+        const bool need_slash = dir_len > 0 && last_ch != ':' && last_ch != '/';
+        const u32 total = dir_len + (need_slash ? 1 : 0) + fn_len;
+        if (total + 1 > size) {
+            fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            return;
+        }
+        u32 at = dir_len;
+        if (need_slash) {
+            b.w8(dirname + at++, '/');
+        }
+        for (u32 i = 0; i <= fn_len; ++i) {
+            b.w8(dirname + at + i, static_cast<u8>(fn[i]));
+        }
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    static void is_file_system(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        if (is_console(name)) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        u32 colon = 0;
+        while (name[colon] != '\0' && name[colon] != ':') {
+            ++colon;
+        }
+        if (name[colon] != ':') {
+            native::set_result(m, DOSTRUE);
+            return;
+        }
+        if (is_mounted_device(d, name, colon)) {
+            native::set_result(m, DOSTRUE);
+            return;
+        }
+        fail(d, b, ERROR_DEVICE_NOT_MOUNTED, DOSFALSE);
+    }
+
     // Turns an AmigaDOS name into a path from the volume's root, its
     // components separated by '/'. A name with a device starts where the
     // device points; one without starts at the current directory.
@@ -851,6 +1025,79 @@ struct DosOps {
 
     // --- console and files -------------------------------------------------
 
+    static Dos::FileSlot make_file_slot(Dos::Stream stream, const DirEntry& entry,
+                                          const char* path) {
+        Dos::FileSlot s{};
+        s.stream = stream;
+        s.entry = entry;
+        s.pos = 0;
+        s.has_unget = false;
+        s.unget = 0;
+        s.has_last = false;
+        s.last_char = 0;
+        copy_cstr(s.path, path, Dos::kMaxPath);
+        return s;
+    }
+
+    static u32 available_bytes(const Dos& d, const Dos::FileSlot& f) {
+        const u32 buffered = f.has_unget ? 1u : 0u;
+        if (f.stream == Dos::Stream::Console) {
+            const u32 left = d.input_length_ > d.input_pos_ ? d.input_length_ - d.input_pos_ : 0u;
+            return buffered + left;
+        }
+        const u32 left = f.pos < f.entry.size ? f.entry.size - f.pos : 0u;
+        return buffered + left;
+    }
+
+    // Reads up to length bytes from slot into to, consuming any pushed-back
+    // byte first. False with IoErr set on a disk error.
+    static bool read_from_slot(Dos& d, Bus& b, u32 slot, u8* to, u32 length, u32& got) {
+        got = 0;
+        if (length == 0) {
+            return true;
+        }
+        Dos::FileSlot& f = d.files_[slot];
+        if (f.has_unget) {
+            to[0] = f.unget;
+            f.has_unget = false;
+            got = 1;
+            if (length == 1) {
+                f.last_char = to[0];
+                f.has_last = true;
+                return true;
+            }
+        }
+        const u32 rem = length - got;
+        if (f.stream == Dos::Stream::Console) {
+            const u32 left = d.input_length_ > d.input_pos_ ? d.input_length_ - d.input_pos_ : 0u;
+            const u32 n = rem < left ? rem : left;
+            for (u32 i = 0; i < n; ++i) {
+                to[got + i] = static_cast<u8>(d.input_[d.input_pos_ + i]);
+            }
+            d.input_pos_ += n;
+            got += n;
+        } else {
+            const u32 left = f.pos < f.entry.size ? f.entry.size - f.pos : 0u;
+            const u32 n = rem < left ? rem : left;
+            if (n != 0) {
+                u32 n_got = 0;
+                if (adf_read(d.volume_, f.entry, f.pos, to + got, n, n_got) != FsError::Ok) {
+                    set_io_err(d, b, ERROR_NOT_A_DOS_DISK);
+                    return false;
+                }
+                f.pos += n_got;
+                got += n_got;
+            }
+        }
+        if (got != 0) {
+            f.last_char = to[got - 1];
+            f.has_last = true;
+        } else {
+            f.has_last = false;
+        }
+        return true;
+    }
+
     static void open(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -866,7 +1113,7 @@ struct DosOps {
                 table_full(d, b, "file handle", Dos::kMaxFiles);
                 return;
             }
-            d.files_[slot] = Dos::FileSlot{Dos::Stream::Console, DirEntry{}, 0};
+            d.files_[slot] = make_file_slot(Dos::Stream::Console, DirEntry{}, "");
             init_handle(d, b, static_cast<u32>(slot), true);
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
@@ -896,7 +1143,7 @@ struct DosOps {
             table_full(d, b, "file handle", Dos::kMaxFiles);
             return;
         }
-        d.files_[slot] = Dos::FileSlot{Dos::Stream::File, entry, 0};
+        d.files_[slot] = make_file_slot(Dos::Stream::File, entry, path);
         init_handle(d, b, static_cast<u32>(slot), false);
         native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
     }
@@ -938,24 +1185,10 @@ struct DosOps {
             fail(d, b, ERROR_BAD_NUMBER, 0xFFFFFFFF);
             return;
         }
-        Dos::FileSlot& f = d.files_[slot];
-        if (f.stream == Dos::Stream::Console) {
-            const u32 left = d.input_length_ - d.input_pos_;
-            const u32 n = length < left ? length : left;
-            u8* to = n != 0 ? b.bytes_at(buffer, n) : nullptr;
-            if (n != 0 && to == nullptr) {
-                return;
-            }
-            for (u32 i = 0; i < n; ++i) {
-                to[i] = static_cast<u8>(d.input_[d.input_pos_ + i]);
-            }
-            d.input_pos_ += n;
-            native::set_result(m, n);
-            return;
-        }
-        const u32 left = f.pos < f.entry.size ? f.entry.size - f.pos : 0;
-        const u32 n = length < left ? length : left;
+        const u32 avail = available_bytes(d, d.files_[slot]);
+        const u32 n = length < avail ? length : avail;
         if (n == 0) {
+            d.files_[slot].has_last = false;
             native::set_result(m, 0);
             return;
         }
@@ -964,11 +1197,10 @@ struct DosOps {
             return;
         }
         u32 got = 0;
-        if (adf_read(d.volume_, f.entry, f.pos, to, n, got) != FsError::Ok) {
-            fail(d, b, ERROR_NOT_A_DOS_DISK, 0xFFFFFFFF);
+        if (!read_from_slot(d, b, static_cast<u32>(slot), to, n, got)) {
+            native::set_result(m, 0xFFFFFFFF);
             return;
         }
-        f.pos += got;
         native::set_result(m, got);
     }
 
@@ -1032,6 +1264,8 @@ struct DosOps {
         }
         const u32 old = f.pos;
         f.pos = static_cast<u32>(to);
+        f.has_unget = false;
+        f.has_last = false;
         native::set_result(m, old);
     }
 
@@ -1164,6 +1398,336 @@ struct DosOps {
         }
     }
 
+    static void fget_c(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 fh = m.cpu.d[1];
+        const i64 slot = handle_slot(d, fh);
+        if (slot < 0) {
+            log_bad_handle("FGetC from", fh);
+            fail(d, b, ERROR_INVALID_LOCK, 0xFFFFFFFF);
+            return;
+        }
+        u8 c = 0;
+        u32 got = 0;
+        if (!read_from_slot(d, b, static_cast<u32>(slot), &c, 1, got)) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        if (got == 0) {
+            set_io_err(d, b, 0);
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        native::set_result(m, c);
+    }
+
+    static void unget_c(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 fh = m.cpu.d[1];
+        const u32 ch = m.cpu.d[2];
+        const i64 slot = handle_slot(d, fh);
+        if (slot < 0) {
+            log_bad_handle("UnGetC on", fh);
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        Dos::FileSlot& f = d.files_[slot];
+        if (f.has_unget) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        if (ch == 0xFFFFFFFF) {
+            if (!f.has_last) {
+                native::set_result(m, DOSFALSE);
+                return;
+            }
+            f.unget = f.last_char;
+        } else {
+            f.unget = static_cast<u8>(ch);
+        }
+        f.has_unget = true;
+        f.has_last = false;
+        native::set_result(m, DOSTRUE);
+    }
+
+    static void fgets(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 fh = m.cpu.d[1];
+        const u32 buf = m.cpu.d[2];
+        const u32 len = m.cpu.d[3];
+        const i64 slot = handle_slot(d, fh);
+        if (slot < 0) {
+            log_bad_handle("FGets from", fh);
+            fail(d, b, ERROR_INVALID_LOCK, 0);
+            return;
+        }
+        if (buf == 0 || len == 0 || (len & 0x80000000) != 0) {
+            fail(d, b, ERROR_BAD_NUMBER, 0);
+            return;
+        }
+        u32 i = 0;
+        while (i < len - 1) {
+            u8 c = 0;
+            u32 got = 0;
+            if (!read_from_slot(d, b, static_cast<u32>(slot), &c, 1, got)) {
+                native::set_result(m, 0);
+                return;
+            }
+            if (got == 0) {
+                if (i == 0) {
+                    set_io_err(d, b, 0);
+                    native::set_result(m, 0);
+                    return;
+                }
+                break;
+            }
+            b.w8(buf + i, c);
+            if (!b.ok()) {
+                return;
+            }
+            ++i;
+            if (c == '\n') {
+                break;
+            }
+        }
+        b.w8(buf + i, 0);
+        if (b.ok()) {
+            native::set_result(m, buf);
+        }
+    }
+
+    static void fread(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 fh = m.cpu.d[1];
+        const u32 buf = m.cpu.d[2];
+        const u32 blocklen = m.cpu.d[3];
+        const u32 blocks = m.cpu.d[4];
+        const i64 slot = handle_slot(d, fh);
+        if (slot < 0) {
+            log_bad_handle("FRead from", fh);
+            fail(d, b, ERROR_INVALID_LOCK, 0);
+            return;
+        }
+        if ((blocklen & 0x80000000) != 0 || (blocks & 0x80000000) != 0) {
+            fail(d, b, ERROR_BAD_NUMBER, 0);
+            return;
+        }
+        if (blocklen == 0 || blocks == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u64 want = static_cast<u64>(blocklen) * blocks;
+        const u32 avail = available_bytes(d, d.files_[slot]);
+        const u32 n = want < avail ? static_cast<u32>(want) : avail;
+        if (n == 0) {
+            d.files_[slot].has_last = false;
+            set_io_err(d, b, 0);
+            native::set_result(m, 0);
+            return;
+        }
+        u8* to = b.bytes_at(buf, n);
+        if (to == nullptr) {
+            return;
+        }
+        u32 got = 0;
+        if (!read_from_slot(d, b, static_cast<u32>(slot), to, n, got)) {
+            native::set_result(m, 0);
+            return;
+        }
+        native::set_result(m, got / blocklen);
+    }
+
+    static void fwrite(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 fh = m.cpu.d[1];
+        const u32 buf = m.cpu.d[2];
+        const u32 blocklen = m.cpu.d[3];
+        const u32 blocks = m.cpu.d[4];
+        const i64 slot = handle_slot(d, fh);
+        if (slot < 0) {
+            log_bad_handle("FWrite to", fh);
+            fail(d, b, ERROR_INVALID_LOCK, 0);
+            return;
+        }
+        if ((blocklen & 0x80000000) != 0 || (blocks & 0x80000000) != 0) {
+            fail(d, b, ERROR_BAD_NUMBER, 0);
+            return;
+        }
+        if (blocklen == 0 || blocks == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u64 total = static_cast<u64>(blocklen) * blocks;
+        const u32 bytes = total > 0xFFFFFFFFu ? 0xFFFFFFFFu : static_cast<u32>(total);
+        const u8* from = b.bytes_at(buf, bytes);
+        if (from == nullptr) {
+            return;
+        }
+        const bool ok = write_slot(d, b, static_cast<u32>(slot), from, bytes);
+        native::set_result(m, ok ? blocks : 0);
+    }
+
+    // BCPL-style formatting (%S, %T, %N, %I, %U, %X, %O, %C, %$, %%) from
+    // an array of 32-bit values.
+    static void vfwritef(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const i64 slot = output_slot(d, b, m.cpu.d[1], "VFWritef to");
+        if (slot < 0) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        u32 fmt = m.cpu.d[2];
+        u32 argv = m.cpu.d[3];
+        Sink sink(d, b, static_cast<u32>(slot));
+        native::format_detail::Capped<Sink> out{sink, native::format_detail::kMaxOutput};
+        for (;;) {
+            u32 c = b.r8(fmt++);
+            if (!b.ok()) {
+                sink.flush();
+                return;
+            }
+            if (c == 0) {
+                break;
+            }
+            if (c != '%') {
+                if (!out.put(c)) {
+                    sink.flush();
+                    native::set_result(m, 0xFFFFFFFF);
+                    return;
+                }
+                continue;
+            }
+            u32 width = 0;
+            c = b.r8(fmt++);
+            while (c >= '0' && c <= '9' && b.ok()) {
+                if (width < native::format_detail::kMaxWidth) {
+                    width = width * 10 + (c - '0');
+                }
+                c = b.r8(fmt++);
+            }
+            if (!b.ok()) {
+                sink.flush();
+                return;
+            }
+            bool ok = true;
+            const char uc = upper(static_cast<char>(c));
+            if (uc == '\0') {
+                --fmt;
+            } else if (uc == '%') {
+                ok = out.put('%');
+            } else if (uc == '$') {
+                argv += 4;
+            } else if (uc == 'C') {
+                const u32 v = b.r32(argv);
+                argv += 4;
+                if (!b.ok()) {
+                    sink.flush();
+                    return;
+                }
+                const u32 pad = width > 1 ? width - 1 : 0;
+                ok = out.put(v & 0xFF) && native::format_detail::repeat(out, ' ', pad);
+            } else if (uc == 'S' || uc == 'T') {
+                const u32 ptr = b.r32(argv);
+                argv += 4;
+                if (!b.ok()) {
+                    sink.flush();
+                    return;
+                }
+                u32 len = 0;
+                if (ptr != 0) {
+                    for (;; ++len) {
+                        const u32 ch = b.r8(ptr + len);
+                        if (!b.ok()) {
+                            sink.flush();
+                            return;
+                        }
+                        if (ch == 0) {
+                            break;
+                        }
+                        if (!out.put(ch)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if (ok && width > len) {
+                    ok = native::format_detail::repeat(out, ' ', width - len);
+                }
+            } else if (uc == 'N' || uc == 'I' || uc == 'U' || uc == 'X') {
+                u32 v = b.r32(argv);
+                argv += 4;
+                if (!b.ok()) {
+                    sink.flush();
+                    return;
+                }
+                bool negative = false;
+                if ((uc == 'N' || uc == 'I') && (v & 0x80000000) != 0) {
+                    negative = true;
+                    v = 0u - v;
+                }
+                char digits[12];
+                format_u64(digits, sizeof digits, v, uc == 'X' ? 16 : 10);
+                if (uc == 'X') {
+                    for (char* p = digits; *p != '\0'; ++p) {
+                        *p = *p >= 'a' && *p <= 'f' ? static_cast<char>(*p - 'a' + 'A') : *p;
+                    }
+                }
+                const native::format_detail::Field f{width, false, uc == 'X'};
+                ok = native::format_detail::put_number(out, f, negative, digits);
+            } else if (uc == 'O') {
+                u32 v = b.r32(argv);
+                argv += 4;
+                if (!b.ok()) {
+                    sink.flush();
+                    return;
+                }
+                char buf[12];
+                u32 n = 0;
+                do {
+                    buf[n++] = static_cast<char>('0' + (v & 7));
+                    v >>= 3;
+                } while (v != 0);
+                char digits[12];
+                for (u32 i = 0; i < n; ++i) {
+                    digits[i] = buf[n - 1 - i];
+                }
+                digits[n] = '\0';
+                const native::format_detail::Field f{width, false, false};
+                ok = native::format_detail::put_number(out, f, false, digits);
+            } else {
+                ok = out.put(c);
+            }
+            if (!ok) {
+                sink.flush();
+                native::set_result(m, 0xFFFFFFFF);
+                return;
+            }
+        }
+        sink.flush();
+        if (b.ok()) {
+            native::set_result(m, sink.failed ? 0xFFFFFFFF : sink.total);
+        }
+    }
+
+    static void is_interactive(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const i64 slot = handle_slot(d, m.cpu.d[1]);
+        if (slot < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        native::set_result(m, d.files_[slot].stream == Dos::Stream::Console ? DOSTRUE : DOSFALSE);
+    }
+
+    static void set_vbuf(void*, Machine& m) { native::set_result(m, 0); }
+
     // --- errors ------------------------------------------------------------
 
     static void io_err(void* ctx, Machine& m) {
@@ -1283,6 +1847,31 @@ struct DosOps {
         }
         set_io_err(d, b, code);
         native::set_result(m, ok ? DOSTRUE : DOSFALSE);
+    }
+
+    static void error_report(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 code = m.cpu.d[1];
+        if (code != 0) {
+            char text[kFaultText];
+            fault_text(b, code, 0, text);
+            const u32 fh = b.r32(d.process_ + pr_COS);
+            if (!b.ok()) {
+                return;
+            }
+            const i64 slot = handle_slot(d, fh);
+            const u32 out_slot = slot >= 0 && d.files_[slot].stream == Dos::Stream::Console
+                                     ? static_cast<u32>(slot)
+                                     : kConsoleOut;
+            Sink out(d, b, out_slot);
+            out.text(text);
+            out.put('\n');
+            out.flush();
+        }
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
     }
 
     // --- variables -------------------------------------------------------------
@@ -1488,6 +2077,51 @@ struct DosOps {
         }
     }
 
+    static void find_var_lvo(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        char name[kMaxName];
+        if (!var_name(d, b, name, 0)) {
+            return;
+        }
+        const u32 node = find_var(d, b, name, m.cpu.d[2]);
+        if (!b.ok()) {
+            return;
+        }
+        if (node == 0) {
+            set_io_err(d, b, ERROR_OBJECT_NOT_FOUND);
+        }
+        if (b.ok()) {
+            native::set_result(m, node);
+        }
+    }
+
+    static void delete_var_lvo(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 flags = m.cpu.d[2];
+        char name[kMaxName];
+        if (!var_name(d, b, name, DOSFALSE)) {
+            return;
+        }
+        if ((flags & GVF_GLOBAL_ONLY) != 0) {
+            fail(d, b, ERROR_DEVICE_NOT_MOUNTED, DOSFALSE);
+            return;
+        }
+        const u32 node = find_var(d, b, name, flags & 0xFF);
+        if (!b.ok()) {
+            return;
+        }
+        if (node == 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
+        delete_var(d, b, node);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
     // StrToLong(string, value): the decimal number at the start of string,
     // after spaces and tabs and an optional sign, into the long at value.
     // D0 is the number of characters it took, the blanks included, or -1,
@@ -1526,6 +2160,194 @@ struct DosOps {
         Bus b(m);
         const u32 bptr = b.r32(d.process_ + pr_CLI);
         native::set_result(m, bptr << 2);
+    }
+
+    static void max_cli(void*, Machine& m) { native::set_result(m, 1); }
+
+    static void find_cli_proc(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        native::set_result(m, m.cpu.d[1] == 1 ? d.process_ : 0);
+    }
+
+    static void find_segment(void*, Machine& m) { native::set_result(m, 0); }
+
+    static void get_arg_str(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 arg = b.r32(d.process_ + pr_Arguments);
+        if (b.ok()) {
+            native::set_result(m, arg);
+        }
+    }
+
+    static void set_arg_str(void* ctx, Machine& m) { select(m, of(ctx), pr_Arguments); }
+
+    static void set_cli_bstr(Dos& d, Bus& b, u32 field, u32 dest, u32 str_addr) {
+        if (str_addr == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char buf[kMaxName];
+        if (!b.string(str_addr, buf, kMaxName)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            }
+            return;
+        }
+        const u32 cli_bptr = b.r32(d.process_ + pr_CLI);
+        if (!b.ok()) {
+            return;
+        }
+        if (cli_bptr == 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
+        put_bstr(b, dest, buf, 255);
+        b.w32((cli_bptr << 2) + field, dest >> 2);
+        if (b.ok()) {
+            native::set_result(b.machine(), DOSTRUE);
+        }
+    }
+
+    static void get_cli_bstr(Dos& d, Bus& b, u32 field, u32 buf_addr, u32 len) {
+        if (buf_addr == 0 || len == 0 || (len & 0x80000000) != 0) {
+            fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            return;
+        }
+        const u32 cli_bptr = b.r32(d.process_ + pr_CLI);
+        if (!b.ok()) {
+            return;
+        }
+        if (cli_bptr == 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
+        const u32 bstr_bptr = b.r32((cli_bptr << 2) + field);
+        if (!b.ok()) {
+            return;
+        }
+        if (bstr_bptr == 0) {
+            b.w8(buf_addr, 0);
+            if (b.ok()) {
+                native::set_result(b.machine(), DOSTRUE);
+            }
+            return;
+        }
+        const u32 bstr = bstr_bptr << 2;
+        const u32 slen = b.r8(bstr);
+        if (!b.ok()) {
+            return;
+        }
+        if (slen + 1 > len) {
+            fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            return;
+        }
+        for (u32 i = 0; i < slen; ++i) {
+            b.w8(buf_addr + i, b.r8(bstr + 1 + i));
+        }
+        b.w8(buf_addr + slen, 0);
+        if (b.ok()) {
+            native::set_result(b.machine(), DOSTRUE);
+        }
+    }
+
+    static void set_current_dir_name(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        set_cli_bstr(d, b, cli_SetName, d.set_name_, m.cpu.d[1]);
+    }
+
+    static void get_current_dir_name(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        get_cli_bstr(d, b, cli_SetName, m.cpu.d[1], m.cpu.d[2]);
+    }
+
+    static void set_program_name(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        set_cli_bstr(d, b, cli_CommandName, d.command_name_, m.cpu.d[1]);
+    }
+
+    static void get_program_name(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        get_cli_bstr(d, b, cli_CommandName, m.cpu.d[1], m.cpu.d[2]);
+    }
+
+    static void set_prompt(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        set_cli_bstr(d, b, cli_Prompt, d.prompt_, m.cpu.d[1]);
+    }
+
+    static void get_prompt(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        get_cli_bstr(d, b, cli_Prompt, m.cpu.d[1], m.cpu.d[2]);
+    }
+
+    static void check_signal(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 mask = m.cpu.d[1];
+        const u32 recvd = b.r32(d.process_ + TC_SIGRECVD);
+        const u32 hit = recvd & mask;
+        if (hit != 0) {
+            b.w32(d.process_ + TC_SIGRECVD, recvd & ~hit);
+        }
+        if (b.ok()) {
+            native::set_result(m, hit);
+        }
+    }
+
+    static u32 dos_object_size(u32 type) {
+        switch (type) {
+        case DOS_FILEHANDLE: return fh_SIZEOF;
+        case DOS_EXALLCONTROL: return eac_SIZEOF;
+        case DOS_FIB: return fib_SIZEOF;
+        case DOS_STDPKT: return sp_SIZEOF;
+        case DOS_CLI: return cli_SIZEOF;
+        case DOS_RDARGS: return RDA_SIZEOF;
+        default: return 0;
+        }
+    }
+
+    static void alloc_dos_object(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 type = m.cpu.d[1];
+        const u32 bytes = dos_object_size(type);
+        if (bytes == 0) {
+            fail(d, b, ERROR_BAD_NUMBER, 0);
+            return;
+        }
+        const u32 at = d.exec_->alloc(bytes, MEMF_PUBLIC | MEMF_CLEAR);
+        if (at == 0) {
+            fail(d, b, ERROR_NO_FREE_STORE, 0);
+            return;
+        }
+        if (type == DOS_STDPKT) {
+            b.w32(at + sp_Msg + LN_NAME, at + sp_Pkt);
+            b.w16(at + sp_Msg + mn_Length, dp_SIZEOF);
+            b.w32(at + sp_Pkt + dp_Link, at + sp_Msg);
+        }
+        if (b.ok()) {
+            native::set_result(m, at);
+        }
+    }
+
+    static void free_dos_object(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        const u32 ptr = m.cpu.d[2];
+        if (ptr == 0) {
+            return;
+        }
+        const u32 bytes = dos_object_size(m.cpu.d[1]);
+        if (bytes == 0) {
+            return;
+        }
+        d.exec_->free(native::guest_address(m, ptr), bytes);
     }
 
     // --- time ----------------------------------------------------------------
@@ -1648,6 +2470,201 @@ struct DosOps {
         native::set_result(m, lock_bptr(d, static_cast<u32>(slot)));
     }
 
+    static void dup_lock_from_fh(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const i64 fslot = handle_slot(d, m.cpu.d[1]);
+        if (fslot < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, 0);
+            return;
+        }
+        const Dos::FileSlot& f = d.files_[fslot];
+        if (f.stream != Dos::Stream::File) {
+            fail(d, b, ERROR_ACTION_NOT_KNOWN, 0);
+            return;
+        }
+        const i64 slot = free_lock(d);
+        if (slot < 0) {
+            table_full(d, b, "lock", Dos::kMaxLocks);
+            return;
+        }
+        Dos::LockSlot& l = d.lock_slots_[slot];
+        l.used = true;
+        l.entry = f.entry;
+        copy_cstr(l.path, f.path, Dos::kMaxPath);
+        init_lock(d, b, static_cast<u32>(slot), l.entry.header_block, SHARED_LOCK);
+        native::set_result(m, lock_bptr(d, static_cast<u32>(slot)));
+    }
+
+    static void open_from_lock(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const i64 lslot = lock_slot(d, m.cpu.d[1]);
+        if (lslot < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, 0);
+            return;
+        }
+        Dos::LockSlot& l = d.lock_slots_[lslot];
+        if (l.entry.is_dir) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
+            return;
+        }
+        const i64 fslot = free_handle(d);
+        if (fslot < 0) {
+            table_full(d, b, "file handle", Dos::kMaxFiles);
+            return;
+        }
+        d.files_[fslot] = make_file_slot(Dos::Stream::File, l.entry, l.path);
+        init_handle(d, b, static_cast<u32>(fslot), false);
+        l.used = false;
+        native::set_result(m, handle_bptr(d, static_cast<u32>(fslot)));
+    }
+
+    static void lock_parent_of_path(Dos& d, Bus& b, const char* path) {
+        const i64 slot = free_lock(d);
+        if (slot < 0) {
+            table_full(d, b, "lock", Dos::kMaxLocks);
+            return;
+        }
+        Dos::LockSlot& l = d.lock_slots_[slot];
+        u32 slash = 0;
+        bool has_slash = false;
+        for (u32 i = 0; path[i] != '\0'; ++i) {
+            if (path[i] == '/') {
+                slash = i;
+                has_slash = true;
+            }
+        }
+        if (has_slash) {
+            for (u32 i = 0; i < slash; ++i) {
+                l.path[i] = path[i];
+            }
+            l.path[slash] = '\0';
+        } else {
+            l.path[0] = '\0';
+        }
+        const FsError found = adf_find(d.volume_, l.path, l.entry);
+        if (found != FsError::Ok) {
+            fail(d, b, io_error_of(found), 0);
+            return;
+        }
+        l.used = true;
+        init_lock(d, b, static_cast<u32>(slot), l.entry.header_block, SHARED_LOCK);
+        native::set_result(b.machine(), lock_bptr(d, static_cast<u32>(slot)));
+    }
+
+    static void parent_dir(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 bptr = m.cpu.d[1];
+        if (bptr == 0) {
+            set_io_err(d, b, 0);
+            native::set_result(m, 0);
+            return;
+        }
+        const i64 from = lock_slot(d, bptr);
+        if (from < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, 0);
+            return;
+        }
+        const char* path = d.lock_slots_[from].path;
+        if (path[0] == '\0') {
+            set_io_err(d, b, 0);
+            native::set_result(m, 0);
+            return;
+        }
+        lock_parent_of_path(d, b, path);
+    }
+
+    static void parent_of_fh(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const i64 fslot = handle_slot(d, m.cpu.d[1]);
+        if (fslot < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, 0);
+            return;
+        }
+        const Dos::FileSlot& f = d.files_[fslot];
+        if (f.stream != Dos::Stream::File) {
+            fail(d, b, ERROR_ACTION_NOT_KNOWN, 0);
+            return;
+        }
+        if (f.path[0] == '\0') {
+            set_io_err(d, b, 0);
+            native::set_result(m, 0);
+            return;
+        }
+        lock_parent_of_path(d, b, f.path);
+    }
+
+    static void same_lock(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        DirEntry e1{};
+        DirEntry e2{};
+        const char* p1 = nullptr;
+        const char* p2 = nullptr;
+        if (!lock_entry(d, b, m.cpu.d[1], e1, p1) || !lock_entry(d, b, m.cpu.d[2], e2, p2)) {
+            native::set_result(m, LOCK_DIFFERENT);
+            return;
+        }
+        native::set_result(m, e1.header_block == e2.header_block ? LOCK_SAME : LOCK_SAME_VOLUME);
+    }
+
+    static void write_volume_path(Dos& d, Bus& b, const char* path, u32 buffer, u32 len) {
+        if (buffer == 0 || len == 0 || (len & 0x80000000) != 0) {
+            fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            return;
+        }
+        const u32 vol_len = length_of(d.volume_.name);
+        const u32 path_len = length_of(path);
+        const u32 total = vol_len + 1 + path_len;
+        if (total + 1 > len) {
+            fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            return;
+        }
+        u32 at = 0;
+        for (u32 i = 0; i < vol_len; ++i) {
+            b.w8(buffer + at++, static_cast<u8>(d.volume_.name[i]));
+        }
+        b.w8(buffer + at++, ':');
+        for (u32 i = 0; i < path_len; ++i) {
+            b.w8(buffer + at++, static_cast<u8>(path[i]));
+        }
+        b.w8(buffer + at, 0);
+        if (b.ok()) {
+            native::set_result(b.machine(), DOSTRUE);
+        }
+    }
+
+    static void name_from_lock(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        DirEntry entry{};
+        const char* path = nullptr;
+        if (!lock_entry(d, b, m.cpu.d[1], entry, path)) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        write_volume_path(d, b, path, m.cpu.d[2], m.cpu.d[3]);
+    }
+
+    static void name_from_fh(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const i64 slot = handle_slot(d, m.cpu.d[1]);
+        if (slot < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        const Dos::FileSlot& f = d.files_[slot];
+        if (f.stream != Dos::Stream::File) {
+            fail(d, b, ERROR_ACTION_NOT_KNOWN, DOSFALSE);
+            return;
+        }
+        write_volume_path(d, b, f.path, m.cpu.d[2], m.cpu.d[3]);
+    }
+
     static void current_dir(void* ctx, Machine& m) { select(m, of(ctx), pr_CurrentDir); }
 
     // The entry and path of a lock; 0 is the root. False with IoErr set if
@@ -1722,6 +2739,23 @@ struct DosOps {
         native::set_result(m, ok ? DOSTRUE : DOSFALSE);
     }
 
+    static void examine_fh(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const i64 slot = handle_slot(d, m.cpu.d[1]);
+        if (slot < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        const Dos::FileSlot& f = d.files_[slot];
+        if (f.stream != Dos::Stream::File) {
+            fail(d, b, ERROR_ACTION_NOT_KNOWN, DOSFALSE);
+            return;
+        }
+        const bool ok = fill_fib(d, b, m.cpu.d[2], f.entry);
+        native::set_result(m, ok ? DOSTRUE : DOSFALSE);
+    }
+
     // Finds the entry after the one with header block `after` in listing
     // order, or the first when `after` is the directory itself.
     struct NextEntry {
@@ -1776,6 +2810,182 @@ struct DosOps {
         const bool ok = fill_fib(d, b, fib, next.entry);
         native::set_result(m, ok ? DOSTRUE : DOSFALSE);
     }
+
+    static u32 ex_all_header_size(u32 type) {
+        switch (type) {
+        case ED_NAME: return 8;
+        case ED_TYPE: return 12;
+        case ED_SIZE: return 16;
+        case ED_PROTECTION: return 20;
+        case ED_DATE: return 32;
+        case ED_COMMENT: return 36;
+        default: return 0;
+        }
+    }
+
+    struct ExAllCollector {
+        Dos& d;
+        Bus& b;
+        u32 buffer;
+        u32 size;
+        u32 type;
+        u32 hdr_size;
+        u32 after;
+        bool seen;
+        u32 offset;
+        u32 entries;
+        u32 prev_entry;
+        u32 last_key;
+        bool full;
+        bool more;
+        bool error;
+
+        static void visit(void* ctx, const DirEntry& e) {
+            using namespace amiga_fs_detail;
+            ExAllCollector& c = *static_cast<ExAllCollector*>(ctx);
+            if (c.error || c.full) {
+                if (!c.error) {
+                    c.more = true;
+                }
+                return;
+            }
+            if (c.after != 0 && !c.seen) {
+                c.seen = e.header_block == c.after;
+                return;
+            }
+            const u8* header = nullptr;
+            if (c.type >= ED_PROTECTION) {
+                FsError err = FsError::Ok;
+                header = load_header(c.d.volume_, e.header_block, err);
+                if (header == nullptr) {
+                    set_io_err(c.d, c.b, io_error_of(err));
+                    c.error = true;
+                    return;
+                }
+            }
+            const u32 name_len = length_of(e.name);
+            const u8* comment = nullptr;
+            u32 comment_len = 0;
+            if (c.type >= ED_COMMENT) {
+                comment = header + (block_longs - 46) * 4;
+                comment_len = comment[0] < 79 ? comment[0] : 79;
+            }
+            const u32 name_at = c.offset + c.hdr_size;
+            const u32 comment_at = name_at + name_len + 1;
+            const u32 end = c.type >= ED_COMMENT ? comment_at + comment_len + 1 : comment_at;
+            if (end < c.offset || end > c.size) {
+                c.full = true;
+                c.more = true;
+                return;
+            }
+            const u32 at = c.buffer + c.offset;
+            if (c.prev_entry != 0) {
+                c.b.w32(c.prev_entry + ed_Next, at);
+            }
+            c.b.w32(at + ed_Next, 0);
+            c.b.w32(at + ed_Name, c.buffer + name_at);
+            for (u32 i = 0; i <= name_len; ++i) {
+                c.b.w8(c.buffer + name_at + i, static_cast<u8>(e.name[i]));
+            }
+            if (c.type >= ED_TYPE) {
+                c.b.w32(at + ed_Type, e.is_dir ? ST_USERDIR : ST_FILE);
+            }
+            if (c.type >= ED_SIZE) {
+                c.b.w32(at + ed_Size, e.is_dir ? 0 : e.size);
+            }
+            if (c.type >= ED_PROTECTION) {
+                c.b.w32(at + ed_Prot, long_at(header, block_longs - 48));
+            }
+            if (c.type >= ED_DATE) {
+                c.b.w32(at + ed_Days, long_at(header, block_longs - 23));
+                c.b.w32(at + ed_Mins, long_at(header, block_longs - 22));
+                c.b.w32(at + ed_Ticks, long_at(header, block_longs - 21));
+            }
+            if (c.type >= ED_COMMENT) {
+                c.b.w32(at + ed_Comment, c.buffer + comment_at);
+                for (u32 i = 0; i < comment_len; ++i) {
+                    c.b.w8(c.buffer + comment_at + i, comment[1 + i]);
+                }
+                c.b.w8(c.buffer + comment_at + comment_len, 0);
+            }
+            if (!c.b.ok()) {
+                c.error = true;
+                return;
+            }
+            c.prev_entry = at;
+            c.offset = align4(end);
+            c.entries += 1;
+            c.last_key = e.header_block;
+        }
+    };
+
+    // Lists directory entries into ExAllData records for ED_NAME..ED_COMMENT;
+    // eac_MatchString and eac_MatchFunc are ignored (no pattern matcher yet).
+    static void ex_all(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 buffer = m.cpu.d[2];
+        const u32 size = m.cpu.d[3];
+        const u32 type = m.cpu.d[4];
+        const u32 control = m.cpu.d[5];
+        if (control == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        const u32 hdr_size = ex_all_header_size(type);
+        if (hdr_size == 0) {
+            fail(d, b, ERROR_BAD_NUMBER, DOSFALSE);
+            return;
+        }
+        if (buffer == 0 || size == 0 || (size & 0x80000000) != 0) {
+            fail(d, b, ERROR_BUFFER_OVERFLOW, DOSFALSE);
+            return;
+        }
+        DirEntry dir{};
+        const char* path = nullptr;
+        if (!lock_entry(d, b, m.cpu.d[1], dir, path)) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        if (!dir.is_dir) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return;
+        }
+        const u32 after = b.r32(control + eac_LastKey);
+        if (!b.ok()) {
+            return;
+        }
+        ExAllCollector col{d, b, buffer, size, type, hdr_size, after, false, 0, 0, 0, after,
+                           false, false, false};
+        const FsError error = adf_list(d.volume_, path, ExAllCollector::visit, &col);
+        if (!b.ok()) {
+            return;
+        }
+        if (col.error) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        if (error != FsError::Ok) {
+            fail(d, b, io_error_of(error), DOSFALSE);
+            return;
+        }
+        b.w32(control + eac_Entries, col.entries);
+        b.w32(control + eac_LastKey, col.last_key);
+        if (!b.ok()) {
+            return;
+        }
+        if (col.more) {
+            if (col.entries == 0) {
+                fail(d, b, ERROR_BUFFER_OVERFLOW, DOSFALSE);
+                return;
+            }
+            native::set_result(m, DOSTRUE);
+            return;
+        }
+        fail(d, b, ERROR_NO_MORE_ENTRIES, DOSFALSE);
+    }
+
+    static void ex_all_end(void*, Machine&) {}
 
     static void info(void* ctx, Machine& m) {
         Dos& d = of(ctx);
@@ -2136,6 +3346,224 @@ struct DosOps {
             d.exec_->free(rdargs, RDA_SIZEOF);
         }
     }
+
+    static void find_arg(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 tmpl_addr = m.cpu.d[1];
+        const u32 word_addr = m.cpu.d[2];
+        if (tmpl_addr == 0 || word_addr == 0) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        char tmpl[kMaxTemplate + 1];
+        if (!b.string(tmpl_addr, tmpl, sizeof tmpl)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_BAD_TEMPLATE, 0xFFFFFFFF);
+            }
+            return;
+        }
+        char word[kMaxName];
+        if (!b.string(word_addr, word, sizeof word)) {
+            if (b.ok()) {
+                native::set_result(m, 0xFFFFFFFF);
+            }
+            return;
+        }
+        if (word[0] == '\0') {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        native::set_result(m, static_cast<u32>(find_keyword(tmpl, word)));
+    }
+
+    struct ItemSource {
+        Dos& d;
+        Bus& b;
+        bool use_cs;
+        u32 cs_addr;
+        u32 cs_buf;
+        u32 cs_len;
+        u32 cs_cur;
+        u32 slot;
+
+        i64 next() {
+            if (use_cs) {
+                if ((cs_len & 0x80000000) != 0 || cs_cur >= cs_len) {
+                    return kEnd;
+                }
+                const u32 c = b.r8(cs_buf + cs_cur);
+                if (!b.ok()) {
+                    return kEnd;
+                }
+                ++cs_cur;
+                return static_cast<i64>(c);
+            }
+            u8 c = 0;
+            u32 got = 0;
+            if (!read_from_slot(d, b, slot, &c, 1, got) || got == 0) {
+                return kEnd;
+            }
+            return static_cast<i64>(c);
+        }
+
+        void unget(i64 c) {
+            if (c == kEnd) {
+                return;
+            }
+            if (use_cs) {
+                if (cs_cur > 0) {
+                    --cs_cur;
+                }
+                return;
+            }
+            Dos::FileSlot& f = d.files_[slot];
+            f.unget = static_cast<u8>(c);
+            f.has_unget = true;
+            f.has_last = false;
+        }
+
+        void commit() {
+            if (use_cs) {
+                b.w32(cs_addr + CS_CurChr, cs_cur);
+            }
+        }
+    };
+
+    static void read_item(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 buf = m.cpu.d[1];
+        const u32 maxchars = m.cpu.d[2];
+        const u32 csource = m.cpu.d[3];
+        if (buf == 0 || maxchars == 0 || (maxchars & 0x80000000) != 0) {
+            fail(d, b, ERROR_LINE_TOO_LONG, ITEM_ERROR);
+            return;
+        }
+        ItemSource src{d, b, false, csource, 0, 0, 0, 0};
+        if (csource != 0) {
+            src.cs_buf = b.r32(csource + CS_Buffer);
+            src.cs_len = b.r32(csource + CS_Length);
+            src.cs_cur = b.r32(csource + CS_CurChr);
+            if (!b.ok()) {
+                return;
+            }
+            src.use_cs = src.cs_buf != 0;
+        }
+        if (!src.use_cs) {
+            const u32 fh = b.r32(d.process_ + pr_CIS);
+            if (!b.ok()) {
+                return;
+            }
+            const i64 slot = handle_slot(d, fh);
+            if (slot < 0) {
+                fail(d, b, ERROR_INVALID_LOCK, ITEM_ERROR);
+                return;
+            }
+            src.slot = static_cast<u32>(slot);
+        }
+        i64 c = src.next();
+        while (b.ok() && (c == ' ' || c == '\t')) {
+            c = src.next();
+        }
+        if (!b.ok()) {
+            return;
+        }
+        if (c == kEnd || c == '\n' || c == 0 || c == ';') {
+            src.unget(c);
+            b.w8(buf, 0);
+            src.commit();
+            if (b.ok()) {
+                native::set_result(m, ITEM_NOTHING);
+            }
+            return;
+        }
+        if (c == '=') {
+            b.w8(buf, 0);
+            src.commit();
+            if (b.ok()) {
+                native::set_result(m, ITEM_EQUAL);
+            }
+            return;
+        }
+        u32 out = 0;
+        if (c == '"') {
+            for (;;) {
+                c = src.next();
+                if (!b.ok()) {
+                    return;
+                }
+                if (c == '*') {
+                    c = src.next();
+                    if (!b.ok()) {
+                        return;
+                    }
+                    if (c == kEnd || c == '\n' || c == 0) {
+                        src.unget(c);
+                        b.w8(buf + out, 0);
+                        src.commit();
+                        fail(d, b, ERROR_UNMATCHED_QUOTES, ITEM_ERROR);
+                        return;
+                    }
+                    if (c == 'n' || c == 'N') {
+                        c = '\n';
+                    } else if (c == 'e' || c == 'E') {
+                        c = 0x1B;
+                    }
+                } else if (c == kEnd || c == '\n' || c == 0) {
+                    src.unget(c);
+                    b.w8(buf + out, 0);
+                    src.commit();
+                    fail(d, b, ERROR_UNMATCHED_QUOTES, ITEM_ERROR);
+                    return;
+                } else if (c == '"') {
+                    b.w8(buf + out, 0);
+                    src.commit();
+                    if (b.ok()) {
+                        native::set_result(m, ITEM_QUOTED);
+                    }
+                    return;
+                }
+                if (out + 1 >= maxchars) {
+                    b.w8(buf + out, 0);
+                    src.commit();
+                    fail(d, b, ERROR_LINE_TOO_LONG, ITEM_ERROR);
+                    return;
+                }
+                b.w8(buf + out++, static_cast<u8>(c));
+                if (!b.ok()) {
+                    return;
+                }
+            }
+        }
+        for (;;) {
+            if (out + 1 >= maxchars) {
+                b.w8(buf + out, 0);
+                src.commit();
+                fail(d, b, ERROR_LINE_TOO_LONG, ITEM_ERROR);
+                return;
+            }
+            b.w8(buf + out++, static_cast<u8>(c));
+            if (!b.ok()) {
+                return;
+            }
+            c = src.next();
+            if (!b.ok()) {
+                return;
+            }
+            if (c == kEnd || c == 0 || c == ' ' || c == '\t' || c == '\n' || c == '=') {
+                if (c == 0 || c == '\n' || c == '=') {
+                    src.unget(c);
+                }
+                b.w8(buf + out, 0);
+                src.commit();
+                if (b.ok()) {
+                    native::set_result(m, ITEM_UNQUOTED);
+                }
+                return;
+            }
+        }
+    }
 };
 
 namespace {
@@ -2168,25 +3596,66 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::DateStamp, DosOps::date_stamp, "DateStamp"},
     {dos_lvo::Delay, DosOps::delay, "Delay"},
     {dos_lvo::WaitForChar, DosOps::wait_for_char, "WaitForChar"},
+    {dos_lvo::ParentDir, DosOps::parent_dir, "ParentDir"},
+    {dos_lvo::IsInteractive, DosOps::is_interactive, "IsInteractive"},
+    {dos_lvo::AllocDosObject, DosOps::alloc_dos_object, "AllocDosObject"},
+    {dos_lvo::FreeDosObject, DosOps::free_dos_object, "FreeDosObject"},
     {dos_lvo::SelectInput, DosOps::select_input, "SelectInput"},
     {dos_lvo::SelectOutput, DosOps::select_output, "SelectOutput"},
+    {dos_lvo::FGetC, DosOps::fget_c, "FGetC"},
     {dos_lvo::FPutC, DosOps::fput_c, "FPutC"},
+    {dos_lvo::UnGetC, DosOps::unget_c, "UnGetC"},
+    {dos_lvo::FRead, DosOps::fread, "FRead"},
+    {dos_lvo::FWrite, DosOps::fwrite, "FWrite"},
+    {dos_lvo::FGets, DosOps::fgets, "FGets"},
     {dos_lvo::FPuts, DosOps::fputs, "FPuts"},
+    {dos_lvo::VFWritef, DosOps::vfwritef, "VFWritef"},
     {dos_lvo::VFPrintf, DosOps::vfprintf, "VFPrintf"},
     {dos_lvo::Flush, DosOps::flush, "Flush"},
+    {dos_lvo::SetVBuf, DosOps::set_vbuf, "SetVBuf"},
+    {dos_lvo::DupLockFromFH, DosOps::dup_lock_from_fh, "DupLockFromFH"},
+    {dos_lvo::OpenFromLock, DosOps::open_from_lock, "OpenFromLock"},
+    {dos_lvo::ParentOfFH, DosOps::parent_of_fh, "ParentOfFH"},
+    {dos_lvo::ExamineFH, DosOps::examine_fh, "ExamineFH"},
+    {dos_lvo::NameFromLock, DosOps::name_from_lock, "NameFromLock"},
+    {dos_lvo::NameFromFH, DosOps::name_from_fh, "NameFromFH"},
+    {dos_lvo::SameLock, DosOps::same_lock, "SameLock"},
     {dos_lvo::SetMode, DosOps::set_mode, "SetMode"},
+    {dos_lvo::ExAll, DosOps::ex_all, "ExAll"},
     {dos_lvo::SetIoErr, DosOps::set_io_err_lvo, "SetIoErr"},
     {dos_lvo::Fault, DosOps::fault, "Fault"},
     {dos_lvo::PrintFault, DosOps::print_fault, "PrintFault"},
+    {dos_lvo::ErrorReport, DosOps::error_report, "ErrorReport"},
     {dos_lvo::Cli, DosOps::cli, "Cli"},
+    {dos_lvo::GetArgStr, DosOps::get_arg_str, "GetArgStr"},
+    {dos_lvo::SetArgStr, DosOps::set_arg_str, "SetArgStr"},
+    {dos_lvo::FindCliProc, DosOps::find_cli_proc, "FindCliProc"},
+    {dos_lvo::MaxCli, DosOps::max_cli, "MaxCli"},
+    {dos_lvo::SetCurrentDirName, DosOps::set_current_dir_name, "SetCurrentDirName"},
+    {dos_lvo::GetCurrentDirName, DosOps::get_current_dir_name, "GetCurrentDirName"},
+    {dos_lvo::SetProgramName, DosOps::set_program_name, "SetProgramName"},
+    {dos_lvo::GetProgramName, DosOps::get_program_name, "GetProgramName"},
+    {dos_lvo::SetPrompt, DosOps::set_prompt, "SetPrompt"},
+    {dos_lvo::GetPrompt, DosOps::get_prompt, "GetPrompt"},
+    {dos_lvo::IsFileSystem, DosOps::is_file_system, "IsFileSystem"},
     {dos_lvo::NewLoadSeg, DosOps::load_seg_lvo, "NewLoadSeg"},
+    {dos_lvo::FindSegment, DosOps::find_segment, "FindSegment"},
+    {dos_lvo::CheckSignal, DosOps::check_signal, "CheckSignal"},
     {dos_lvo::ReadArgs, DosOps::read_args, "ReadArgs"},
+    {dos_lvo::FindArg, DosOps::find_arg, "FindArg"},
+    {dos_lvo::ReadItem, DosOps::read_item, "ReadItem"},
     {dos_lvo::StrToLong, DosOps::str_to_long, "StrToLong"},
     {dos_lvo::FreeArgs, DosOps::free_args, "FreeArgs"},
+    {dos_lvo::FilePart, DosOps::file_part, "FilePart"},
+    {dos_lvo::PathPart, DosOps::path_part, "PathPart"},
+    {dos_lvo::AddPart, DosOps::add_part, "AddPart"},
     {dos_lvo::SetVar, DosOps::set_var, "SetVar"},
     {dos_lvo::GetVar, DosOps::get_var, "GetVar"},
+    {dos_lvo::DeleteVar, DosOps::delete_var_lvo, "DeleteVar"},
+    {dos_lvo::FindVar, DosOps::find_var_lvo, "FindVar"},
     {dos_lvo::PutStr, DosOps::put_str, "PutStr"},
     {dos_lvo::VPrintf, DosOps::vprintf, "VPrintf"},
+    {dos_lvo::ExAllEnd, DosOps::ex_all_end, "ExAllEnd"},
 };
 
 }
@@ -2200,7 +3669,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     base_ = 0;
     process_ = 0;
     for (FileSlot& f : files_) {
-        f = FileSlot{Stream::Closed, DirEntry{}, 0};
+        f = DosOps::make_file_slot(Stream::Closed, DirEntry{}, "");
     }
     for (LockSlot& l : lock_slots_) {
         l.used = false;
@@ -2227,6 +3696,8 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     port_ = block_ + kPortAt;
     process_ = block_ + kProcessAt;
     cli_ = block_ + kCliAt;
+    set_name_ = block_ + kSetNameAt;
+    prompt_ = block_ + kPromptAt;
     command_name_ = block_ + kCommandNameAt;
     handles_ = block_ + kHandlesAt;
     locks_ = block_ + kLocksAt;
@@ -2310,14 +3781,14 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     }
     set_name[n++] = ':';
     set_name[n] = '\0';
-    put_bstr(b, block_ + kSetNameAt, set_name, 31);
-    put_bstr(b, block_ + kPromptAt, kPrompt, 4);
+    put_bstr(b, set_name_, set_name, 31);
+    put_bstr(b, prompt_, kPrompt, 4);
     put_bstr(b, block_ + kCommandFileAt, "", 0);
     put_bstr(b, command_name_, "", 0);
-    b.w32(cli_ + cli_SetName, (block_ + kSetNameAt) >> 2);
+    b.w32(cli_ + cli_SetName, set_name_ >> 2);
     b.w32(cli_ + cli_CommandName, command_name_ >> 2);
     b.w32(cli_ + cli_FailLevel, kFailLevel);
-    b.w32(cli_ + cli_Prompt, (block_ + kPromptAt) >> 2);
+    b.w32(cli_ + cli_Prompt, prompt_ >> 2);
     b.w32(cli_ + cli_StandardInput, b.r32(process_ + pr_CIS));
     b.w32(cli_ + cli_CurrentInput, b.r32(process_ + pr_CIS));
     b.w32(cli_ + cli_CommandFile, (block_ + kCommandFileAt) >> 2);
@@ -2327,8 +3798,8 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     b.w32(cli_ + cli_StandardOutput, b.r32(process_ + pr_COS));
 
     // The console streams.
-    files_[kConsoleIn] = FileSlot{Stream::Console, DirEntry{}, 0};
-    files_[kConsoleOut] = FileSlot{Stream::Console, DirEntry{}, 0};
+    files_[kConsoleIn] = DosOps::make_file_slot(Stream::Console, DirEntry{}, "");
+    files_[kConsoleOut] = DosOps::make_file_slot(Stream::Console, DirEntry{}, "");
     DosOps::init_handle(*this, b, kConsoleIn, true);
     DosOps::init_handle(*this, b, kConsoleOut, true);
     if (!b.ok()) {
@@ -2446,6 +3917,7 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
     }
     b.w8(args_ + length, 0);
     put_bstr(b, command_name_, path, 255);
+    b.w32(cli_ + cli_CommandName, command_name_ >> 2);
     b.w32(cli_ + cli_Module, seglist);
     b.w32(cli_ + cli_ReturnCode, 0);
     b.w32(process_ + pr_Result2, 0);

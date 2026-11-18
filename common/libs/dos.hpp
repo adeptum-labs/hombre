@@ -91,25 +91,66 @@ constexpr u32 UnLoadSeg = 156;
 constexpr u32 DateStamp = 192;
 constexpr u32 Delay = 198;
 constexpr u32 WaitForChar = 204;
+constexpr u32 ParentDir = 210;
+constexpr u32 IsInteractive = 216;
+constexpr u32 AllocDosObject = 228;
+constexpr u32 FreeDosObject = 234;
 constexpr u32 SelectInput = 294;
 constexpr u32 SelectOutput = 300;
+constexpr u32 FGetC = 306;
 constexpr u32 FPutC = 312;
+constexpr u32 UnGetC = 318;
+constexpr u32 FRead = 324;
+constexpr u32 FWrite = 330;
+constexpr u32 FGets = 336;
 constexpr u32 FPuts = 342;
+constexpr u32 VFWritef = 348;
 constexpr u32 VFPrintf = 354;
 constexpr u32 Flush = 360;
+constexpr u32 SetVBuf = 366;
+constexpr u32 DupLockFromFH = 372;
+constexpr u32 OpenFromLock = 378;
+constexpr u32 ParentOfFH = 384;
+constexpr u32 ExamineFH = 390;
+constexpr u32 NameFromLock = 402;
+constexpr u32 NameFromFH = 408;
+constexpr u32 SameLock = 420;
 constexpr u32 SetMode = 426;
+constexpr u32 ExAll = 432;
 constexpr u32 SetIoErr = 462;
 constexpr u32 Fault = 468;
 constexpr u32 PrintFault = 474;
+constexpr u32 ErrorReport = 480;
 constexpr u32 Cli = 492;
+constexpr u32 GetArgStr = 534;
+constexpr u32 SetArgStr = 540;
+constexpr u32 FindCliProc = 546;
+constexpr u32 MaxCli = 552;
+constexpr u32 SetCurrentDirName = 558;
+constexpr u32 GetCurrentDirName = 564;
+constexpr u32 SetProgramName = 570;
+constexpr u32 GetProgramName = 576;
+constexpr u32 SetPrompt = 582;
+constexpr u32 GetPrompt = 588;
+constexpr u32 IsFileSystem = 708;
 constexpr u32 NewLoadSeg = 768;
+constexpr u32 FindSegment = 780;
+constexpr u32 CheckSignal = 792;
 constexpr u32 ReadArgs = 798;
+constexpr u32 FindArg = 804;
+constexpr u32 ReadItem = 810;
 constexpr u32 StrToLong = 816;
 constexpr u32 FreeArgs = 858;
+constexpr u32 FilePart = 870;
+constexpr u32 PathPart = 876;
+constexpr u32 AddPart = 882;
 constexpr u32 SetVar = 900;
 constexpr u32 GetVar = 906;
+constexpr u32 DeleteVar = 912;
+constexpr u32 FindVar = 918;
 constexpr u32 PutStr = 948;
 constexpr u32 VPrintf = 954;
+constexpr u32 ExAllEnd = 990;
 // The last vector of the 3.1 library; dos's table reaches down to it.
 constexpr u32 SetOwner = 996;
 
@@ -344,6 +385,57 @@ constexpr u32 ST_ROOT = 1;
 constexpr u32 ST_USERDIR = 2;
 constexpr u32 ST_FILE = 0xFFFFFFFD;  // -3
 
+constexpr u32 LOCK_SAME = 0;
+constexpr u32 LOCK_SAME_VOLUME = 1;
+constexpr u32 LOCK_DIFFERENT = 0xFFFFFFFF;  // -1
+
+constexpr u32 ITEM_EQUAL = 0xFFFFFFFE;      // -2
+constexpr u32 ITEM_ERROR = 0xFFFFFFFF;      // -1
+constexpr u32 ITEM_NOTHING = 0;
+constexpr u32 ITEM_UNQUOTED = 1;
+constexpr u32 ITEM_QUOTED = 2;
+
+constexpr u32 DOS_FILEHANDLE = 0;
+constexpr u32 DOS_EXALLCONTROL = 1;
+constexpr u32 DOS_FIB = 2;
+constexpr u32 DOS_STDPKT = 3;
+constexpr u32 DOS_CLI = 4;
+constexpr u32 DOS_RDARGS = 5;
+
+constexpr u32 ED_NAME = 1;
+constexpr u32 ED_TYPE = 2;
+constexpr u32 ED_SIZE = 3;
+constexpr u32 ED_PROTECTION = 4;
+constexpr u32 ED_DATE = 5;
+constexpr u32 ED_COMMENT = 6;
+
+// struct ExAllData and struct ExAllControl
+constexpr u32 ed_Next = 0;
+constexpr u32 ed_Name = 4;
+constexpr u32 ed_Type = 8;
+constexpr u32 ed_Size = 12;
+constexpr u32 ed_Prot = 16;
+constexpr u32 ed_Days = 20;
+constexpr u32 ed_Mins = 24;
+constexpr u32 ed_Ticks = 28;
+constexpr u32 ed_Comment = 32;
+constexpr u32 eac_Entries = 0;
+constexpr u32 eac_LastKey = 4;
+constexpr u32 eac_MatchString = 8;
+constexpr u32 eac_MatchFunc = 12;
+constexpr u32 eac_SIZEOF = 16;
+
+// struct DosPacket and struct StandardPacket
+constexpr u32 dp_Link = 0;
+constexpr u32 dp_Port = 4;
+constexpr u32 dp_Type = 8;
+constexpr u32 dp_Res1 = 12;
+constexpr u32 dp_Res2 = 16;
+constexpr u32 dp_SIZEOF = 48;
+constexpr u32 sp_Msg = 0;
+constexpr u32 sp_Pkt = MN_SIZE;
+constexpr u32 sp_SIZEOF = MN_SIZE + dp_SIZEOF;
+
 // IoErr() codes
 constexpr u32 ERROR_NO_FREE_STORE = 103;
 constexpr u32 ERROR_TASK_TABLE_FULL = 105;
@@ -445,6 +537,11 @@ private:
         Stream stream;
         DirEntry entry;
         u32 pos;
+        bool has_unget;
+        u8 unget;
+        bool has_last;
+        u8 last_char;
+        char path[kMaxPath];
     };
 
     struct LockSlot {
@@ -474,6 +571,8 @@ private:
     u32 port_ = 0;  // the file system's MsgPort
     u32 process_ = 0;
     u32 cli_ = 0;
+    u32 set_name_ = 0;
+    u32 prompt_ = 0;
     u32 command_name_ = 0;
     u32 handles_ = 0;
     u32 locks_ = 0;

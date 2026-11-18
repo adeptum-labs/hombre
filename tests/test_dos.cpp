@@ -399,12 +399,13 @@ public:
         return g_jit.run(kBlocks);
     }
 
-    // D1..D4 set, the vector called, D0 returned; the run must halt.
-    u32 call(u32 lvo, u32 d1 = 0, u32 d2 = 0, u32 d3 = 0, u32 d4 = 0) {
+    // D1..D5 set, the vector called, D0 returned; the run must halt.
+    u32 call(u32 lvo, u32 d1 = 0, u32 d2 = 0, u32 d3 = 0, u32 d4 = 0, u32 d5 = 0) {
         m.cpu.d[1] = d1;
         m.cpu.d[2] = d2;
         m.cpu.d[3] = d3;
         m.cpu.d[4] = d4;
+        m.cpu.d[5] = d5;
         CHECK_EQ(dos(lvo), ExitReason::Halt);
         return m.cpu.d[0];
     }
@@ -460,25 +461,66 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::DateStamp, 192u);
     CHECK_EQ(dos_lvo::Delay, 198u);
     CHECK_EQ(dos_lvo::WaitForChar, 204u);
+    CHECK_EQ(dos_lvo::ParentDir, 210u);
+    CHECK_EQ(dos_lvo::IsInteractive, 216u);
+    CHECK_EQ(dos_lvo::AllocDosObject, 228u);
+    CHECK_EQ(dos_lvo::FreeDosObject, 234u);
     CHECK_EQ(dos_lvo::SelectInput, 294u);
     CHECK_EQ(dos_lvo::SelectOutput, 300u);
+    CHECK_EQ(dos_lvo::FGetC, 306u);
     CHECK_EQ(dos_lvo::FPutC, 312u);
+    CHECK_EQ(dos_lvo::UnGetC, 318u);
+    CHECK_EQ(dos_lvo::FRead, 324u);
+    CHECK_EQ(dos_lvo::FWrite, 330u);
+    CHECK_EQ(dos_lvo::FGets, 336u);
     CHECK_EQ(dos_lvo::FPuts, 342u);
+    CHECK_EQ(dos_lvo::VFWritef, 348u);
     CHECK_EQ(dos_lvo::VFPrintf, 354u);
     CHECK_EQ(dos_lvo::Flush, 360u);
+    CHECK_EQ(dos_lvo::SetVBuf, 366u);
+    CHECK_EQ(dos_lvo::DupLockFromFH, 372u);
+    CHECK_EQ(dos_lvo::OpenFromLock, 378u);
+    CHECK_EQ(dos_lvo::ParentOfFH, 384u);
+    CHECK_EQ(dos_lvo::ExamineFH, 390u);
+    CHECK_EQ(dos_lvo::NameFromLock, 402u);
+    CHECK_EQ(dos_lvo::NameFromFH, 408u);
+    CHECK_EQ(dos_lvo::SameLock, 420u);
     CHECK_EQ(dos_lvo::SetMode, 426u);
+    CHECK_EQ(dos_lvo::ExAll, 432u);
     CHECK_EQ(dos_lvo::SetIoErr, 462u);
     CHECK_EQ(dos_lvo::Fault, 468u);
     CHECK_EQ(dos_lvo::PrintFault, 474u);
+    CHECK_EQ(dos_lvo::ErrorReport, 480u);
     CHECK_EQ(dos_lvo::Cli, 492u);
+    CHECK_EQ(dos_lvo::GetArgStr, 534u);
+    CHECK_EQ(dos_lvo::SetArgStr, 540u);
+    CHECK_EQ(dos_lvo::FindCliProc, 546u);
+    CHECK_EQ(dos_lvo::MaxCli, 552u);
+    CHECK_EQ(dos_lvo::SetCurrentDirName, 558u);
+    CHECK_EQ(dos_lvo::GetCurrentDirName, 564u);
+    CHECK_EQ(dos_lvo::SetProgramName, 570u);
+    CHECK_EQ(dos_lvo::GetProgramName, 576u);
+    CHECK_EQ(dos_lvo::SetPrompt, 582u);
+    CHECK_EQ(dos_lvo::GetPrompt, 588u);
+    CHECK_EQ(dos_lvo::IsFileSystem, 708u);
     CHECK_EQ(dos_lvo::NewLoadSeg, 768u);
+    CHECK_EQ(dos_lvo::FindSegment, 780u);
+    CHECK_EQ(dos_lvo::CheckSignal, 792u);
     CHECK_EQ(dos_lvo::ReadArgs, 798u);
+    CHECK_EQ(dos_lvo::FindArg, 804u);
+    CHECK_EQ(dos_lvo::ReadItem, 810u);
     CHECK_EQ(dos_lvo::StrToLong, 816u);
     CHECK_EQ(dos_lvo::FreeArgs, 858u);
+    CHECK_EQ(dos_lvo::FilePart, 870u);
+    CHECK_EQ(dos_lvo::PathPart, 876u);
+    CHECK_EQ(dos_lvo::AddPart, 882u);
     CHECK_EQ(dos_lvo::SetVar, 900u);
     CHECK_EQ(dos_lvo::GetVar, 906u);
+    CHECK_EQ(dos_lvo::DeleteVar, 912u);
+    CHECK_EQ(dos_lvo::FindVar, 918u);
     CHECK_EQ(dos_lvo::PutStr, 948u);
     CHECK_EQ(dos_lvo::VPrintf, 954u);
+    CHECK_EQ(dos_lvo::ExAllEnd, 990u);
     CHECK_EQ(dos_lvo::SetOwner, 996u);
 
     // Task, MsgPort, MinList, SignalSemaphore, DateStamp.
@@ -665,6 +707,43 @@ void layout_matches_the_ndk() {
     CHECK_EQ(ERROR_NOT_A_DOS_DISK, 225u);
     CHECK_EQ(ERROR_NO_MORE_ENTRIES, 232u);
     CHECK_EQ(ERROR_BAD_HUNK, 235u);
+    CHECK_EQ(LOCK_SAME, 0u);
+    CHECK_EQ(LOCK_SAME_VOLUME, 1u);
+    CHECK_EQ(as_signed(LOCK_DIFFERENT), -1);
+    CHECK_EQ(as_signed(ITEM_EQUAL), -2);
+    CHECK_EQ(as_signed(ITEM_ERROR), -1);
+    CHECK_EQ(ITEM_NOTHING, 0u);
+    CHECK_EQ(ITEM_UNQUOTED, 1u);
+    CHECK_EQ(ITEM_QUOTED, 2u);
+    CHECK_EQ(DOS_FILEHANDLE, 0u);
+    CHECK_EQ(DOS_EXALLCONTROL, 1u);
+    CHECK_EQ(DOS_FIB, 2u);
+    CHECK_EQ(DOS_STDPKT, 3u);
+    CHECK_EQ(DOS_CLI, 4u);
+    CHECK_EQ(DOS_RDARGS, 5u);
+    CHECK_EQ(ED_NAME, 1u);
+    CHECK_EQ(ED_TYPE, 2u);
+    CHECK_EQ(ED_SIZE, 3u);
+    CHECK_EQ(ED_PROTECTION, 4u);
+    CHECK_EQ(ED_DATE, 5u);
+    CHECK_EQ(ED_COMMENT, 6u);
+    CHECK_EQ(ed_Next, 0u);
+    CHECK_EQ(ed_Name, 4u);
+    CHECK_EQ(ed_Type, 8u);
+    CHECK_EQ(ed_Size, 12u);
+    CHECK_EQ(ed_Prot, 16u);
+    CHECK_EQ(ed_Days, 20u);
+    CHECK_EQ(ed_Mins, 24u);
+    CHECK_EQ(ed_Ticks, 28u);
+    CHECK_EQ(ed_Comment, 32u);
+    CHECK_EQ(eac_Entries, 0u);
+    CHECK_EQ(eac_LastKey, 4u);
+    CHECK_EQ(eac_MatchString, 8u);
+    CHECK_EQ(eac_MatchFunc, 12u);
+    CHECK_EQ(eac_SIZEOF, 16u);
+    CHECK_EQ(sp_Msg, 0u);
+    CHECK_EQ(sp_Pkt, 20u);
+    CHECK_EQ(sp_SIZEOF, 68u);
 }
 
 // --- the library and its structures -------------------------------------
@@ -2283,6 +2362,488 @@ void read_args_survives_any_input() {
     }
 }
 
+u32 exec_call(Rig& r, u32 lvo, u32 d0 = 0, u32 d1 = 0, u32 a1 = 0) {
+    r.cpu().d[0] = d0;
+    r.cpu().d[1] = d1;
+    r.cpu().a[1] = a1;
+    r.put16(kCall, 0x4EAE);
+    r.put16(kCall + 2, disp(lvo));
+    r.put16(kCall + 4, 0x4EF8);
+    r.put16(kCall + 6, 0x0400);
+    g_jit.flush();
+    r.cpu().a[6] = g_exec.exec_base();
+    r.cpu().a[7] = kStack;
+    r.cpu().pc = kCall;
+    CHECK_EQ(g_jit.run(kBlocks), ExitReason::Halt);
+    return r.cpu().d[0];
+}
+
+// --- names, locks and ExAll -----------------------------------------------
+
+void add_part_file_part_path_part() {
+    Rig r;
+    const u32 dir = kData;
+    const u32 file = kData + 0x100;
+
+    r.str(dir, "SYS:");
+    r.str(file, "C");
+    CHECK_EQ(r.call(dos_lvo::AddPart, dir, file, 64), DOSTRUE);
+    CHECK(r.read_str(dir) == "SYS:C");
+
+    r.str(file, "Dir");
+    CHECK_EQ(r.call(dos_lvo::AddPart, dir, file, 64), DOSTRUE);
+    CHECK(r.read_str(dir) == "SYS:C/Dir");
+
+    r.str(dir, "SYS:C/");
+    r.str(file, "Dir");
+    CHECK_EQ(r.call(dos_lvo::AddPart, dir, file, 64), DOSTRUE);
+    CHECK(r.read_str(dir) == "SYS:C/Dir");
+
+    r.str(dir, "");
+    r.str(file, "Dir");
+    CHECK_EQ(r.call(dos_lvo::AddPart, dir, file, 64), DOSTRUE);
+    CHECK(r.read_str(dir) == "Dir");
+
+    r.str(dir, "SYS:C");
+    r.str(file, "a:b");
+    CHECK_EQ(r.call(dos_lvo::AddPart, dir, file, 64), DOSTRUE);
+    CHECK(r.read_str(dir) == "a:b");
+
+    // Too small leaves dirname unchanged and sets ERROR_LINE_TOO_LONG.
+    r.str(dir, "SYS:C");
+    r.str(file, "Dir");
+    CHECK_EQ(r.call(dos_lvo::AddPart, dir, file, 9), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_LINE_TOO_LONG);
+    CHECK(r.read_str(dir) == "SYS:C");
+
+    // FilePart and PathPart return pointers into the guest string.
+    r.str(dir, "SYS:C/Dir");
+    CHECK_EQ(r.call(dos_lvo::FilePart, dir), dir + 6);
+    CHECK(r.read_str(dir + 6) == "Dir");
+    CHECK_EQ(r.call(dos_lvo::PathPart, dir), dir + 5);
+    CHECK(r.read_str(dir + 5) == "/Dir");
+
+    r.str(dir, "SYS:C");
+    CHECK_EQ(r.call(dos_lvo::FilePart, dir), dir + 4);
+    CHECK_EQ(r.call(dos_lvo::PathPart, dir), dir + 4);
+
+    r.str(dir, "SYS:");
+    CHECK_EQ(r.call(dos_lvo::FilePart, dir), dir + 4);
+    CHECK_EQ(r.call(dos_lvo::PathPart, dir), dir + 4);
+
+    r.str(dir, "Dir");
+    CHECK_EQ(r.call(dos_lvo::FilePart, dir), dir);
+    CHECK_EQ(r.call(dos_lvo::PathPart, dir), dir);
+}
+
+void name_from_lock_and_parent_dir() {
+    Rig r;
+    const u32 buf = kData + 0x100;
+
+    // Root via 0 and via Lock("").
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, 0, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:");
+    r.str(kData, "");
+    const u32 root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(root != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, root, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:");
+    r.set_io_err(ERROR_INVALID_LOCK);
+    CHECK_EQ(r.call(dos_lvo::ParentDir, root), 0u);
+    CHECK_EQ(r.io_err(), 0u);
+    CHECK_EQ(r.call(dos_lvo::ParentDir, 0), 0u);
+    CHECK_EQ(r.io_err(), 0u);
+    r.call(dos_lvo::UnLock, root);
+
+    // Subdirectory and walking up to root.
+    r.str(kData, "Devs/Sub/Deep");
+    const u32 deep = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(deep != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, deep, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:Devs/Sub/Deep");
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, deep, buf, 10), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_LINE_TOO_LONG);
+
+    const u32 p1 = r.call(dos_lvo::ParentDir, deep);
+    CHECK(p1 != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, p1, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:Devs/Sub");
+    const u32 p2 = r.call(dos_lvo::ParentDir, p1);
+    CHECK(p2 != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, p2, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:Devs");
+    const u32 p3 = r.call(dos_lvo::ParentDir, p2);
+    CHECK(p3 != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, p3, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:");
+    CHECK_EQ(r.call(dos_lvo::ParentDir, p3), 0u);
+    CHECK_EQ(r.io_err(), 0u);
+
+    // OpenFromLock consumes the lock on success, keeps it on failure.
+    const u32 dir_fh = r.call(dos_lvo::OpenFromLock, p1);
+    CHECK_EQ(dir_fh, 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_WRONG_TYPE);
+    const u32 fh = r.call(dos_lvo::OpenFromLock, deep);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::DupLock, deep), 0u);
+    CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
+    CHECK_EQ(r.call(dos_lvo::NameFromFH, fh, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:Devs/Sub/Deep");
+    const u32 pfh = r.call(dos_lvo::ParentOfFH, fh);
+    CHECK(pfh != 0);
+    CHECK_EQ(r.call(dos_lvo::SameLock, pfh, p1), LOCK_SAME);
+    r.call(dos_lvo::Close, fh);
+    r.call(dos_lvo::UnLock, pfh);
+    r.call(dos_lvo::UnLock, p1);
+    r.call(dos_lvo::UnLock, p2);
+    r.call(dos_lvo::UnLock, p3);
+
+    // IsFileSystem.
+    for (const char* name : {"SYS:", "HombreTest:", "C:", "LIBS:", "S:", ":", "C/Echo"}) {
+        r.str(kData, name);
+        CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData), DOSTRUE);
+    }
+    for (const char* name : {"CONSOLE:", "*", "Work:"}) {
+        r.str(kData, name);
+        CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData), DOSFALSE);
+    }
+}
+
+void same_lock_and_dup_lock_from_fh() {
+    Rig r;
+    r.str(kData, "C:Echo");
+    const u32 lock1 = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    const u32 lock2 = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    r.str(kData + 0x40, "S:Startup-Sequence");
+    const u32 other = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::SameLock, lock1, lock2), LOCK_SAME);
+    CHECK_EQ(r.call(dos_lvo::SameLock, lock1, other), LOCK_SAME_VOLUME);
+    CHECK_EQ(r.call(dos_lvo::SameLock, 0x777, lock1), LOCK_DIFFERENT);
+    CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
+
+    r.str(kData, "");
+    const u32 root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::SameLock, 0, root), LOCK_SAME);
+
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x40, MODE_OLDFILE);
+    CHECK(fh != 0);
+    const u32 from_fh = r.call(dos_lvo::DupLockFromFH, fh);
+    CHECK(from_fh != 0);
+    CHECK_EQ(r.call(dos_lvo::SameLock, from_fh, other), LOCK_SAME);
+
+    const u32 fib = kData + 0x200;
+    CHECK_EQ(r.call(dos_lvo::ExamineFH, fh, fib), DOSTRUE);
+    CHECK(read_fib(r, fib).name == "Startup-Sequence");
+    CHECK_EQ(read_fib(r, fib).size, 11u);
+
+    r.call(dos_lvo::Close, fh);
+    r.call(dos_lvo::UnLock, from_fh);
+    r.call(dos_lvo::UnLock, root);
+    r.call(dos_lvo::UnLock, other);
+    r.call(dos_lvo::UnLock, lock2);
+    r.call(dos_lvo::UnLock, lock1);
+}
+
+void fgets_fgetc_ungetc_on_a_file() {
+    Rig r({{"S/Lines", text("ab\ncde\nf")}});
+    CHECK_EQ(r.call(dos_lvo::IsInteractive, r.call(dos_lvo::Input)), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::IsInteractive, r.call(dos_lvo::Output)), DOSTRUE);
+
+    r.str(kData, "S:Lines");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::IsInteractive, fh), DOSFALSE);
+    CHECK_EQ(r.call(dos_lvo::SetVBuf, fh, 0, 0, 256), 0u);
+
+    // UnGetC(-1) fails before any read; after FGetC it pushes the byte back.
+    CHECK_EQ(r.call(dos_lvo::UnGetC, fh, 0xFFFFFFFF), DOSFALSE);
+    CHECK_EQ(r.call(dos_lvo::FGetC, fh), static_cast<u32>('a'));
+    CHECK_EQ(r.call(dos_lvo::UnGetC, fh, 0xFFFFFFFF), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::UnGetC, fh, 'x'), DOSFALSE);
+    CHECK_EQ(r.call(dos_lvo::FGetC, fh), static_cast<u32>('a'));
+    CHECK_EQ(r.call(dos_lvo::UnGetC, fh, 'Z'), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::FGetC, fh), static_cast<u32>('Z'));
+
+    const u32 buf = kData + 0x100;
+    CHECK_EQ(r.call(dos_lvo::FGets, fh, buf, 16), buf);
+    CHECK(r.read_str(buf) == "b\n");
+    CHECK_EQ(r.call(dos_lvo::FGets, fh, buf, 4), buf);
+    CHECK(r.read_str(buf) == "cde");
+    CHECK_EQ(r.call(dos_lvo::FGets, fh, buf, 16), buf);
+    CHECK(r.read_str(buf) == "\n");
+    CHECK_EQ(r.call(dos_lvo::FGets, fh, buf, 16), buf);
+    CHECK(r.read_str(buf) == "f");
+    CHECK_EQ(r.call(dos_lvo::FGets, fh, buf, 16), 0u);
+    CHECK_EQ(r.io_err(), 0u);
+    CHECK_EQ(as_signed(r.call(dos_lvo::FGetC, fh)), -1);
+    CHECK_EQ(r.io_err(), 0u);
+
+    r.call(dos_lvo::Close, fh);
+}
+
+void fread_fwrite_counts() {
+    Rig r;
+    const std::vector<u8> echo = echo_bytes();
+    r.str(kData, "C:Echo");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+
+    const u32 buf = kData + 0x100;
+    CHECK_EQ(r.call(dos_lvo::FRead, fh, buf, 10, 5), 5u);
+    CHECK(r.bytes(buf, 50) == std::vector<u8>(echo.begin(), echo.begin() + 50));
+    // 950 bytes remain: 3 full blocks of 300 bytes, plus 50 trailing bytes.
+    CHECK_EQ(r.call(dos_lvo::FRead, fh, buf, 300, 4), 3u);
+    CHECK(r.bytes(buf, 950) == std::vector<u8>(echo.begin() + 50, echo.end()));
+    CHECK_EQ(r.call(dos_lvo::FRead, fh, buf, 10, 1), 0u);
+    CHECK_EQ(r.call(dos_lvo::FWrite, fh, buf, 4, 2), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    r.call(dos_lvo::Close, fh);
+
+    const u32 out = r.call(dos_lvo::Output);
+    r.str(kData, "abcdef");
+    CHECK_EQ(r.call(dos_lvo::FWrite, out, kData, 2, 3), 3u);
+    CHECK(g_console == "abcdef");
+
+    // VFWritef formats BCPL-style from a 32-bit argument array.
+    g_console.clear();
+    r.str(kData, "%S:%5N:%4X:%C:%6T:%%");
+    r.str(kData + 0x100, "hi");
+    r.str(kData + 0x120, "tag");
+    r.put32(kData + 0x200, kData + 0x100);
+    r.put32(kData + 0x204, 0xFFFFFFF9);  // -7
+    r.put32(kData + 0x208, 0x2A);
+    r.put32(kData + 0x20C, 'Q');
+    r.put32(kData + 0x210, kData + 0x120);
+    CHECK_EQ(r.call(dos_lvo::VFWritef, out, kData, kData + 0x200), 24u);
+    CHECK(g_console == "hi:   -7:002A:Q:tag   :%");
+}
+
+void read_item_and_find_arg() {
+    Asm a;
+    a.open_dos();
+    a.move_l(kOut, 1).moveq(64, 2).moveq(0, 3).dos(dos_lvo::ReadItem).store_d0(kOut + 128);
+    a.move_l(kOut + 64, 1).moveq(64, 2).moveq(0, 3).dos(dos_lvo::ReadItem).store_d0(kOut + 132);
+    a.moveq(0, 0).rts();
+    Rig r({{"C/ItemCmd", hunk_file(a.build())}});
+
+    // FindArg with aliases.
+    r.str(kTemplate, "N=NAME/K,ALL/S,TO/A");
+    r.str(kData, "name");
+    CHECK_EQ(r.call(dos_lvo::FindArg, kTemplate, kData), 0u);
+    r.str(kData, "n");
+    CHECK_EQ(r.call(dos_lvo::FindArg, kTemplate, kData), 0u);
+    r.str(kData, "ALL");
+    CHECK_EQ(r.call(dos_lvo::FindArg, kTemplate, kData), 1u);
+    r.str(kData, "to");
+    CHECK_EQ(r.call(dos_lvo::FindArg, kTemplate, kData), 2u);
+    r.str(kData, "other");
+    CHECK_EQ(as_signed(r.call(dos_lvo::FindArg, kTemplate, kData)), -1);
+
+    // ReadItem from a CSource.
+    const std::string line = "key=\"a*\"b*Nc\" ; rest\n";
+    const u32 cs = kData + 0x400;
+    const u32 sbuf = kData + 0x500;
+    const u32 item = kData + 0x600;
+    r.str(sbuf, line);
+    r.put32(cs + CS_Buffer, sbuf);
+    r.put32(cs + CS_Length, static_cast<u32>(line.size()));
+    r.put32(cs + CS_CurChr, 0);
+    CHECK_EQ(r.call(dos_lvo::ReadItem, item, 64, cs), ITEM_UNQUOTED);
+    CHECK(r.read_str(item) == "key");
+    CHECK_EQ(r.call(dos_lvo::ReadItem, item, 64, cs), ITEM_EQUAL);
+    CHECK_EQ(r.call(dos_lvo::ReadItem, item, 64, cs), ITEM_QUOTED);
+    CHECK(r.read_str(item) == "a\"b\nc");
+    CHECK_EQ(r.call(dos_lvo::ReadItem, item, 64, cs), ITEM_NOTHING);
+
+    // Unclosed quote and buffer overflow return ITEM_ERROR.
+    const std::string bad = "\"unclosed\n";
+    r.str(sbuf, bad);
+    r.put32(cs + CS_Length, static_cast<u32>(bad.size()));
+    r.put32(cs + CS_CurChr, 0);
+    CHECK_EQ(r.call(dos_lvo::ReadItem, item, 64, cs), ITEM_ERROR);
+
+    const std::string long_item = "toolong\n";
+    r.str(sbuf, long_item);
+    r.put32(cs + CS_Length, static_cast<u32>(long_item.size()));
+    r.put32(cs + CS_CurChr, 0);
+    CHECK_EQ(r.call(dos_lvo::ReadItem, item, 4, cs), ITEM_ERROR);
+
+    // ReadItem from Input() inside a 68000 command.
+    u32 result = 1;
+    CHECK(g_dos.run_command("C:ItemCmd", "one \"two three\"", result, kBlocks));
+    CHECK_EQ(r.get32(kOut + 128), ITEM_UNQUOTED);
+    CHECK(r.read_str(kOut) == "one");
+    CHECK_EQ(r.get32(kOut + 132), ITEM_QUOTED);
+    CHECK(r.read_str(kOut + 64) == "two three");
+}
+
+void alloc_dos_object_fib_and_free() {
+    Rig r;
+    const auto before = r.chunks();
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+
+    const u32 fib = r.call(dos_lvo::AllocDosObject, DOS_FIB, 0);
+    CHECK(fib != 0);
+    CHECK_EQ(fib & 3u, 0u);
+    for (u32 i = 0; i < fib_SIZEOF; i += 4) {
+        CHECK_EQ(r.get32(fib + i), 0u);
+    }
+    CHECK_EQ(r.call(dos_lvo::Examine, 0, fib), DOSTRUE);
+    CHECK(read_fib(r, fib).name == "HombreTest");
+    r.call(dos_lvo::FreeDosObject, DOS_FIB, fib);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+
+    for (u32 type : {DOS_FILEHANDLE, DOS_EXALLCONTROL, DOS_STDPKT, DOS_CLI, DOS_RDARGS}) {
+        const u32 obj = r.call(dos_lvo::AllocDosObject, type, 0);
+        CHECK(obj != 0);
+        CHECK_EQ(obj & 3u, 0u);
+        r.call(dos_lvo::FreeDosObject, type, obj);
+    }
+    r.call(dos_lvo::FreeDosObject, DOS_FIB, 0);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+}
+
+void exall_lists_a_directory() {
+    Rig r;
+    r.str(kData, "C:");
+    const u32 dir = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(dir != 0);
+    const u32 eac = r.call(dos_lvo::AllocDosObject, DOS_EXALLCONTROL, 0);
+    CHECK(eac != 0);
+
+    // Small buffer forces multiple ExAll calls before ERROR_NO_MORE_ENTRIES.
+    const u32 buf = kData + 0x200;
+    std::vector<std::string> names;
+    u32 more = DOSTRUE;
+    for (u32 round = 0; round < 20 && more == DOSTRUE; ++round) {
+        r.cpu().d[5] = eac;
+        more = r.call(dos_lvo::ExAll, dir, buf, 48, ED_NAME, eac);
+        if (more == DOSFALSE) {
+            CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+        }
+        const u32 count = r.get32(eac + eac_Entries);
+        u32 got = 0;
+        for (u32 cur = buf; cur != 0 && got < count; cur = r.get32(cur + ed_Next)) {
+            names.push_back(r.read_str(r.get32(cur + ed_Name)));
+            ++got;
+        }
+        CHECK_EQ(got, count);
+    }
+    CHECK_EQ(more, DOSFALSE);
+    std::sort(names.begin(), names.end());
+    CHECK(names == (std::vector<std::string>{"Args", "Echo", "Empty", "Entry", "Exit", "Hello",
+                                             "Unknown"}));
+
+    // ED_COMMENT records include type, size, protection, date and comment.
+    r.put32(eac + eac_LastKey, 0);
+    r.cpu().d[5] = eac;
+    CHECK_EQ(r.call(dos_lvo::ExAll, dir, buf, 512, ED_COMMENT, eac), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK_EQ(r.get32(eac + eac_Entries), 7u);
+    bool saw_echo = false;
+    for (u32 cur = buf; cur != 0; cur = r.get32(cur + ed_Next)) {
+        if (r.read_str(r.get32(cur + ed_Name)) == "Echo") {
+            CHECK_EQ(as_signed(r.get32(cur + ed_Type)), -3);
+            CHECK_EQ(r.get32(cur + ed_Size), 1000u);
+            CHECK(r.read_str(r.get32(cur + ed_Comment)).empty());
+            saw_echo = true;
+        }
+    }
+    CHECK(saw_echo);
+
+    r.cpu().d[5] = eac;
+    r.call(dos_lvo::ExAllEnd, dir, buf, 512, ED_COMMENT, eac);
+    r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
+    r.call(dos_lvo::UnLock, dir);
+}
+
+void cli_queries() {
+    Asm a;
+    a.open_dos();
+    a.move_l(kOut, 1).moveq(64, 2).dos(dos_lvo::GetProgramName).store_d0(kOut + 64);
+    a.dos(dos_lvo::GetArgStr).store_d0(kOut + 68);
+    a.moveq(0, 0).rts();
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/CliInfo", hunk_file(a.build())});
+    Rig r(files);
+
+    CHECK_EQ(r.call(dos_lvo::MaxCli), 1u);
+    CHECK_EQ(r.call(dos_lvo::FindCliProc, 1), r.proc());
+    CHECK_EQ(r.call(dos_lvo::FindCliProc, 0), 0u);
+    CHECK_EQ(r.call(dos_lvo::FindCliProc, 2), 0u);
+    r.str(kData, "Resident");
+    CHECK_EQ(r.call(dos_lvo::FindSegment, kData, 0, 0), 0u);
+
+    const u32 buf = kData + 0x100;
+    CHECK_EQ(r.call(dos_lvo::GetPrompt, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "%N> ");
+    r.str(kData, "Hombre> ");
+    CHECK_EQ(r.call(dos_lvo::SetPrompt, kData), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::GetPrompt, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Hombre> ");
+
+    CHECK_EQ(r.call(dos_lvo::GetCurrentDirName, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:");
+    r.str(kData, "HombreTest:C");
+    CHECK_EQ(r.call(dos_lvo::SetCurrentDirName, kData), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::GetCurrentDirName, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C");
+
+    r.str(kData, "MyProg");
+    CHECK_EQ(r.call(dos_lvo::SetProgramName, kData), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::GetProgramName, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "MyProg");
+
+    r.str(kData, "first args");
+    const u32 old_arg = r.call(dos_lvo::SetArgStr, kData);
+    CHECK_EQ(r.call(dos_lvo::GetArgStr), kData);
+    CHECK_EQ(r.call(dos_lvo::SetArgStr, old_arg), kData);
+
+    // GetProgramName and GetArgStr inside a command.
+    u32 result = 1;
+    CHECK(g_dos.run_command("C:CliInfo", "alpha beta", result, kBlocks));
+    CHECK_EQ(r.get32(kOut + 64), DOSTRUE);
+    CHECK(r.read_str(kOut) == "C:CliInfo");
+    CHECK(r.read_str(r.get32(kOut + 68)) == "alpha beta\n");
+
+    // CheckSignal uses exec's task signal state.
+    exec_call(r, exec_lvo::Signal, SIGBREAKF_CTRL_C | (1u << 13), 0, r.proc());
+    CHECK_EQ(r.call(dos_lvo::CheckSignal, SIGBREAKF_CTRL_C), SIGBREAKF_CTRL_C);
+    CHECK_EQ(r.call(dos_lvo::CheckSignal, SIGBREAKF_CTRL_C), 0u);
+    CHECK_EQ(r.call(dos_lvo::CheckSignal, 1u << 13), 1u << 13);
+
+    // ErrorReport prints the fault text to the console and returns DOSTRUE.
+    g_console.clear();
+    CHECK_EQ(r.call(dos_lvo::ErrorReport, ERROR_DISK_WRITE_PROTECTED, 0, 0, 0), DOSTRUE);
+    CHECK(g_console == "volume is read-only\n");
+}
+
+void find_var_and_delete_var() {
+    Rig r;
+    const auto before = r.chunks();
+    CHECK_EQ(set_var(r, "Shell", "Hombre"), DOSTRUE);
+    CHECK_EQ(set_var(r, "Shell", "Alias", LV_ALIAS), DOSTRUE);
+
+    r.str(kData, "shell");
+    const u32 var_node = r.call(dos_lvo::FindVar, kData, LV_VAR);
+    CHECK(var_node != 0);
+    CHECK(r.read_str(r.get32(var_node + LN_NAME)) == "Shell");
+    CHECK_EQ(r.get32(var_node + lv_Len), 6u);
+
+    const u32 alias_node = r.call(dos_lvo::FindVar, kData, LV_ALIAS);
+    CHECK(alias_node != 0);
+    CHECK(alias_node != var_node);
+
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, LV_VAR), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::FindVar, kData, LV_VAR), 0u);
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, LV_VAR), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, LV_ALIAS), DOSTRUE);
+    CHECK(r.chunks() == before);
+}
+
 }
 
 int main() {
@@ -2325,5 +2886,15 @@ int main() {
     read_args_templates_and_limits();
     free_args_returns_the_memory();
     read_args_survives_any_input();
+    add_part_file_part_path_part();
+    name_from_lock_and_parent_dir();
+    same_lock_and_dup_lock_from_fh();
+    fgets_fgetc_ungetc_on_a_file();
+    fread_fwrite_counts();
+    read_item_and_find_arg();
+    alloc_dos_object_fib_and_free();
+    exall_lists_a_directory();
+    cli_queries();
+    find_var_and_delete_var();
     return check::finish("test_dos");
 }
