@@ -23,6 +23,7 @@
 
 #include "../common/font.hpp"
 #include "gfx_rig.hpp"
+#include "hid_mouse.hpp"
 #include "libs/dos.hpp"
 #include "libs/raster.hpp"
 #include "shell_window.hpp"
@@ -772,6 +773,369 @@ void erase_past_top_row_redraws() {
     CHECK(screen_planes(r, screen) == screen_planes(fresh, fresh.intuition.front_screen()));
 }
 
+void press(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, kMouseLeft, kMouseLeft, 0, false);
+}
+
+void move_to(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, kMouseLeft, 0, 0, true);
+}
+
+void release(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, 0, 0, kMouseLeft, false);
+}
+
+void write_lines(ShellWindow& shell, u32 count, char ch) {
+    const u8 line[2] = {static_cast<u8>(ch), '\n'};
+    for (u32 i = 0; i < count; ++i) {
+        shell.write(line, 2);
+    }
+}
+
+struct ViewLog {
+    std::vector<u32> views;
+};
+
+void record_view(void* ctx, u32 view) {
+    static_cast<ViewLog*>(ctx)->views.push_back(view);
+}
+
+void shell_has_scroll_gadget() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+
+    const u32 gad = r.get32(window + wd_FirstGadget);
+    CHECK(gad != 0);
+    CHECK_EQ(static_cast<i16>(r.get16(gad + gg_LeftEdge)), static_cast<i16>(-8));
+    CHECK_EQ(r.get16(gad + gg_TopEdge), static_cast<u32>(r.get8(window + wd_BorderTop)));
+    CHECK_EQ(r.get16(gad + gg_Width), 8u);
+    const i32 expected_h = -(static_cast<i32>(r.get8(window + wd_BorderTop)) +
+                             static_cast<i32>(r.get8(window + wd_BorderBottom)));
+    CHECK_EQ(static_cast<i16>(r.get16(gad + gg_Height)), static_cast<i16>(expected_h));
+    CHECK_EQ(r.get16(gad + gg_Flags), GFLG_RELRIGHT | GFLG_RELHEIGHT);
+    CHECK_EQ(r.get16(gad + gg_Activation),
+             GACT_RIGHTBORDER | GACT_IMMEDIATE | GACT_FOLLOWMOUSE | GACT_RELVERIFY);
+    CHECK_EQ(r.get16(gad + gg_GadgetType) & GTYP_GTYPEMASK, GTYP_PROPGADGET);
+
+    const u32 pi = r.get32(gad + gg_SpecialInfo);
+    CHECK(pi != 0);
+    CHECK_EQ(r.get16(pi + pi_Flags), AUTOKNOB | FREEVERT | PROPNEWLOOK);
+
+    shell.close();
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
+}
+
+void scroll_by_shows_older_rows() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 visible = rows(r, window);
+    CHECK(visible >= 10);
+
+    for (u32 i = 0; i < visible + 5; ++i) {
+        const u8 line[2] = {static_cast<u8>('A' + (i % 26)), '\n'};
+        shell.write(line, 2);
+    }
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, static_cast<char>('A' + 6)));
+
+    shell.scroll_by(6);
+    CHECK_EQ(shell.view_from_bottom(), 6u);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_is(r, bm, ix, iy, 0, 1, 'B'));
+    CHECK(cell_is(r, bm, ix, iy, 0, 2, 'C'));
+
+    shell.scroll_by(-3);
+    CHECK_EQ(shell.view_from_bottom(), 3u);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'D'));
+}
+
+void scroll_clamps_at_top_and_bottom() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const u32 visible = rows(r, window);
+
+    shell.scroll_by(10);
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+    shell.scroll_to_top();
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+
+    write_lines(shell, visible + 10, 'X');
+    shell.scroll_by(1000);
+    CHECK_EQ(shell.view_from_bottom(), 11u);
+    shell.scroll_by(-1000);
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+    shell.scroll_to_top();
+    CHECK_EQ(shell.view_from_bottom(), 11u);
+    shell.scroll_to_bottom();
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+}
+
+void knob_reflects_view() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const u32 visible = rows(r, window);
+    const u32 gad = r.get32(window + wd_FirstGadget);
+    const u32 pi = r.get32(gad + gg_SpecialInfo);
+    CHECK(pi != 0);
+
+    CHECK_EQ(r.get16(pi + pi_VertBody), MAXBODY);
+    CHECK_EQ(r.get16(pi + pi_VertPot), 0u);
+
+    write_lines(shell, visible * 2 - 1, 'X');
+    CHECK_EQ(r.get16(pi + pi_VertBody), (MAXBODY * visible) / (visible * 2));
+    CHECK_EQ(r.get16(pi + pi_VertPot), MAXPOT);
+
+    shell.scroll_to_top();
+    CHECK_EQ(r.get16(pi + pi_VertPot), 0u);
+
+    const u32 step = visible / 3;
+    shell.scroll_by(-static_cast<i32>(step));
+    CHECK_EQ(r.get16(pi + pi_VertPot), (MAXPOT * step) / visible);
+}
+
+void knob_drag_scrolls() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 visible = rows(r, window);
+
+    write_lines(shell, 1, 'A');
+    write_lines(shell, visible * 2 - 2, 'B');
+
+    const i32 win_left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 win_top = static_cast<i16>(r.get16(window + wd_TopEdge));
+    const i32 win_w = static_cast<i16>(r.get16(window + wd_Width));
+    const i32 win_h = static_cast<i16>(r.get16(window + wd_Height));
+    const i32 knob_x = win_left + win_w - 5;
+    const i32 knob_bottom_y = win_top + win_h - 15;
+    const i32 track_top_y = win_top + 15;
+
+    press(r, knob_x, knob_bottom_y);
+    move_to(r, knob_x, (knob_bottom_y + track_top_y) / 2);
+    CHECK(shell.view_from_bottom() > 0 && shell.view_from_bottom() < visible);
+    move_to(r, knob_x, track_top_y);
+    release(r, knob_x, track_top_y);
+
+    CHECK_EQ(shell.view_from_bottom(), visible);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+}
+
+void typing_returns_to_bottom() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 visible = rows(r, window);
+    const u32 gad = r.get32(window + wd_FirstGadget);
+    const u32 pi = r.get32(gad + gg_SpecialInfo);
+
+    write_lines(shell, visible + 10, 'L');
+    shell.write_prompt(1, "X");
+    shell.echo('a');
+
+    shell.scroll_by(5);
+    CHECK_EQ(shell.view_from_bottom(), 5u);
+    shell.echo('b');
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+
+    shell.scroll_by(5);
+    CHECK_EQ(shell.view_from_bottom(), 5u);
+    shell.erase_last();
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+
+    shell.scroll_by(5);
+    CHECK_EQ(shell.view_from_bottom(), 5u);
+    shell.end_line();
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+
+    shell.scroll_by(5);
+    CHECK_EQ(shell.view_from_bottom(), 5u);
+    shell.write_prompt(1, "Y");
+    CHECK_EQ(shell.view_from_bottom(), 0u);
+    CHECK_EQ(r.get16(pi + pi_VertPot), MAXPOT);
+    CHECK(cell_is(r, bm, ix, iy, 2, visible - 1, 'Y'));
+}
+
+void scrolled_view_keeps_content_on_output() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 visible = rows(r, window);
+    const u32 gad = r.get32(window + wd_FirstGadget);
+    const u32 pi = r.get32(gad + gg_SpecialInfo);
+
+    write_lines(shell, 1, 'A');
+    write_lines(shell, 1, 'B');
+    write_lines(shell, visible + 3, 'Z');
+
+    shell.scroll_to_top();
+    CHECK_EQ(shell.view_from_bottom(), 6u);
+    const u32 body_before = r.get16(pi + pi_VertBody);
+    const u32 pot_before = r.get16(pi + pi_VertPot);
+
+    write_lines(shell, 10, 'N');
+    CHECK_EQ(shell.view_from_bottom(), 16u);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_is(r, bm, ix, iy, 0, 1, 'B'));
+    CHECK(r.get16(pi + pi_VertBody) < body_before);
+    // The view stays on the oldest lines, so the knob stays at the top.
+    CHECK_EQ(pot_before, 0u);
+    CHECK_EQ(r.get16(pi + pi_VertPot), 0u);
+}
+
+void eviction_clamps_view() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    r.intuition.size_window_to(window, 320, 100);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 cols = columns(r, window);
+    const u32 visible = rows(r, window);
+    CHECK(cols > 0 && cols <= 80);
+
+    u8 long_line[256];
+    const u32 span = cols * 3;
+    for (u32 i = 0; i < span; ++i) {
+        long_line[i] = 'L';
+    }
+    long_line[span] = '\n';
+    shell.write(long_line, span + 1);
+    write_lines(shell, ShellText::kMaxLines - 2, 'S');
+
+    shell.scroll_to_top();
+    CHECK_EQ(shell.view_from_bottom(), (ShellText::kMaxLines + 2) - visible);
+
+    write_lines(shell, 1, 'N');
+    CHECK_EQ(shell.view_from_bottom(), ShellText::kMaxLines - visible);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'S'));
+}
+
+void resize_while_scrolled_keeps_top_line() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+
+    for (u32 i = 0; i < 60; ++i) {
+        const u8 line[2] = {static_cast<u8>('A' + (i % 26)), '\n'};
+        shell.write(line, 2);
+    }
+    const u32 vis0 = rows(r, window);
+    CHECK(vis0 < 51);
+    shell.scroll_by(static_cast<i32>(61u - vis0 - 10u));
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'K'));
+
+    r.intuition.size_window_to(window, 400, 200);
+    const u32 vis1 = rows(r, window);
+    CHECK(vis1 < vis0);
+    CHECK_EQ(shell.view_from_bottom(), 61u - vis1 - 10u);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'K'));
+
+    r.intuition.size_window_to(window, 400, 350);
+    const u32 vis2 = rows(r, window);
+    CHECK(vis2 > vis1);
+    CHECK_EQ(shell.view_from_bottom(), 61u - vis2 - 10u);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'K'));
+}
+
+void listener_called_on_user_changes_only() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+
+    ViewLog log;
+    shell.set_view_listener(&record_view, &log);
+
+    write_lines(shell, 60, 'A');
+    CHECK(log.views.empty());
+
+    shell.scroll_by(5);
+    CHECK_EQ(log.views.size(), 1u);
+    CHECK_EQ(log.views[0], 5u);
+
+    write_lines(shell, 10, 'B');
+    CHECK_EQ(shell.view_from_bottom(), 15u);
+    CHECK_EQ(log.views.size(), 1u);
+
+    shell.scroll_to_top();
+    CHECK_EQ(log.views.size(), 2u);
+    CHECK_EQ(log.views[1], shell.view_from_bottom());
+
+    write_lines(shell, 1050, 'C');
+    CHECK_EQ(log.views.size(), 2u);
+
+    const i32 win_left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 win_top = static_cast<i16>(r.get16(window + wd_TopEdge));
+    const i32 win_w = static_cast<i16>(r.get16(window + wd_Width));
+    const i32 win_h = static_cast<i16>(r.get16(window + wd_Height));
+    const i32 knob_x = win_left + win_w - 5;
+    const i32 below_y = win_top + win_h - 15;
+    press(r, knob_x, below_y);
+    release(r, knob_x, below_y);
+    CHECK_EQ(log.views.size(), 3u);
+    CHECK_EQ(log.views[2], shell.view_from_bottom());
+
+    r.intuition.size_window_to(window, 400, 200);
+    CHECK_EQ(log.views.size(), 4u);
+    CHECK_EQ(log.views[3], shell.view_from_bottom());
+
+    shell.echo('x');
+    CHECK_EQ(log.views.size(), 5u);
+    CHECK_EQ(log.views[4], 0u);
+
+    r.intuition.size_window_to(window, 500, 300);
+    CHECK_EQ(log.views.size(), 5u);
+}
+
 }
 
 int main() {
@@ -801,5 +1165,15 @@ int main() {
     shell_rewraps_on_resize();
     shell_erase_after_resize_stops_at_prompt();
     erase_past_top_row_redraws();
+    shell_has_scroll_gadget();
+    scroll_by_shows_older_rows();
+    scroll_clamps_at_top_and_bottom();
+    knob_reflects_view();
+    knob_drag_scrolls();
+    typing_returns_to_bottom();
+    scrolled_view_keeps_content_on_output();
+    eviction_clamps_view();
+    resize_while_scrolled_keeps_top_line();
+    listener_called_on_user_changes_only();
     return check::finish("test_shell_window");
 }

@@ -77,24 +77,42 @@ public:
     u32 window() const { return window_; }
     void close();
 
+    // Scrolls view rows back into history (negative moves toward the bottom).
+    void scroll_by(i32 rows);
+    void scroll_to_top();
+    void scroll_to_bottom();
+    u32 view_from_bottom() const { return view_; }
+    void set_view_listener(void (*fn)(void* ctx, u32 view), void* ctx);
+
     // The ConsoleWrite sink of dos.hpp: writes the bytes to the window.
     static void sink(void* ctx, const u8* data, u32 bytes);
 
     // The Intuition WindowHook called after the window is resized.
     static void on_size(void* ctx, u32 window);
 
+    // The Intuition GadgetHook called when the scroll bar changes.
+    static void on_gadget(void* ctx, u32 gadget, u32 vert_pot);
+
 private:
-    void put_byte(u8 c);
+    u32 max_view() const;
+    void apply_user_view(u32 new_view);
+    void redraw_viewport();
+    void update_knob();
+    void notify_view_listener();
+    void put_byte(u8 c, bool draw);
     void advance_row();
     void draw_cell(u8 c);
     void draw_cursor();
     void mark_line_start();
 
     m68k::Machine* machine_ = nullptr;
+    Exec* exec_ = nullptr;
     Intuition* intuition_ = nullptr;
     Graphics* graphics_ = nullptr;
     u32 window_ = 0;
     u32 rp_ = 0;
+    u32 gadget_ = 0;
+    u32 prop_info_ = 0;
     i32 origin_x_ = 0;
     i32 origin_y_ = 0;
     i32 inner_w_ = 0;
@@ -103,6 +121,10 @@ private:
     u32 rows_ = 0;
     u32 col_ = 0;
     u32 row_ = 0;
+    u32 view_ = 0;
+    bool cursor_visible_ = false;
+    void (*view_listener_)(void* ctx, u32 view) = nullptr;
+    void* view_ctx_ = nullptr;
     ShellText text_{};
 };
 

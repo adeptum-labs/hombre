@@ -273,7 +273,40 @@ void keeps_1024_lines() {
 
 }
 
+// Lines keep a number across drops, and rows map to lines and back.
+void dropped_rows_before_and_locate() {
+    ShellText text;
+    for (u32 i = 0; i < ShellText::kMaxLines + 5; ++i) {
+        text.put('a');
+        text.new_line();
+    }
+    CHECK_EQ(text.dropped(), 6u);
+    ShellText t2;
+    for (u32 i = 0; i < 25; ++i) {
+        t2.put('x');
+    }
+    t2.new_line();
+    t2.put('y');
+    t2.new_line();
+    // At 10 columns: the first line is rows 0-2, the second row 3, the
+    // current (empty) line row 4.
+    CHECK_EQ(t2.rows_before(10, 1), 3u);
+    CHECK_EQ(t2.rows_before(10, 2), 4u);
+    u32 line = 9;
+    u32 row = 9;
+    t2.locate_row(10, 2, line, row);
+    CHECK_EQ(line, 0u);
+    CHECK_EQ(row, 2u);
+    t2.locate_row(10, 3, line, row);
+    CHECK_EQ(line, 1u);
+    CHECK_EQ(row, 0u);
+    t2.locate_row(10, 99, line, row);
+    CHECK_EQ(line, 2u);
+    CHECK_EQ(row, 0u);
+}
+
 int main() {
+    dropped_rows_before_and_locate();
     CHECK_EQ(constinit_probe.line_count(), 1u);
     wraps_at_columns();
     rewrap_wider_joins_rows();

@@ -42,6 +42,7 @@ public:
     void clear() {
         head_ = 0;
         count_ = 1;
+        dropped_ = 0;
         lengths_[0] = 0;
         input_start_ = 0;
     }
@@ -60,6 +61,7 @@ public:
             ++count_;
         } else {
             head_ = (head_ + 1) % kMaxLines;
+            ++dropped_;
         }
         lengths_[current_slot()] = 0;
         input_start_ = 0;
@@ -139,6 +141,38 @@ public:
         return rows_from(columns, total - take, rows, out);
     }
 
+    // How many lines have been dropped from the front since the last clear,
+    // so dropped() + index numbers a line for as long as it is kept.
+    u32 dropped() const { return dropped_; }
+
+    // Rows of the lines before index at columns (0 means 1).
+    u32 rows_before(u32 columns, u32 index) const {
+        const u32 cols = columns == 0 ? 1 : columns;
+        u32 rows = 0;
+        for (u32 i = 0; i < index && i < count_; ++i) {
+            rows += line_rows(i, cols);
+        }
+        return rows;
+    }
+
+    // The line that row lies in at columns (0 means 1) and the row within
+    // it. A row past the end gives the current line's last row.
+    void locate_row(u32 columns, u32 row, u32& line, u32& row_in_line) const {
+        const u32 cols = columns == 0 ? 1 : columns;
+        u32 cursor = 0;
+        for (u32 i = 0; i < count_; ++i) {
+            const u32 r = line_rows(i, cols);
+            if (row < cursor + r || i + 1 == count_) {
+                line = i;
+                row_in_line = row < cursor + r ? row - cursor : r - 1;
+                return;
+            }
+            cursor += r;
+        }
+        line = 0;
+        row_in_line = 0;
+    }
+
     u32 cursor_column(u32 columns) const {
         const u32 cols = columns == 0 ? 1 : columns;
         return lengths_[current_slot()] % cols;
@@ -166,6 +200,7 @@ private:
     u32 head_ = 0;
     u32 count_ = 1;
     u32 input_start_ = 0;
+    u32 dropped_ = 0;
 };
 
 static_assert(sizeof(ShellText) <= 1024u * 1024u);
