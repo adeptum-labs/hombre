@@ -177,7 +177,7 @@ void open_gives_a_window_on_the_front_screen() {
     const u32 flags = r.get32(window + wd_Flags) &
                       (WFLG_DEPTHGADGET | WFLG_CLOSEGADGET | WFLG_DRAGBAR);
     CHECK_EQ(flags, static_cast<u32>(WFLG_DEPTHGADGET | WFLG_CLOSEGADGET | WFLG_DRAGBAR));
-    CHECK(r.read_str(r.get32(window + wd_Title)) == "AmigaShell");
+    CHECK(r.read_str(r.get32(window + wd_Title)) == "HombreShell");
     CHECK_EQ(r.get32(layer_of(r, window) + ly_Window), window);
     CHECK_EQ(inner_x(r, window), 1);
     // Below the screen title bar (10 rows and its line), as a real shell window.

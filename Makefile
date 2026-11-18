@@ -181,7 +181,7 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "disk: DMS SIMPLE, 80 tracks" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
 	    "S:Startup-Sequence:" "  Hombre test startup" "usb: no controller" \
 	    "intuition: screen opened 640x400" \
-	    "intuition: window opened AmigaShell" "m68k: running C:Version" \
+	    "intuition: window opened HombreShell" "m68k: running C:Version" \
 	    "Hombre test version 1" "m68k: C:Version returned 0" "halting"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "v e r s i o n ret z z z ret bracket_left apostrophe semicolon ret" \
@@ -229,7 +229,7 @@ check-workbench: image
 	    "volume: Workbench3.1 (FFS)" "  S/" "  C/" "S:Startup-Sequence:" \
 	    "; Startup-Sequence for low-density floppies" "usb: no controller" \
 	    "intuition: screen opened 640x400" \
-	    "intuition: window opened AmigaShell" "m68k: running C:Version" \
+	    "intuition: window opened HombreShell" "m68k: running C:Version" \
 	    "Kickstart 60.0, Workbench 40.42" "m68k: C:Version returned 0" "halting"
 else
 check-workbench:

@@ -27,7 +27,7 @@
 
 namespace hombre {
 
-// Logical lines of the AmigaShell console, kept in a ring and laid out at
+// Logical lines of the HombreShell console, kept in a ring and laid out at
 // any column count on demand.
 class ShellText {
 public:

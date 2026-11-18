@@ -37,9 +37,9 @@ Targets:
   virtio-blk disk: a generated test disk by default, or the file given as
   `DISK=`, for example `make run DISK="path/to/disk.dms"`. The file may be
   a DMS archive or a raw ADF image, and its path may contain spaces.
-  The QEMU window shows an Amiga screen with an AmigaShell window that
-  holds what the disk's `C:Version` prints and a `1.<volume>:>` prompt; the
-  kernel's own messages stay on the serial port. The QEMU window's keyboard
+  The QEMU window shows a Hombre Workbench screen with a HombreShell window
+  that holds what the disk's `C:Version` prints and a `1.<volume>:>` prompt;
+  the kernel's own messages stay on the serial port. The QEMU window's keyboard
   is a USB keyboard on an xHCI controller (Swedish layout): type at the
   prompt, and Enter runs `C:<word>` from the disk with the rest of the line
   as its arguments (`version` runs `C:Version`; an unknown word prints
@@ -51,7 +51,7 @@ Targets:
   stops a program waiting for events. On the test disk, `mousetest` opens a
   window and prints the mouse and window events it receives.
   Windows can be dragged by their title bar and resized live by the size
-  gadget in the bottom-right corner. The AmigaShell window rewraps its text
+  gadget in the bottom-right corner. The HombreShell window rewraps its text
   when resized; it opens full screen, so shrink it first to move it.
 - `make check` boots the image headless and verifies the messages on the
   serial port. The main boot attaches the generated test disk and verifies

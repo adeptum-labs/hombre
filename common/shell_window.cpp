@@ -35,7 +35,7 @@ using i16 = __INT16_TYPE__;
 
 namespace {
 
-constexpr char kTitle[] = "AmigaShell";
+constexpr char kTitle[] = "HombreShell";
 constexpr u32 kMaxWrite = 65536;
 constexpr u32 kCell = 8;
 constexpr u32 kBaseline = 6;

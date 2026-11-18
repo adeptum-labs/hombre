@@ -27,7 +27,7 @@
 #include "libs/gfx.hpp"
 #include "shell_text.hpp"
 
-// The AmigaShell console: a window with a character grid, drawn and
+// The HombreShell console: a window with a character grid, drawn and
 // scrolled through the Graphics C++ methods. write takes console output,
 // write_prompt prints the CLI prompt and leaves a block cursor after it,
 // echo draws a typed byte at the cursor, erase_last takes it back and
@@ -44,7 +44,7 @@ class ShellWindow {
 public:
     static constexpr u32 kMaxPrompt = 64;
 
-    // Opens the "AmigaShell" window on display.front_screen. False if
+    // Opens the "HombreShell" window on display.front_screen. False if
     // there is no front screen or the window cannot be opened.
     bool open(m68k::Machine& m, Exec& exec, Graphics& gfx, Intuition& intuition,
               DisplayState& display);
