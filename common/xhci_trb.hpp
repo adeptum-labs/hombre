@@ -422,4 +422,14 @@ constexpr u16 default_ep0_max_packet(u8 speed_id) {
     return 64;
 }
 
+inline constexpr u16 kMaxInterruptTransferBytes = 64;
+
+// The Normal TRB length queued on a boot HID interrupt IN endpoint: the
+// endpoint's maximum packet size (bits 10:0 of wMaxPacketSize), capped at 64
+// bytes.
+constexpr u16 interrupt_transfer_length(u16 max_packet) {
+    const u16 packet = max_packet & 0x7FFu;
+    return packet < kMaxInterruptTransferBytes ? packet : kMaxInterruptTransferBytes;
+}
+
 }

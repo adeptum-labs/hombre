@@ -397,6 +397,18 @@ void default_ep0_max_packet() {
     CHECK_EQ(xhci::default_ep0_max_packet(5), 512);
 }
 
+void interrupt_transfer_length_is_the_masked_max_packet_capped_at_64() {
+    CHECK_EQ(xhci::interrupt_transfer_length(4), 4);
+    CHECK_EQ(xhci::interrupt_transfer_length(8), 8);
+    CHECK_EQ(xhci::interrupt_transfer_length(16), 16);
+    CHECK_EQ(xhci::interrupt_transfer_length(64), 64);
+    CHECK_EQ(xhci::interrupt_transfer_length(65), 64);
+    CHECK_EQ(xhci::interrupt_transfer_length(512), 64);
+    CHECK_EQ(xhci::interrupt_transfer_length(static_cast<u16>((2u << 11) | 8u)), 8);
+    CHECK_EQ(xhci::interrupt_transfer_length(static_cast<u16>((1u << 11) | 16u)), 16);
+    CHECK_EQ(xhci::interrupt_transfer_length(static_cast<u16>((2u << 11) | 128u)), 64);
+}
+
 }
 
 int main() {
@@ -420,5 +432,6 @@ int main() {
     report_queue_pop_on_empty_returns_false();
     endpoint_interval_conversion();
     default_ep0_max_packet();
+    interrupt_transfer_length_is_the_masked_max_packet_capped_at_64();
     return check::finish("test_xhci_trb");
 }

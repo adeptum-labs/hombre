@@ -203,15 +203,21 @@ bool usb_mouse_present() {
 bool usb_mouse_poll(u8 report[4]) {
     __builtin_memset(report, 0, 4);
     Xhci& controller = controllers[active_controller];
-    u8 raw[xhci::ReportQueue::kMaxReport] = {};
-    u32 length = 0;
-    const Xhci::KeyEvent event = controller.poll_hid(controller.mouse(), raw, length);
-    check_mouse_lost();
-    if (event != Xhci::KeyEvent::Report) {
-        return false;
+    for (u32 i = 0; i < xhci::ReportQueue::kCapacity; ++i) {
+        u8 raw[xhci::ReportQueue::kMaxReport] = {};
+        u32 length = 0;
+        const Xhci::KeyEvent event = controller.poll_hid(controller.mouse(), raw, length);
+        check_mouse_lost();
+        if (event != Xhci::KeyEvent::Report) {
+            return false;
+        }
+        if (length < 3) {
+            continue;
+        }
+        __builtin_memcpy(report, raw, 4);
+        return true;
     }
-    __builtin_memcpy(report, raw, 4);
-    return true;
+    return false;
 }
 
 }

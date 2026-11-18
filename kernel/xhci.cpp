@@ -478,9 +478,7 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         error = kErrorConfigurationInvalid;
         return Xhci::Scan::Failed;
     }
-    const u16 report_bytes = endpoint_max < xhci::ReportQueue::kMaxReport
-                                 ? endpoint_max
-                                 : xhci::ReportQueue::kMaxReport;
+    const u16 report_bytes = xhci::interrupt_transfer_length(info.max_packet);
     const u8 dci = static_cast<u8>(2 * (info.endpoint_address & 0x0Fu) + 1);
     const EndpointSetup endpoint{dci, kEndpointInterruptIn, endpoint_max,
                                  xhci::endpoint_interval(speed, info.interval), ring_phys,
