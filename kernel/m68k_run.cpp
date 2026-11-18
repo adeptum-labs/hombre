@@ -111,9 +111,9 @@ void fail(const char* reason) {
     serial::write("\n");
 }
 
-// Opens the default Amiga screen on the framebuffer, when there is one, and
-// hands the framebuffer to it. A failure is logged and leaves the kernel's
-// text console as it was.
+// Opens the default Amiga screen, when there is a framebuffer. Nothing is
+// drawn yet: a failure is logged and leaves the kernel's text console as the
+// display.
 void open_amiga_screen(const BootInfo& info) {
     if (info.fb.phys == 0) {
         return;
@@ -147,8 +147,11 @@ void open_amiga_screen(const BootInfo& info) {
         return;
     }
     serial::write("intuition: screen opened 640x400\n");
-    // The screen takes over the framebuffer: the kernel's text console stops
-    // and the screen is painted in full.
+}
+
+// Hands the framebuffer to the Amiga screen: the kernel's text console stops
+// and the screen is painted in full.
+void show_amiga_screen(const BootInfo& info) {
     serial::mirror = nullptr;
     amiga_display.init(make_framebuffer(info));
     display.sink = amiga_display.sink();
@@ -205,8 +208,16 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
     if (!start(info, pages, volume)) {
         return;
     }
-    if (amiga_screen != 0 && shell.open(machine, exec, graphics, intuition, display)) {
-        serial::write("intuition: window opened AmigaShell\n");
+    if (amiga_screen != 0) {
+        if (shell.open(machine, exec, graphics, intuition, display)) {
+            serial::write("intuition: window opened AmigaShell\n");
+            show_amiga_screen(info);
+        } else {
+            // The kernel's text console stays as the display.
+            fail("could not open the shell window");
+            intuition.close_screen(amiga_screen);
+            amiga_screen = 0;
+        }
     }
     serial::write("m68k: running ");
     write_filtered(path);
