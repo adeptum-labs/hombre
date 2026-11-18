@@ -23,6 +23,7 @@
 
 #include "m68k_run.hpp"
 
+#include "../common/dos_date.hpp"
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
 #include "../common/libs/graphics.hpp"
@@ -41,6 +42,7 @@
 #include "boot_framebuffer.hpp"
 #include "clock.hpp"
 #include "code_region.hpp"
+#include "rtc.hpp"
 #include "usb_keyboard.hpp"
 
 namespace hombre {
@@ -195,6 +197,38 @@ void flush_mouse_move() {
     intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), 0, 0, true);
 }
 
+// The AmigaDOS time: the real-time clock read once, advanced by the TSC
+// clock. Without a readable clock DateStamp stays at the start of 1978.
+u64 boot_dos_ticks = 0;
+u64 boot_clock_us = 0;
+
+u64 dos_now_ticks() {
+    return boot_dos_ticks + (clock_us() - boot_clock_us) / 20000;
+}
+
+void start_dos_clock() {
+    CivilTime now{};
+    if (!rtc_read(now)) {
+        serial::write("clock: no real-time clock\n");
+        return;
+    }
+    const DosStamp stamp = dos_stamp_from_civil(now);
+    boot_dos_ticks = (static_cast<u64>(stamp.days) * 1440 + stamp.minutes) * 3000 + stamp.ticks;
+    boot_clock_us = clock_us();
+    dos.set_clock(&dos_now_ticks);
+    serial::write("clock: ");
+    serial::write_dec(now.year);
+    serial::write("-");
+    serial::write_dec(now.month);
+    serial::write("-");
+    serial::write_dec(now.day);
+    serial::write(" ");
+    serial::write_dec(now.hour);
+    serial::write(":");
+    serial::write_dec(now.minute);
+    serial::write("\n");
+}
+
 void poll_mouse() {
     u8 report[4];
     bool moved = false;
@@ -294,6 +328,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         fail("dos init failed");
         return false;
     }
+    start_dos_clock();
     machine.cpu.a[7] = boot_stack;
     open_amiga_screen(info);
     return true;
