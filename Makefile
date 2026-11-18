@@ -168,7 +168,7 @@ run: image disk-image
 	    -drive format=raw,file=$(IMAGE) \
 	    -drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG) \
 	    -device virtio-blk-pci,disable-legacy=on,drive=disk0 \
-	    -device qemu-xhci -device usb-kbd
+	    -device qemu-xhci -device usb-kbd -device usb-mouse
 
 # The boots attach the generated test disk whatever DISK says, so they stay
 # hermetic. The main boot expects its size in 512-byte sectors, rounded up.
@@ -188,6 +188,12 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
 	    "m68k: C:version returned 0" "shell: line: zzz" "shell: unknown command zzz" \
 	    "shell: line: \\xe5\\xe4\\xf6"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "m o u s e t e s t ret" \
+	    --mouse-after "mousetest: ready" \
+	    --mouse "mouse_move 10 10;mouse_button 1;mouse_button 0;sendkey ctrl-c" \
+	    "usb: mouse ready" "mousetest: ready" "mousetest: active" \
+	    "mousetest: move at 130,110" "mousetest: select down at 130,110" \
+	    "mousetest: select up at 130,110" "mousetest: break"
 	tools/boot_check.sh --disk $(ZERO_DISK) "virtio-blk: 2 sectors" "disk: unknown format" \
 	    "halting"
 	tools/boot_check.sh --disk $(CORRUPT_DISK) "disk: dms error: TrackCrc track 0" \
@@ -267,7 +273,7 @@ $(ELF2HUNK): tools/elf2hunk.cpp
 # turns the ELF executable into a hunk file.
 M68K_AS       := m68k-linux-gnu-as
 M68K_LD       := m68k-linux-gnu-ld
-M68K_PROGRAMS := version hombretest
+M68K_PROGRAMS := version hombretest mousetest
 M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
 
 define require_tool

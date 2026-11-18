@@ -34,9 +34,16 @@
 # the QEMU monitor, which needs socat. Key names are key positions: on the
 # Swedish layout the keys to the right of p, l and the apostrophe key are
 # bracket_left (å), semicolon (ö) and apostrophe (ä).
+#
+# --mouse-after <marker> and --mouse "<commands>" must be given together.
+# --mouse implies the USB devices of --usb-kbd and also attaches a USB mouse
+# (-device usb-mouse); once <marker> shows on the serial console and any
+# --keys have been sent, the ';'-separated HMP commands (for example
+# "mouse_move 10 10;mouse_button 1") are sent to the QEMU monitor 0.25 s
+# apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--usb-kbd] [--keys <names>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--usb-kbd] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -45,7 +52,11 @@ build_dir="$tools_dir/../build"
 image_name=hombre.img
 vga_args=()
 usb_args=()
+usb_kbd=false
+usb_mouse=false
 keys=
+mouse_after=
+mouse=
 disk_mode=default
 disk_source=
 while [[ ${1:-} == --* ]]; do
@@ -57,11 +68,23 @@ while [[ ${1:-} == --* ]]; do
             shift
             ;;
         --no-disk) disk_mode=none ;;
-        --usb-kbd) usb_args=(-device qemu-xhci -device usb-kbd) ;;
+        --usb-kbd) usb_kbd=true ;;
         --keys)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
-            usb_args=(-device qemu-xhci -device usb-kbd)
+            usb_kbd=true
             keys=$2
+            shift
+            ;;
+        --mouse-after)
+            [[ $# -ge 2 && $2 != --* && -n $2 ]] || { echo "$usage" >&2; exit 2; }
+            mouse_after=$2
+            shift
+            ;;
+        --mouse)
+            [[ $# -ge 2 && $2 != --* && -n $2 ]] || { echo "$usage" >&2; exit 2; }
+            usb_kbd=true
+            usb_mouse=true
+            mouse=$2
             shift
             ;;
         --no-kernel) image_name=hombre-nokernel.img ;;
@@ -78,6 +101,14 @@ while [[ ${1:-} == --* ]]; do
     shift
 done
 [[ $# -gt 0 ]] || { echo "$usage" >&2; exit 2; }
+[[ (-z $mouse_after && -z $mouse) || (-n $mouse_after && -n $mouse) ]] || { echo "$usage" >&2; exit 2; }
+
+if [[ $usb_kbd == true ]]; then
+    usb_args=(-device qemu-xhci -device usb-kbd)
+fi
+if [[ $usb_mouse == true ]]; then
+    usb_args+=(-device usb-mouse)
+fi
 
 image=$build_dir/$image_name
 [[ -f $image ]] || { echo "missing $image (run make image, image-nokernel or image-fault<n>)" >&2; exit 1; }
@@ -102,8 +133,8 @@ fi
 serial_log=$build_dir/serial.log
 monitor_socket=
 monitor_args=()
-if [[ -n $keys ]]; then
-    command -v socat > /dev/null || { echo "$0: --keys needs socat" >&2; exit 1; }
+if [[ -n $keys || -n $mouse ]]; then
+    command -v socat > /dev/null || { echo "$0: --keys/--mouse needs socat" >&2; exit 1; }
     monitor_socket=$build_dir/monitor.$$.sock
     monitor_args=(-monitor "unix:$monitor_socket,server,nowait")
 fi
@@ -131,6 +162,18 @@ send_keys() {
 }
 keys_sent=false
 
+# Sends the ';'-separated HMP mouse commands once --mouse-after shows up.
+send_mouse() {
+    local cmds cmd
+    IFS=';' read -ra cmds <<< "$mouse"
+    for cmd in "${cmds[@]}"; do
+        [[ -n $cmd ]] || continue
+        echo "$cmd" | socat - "UNIX-CONNECT:$monitor_socket" > /dev/null || return 1
+        sleep 0.25
+    done
+}
+mouse_sent=false
+
 all_markers_present() {
     local marker
     for marker in "$@"; do
@@ -143,6 +186,11 @@ for ((i = 0; i < timeout_seconds * 4; i++)); do
     if [[ -n $keys && $keys_sent == false ]] && grep -qF -- "shell: ready" "$serial_log"; then
         keys_sent=true
         send_keys || true
+    fi
+    if [[ -n $mouse && $mouse_sent == false && ( -z $keys || $keys_sent == true ) ]] &&
+       grep -qF -- "$mouse_after" "$serial_log"; then
+        mouse_sent=true
+        send_mouse || true
     fi
     kill -0 "$qemu_pid" 2>/dev/null || break
     sleep 0.25

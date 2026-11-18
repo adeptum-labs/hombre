@@ -46,6 +46,10 @@ Targets:
   `Unknown command <word>`). Input needs the controller and keyboard; without
   them the window says why and the boot ends. The serial port logs `usb:` and
   `shell:` lines, with each submitted line as `shell: line: <text>`.
+  A USB mouse on the same controller moves an Amiga pointer on the screen,
+  and Amiga programs get mouse events in windows that ask for them; Ctrl+C
+  stops a program waiting for events. On the test disk, `mousetest` opens a
+  window and prints the mouse and window events it receives.
 - `make check` boots the image headless and verifies the messages on the
   serial port. The main boot attaches the generated test disk and verifies
   the volume, the root directory and the startup sequence read from it, and
