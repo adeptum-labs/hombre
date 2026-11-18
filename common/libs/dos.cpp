@@ -2352,14 +2352,157 @@ struct DosOps {
 
     // --- time ----------------------------------------------------------------
 
-    // There is no clock: the time is the start of 1978.
-    static void date_stamp(void*, Machine& m) {
+    static DosStamp current_stamp(const Dos& d) {
+        if (d.now_ticks_ == nullptr) {
+            return DosStamp{0u, 0u, 0u};
+        }
+        const u64 total = d.now_ticks_();
+        constexpr u64 kTicksPerMin = detail::kTicksPerMinute;
+        constexpr u64 kTicksPerDay = static_cast<u64>(detail::kMinutesPerDay) * kTicksPerMin;
+        const u32 days = static_cast<u32>(total / kTicksPerDay);
+        const u64 rem = total % kTicksPerDay;
+        const u32 minutes = static_cast<u32>(rem / kTicksPerMin);
+        const u32 ticks = static_cast<u32>(rem % kTicksPerMin);
+        return DosStamp{days, minutes, ticks};
+    }
+
+    static void date_stamp(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
         Bus b(m);
         const u32 ds = m.cpu.d[1];
-        b.w32(ds + ds_Days, 0);
-        b.w32(ds + ds_Minute, 0);
-        b.w32(ds + ds_Tick, 0);
+        const DosStamp s = current_stamp(d);
+        b.w32(ds + ds_Days, s.days);
+        b.w32(ds + ds_Minute, s.minutes);
+        b.w32(ds + ds_Tick, s.ticks);
         native::set_result(m, ds);
+    }
+
+    // Returns < 0 if date1 is later than date2, 0 if equal, > 0 if earlier.
+    static void compare_dates(void*, Machine& m) {
+        Bus b(m);
+        const u32 a1 = m.cpu.d[1];
+        const u32 a2 = m.cpu.d[2];
+        const i64 d1 = static_cast<i32>(b.r32(a1 + ds_Days));
+        const i64 m1 = static_cast<i32>(b.r32(a1 + ds_Minute));
+        const i64 t1 = static_cast<i32>(b.r32(a1 + ds_Tick));
+        const i64 d2 = static_cast<i32>(b.r32(a2 + ds_Days));
+        const i64 m2 = static_cast<i32>(b.r32(a2 + ds_Minute));
+        const i64 t2 = static_cast<i32>(b.r32(a2 + ds_Tick));
+        if (!b.ok()) {
+            return;
+        }
+        i32 cmp = 0;
+        if (d1 != d2) {
+            cmp = d1 < d2 ? 1 : -1;
+        } else if (m1 != m2) {
+            cmp = m1 < m2 ? 1 : -1;
+        } else if (t1 != t2) {
+            cmp = t1 < t2 ? 1 : -1;
+        }
+        native::set_result(m, static_cast<u32>(cmp));
+    }
+
+    static void date_to_str(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 dt = m.cpu.d[1];
+        if (dt == 0) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        const DosStamp stamp{
+            b.r32(dt + dat_Stamp + ds_Days),
+            b.r32(dt + dat_Stamp + ds_Minute),
+            b.r32(dt + dat_Stamp + ds_Tick),
+        };
+        const u8 format = static_cast<u8>(b.r8(dt + dat_Format));
+        const u8 flags = static_cast<u8>(b.r8(dt + dat_Flags));
+        const u32 str_day = b.r32(dt + dat_StrDay);
+        const u32 str_date = b.r32(dt + dat_StrDate);
+        const u32 str_time = b.r32(dt + dat_StrTime);
+        if (!b.ok()) {
+            return;
+        }
+        char day_buf[LEN_DATSTRING]{};
+        char date_buf[LEN_DATSTRING]{};
+        char time_buf[LEN_DATSTRING]{};
+        const u32 today = current_stamp(d).days;
+        const u32 ok = dos_format_date(
+            stamp, format, flags, today,
+            str_date != 0 ? date_buf : nullptr, str_date != 0 ? LEN_DATSTRING : 0u,
+            str_day != 0 ? day_buf : nullptr, str_day != 0 ? LEN_DATSTRING : 0u,
+            str_time != 0 ? time_buf : nullptr, str_time != 0 ? LEN_DATSTRING : 0u);
+        if (ok == 0u) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        if (str_day != 0) {
+            put_string(b, str_day, day_buf);
+        }
+        if (str_date != 0) {
+            put_string(b, str_date, date_buf);
+        }
+        if (str_time != 0) {
+            put_string(b, str_time, time_buf);
+        }
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    static void str_to_date(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 dt = m.cpu.d[1];
+        if (dt == 0) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        DosStamp stamp{
+            b.r32(dt + dat_Stamp + ds_Days),
+            b.r32(dt + dat_Stamp + ds_Minute),
+            b.r32(dt + dat_Stamp + ds_Tick),
+        };
+        const u8 format = static_cast<u8>(b.r8(dt + dat_Format));
+        const u32 str_day = b.r32(dt + dat_StrDay);
+        const u32 str_date = b.r32(dt + dat_StrDate);
+        const u32 str_time = b.r32(dt + dat_StrTime);
+        if (!b.ok()) {
+            return;
+        }
+        char day_buf[LEN_DATSTRING]{};
+        char date_buf[LEN_DATSTRING]{};
+        char time_buf[LEN_DATSTRING]{};
+        if (str_day != 0) {
+            b.string(str_day, day_buf, LEN_DATSTRING);
+            if (!b.ok()) {
+                return;
+            }
+        }
+        if (str_date != 0 && !b.string(str_date, date_buf, LEN_DATSTRING)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        if (str_time != 0 && !b.string(str_time, time_buf, LEN_DATSTRING)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        const u32 today = current_stamp(d).days;
+        if (!dos_parse_date(str_date != 0 ? date_buf : nullptr,
+                            str_time != 0 ? time_buf : nullptr, format, today, stamp)) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        b.w32(dt + dat_Stamp + ds_Days, stamp.days);
+        b.w32(dt + dat_Stamp + ds_Minute, stamp.minutes);
+        b.w32(dt + dat_Stamp + ds_Tick, stamp.ticks);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
     }
 
     // Nothing else runs, so a Delay is over at once.
@@ -2823,6 +2966,409 @@ struct DosOps {
         }
     }
 
+    // --- pattern matching and directory anchors --------------------------------
+
+    // Reads a NUL-terminated tokenised pattern from guest memory. False if it
+    // faults (b.ok() is false) or exceeds kDosPatMaxTokens bytes.
+    static bool read_pattern_tokens(Bus& b, u32 addr,
+                                    u8 (&tokens)[detail::kDosPatMaxTokens + 1]) {
+        for (u32 i = 0; i <= detail::kDosPatMaxTokens; ++i) {
+            const u32 c = b.r8(addr + i);
+            if (!b.ok()) {
+                return false;
+            }
+            tokens[i] = static_cast<u8>(c);
+            if (c == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static void parse_pattern_impl(Dos& d, Machine& m, bool no_case) {
+        Bus b(m);
+        const u32 pat_addr = m.cpu.d[1];
+        const u32 buf_addr = m.cpu.d[2];
+        const u32 buflen = m.cpu.d[3];
+        if (pat_addr == 0) {
+            fail(d, b, ERROR_BAD_TEMPLATE, 0xFFFFFFFF);
+            return;
+        }
+        if (buf_addr == 0 || buflen == 0 || (buflen & 0x80000000) != 0) {
+            fail(d, b, ERROR_LINE_TOO_LONG, 0xFFFFFFFF);
+            return;
+        }
+        char src[detail::kDosPatMaxPat + 1];
+        if (!b.string(pat_addr, src, sizeof src)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_LINE_TOO_LONG, 0xFFFFFFFF);
+            }
+            return;
+        }
+        u8 tokens[detail::kDosPatMaxTokens]{};
+        const u32 src_len = length_of(src);
+        const i32 wild = dos_parse_pattern(reinterpret_cast<const u8*>(src), src_len, tokens,
+                                           sizeof tokens, no_case);
+        if (wild < 0) {
+            fail(d, b, ERROR_BAD_TEMPLATE, 0xFFFFFFFF);
+            return;
+        }
+        u32 tok_len = 0;
+        while (tok_len < sizeof tokens && tokens[tok_len] != '\0') {
+            ++tok_len;
+        }
+        if (tok_len + 1 > buflen) {
+            fail(d, b, ERROR_LINE_TOO_LONG, 0xFFFFFFFF);
+            return;
+        }
+        for (u32 i = 0; i <= tok_len; ++i) {
+            b.w8(buf_addr + i, tokens[i]);
+        }
+        if (b.ok()) {
+            native::set_result(m, static_cast<u32>(wild));
+        }
+    }
+
+    static void match_pattern_impl(Dos& d, Machine& m, bool no_case) {
+        Bus b(m);
+        const u32 pat_addr = m.cpu.d[1];
+        const u32 str_addr = m.cpu.d[2];
+        if (pat_addr == 0 || str_addr == 0) {
+            native::set_result(m, DOSFALSE);
+            return;
+        }
+        u8 tokens[detail::kDosPatMaxTokens + 1];
+        if (!read_pattern_tokens(b, pat_addr, tokens)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            }
+            return;
+        }
+        char str[detail::kDosPatMaxStr + 1];
+        if (!b.string(str_addr, str, sizeof str)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
+            }
+            return;
+        }
+        const bool matched =
+            dos_match_pattern(tokens, reinterpret_cast<const u8*>(str), length_of(str), no_case);
+        native::set_result(m, matched ? DOSTRUE : DOSFALSE);
+    }
+
+    static void parse_pattern(void* ctx, Machine& m) { parse_pattern_impl(of(ctx), m, false); }
+    static void match_pattern(void* ctx, Machine& m) { match_pattern_impl(of(ctx), m, false); }
+    static void parse_pattern_nc(void* ctx, Machine& m) { parse_pattern_impl(of(ctx), m, true); }
+    static void match_pattern_nc(void* ctx, Machine& m) { match_pattern_impl(of(ctx), m, true); }
+
+    struct MatchVisitor {
+        u32 after;
+        bool first;
+        bool seen;
+        bool found;
+        const u8* tokens;
+        DirEntry entry;
+
+        static void visit(void* ctx, const DirEntry& e) {
+            MatchVisitor& v = *static_cast<MatchVisitor*>(ctx);
+            if (v.found) {
+                return;
+            }
+            if (!v.first && !v.seen) {
+                v.seen = e.header_block == v.after;
+                return;
+            }
+            if (dos_match_pattern(v.tokens, reinterpret_cast<const u8*>(e.name),
+                                  length_of(e.name), true)) {
+                v.entry = e;
+                v.found = true;
+            }
+        }
+    };
+
+    static i64 find_anchor_slot(const Dos& d, u32 key) {
+        for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
+            if (d.anchors_[i].used && d.anchors_[i].anchor_addr == key) {
+                return static_cast<i64>(i);
+            }
+        }
+        return -1;
+    }
+
+    static i64 free_anchor_slot(const Dos& d) {
+        for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
+            if (!d.anchors_[i].used) {
+                return static_cast<i64>(i);
+            }
+        }
+        return -1;
+    }
+
+    static bool check_anchor_break(Dos& d, Bus& b, u32 anchor) {
+        const u32 break_bits = b.r32(anchor + ap_BreakBits);
+        b.w32(anchor + ap_FoundBreak, 0);
+        if (!b.ok() || break_bits == 0) {
+            return false;
+        }
+        const u32 recvd = b.r32(d.process_ + TC_SIGRECVD);
+        if (!b.ok()) {
+            return false;
+        }
+        const u32 hit = recvd & break_bits;
+        if (hit != 0) {
+            b.w32(d.process_ + TC_SIGRECVD, recvd & ~hit);
+            b.w32(anchor + ap_FoundBreak, hit);
+            fail(d, b, ERROR_BREAK, ERROR_BREAK);
+            return true;
+        }
+        return false;
+    }
+
+    static void join_path(const char* a, const char* b, char* out, u32 cap) {
+        u32 pos = 0;
+        for (u32 i = 0; a[i] != '\0' && pos + 1 < cap; ++i) {
+            out[pos++] = a[i];
+        }
+        for (u32 i = 0; b[i] != '\0' && pos + 1 < cap; ++i) {
+            out[pos++] = b[i];
+        }
+        out[pos] = '\0';
+    }
+
+    static bool write_anchor_match(Dos& d, Bus& b, u32 anchor, const char* full_path,
+                                   const DirEntry& entry) {
+        const u32 ap_len = b.r16(anchor + ap_Strlen);
+        if (!b.ok()) {
+            return false;
+        }
+        if ((ap_len & 0x8000u) == 0 && ap_len > 0) {
+            const u32 len = length_of(full_path);
+            if (len + 1 > ap_len) {
+                fail(d, b, ERROR_BUFFER_OVERFLOW, ERROR_BUFFER_OVERFLOW);
+                return false;
+            }
+            put_string(b, anchor + ap_Buf, full_path);
+        }
+        if (!fill_fib(d, b, anchor + ap_Info, entry)) {
+            if (b.ok()) {
+                const u32 err = b.r32(d.process_ + pr_Result2);
+                native::set_result(b.machine(), err);
+            }
+            return false;
+        }
+        return b.ok();
+    }
+
+    // Supports patterns with an optional directory prefix and wildcards only in
+    // the last path component. APF_DODIR directory recursion is not implemented.
+    static void match_first(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 pat_addr = m.cpu.d[1];
+        const u32 anchor = m.cpu.d[2];
+        if (pat_addr == 0 || anchor == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, ERROR_REQUIRED_ARG_MISSING);
+            return;
+        }
+        const u32 key = native::guest_address(m, anchor);
+        const i64 existing = find_anchor_slot(d, key);
+        if (existing >= 0) {
+            d.anchors_[existing].used = false;
+        }
+        const u32 raw_flags = b.r8(anchor + ap_Flags);
+        if (check_anchor_break(d, b, anchor) || !b.ok()) {
+            return;
+        }
+        char pat_str[detail::kDosPatMaxPat + 1];
+        if (!b.string(pat_addr, pat_str, sizeof pat_str)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_LINE_TOO_LONG, ERROR_LINE_TOO_LONG);
+            }
+            return;
+        }
+        const u32 pat_len = length_of(pat_str);
+        u32 split = 0;
+        for (u32 i = 0; i < pat_len; ++i) {
+            if (pat_str[i] == '/' || pat_str[i] == ':') {
+                split = i + 1;
+            }
+        }
+        char prefix[detail::kDosPatMaxPat + 1];
+        for (u32 i = 0; i < split; ++i) {
+            prefix[i] = pat_str[i];
+        }
+        prefix[split] = '\0';
+        const char* leaf = pat_str + split;
+        const u32 leaf_len = pat_len - split;
+
+        u8 tokens[detail::kDosPatMaxTokens + 1]{};
+        const i32 wild = dos_parse_pattern(reinterpret_cast<const u8*>(leaf), leaf_len, tokens,
+                                           sizeof tokens, true);
+        if (wild < 0) {
+            fail(d, b, ERROR_BAD_TEMPLATE, ERROR_BAD_TEMPLATE);
+            return;
+        }
+        u8 flags = static_cast<u8>(raw_flags);
+        if (wild > 0) {
+            flags |= static_cast<u8>(APF_ITSWILD);
+        } else {
+            flags &= static_cast<u8>(~APF_ITSWILD);
+        }
+        b.w8(anchor + ap_Flags, flags);
+        if (!b.ok()) {
+            return;
+        }
+
+        const i64 slot_idx = free_anchor_slot(d);
+        if (slot_idx < 0) {
+            LogLine().text("dos: anchor table full, ").dec(Dos::kMaxAnchors)
+                .text(" entries in use").send();
+            fail(d, b, ERROR_NO_FREE_STORE, ERROR_NO_FREE_STORE);
+            return;
+        }
+
+        if (wild == 0) {
+            char lookup[detail::kDosPatMaxPat + 1];
+            if (leaf_len == 0) {
+                copy_cstr(lookup, pat_str, sizeof lookup);
+            } else {
+                join_path(prefix, reinterpret_cast<const char*>(tokens), lookup, sizeof lookup);
+            }
+            char resolved[Dos::kMaxPath];
+            DirEntry entry{};
+            u32 error = 0;
+            if (!locate(d, b, lookup, resolved, entry, error)) {
+                if (b.ok()) {
+                    fail(d, b, error, error);
+                }
+                return;
+            }
+            char full[detail::kDosPatMaxPat + 32 + 1];
+            if (leaf_len == 0) {
+                copy_cstr(full, pat_str, sizeof full);
+            } else {
+                join_path(prefix, entry.name, full, sizeof full);
+            }
+            if (!write_anchor_match(d, b, anchor, full, entry)) {
+                return;
+            }
+            Dos::AnchorSlot& s = d.anchors_[slot_idx];
+            s.used = true;
+            s.anchor_addr = key;
+            s.is_wild = false;
+            s.done = true;
+            set_io_err(d, b, 0);
+            native::set_result(m, 0);
+            return;
+        }
+
+        char dir_path[Dos::kMaxPath];
+        DirEntry dir_entry{};
+        u32 error = 0;
+        if (!locate(d, b, prefix, dir_path, dir_entry, error)) {
+            if (b.ok()) {
+                if (error == ERROR_OBJECT_NOT_FOUND) {
+                    error = ERROR_DIR_NOT_FOUND;
+                }
+                fail(d, b, error, error);
+            }
+            return;
+        }
+        if (!dir_entry.is_dir) {
+            fail(d, b, ERROR_DIR_NOT_FOUND, ERROR_DIR_NOT_FOUND);
+            return;
+        }
+        MatchVisitor mv{0, true, false, false, tokens, DirEntry{}};
+        const FsError list_err = adf_list(d.volume_, dir_path, MatchVisitor::visit, &mv);
+        if (list_err != FsError::Ok) {
+            const u32 err = io_error_of(list_err);
+            fail(d, b, err, err);
+            return;
+        }
+        if (!mv.found) {
+            fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
+            return;
+        }
+        char full[detail::kDosPatMaxPat + 32 + 1];
+        join_path(prefix, mv.entry.name, full, sizeof full);
+        if (!write_anchor_match(d, b, anchor, full, mv.entry)) {
+            return;
+        }
+        Dos::AnchorSlot& s = d.anchors_[slot_idx];
+        s.used = true;
+        s.anchor_addr = key;
+        s.is_wild = true;
+        s.done = false;
+        s.dir = dir_entry;
+        copy_cstr(s.dir_path, dir_path, Dos::kMaxPath);
+        copy_cstr(s.prefix, prefix, sizeof s.prefix);
+        s.after = mv.entry.header_block;
+        for (u32 i = 0; i <= detail::kDosPatMaxTokens; ++i) {
+            s.tokens[i] = tokens[i];
+            if (tokens[i] == 0) {
+                break;
+            }
+        }
+        set_io_err(d, b, 0);
+        native::set_result(m, 0);
+    }
+
+    static void match_next(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 anchor = m.cpu.d[1];
+        if (anchor == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, ERROR_REQUIRED_ARG_MISSING);
+            return;
+        }
+        if (check_anchor_break(d, b, anchor) || !b.ok()) {
+            return;
+        }
+        const i64 slot_idx = find_anchor_slot(d, native::guest_address(m, anchor));
+        if (slot_idx < 0) {
+            fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
+            return;
+        }
+        Dos::AnchorSlot& s = d.anchors_[slot_idx];
+        if (!s.is_wild || s.done) {
+            s.done = true;
+            fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
+            return;
+        }
+        MatchVisitor mv{s.after, false, false, false, s.tokens, DirEntry{}};
+        const FsError list_err = adf_list(d.volume_, s.dir_path, MatchVisitor::visit, &mv);
+        if (list_err != FsError::Ok) {
+            const u32 err = io_error_of(list_err);
+            fail(d, b, err, err);
+            return;
+        }
+        if (!mv.found) {
+            s.done = true;
+            fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
+            return;
+        }
+        char full[detail::kDosPatMaxPat + 32 + 1];
+        join_path(s.prefix, mv.entry.name, full, sizeof full);
+        if (!write_anchor_match(d, b, anchor, full, mv.entry)) {
+            return;
+        }
+        s.after = mv.entry.header_block;
+        set_io_err(d, b, 0);
+        native::set_result(m, 0);
+    }
+
+    static void match_end(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        const u32 anchor = m.cpu.d[1];
+        if (anchor == 0) {
+            return;
+        }
+        const i64 slot_idx = find_anchor_slot(d, native::guest_address(m, anchor));
+        if (slot_idx >= 0) {
+            d.anchors_[slot_idx].used = false;
+        }
+    }
+
     struct ExAllCollector {
         Dos& d;
         Bus& b;
@@ -2831,6 +3377,7 @@ struct DosOps {
         u32 type;
         u32 hdr_size;
         u32 after;
+        const u8* match_pat;
         bool seen;
         u32 offset;
         u32 entries;
@@ -2853,6 +3400,12 @@ struct DosOps {
                 c.seen = e.header_block == c.after;
                 return;
             }
+            const u32 name_len = length_of(e.name);
+            if (c.match_pat != nullptr &&
+                !dos_match_pattern(c.match_pat, reinterpret_cast<const u8*>(e.name), name_len,
+                                   true)) {
+                return;
+            }
             const u8* header = nullptr;
             if (c.type >= ED_PROTECTION) {
                 FsError err = FsError::Ok;
@@ -2863,7 +3416,6 @@ struct DosOps {
                     return;
                 }
             }
-            const u32 name_len = length_of(e.name);
             const u8* comment = nullptr;
             u32 comment_len = 0;
             if (c.type >= ED_COMMENT) {
@@ -2919,8 +3471,8 @@ struct DosOps {
         }
     };
 
-    // Lists directory entries into ExAllData records for ED_NAME..ED_COMMENT;
-    // eac_MatchString and eac_MatchFunc are ignored (no pattern matcher yet).
+    // Lists directory entries into ExAllData records for ED_NAME..ED_COMMENT.
+    // Honours eac_MatchString; eac_MatchFunc is ignored.
     static void ex_all(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -2952,11 +3504,23 @@ struct DosOps {
             return;
         }
         const u32 after = b.r32(control + eac_LastKey);
+        const u32 match_str = b.r32(control + eac_MatchString);
         if (!b.ok()) {
             return;
         }
-        ExAllCollector col{d, b, buffer, size, type, hdr_size, after, false, 0, 0, 0, after,
-                           false, false, false};
+        u8 match_tokens[detail::kDosPatMaxTokens + 1];
+        const u8* match_pat = nullptr;
+        if (match_str != 0) {
+            if (!read_pattern_tokens(b, match_str, match_tokens)) {
+                if (b.ok()) {
+                    fail(d, b, ERROR_BAD_TEMPLATE, DOSFALSE);
+                }
+                return;
+            }
+            match_pat = match_tokens;
+        }
+        ExAllCollector col{d, b, buffer, size, type, hdr_size, after, match_pat,
+                           false, 0, 0, 0, after, false, false, false};
         const FsError error = adf_list(d.volume_, path, ExAllCollector::visit, &col);
         if (!b.ok()) {
             return;
@@ -3638,6 +4202,9 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::SetPrompt, DosOps::set_prompt, "SetPrompt"},
     {dos_lvo::GetPrompt, DosOps::get_prompt, "GetPrompt"},
     {dos_lvo::IsFileSystem, DosOps::is_file_system, "IsFileSystem"},
+    {dos_lvo::CompareDates, DosOps::compare_dates, "CompareDates"},
+    {dos_lvo::DateToStr, DosOps::date_to_str, "DateToStr"},
+    {dos_lvo::StrToDate, DosOps::str_to_date, "StrToDate"},
     {dos_lvo::NewLoadSeg, DosOps::load_seg_lvo, "NewLoadSeg"},
     {dos_lvo::FindSegment, DosOps::find_segment, "FindSegment"},
     {dos_lvo::CheckSignal, DosOps::check_signal, "CheckSignal"},
@@ -3645,6 +4212,11 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::FindArg, DosOps::find_arg, "FindArg"},
     {dos_lvo::ReadItem, DosOps::read_item, "ReadItem"},
     {dos_lvo::StrToLong, DosOps::str_to_long, "StrToLong"},
+    {dos_lvo::MatchFirst, DosOps::match_first, "MatchFirst"},
+    {dos_lvo::MatchNext, DosOps::match_next, "MatchNext"},
+    {dos_lvo::MatchEnd, DosOps::match_end, "MatchEnd"},
+    {dos_lvo::ParsePattern, DosOps::parse_pattern, "ParsePattern"},
+    {dos_lvo::MatchPattern, DosOps::match_pattern, "MatchPattern"},
     {dos_lvo::FreeArgs, DosOps::free_args, "FreeArgs"},
     {dos_lvo::FilePart, DosOps::file_part, "FilePart"},
     {dos_lvo::PathPart, DosOps::path_part, "PathPart"},
@@ -3655,6 +4227,8 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::FindVar, DosOps::find_var_lvo, "FindVar"},
     {dos_lvo::PutStr, DosOps::put_str, "PutStr"},
     {dos_lvo::VPrintf, DosOps::vprintf, "VPrintf"},
+    {dos_lvo::ParsePatternNoCase, DosOps::parse_pattern_nc, "ParsePatternNoCase"},
+    {dos_lvo::MatchPatternNoCase, DosOps::match_pattern_nc, "MatchPatternNoCase"},
     {dos_lvo::ExAllEnd, DosOps::ex_all_end, "ExAllEnd"},
 };
 
@@ -3677,6 +4251,10 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     for (ArgBlock& a : arg_blocks_) {
         a = ArgBlock{0, 0, 0, false};
     }
+    for (AnchorSlot& a : anchors_) {
+        a.used = false;
+    }
+    now_ticks_ = nullptr;
     input_length_ = 0;
     input_pos_ = 0;
     running_ = false;

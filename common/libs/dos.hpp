@@ -24,6 +24,8 @@
 #pragma once
 
 #include "../amiga_fs.hpp"
+#include "../dos_date.hpp"
+#include "../dos_pattern.hpp"
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
 #include "../types.hpp"
@@ -133,6 +135,9 @@ constexpr u32 GetProgramName = 576;
 constexpr u32 SetPrompt = 582;
 constexpr u32 GetPrompt = 588;
 constexpr u32 IsFileSystem = 708;
+constexpr u32 CompareDates = 738;
+constexpr u32 DateToStr = 744;
+constexpr u32 StrToDate = 750;
 constexpr u32 NewLoadSeg = 768;
 constexpr u32 FindSegment = 780;
 constexpr u32 CheckSignal = 792;
@@ -140,6 +145,11 @@ constexpr u32 ReadArgs = 798;
 constexpr u32 FindArg = 804;
 constexpr u32 ReadItem = 810;
 constexpr u32 StrToLong = 816;
+constexpr u32 MatchFirst = 822;
+constexpr u32 MatchNext = 828;
+constexpr u32 MatchEnd = 834;
+constexpr u32 ParsePattern = 840;
+constexpr u32 MatchPattern = 846;
 constexpr u32 FreeArgs = 858;
 constexpr u32 FilePart = 870;
 constexpr u32 PathPart = 876;
@@ -150,6 +160,8 @@ constexpr u32 DeleteVar = 912;
 constexpr u32 FindVar = 918;
 constexpr u32 PutStr = 948;
 constexpr u32 VPrintf = 954;
+constexpr u32 ParsePatternNoCase = 966;
+constexpr u32 MatchPatternNoCase = 972;
 constexpr u32 ExAllEnd = 990;
 // The last vector of the 3.1 library; dos's table reaches down to it.
 constexpr u32 SetOwner = 996;
@@ -196,6 +208,15 @@ constexpr u32 ds_Days = 0;
 constexpr u32 ds_Minute = 4;
 constexpr u32 ds_Tick = 8;
 constexpr u32 ds_SIZEOF = 12;
+
+// struct DateTime
+constexpr u32 dat_Stamp = 0;
+constexpr u32 dat_Format = 12;
+constexpr u32 dat_Flags = 13;
+constexpr u32 dat_StrDay = 14;
+constexpr u32 dat_StrDate = 18;
+constexpr u32 dat_StrTime = 22;
+constexpr u32 dat_SIZEOF = 26;
 
 // struct Process
 constexpr u32 pr_Task = 0;
@@ -436,6 +457,24 @@ constexpr u32 sp_Msg = 0;
 constexpr u32 sp_Pkt = MN_SIZE;
 constexpr u32 sp_SIZEOF = MN_SIZE + dp_SIZEOF;
 
+// struct AnchorPath and ap_Flags bits (dos/dosasl.h)
+constexpr u32 ap_Base = 0;
+constexpr u32 ap_Last = 4;
+constexpr u32 ap_BreakBits = 8;
+constexpr u32 ap_FoundBreak = 12;
+constexpr u32 ap_Flags = 16;
+constexpr u32 ap_Reserved = 17;
+constexpr u32 ap_Strlen = 18;
+constexpr u32 ap_Info = 20;
+constexpr u32 ap_Buf = 280;
+constexpr u32 APF_DOWILD = 1;
+constexpr u32 APF_ITSWILD = 2;
+constexpr u32 APF_DODIR = 4;
+constexpr u32 APF_DIDDIR = 8;
+constexpr u32 APF_NOMEMERR = 16;
+constexpr u32 APF_DODOT = 32;
+constexpr u32 APF_DirChanged = 64;
+
 // IoErr() codes
 constexpr u32 ERROR_NO_FREE_STORE = 103;
 constexpr u32 ERROR_TASK_TABLE_FULL = 105;
@@ -500,6 +539,7 @@ public:
     static constexpr u32 kMaxFiles = 16;    // files and console streams a program opens
     static constexpr u32 kMaxLocks = 32;
     static constexpr u32 kMaxArgBlocks = 16;  // ReadArgs results not yet freed
+    static constexpr u32 kMaxAnchors = 8;     // active MatchFirst/MatchNext anchors
 
     // Makes dos.library over the volume, which must stay mounted, with its
     // structures and the shell Process, registers the Process as exec's
@@ -521,6 +561,10 @@ public:
     // LoadSeg of a path, relative to the current directory: the seglist
     // BPTR, or 0 with the Process's IoErr set. Flushes the translations.
     u32 load_seg(const char* path);
+
+    // Sets the clock source returning 50 Hz AmigaDOS ticks since 1978-01-01,
+    // or null to report 0/0/0.
+    void set_clock(u64 (*now_ticks)()) { now_ticks_ = now_ticks; }
 
     u32 dos_base() const { return base_; }
     u32 process() const { return process_; }
@@ -557,6 +601,18 @@ private:
         bool owns_rdargs;
     };
 
+    struct AnchorSlot {
+        bool used;
+        u32 anchor_addr;  // masked guest AnchorPath address
+        bool is_wild;
+        bool done;
+        DirEntry dir;
+        char dir_path[kMaxPath];
+        char prefix[detail::kDosPatMaxPat + 1];
+        u32 after;
+        u8 tokens[detail::kDosPatMaxTokens + 1];
+    };
+
     m68k::Machine* m_ = nullptr;
     Exec* exec_ = nullptr;
     AdfVolume volume_{};
@@ -582,7 +638,9 @@ private:
     FileSlot files_[kHandles]{};
     LockSlot lock_slots_[kMaxLocks]{};
     ArgBlock arg_blocks_[kMaxArgBlocks]{};
+    AnchorSlot anchors_[kMaxAnchors]{};
     NativeVector vectors_[kVectors]{};
+    u64 (*now_ticks_)() = nullptr;
 
     // The console's input: the argument line, read once.
     char input_[kMaxArgs + 2]{};

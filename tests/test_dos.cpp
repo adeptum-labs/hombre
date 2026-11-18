@@ -503,6 +503,9 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::SetPrompt, 582u);
     CHECK_EQ(dos_lvo::GetPrompt, 588u);
     CHECK_EQ(dos_lvo::IsFileSystem, 708u);
+    CHECK_EQ(dos_lvo::CompareDates, 738u);
+    CHECK_EQ(dos_lvo::DateToStr, 744u);
+    CHECK_EQ(dos_lvo::StrToDate, 750u);
     CHECK_EQ(dos_lvo::NewLoadSeg, 768u);
     CHECK_EQ(dos_lvo::FindSegment, 780u);
     CHECK_EQ(dos_lvo::CheckSignal, 792u);
@@ -510,6 +513,11 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::FindArg, 804u);
     CHECK_EQ(dos_lvo::ReadItem, 810u);
     CHECK_EQ(dos_lvo::StrToLong, 816u);
+    CHECK_EQ(dos_lvo::MatchFirst, 822u);
+    CHECK_EQ(dos_lvo::MatchNext, 828u);
+    CHECK_EQ(dos_lvo::MatchEnd, 834u);
+    CHECK_EQ(dos_lvo::ParsePattern, 840u);
+    CHECK_EQ(dos_lvo::MatchPattern, 846u);
     CHECK_EQ(dos_lvo::FreeArgs, 858u);
     CHECK_EQ(dos_lvo::FilePart, 870u);
     CHECK_EQ(dos_lvo::PathPart, 876u);
@@ -520,6 +528,8 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::FindVar, 918u);
     CHECK_EQ(dos_lvo::PutStr, 948u);
     CHECK_EQ(dos_lvo::VPrintf, 954u);
+    CHECK_EQ(dos_lvo::ParsePatternNoCase, 966u);
+    CHECK_EQ(dos_lvo::MatchPatternNoCase, 972u);
     CHECK_EQ(dos_lvo::ExAllEnd, 990u);
     CHECK_EQ(dos_lvo::SetOwner, 996u);
 
@@ -744,6 +754,29 @@ void layout_matches_the_ndk() {
     CHECK_EQ(sp_Msg, 0u);
     CHECK_EQ(sp_Pkt, 20u);
     CHECK_EQ(sp_SIZEOF, 68u);
+
+    // DateTime and AnchorPath.
+    CHECK_EQ(dat_Stamp, 0u);
+    CHECK_EQ(dat_Format, 12u);
+    CHECK_EQ(dat_Flags, 13u);
+    CHECK_EQ(dat_StrDay, 14u);
+    CHECK_EQ(dat_StrDate, 18u);
+    CHECK_EQ(dat_StrTime, 22u);
+    CHECK_EQ(dat_SIZEOF, 26u);
+    CHECK_EQ(ap_Base, 0u);
+    CHECK_EQ(ap_Last, 4u);
+    CHECK_EQ(ap_BreakBits, 8u);
+    CHECK_EQ(ap_FoundBreak, 12u);
+    CHECK_EQ(ap_Flags, 16u);
+    CHECK_EQ(ap_Reserved, 17u);
+    CHECK_EQ(ap_Strlen, 18u);
+    CHECK_EQ(ap_Info, 20u);
+    CHECK_EQ(ap_Buf, 280u);
+    CHECK_EQ(APF_DOWILD, 1u);
+    CHECK_EQ(APF_ITSWILD, 2u);
+    CHECK_EQ(APF_DODIR, 4u);
+    CHECK_EQ(APF_DIDDIR, 8u);
+    CHECK_EQ(APF_DirChanged, 64u);
 }
 
 // --- the library and its structures -------------------------------------
@@ -2844,6 +2877,374 @@ void find_var_and_delete_var() {
     CHECK(r.chunks() == before);
 }
 
+// --- patterns, anchors and dates -----------------------------------------
+
+void clear_anchor(Rig& r, u32 anchor, u16 buf_len, u32 break_bits = 0) {
+    for (u32 i = 0; i < ap_Buf + buf_len; ++i) {
+        r.put8(anchor + i, 0);
+    }
+    r.put32(anchor + ap_BreakBits, break_bits);
+    r.put16(anchor + ap_Strlen, buf_len);
+}
+
+void parse_and_match_pattern_lvos() {
+    Rig r;
+    const u32 pat = kData;
+    const u32 tok = kData + 0x200;
+    const u32 str = kData + 0x500;
+
+    // Case-sensitive wild pattern.
+    r.str(pat, "#?.info");
+    CHECK_EQ(r.call(dos_lvo::ParsePattern, pat, tok, 64), 1u);
+    r.str(str, "Disk.info");
+    CHECK_EQ(r.call(dos_lvo::MatchPattern, tok, str), DOSTRUE);
+    r.str(str, "Disk.INFO");
+    CHECK_EQ(r.call(dos_lvo::MatchPattern, tok, str), DOSFALSE);
+
+    // Case-sensitive plain pattern returns 0.
+    r.str(pat, "Readme");
+    CHECK_EQ(r.call(dos_lvo::ParsePattern, pat, tok, 64), 0u);
+    r.str(str, "Readme");
+    CHECK_EQ(r.call(dos_lvo::MatchPattern, tok, str), DOSTRUE);
+    r.str(str, "readme");
+    CHECK_EQ(r.call(dos_lvo::MatchPattern, tok, str), DOSFALSE);
+
+    // Case-insensitive variants.
+    r.str(pat, "#?.info");
+    CHECK_EQ(r.call(dos_lvo::ParsePatternNoCase, pat, tok, 64), 1u);
+    r.str(str, "Disk.INFO");
+    CHECK_EQ(r.call(dos_lvo::MatchPatternNoCase, tok, str), DOSTRUE);
+    r.str(str, "disk.info");
+    CHECK_EQ(r.call(dos_lvo::MatchPatternNoCase, tok, str), DOSTRUE);
+    r.str(str, "Disk.inf");
+    CHECK_EQ(r.call(dos_lvo::MatchPatternNoCase, tok, str), DOSFALSE);
+
+    r.str(pat, "(a|b)?[0-9]");
+    CHECK_EQ(r.call(dos_lvo::ParsePatternNoCase, pat, tok, 64), 1u);
+    r.str(str, "Bx7");
+    CHECK_EQ(r.call(dos_lvo::MatchPatternNoCase, tok, str), DOSTRUE);
+    r.str(str, "Cx7");
+    CHECK_EQ(r.call(dos_lvo::MatchPatternNoCase, tok, str), DOSFALSE);
+
+    // Buffer too small -> -1 with ERROR_LINE_TOO_LONG.
+    r.str(pat, "#?.info");
+    CHECK_EQ(as_signed(r.call(dos_lvo::ParsePattern, pat, tok, 4)), -1);
+    CHECK_EQ(r.io_err(), ERROR_LINE_TOO_LONG);
+    CHECK_EQ(as_signed(r.call(dos_lvo::ParsePatternNoCase, pat, tok, 0)), -1);
+    CHECK_EQ(r.io_err(), ERROR_LINE_TOO_LONG);
+
+    // Syntax error -> -1 with ERROR_BAD_TEMPLATE.
+    r.str(pat, "(unclosed");
+    CHECK_EQ(as_signed(r.call(dos_lvo::ParsePattern, pat, tok, 64)), -1);
+    CHECK_EQ(r.io_err(), ERROR_BAD_TEMPLATE);
+
+    // Bad pointer faults.
+    r.cpu().d[1] = kGuestBytes;
+    r.cpu().d[2] = tok;
+    r.cpu().d[3] = 64;
+    CHECK_EQ(r.dos(dos_lvo::ParsePattern), ExitReason::BusError);
+}
+
+void match_first_lists_wild_entries() {
+    Rig r;
+    const u32 pat = kData;
+    const u32 anchor = kData + 0x200;
+
+    // Wild pattern over C: with ap_Strlen set.
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "C:E#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK((r.get8(anchor + ap_Flags) & APF_ITSWILD) != 0);
+
+    std::vector<std::string> fib_names;
+    std::vector<std::string> buf_paths;
+    fib_names.push_back(read_fib(r, anchor + ap_Info).name);
+    buf_paths.push_back(r.read_str(anchor + ap_Buf));
+    for (u32 i = 0; i < 20; ++i) {
+        const u32 rc = r.call(dos_lvo::MatchNext, anchor);
+        if (rc != 0) {
+            CHECK_EQ(rc, ERROR_NO_MORE_ENTRIES);
+            break;
+        }
+        fib_names.push_back(read_fib(r, anchor + ap_Info).name);
+        buf_paths.push_back(r.read_str(anchor + ap_Buf));
+    }
+    r.call(dos_lvo::MatchEnd, anchor);
+    std::sort(fib_names.begin(), fib_names.end());
+    std::sort(buf_paths.begin(), buf_paths.end());
+    CHECK(fib_names == (std::vector<std::string>{"Echo", "Empty", "Entry", "Exit"}));
+    CHECK(buf_paths == (std::vector<std::string>{"C:Echo", "C:Empty", "C:Entry", "C:Exit"}));
+
+    // Subdirectory prefix and case-insensitive extension match.
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "libs:#?.LIBRARY");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK(read_fib(r, anchor + ap_Info).name == "x.library");
+    CHECK(r.read_str(anchor + ap_Buf) == "libs:x.library");
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), ERROR_NO_MORE_ENTRIES);
+    r.call(dos_lvo::MatchEnd, anchor);
+
+    // Relative wild pattern after CurrentDir.
+    r.str(pat, "Devs/Sub");
+    const u32 sub = r.call(dos_lvo::Lock, pat, SHARED_LOCK);
+    CHECK(sub != 0);
+    const u32 old_dir = r.call(dos_lvo::CurrentDir, sub);
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK(read_fib(r, anchor + ap_Info).name == "Deep");
+    CHECK(r.read_str(anchor + ap_Buf) == "Deep");
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), ERROR_NO_MORE_ENTRIES);
+    r.call(dos_lvo::MatchEnd, anchor);
+    r.call(dos_lvo::CurrentDir, old_dir);
+    r.call(dos_lvo::UnLock, sub);
+
+    // ap_Strlen == 0 leaves ap_Buf untouched.
+    clear_anchor(r, anchor, 0);
+    r.put8(anchor + ap_Buf, 0xEE);
+    r.str(pat, "S:#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK(read_fib(r, anchor + ap_Info).name == "Startup-Sequence");
+    CHECK_EQ(r.get8(anchor + ap_Buf), 0xEEu);
+    r.call(dos_lvo::MatchEnd, anchor);
+
+    // ap_Strlen too small fails with ERROR_BUFFER_OVERFLOW.
+    clear_anchor(r, anchor, 4);
+    r.str(pat, "S:#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), ERROR_BUFFER_OVERFLOW);
+
+    // Bad directory prefix fails with ERROR_DIR_NOT_FOUND.
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "NoSuchDir/#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), ERROR_DIR_NOT_FOUND);
+
+    // ap_BreakBits returns ERROR_BREAK and clears pending matching signals.
+    exec_call(r, exec_lvo::Signal, SIGBREAKF_CTRL_C | (1u << 13), 0, r.proc());
+    clear_anchor(r, anchor, 64, SIGBREAKF_CTRL_C);
+    r.str(pat, "C:#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), ERROR_BREAK);
+    CHECK_EQ(r.get32(anchor + ap_FoundBreak), SIGBREAKF_CTRL_C);
+    CHECK_EQ(r.call(dos_lvo::CheckSignal, SIGBREAKF_CTRL_C), 0u);
+    CHECK_EQ(r.call(dos_lvo::CheckSignal, 1u << 13), 1u << 13);
+}
+
+void match_first_plain_name() {
+    Rig r;
+    const u32 pat = kData;
+    const u32 anchor = kData + 0x200;
+
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "S:Startup-Sequence");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    CHECK_EQ(r.get8(anchor + ap_Flags) & APF_ITSWILD, 0u);
+    const Fib f = read_fib(r, anchor + ap_Info);
+    CHECK(f.name == "Startup-Sequence");
+    CHECK_EQ(f.size, 11u);
+    CHECK(r.read_str(anchor + ap_Buf) == "S:Startup-Sequence");
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), ERROR_NO_MORE_ENTRIES);
+    r.call(dos_lvo::MatchEnd, anchor);
+
+    // Missing plain object returns ERROR_OBJECT_NOT_FOUND.
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "C:Missing");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), ERROR_OBJECT_NOT_FOUND);
+    r.call(dos_lvo::MatchEnd, anchor);
+}
+
+void match_end_releases_anchor() {
+    Rig r;
+    const u32 pat = kData;
+    r.str(pat, "C:#?");
+
+    // 9 MatchFirst/MatchEnd pairs in a row (with distinct addresses) all work.
+    for (u32 i = 0; i < 9; ++i) {
+        const u32 anchor = kData + 0x200 + i * 0x200;
+        clear_anchor(r, anchor, 32);
+        CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+        r.call(dos_lvo::MatchEnd, anchor);
+    }
+
+    // Holding kMaxAnchors active anchors fills the table until one is ended.
+    for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
+        const u32 anchor = kData + 0x200 + i * 0x200;
+        clear_anchor(r, anchor, 32);
+        CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    }
+    const u32 extra = kData + 0x200 + Dos::kMaxAnchors * 0x200;
+    clear_anchor(r, extra, 32);
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, extra), ERROR_NO_FREE_STORE);
+
+    // Reusing an active anchor resets its slot.
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, kData + 0x200), 0u);
+    r.call(dos_lvo::MatchEnd, kData + 0x200);
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, extra), 0u);
+    for (u32 i = 1; i < Dos::kMaxAnchors; ++i) {
+        r.call(dos_lvo::MatchEnd, kData + 0x200 + i * 0x200);
+    }
+    r.call(dos_lvo::MatchEnd, extra);
+}
+
+void exall_honours_match_string() {
+    Rig r;
+    r.str(kData, "C:");
+    const u32 dir = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(dir != 0);
+    const u32 eac = r.call(dos_lvo::AllocDosObject, DOS_EXALLCONTROL, 0);
+    CHECK(eac != 0);
+
+    const u32 pat = kData + 0x100;
+    const u32 tok = kData + 0x180;
+    const u32 buf = kData + 0x200;
+    r.str(pat, "e#?");
+    CHECK_EQ(r.call(dos_lvo::ParsePatternNoCase, pat, tok, 64), 1u);
+    r.put32(eac + eac_MatchString, tok);
+
+    std::vector<std::string> names;
+    u32 more = DOSTRUE;
+    for (u32 round = 0; round < 10 && more == DOSTRUE; ++round) {
+        r.cpu().d[5] = eac;
+        more = r.call(dos_lvo::ExAll, dir, buf, 32, ED_NAME, eac);
+        if (more == DOSFALSE) {
+            CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+        }
+        const u32 count = r.get32(eac + eac_Entries);
+        u32 got = 0;
+        for (u32 cur = buf; cur != 0 && got < count; cur = r.get32(cur + ed_Next)) {
+            names.push_back(r.read_str(r.get32(cur + ed_Name)));
+            ++got;
+        }
+        CHECK_EQ(got, count);
+    }
+    CHECK_EQ(more, DOSFALSE);
+    std::sort(names.begin(), names.end());
+    CHECK(names == (std::vector<std::string>{"Echo", "Empty", "Entry", "Exit"}));
+
+    // A pattern matching no entries ends immediately with 0 entries.
+    r.str(pat, "zzz#?");
+    CHECK_EQ(r.call(dos_lvo::ParsePatternNoCase, pat, tok, 64), 1u);
+    r.put32(eac + eac_LastKey, 0);
+    r.cpu().d[5] = eac;
+    CHECK_EQ(r.call(dos_lvo::ExAll, dir, buf, 256, ED_NAME, eac), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK_EQ(r.get32(eac + eac_Entries), 0u);
+
+    r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
+    r.call(dos_lvo::UnLock, dir);
+}
+
+u64 fake_clock_2026() {
+    const DosStamp s = dos_stamp_from_civil(CivilTime{2026, 11, 18, 17, 30, 45});
+    return static_cast<u64>(s.days) * 1440ull * 3000ull +
+           static_cast<u64>(s.minutes) * 3000ull + static_cast<u64>(s.ticks);
+}
+
+void date_stamp_uses_the_clock() {
+    Rig r;
+    CHECK_EQ(r.call(dos_lvo::DateStamp, kData), kData);
+    CHECK_EQ(r.get32(kData + ds_Days), 0u);
+    CHECK_EQ(r.get32(kData + ds_Minute), 0u);
+    CHECK_EQ(r.get32(kData + ds_Tick), 0u);
+
+    g_dos.set_clock(fake_clock_2026);
+    CHECK_EQ(r.call(dos_lvo::DateStamp, kData), kData);
+    CHECK_EQ(r.get32(kData + ds_Days), 17853u);
+    CHECK_EQ(r.get32(kData + ds_Minute), 17u * 60u + 30u);
+    CHECK_EQ(r.get32(kData + ds_Tick), 45u * 50u);
+
+    g_dos.set_clock(nullptr);
+    CHECK_EQ(r.call(dos_lvo::DateStamp, kData), kData);
+    CHECK_EQ(r.get32(kData + ds_Days), 0u);
+    CHECK_EQ(r.get32(kData + ds_Minute), 0u);
+    CHECK_EQ(r.get32(kData + ds_Tick), 0u);
+}
+
+void date_to_str_and_str_to_date() {
+    Rig r;
+    g_dos.set_clock(fake_clock_2026);
+
+    const u32 dt = kData;
+    const u32 day_buf = kData + 0x40;
+    const u32 date_buf = kData + 0x60;
+    const u32 time_buf = kData + 0x80;
+
+    // 2026-11-18 17:30:45 -> "18-Nov-26", "17:30:45", "Wednesday".
+    r.put32(dt + dat_Stamp + ds_Days, 17853u);
+    r.put32(dt + dat_Stamp + ds_Minute, 1050u);
+    r.put32(dt + dat_Stamp + ds_Tick, 2250u);
+    r.put8(dt + dat_Format, FORMAT_DOS);
+    r.put8(dt + dat_Flags, 0);
+    r.put32(dt + dat_StrDay, day_buf);
+    r.put32(dt + dat_StrDate, date_buf);
+    r.put32(dt + dat_StrTime, time_buf);
+    CHECK_EQ(r.call(dos_lvo::DateToStr, dt), DOSTRUE);
+    CHECK(r.read_str(day_buf) == "Wednesday");
+    CHECK(r.read_str(date_buf) == "18-Nov-26");
+    CHECK(r.read_str(time_buf) == "17:30:45");
+
+    // Round-trip back through StrToDate.
+    r.put32(dt + dat_Stamp + ds_Days, 0u);
+    r.put32(dt + dat_Stamp + ds_Minute, 0u);
+    r.put32(dt + dat_Stamp + ds_Tick, 0u);
+    r.put32(dt + dat_StrDay, 0u);
+    CHECK_EQ(r.call(dos_lvo::StrToDate, dt), DOSTRUE);
+    CHECK_EQ(r.get32(dt + dat_Stamp + ds_Days), 17853u);
+    CHECK_EQ(r.get32(dt + dat_Stamp + ds_Minute), 1050u);
+    CHECK_EQ(r.get32(dt + dat_Stamp + ds_Tick), 2250u);
+
+    // DTF_SUBST uses the clock's current day as today.
+    r.put8(dt + dat_Flags, DTF_SUBST);
+    r.put32(dt + dat_StrDay, day_buf);
+    r.put32(dt + dat_StrDate, 0u);
+    r.put32(dt + dat_StrTime, 0u);
+    CHECK_EQ(r.call(dos_lvo::DateToStr, dt), DOSTRUE);
+    CHECK(r.read_str(day_buf) == "Today");
+
+    // StrToDate accepts "today" and rejects bad text.
+    r.str(date_buf, "today");
+    r.put32(dt + dat_Stamp + ds_Days, 0u);
+    r.put32(dt + dat_StrDay, 0u);
+    r.put32(dt + dat_StrDate, date_buf);
+    CHECK_EQ(r.call(dos_lvo::StrToDate, dt), DOSTRUE);
+    CHECK_EQ(r.get32(dt + dat_Stamp + ds_Days), 17853u);
+
+    r.str(date_buf, "99-Bad-26");
+    CHECK_EQ(r.call(dos_lvo::StrToDate, dt), DOSFALSE);
+
+    r.put8(dt + dat_Format, 99);
+    CHECK_EQ(r.call(dos_lvo::DateToStr, dt), DOSFALSE);
+}
+
+void compare_dates_sign() {
+    Rig r;
+    const u32 a = kData;
+    const u32 b = kData + 0x20;
+    auto put_ds = [&](u32 addr, u32 d, u32 min, u32 t) {
+        r.put32(addr + ds_Days, d);
+        r.put32(addr + ds_Minute, min);
+        r.put32(addr + ds_Tick, t);
+    };
+
+    put_ds(a, 100, 500, 1000);
+    put_ds(b, 100, 500, 1000);
+    CHECK_EQ(as_signed(r.call(dos_lvo::CompareDates, a, b)), 0);
+
+    // date1 earlier than date2 -> > 0.
+    put_ds(b, 101, 0, 0);
+    CHECK(as_signed(r.call(dos_lvo::CompareDates, a, b)) > 0);
+    put_ds(b, 100, 501, 0);
+    CHECK(as_signed(r.call(dos_lvo::CompareDates, a, b)) > 0);
+    put_ds(b, 100, 500, 1001);
+    CHECK(as_signed(r.call(dos_lvo::CompareDates, a, b)) > 0);
+
+    // date1 later than date2 -> < 0.
+    put_ds(b, 99, 1400, 2999);
+    CHECK(as_signed(r.call(dos_lvo::CompareDates, a, b)) < 0);
+    put_ds(b, 100, 499, 2999);
+    CHECK(as_signed(r.call(dos_lvo::CompareDates, a, b)) < 0);
+    put_ds(b, 100, 500, 999);
+    CHECK(as_signed(r.call(dos_lvo::CompareDates, a, b)) < 0);
+}
+
 }
 
 int main() {
@@ -2896,5 +3297,13 @@ int main() {
     exall_lists_a_directory();
     cli_queries();
     find_var_and_delete_var();
+    parse_and_match_pattern_lvos();
+    match_first_lists_wild_entries();
+    match_first_plain_name();
+    match_end_releases_anchor();
+    exall_honours_match_string();
+    date_stamp_uses_the_clock();
+    date_to_str_and_str_to_date();
+    compare_dates_sign();
     return check::finish("test_dos");
 }
