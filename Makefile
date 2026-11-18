@@ -188,6 +188,12 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
 	    "m68k: C:version returned 0" "shell: line: zzz" "shell: unknown command zzz" \
 	    "shell: line: \\xe5\\xe4\\xf6"
+	tools/boot_check.sh --disk $(TEST_DISK) \
+	    --keys "c d spc c ret c d ret c d spc shift-7 ret e c h o spc h e j ret p a t h ret w h y ret" \
+	    "shell: builtin cd returned 0" "HombreTest:C" "hej" \
+	    "shell: builtin echo returned 0" "Current_directory" \
+	    "shell: builtin path returned 0" "The last command did not set a return code" \
+	    "shell: builtin why returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "m o u s e t e s t ret" \
 	    --mouse-after "mousetest: ready" \
 	    --mouse "mouse_move 10 10;mouse_button 1;mouse_button 0;sendkey ctrl-c" \
@@ -231,6 +237,14 @@ check-workbench: image
 	    "intuition: screen opened 640x400" \
 	    "intuition: window opened HombreShell" "m68k: running C:Version" \
 	    "Kickstart 60.0, Workbench 40.42" "m68k: C:Version returned 0" "halting"
+	tools/boot_check.sh --disk "$$DISK" \
+	    --keys "d i r ret l i s t spc c ret t y p e spc s shift-dot s t a r t u p slash s e q u e n c e ret i n f o ret a s s i g n ret d a t e ret w h i c h spc d i r ret c d spc c ret c d spc shift-7 ret a s k spc q ret y ret w h y ret" \
+	    "m68k: C:dir returned 0" "m68k: C:list returned 0" "Directory \"C\" on" \
+	    "m68k: C:type returned 0" "Workbench3.1 [Mounted]" "m68k: C:info returned 0" \
+	    "LIBS           Workbench3.1:Libs" "m68k: C:assign returned 0" \
+	    "m68k: C:date returned 0" "m68k: C:which returned 0" \
+	    "shell: builtin cd returned 0" "shell: builtin ask returned 5" \
+	    "shell: builtin why returned 0"
 else
 check-workbench:
 	@echo "set DISK=<path to a Workbench .dms or .adf>" >&2; exit 1

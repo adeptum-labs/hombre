@@ -118,6 +118,12 @@ void log_line(const char* line) {
 }
 
 // What the program writes to the console. Newlines and tabs are kept.
+void poll_keys_while_running();
+
+// True while a command runs: its console output is also when the keyboard
+// is read, so keys typed during a long listing are not lost.
+constinit bool command_running = false;
+
 void console_write(void*, const u8* data, u32 bytes) {
     for (u32 i = 0; i < bytes; ++i) {
         const u8 c = data[i];
@@ -126,6 +132,9 @@ void console_write(void*, const u8* data, u32 bytes) {
     }
     if (shell.is_open()) {
         shell.write(data, bytes);
+    }
+    if (command_running) {
+        poll_keys_while_running();
     }
 }
 
@@ -300,8 +309,12 @@ bool slots_have_key(const u8* slots, u8 usage) {
     return false;
 }
 
-bool poll_input_while_running() {
-    poll_mouse();
+// Reads the keyboard while a command runs: Ctrl+C becomes the break signal
+// and other keys go to the queue the console input and the shell read.
+void poll_keys_while_running() {
+    if (usb_keyboard_status() != UsbStatus::Ready) {
+        return;
+    }
     u8 report[KeyDecoder::kReportBytes];
     for (u32 i = 0; i < poll_budget && usb_keyboard_poll(report); ++i) {
         const bool ctrl = (report[0] & (kModLCtrl | kModRCtrl)) != 0;
@@ -331,6 +344,11 @@ bool poll_input_while_running() {
             prev_key_slots[s] = slots[s];
         }
     }
+}
+
+bool poll_input_while_running() {
+    poll_mouse();
+    poll_keys_while_running();
     asm volatile("pause");
     // Without a keyboard nothing could stop a blocked program: let the run end.
     return usb_keyboard_status() == UsbStatus::Ready;
@@ -476,7 +494,9 @@ bool execute(const char* path, const char* args) {
 
     machine.cpu.exit = ExitReason::None;
     u32 result = 0;
+    command_running = true;
     const bool ok = dos.run_command(path, args, result, block_budget);
+    command_running = false;
     reclaim_after_program();
     if (!console_at_line_start) {
         serial::write_char('\n');
@@ -563,8 +583,9 @@ bool typed_builtin(void* ctx, const char* word, const char* args) {
     return true;
 }
 
-// A typed command may fault like any other; the next one starts clean. Any
-// leftover queued input after it finishes is dropped.
+// A typed command may fault like any other; the next one starts clean.
+// Keys typed while it ran and not read by it stay queued, and the shell
+// loop gives them to the line editor afterwards, as type-ahead.
 bool typed_run(void*, const char* path, const char* args) {
     const char* word = path;
     if (word[0] == 'C' && word[1] == ':') {
@@ -575,12 +596,6 @@ bool typed_run(void*, const char* path, const char* args) {
         return false;
     }
     const bool loaded = execute(cmd, args);
-    key_queue_clear();
-    usb_keyboard_drain();
-    typed_decoder.release_all();
-    for (usize i = 0; i < KeyDecoder::kKeySlots; ++i) {
-        prev_key_slots[i] = 0;
-    }
     if (loaded && (machine.cpu.exit == ExitReason::None ||
                    machine.cpu.exit == ExitReason::Returned)) {
         const u32 rc = dos.last_return_code();
@@ -613,6 +628,12 @@ bool typed_run(void*, const char* path, const char* args) {
     serial::write("shell: ready\n");
     while (usb_keyboard_status() == UsbStatus::Ready) {
         poll_mouse();
+        u8 queued = 0;
+        while (key_queue_pop(queued)) {
+            if (queued != ctrl_backslash) {
+                line_editor.key(queued);
+            }
+        }
         u8 report[8];
         if (usb_keyboard_poll(report)) {
             u8 chars[8];

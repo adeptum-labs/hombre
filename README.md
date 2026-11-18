@@ -46,6 +46,16 @@ Targets:
   `Unknown command <word>`). Input needs the controller and keyboard; without
   them the window says why and the boot ends. The serial port logs `usb:` and
   `shell:` lines, with each submitted line as `shell: line: <text>`.
+  The shell has the Workbench 3.1 builtins `Cd`, `Echo`, `Path`, `Why`,
+  `Prompt`, `Ask` and `Failat`; its prompt shows the current directory, and a
+  command whose return code reaches the fail level prints
+  `<word> failed returncode <n>`. Commands are searched in `C:` and the
+  `Path` directories. On a Workbench 3.1 disk the read-only commands work:
+  `Dir`, `List`, `Type`, `Info`, `Assign`, `Date` (from the PC's real-time
+  clock), `Which`, `Avail`, `Status` and `Version`. The disk stays read-only:
+  there is no RAM: disk and no `Run` yet. `tools/probe_commands.sh <disk>
+  "<line>"...` boots once per line and shows how each command ends, and
+  `make KCXXEXTRA=-DHOMBRE_TRACE_NATIVES` logs every library call.
   A USB mouse on the same controller moves an Amiga pointer on the screen,
   and Amiga programs get mouse events in windows that ask for them; Ctrl+C
   stops a program waiting for events. On the test disk, `mousetest` opens a
