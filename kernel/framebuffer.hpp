@@ -58,7 +58,7 @@ public:
     // rgb is 0xRRGGBB.
     void fill(u32 rgb) { fill_rect(0, 0, width_, height_, rgb); }
 
-    // Draws text with its top left corner at (x, y), 8 * scale pixels per
+    // character. Characters the font has no glyph for are drawn as '?'.
     // character. Characters outside printable ASCII are drawn as '?'.
     void draw_text(u32 x, u32 y, const char* text, u32 rgb, u32 scale) {
         if (text == nullptr || scale == 0 || x >= width_ || y >= height_) {
