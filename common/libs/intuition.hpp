@@ -78,7 +78,9 @@ public:
     // Opens a screen from the NewScreen at new_screen, overridden by the
     // tags at tags. Either may be 0. Returns the Screen, or 0 with a log.
     u32 open_screen(u32 new_screen, u32 tags);
-    void close_screen(u32 screen);
+
+    // Closes the screen unless it is unknown or still has open windows.
+    bool close_screen(u32 screen);
     void screen_to_front(u32 screen);
     u32 front_screen() const { return front_; }
 
@@ -89,18 +91,60 @@ public:
     void close_window(u32 window);
     void set_window_titles(u32 window, u32 title, u32 screen_title);
     void window_to_front(u32 window);
+    bool window_open(u32 window) const;
 
 private:
     friend struct IntuitionNatives;
 
     static constexpr u32 kVectors = intuition_lvo::Last / 6;
 
+    // What a screen owns in guest memory, so that closing it never has to
+    // believe a guest field.
+    struct ScreenRecord {
+        u32 addr = 0;
+        u32 screen_bytes = 0;
+        u32 planes = 0;
+        u32 planes_bytes = 0;
+        u32 colormap = 0;
+        u32 colormap_bytes = 0;
+        u32 colors = 0;
+        u32 colors_bytes = 0;
+        u32 title = 0;
+        u32 title_bytes = 0;
+        u32 width = 0;
+        u32 height = 0;
+        u32 first_window = 0;
+    };
+
+    // What a window owns, with its place in the screen's window list.
+    struct WindowRecord {
+        u32 addr = 0;
+        u32 window_bytes = 0;
+        u32 screen = 0;
+        u32 next_window = 0;
+        i32 left = 0;
+        i32 top = 0;
+        i32 width = 0;
+        i32 height = 0;
+        u32 rp = 0;
+        u32 rp_bytes = 0;
+        u32 layer = 0;
+        u32 layer_bytes = 0;
+        u32 title = 0;
+        u32 title_bytes = 0;
+    };
+
     u32 find_screen(u32 screen) const;
+    ScreenRecord* find_screen_record(u32 screen);
+    ScreenRecord* free_screen_record();
     void remove_at(u32 index);
     void write_links();
+    void write_window_links(u32 screen);
     void screen_to_back(u32 screen);
     void refresh_screen(u32 screen);
     u32 find_window(u32 window) const;
+    WindowRecord* find_window_record(u32 window);
+    WindowRecord* free_window_record();
     void remove_window_at(u32 index);
 
     m68k::Machine* machine_ = nullptr;
@@ -111,6 +155,8 @@ private:
     u32 front_ = 0;
     u32 screens_[kMaxScreens]{};
     u32 windows_[kMaxWindows]{};
+    ScreenRecord screen_records_[kMaxScreens]{};
+    WindowRecord window_records_[kMaxWindows]{};
     NativeVector vectors_[kVectors]{};
 };
 

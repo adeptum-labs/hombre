@@ -27,6 +27,8 @@
 #include "libs/raster.hpp"
 #include "libs/shell_window.hpp"
 
+#include <vector>
+
 using namespace hombre;
 using namespace hombre::m68k;
 using namespace hombre::ndk;
@@ -70,25 +72,31 @@ u32 shell_window(GfxRig& r, u32 screen) { return r.get32(screen + sc_FirstWindow
 u32 layer_of(GfxRig& r, u32 window) { return r.get32(window + wd_WLayer); }
 
 i32 inner_x(GfxRig& r, u32 window) {
-    return static_cast<i16>(r.get16(layer_of(r, window) + ly_MinX));
+    return static_cast<i16>(r.get16(layer_of(r, window) + ly_MinX)) +
+           static_cast<i32>(r.get8(window + wd_BorderLeft));
 }
 
 i32 inner_y(GfxRig& r, u32 window) {
-    return static_cast<i16>(r.get16(layer_of(r, window) + ly_MinY));
+    return static_cast<i16>(r.get16(layer_of(r, window) + ly_MinY)) +
+           static_cast<i32>(r.get8(window + wd_BorderTop));
 }
 
 u32 columns(GfxRig& r, u32 window) {
     const u32 layer = layer_of(r, window);
     const i32 min = static_cast<i16>(r.get16(layer + ly_MinX));
     const i32 max = static_cast<i16>(r.get16(layer + ly_MaxX));
-    return static_cast<u32>(max - min + 1) / 8;
+    const i32 borders = static_cast<i32>(r.get8(window + wd_BorderLeft)) +
+                        static_cast<i32>(r.get8(window + wd_BorderRight));
+    return static_cast<u32>(max - min + 1 - borders) / 8;
 }
 
 u32 rows(GfxRig& r, u32 window) {
     const u32 layer = layer_of(r, window);
     const i32 min = static_cast<i16>(r.get16(layer + ly_MinY));
     const i32 max = static_cast<i16>(r.get16(layer + ly_MaxY));
-    return static_cast<u32>(max - min + 1) / 8;
+    const i32 borders = static_cast<i32>(r.get8(window + wd_BorderTop)) +
+                        static_cast<i32>(r.get8(window + wd_BorderBottom));
+    return static_cast<u32>(max - min + 1 - borders) / 8;
 }
 
 raster::Bitmap screen_bitmap(GfxRig& r, u32 screen) {
@@ -107,6 +115,17 @@ raster::Bitmap screen_bitmap(GfxRig& r, u32 screen) {
 u32 pixel(GfxRig& r, const raster::Bitmap& bm, i32 x, i32 y) {
     native::Bus bus(r.machine);
     return raster::read_pixel(bus, bm, x, y);
+}
+
+std::vector<u8> screen_planes(GfxRig& r, u32 screen) {
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 bytes = bm.bytes_per_row * bm.rows;
+    std::vector<u8> out(bytes * 2);
+    for (u32 i = 0; i < bytes; ++i) {
+        out[i] = static_cast<u8>(r.get8(bm.planes[0] + i));
+        out[bytes + i] = static_cast<u8>(r.get8(bm.planes[1] + i));
+    }
+    return out;
 }
 
 bool cell_is(GfxRig& r, const raster::Bitmap& bm, i32 ix, i32 iy, u32 column, u32 row, char ch) {
@@ -155,7 +174,7 @@ void open_gives_a_window_on_the_front_screen() {
     const u32 window = shell_window(r, screen);
     CHECK(window != 0);
     CHECK_EQ(r.get32(window + wd_WScreen), screen);
-    const u32 flags = r.get16(window + wd_Flags) &
+    const u32 flags = r.get32(window + wd_Flags) &
                       (WFLG_DEPTHGADGET | WFLG_CLOSEGADGET | WFLG_DRAGBAR);
     CHECK_EQ(flags, static_cast<u32>(WFLG_DEPTHGADGET | WFLG_CLOSEGADGET | WFLG_DRAGBAR));
     CHECK(r.read_str(r.get32(window + wd_Title)) == "AmigaShell");
@@ -360,6 +379,50 @@ void close_is_idempotent() {
     shell.write(text, 1);
 }
 
+void shell_is_not_open_after_its_window_is_closed() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+
+    r.intuition.close_window(window);
+    const std::vector<u8> before = screen_planes(r, screen);
+    const usize refreshes = r.refreshes.size();
+    const usize screens = r.refreshed_screens.size();
+
+    CHECK(!shell.is_open());
+    const u8 text[] = {'H'};
+    shell.write(text, 1);
+    shell.write_prompt(1, "X");
+    shell.close();
+    CHECK(screen_planes(r, screen) == before);
+    CHECK_EQ(r.refreshes.size(), refreshes);
+    CHECK_EQ(r.refreshed_screens.size(), screens);
+}
+
+void shell_is_not_open_after_its_screen_is_closed() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+
+    CHECK(!r.intuition.close_screen(screen));
+    CHECK_EQ(r.intuition.front_screen(), screen);
+    CHECK(shell.is_open());
+
+    r.intuition.close_window(window);
+    CHECK(r.intuition.close_screen(screen));
+    CHECK_EQ(r.intuition.front_screen(), 0u);
+    CHECK(!shell.is_open());
+    CHECK(!r.intuition.window_open(window));
+}
+
 }
 
 int main() {
@@ -374,5 +437,7 @@ int main() {
     non_printable_bytes_draw_question_mark();
     sink_forwards_to_write();
     close_is_idempotent();
+    shell_is_not_open_after_its_window_is_closed();
+    shell_is_not_open_after_its_screen_is_closed();
     return check::finish("test_shell_window");
 }

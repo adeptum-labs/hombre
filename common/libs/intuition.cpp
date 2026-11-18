@@ -136,8 +136,10 @@ void read_tags(Bus& b, u32 tags, OpenArgs& a) {
 }
 
 // Copies the guest string at src into a fresh block, NUL included; 0 if
-// there is no memory or the string cannot be read.
-u32 copy_title(Bus& b, Exec& exec, u32 src) {
+// there is no memory or the string cannot be read. bytes is the size of
+// the block that was allocated.
+u32 copy_title(Bus& b, Exec& exec, u32 src, u32& bytes) {
+    bytes = 0;
     u32 length = 0;
     while (b.r8(src + length) != 0) {
         if (!b.ok() || ++length == kMaxTitleChars) {
@@ -155,17 +157,8 @@ u32 copy_title(Bus& b, Exec& exec, u32 src) {
         exec.free(at, length + 1);
         return 0;
     }
+    bytes = length + 1;
     return at;
-}
-
-u32 title_length(Bus& b, u32 title) {
-    u32 length = 0;
-    if (title != 0) {
-        while (b.r8(title + length) != 0 && b.ok()) {
-            ++length;
-        }
-    }
-    return length + 1;
 }
 
 void refresh_full(DisplayState& display, Machine& m, u32 screen, u32 width, u32 height) {
@@ -240,7 +233,7 @@ void read_new_window(Bus& b, u32 nw, WindowArgs& a) {
     a.height = b.r16(nw + ndk::nw_Height);
     a.detail = b.r8(nw + ndk::nw_DetailPen);
     a.block = b.r8(nw + ndk::nw_BlockPen);
-    a.flags = b.r16(nw + ndk::nw_Flags);
+    a.flags = b.r32(nw + ndk::nw_Flags);
     a.title = b.r32(nw + ndk::nw_Title);
     a.screen = b.r32(nw + ndk::nw_Screen);
     a.min_width = b.r16(nw + ndk::nw_MinWidth);
@@ -319,8 +312,6 @@ void read_window_tags(Bus& b, u32 tags, WindowArgs& a) {
 struct WindowView {
     u32 window = 0;
     u32 screen = 0;
-    u32 rp = 0;
-    u32 layer = 0;
     i32 left = 0;
     i32 top = 0;
     i32 width = 0;
@@ -341,11 +332,9 @@ WindowView load_window(Bus& b, u32 window) {
     w.top = static_cast<i16>(b.r16(window + ndk::wd_TopEdge));
     w.width = b.r16(window + ndk::wd_Width);
     w.height = b.r16(window + ndk::wd_Height);
-    w.flags = b.r16(window + ndk::wd_Flags);
+    w.flags = b.r32(window + ndk::wd_Flags);
     w.title = b.r32(window + ndk::wd_Title);
     w.screen = b.r32(window + ndk::wd_WScreen);
-    w.rp = b.r32(window + ndk::wd_RPort);
-    w.layer = b.r32(window + ndk::wd_WLayer);
     w.border_top = b.r8(window + ndk::wd_BorderTop);
     w.ok = b.ok();
     return w;
@@ -408,7 +397,9 @@ void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w) {
 struct IntuitionNatives {
     static Intuition& of(void* ctx) { return *static_cast<Intuition*>(ctx); }
 
-    static void close_screen(void* ctx, Machine& m) { of(ctx).close_screen(m.cpu.a[0]); }
+    static void close_screen(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).close_screen(m.cpu.a[0]) ? 1 : 0);
+    }
 
     static void open_screen(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).open_screen(m.cpu.a[0], 0));
@@ -515,6 +506,12 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     for (u32& window : windows_) {
         window = 0;
     }
+    for (ScreenRecord& rec : screen_records_) {
+        rec = ScreenRecord{};
+    }
+    for (WindowRecord& rec : window_records_) {
+        rec = WindowRecord{};
+    }
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -549,6 +546,24 @@ void Intuition::remove_at(u32 index) {
     screens_[kMaxScreens - 1] = 0;
 }
 
+Intuition::ScreenRecord* Intuition::find_screen_record(u32 screen) {
+    for (ScreenRecord& rec : screen_records_) {
+        if (rec.addr == screen) {
+            return &rec;
+        }
+    }
+    return nullptr;
+}
+
+Intuition::ScreenRecord* Intuition::free_screen_record() {
+    for (ScreenRecord& rec : screen_records_) {
+        if (rec.addr == 0) {
+            return &rec;
+        }
+    }
+    return nullptr;
+}
+
 void Intuition::write_links() {
     Bus b(*machine_);
     for (u32 i = 0; i < kMaxScreens; ++i) {
@@ -559,16 +574,34 @@ void Intuition::write_links() {
     }
 }
 
+// Writes the guest window list from the records, head first.
+void Intuition::write_window_links(u32 screen) {
+    ScreenRecord* srec = find_screen_record(screen);
+    if (srec == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    b.w32(screen + ndk::sc_FirstWindow, srec->first_window);
+    u32 window = srec->first_window;
+    for (u32 step = 0; step < kMaxWindows && window != 0; ++step) {
+        WindowRecord* rec = find_window_record(window);
+        if (rec == nullptr) {
+            return;
+        }
+        b.w32(window + ndk::wd_NextWindow, rec->next_window);
+        window = rec->next_window;
+    }
+}
+
 void Intuition::refresh_screen(u32 screen) {
     if (screen == 0 || display_ == nullptr) {
         return;
     }
-    Bus b(*machine_);
-    const u32 width = b.r16(screen + ndk::sc_Width);
-    const u32 height = b.r16(screen + ndk::sc_Height);
-    if (b.ok()) {
-        refresh_full(*display_, *machine_, screen, width, height);
+    const ScreenRecord* rec = find_screen_record(screen);
+    if (rec == nullptr) {
+        return;
     }
+    refresh_full(*display_, *machine_, screen, rec->width, rec->height);
 }
 
 u32 Intuition::open_screen(u32 new_screen, u32 tags) {
@@ -611,6 +644,11 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
         LogLine().text("intuition: screen limit reached").send();
         return 0;
     }
+    ScreenRecord* rec = free_screen_record();
+    if (rec == nullptr) {
+        LogLine().text("intuition: screen limit reached").send();
+        return 0;
+    }
 
     const u64 bytes_per_row = (static_cast<u64>(a.width) + 15) / 16 * 2;
     const u64 planes_bytes = 2 * bytes_per_row * a.height;
@@ -648,8 +686,9 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
         return 0;
     }
     u32 title = 0;
+    u32 title_bytes = 0;
     if (a.title != 0) {
-        title = copy_title(b, *exec_, a.title);
+        title = copy_title(b, *exec_, a.title, title_bytes);
         if (title == 0) {
             exec_->free(colors, 8);
             exec_->free(map, ndk::ColorMap_SIZEOF);
@@ -708,6 +747,19 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     front_ = screen;
     display_->front_screen = screen;
     write_links();
+    rec->addr = screen;
+    rec->screen_bytes = ndk::Screen_SIZEOF;
+    rec->planes = planes;
+    rec->planes_bytes = static_cast<u32>(planes_bytes);
+    rec->colormap = map;
+    rec->colormap_bytes = ndk::ColorMap_SIZEOF;
+    rec->colors = colors;
+    rec->colors_bytes = 8;
+    rec->title = title;
+    rec->title_bytes = title_bytes;
+    rec->width = a.width;
+    rec->height = a.height;
+    rec->first_window = 0;
 
     const i32 right = static_cast<i32>(a.width) - 1;
     const i32 bottom = static_cast<i32>(a.height) - 1;
@@ -725,49 +777,40 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     return screen;
 }
 
-void Intuition::close_screen(u32 screen) {
+bool Intuition::close_screen(u32 screen) {
     const u32 index = find_screen(screen);
     if (index >= kMaxScreens) {
-        return;
+        return false;
     }
-    Bus b(*machine_);
-    u32 doomed[kMaxWindows];
-    u32 doomed_count = 0;
-    for (u32 window : windows_) {
-        if (window != 0 && b.r32(window + ndk::wd_WScreen) == screen) {
-            doomed[doomed_count++] = window;
+    for (const WindowRecord& window : window_records_) {
+        if (window.addr != 0 && window.screen == screen) {
+            return false;
         }
     }
-    for (u32 i = 0; i < doomed_count; ++i) {
-        close_window(doomed[i]);
+    ScreenRecord* rec = find_screen_record(screen);
+    if (rec == nullptr) {
+        return false;
     }
-    const u32 width = b.r16(screen + ndk::sc_Width);
-    const u32 height = b.r16(screen + ndk::sc_Height);
-    const u32 title = b.r32(screen + ndk::sc_Title);
-    const u32 bitmap = screen + ndk::sc_BitMap;
-    const u32 bpr = b.r16(bitmap + ndk::bm_BytesPerRow);
-    const u32 rows = b.r16(bitmap + ndk::bm_Rows);
-    const u32 planes = b.r32(bitmap + ndk::bm_Planes);
-    const u32 map = b.r32(screen + ndk::sc_ViewPort + ndk::vp_ColorMap);
-    const u32 colors = map != 0 ? b.r32(map + ndk::cm_ColorTable) : 0;
-    const u32 title_size = title_length(b, title);
     const bool was_front = index == 0;
+    const u32 width = rec->width;
+    const u32 height = rec->height;
 
     remove_at(index);
     write_links();
-    if (planes != 0) {
-        exec_->free(planes, 2 * bpr * rows);
+    if (rec->planes != 0) {
+        exec_->free(rec->planes, rec->planes_bytes);
     }
-    if (colors != 0) {
-        exec_->free(colors, 8);
+    if (rec->colors != 0) {
+        exec_->free(rec->colors, rec->colors_bytes);
     }
-    if (map != 0) {
-        exec_->free(map, ndk::ColorMap_SIZEOF);
+    if (rec->colormap != 0) {
+        exec_->free(rec->colormap, rec->colormap_bytes);
     }
-    if (title != 0) {
-        exec_->free(title, title_size);
+    if (rec->title != 0) {
+        exec_->free(rec->title, rec->title_bytes);
     }
-    exec_->free(screen, ndk::Screen_SIZEOF);
+    exec_->free(screen, rec->screen_bytes);
+    *rec = ScreenRecord{};
 
     if (was_front) {
         front_ = screens_[0];
@@ -778,6 +821,7 @@ void Intuition::close_screen(u32 screen) {
             refresh_full(*display_, *machine_, 0, width, height);
         }
     }
+    return true;
 }
 
 void Intuition::screen_to_front(u32 screen) {
@@ -828,6 +872,24 @@ u32 Intuition::find_window(u32 window) const {
     return kMaxWindows;
 }
 
+Intuition::WindowRecord* Intuition::find_window_record(u32 window) {
+    for (WindowRecord& rec : window_records_) {
+        if (rec.addr == window) {
+            return &rec;
+        }
+    }
+    return nullptr;
+}
+
+Intuition::WindowRecord* Intuition::free_window_record() {
+    for (WindowRecord& rec : window_records_) {
+        if (rec.addr == 0) {
+            return &rec;
+        }
+    }
+    return nullptr;
+}
+
 void Intuition::remove_window_at(u32 index) {
     for (u32 i = index; i + 1 < kMaxWindows; ++i) {
         windows_[i] = windows_[i + 1];
@@ -876,6 +938,12 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         LogLine().text("intuition: window limit reached").send();
         return 0;
     }
+    WindowRecord* rec = free_window_record();
+    ScreenRecord* srec = find_screen_record(screen);
+    if (rec == nullptr || srec == nullptr) {
+        LogLine().text("intuition: window limit reached").send();
+        return 0;
+    }
 
     i32 left = a.left < 0 ? 0 : a.left;
     i32 top = a.top < 0 ? 0 : a.top;
@@ -913,8 +981,9 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         return 0;
     }
     u32 title = 0;
+    u32 title_bytes = 0;
     if (a.title != 0) {
-        title = copy_title(b, *exec_, a.title);
+        title = copy_title(b, *exec_, a.title, title_bytes);
         if (title == 0) {
             exec_->free(layer, ndk::Layer_SIZEOF);
             exec_->free(rp, ndk::RastPort_SIZEOF);
@@ -933,7 +1002,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w16(window + ndk::wd_MinHeight, a.min_height);
     b.w16(window + ndk::wd_MaxWidth, a.max_width);
     b.w16(window + ndk::wd_MaxHeight, a.max_height);
-    b.w16(window + ndk::wd_Flags, a.flags);
+    b.w32(window + ndk::wd_Flags, a.flags);
     b.w32(window + ndk::wd_Title, title);
     b.w32(window + ndk::wd_WScreen, screen);
     b.w32(window + ndk::wd_RPort, rp);
@@ -956,20 +1025,31 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w16(rp + ndk::rp_cp_x, 0);
     b.w16(rp + ndk::rp_cp_y, 6);
 
-    const i32 inner_x0 = left + 1;
-    const i32 inner_y0 = top + static_cast<i32>(border_top);
-    const i32 inner_x1 = left + width - 2;
-    const i32 inner_y1 = top + height - 2;
+    const i32 right = left + width - 1;
+    const i32 bottom = top + height - 1;
     b.w32(layer + ndk::ly_rp, rp);
-    b.w16(layer + ndk::ly_MinX, static_cast<u32>(inner_x0));
-    b.w16(layer + ndk::ly_MinY, static_cast<u32>(inner_y0));
-    b.w16(layer + ndk::ly_MaxX, static_cast<u32>(inner_x1));
-    b.w16(layer + ndk::ly_MaxY, static_cast<u32>(inner_y1));
+    b.w16(layer + ndk::ly_MinX, static_cast<u32>(left));
+    b.w16(layer + ndk::ly_MinY, static_cast<u32>(top));
+    b.w16(layer + ndk::ly_MaxX, static_cast<u32>(right));
+    b.w16(layer + ndk::ly_MaxY, static_cast<u32>(bottom));
     b.w32(layer + ndk::ly_Window, window);
 
-    const u32 head = b.r32(screen + ndk::sc_FirstWindow);
-    b.w32(window + ndk::wd_NextWindow, head);
-    b.w32(screen + ndk::sc_FirstWindow, window);
+    rec->addr = window;
+    rec->window_bytes = ndk::Window_SIZEOF;
+    rec->screen = screen;
+    rec->next_window = srec->first_window;
+    rec->left = left;
+    rec->top = top;
+    rec->width = width;
+    rec->height = height;
+    rec->rp = rp;
+    rec->rp_bytes = ndk::RastPort_SIZEOF;
+    rec->layer = layer;
+    rec->layer_bytes = ndk::Layer_SIZEOF;
+    rec->title = title;
+    rec->title_bytes = title_bytes;
+    srec->first_window = window;
+    write_window_links(screen);
     for (u32& slot : windows_) {
         if (slot == 0) {
             slot = window;
@@ -986,45 +1066,53 @@ void Intuition::close_window(u32 window) {
     if (index >= kMaxWindows) {
         return;
     }
-    Bus b(*machine_);
-    const WindowView w = load_window(b, window);
-    if (!w.ok) {
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
         remove_window_at(index);
-        exec_->free(window, ndk::Window_SIZEOF);
         return;
     }
-    if (find_screen(w.screen) < kMaxScreens) {
-        const u32 next = b.r32(window + ndk::wd_NextWindow);
-        const u32 head = b.r32(w.screen + ndk::sc_FirstWindow);
-        if (head == window) {
-            b.w32(w.screen + ndk::sc_FirstWindow, next);
+    const u32 screen = rec->screen;
+    const i32 left = rec->left;
+    const i32 top = rec->top;
+    const i32 width = rec->width;
+    const i32 height = rec->height;
+
+    ScreenRecord* srec = find_screen_record(screen);
+    if (srec != nullptr) {
+        if (srec->first_window == window) {
+            srec->first_window = rec->next_window;
         } else {
-            u32 prev = head;
+            u32 prev = srec->first_window;
             for (u32 step = 0; step < kMaxWindows && prev != 0; ++step) {
-                const u32 link = b.r32(prev + ndk::wd_NextWindow);
-                if (link == window) {
-                    b.w32(prev + ndk::wd_NextWindow, next);
+                WindowRecord* prec = find_window_record(prev);
+                if (prec == nullptr) {
                     break;
                 }
-                prev = link;
+                if (prec->next_window == window) {
+                    prec->next_window = rec->next_window;
+                    break;
+                }
+                prev = prec->next_window;
             }
         }
-        const u32 rp = w.screen + ndk::sc_RastPort;
+        write_window_links(screen);
+        const u32 rp = screen + ndk::sc_RastPort;
         graphics_->set_pens(rp, 0, 0, ndk::JAM2);
-        graphics_->rect_fill(rp, w.left, w.top, w.left + w.width - 1, w.top + w.height - 1);
+        graphics_->rect_fill(rp, left, top, left + width - 1, top + height - 1);
     }
-    const u32 title_size = title_length(b, w.title);
+
     remove_window_at(index);
-    if (w.title != 0) {
-        exec_->free(w.title, title_size);
+    if (rec->title != 0) {
+        exec_->free(rec->title, rec->title_bytes);
     }
-    if (w.layer != 0) {
-        exec_->free(w.layer, ndk::Layer_SIZEOF);
+    if (rec->layer != 0) {
+        exec_->free(rec->layer, rec->layer_bytes);
     }
-    if (w.rp != 0) {
-        exec_->free(w.rp, ndk::RastPort_SIZEOF);
+    if (rec->rp != 0) {
+        exec_->free(rec->rp, rec->rp_bytes);
     }
-    exec_->free(window, ndk::Window_SIZEOF);
+    exec_->free(window, rec->window_bytes);
+    *rec = WindowRecord{};
 }
 
 void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
@@ -1032,41 +1120,47 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
     if (index >= kMaxWindows) {
         return;
     }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return;
+    }
     Bus b(*machine_);
     bool redraw = false;
     if (title != 0xFFFFFFFF) {
         u32 copy = 0;
+        u32 bytes = 0;
         if (title != 0) {
-            copy = copy_title(b, *exec_, title);
+            copy = copy_title(b, *exec_, title, bytes);
             if (copy == 0) {
                 return;
             }
         }
-        const u32 old = b.r32(window + ndk::wd_Title);
-        const u32 old_size = title_length(b, old);
-        b.w32(window + ndk::wd_Title, copy);
-        if (old != 0) {
-            exec_->free(old, old_size);
+        if (rec->title != 0) {
+            exec_->free(rec->title, rec->title_bytes);
         }
+        rec->title = copy;
+        rec->title_bytes = bytes;
+        b.w32(window + ndk::wd_Title, copy);
         redraw = true;
     }
     if (screen_title != 0xFFFFFFFF) {
-        const WindowView w = load_window(b, window);
-        if (w.ok && find_screen(w.screen) < kMaxScreens) {
+        ScreenRecord* srec = find_screen_record(rec->screen);
+        if (srec != nullptr) {
             u32 copy = 0;
+            u32 bytes = 0;
             if (screen_title != 0) {
-                copy = copy_title(b, *exec_, screen_title);
+                copy = copy_title(b, *exec_, screen_title, bytes);
                 if (copy == 0) {
                     return;
                 }
             }
-            const u32 old = b.r32(w.screen + ndk::sc_Title);
-            const u32 old_size = title_length(b, old);
-            b.w32(w.screen + ndk::sc_Title, copy);
-            b.w32(w.screen + ndk::sc_DefaultTitle, copy);
-            if (old != 0) {
-                exec_->free(old, old_size);
+            if (srec->title != 0) {
+                exec_->free(srec->title, srec->title_bytes);
             }
+            srec->title = copy;
+            srec->title_bytes = bytes;
+            b.w32(rec->screen + ndk::sc_Title, copy);
+            b.w32(rec->screen + ndk::sc_DefaultTitle, copy);
         }
     }
     if (redraw) {
@@ -1082,32 +1176,33 @@ void Intuition::window_to_front(u32 window) {
     if (index >= kMaxWindows) {
         return;
     }
-    Bus b(*machine_);
-    const u32 screen = b.r32(window + ndk::wd_WScreen);
-    if (!b.ok() || screen == 0 || find_screen(screen) >= kMaxScreens) {
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
         return;
     }
-    const u32 head = b.r32(screen + ndk::sc_FirstWindow);
-    if (head == window) {
+    ScreenRecord* srec = find_screen_record(rec->screen);
+    if (srec == nullptr || srec->first_window == window) {
         return;
     }
-    u32 prev = head;
-    u32 next = 0;
-    bool found = false;
+    u32 prev = srec->first_window;
     for (u32 step = 0; step < kMaxWindows && prev != 0; ++step) {
-        next = b.r32(prev + ndk::wd_NextWindow);
-        if (next == window) {
-            found = true;
-            break;
+        WindowRecord* prec = find_window_record(prev);
+        if (prec == nullptr) {
+            return;
         }
-        prev = next;
+        if (prec->next_window == window) {
+            prec->next_window = rec->next_window;
+            rec->next_window = srec->first_window;
+            srec->first_window = window;
+            write_window_links(rec->screen);
+            return;
+        }
+        prev = prec->next_window;
     }
-    if (!found) {
-        return;
-    }
-    b.w32(prev + ndk::wd_NextWindow, b.r32(window + ndk::wd_NextWindow));
-    b.w32(window + ndk::wd_NextWindow, head);
-    b.w32(screen + ndk::sc_FirstWindow, window);
+}
+
+bool Intuition::window_open(u32 window) const {
+    return find_window(window) < kMaxWindows;
 }
 
 }

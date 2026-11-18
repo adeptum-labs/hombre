@@ -71,7 +71,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     b.w8(nw + ndk::nw_DetailPen, 0);
     b.w8(nw + ndk::nw_BlockPen, 1);
     b.w16(nw + ndk::nw_IDCMPFlags, 0);
-    b.w16(nw + ndk::nw_Flags,
+    b.w32(nw + ndk::nw_Flags,
            ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET | ndk::WFLG_DRAGBAR);
     b.w32(nw + ndk::nw_Title, title);
     b.w32(nw + ndk::nw_Screen, display.front_screen);
@@ -102,12 +102,16 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     const i32 min_y = static_cast<i16>(b.r16(layer + ndk::ly_MinY));
     const i32 max_x = static_cast<i16>(b.r16(layer + ndk::ly_MaxX));
     const i32 max_y = static_cast<i16>(b.r16(layer + ndk::ly_MaxY));
+    const i32 border_left = static_cast<i32>(b.r8(window + ndk::wd_BorderLeft));
+    const i32 border_top = static_cast<i32>(b.r8(window + ndk::wd_BorderTop));
+    const i32 border_right = static_cast<i32>(b.r8(window + ndk::wd_BorderRight));
+    const i32 border_bottom = static_cast<i32>(b.r8(window + ndk::wd_BorderBottom));
     if (!b.ok()) {
         intuition.close_window(window);
         return false;
     }
-    const i32 width = max_x - min_x + 1;
-    const i32 height = max_y - min_y + 1;
+    const i32 width = max_x - min_x + 1 - border_left - border_right;
+    const i32 height = max_y - min_y + 1 - border_top - border_bottom;
     if (width <= 0 || height <= 0) {
         intuition.close_window(window);
         return false;
@@ -117,6 +121,8 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     graphics_ = &gfx;
     window_ = window;
     rp_ = rp;
+    origin_x_ = border_left;
+    origin_y_ = border_top;
     inner_w_ = width;
     inner_h_ = height;
     columns_ = static_cast<u32>(width) / kCell;
@@ -127,8 +133,12 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     return true;
 }
 
+bool ShellWindow::is_open() const {
+    return window_ != 0 && intuition_ != nullptr && intuition_->window_open(window_);
+}
+
 void ShellWindow::write(const u8* data, u32 bytes) {
-    if (window_ == 0 || data == nullptr || columns_ == 0 || rows_ == 0) {
+    if (!is_open() || data == nullptr || columns_ == 0 || rows_ == 0) {
         return;
     }
     if (bytes > kMaxWrite) {
@@ -141,7 +151,7 @@ void ShellWindow::write(const u8* data, u32 bytes) {
 }
 
 void ShellWindow::write_prompt(u32 cli_number, const char* volume) {
-    if (window_ == 0) {
+    if (!is_open()) {
         return;
     }
     if (col_ != 0) {
@@ -177,7 +187,7 @@ void ShellWindow::write_prompt(u32 cli_number, const char* volume) {
 }
 
 void ShellWindow::close() {
-    if (window_ != 0 && intuition_ != nullptr) {
+    if (is_open()) {
         intuition_->close_window(window_);
     }
     window_ = 0;
@@ -232,12 +242,13 @@ void ShellWindow::advance_row() {
         return;
     }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
-    graphics_->scroll(rp_, 0, static_cast<i32>(kCell), 0, 0, inner_w_ - 1, inner_h_ - 1);
+    graphics_->scroll(rp_, 0, static_cast<i32>(kCell), origin_x_, origin_y_,
+                      origin_x_ + inner_w_ - 1, origin_y_ + inner_h_ - 1);
 }
 
 void ShellWindow::draw_cell(u8 c) {
-    graphics_->move(rp_, static_cast<i32>(col_ * kCell),
-                    static_cast<i32>(row_ * kCell) + static_cast<i32>(kBaseline));
+    graphics_->move(rp_, origin_x_ + static_cast<i32>(col_ * kCell),
+                    origin_y_ + static_cast<i32>(row_ * kCell) + static_cast<i32>(kBaseline));
     graphics_->text(rp_, &c, 1);
 }
 
@@ -246,8 +257,8 @@ void ShellWindow::draw_cursor() {
         return;
     }
     graphics_->set_pens(rp_, 1, 1, ndk::JAM2);
-    const i32 x = static_cast<i32>(col_ * kCell);
-    const i32 y = static_cast<i32>(row_ * kCell);
+    const i32 x = origin_x_ + static_cast<i32>(col_ * kCell);
+    const i32 y = origin_y_ + static_cast<i32>(row_ * kCell);
     graphics_->rect_fill(rp_, x, y, x + static_cast<i32>(kCell) - 1,
                          y + static_cast<i32>(kCell) - 1);
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);

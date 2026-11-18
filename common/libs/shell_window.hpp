@@ -48,7 +48,7 @@ public:
 
     void write(const u8* data, u32 bytes);
     void write_prompt(u32 cli_number, const char* volume);
-    bool is_open() const { return window_ != 0; }
+    bool is_open() const;
     void close();
 
     // The ConsoleWrite sink of dos.hpp: writes the bytes to the window.
@@ -64,6 +64,8 @@ private:
     Graphics* graphics_ = nullptr;
     u32 window_ = 0;
     u32 rp_ = 0;
+    i32 origin_x_ = 0;
+    i32 origin_y_ = 0;
     i32 inner_w_ = 0;
     i32 inner_h_ = 0;
     u32 columns_ = 0;
