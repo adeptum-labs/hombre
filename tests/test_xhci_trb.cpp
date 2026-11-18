@@ -81,6 +81,38 @@ void trb_builders_set_type_and_fields() {
     CHECK(normal.control & (1u << 5));
 }
 
+void context_and_endpoint_builders_set_type_and_fields() {
+    const xhci::Trb evaluate = xhci::make_evaluate_context(0x7000, 6);
+    CHECK_EQ(xhci::trb_type(evaluate.control), 13u);
+    CHECK_EQ(evaluate.parameter, 0x7000u);
+    CHECK_EQ((evaluate.control >> 24) & 0xFFu, 6u);
+
+    const xhci::Trb reset = xhci::make_reset_endpoint(4, 3);
+    CHECK_EQ(xhci::trb_type(reset.control), 14u);
+    CHECK_EQ(reset.parameter, 0u);
+    CHECK_EQ((reset.control >> 24) & 0xFFu, 4u);
+    CHECK_EQ((reset.control >> 16) & 0x1Fu, 3u);
+
+    const xhci::Trb dequeue = xhci::make_set_tr_dequeue_pointer(0x9001, 4, 3);
+    CHECK_EQ(xhci::trb_type(dequeue.control), 16u);
+    CHECK_EQ(dequeue.parameter, 0x9001u);
+    CHECK_EQ((dequeue.control >> 24) & 0xFFu, 4u);
+    CHECK_EQ((dequeue.control >> 16) & 0x1Fu, 3u);
+}
+
+void scratchpad_count_swaps_hi_and_lo_correctly() {
+    CHECK_EQ(xhci::scratchpad_count(1u << 21), 32u);
+    CHECK_EQ(xhci::scratchpad_count(31u << 27), 31u);
+    CHECK_EQ(xhci::scratchpad_count(0), 0u);
+    CHECK_EQ(xhci::scratchpad_count((31u << 27) | (31u << 21)), 1023u);
+}
+
+void next_extended_capability_is_relative() {
+    CHECK_EQ(xhci::next_extended_capability(0x20, 4u << 8), 0x30u);
+    CHECK_EQ(xhci::next_extended_capability(0x20, 0), 0u);
+    CHECK_EQ(xhci::next_extended_capability(0x40, 2u << 8), 0x48u);
+}
+
 void producer_ring_writes_cycle_bits_and_wraps() {
     xhci::Trb ring[8] = {};
     xhci::ProducerRing producer;
@@ -251,6 +283,9 @@ void default_ep0_max_packet() {
 
 int main() {
     trb_builders_set_type_and_fields();
+    context_and_endpoint_builders_set_type_and_fields();
+    scratchpad_count_swaps_hi_and_lo_correctly();
+    next_extended_capability_is_relative();
     producer_ring_writes_cycle_bits_and_wraps();
     producer_ring_rejects_tiny_rings();
     event_ring_pops_in_order_and_wraps();

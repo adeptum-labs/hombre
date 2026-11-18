@@ -50,6 +50,9 @@ inline constexpr u32 kTrbLink = 6;
 inline constexpr u32 kTrbEnableSlot = 9;
 inline constexpr u32 kTrbAddressDevice = 11;
 inline constexpr u32 kTrbConfigureEndpoint = 12;
+inline constexpr u32 kTrbEvaluateContext = 13;
+inline constexpr u32 kTrbResetEndpoint = 14;
+inline constexpr u32 kTrbSetTrDequeuePointer = 16;
 inline constexpr u32 kTrbNoOpCommand = 23;
 inline constexpr u32 kTrbTransferEvent = 32;
 inline constexpr u32 kTrbCommandCompletionEvent = 33;
@@ -91,6 +94,25 @@ constexpr Trb make_configure_endpoint(u64 input_context, u8 slot) {
             (static_cast<u32>(slot) << kTrbSlotShift) | (kTrbConfigureEndpoint << kTrbTypeShift)};
 }
 
+constexpr Trb make_evaluate_context(u64 input_context, u8 slot) {
+    return {input_context, 0,
+            (static_cast<u32>(slot) << kTrbSlotShift) |
+                (kTrbEvaluateContext << kTrbTypeShift)};
+}
+
+constexpr Trb make_reset_endpoint(u8 slot, u8 endpoint) {
+    return {0, 0,
+            (static_cast<u32>(slot) << kTrbSlotShift) |
+                (static_cast<u32>(endpoint) << 16) | (kTrbResetEndpoint << kTrbTypeShift)};
+}
+
+constexpr Trb make_set_tr_dequeue_pointer(u64 dequeue, u8 slot, u8 endpoint) {
+    return {dequeue, 0,
+            (static_cast<u32>(slot) << kTrbSlotShift) |
+                (static_cast<u32>(endpoint) << 16) |
+                (kTrbSetTrDequeuePointer << kTrbTypeShift)};
+}
+
 constexpr Trb make_link(u64 next, bool toggle_cycle) {
     return {next, 0, (kTrbLink << kTrbTypeShift) | (toggle_cycle ? kTrbToggleCycle : 0u)};
 }
@@ -116,6 +138,19 @@ constexpr Trb make_normal(u64 buffer, u16 length) {
     return {buffer, length, (kTrbNormal << kTrbTypeShift) | kTrbIoc};
 }
 
+// The number of scratchpad buffers in HCSPARAMS2. Bits 25:21 hold the high
+// five bits of the count and bits 31:27 the low five.
+constexpr u32 scratchpad_count(u32 hcsparams2) {
+    return (((hcsparams2 >> 21) & 0x1Fu) << 5) | ((hcsparams2 >> 27) & 0x1Fu);
+}
+
+// The offset of the next extended capability, or 0 at the end of the list.
+// The Next field names a dword offset from the current capability.
+constexpr u32 next_extended_capability(u32 offset, u32 header) {
+    const u32 next = (header >> 8) & 0xFFu;
+    return next == 0 ? 0 : offset + (next << 2);
+}
+
 // The producer side of a command or transfer ring. The last slot holds a Link
 // TRB back to the start, so only the other slots carry work, and the producer
 // cycle flips each time the Link TRB is written.
@@ -135,9 +170,9 @@ public:
         if (trbs_ < 4) {
             return false;
         }
-        base_[index_] = with_cycle(trb);
+        write(base_[index_], with_cycle(trb));
         if (++index_ == trbs_ - 1) {
-            base_[index_] = with_cycle(make_link(base_physical_, true));
+            write(base_[index_], with_cycle(make_link(base_physical_, true)));
             index_ = 0;
             cycle_ = !cycle_;
         }
@@ -152,6 +187,15 @@ private:
     Trb with_cycle(Trb trb) const {
         trb.control = (trb.control & ~kTrbCycle) | (cycle_ ? kTrbCycle : 0u);
         return trb;
+    }
+
+    // The cycle bit publishes a TRB, so it is stored after the other fields
+    // the controller reads.
+    static void write(Trb& slot, const Trb& trb) {
+        slot.parameter = trb.parameter;
+        slot.status = trb.status;
+        __atomic_signal_fence(__ATOMIC_SEQ_CST);
+        slot.control = trb.control;
     }
 
     Trb* base_ = nullptr;
@@ -174,11 +218,17 @@ public:
     }
 
     bool pop(Trb& out) {
-        if (base_ == nullptr || trbs_ == 0 ||
-            (base_[index_].control & kTrbCycle) != (cycle_ ? kTrbCycle : 0u)) {
+        if (base_ == nullptr || trbs_ == 0) {
             return false;
         }
-        out = base_[index_];
+        const volatile Trb* slot = base_ + index_;
+        const u32 control = slot->control;
+        if ((control & kTrbCycle) != (cycle_ ? kTrbCycle : 0u)) {
+            return false;
+        }
+        out.parameter = slot->parameter;
+        out.status = slot->status;
+        out.control = control;
         if (++index_ == trbs_) {
             index_ = 0;
             cycle_ = !cycle_;

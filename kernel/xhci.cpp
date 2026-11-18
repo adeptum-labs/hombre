@@ -78,8 +78,6 @@ constexpr u32 kMaxExtendedCapabilities = 64;
 constexpr u32 kLegacyCapability = 1;
 constexpr u32 kSupportedProtocolCapability = 2;
 constexpr u32 kExtCapIdMask = 0xFFu;
-constexpr u32 kExtCapNextShift = 8;
-constexpr u32 kExtCapNextMask = 0xFFu;
 constexpr u32 kProtocolDword2 = 0x08;
 constexpr u32 kProtocolRevisionShift = 24;
 constexpr u32 kProtocolPortOffsetMask = 0xFFu;
@@ -87,9 +85,17 @@ constexpr u32 kProtocolPortCountShift = 8;
 constexpr u32 kMaxPorts = 256;
 constexpr u32 kLegacyBiosOwned = 1u << 16;
 constexpr u32 kLegacyOsOwned = 1u << 24;
-constexpr u32 kLegacySmiEnables =
-    (1u << 0) | (1u << 4) | (1u << 5) | (1u << 16) | (1u << 20);
+constexpr u32 kLegacySmiKeep = (0x7u << 1) | (0xFFu << 5) | (0x7u << 17);
 constexpr u32 kLegacySmiStatus = 0x7u << 29;
+
+// Panther Point and its successors keep the root port routing in PCI
+// configuration space until the OS claims it.
+constexpr u8 kUsb3RoutingOffset = 0xDC;
+constexpr u8 kUsb3PssenOffset = 0xD8;
+constexpr u8 kXusb2RoutingOffset = 0xD4;
+constexpr u8 kXusb2prOffset = 0xD0;
+constexpr u32 kIntelVendor = 0x8086;
+constexpr u32 kIntelXhciDevices[] = {0x1E31u, 0x8C31u, 0x9C31u, 0x9CB1u};
 
 // PORTSC. PED and the change bits are write-one-to-clear; a write keeps only
 // PP and the bits it means to set. CSC through CEC are bits 17 to 23.
@@ -118,13 +124,17 @@ constexpr u32 kRingTrbs = static_cast<u32>(kPageBytes / sizeof(xhci::Trb));
 constexpr u64 kReadyTimeoutUs = 1000000;
 constexpr u64 kHandoffTimeoutUs = 1000000;
 constexpr u64 kCommandTimeoutUs = 1000000;
+constexpr u64 kPortDetectTimeoutUs = 500000;
 constexpr u64 kPortResetTimeoutUs = 500000;
+constexpr u64 kPortDebounceUs = 100000;
+constexpr u64 kResetRecoveryUs = 10000;
+constexpr u64 kAddressRecoveryUs = 2000;
+constexpr u64 kResetSettleUs = 1000;
 constexpr u64 kControlTimeoutUs = 500000;
 constexpr u64 kFourGiB = 1ull << 32;
 
 constexpr const char* kErrorNoBar = "controller has no memory BAR";
 constexpr const char* kErrorMap = "cannot map controller registers";
-constexpr const char* kErrorHandoff = "controller handoff did not complete";
 constexpr const char* kErrorReady = "controller does not become ready";
 constexpr const char* kErrorHalt = "controller does not halt";
 constexpr const char* kErrorMemory = "no memory for controller structures";
@@ -133,12 +143,12 @@ constexpr const char* kErrorNoop = "no-op command failed";
 constexpr const char* kErrorDeviceMemory = "no memory for the device";
 constexpr const char* kErrorEnableSlot = "enable slot command failed";
 constexpr const char* kErrorAddressDevice = "address device command failed";
+constexpr const char* kErrorEvaluateContext = "evaluate context command failed";
 constexpr const char* kErrorDeviceDescriptor = "device descriptor read failed";
 constexpr const char* kErrorConfigurationDescriptor = "configuration descriptor read failed";
 constexpr const char* kErrorConfigurationInvalid = "configuration descriptor is invalid";
 constexpr const char* kErrorSetConfiguration = "set configuration failed";
 constexpr const char* kErrorSetProtocol = "set protocol failed";
-constexpr const char* kErrorSetIdle = "set idle failed";
 constexpr const char* kErrorConfigureEndpoint = "configure endpoint command failed";
 
 struct EventRingSegment {
@@ -193,28 +203,48 @@ bool wait_bits(const volatile u8* base, u32 offset, u32 mask, u32 value) {
     }
 }
 
-constexpr u32 scratchpad_count(u32 hcsparams2) {
-    return (((hcsparams2 >> 27) & 0x1Fu) << 5) | ((hcsparams2 >> 21) & 0x1Fu);
-}
-
 constexpr bool fits_below_4g(u64 phys, u64 bytes) {
     return phys + bytes <= kFourGiB;
 }
 
-// Takes the legacy capability at `offset`: OS ownership on, then wait for
-// the firmware to drop BIOS ownership, then SMI generation off.
-bool take_legacy_capability(volatile u8* registers, u32 offset) {
+constexpr u32 port_offset(u32 port) {
+    return kPortRegisters + kPortRegisterBytes * (port - 1);
+}
+
+// Takes the legacy capability at `offset`: OS ownership on, BIOS ownership
+// off, then SMI generation off. A BIOS bit the firmware does not drop in
+// time is cleared here, as Linux does.
+void take_legacy_capability(volatile u8* registers, u32 offset) {
     write32(registers, offset, read32(registers, offset) | kLegacyOsOwned);
     const Deadline deadline = deadline_in_us(kHandoffTimeoutUs);
     while ((read32(registers, offset) & kLegacyBiosOwned) != 0) {
         if (expired(deadline)) {
-            return false;
+            write32(registers, offset, read32(registers, offset) & ~kLegacyBiosOwned);
+            break;
         }
         cpu_pause();
     }
-    write32(registers, offset + 4,
-            (read32(registers, offset + 4) & ~kLegacySmiEnables) | kLegacySmiStatus);
-    return true;
+    const u32 control = read32(registers, offset + 4) & kLegacySmiKeep;
+    write32(registers, offset + 4, control | kLegacySmiStatus);
+}
+
+// Claims the root port routing of the Intel chipsets that keep the ports
+// hidden behind PCI configuration registers until an OS asks for them.
+void route_intel_ports(PciAddress address) {
+    const u32 ids = pci_read32(address, kPciVendorOffset);
+    if ((ids & 0xFFFFu) != kIntelVendor) {
+        return;
+    }
+    const u32 device = ids >> 16;
+    bool routed = false;
+    for (u32 i = 0; i < sizeof(kIntelXhciDevices) / sizeof(kIntelXhciDevices[0]); ++i) {
+        routed = routed || device == kIntelXhciDevices[i];
+    }
+    if (!routed) {
+        return;
+    }
+    pci_write32(address, kUsb3PssenOffset, pci_read32(address, kUsb3RoutingOffset));
+    pci_write32(address, kXusb2prOffset, pci_read32(address, kXusb2RoutingOffset));
 }
 
 // One endpoint to add to an input context.
@@ -223,7 +253,7 @@ struct EndpointSetup {
     u8 type;
     u16 max_packet;
     u8 interval;
-    u64 ring_phys;
+    u64 dequeue;
     u16 average_trb;
     u16 max_esit;
 };
@@ -235,9 +265,9 @@ void set_dword(u8* base, u32 offset, u32 value) {
 // Builds the input context a command hands to the controller: the input
 // control context, the slot context and the context of one endpoint.
 void build_input_context(u8* input, u32 context_size, u8 speed, u32 port, u32 entries,
-                         const EndpointSetup& endpoint) {
+                         u32 add_flags, const EndpointSetup& endpoint) {
     __builtin_memset(input, 0, kPageBytes);
-    set_dword(input, 4, 1u | (1u << endpoint.dci));
+    set_dword(input, 4, add_flags);
     u8* slot = input + context_size;
     set_dword(slot, 0, (static_cast<u32>(speed) << 20) | (entries << 27));
     set_dword(slot, 4, port << 16);
@@ -246,29 +276,46 @@ void build_input_context(u8* input, u32 context_size, u8 speed, u32 port, u32 en
     set_dword(ep, 4,
               (3u << 1) | (static_cast<u32>(endpoint.type) << 3) |
                   (static_cast<u32>(endpoint.max_packet) << 16));
-    set_dword(ep, 8, static_cast<u32>(endpoint.ring_phys) | 1u);
-    set_dword(ep, 12, static_cast<u32>(endpoint.ring_phys >> 32));
+    set_dword(ep, 8, static_cast<u32>(endpoint.dequeue) | 1u);
+    set_dword(ep, 12, static_cast<u32>(endpoint.dequeue >> 32));
     set_dword(ep, 16, static_cast<u32>(endpoint.average_trb) |
                           (static_cast<u32>(endpoint.max_esit) << 16));
 }
 
+struct ControlResult {
+    bool ok;
+    u32 received;
+};
+
+// Clears a halted EP0: reset the endpoint, then move its dequeue pointer to
+// the ring's next free slot. A failure leaves the device unusable.
+void recover_ep0(Xhci& controller, u8 slot, xhci::ProducerRing& ring, u64 ring_phys) {
+    xhci::Trb completion{};
+    if (!controller.command(xhci::make_reset_endpoint(slot, 1), completion) ||
+        xhci::completion_code(completion) != 1) {
+        return;
+    }
+    const u64 dequeue = (ring_phys + ring.enqueue_index() * sizeof(xhci::Trb)) |
+                        (ring.cycle() ? 1u : 0u);
+    controller.command(xhci::make_set_tr_dequeue_pointer(dequeue, slot, 1), completion);
+}
+
 // Runs one control transfer on the slot's EP0 ring and waits for the event
 // that names the status TRB. The status stage is an IN transaction unless an
-// IN data stage came before it.
-bool control_transfer(Xhci& controller, u8 slot, xhci::ProducerRing& ring, u64 ring_phys,
-                      u64 data_phys, u16 length, bool in, u8 request_type, u8 request,
-                      u16 value, u16 index) {
+// IN data stage came before it. The result carries the number of bytes the
+// data stage delivered.
+ControlResult control_transfer(Xhci& controller, u8 slot, xhci::ProducerRing& ring,
+                               u64 ring_phys, u64 data_phys, u16 length, bool in,
+                               u8 request_type, u8 request, u16 value, u16 index) {
     const u32 transfer_type = length == 0 ? 0u : (in ? 3u : 2u);
     if (!ring.push(xhci::make_setup_stage(request_type, request, value, index, length,
-                                          transfer_type))) {
-        return false;
-    }
-    if (length != 0 && !ring.push(xhci::make_data_stage(data_phys, length, in))) {
-        return false;
+                                          transfer_type)) ||
+        (length != 0 && !ring.push(xhci::make_data_stage(data_phys, length, in)))) {
+        return ControlResult{false, 0};
     }
     const u64 status_index = ring.enqueue_index();
     if (!ring.push(xhci::make_status_stage(length == 0 || !in))) {
-        return false;
+        return ControlResult{false, 0};
     }
     const u64 status_phys = ring_phys + status_index * sizeof(xhci::Trb);
     memory_fence();
@@ -282,19 +329,29 @@ bool control_transfer(Xhci& controller, u8 slot, xhci::ProducerRing& ring, u64 r
             continue;
         }
         if (xhci::event_type(event) != xhci::kTrbTransferEvent ||
-            xhci::event_slot(event) != slot || xhci::event_endpoint(event) != 1 ||
-            event.parameter != status_phys) {
+            xhci::event_slot(event) != slot || xhci::event_endpoint(event) != 1) {
             continue;
         }
         const u32 code = xhci::completion_code(event);
-        return code == 1 || code == 13;
+        if (code != 1 && code != 13) {
+            recover_ep0(controller, slot, ring, ring_phys);
+            return ControlResult{false, 0};
+        }
+        if (event.parameter != status_phys) {
+            continue;
+        }
+        const u32 requested = length;
+        const u32 residual = event.status & 0xFFFFFFu;
+        return ControlResult{true, residual < requested ? requested - residual : 0};
     }
-    return false;
+    recover_ep0(controller, slot, ring, ring_phys);
+    return ControlResult{false, 0};
 }
 
 struct KeyboardState {
     u8 slot = 0;
     u8 dci = 0;
+    u16 report_bytes = 8;
     xhci::ProducerRing ring{};
     u64 report_phys = 0;
     u8* report = nullptr;
@@ -327,9 +384,10 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         return Xhci::Scan::Failed;
     }
 
-    const EndpointSetup ep0{1, kEndpointControl, xhci::default_ep0_max_packet(speed),
-                            0, ep0_phys, 8, 0};
-    build_input_context(input, controller.context_size(), speed, port, 1, ep0);
+    const u16 ep0_max_packet = speed == 1 ? 8 : xhci::default_ep0_max_packet(speed);
+    const EndpointSetup ep0{1, kEndpointControl, ep0_max_packet, 0, ep0_phys, 8, 0};
+    build_input_context(input, controller.context_size(), speed, port, 1, 1u | (1u << 1),
+                        ep0);
     controller.dcbaa()[slot] = output_phys;
     if (!controller.command(xhci::make_address_device(input_phys, slot, false),
                             completion) ||
@@ -337,20 +395,35 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         error = kErrorAddressDevice;
         return Xhci::Scan::Failed;
     }
+    delay_us(kAddressRecoveryUs);
 
     xhci::ProducerRing ep0_ring;
     ep0_ring.init(reinterpret_cast<xhci::Trb*>(pages.to_ptr(ep0_phys)), kRingTrbs,
                   ep0_phys);
 
-    if (!control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys, 8, true,
-                          0x80, 6, 0x0100, 0)) {
+    const ControlResult device = control_transfer(
+        controller, slot, ep0_ring, ep0_phys, data_phys, 8, true, 0x80, 6, 0x0100, 0);
+    if (!device.ok || device.received < 8) {
         error = kErrorDeviceDescriptor;
         return Xhci::Scan::Failed;
     }
     const u8 device_class = data[4];
+    if (speed == 1 && data[7] != ep0_max_packet) {
+        const u64 dequeue = ep0_phys + ep0_ring.enqueue_index() * sizeof(xhci::Trb);
+        const EndpointSetup updated{1, kEndpointControl, data[7], 0, dequeue, 8, 0};
+        build_input_context(input, controller.context_size(), speed, port, 1, 1u << 1,
+                            updated);
+        if (!controller.command(xhci::make_evaluate_context(input_phys, slot),
+                                completion) ||
+            xhci::completion_code(completion) != 1) {
+            error = kErrorEvaluateContext;
+            return Xhci::Scan::Failed;
+        }
+    }
 
-    if (!control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys, 9, true,
-                          0x80, 6, 0x0200, 0)) {
+    const ControlResult header = control_transfer(
+        controller, slot, ep0_ring, ep0_phys, data_phys, 9, true, 0x80, 6, 0x0200, 0);
+    if (!header.ok || header.received < 9) {
         error = kErrorConfigurationDescriptor;
         return Xhci::Scan::Failed;
     }
@@ -359,32 +432,36 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         error = kErrorConfigurationInvalid;
         return Xhci::Scan::Failed;
     }
-    if (!control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys,
-                          static_cast<u16>(total), true, 0x80, 6, 0x0200, 0)) {
+    const ControlResult config = control_transfer(
+        controller, slot, ep0_ring, ep0_phys, data_phys, static_cast<u16>(total), true,
+        0x80, 6, 0x0200, 0);
+    if (!config.ok || config.received < total) {
         error = kErrorConfigurationDescriptor;
         return Xhci::Scan::Failed;
     }
 
     xhci::KeyboardInterface info{};
-    if (!xhci::find_boot_keyboard(data, total, info)) {
+    if (!xhci::find_boot_keyboard(data, config.received, info)) {
         return device_class == 9 ? Xhci::Scan::OnlyHub : Xhci::Scan::NoKeyboard;
     }
 
-    if (!control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys, 0, false,
-                          0x00, 9, info.configuration_value, 0)) {
+    const ControlResult set_configuration = control_transfer(
+        controller, slot, ep0_ring, ep0_phys, data_phys, 0, false, 0x00, 9,
+        info.configuration_value, 0);
+    if (!set_configuration.ok) {
         error = kErrorSetConfiguration;
         return Xhci::Scan::Failed;
     }
-    if (!control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys, 0, false,
-                          0x21, 0x0B, 0, info.interface_number)) {
+    const ControlResult set_protocol = control_transfer(
+        controller, slot, ep0_ring, ep0_phys, data_phys, 0, false, 0x21, 0x0B, 0,
+        info.interface_number);
+    if (!set_protocol.ok) {
         error = kErrorSetProtocol;
         return Xhci::Scan::Failed;
     }
-    if (!control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys, 0, false,
-                          0x21, 0x0A, 0, info.interface_number)) {
-        error = kErrorSetIdle;
-        return Xhci::Scan::Failed;
-    }
+    // A keyboard may stall SET_IDLE; EP0 is recovered by the failed transfer.
+    control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys, 0, false, 0x21,
+                     0x0A, 0, info.interface_number);
 
     const u64 ring_phys = pages.alloc_pages(1);
     const u64 report_phys = pages.alloc_pages(1);
@@ -392,11 +469,18 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         error = kErrorDeviceMemory;
         return Xhci::Scan::Failed;
     }
+    const u16 endpoint_max = info.max_packet & 0x7FFu;
+    const u16 report_bytes = endpoint_max < 64 ? endpoint_max : 64;
+    if (report_bytes < 8) {
+        error = kErrorConfigurationInvalid;
+        return Xhci::Scan::Failed;
+    }
     const u8 dci = static_cast<u8>(2 * (info.endpoint_address & 0x0Fu) + 1);
-    const EndpointSetup endpoint{dci, kEndpointInterruptIn, info.max_packet,
+    const EndpointSetup endpoint{dci, kEndpointInterruptIn, endpoint_max,
                                  xhci::endpoint_interval(speed, info.interval), ring_phys,
-                                 8, 8};
-    build_input_context(input, controller.context_size(), speed, port, dci, endpoint);
+                                 endpoint_max, endpoint_max};
+    build_input_context(input, controller.context_size(), speed, port, dci,
+                        1u | (1u << dci), endpoint);
     if (!controller.command(xhci::make_configure_endpoint(input_phys, slot), completion) ||
         xhci::completion_code(completion) != 1) {
         error = kErrorConfigureEndpoint;
@@ -405,11 +489,12 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
 
     keyboard.slot = slot;
     keyboard.dci = dci;
+    keyboard.report_bytes = report_bytes;
     keyboard.ring.init(reinterpret_cast<xhci::Trb*>(pages.to_ptr(ring_phys)), kRingTrbs,
                        ring_phys);
     keyboard.report = pages.to_ptr(report_phys);
     keyboard.report_phys = report_phys;
-    if (!keyboard.ring.push(xhci::make_normal(report_phys, 8))) {
+    if (!keyboard.ring.push(xhci::make_normal(report_phys, report_bytes))) {
         error = kErrorDeviceMemory;
         return Xhci::Scan::Failed;
     }
@@ -465,6 +550,7 @@ bool Xhci::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages,
     const u32 pci_command = pci_read32(address, kPciCommandOffset) & 0xFFFFu;
     pci_write32(address, kPciCommandOffset,
                 pci_command | kPciCommandMemorySpace | kPciCommandBusMaster);
+    route_intel_ports(address);
 
     volatile u8* registers =
         static_cast<volatile u8*>(mmio.map(bar.phys, kCapabilityWindow));
@@ -522,17 +608,19 @@ bool Xhci::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages,
     doorbells_ = reinterpret_cast<volatile u32*>(registers + dboff);
 
     // The extended capability list names the legacy handoff and which ports
-    // follow the USB 3 protocol.
+    // follow the USB 3 protocol. Each Next field is relative to its entry.
     u32 capability = extended << 2;
     for (u32 n = 0; n < kMaxExtendedCapabilities && capability != 0; ++n) {
+        if (static_cast<u64>(capability) + sizeof(u32) > window) {
+            break;
+        }
         const u32 header = read32(registers, capability);
         const u32 id = header & kExtCapIdMask;
         if (id == kLegacyCapability) {
-            if (!take_legacy_capability(registers, capability)) {
-                error = kErrorHandoff;
-                return false;
-            }
-        } else if (id == kSupportedProtocolCapability) {
+            take_legacy_capability(registers, capability);
+        } else if (id == kSupportedProtocolCapability &&
+                   static_cast<u64>(capability) + kProtocolDword2 + sizeof(u32) <=
+                       window) {
             const u32 revision = header >> kProtocolRevisionShift;
             const u32 protocols = read32(registers, capability + kProtocolDword2);
             if (revision == 3) {
@@ -540,7 +628,7 @@ bool Xhci::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages,
                          (protocols >> kProtocolPortCountShift) & 0xFFu);
             }
         }
-        capability = ((header >> kExtCapNextShift) & kExtCapNextMask) << 2;
+        capability = xhci::next_extended_capability(capability, header);
     }
     if (!wait_bits(operational_, kUsbSts, kUsbStsNotReady, 0)) {
         error = kErrorReady;
@@ -559,9 +647,10 @@ bool Xhci::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages,
         error = kErrorReady;
         return false;
     }
+    delay_us(kResetSettleUs);
     write32(operational_, kConfig, slots_);
 
-    const u32 scratchpads = scratchpad_count(hcsparams2);
+    const u32 scratchpads = xhci::scratchpad_count(hcsparams2);
     dcbaa_phys_ = pages.alloc_pages(1);
     command_phys_ = pages.alloc_pages(1);
     event_phys_ = pages.alloc_pages(1);
@@ -705,7 +794,7 @@ bool Xhci::is_usb3(u32 port) const {
 // Brings a connected port up and returns its speed id, or 0 when it does not
 // come up. USB 2 ports are reset; USB 3 links train on their own.
 u8 Xhci::bring_up_port(u32 port) {
-    const u32 offset = kPortRegisters + kPortRegisterBytes * (port - 1);
+    const u32 offset = port_offset(port);
     u32 status = read32(operational_, offset);
     if ((status & kPortConnected) == 0) {
         return 0;
@@ -716,6 +805,7 @@ u8 Xhci::bring_up_port(u32 port) {
             return 0;
         }
     } else {
+        delay_us(kPortDebounceUs);
         write32(operational_, offset, (status & kPortPower) | kPortReset);
         const Deadline deadline = deadline_in_us(kPortResetTimeoutUs);
         for (;;) {
@@ -731,6 +821,7 @@ u8 Xhci::bring_up_port(u32 port) {
             cpu_pause();
         }
         write32(operational_, offset, status & (kPortPower | kPortChanges));
+        delay_us(kResetRecoveryUs);
     }
     return static_cast<u8>((status >> kPortSpeedShift) & kPortSpeedMask);
 }
@@ -740,7 +831,26 @@ Xhci::Scan Xhci::scan(PhysAllocator& pages, const char*& error) {
     keyboard_running_ = false;
     bool hub = false;
     const char* failure = nullptr;
+    // Ports report their devices late after Run; one window covers them all.
+    const Deadline detect = deadline_in_us(kPortDetectTimeoutUs);
     for (u32 port = 1; port <= ports_; ++port) {
+        const u32 offset = port_offset(port);
+        u32 status = read32(operational_, offset);
+        bool reported = false;
+        while ((status & kPortConnected) == 0 && !reported && !expired(detect)) {
+            xhci::Trb event{};
+            while (poll_event(event)) {
+                if (xhci::event_type(event) == xhci::kTrbPortStatusChangeEvent &&
+                    static_cast<u32>(xhci::port_id(event)) == port) {
+                    reported = true;
+                }
+            }
+            cpu_pause();
+            status = read32(operational_, offset);
+        }
+        if ((status & kPortConnected) == 0) {
+            continue;
+        }
         const u8 speed = bring_up_port(port);
         if (speed == 0) {
             continue;
@@ -753,6 +863,7 @@ Xhci::Scan Xhci::scan(PhysAllocator& pages, const char*& error) {
             keyboard_port_ = port;
             keyboard_slot_ = keyboard.slot;
             keyboard_dci_ = keyboard.dci;
+            keyboard_report_bytes_ = keyboard.report_bytes;
             keyboard_ring_ = keyboard.ring;
             keyboard_report_phys_ = keyboard.report_phys;
             keyboard_report_ = keyboard.report;
@@ -781,8 +892,7 @@ Xhci::KeyEvent Xhci::poll_keyboard(u8 report[8]) {
     while (poll_event(event)) {
         if (xhci::event_type(event) == xhci::kTrbPortStatusChangeEvent) {
             if (static_cast<u32>(xhci::port_id(event)) == keyboard_port_) {
-                const u32 offset =
-                    kPortRegisters + kPortRegisterBytes * (keyboard_port_ - 1);
+                const u32 offset = port_offset(keyboard_port_);
                 const u32 status = read32(operational_, offset);
                 write32(operational_, offset, status & (kPortPower | kPortChanges));
                 if ((status & kPortConnected) == 0) {
@@ -804,7 +914,8 @@ Xhci::KeyEvent Xhci::poll_keyboard(u8 report[8]) {
         }
         __builtin_memcpy(report, keyboard_report_, 8);
         __builtin_memset(keyboard_report_, 0, 8);
-        if (!keyboard_ring_.push(xhci::make_normal(keyboard_report_phys_, 8))) {
+        if (!keyboard_ring_.push(
+                xhci::make_normal(keyboard_report_phys_, keyboard_report_bytes_))) {
             keyboard_running_ = false;
             return KeyEvent::Lost;
         }

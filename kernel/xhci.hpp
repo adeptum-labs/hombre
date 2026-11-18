@@ -131,6 +131,7 @@ private:
     u32 keyboard_port_ = 0;
     u8 keyboard_slot_ = 0;
     u8 keyboard_dci_ = 0;
+    u16 keyboard_report_bytes_ = 8;
     xhci::ProducerRing keyboard_ring_{};
     u64 keyboard_report_phys_ = 0;
     u8* keyboard_report_ = nullptr;

@@ -95,12 +95,17 @@ UsbResult usb_keyboard_start(MmioMapper& mmio, PhysAllocator& pages) {
     bool controller_ready = false;
     bool hub = false;
     const char* scan_failure = nullptr;
+    const char* init_failure = nullptr;
     for (u32 i = 0; i < count; ++i) {
         const char* error = nullptr;
         if (!controllers[i].init(addresses[i], mmio, pages, error)) {
+            const char* reason = error != nullptr ? error : "controller init failed";
             serial::write("usb: ");
-            serial::write(error != nullptr ? error : "controller init failed");
+            serial::write(reason);
             serial::write_char('\n');
+            if (init_failure == nullptr) {
+                init_failure = reason;
+            }
             continue;
         }
         controller_ready = true;
@@ -124,15 +129,17 @@ UsbResult usb_keyboard_start(MmioMapper& mmio, PhysAllocator& pages) {
             scan_failure = port_error;
         }
     }
+    if (!controller_ready) {
+        return publish(UsbStatus::Failed,
+                       init_failure != nullptr ? with_prefix(init_failure)
+                                               : "usb: controller init failed");
+    }
     if (scan_failure != nullptr) {
         return publish(UsbStatus::Failed, with_prefix(scan_failure));
     }
     if (hub) {
         return publish(UsbStatus::OnlyHub,
                        "usb: only a hub is attached; hubs are not supported");
-    }
-    if (!controller_ready) {
-        return publish(UsbStatus::Failed, "usb: controller init failed");
     }
     return publish(UsbStatus::NoKeyboard, "usb: no keyboard found");
 }
@@ -153,8 +160,7 @@ bool usb_keyboard_poll(u8 report[8]) {
     case Xhci::KeyEvent::Report:
         return true;
     case Xhci::KeyEvent::Lost:
-        status = UsbStatus::Failed;
-        serial::write("usb: keyboard lost\n");
+        publish(UsbStatus::Failed, "usb: keyboard lost");
         return false;
     case Xhci::KeyEvent::None:
         break;
