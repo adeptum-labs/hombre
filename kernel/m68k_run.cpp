@@ -24,6 +24,7 @@
 #include "m68k_run.hpp"
 
 #include "../common/dos_date.hpp"
+#include "../common/format.hpp"
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
 #include "../common/libs/graphics.hpp"
@@ -37,6 +38,7 @@
 #include "../common/hid_mouse.hpp"
 #include "../common/serial.hpp"
 #include "../common/shell.hpp"
+#include "../common/shell_commands.hpp"
 #include "../common/shell_window.hpp"
 #include "amiga_display.hpp"
 #include "boot_framebuffer.hpp"
@@ -66,6 +68,10 @@ constexpr u32 free_start = 0x10000;
 constexpr u64 block_budget = 1ull << 24;
 constexpr u32 poll_budget = 64;
 constexpr u8 usage_key_c = 0x06;
+constexpr u8 usage_key_backslash_us = 0x31;
+constexpr u8 usage_key_backslash_iso = 0x32;
+constexpr u8 ctrl_backslash = 0x1C;
+constexpr u32 key_queue_cap = 64;
 constexpr u32 sigbreakf_ctrl_c = 1u << 12;
 
 // Constant initialised, so they sit in .bss (or .data) without a
@@ -85,6 +91,11 @@ constinit ShellWindow shell{};
 constinit u32 amiga_screen = 0;
 // The key slots of the last keyboard report seen while a command waited.
 constinit u8 prev_key_slots[KeyDecoder::kKeySlots]{};
+// The key decoder of the shell and running-command input paths.
+constinit KeyDecoder typed_decoder{};
+constinit u8 key_queue[key_queue_cap]{};
+constinit u32 key_queue_head = 0;
+constinit u32 key_queue_count = 0;
 
 // Whether the console output so far ends a line.
 constinit bool console_at_line_start = true;
@@ -257,6 +268,29 @@ void poll_mouse() {
     }
 }
 
+void key_queue_clear() {
+    key_queue_head = 0;
+    key_queue_count = 0;
+}
+
+void key_queue_push(u8 ch) {
+    if (key_queue_count >= key_queue_cap) {
+        return;
+    }
+    key_queue[(key_queue_head + key_queue_count) % key_queue_cap] = ch;
+    ++key_queue_count;
+}
+
+bool key_queue_pop(u8& out) {
+    if (key_queue_count == 0) {
+        return false;
+    }
+    out = key_queue[key_queue_head];
+    key_queue_head = (key_queue_head + 1) % key_queue_cap;
+    --key_queue_count;
+    return true;
+}
+
 bool slots_have_key(const u8* slots, u8 usage) {
     for (usize i = 0; i < KeyDecoder::kKeySlots; ++i) {
         if (slots[i] == usage) {
@@ -272,9 +306,26 @@ bool poll_input_while_running() {
     for (u32 i = 0; i < poll_budget && usb_keyboard_poll(report); ++i) {
         const bool ctrl = (report[0] & (kModLCtrl | kModRCtrl)) != 0;
         const u8* slots = report + 2;
-        if (ctrl && slots_have_key(slots, usage_key_c) &&
-            !slots_have_key(prev_key_slots, usage_key_c)) {
-            exec.signal_current_task(sigbreakf_ctrl_c);
+        u8 chars[KeyDecoder::kKeySlots];
+        const usize count = typed_decoder.feed(report, chars, sizeof(chars));
+        if (ctrl) {
+            for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
+                const u8 usage = slots[s];
+                if (usage == 0 || slots_have_key(prev_key_slots, usage)) {
+                    continue;
+                }
+                if (usage == usage_key_c) {
+                    exec.signal_current_task(sigbreakf_ctrl_c);
+                } else if (usage == usage_key_backslash_us ||
+                           usage == usage_key_backslash_iso ||
+                           keymap_se(usage, report[0], false) == '\\') {
+                    key_queue_push(ctrl_backslash);
+                }
+            }
+        } else {
+            for (usize k = 0; k < count; ++k) {
+                key_queue_push(chars[k]);
+            }
         }
         for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
             prev_key_slots[s] = slots[s];
@@ -287,6 +338,77 @@ bool poll_input_while_running() {
 
 bool hook_trampoline(void*) {
     return poll_input_while_running();
+}
+
+constexpr bool is_console_printable(u8 c) {
+    return (c >= 0x20 && c <= 0x7e) || c >= 0xa0;
+}
+
+u32 console_read(void*, u8* buf, u32 size) {
+    if (buf == nullptr || size == 0) {
+        return 0;
+    }
+    shell.begin_input();
+    u32 len = 0;
+    for (;;) {
+        u8 ch = 0;
+        if (!key_queue_pop(ch)) {
+            if (usb_keyboard_status() != UsbStatus::Ready) {
+                if (len > 0) {
+                    shell.end_line();
+                }
+                return 0;
+            }
+            poll_input_while_running();
+            continue;
+        }
+        if (ch == ctrl_backslash) {
+            shell.end_line();
+            return 0;
+        }
+        if (ch == '\n') {
+            shell.end_line();
+            buf[len++] = '\n';
+            return len;
+        }
+        if (ch == '\b') {
+            if (len > 0) {
+                --len;
+                shell.erase_last();
+            }
+            continue;
+        }
+        if (is_console_printable(ch) && len + 1 < size && len < Shell::kMaxLine) {
+            buf[len++] = ch;
+            shell.echo(ch);
+        }
+    }
+}
+
+bool console_ready(void*, u32 timeout_us) {
+    if (key_queue_count > 0) {
+        return true;
+    }
+    if (usb_keyboard_status() != UsbStatus::Ready) {
+        return false;
+    }
+    poll_input_while_running();
+    if (key_queue_count > 0) {
+        return true;
+    }
+    if (timeout_us == 0 || clock_us() == 0) {
+        return false;
+    }
+    const Deadline deadline = deadline_in_us(timeout_us);
+    while (!expired(deadline)) {
+        if (!poll_input_while_running()) {
+            return key_queue_count > 0;
+        }
+        if (key_queue_count > 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
@@ -328,6 +450,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         fail("dos init failed");
         return false;
     }
+    dos.set_console_input(&console_read, &console_ready, nullptr);
     start_dos_clock();
     machine.cpu.a[7] = boot_stack;
     open_amiga_screen(info);
@@ -393,45 +516,100 @@ bool execute(const char* path, const char* args) {
 
 // The shell's view of the window, the log and the commands.
 struct TypedShell {
-    const AdfVolume* volume;
+    ShellCommands* commands;
 };
+
+void shell_print(void*, const char* text) {
+    if (text == nullptr) {
+        return;
+    }
+    u32 len = 0;
+    while (text[len] != '\0') {
+        ++len;
+    }
+    console_write(nullptr, reinterpret_cast<const u8*>(text), len);
+}
+
+void write_shell_prompt() {
+    char buf[260];
+    format_prompt(dos, 1, buf, sizeof buf);
+    shell.write_prompt_text(buf);
+}
 
 void typed_echo(void*, u8 ch) { shell.echo(ch); }
 void typed_erase(void*) { shell.erase_last(); }
 void typed_end_line(void*) { shell.end_line(); }
 void typed_message(void*, const char* text) { shell.print_line(text); }
-void typed_prompt(void* ctx) {
-    shell.write_prompt(1, static_cast<const TypedShell*>(ctx)->volume->name);
-}
+void typed_prompt(void*) { write_shell_prompt(); }
 void typed_log(void*, const char* text) {
     write_filtered(text);
     serial::write_char('\n');
 }
 
-// The key decoder of the input loop. It lives here so a finished command can
-// make it forget the keys: the reports it dropped included their releases.
-constinit KeyDecoder typed_decoder;
+bool typed_builtin(void* ctx, const char* word, const char* args) {
+    ShellCommands* cmds = static_cast<TypedShell*>(ctx)->commands;
+    if (cmds == nullptr || !cmds->run(word, args)) {
+        return false;
+    }
+    if (!console_at_line_start) {
+        serial::write_char('\n');
+        console_at_line_start = true;
+    }
+    serial::write("shell: builtin ");
+    write_filtered(word);
+    serial::write(" returned ");
+    serial::write_dec(dos.last_return_code());
+    serial::write("\n");
+    return true;
+}
 
-// A typed command may fault like any other; the next one starts clean. What
-// the keyboard queued while it ran is dropped.
+// A typed command may fault like any other; the next one starts clean. Any
+// leftover queued input after it finishes is dropped.
 bool typed_run(void*, const char* path, const char* args) {
-    const bool loaded = execute(path, args);
+    const char* word = path;
+    if (word[0] == 'C' && word[1] == ':') {
+        word += 2;
+    }
+    char cmd[Dos::kMaxPath];
+    if (!dos.find_command(word, cmd, sizeof cmd)) {
+        return false;
+    }
+    const bool loaded = execute(cmd, args);
+    key_queue_clear();
     usb_keyboard_drain();
     typed_decoder.release_all();
     for (usize i = 0; i < KeyDecoder::kKeySlots; ++i) {
         prev_key_slots[i] = 0;
+    }
+    if (loaded && (machine.cpu.exit == ExitReason::None ||
+                   machine.cpu.exit == ExitReason::Returned)) {
+        const u32 rc = dos.last_return_code();
+        if (rc >= dos.fail_level()) {
+            if (!console_at_line_start) {
+                console_write(nullptr, reinterpret_cast<const u8*>("\n"), 1);
+            }
+            char digits[16];
+            format_u64(digits, sizeof digits, rc, 10);
+            shell_print(nullptr, word);
+            shell_print(nullptr, " failed returncode ");
+            shell_print(nullptr, digits);
+            shell_print(nullptr, "\n");
+        }
     }
     return loaded;
 }
 
 // Reads the keyboard for good: keys go to the line editor, Enter runs the
 // line. Never returns; a lost keyboard leaves the window as it is.
-[[noreturn]] void run_shell_loop(const AdfVolume& volume) {
+[[noreturn]] void run_shell_loop() {
+    static constinit ShellCommands commands;
+    commands.init(dos, &shell_print, nullptr);
     static constinit TypedShell typed{};
-    typed.volume = &volume;
+    typed.commands = &commands;
     static constinit Shell line_editor;
     line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
-                               &typed_message, &typed_prompt, &typed_log, &typed});
+                               &typed_message, &typed_prompt, &typed_log, &typed,
+                               &typed_builtin});
     serial::write("shell: ready\n");
     while (usb_keyboard_status() == UsbStatus::Ready) {
         poll_mouse();
@@ -439,6 +617,9 @@ bool typed_run(void*, const char* path, const char* args) {
         if (usb_keyboard_poll(report)) {
             u8 chars[8];
             const usize count = typed_decoder.feed(report, chars, sizeof(chars));
+            for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
+                prev_key_slots[s] = report[2 + s];
+            }
             for (usize i = 0; i < count; ++i) {
                 line_editor.key(chars[i]);
             }
@@ -470,10 +651,11 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
         }
     }
     execute(path, args);
+    key_queue_clear();
     if (shell.is_open()) {
-        shell.write_prompt(1, volume.name);
+        write_shell_prompt();
         if (usb_keyboard_status() == UsbStatus::Ready) {
-            run_shell_loop(volume);
+            run_shell_loop();
         }
         // No keyboard: the window says why, and the boot ends as it always did.
         shell.print_line(usb_keyboard_result().message);

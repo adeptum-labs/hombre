@@ -51,6 +51,11 @@ public:
 
     void write(const u8* data, u32 bytes);
     void write_prompt(u32 cli_number, const char* volume);
+    void write_prompt_text(const char* text);
+
+    // Marks the current cursor position as the start of typed input and
+    // draws the block cursor, so erase_last stops here.
+    void begin_input();
 
     // Draws one printable byte at the cursor and moves the block cursor
     // past it, wrapping and scrolling like write.

@@ -36,6 +36,7 @@ struct Recorder {
     std::vector<std::string> paths;
     std::vector<std::string> args;
     std::vector<std::string> messages;
+    std::string accept_builtin;
     bool run_result = true;
 };
 
@@ -66,6 +67,12 @@ void host_prompt(void* ctx) { static_cast<Recorder*>(ctx)->calls.push_back("prom
 
 void host_log_line(void* ctx, const char* text) {
     static_cast<Recorder*>(ctx)->calls.push_back(std::string("log:") + text);
+}
+
+bool host_builtin(void* ctx, const char* word, const char* args) {
+    Recorder& r = *static_cast<Recorder*>(ctx);
+    r.calls.push_back(std::string("builtin:") + word + "|" + args);
+    return !r.accept_builtin.empty() && word == r.accept_builtin;
 }
 
 ShellHost make_host(Recorder& recorder) {
@@ -271,6 +278,32 @@ void control_bytes_are_ignored() {
     CHECK(r.calls.empty());
 }
 
+void builtin_is_tried_first() {
+    Recorder r;
+    r.accept_builtin = "cd";
+    ShellHost host = make_host(r);
+    host.builtin = host_builtin;
+    Shell shell;
+    shell.init(host);
+
+    type_text(shell, "cd c");
+    shell.key('\n');
+    CHECK(r.paths.empty());
+    CHECK(r.messages.empty());
+    CHECK_EQ(calls_with(r, "builtin:").size(), 1u);
+    CHECK(calls_with(r, "builtin:")[0] == "builtin:cd|c");
+    CHECK(r.calls.back() == "prompt");
+
+    type_text(shell, "version 1");
+    shell.key('\n');
+    CHECK_EQ(calls_with(r, "builtin:").size(), 2u);
+    CHECK(calls_with(r, "builtin:")[1] == "builtin:version|1");
+    CHECK_EQ(r.paths.size(), 1u);
+    CHECK(r.paths[0] == "C:version");
+    CHECK(r.args[0] == "1");
+    CHECK(r.calls.back() == "prompt");
+}
+
 }
 
 int main() {
@@ -285,5 +318,6 @@ int main() {
     line_is_limited_to_512_bytes();
     second_command_after_unknown_one_works();
     control_bytes_are_ignored();
+    builtin_is_tried_first();
     return check::finish("test_shell");
 }

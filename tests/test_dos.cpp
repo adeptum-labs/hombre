@@ -2882,7 +2882,7 @@ void cli_queries() {
 
     const u32 buf = kData + 0x100;
     CHECK_EQ(r.call(dos_lvo::GetPrompt, buf, 64), DOSTRUE);
-    CHECK(r.read_str(buf) == "%N> ");
+    CHECK(r.read_str(buf) == "%N.%S> ");
     r.str(kData, "Hombre> ");
     CHECK_EQ(r.call(dos_lvo::SetPrompt, kData), DOSTRUE);
     CHECK_EQ(r.call(dos_lvo::GetPrompt, buf, 64), DOSTRUE);
@@ -3958,6 +3958,248 @@ void is_file_system_for_assigns_and_df0() {
     CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
 }
 
+void change_dir_and_current_dir_name() {
+    Rig r;
+    char buf[128];
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:");
+
+    u32 err = 1;
+    CHECK(g_dos.change_dir("C", err));
+    CHECK_EQ(err, 0u);
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:C");
+
+    // Up from C, then a subdirectory, with case normalisation.
+    CHECK(g_dos.change_dir("/devs/sub", err));
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:Devs/Sub");
+
+    // Parent ("/") and volume root (":").
+    CHECK(g_dos.change_dir("/", err));
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:Devs");
+    CHECK(g_dos.change_dir(":", err));
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:");
+
+    // Assigns work too.
+    CHECK(g_dos.change_dir("S:", err));
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:S");
+
+    // Files and missing directories fail without disturbing the current directory.
+    CHECK(!g_dos.change_dir("C:Echo", err));
+    CHECK_EQ(err, ERROR_OBJECT_WRONG_TYPE);
+    CHECK_EQ(g_dos.last_error(), ERROR_OBJECT_WRONG_TYPE);
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:S");
+
+    CHECK(!g_dos.change_dir("NoSuchDir", err));
+    CHECK_EQ(err, ERROR_OBJECT_NOT_FOUND);
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:S");
+
+    // "/" at the root fails.
+    CHECK(g_dos.change_dir(":", err));
+    CHECK(!g_dos.change_dir("/", err));
+    CHECK_EQ(err, ERROR_OBJECT_NOT_FOUND);
+}
+
+void find_command_uses_path() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/CmdC", hello_command()});
+    files.push_back({"S/CmdS", hello_command()});
+    files.push_back({"Devs/Sub/CmdD", hello_command()});
+    files.push_back({"TopCmd", hello_command()});
+    Rig r(files);
+
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+    const u32 cli = r.call(dos_lvo::Cli);
+    CHECK_EQ(r.get32(cli + cli_CommandDir), 0u);
+    CHECK_EQ(g_dos.path_count(), 0u);
+
+    char out[128];
+    CHECK(g_dos.find_command("CmdC", out, sizeof out));
+    CHECK(std::string(out) == "C:CmdC");
+    CHECK(g_dos.find_command("S:CmdS", out, sizeof out));
+    CHECK(std::string(out) == "S:CmdS");
+    CHECK(g_dos.find_command("Devs/Sub/CmdD", out, sizeof out));
+    CHECK(std::string(out) == "Devs/Sub/CmdD");
+    CHECK(!g_dos.find_command("CmdS", out, sizeof out));
+    CHECK(!g_dos.find_command("C:", out, sizeof out));
+
+    u32 err = 0;
+    CHECK(g_dos.path_add("S:", err));
+    CHECK_EQ(err, 0u);
+    CHECK(g_dos.path_add("Devs/Sub", err));
+    CHECK(g_dos.path_add(":", err));
+    CHECK_EQ(g_dos.path_count(), 3u);
+    CHECK(g_dos.path_name(0, out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:S");
+    CHECK(g_dos.path_name(1, out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:Devs/Sub");
+    CHECK(g_dos.path_name(2, out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:");
+
+    // cli_CommandDir mirrors the path as {next BPTR, lock BPTR}.
+    const u32 n0 = r.get32(cli + cli_CommandDir) << 2;
+    CHECK(n0 != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, r.get32(n0 + 4), kData, 64), DOSTRUE);
+    CHECK(r.read_str(kData) == "HombreTest:S");
+    const u32 n1 = r.get32(n0) << 2;
+    CHECK(n1 != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, r.get32(n1 + 4), kData, 64), DOSTRUE);
+    CHECK(r.read_str(kData) == "HombreTest:Devs/Sub");
+    const u32 n2 = r.get32(n1) << 2;
+    CHECK(n2 != 0);
+    CHECK_EQ(r.get32(n2), 0u);
+
+    CHECK(g_dos.find_command("CmdS", out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:S/CmdS");
+    CHECK(g_dos.find_command("CmdD", out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:Devs/Sub/CmdD");
+    CHECK(g_dos.find_command("TopCmd", out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:TopCmd");
+
+    // Path capacity is bounded at kMaxPathDirs.
+    for (u32 i = 3; i < Dos::kMaxPathDirs; ++i) {
+        CHECK(g_dos.path_add("C:", err));
+    }
+    CHECK(!g_dos.path_add("C:", err));
+
+    g_dos.path_reset();
+    CHECK_EQ(g_dos.path_count(), 0u);
+    CHECK_EQ(r.get32(cli + cli_CommandDir), 0u);
+    CHECK(!g_dos.find_command("CmdS", out, sizeof out));
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+}
+
+struct FakeConsole {
+    std::vector<std::string> lines;
+    usize line_idx = 0;
+    std::vector<bool> ready_seq;
+    usize ready_idx = 0;
+    std::vector<u32> timeouts;
+};
+
+u32 fake_console_read(void* ctx, u8* buf, u32 size) {
+    FakeConsole& fc = *static_cast<FakeConsole*>(ctx);
+    if (fc.line_idx >= fc.lines.size() || size == 0) {
+        return 0;
+    }
+    const std::string& s = fc.lines[fc.line_idx++];
+    const u32 n = static_cast<u32>(std::min<usize>(s.size(), size));
+    std::memcpy(buf, s.data(), n);
+    return n;
+}
+
+bool fake_console_ready(void* ctx, u32 timeout_us) {
+    FakeConsole& fc = *static_cast<FakeConsole*>(ctx);
+    fc.timeouts.push_back(timeout_us);
+    if (fc.ready_idx >= fc.ready_seq.size()) {
+        return false;
+    }
+    return fc.ready_seq[fc.ready_idx++];
+}
+
+void console_read_uses_the_reader_after_the_arguments() {
+    // 1. FGets(Input(), kData, 32) -> "first\n" (from args)
+    // 2. FGets(Input(), kData + 32, 32) -> "alpha\n" (from fake reader)
+    // 3. FGetC(Input()) x3 -> 'x', 'y', '\n' (from fake reader line 2)
+    // 4. FGets(Input(), kData + 64, 32) -> 0 (EOF from fake reader)
+    Asm a;
+    a.open_dos();
+    a.dos(dos_lvo::Input).from_d0(1).move_l(kData, 2).moveq(32, 3).dos(dos_lvo::FGets);
+    a.store_d0(kOut);
+    a.dos(dos_lvo::Input).from_d0(1).move_l(kData + 32, 2).moveq(32, 3).dos(dos_lvo::FGets);
+    a.store_d0(kOut + 4);
+    for (u32 i = 0; i < 3; ++i) {
+        a.dos(dos_lvo::Input).from_d0(1).dos(dos_lvo::FGetC);
+        a.store_d0(kOut + 8 + i * 4);
+    }
+    a.dos(dos_lvo::Input).from_d0(1).move_l(kData + 64, 2).moveq(32, 3).dos(dos_lvo::FGets);
+    a.store_d0(kOut + 20);
+    a.moveq(0, 0).rts();
+
+    Rig r({{"C/ConReader", hunk_file(a.build())}});
+    FakeConsole fc;
+    fc.lines = {"alpha\n", "xy\n"};
+    g_dos.set_console_input(fake_console_read, fake_console_ready, &fc);
+
+    u32 result = 1;
+    CHECK(g_dos.run_command("C:ConReader", "first", result, kBlocks));
+    CHECK_EQ(result, 0u);
+    CHECK_EQ(r.get32(kOut), kData);
+    CHECK(r.read_str(kData) == "first\n");
+    CHECK_EQ(r.get32(kOut + 4), kData + 32);
+    CHECK(r.read_str(kData + 32) == "alpha\n");
+    CHECK_EQ(r.get32(kOut + 8), static_cast<u32>('x'));
+    CHECK_EQ(r.get32(kOut + 12), static_cast<u32>('y'));
+    CHECK_EQ(r.get32(kOut + 16), static_cast<u32>('\n'));
+    CHECK_EQ(r.get32(kOut + 20), 0u);
+
+    // read_console_line uses the same reader and strips trailing newline.
+    fc.lines = {"yes\n"};
+    fc.line_idx = 0;
+    char line[32];
+    CHECK(g_dos.read_console_line(line, sizeof line));
+    CHECK(std::string(line) == "yes");
+    CHECK(!g_dos.read_console_line(line, sizeof line));
+}
+
+void wait_for_char_uses_ready() {
+    Rig r;
+    FakeConsole fc;
+    fc.ready_seq = {true, false};
+    g_dos.set_console_input(fake_console_read, fake_console_ready, &fc);
+
+    const u32 in = r.call(dos_lvo::Input);
+    CHECK_EQ(r.call(dos_lvo::WaitForChar, in, 12345), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::WaitForChar, in, 67890), DOSFALSE);
+    CHECK_EQ(fc.timeouts.size(), 2u);
+    CHECK_EQ(fc.timeouts[0], 12345u);
+    CHECK_EQ(fc.timeouts[1], 67890u);
+}
+
+void fault_text_api() {
+    Rig r;
+    char buf[64];
+    const u32 len = g_dos.fault(ERROR_OBJECT_NOT_FOUND, buf, sizeof buf);
+    CHECK(std::string(buf) == "no such file or directory");
+    CHECK_EQ(len, std::string("no such file or directory").size());
+
+    CHECK_EQ(g_dos.fault(0, buf, sizeof buf), 0u);
+    CHECK(std::string(buf).empty());
+
+    CHECK_EQ(g_dos.fault(999, buf, sizeof buf), 9u);
+    CHECK(std::string(buf) == "Error 999");
+
+    CHECK_EQ(g_dos.fault(ERROR_OBJECT_NOT_FOUND, buf, 8), 7u);
+    CHECK(std::string(buf) == "no such");
+}
+
+void fail_level_and_return_code() {
+    Rig r;
+    const u32 cli = r.call(dos_lvo::Cli);
+    CHECK_EQ(g_dos.fail_level(), 10u);
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.last_error(), 0u);
+
+    g_dos.set_fail_level(20);
+    CHECK_EQ(g_dos.fail_level(), 20u);
+    CHECK_EQ(r.get32(cli + cli_FailLevel), 20u);
+
+    g_dos.set_return_code(5);
+    CHECK_EQ(g_dos.last_return_code(), 5u);
+    CHECK_EQ(r.get32(cli + cli_ReturnCode), 5u);
+
+    g_dos.set_last_error(ERROR_OBJECT_WRONG_TYPE);
+    CHECK_EQ(g_dos.last_error(), ERROR_OBJECT_WRONG_TYPE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_WRONG_TYPE);
+    CHECK_EQ(r.get32(cli + cli_Result2), ERROR_OBJECT_WRONG_TYPE);
+}
+
 }
 
 int main() {
@@ -4031,5 +4273,11 @@ int main() {
     dos_list_walk();
     get_device_proc_walks_assign_list();
     is_file_system_for_assigns_and_df0();
+    change_dir_and_current_dir_name();
+    find_command_uses_path();
+    console_read_uses_the_reader_after_the_arguments();
+    wait_for_char_uses_ready();
+    fault_text_api();
+    fail_level_and_return_code();
     return check::finish("test_dos");
 }

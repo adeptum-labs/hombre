@@ -123,6 +123,14 @@ void Shell::enter() {
     line_[end] = '\0';
     line_[word_end] = '\0';
 
+    if (host_.builtin != nullptr &&
+        host_.builtin(host_.ctx, line_ + begin, line_ + args_begin)) {
+        host_.prompt(host_.ctx);
+        length_ = 0;
+        line_[0] = '\0';
+        return;
+    }
+
     bool needs_prefix = true;
     for (u32 i = begin; i < word_end; ++i) {
         if (line_[i] == ':' || line_[i] == '/') {

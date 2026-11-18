@@ -609,13 +609,25 @@ constexpr u32 ERROR_NOT_EXECUTABLE = 305;
 // writes them.
 using ConsoleWrite = void (*)(void* ctx, const u8* data, u32 bytes);
 
+// Interactive console line input: blocks until a line is typed, returns the
+// byte count written into buf (final '\n' included), or 0 at end of input.
+using ConsoleRead = u32 (*)(void* ctx, u8* buf, u32 size);
+
+// Interactive console readiness check: returns true if a byte is ready or
+// arrives within timeout_us microseconds.
+using ConsoleReady = bool (*)(void* ctx, u32 timeout_us);
+
 class Dos {
 public:
+    using ConsoleRead = hombre::ConsoleRead;
+    using ConsoleReady = hombre::ConsoleReady;
+
     static constexpr u32 kStackBytes = 4096;
     static constexpr u32 kMaxArgs = 512;    // bytes of a command's argument line
     static constexpr u32 kMaxPath = 256;    // bytes of a resolved path, NUL included
     static constexpr u32 kMaxFiles = 16;    // files and console streams a program opens
     static constexpr u32 kMaxLocks = 32;
+    static constexpr u32 kMaxPathDirs = 8;  // directories in the CLI command search path
     static constexpr u32 kMaxAssigns = 32;
     static constexpr u32 kMaxAssignDirs = 4;
     static constexpr u32 kMaxAssignLocks = 64;
@@ -648,6 +660,72 @@ public:
     // Sets the clock source returning 50 Hz AmigaDOS ticks since 1978-01-01,
     // or null to report 0/0/0.
     void set_clock(u64 (*now_ticks)()) { now_ticks_ = now_ticks; }
+
+    // Changes the shell's current directory to path ("/" parent, ":" volume
+    // root, relative, or volume/assign-qualified). Must be a directory
+    // (ERROR_OBJECT_WRONG_TYPE otherwise). Updates pr_CurrentDir (unlocking
+    // the previous lock) and cli_SetName. On failure sets error and IoErr.
+    bool change_dir(const char* path, u32& error);
+
+    // Copies the current directory name (cli_SetName) into out. False if out
+    // is null, size is 0, or the name does not fit.
+    bool current_dir_name(char* out, u32 size) const;
+
+    // Copies the CLI prompt template (cli_Prompt) into out. False if out is
+    // null, size is 0, or the template does not fit.
+    bool prompt(char* out, u32 size) const;
+
+    // Stores text as the CLI prompt template (cli_Prompt, bounded to 255
+    // bytes).
+    void set_prompt(const char* text);
+
+    // Gets or sets the last IoErr code (pr_Result2 / cli_Result2).
+    u32 last_error() const;
+    void set_last_error(u32 code);
+
+    // Gets or sets the last CLI command return code (cli_ReturnCode).
+    u32 last_return_code() const;
+    void set_return_code(u32 code);
+
+    // Gets or sets the CLI fail limit (cli_FailLevel).
+    u32 fail_level() const;
+    void set_fail_level(u32 level);
+
+    // Formats the fault text for code without a header into out (at most
+    // size - 1 bytes plus NUL) and returns the length written (0 for code 0).
+    u32 fault(u32 code, char* out, u32 size) const;
+
+    // Appends dir to the CLI command search path (up to kMaxPathDirs), kept
+    // as locks and mirrored in cli_CommandDir. On failure sets error and
+    // IoErr.
+    bool path_add(const char* dir, u32& error);
+
+    // Clears the CLI command search path, unlocking all path locks and
+    // freeing the cli_CommandDir list.
+    void path_reset();
+
+    // Number of directories currently in the command search path.
+    u32 path_count() const { return path_count_; }
+
+    // Copies the NameFromLock text of path entry i into out. False if i is
+    // out of range or the name does not fit.
+    bool path_name(u32 i, char* out, u32 size) const;
+
+    // Resolves command word: if it contains ':' or '/', returns it as is
+    // when it exists as a file; otherwise checks "C:<word>", then each path
+    // directory in order. Returns false if none exists as a file or out is
+    // too small.
+    bool find_command(const char* word, char* out, u32 size);
+
+    // Registers the interactive console input callbacks used after the
+    // command's argument line is exhausted (and by WaitForChar /
+    // read_console_line). Pass null to restore immediate EOF.
+    void set_console_input(ConsoleRead read, ConsoleReady ready, void* ctx);
+
+    // Reads one line from the interactive console reader into out (trailing
+    // newline stripped). False when no reader is set, at EOF, or invalid
+    // buffer.
+    bool read_console_line(char* out, u32 size);
 
     u32 dos_base() const { return base_; }
     u32 process() const { return process_; }
@@ -753,8 +831,14 @@ private:
     u32 unknown_pkt_count_ = 0;
     NativeVector vectors_[kVectors]{};
     u64 (*now_ticks_)() = nullptr;
+    ConsoleRead console_read_ = nullptr;
+    ConsoleReady console_ready_ = nullptr;
+    void* console_ctx_ = nullptr;
+    u32 path_locks_[kMaxPathDirs]{};
+    u32 path_nodes_[kMaxPathDirs]{};
+    u32 path_count_ = 0;
 
-    // The console's input: the argument line, read once.
+    // The console's input: the argument line, read once, then console_read_.
     char input_[kMaxArgs + 2]{};
     u32 input_length_ = 0;
     u32 input_pos_ = 0;

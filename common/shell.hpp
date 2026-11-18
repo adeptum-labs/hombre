@@ -28,9 +28,10 @@
 namespace hombre {
 
 // What the shell line editor drives: echo, erase and end_line update the
-// visible line, run starts a command, and message, prompt and log_line
-// receive the shell's replies. run returns false when the command cannot
-// be loaded.
+// visible line, builtin handles internal commands when non-null (returning
+// true when handled), run starts a command, and message, prompt and
+// log_line receive the shell's replies. run returns false when the command
+// cannot be loaded.
 struct ShellHost {
     void (*echo)(void* ctx, u8 ch);
     void (*erase)(void* ctx);
@@ -40,6 +41,7 @@ struct ShellHost {
     void (*prompt)(void* ctx);
     void (*log_line)(void* ctx, const char* text);
     void* ctx;
+    bool (*builtin)(void* ctx, const char* word, const char* args) = nullptr;
 };
 
 // One shell session: a fixed line buffer edited by the keyboard and parsed

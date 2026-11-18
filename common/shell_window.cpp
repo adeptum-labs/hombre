@@ -161,11 +161,6 @@ void ShellWindow::write_prompt(u32 cli_number, const char* volume) {
     if (!is_open()) {
         return;
     }
-    if (col_ != 0) {
-        text_.new_line();
-        col_ = 0;
-        advance_row();
-    }
     char prompt[kMaxPrompt + 16];
     u32 length = 0;
     char digits[12];
@@ -190,7 +185,32 @@ void ShellWindow::write_prompt(u32 cli_number, const char* volume) {
     prompt[length++] = ':';
     prompt[length++] = '>';
     prompt[length++] = ' ';
-    write(reinterpret_cast<const u8*>(prompt), length);
+    prompt[length] = '\0';
+    write_prompt_text(prompt);
+}
+
+void ShellWindow::write_prompt_text(const char* text) {
+    if (!is_open() || text == nullptr) {
+        return;
+    }
+    if (col_ != 0) {
+        text_.new_line();
+        col_ = 0;
+        advance_row();
+    }
+    u32 length = 0;
+    while (length < kMaxWrite && text[length] != '\0') {
+        ++length;
+    }
+    write(reinterpret_cast<const u8*>(text), length);
+    draw_cursor();
+    mark_line_start();
+}
+
+void ShellWindow::begin_input() {
+    if (!is_open()) {
+        return;
+    }
     draw_cursor();
     mark_line_start();
 }

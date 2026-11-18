@@ -57,7 +57,7 @@ constexpr u8 SIGB_DOS = 8;
 constexpr char kDosName[] = "dos.library";
 constexpr char kIdString[] = "dos 60.0 (Hombre)\r\n";
 constexpr char kProcessName[] = "Hombre Shell";
-constexpr char kPrompt[] = "%N> ";
+constexpr char kPrompt[] = "%N.%S> ";
 
 constexpr u32 align4(u32 v) {
     return (v + 3) & ~3u;
@@ -179,6 +179,110 @@ void copy_cstr(char* dst, const char* src, u32 capacity) {
         dst[i] = src[i];
     }
     dst[i] = '\0';
+}
+
+u32 copy_fault_message(u32 code, char* out, u32 size) {
+    if (out == nullptr || size == 0) {
+        return 0;
+    }
+    if (code == 0) {
+        out[0] = '\0';
+        return 0;
+    }
+    const char* message = nullptr;
+    for (const FaultText& f : kFaults) {
+        if (f.code == code) {
+            message = f.text;
+        }
+    }
+    u32 n = 0;
+    auto add = [&](char c) {
+        if (n + 1 < size) {
+            out[n++] = c;
+        }
+    };
+    if (message != nullptr) {
+        for (const char* p = message; *p != '\0'; ++p) {
+            add(*p);
+        }
+    } else {
+        char digits[12];
+        const bool negative = (code & 0x80000000) != 0;
+        format_u64(digits, sizeof digits, negative ? 0u - code : code, 10);
+        for (const char* p = "Error "; *p != '\0'; ++p) {
+            add(*p);
+        }
+        if (negative) {
+            add('-');
+        }
+        for (const char* p = digits; *p != '\0'; ++p) {
+            add(*p);
+        }
+    }
+    out[n] = '\0';
+    return n;
+}
+
+bool format_volume_path(const AdfVolume& volume, const char* path, char* out, u32 size) {
+    if (out == nullptr || size == 0) {
+        return false;
+    }
+    const u32 vol_len = length_of(volume.name);
+    const u32 path_len = length_of(path);
+    const u32 total = vol_len + 1 + path_len;
+    u32 at = 0;
+    for (u32 i = 0; i < vol_len && at + 1 < size; ++i) {
+        out[at++] = volume.name[i];
+    }
+    if (at + 1 < size) {
+        out[at++] = ':';
+    }
+    for (u32 i = 0; i < path_len && at + 1 < size; ++i) {
+        out[at++] = path[i];
+    }
+    out[at] = '\0';
+    return total + 1 <= size;
+}
+
+void canonicalize_path(const AdfVolume& volume, const char* resolved, char (&out)[Dos::kMaxPath]) {
+    if (resolved[0] == '\0') {
+        out[0] = '\0';
+        return;
+    }
+    char probe[Dos::kMaxPath];
+    u32 out_pos = 0;
+    u32 i = 0;
+    while (resolved[i] != '\0') {
+        u32 comp_len = 0;
+        while (resolved[i + comp_len] != '\0' && resolved[i + comp_len] != '/') {
+            ++comp_len;
+        }
+        if (out_pos != 0 && out_pos + 1 < Dos::kMaxPath) {
+            probe[out_pos] = '/';
+            out[out_pos] = '/';
+            ++out_pos;
+        }
+        u32 p_pos = out_pos;
+        for (u32 k = 0; k < comp_len && p_pos + 1 < Dos::kMaxPath; ++k) {
+            probe[p_pos++] = resolved[i + k];
+        }
+        probe[p_pos] = '\0';
+        DirEntry e{};
+        const char* name = probe + out_pos;
+        if (adf_find(volume, probe, e) == FsError::Ok && e.name[0] != '\0') {
+            name = e.name;
+        }
+        for (u32 k = 0; name[k] != '\0' && out_pos + 1 < Dos::kMaxPath; ++k) {
+            out[out_pos] = name[k];
+            probe[out_pos] = name[k];
+            ++out_pos;
+        }
+        i += comp_len;
+        if (resolved[i] == '/') {
+            ++i;
+        }
+    }
+    out[out_pos] = '\0';
 }
 
 void put_string(Bus& b, u32 at, const char* s) {
@@ -1278,6 +1382,23 @@ struct DosOps {
         return s;
     }
 
+    static bool refill_console(Dos& d) {
+        if (d.input_pos_ < d.input_length_) {
+            return true;
+        }
+        if (d.console_read_ == nullptr) {
+            return false;
+        }
+        u32 n = d.console_read_(d.console_ctx_, reinterpret_cast<u8*>(d.input_),
+                                Dos::kMaxArgs + 1);
+        if (n > Dos::kMaxArgs + 1) {
+            n = Dos::kMaxArgs + 1;
+        }
+        d.input_pos_ = 0;
+        d.input_length_ = n;
+        return n > 0;
+    }
+
     static u32 available_bytes(const Dos& d, const Dos::FileSlot& f) {
         const u32 buffered = f.has_unget ? 1u : 0u;
         if (f.stream == Dos::Stream::Console) {
@@ -1308,6 +1429,9 @@ struct DosOps {
         }
         const u32 rem = length - got;
         if (f.stream == Dos::Stream::Console) {
+            if (d.input_pos_ >= d.input_length_ && got == 0) {
+                refill_console(d);
+            }
             const u32 left = d.input_length_ > d.input_pos_ ? d.input_length_ - d.input_pos_ : 0u;
             const u32 n = rem < left ? rem : left;
             for (u32 i = 0; i < n; ++i) {
@@ -1423,6 +1547,10 @@ struct DosOps {
         if ((length & 0x80000000) != 0) {
             fail(d, b, ERROR_BAD_NUMBER, 0xFFFFFFFF);
             return;
+        }
+        if (length != 0 && d.files_[slot].stream == Dos::Stream::Console &&
+            available_bytes(d, d.files_[slot]) == 0) {
+            refill_console(d);
         }
         const u32 avail = available_bytes(d, d.files_[slot]);
         const u32 n = length < avail ? length : avail;
@@ -1769,6 +1897,10 @@ struct DosOps {
             native::set_result(m, 0);
             return;
         }
+        if (d.files_[slot].stream == Dos::Stream::Console &&
+            available_bytes(d, d.files_[slot]) == 0) {
+            refill_console(d);
+        }
         const u64 want = static_cast<u64>(blocklen) * blocks;
         const u32 avail = available_bytes(d, d.files_[slot]);
         const u32 n = want < avail ? static_cast<u32>(want) : avail;
@@ -2015,30 +2147,7 @@ struct DosOps {
             add(':');
             add(' ');
         }
-        const char* message = nullptr;
-        for (const FaultText& f : kFaults) {
-            if (f.code == code) {
-                message = f.text;
-            }
-        }
-        if (message != nullptr) {
-            for (const char* p = message; *p != '\0'; ++p) {
-                add(*p);
-            }
-        } else {
-            char digits[12];
-            const bool negative = (code & 0x80000000) != 0;
-            format_u64(digits, sizeof digits, negative ? 0u - code : code, 10);
-            for (const char* p = "Error "; *p != '\0'; ++p) {
-                add(*p);
-            }
-            if (negative) {
-                add('-');
-            }
-            for (const char* p = digits; *p != '\0'; ++p) {
-                add(*p);
-            }
-        }
+        n += copy_fault_message(code, text + n, kFaultText - n);
         text[n] = '\0';
         return n;
     }
@@ -2444,6 +2553,37 @@ struct DosOps {
 
     static void set_arg_str(void* ctx, Machine& m) { select(m, of(ctx), pr_Arguments); }
 
+    // Reads a CLI BSTR field into a host buffer. False if out/size invalid,
+    // no CLI exists, or the string does not fit.
+    static bool read_cli_bstr_host(const Dos& d, Bus& b, u32 field, char* out, u32 size) {
+        if (out == nullptr || size == 0) {
+            return false;
+        }
+        out[0] = '\0';
+        const u32 cli_bptr = b.r32(d.process_ + pr_CLI);
+        if (!b.ok() || cli_bptr == 0) {
+            return false;
+        }
+        const u32 bstr_bptr = b.r32((cli_bptr << 2) + field);
+        if (!b.ok()) {
+            return false;
+        }
+        if (bstr_bptr == 0) {
+            return true;
+        }
+        const u32 bstr = bstr_bptr << 2;
+        const u32 slen = b.r8(bstr);
+        if (!b.ok()) {
+            return false;
+        }
+        const u32 copy = slen < size - 1 ? slen : size - 1;
+        for (u32 i = 0; i < copy; ++i) {
+            out[i] = static_cast<char>(b.r8(bstr + 1 + i));
+        }
+        out[copy] = '\0';
+        return b.ok() && slen + 1 <= size;
+    }
+
     static void set_cli_bstr(Dos& d, Bus& b, u32 field, u32 dest, u32 str_addr) {
         if (str_addr == 0) {
             fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
@@ -2770,8 +2910,31 @@ struct DosOps {
     // Nothing else runs, so a Delay is over at once.
     static void delay(void*, Machine& m) { native::set_result(m, 0); }
 
-    // The console never has a character waiting.
-    static void wait_for_char(void*, Machine& m) { native::set_result(m, DOSFALSE); }
+    // Reports whether the stream has a byte ready or becomes ready within the
+    // timeout (microseconds).
+    static void wait_for_char(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 fh = m.cpu.d[1];
+        const u32 timeout = m.cpu.d[2];
+        const i64 slot = handle_slot(d, fh);
+        if (slot < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        const Dos::FileSlot& f = d.files_[slot];
+        if (f.stream == Dos::Stream::Console) {
+            if (available_bytes(d, f) > 0) {
+                native::set_result(m, DOSTRUE);
+                return;
+            }
+            if (d.console_ready_ != nullptr && d.console_ready_(d.console_ctx_, timeout)) {
+                native::set_result(m, DOSTRUE);
+                return;
+            }
+        }
+        native::set_result(m, DOSFALSE);
+    }
 
     // --- the command -----------------------------------------------------------
 
@@ -4921,6 +5084,9 @@ struct DosOps {
     // The next line of the console's input, its newline included; false if
     // it is longer than a line can be (it is read all the same).
     static bool console_line(Dos& d, ArgLine& line) {
+        if (d.input_pos_ >= d.input_length_) {
+            refill_console(d);
+        }
         u32 n = 0;
         bool fits = true;
         while (d.input_pos_ < d.input_length_) {
@@ -5575,6 +5741,14 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     }
     unknown_pkt_count_ = 0;
     now_ticks_ = nullptr;
+    console_read_ = nullptr;
+    console_ready_ = nullptr;
+    console_ctx_ = nullptr;
+    for (u32 i = 0; i < kMaxPathDirs; ++i) {
+        path_locks_[i] = 0;
+        path_nodes_[i] = 0;
+    }
+    path_count_ = 0;
     input_length_ = 0;
     input_pos_ = 0;
     running_ = false;
@@ -5687,7 +5861,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     set_name[n++] = ':';
     set_name[n] = '\0';
     put_bstr(b, set_name_, set_name, 31);
-    put_bstr(b, prompt_, kPrompt, 4);
+    put_bstr(b, prompt_, kPrompt, sizeof kPrompt - 1);
     put_bstr(b, block_ + kCommandFileAt, "", 0);
     put_bstr(b, command_name_, "", 0);
     b.w32(cli_ + cli_SetName, set_name_ >> 2);
@@ -5935,6 +6109,329 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
     }
     DosOps::unload(*this, seglist);
     return ok;
+}
+
+bool Dos::change_dir(const char* path, u32& error) {
+    if (m_ == nullptr || path == nullptr) {
+        error = ERROR_INVALID_COMPONENT_NAME;
+        return false;
+    }
+    if (length_of(path) >= kMaxName) {
+        error = ERROR_INVALID_COMPONENT_NAME;
+        set_last_error(error);
+        return false;
+    }
+    Bus b(*m_);
+    char resolved[kMaxPath];
+    DirEntry entry{};
+    if (!DosOps::locate(*this, b, path, resolved, entry, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    if (!entry.is_dir) {
+        error = ERROR_OBJECT_WRONG_TYPE;
+        set_last_error(error);
+        return false;
+    }
+    char canonical[kMaxPath];
+    canonicalize_path(volume_, resolved, canonical);
+    u32 new_lock = 0;
+    if (!DosOps::alloc_user_lock(*this, b, canonical, entry, SHARED_LOCK, new_lock)) {
+        error = b.r32(process_ + pr_Result2);
+        return false;
+    }
+    const u32 old_lock = b.r32(process_ + pr_CurrentDir);
+    b.w32(process_ + pr_CurrentDir, new_lock);
+    if (old_lock != 0) {
+        DosOps::free_user_lock(*this, old_lock);
+    }
+    char full_name[kMaxName];
+    format_volume_path(volume_, canonical, full_name, sizeof full_name);
+    put_bstr(b, set_name_, full_name, 255);
+    b.w32(cli_ + cli_SetName, set_name_ >> 2);
+    error = 0;
+    return b.ok();
+}
+
+bool Dos::current_dir_name(char* out, u32 size) const {
+    if (m_ == nullptr || out == nullptr || size == 0) {
+        return false;
+    }
+    Bus b(*m_);
+    return DosOps::read_cli_bstr_host(*this, b, cli_SetName, out, size);
+}
+
+bool Dos::prompt(char* out, u32 size) const {
+    if (m_ == nullptr || out == nullptr || size == 0) {
+        return false;
+    }
+    Bus b(*m_);
+    return DosOps::read_cli_bstr_host(*this, b, cli_Prompt, out, size);
+}
+
+void Dos::set_prompt(const char* text) {
+    if (m_ == nullptr || text == nullptr || cli_ == 0) {
+        return;
+    }
+    Bus b(*m_);
+    put_bstr(b, prompt_, text, 255);
+    b.w32(cli_ + cli_Prompt, prompt_ >> 2);
+}
+
+u32 Dos::last_error() const {
+    if (m_ == nullptr) {
+        return 0;
+    }
+    Bus b(*m_);
+    return b.r32(process_ + pr_Result2);
+}
+
+void Dos::set_last_error(u32 code) {
+    if (m_ == nullptr) {
+        return;
+    }
+    Bus b(*m_);
+    b.w32(process_ + pr_Result2, code);
+    if (cli_ != 0) {
+        b.w32(cli_ + cli_Result2, code);
+    }
+}
+
+u32 Dos::last_return_code() const {
+    if (m_ == nullptr || cli_ == 0) {
+        return 0;
+    }
+    Bus b(*m_);
+    return b.r32(cli_ + cli_ReturnCode);
+}
+
+void Dos::set_return_code(u32 code) {
+    if (m_ == nullptr || cli_ == 0) {
+        return;
+    }
+    Bus b(*m_);
+    b.w32(cli_ + cli_ReturnCode, code);
+}
+
+u32 Dos::fail_level() const {
+    if (m_ == nullptr || cli_ == 0) {
+        return kFailLevel;
+    }
+    Bus b(*m_);
+    return b.r32(cli_ + cli_FailLevel);
+}
+
+void Dos::set_fail_level(u32 level) {
+    if (m_ == nullptr || cli_ == 0) {
+        return;
+    }
+    Bus b(*m_);
+    b.w32(cli_ + cli_FailLevel, level);
+}
+
+u32 Dos::fault(u32 code, char* out, u32 size) const {
+    return copy_fault_message(code, out, size);
+}
+
+bool Dos::path_add(const char* dir, u32& error) {
+    if (m_ == nullptr || dir == nullptr) {
+        error = ERROR_INVALID_COMPONENT_NAME;
+        return false;
+    }
+    if (length_of(dir) >= kMaxName) {
+        error = ERROR_INVALID_COMPONENT_NAME;
+        set_last_error(error);
+        return false;
+    }
+    if (path_count_ >= kMaxPathDirs) {
+        error = ERROR_NO_FREE_STORE;
+        set_last_error(error);
+        return false;
+    }
+    Bus b(*m_);
+    char resolved[kMaxPath];
+    DirEntry entry{};
+    if (!DosOps::locate(*this, b, dir, resolved, entry, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    if (!entry.is_dir) {
+        error = ERROR_OBJECT_WRONG_TYPE;
+        set_last_error(error);
+        return false;
+    }
+    char canonical[kMaxPath];
+    canonicalize_path(volume_, resolved, canonical);
+    u32 lock_bptr = 0;
+    if (!DosOps::alloc_user_lock(*this, b, canonical, entry, SHARED_LOCK, lock_bptr)) {
+        error = b.r32(process_ + pr_Result2);
+        return false;
+    }
+    constexpr u32 kPathNodeBytes = 8;
+    const u32 node = exec_->alloc(kPathNodeBytes, MEMF_PUBLIC | MEMF_CLEAR);
+    if (node == 0) {
+        DosOps::free_user_lock(*this, lock_bptr);
+        error = ERROR_NO_FREE_STORE;
+        set_last_error(error);
+        return false;
+    }
+    b.w32(node, 0);
+    b.w32(node + 4, lock_bptr);
+    if (path_count_ == 0) {
+        b.w32(cli_ + cli_CommandDir, node >> 2);
+    } else {
+        b.w32(path_nodes_[path_count_ - 1], node >> 2);
+    }
+    if (!b.ok()) {
+        exec_->free(node, kPathNodeBytes);
+        DosOps::free_user_lock(*this, lock_bptr);
+        error = ERROR_INVALID_LOCK;
+        return false;
+    }
+    path_locks_[path_count_] = lock_bptr;
+    path_nodes_[path_count_] = node;
+    ++path_count_;
+    error = 0;
+    return true;
+}
+
+void Dos::path_reset() {
+    if (m_ == nullptr) {
+        return;
+    }
+    constexpr u32 kPathNodeBytes = 8;
+    for (u32 i = 0; i < path_count_; ++i) {
+        if (path_locks_[i] != 0) {
+            DosOps::free_user_lock(*this, path_locks_[i]);
+            path_locks_[i] = 0;
+        }
+        if (path_nodes_[i] != 0) {
+            exec_->free(path_nodes_[i], kPathNodeBytes);
+            path_nodes_[i] = 0;
+        }
+    }
+    path_count_ = 0;
+    if (cli_ != 0) {
+        Bus b(*m_);
+        b.w32(cli_ + cli_CommandDir, 0);
+    }
+}
+
+bool Dos::path_name(u32 i, char* out, u32 size) const {
+    if (m_ == nullptr || out == nullptr || size == 0 || i >= path_count_) {
+        return false;
+    }
+    const i64 slot = DosOps::lock_slot(*this, path_locks_[i]);
+    if (slot < 0) {
+        out[0] = '\0';
+        return false;
+    }
+    return format_volume_path(volume_, lock_slots_[slot].path, out, size);
+}
+
+bool Dos::find_command(const char* word, char* out, u32 size) {
+    if (m_ == nullptr || word == nullptr || word[0] == '\0' || out == nullptr || size == 0) {
+        return false;
+    }
+    const u32 word_len = length_of(word);
+    if (word_len >= kMaxName) {
+        return false;
+    }
+    bool has_sep = false;
+    for (u32 i = 0; i < word_len; ++i) {
+        if (word[i] == ':' || word[i] == '/') {
+            has_sep = true;
+            break;
+        }
+    }
+    Bus b(*m_);
+    auto exists_file = [&](const char* candidate) -> bool {
+        char resolved[kMaxPath];
+        DirEntry entry{};
+        u32 error = 0;
+        return DosOps::locate(*this, b, candidate, resolved, entry, error) && !entry.is_dir;
+    };
+    auto copy_out = [&](const char* candidate) -> bool {
+        const u32 len = length_of(candidate);
+        if (len + 1 > size) {
+            return false;
+        }
+        copy_cstr(out, candidate, size);
+        return true;
+    };
+
+    if (has_sep) {
+        return exists_file(word) && copy_out(word);
+    }
+
+    char cand[kMaxName + 32];
+    if (2 + word_len < sizeof cand) {
+        cand[0] = 'C';
+        cand[1] = ':';
+        copy_cstr(cand + 2, word, sizeof cand - 2);
+        if (exists_file(cand)) {
+            return copy_out(cand);
+        }
+    }
+
+    for (u32 i = 0; i < path_count_; ++i) {
+        char dir[kMaxName];
+        if (!path_name(i, dir, sizeof dir)) {
+            continue;
+        }
+        const u32 dir_len = length_of(dir);
+        const bool need_slash = dir_len > 0 && dir[dir_len - 1] != ':' && dir[dir_len - 1] != '/';
+        if (dir_len + (need_slash ? 1u : 0u) + word_len >= sizeof cand) {
+            continue;
+        }
+        copy_cstr(cand, dir, sizeof cand);
+        u32 pos = dir_len;
+        if (need_slash) {
+            cand[pos++] = '/';
+        }
+        copy_cstr(cand + pos, word, sizeof cand - pos);
+        if (exists_file(cand)) {
+            return copy_out(cand);
+        }
+    }
+    return false;
+}
+
+void Dos::set_console_input(ConsoleRead read, ConsoleReady ready, void* ctx) {
+    console_read_ = read;
+    console_ready_ = ready;
+    console_ctx_ = ctx;
+}
+
+bool Dos::read_console_line(char* out, u32 size) {
+    if (out == nullptr || size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (console_read_ == nullptr) {
+        return false;
+    }
+    u8 raw[kMaxArgs + 2];
+    u32 n = console_read_(console_ctx_, raw, kMaxArgs + 1);
+    if (n == 0) {
+        return false;
+    }
+    if (n > kMaxArgs + 1) {
+        n = kMaxArgs + 1;
+    }
+    while (n > 0 && (raw[n - 1] == '\n' || raw[n - 1] == '\r')) {
+        --n;
+    }
+    const u32 copy = n < size - 1 ? n : size - 1;
+    for (u32 i = 0; i < copy; ++i) {
+        out[i] = static_cast<char>(raw[i]);
+    }
+    out[copy] = '\0';
+    return true;
 }
 
 }
