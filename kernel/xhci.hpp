@@ -47,6 +47,21 @@ class Xhci {
 public:
     constexpr Xhci() = default;
 
+    // How far a scan of the ports got.
+    enum class Scan {
+        Keyboard,   // a boot keyboard is configured and delivering reports
+        OnlyHub,    // a hub was found and nothing else
+        NoKeyboard, // devices were seen but none is a boot keyboard
+        Failed      // a step failed; `error` says which
+    };
+
+    // What polling the keyboard endpoint found.
+    enum class KeyEvent {
+        None,   // nothing pending
+        Report, // one 8-byte report was taken
+        Lost    // the endpoint failed or the device went away
+    };
+
     // Brings the controller up. On failure returns false and points `error`
     // at a static description; on success `error` is null.
     bool init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages, const char*& error);
@@ -83,7 +98,22 @@ public:
     // dequeue pointer past it. Returns false when no event is pending.
     bool poll_event(xhci::Trb& out);
 
+    // Scans every port: each connected device is reset if it sits on a USB 2
+    // port, addressed, and asked for its descriptors. The first boot keyboard
+    // is configured and left delivering reports. `error` describes a Failed
+    // scan and is null otherwise.
+    Scan scan(PhysAllocator& pages, const char*& error);
+
+    // Takes one pending report from the configured keyboard. Events for
+    // other endpoints and ports are read and discarded; a Port Status Change
+    // that says the keyboard's port lost its device marks it lost.
+    KeyEvent poll_keyboard(u8 report[8]);
+
 private:
+    u8 bring_up_port(u32 port);
+    void set_usb3(u32 first, u32 count);
+    bool is_usb3(u32 port) const;
+
     volatile u8* operational_ = nullptr;
     volatile u8* runtime_ = nullptr;
     volatile u32* doorbells_ = nullptr;
@@ -97,6 +127,14 @@ private:
     u32 slots_ = 0;
     u32 ports_ = 0;
     u32 context_size_ = 32;
+    u32 usb3_ports_[8] = {};
+    u32 keyboard_port_ = 0;
+    u8 keyboard_slot_ = 0;
+    u8 keyboard_dci_ = 0;
+    xhci::ProducerRing keyboard_ring_{};
+    u64 keyboard_report_phys_ = 0;
+    u8* keyboard_report_ = nullptr;
+    bool keyboard_running_ = false;
 };
 
 }
