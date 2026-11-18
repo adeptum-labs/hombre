@@ -1672,7 +1672,28 @@ void Jit::dispatch(u32 opcode) {
         cpu.trap_number = 10;
         return;
     }
+#ifdef HOMBRE_TRACE_NATIVES
+    // Built with -DHOMBRE_TRACE_NATIVES: every native call is logged with
+    // its argument registers and its result.
+    LogLine()
+        .text("call ")
+        .text(slot.name != nullptr ? slot.name : "?")
+        .text(" d1=")
+        .hex(cpu.d[1])
+        .text(" d2=")
+        .hex(cpu.d[2])
+        .text(" d3=")
+        .hex(cpu.d[3])
+        .text(" a0=")
+        .hex(cpu.a[0])
+        .text(" a1=")
+        .hex(cpu.a[1])
+        .send();
+#endif
     slot.fn(slot.ctx, *machine_);
+#ifdef HOMBRE_TRACE_NATIVES
+    LogLine().text("  -> d0=").hex(cpu.d[0]).send();
+#endif
     if (cpu.exit == ExitReason::None) {
         cpu.pc = resume;
     }
