@@ -20,8 +20,8 @@
 | Contact: info@adeptum.se
 
 | Opens an Intuition window on the front screen and prints each IDCMP
-| activation, mouse move, mouse button and close event to Output() until
-| the window is closed or Ctrl+C is pressed.
+| activation, mouse move, mouse button, resize, window change and close
+| event to Output() until the window is closed or Ctrl+C is pressed.
 |
 | Returns 0 on close, or 20 when a library or the window cannot be opened.
 
@@ -38,6 +38,10 @@
         .set    CloseWindow, -72
         .set    OpenWindow, -204
 
+        .set    wd_LeftEdge, 4
+        .set    wd_TopEdge, 6
+        .set    wd_Width, 8
+        .set    wd_Height, 10
         .set    wd_UserPort, 86
 
         .set    im_Class, 20
@@ -45,16 +49,21 @@
         .set    im_MouseX, 32
         .set    im_MouseY, 34
 
+        .set    IDCMP_NEWSIZE, 0x2
         .set    IDCMP_MOUSEBUTTONS, 0x8
         .set    IDCMP_MOUSEMOVE, 0x10
         .set    IDCMP_CLOSEWINDOW, 0x200
         .set    IDCMP_ACTIVEWINDOW, 0x40000
+        .set    IDCMP_CHANGEWINDOW, 0x02000000
+        .set    IDCMP_BASE, IDCMP_MOUSEBUTTONS + IDCMP_MOUSEMOVE + IDCMP_CLOSEWINDOW
 
+        .set    WFLG_SIZEGADGET, 0x1
         .set    WFLG_DRAGBAR, 0x2
         .set    WFLG_DEPTHGADGET, 0x4
         .set    WFLG_CLOSEGADGET, 0x8
         .set    WFLG_REPORTMOUSE, 0x200
         .set    WFLG_ACTIVATE, 0x1000
+        .set    WFLG_BASE, WFLG_CLOSEGADGET + WFLG_DEPTHGADGET + WFLG_DRAGBAR + WFLG_ACTIVATE
 
         .set    WBENCHSCREEN, 1
 
@@ -141,7 +150,7 @@ check_move:
 
 check_buttons:
         cmpi.l  #IDCMP_MOUSEBUTTONS,%d3
-        bne.s   check_close
+        bne.s   check_newsize
         cmpi.w  #SELECTDOWN,%d4
         beq.s   sel_down
         cmpi.w  #SELECTUP,%d4
@@ -164,6 +173,32 @@ menu_down:
 menu_up:
         lea     fmt_menu_up(%pc),%a0
 emit_xy:
+        bsr     print_xy
+        bra     loop
+
+check_newsize:
+        cmpi.l  #IDCMP_NEWSIZE,%d3
+        bne.s   check_change
+        move.w  wd_Width(%a3),%d5
+        ext.l   %d5
+        move.w  wd_Height(%a3),%d6
+        ext.l   %d6
+        lea     fmt_newsize(%pc),%a0
+        bsr     print_xy
+        bra     loop
+
+check_change:
+        cmpi.l  #IDCMP_CHANGEWINDOW,%d3
+        bne.s   check_close
+        move.w  wd_LeftEdge(%a3),%d5
+        ext.l   %d5
+        move.w  wd_TopEdge(%a3),%d6
+        ext.l   %d6
+        move.w  wd_Width(%a3),%d3
+        ext.l   %d3
+        move.w  wd_Height(%a3),%d4
+        ext.l   %d4
+        lea     fmt_change(%pc),%a0
         bsr     print_xy
         bra     loop
 
@@ -232,18 +267,21 @@ print:
         movem.l (%sp)+,%d2-%d3/%a2/%a6
         rts
 
-| Formats A0 with D5 (X) and D6 (Y) through exec RawDoFmt and prints it.
+| Formats A0 with up to four longs (D5, D6, D3, D4) through exec RawDoFmt
+| and prints it.
 print_xy:
         movem.l %a2-%a3/%a6,-(%sp)
         lea     -64(%sp),%sp
+        move.l  %d4,-(%sp)
+        move.l  %d3,-(%sp)
         move.l  %d6,-(%sp)
         move.l  %d5,-(%sp)
         movea.l %sp,%a1
         lea     putch(%pc),%a2
-        lea     8(%sp),%a3
+        lea     16(%sp),%a3
         movea.l 4.w,%a6
         jsr     RawDoFmt(%a6)
-        addq.l  #8,%sp
+        lea     16(%sp),%sp
         movea.l %sp,%a0
         bsr.s   print
         lea     64(%sp),%sp
@@ -266,6 +304,8 @@ fmt_sel_up:     .asciz  "mousetest: select up at %ld,%ld\n"
 fmt_menu_down:  .asciz  "mousetest: menu down at %ld,%ld\n"
 fmt_menu_up:    .asciz  "mousetest: menu up at %ld,%ld\n"
 fmt_move:       .asciz  "mousetest: move at %ld,%ld\n"
+fmt_newsize:    .asciz  "mousetest: newsize %ldx%ld\n"
+fmt_change:     .asciz  "mousetest: change at %ld,%ld size %ldx%ld\n"
 err_intuition:  .asciz  "mousetest: cannot open intuition.library\n"
 err_window:     .asciz  "mousetest: cannot open window\n"
         .even
@@ -279,15 +319,15 @@ newwindow:
         .word   160
         .byte   0
         .byte   1
-        .long   IDCMP_MOUSEBUTTONS + IDCMP_MOUSEMOVE + IDCMP_CLOSEWINDOW + IDCMP_ACTIVEWINDOW
-        .long   WFLG_CLOSEGADGET + WFLG_DEPTHGADGET + WFLG_DRAGBAR + WFLG_ACTIVATE + WFLG_REPORTMOUSE
+        .long   IDCMP_BASE + IDCMP_ACTIVEWINDOW + IDCMP_NEWSIZE + IDCMP_CHANGEWINDOW
+        .long   WFLG_BASE + WFLG_SIZEGADGET + WFLG_REPORTMOUSE
         .long   0
         .long   0
         .long   title
         .long   0
         .long   0
-        .word   0
-        .word   0
-        .word   0
-        .word   0
+        .word   100
+        .word   50
+        .word   0xFFFF
+        .word   0xFFFF
         .word   WBENCHSCREEN

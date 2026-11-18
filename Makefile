@@ -196,6 +196,12 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "mousetest: select up at 130,110" "mousetest: break" \
 	    "mouse: down 1 at 330,210" "mouse: up 1 at 330,210" \
 	    "m68k: C:mousetest returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "m o u s e t e s t ret" \
+	    --mouse-after "mousetest: ready" \
+	    --mouse "mouse_move -100 -95;mouse_button 1;mouse_move 50 20;mouse_button 0;mouse_move 100 75;mouse_move 100 75;mouse_move 15 0;mouse_button 1;mouse_move -40 -30;mouse_button 0;sendkey ctrl-c" \
+	    "mousetest: change at 250,120 size 240x160" "mousetest: newsize 200x130" \
+	    "mousetest: change at 250,120 size 200x130" "mousetest: break" \
+	    "m68k: C:mousetest returned 0"
 	tools/boot_check.sh --disk $(ZERO_DISK) "virtio-blk: 2 sectors" "disk: unknown format" \
 	    "halting"
 	tools/boot_check.sh --disk $(CORRUPT_DISK) "disk: dms error: TrackCrc track 0" \

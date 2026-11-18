@@ -190,8 +190,14 @@ void log_mouse_buttons(const char* prefix, u8 mask, i32 x, i32 y) {
     }
 }
 
+void flush_mouse_move() {
+    amiga_display.move_pointer(machine, intuition.front_screen(), pointer.x(), pointer.y());
+    intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), 0, 0, true);
+}
+
 void poll_mouse() {
     u8 report[4];
+    bool moved = false;
     for (u32 i = 0; i < poll_budget && usb_mouse_poll(report); ++i) {
         MouseSample sample{};
         if (!decode_mouse_report(report, sizeof(report), sample)) {
@@ -199,15 +205,21 @@ void poll_mouse() {
         }
         const PointerState::Update update = pointer.apply(sample);
         if (update.moved) {
-            amiga_display.move_pointer(machine, intuition.front_screen(), pointer.x(),
-                                       pointer.y());
+            moved = true;
         }
-        if (update.moved || update.pressed != 0 || update.released != 0) {
+        if (update.pressed != 0 || update.released != 0) {
+            if (moved) {
+                flush_mouse_move();
+                moved = false;
+            }
             intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), update.pressed,
-                                    update.released, update.moved);
+                                    update.released, false);
+            log_mouse_buttons("mouse: down ", update.pressed, pointer.x(), pointer.y());
+            log_mouse_buttons("mouse: up ", update.released, pointer.x(), pointer.y());
         }
-        log_mouse_buttons("mouse: down ", update.pressed, pointer.x(), pointer.y());
-        log_mouse_buttons("mouse: up ", update.released, pointer.x(), pointer.y());
+    }
+    if (moved) {
+        flush_mouse_move();
     }
 }
 

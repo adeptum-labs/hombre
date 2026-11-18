@@ -50,6 +50,9 @@ Targets:
   and Amiga programs get mouse events in windows that ask for them; Ctrl+C
   stops a program waiting for events. On the test disk, `mousetest` opens a
   window and prints the mouse and window events it receives.
+  Windows can be dragged by their title bar and resized live by the size
+  gadget in the bottom-right corner. The AmigaShell window rewraps its text
+  when resized; it opens full screen, so shrink it first to move it.
 - `make check` boots the image headless and verifies the messages on the
   serial port. The main boot attaches the generated test disk and verifies
   the volume, the root directory and the startup sequence read from it, and
