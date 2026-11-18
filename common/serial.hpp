@@ -32,6 +32,9 @@ namespace hombre::serial {
 constexpr u16 com1 = 0x3F8;
 constexpr u8 line_status_transmit_empty = 0x20;
 
+// Receives every character written to the port, when set.
+inline void (*mirror)(char) = nullptr;
+
 inline void init() {
     outb(com1 + 1, 0x00);  // no interrupts
     outb(com1 + 3, 0x80);  // unlock the baud rate divisor
@@ -46,6 +49,9 @@ inline void write_char(char c) {
     while (!(inb(com1 + 5) & line_status_transmit_empty)) {
     }
     outb(com1, static_cast<u8>(c));
+    if (mirror != nullptr) {
+        mirror(c);
+    }
 }
 
 inline void write(const char* text) {

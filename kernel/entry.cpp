@@ -31,6 +31,7 @@
 #include "mmio.hpp"
 #include "page_alloc.hpp"
 #include "percpu.hpp"
+#include "text_console.hpp"
 
 using namespace hombre;
 
@@ -41,6 +42,7 @@ PerCpu bsp_cpu;
 // Constant initialised, so they sit in .bss without a constructor run.
 constinit PhysAllocator phys_pages;
 constinit MmioMapper mmio;
+constinit TextConsole console;
 
 [[noreturn]] void halt() {
     for (;;) {
@@ -72,15 +74,21 @@ void unmap_lower_half(u64 direct_map_base) {
     asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
 }
 
-void draw_banner(const BootInfo& info) {
+Framebuffer make_framebuffer(const BootInfo& info) {
+    return Framebuffer(reinterpret_cast<u8*>(info.direct_map_base + info.fb.phys), info.fb.width,
+                       info.fb.height, info.fb.pitch_bytes, info.fb.format);
+}
+
+void draw_banner(Framebuffer& fb) {
     constexpr const char* text = "Hombre";
     constexpr u32 scale = 4;
     constexpr u32 text_width = 6 * 8 * scale;
-    Framebuffer fb(reinterpret_cast<u8*>(info.direct_map_base + info.fb.phys), info.fb.width,
-                   info.fb.height, info.fb.pitch_bytes, info.fb.format);
-    fb.fill(0x000040);
-    const u32 x = info.fb.width > text_width ? (info.fb.width - text_width) / 2 : 0;
-    fb.draw_text(x, info.fb.height / 4, text, 0xE0E0FF, scale);
+    const u32 x = fb.width() > text_width ? (fb.width() - text_width) / 2 : 0;
+    fb.draw_text(x, 16, text, 0xE0E0FF, scale);
+}
+
+void console_put(char c) {
+    console.put(c);
 }
 
 #if defined(HOMBRE_FAULT_TEST)
@@ -115,6 +123,14 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         info->version != boot_info_version) {
         serial::write("kernel: unexpected boot info\n");
         halt();
+    }
+
+    if (info->fb.phys != 0) {
+        Framebuffer fb = make_framebuffer(*info);
+        fb.fill(0x000040);
+        draw_banner(fb);
+        console.init(fb, 16 + 32 + 16, 2, 0xE0E0FF, 0x000040);
+        serial::mirror = &console_put;
     }
 
     // The firmware's IDT gates use selectors outside the new GDT, so no
@@ -170,7 +186,6 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write("x");
         serial::write_dec(info->fb.height);
         serial::write("\n");
-        draw_banner(*info);
     } else {
         serial::write("no framebuffer\n");
     }

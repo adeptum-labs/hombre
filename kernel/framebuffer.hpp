@@ -34,6 +34,9 @@ namespace hombre {
 // outside the screen is clipped and never touches memory outside the buffer.
 class Framebuffer {
 public:
+    // An empty framebuffer that ignores all drawing.
+    constexpr Framebuffer() : base_(nullptr), width_(0), height_(0), pitch_(0), rgbx_(false) {}
+
     // format is kFramebufferRgbx8 or, for any other value, kFramebufferBgrx8.
     // A null base, an empty screen or a pitch shorter than a row of pixels
     // gives a framebuffer that ignores all drawing.
@@ -48,6 +51,9 @@ public:
             height_ = 0;
         }
     }
+
+    u32 width() const { return width_; }
+    u32 height() const { return height_; }
 
     // rgb is 0xRRGGBB.
     void fill(u32 rgb) { fill_rect(0, 0, width_, height_, rgb); }
@@ -76,18 +82,6 @@ public:
         }
     }
 
-private:
-    // The pixel value whose little endian bytes are in the framebuffer's order.
-    u32 pixel_value(u32 rgb) const {
-        if (!rgbx_) {
-            return rgb & 0xFFFFFF;  // B, G, R, X in memory
-        }
-        const u32 red = (rgb >> 16) & 0xFF;
-        const u32 green = (rgb >> 8) & 0xFF;
-        const u32 blue = rgb & 0xFF;
-        return red | (green << 8) | (blue << 16);  // R, G, B, X in memory
-    }
-
     // Fills the part of the rectangle that lies on screen. The coordinates
     // are 64-bit so that adding a size to a position cannot wrap.
     void fill_rect(u64 left, u64 top, u64 width, u64 height, u32 rgb) {
@@ -104,6 +98,18 @@ private:
                 __builtin_memcpy(row + x * 4, &value, sizeof(value));
             }
         }
+    }
+
+private:
+    // The pixel value whose little endian bytes are in the framebuffer's order.
+    u32 pixel_value(u32 rgb) const {
+        if (!rgbx_) {
+            return rgb & 0xFFFFFF;  // B, G, R, X in memory
+        }
+        const u32 red = (rgb >> 16) & 0xFF;
+        const u32 green = (rgb >> 8) & 0xFF;
+        const u32 blue = rgb & 0xFF;
+        return red | (green << 8) | (blue << 16);  // R, G, B, X in memory
     }
 
     u8* base_;
