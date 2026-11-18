@@ -261,6 +261,7 @@ private:
     void drag_prop(i32 x, i32 y);
     void end_prop_drag();
     void call_gadget_hook(u32 gadget, u32 vert_pot);
+    void clear_gadget_hook(u32 gadget);
     void clear_window_gadget_hooks(u32 window);
     void log_unhandled_gadget_type(u32 gtype);
     u32 find_gadget_window(u32 gadget) const;

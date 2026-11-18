@@ -230,22 +230,6 @@ void on_shell_view(void*, u32 view) {
     serial::write("\n");
 }
 
-u32 shell_visible_rows() {
-    const u32 win = shell.window();
-    if (win == 0) {
-        return 0;
-    }
-    native::Bus bus(machine);
-    const i32 win_h = static_cast<__INT16_TYPE__>(bus.r16(win + ndk::wd_Height));
-    const i32 border_top = static_cast<i32>(bus.r8(win + ndk::wd_BorderTop));
-    const i32 border_bottom = static_cast<i32>(bus.r8(win + ndk::wd_BorderBottom));
-    if (!bus.ok()) {
-        return 0;
-    }
-    const i32 inner_h = win_h - border_top - border_bottom;
-    return inner_h > 0 ? static_cast<u32>(inner_h) / 8 : 0;
-}
-
 // The AmigaDOS time: the real-time clock read once, advanced by the TSC
 // clock. Without a readable clock DateStamp stays at the start of 1978.
 u64 boot_dos_ticks = 0;
@@ -368,13 +352,13 @@ void handle_decoded_byte(u8 raw, Shell* line_editor) {
         shell.scroll_by(-1);
         break;
     case ConsoleKey::PageUp: {
-        const u32 rows = shell_visible_rows();
+        const u32 rows = shell.rows();
         const i32 step = rows > 1 ? static_cast<i32>(rows - 1) : 0;
         shell.scroll_by(step);
         break;
     }
     case ConsoleKey::PageDown: {
-        const u32 rows = shell_visible_rows();
+        const u32 rows = shell.rows();
         const i32 step = rows > 1 ? static_cast<i32>(rows - 1) : 0;
         shell.scroll_by(-step);
         break;
@@ -481,15 +465,19 @@ u32 console_read(void*, u8* buf, u32 size) {
             return len;
         }
         if (ch == '\b') {
+            shell.scroll_to_bottom();
             if (len > 0) {
                 --len;
                 shell.erase_last();
             }
             continue;
         }
-        if (is_console_printable(ch) && len + 1 < size && len < Shell::kMaxLine) {
-            buf[len++] = ch;
-            shell.echo(ch);
+        if (is_console_printable(ch)) {
+            shell.scroll_to_bottom();
+            if (len + 1 < size && len < Shell::kMaxLine) {
+                buf[len++] = ch;
+                shell.echo(ch);
+            }
         }
     }
 }
@@ -653,6 +641,7 @@ void typed_erase(void*) { shell.erase_last(); }
 void typed_end_line(void*) { shell.end_line(); }
 void typed_message(void*, const char* text) { shell.print_line(text); }
 void typed_prompt(void*) { write_shell_prompt(); }
+void typed_scroll_to_bottom(void*) { shell.scroll_to_bottom(); }
 void typed_log(void*, const char* text) {
     write_filtered(text);
     serial::write_char('\n');
@@ -716,7 +705,7 @@ bool typed_run(void*, const char* path, const char* args) {
     static constinit Shell line_editor;
     line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
                                &typed_message, &typed_prompt, &typed_log, &typed,
-                               &typed_builtin});
+                               &typed_builtin, &typed_scroll_to_bottom});
     serial::write("shell: ready\n");
     while (usb_keyboard_status() == UsbStatus::Ready) {
         poll_mouse();

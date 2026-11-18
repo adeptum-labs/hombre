@@ -53,22 +53,33 @@ void Shell::init(const ShellHost& host) {
 }
 
 void Shell::key(u8 ch) {
+    auto to_bottom = [&]() {
+        if (host_.scroll_to_bottom != nullptr) {
+            host_.scroll_to_bottom(host_.ctx);
+        }
+    };
     if (ch == '\n') {
+        to_bottom();
         enter();
     } else if (ch == '\b') {
+        to_bottom();
         if (length_ > 0) {
             --length_;
             host_.erase(host_.ctx);
         }
     } else if (ch == '\t') {
+        to_bottom();
         const u32 spaces = kTabColumns - length_ % kTabColumns;
         for (u32 i = 0; i < spaces && length_ < kMaxLine; ++i) {
             line_[length_++] = ' ';
             host_.echo(host_.ctx, ' ');
         }
-    } else if (is_printable(ch) && length_ < kMaxLine) {
-        line_[length_++] = static_cast<char>(ch);
-        host_.echo(host_.ctx, ch);
+    } else if (is_printable(ch)) {
+        to_bottom();
+        if (length_ < kMaxLine) {
+            line_[length_++] = static_cast<char>(ch);
+            host_.echo(host_.ctx, ch);
+        }
     }
 }
 

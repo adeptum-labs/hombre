@@ -305,6 +305,56 @@ void dropped_rows_before_and_locate() {
     CHECK_EQ(row, 0u);
 }
 
+void total_rows_cache_matches_full_count() {
+    ShellText text;
+    u32 cols = 80;
+    CHECK_EQ(text.total_rows(cols), text.full_total_rows(cols));
+
+    u32 seed = 0x12345678u;
+    auto next_rand = [&]() -> u32 {
+        seed = seed * 1664525u + 1013904223u;
+        return seed >> 16;
+    };
+
+    const u32 widths[6] = {80, 23, 1, 0, 45, 80};
+    for (u32 step = 0; step < 2500; ++step) {
+        const u32 op = next_rand() % 10;
+        if (op < 5) {
+            const u32 n = next_rand() % 35;
+            for (u32 i = 0; i < n; ++i) {
+                text.put(static_cast<u8>('a' + (i % 26)));
+            }
+        } else if (op < 8) {
+            text.new_line();
+            if (next_rand() % 4 == 0) {
+                text.mark_input_start();
+            }
+        } else if (op == 8) {
+            const u32 n = next_rand() % 12;
+            for (u32 i = 0; i < n; ++i) {
+                text.erase_last();
+            }
+        } else {
+            cols = widths[next_rand() % 6];
+        }
+        CHECK_EQ(text.total_rows(cols), text.full_total_rows(cols));
+    }
+
+    // Enough lines to drop from the front, checking the cache each time.
+    for (u32 i = 0; i < ShellText::kMaxLines + 76; ++i) {
+        text.put(static_cast<u8>('a' + (i % 26)));
+        text.new_line();
+        CHECK_EQ(text.total_rows(cols), text.full_total_rows(cols));
+    }
+    CHECK(text.dropped() > 0);
+    text.clear();
+    CHECK_EQ(text.total_rows(cols), text.full_total_rows(cols));
+    for (u32 i = 0; i < 40; ++i) {
+        text.put('x');
+    }
+    CHECK_EQ(text.total_rows(10), text.full_total_rows(10));
+}
+
 int main() {
     dropped_rows_before_and_locate();
     CHECK_EQ(constinit_probe.line_count(), 1u);
@@ -321,5 +371,6 @@ int main() {
     rows_from_top_and_middle();
     rows_from_clamps_past_end();
     keeps_1024_lines();
+    total_rows_cache_matches_full_count();
     return check::finish("test_shell_text");
 }

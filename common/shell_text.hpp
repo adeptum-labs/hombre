@@ -45,6 +45,8 @@ public:
         dropped_ = 0;
         lengths_[0] = 0;
         input_start_ = 0;
+        cached_cols_ = 0;
+        cached_total_ = 0;
     }
 
     void put(u8 c) {
@@ -53,10 +55,25 @@ public:
             new_line();
             cur = current_slot();
         }
-        lines_[cur][lengths_[cur]++] = c;
+        const u32 old_len = lengths_[cur];
+        lengths_[cur] = old_len + 1;
+        if (cached_cols_ != 0) {
+            cached_total_ -= current_rows(old_len, cached_cols_);
+            cached_total_ += current_rows(old_len + 1, cached_cols_);
+        }
+        lines_[cur][old_len] = c;
     }
 
     void new_line() {
+        if (cached_cols_ != 0) {
+            if (count_ == kMaxLines) {
+                cached_total_ -= completed_rows(lengths_[head_], cached_cols_);
+            }
+            const u32 cur_len = lengths_[current_slot()];
+            cached_total_ -= current_rows(cur_len, cached_cols_);
+            cached_total_ += completed_rows(cur_len, cached_cols_);
+            cached_total_ += 1;
+        }
         if (count_ < kMaxLines) {
             ++count_;
         } else {
@@ -76,7 +93,12 @@ public:
         if (lengths_[cur] <= input_start_) {
             return false;
         }
+        const u32 old_len = lengths_[cur];
         --lengths_[cur];
+        if (cached_cols_ != 0) {
+            cached_total_ -= current_rows(old_len, cached_cols_);
+            cached_total_ += current_rows(old_len - 1, cached_cols_);
+        }
         return true;
     }
 
@@ -84,15 +106,20 @@ public:
         return count_;
     }
 
-    // Total wrapped rows in the whole layout at columns (0 means 1), using
-    // the same rule as tail.
+    // Total wrapped rows in the whole layout at columns (0 means 1), cached
+    // per column count and maintained incrementally on edits.
     u32 total_rows(u32 columns) const {
         const u32 cols = columns == 0 ? 1 : columns;
-        u32 total = 0;
-        for (u32 i = 0; i < count_; ++i) {
-            total += line_rows(i, cols);
+        if (cached_cols_ != cols) {
+            cached_total_ = recompute_total_rows(cols);
+            cached_cols_ = cols;
         }
-        return total;
+        return cached_total_;
+    }
+
+    // Full uncached recount of wrapped rows at columns (0 means 1).
+    u32 full_total_rows(u32 columns) const {
+        return recompute_total_rows(columns == 0 ? 1 : columns);
     }
 
     // Fills out with rows [top_row, top_row + count) of the whole layout
@@ -145,6 +172,15 @@ public:
     // so dropped() + index numbers a line for as long as it is kept.
     u32 dropped() const { return dropped_; }
 
+    // Rows of line index at columns (0 means 1).
+    u32 rows_of_line(u32 columns, u32 index) const {
+        if (index >= count_) {
+            return 0;
+        }
+        const u32 cols = columns == 0 ? 1 : columns;
+        return line_rows(index, cols);
+    }
+
     // Rows of the lines before index at columns (0 means 1).
     u32 rows_before(u32 columns, u32 index) const {
         const u32 cols = columns == 0 ? 1 : columns;
@@ -187,12 +223,25 @@ private:
         return slot_of(count_ - 1);
     }
 
+    static u32 completed_rows(u32 len, u32 cols) {
+        return len == 0 ? 1 : (len - 1) / cols + 1;
+    }
+
+    static u32 current_rows(u32 len, u32 cols) {
+        return len / cols + 1;
+    }
+
     u32 line_rows(u32 index, u32 cols) const {
         const u32 len = lengths_[slot_of(index)];
-        if (index + 1 == count_) {
-            return len / cols + 1;
+        return index + 1 == count_ ? current_rows(len, cols) : completed_rows(len, cols);
+    }
+
+    u32 recompute_total_rows(u32 cols) const {
+        u32 total = 0;
+        for (u32 i = 0; i < count_; ++i) {
+            total += line_rows(i, cols);
         }
-        return len == 0 ? 1 : (len - 1) / cols + 1;
+        return total;
     }
 
     u8 lines_[kMaxLines][kMaxLineBytes]{};
@@ -201,6 +250,8 @@ private:
     u32 count_ = 1;
     u32 input_start_ = 0;
     u32 dropped_ = 0;
+    mutable u32 cached_cols_ = 0;
+    mutable u32 cached_total_ = 0;
 };
 
 static_assert(sizeof(ShellText) <= 1024u * 1024u);

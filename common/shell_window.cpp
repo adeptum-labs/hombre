@@ -196,9 +196,11 @@ void ShellWindow::write(const u8* data, u32 bytes) {
     }
     cursor_visible_ = false;
     const u32 old_total = text_.total_rows(columns_);
+    intuition_->begin_batch();
     if (view_ > 0) {
         // The view stays on the same top line: remember it by its number,
         // which survives lines being dropped from the front.
+        const u32 old_view = view_;
         const u32 old_top = old_total > rows_ + view_ ? old_total - rows_ - view_ : 0;
         u32 line = 0;
         u32 row_in_line = 0;
@@ -224,9 +226,10 @@ void ShellWindow::write(const u8* data, u32 bytes) {
         if (view_ == 0 || redraw) {
             redraw_viewport();
         }
-        if (redraw || new_total != old_total) {
+        if (redraw || view_ != old_view || new_total != old_total) {
             update_knob();
         }
+        intuition_->end_batch();
         return;
     }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
@@ -236,6 +239,7 @@ void ShellWindow::write(const u8* data, u32 bytes) {
     if (text_.total_rows(columns_) != old_total) {
         update_knob();
     }
+    intuition_->end_batch();
 }
 
 void ShellWindow::write_prompt(u32 cli_number, const char* volume) {
@@ -274,6 +278,7 @@ void ShellWindow::write_prompt_text(const char* text) {
     if (!is_open() || text == nullptr) {
         return;
     }
+    intuition_->begin_batch();
     if (view_ > 0) {
         scroll_to_bottom();
     }
@@ -293,6 +298,7 @@ void ShellWindow::write_prompt_text(const char* text) {
     if (text_.total_rows(columns_) != old_total) {
         update_knob();
     }
+    intuition_->end_batch();
 }
 
 void ShellWindow::begin_input() {
@@ -310,6 +316,7 @@ void ShellWindow::echo(u8 ch) {
     if (!is_open() || !is_printable(ch) || columns_ == 0 || rows_ == 0) {
         return;
     }
+    intuition_->begin_batch();
     if (view_ > 0) {
         scroll_to_bottom();
     }
@@ -320,17 +327,20 @@ void ShellWindow::echo(u8 ch) {
     if (text_.total_rows(columns_) != old_total) {
         update_knob();
     }
+    intuition_->end_batch();
 }
 
 void ShellWindow::erase_last() {
     if (!is_open() || columns_ == 0 || rows_ == 0) {
         return;
     }
+    intuition_->begin_batch();
     if (view_ > 0) {
         scroll_to_bottom();
     }
     const u32 old_total = text_.total_rows(columns_);
     if (!text_.erase_last()) {
+        intuition_->end_batch();
         return;
     }
     if (row_ == 0 && col_ == 0) {
@@ -338,6 +348,7 @@ void ShellWindow::erase_last() {
         // again so that row comes into view.
         cursor_visible_ = true;
         on_size(this, window_);
+        intuition_->end_batch();
         return;
     }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
@@ -353,12 +364,14 @@ void ShellWindow::erase_last() {
     if (text_.total_rows(columns_) != old_total) {
         update_knob();
     }
+    intuition_->end_batch();
 }
 
 void ShellWindow::end_line() {
     if (!is_open() || columns_ == 0 || rows_ == 0) {
         return;
     }
+    intuition_->begin_batch();
     if (view_ > 0) {
         scroll_to_bottom();
     }
@@ -373,12 +386,14 @@ void ShellWindow::end_line() {
     if (text_.total_rows(columns_) != old_total) {
         update_knob();
     }
+    intuition_->end_batch();
 }
 
 void ShellWindow::print_line(const char* text) {
     if (!is_open() || text == nullptr) {
         return;
     }
+    intuition_->begin_batch();
     if (col_ != 0) {
         if (view_ == 0) {
             graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
@@ -397,6 +412,7 @@ void ShellWindow::print_line(const char* text) {
     }
     write(reinterpret_cast<const u8*>(text), length);
     end_line();
+    intuition_->end_batch();
 }
 
 void ShellWindow::close() {
@@ -415,6 +431,8 @@ void ShellWindow::close() {
     gadget_ = 0;
     window_ = 0;
     rp_ = 0;
+    columns_ = 0;
+    rows_ = 0;
     view_ = 0;
     cursor_visible_ = false;
     machine_ = nullptr;
@@ -484,12 +502,18 @@ void ShellWindow::on_size(void* ctx, u32 window) {
     const u32 old_columns = self.columns_;
     const u32 old_rows = self.rows_;
     const u32 old_view = self.view_;
-    u32 old_top_row = 0;
+    u32 top_number = 0;
+    u32 row_in_line = 0;
+    bool had_top = false;
     if (old_view > 0 && old_columns != 0 && old_rows != 0) {
         const u32 old_total = self.text_.total_rows(old_columns);
         const u32 old_limit = old_total > old_rows ? old_total - old_rows : 0;
         const u32 clamped_old_view = old_view < old_limit ? old_view : old_limit;
-        old_top_row = old_limit - clamped_old_view;
+        const u32 old_top_row = old_limit - clamped_old_view;
+        u32 line = 0;
+        self.text_.locate_row(old_columns, old_top_row, line, row_in_line);
+        top_number = self.text_.dropped() + line;
+        had_top = true;
     }
 
     const i32 width = win_w - border_left - border_right;
@@ -501,16 +525,30 @@ void ShellWindow::on_size(void* ctx, u32 window) {
     self.columns_ = static_cast<u32>(self.inner_w_) / kCell;
     self.rows_ = static_cast<u32>(self.inner_h_) / kCell;
 
-    if (old_view == 0 || self.columns_ == 0 || self.rows_ == 0) {
+    if (!had_top || self.columns_ == 0 || self.rows_ == 0) {
         self.view_ = 0;
     } else {
         const u32 new_limit = self.max_view();
-        const u32 top_row = old_top_row < new_limit ? old_top_row : new_limit;
+        u32 top_row = 0;
+        if (top_number >= self.text_.dropped()) {
+            const u32 line = top_number - self.text_.dropped();
+            const u32 line_r = self.text_.rows_of_line(self.columns_, line);
+            const u32 max_in_line = line_r > 0 ? line_r - 1 : 0;
+            const u32 scaled = static_cast<u32>(
+                (static_cast<u64>(row_in_line) * old_columns) / self.columns_);
+            const u32 offset = scaled < max_in_line ? scaled : max_in_line;
+            top_row = self.text_.rows_before(self.columns_, line) + offset;
+        }
+        if (top_row > new_limit) {
+            top_row = new_limit;
+        }
         self.view_ = new_limit - top_row;
     }
 
+    self.intuition_->begin_batch();
     self.redraw_viewport();
     self.update_knob();
+    self.intuition_->end_batch();
     if (self.view_ != old_view) {
         self.notify_view_listener();
     }
@@ -538,8 +576,10 @@ void ShellWindow::on_gadget(void* ctx, u32 gadget, u32 vert_pot) {
     if (new_view == self.view_) {
         return;
     }
+    self.intuition_->begin_batch();
     self.view_ = new_view;
     self.redraw_viewport();
+    self.intuition_->end_batch();
     self.notify_view_listener();
 }
 
@@ -559,9 +599,11 @@ void ShellWindow::apply_user_view(u32 new_view) {
     if (new_view == view_) {
         return;
     }
+    intuition_->begin_batch();
     view_ = new_view;
     redraw_viewport();
     update_knob();
+    intuition_->end_batch();
     notify_view_listener();
 }
 

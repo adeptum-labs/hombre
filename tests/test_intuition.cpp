@@ -3356,6 +3356,96 @@ void gadget_lvos_from_guest_calls() {
     CHECK_EQ(r.get32(kGad1 + gg_NextGadget), 0u);
 }
 
+void modify_prop_ignores_non_prop_gadget() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    put_prop_info(r, kProp1, 0x0012, 0x1234, 0x5678, 0x9ABC, 0xDEF0);
+    put_gadget(r, kGad1, 0, 20, 20, 20, 20, 0, 0, 1, kProp1);
+    r.intuition.add_glist(window, kGad1, -1, 1);
+
+    const std::vector<u8> before = screen_planes(r, r.intuition.front_screen());
+    r.intuition.new_modify_prop(kGad1, window, AUTOKNOB | FREEVERT, 0, MAXPOT, MAXBODY,
+                                MAXBODY / 4, 1);
+
+    CHECK_EQ(r.get16(kProp1 + pi_Flags), 0x0012u);
+    CHECK_EQ(r.get16(kProp1 + pi_HorizPot), 0x1234u);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), 0x5678u);
+    CHECK_EQ(r.get16(kProp1 + pi_HorizBody), 0x9ABCu);
+    CHECK_EQ(r.get16(kProp1 + pi_VertBody), 0xDEF0u);
+    CHECK(screen_planes(r, r.intuition.front_screen()) == before);
+}
+
+void modify_prop_keeps_knobhit_during_drag() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, kGad1, 0, 20, 20, 14, 62, 0, GACT_IMMEDIATE | GACT_RELVERIFY, GTYP_PROPGADGET,
+               kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    press(r, 77, 75);
+    CHECK((r.get16(kProp1 + pi_Flags) & KNOBHIT) != 0);
+
+    r.intuition.new_modify_prop(kGad1, window, AUTOKNOB | FREEVERT, 0, MAXPOT / 2, MAXBODY,
+                                MAXBODY / 4, 1);
+    CHECK((r.get16(kProp1 + pi_Flags) & KNOBHIT) != 0);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT / 2);
+
+    // Disabling during an active drag stops drag_prop from moving the knob.
+    g_prop_pots.clear();
+    r.intuition.set_gadget_hook(kGad1, &record_prop_hook, &g_prop_pots);
+    r.intuition.off_gadget(kGad1, window);
+    move_to(r, 77, 115);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT / 2);
+    CHECK(g_prop_pots.empty());
+
+    release(r, 77, 115);
+    CHECK((r.get16(kProp1 + pi_Flags) & KNOBHIT) == 0);
+}
+
+void remove_glist_clears_hook() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, 0x4000);
+    put_prop_info(r, kProp2, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, 0x4000);
+    put_gadget(r, kGad1, kGad2, 20, 20, 14, 62, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_gadget(r, kGad2, 0, 50, 20, 14, 62, 0, 0, GTYP_PROPGADGET, kProp2);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    g_prop_pots.clear();
+    r.intuition.set_gadget_hook(kGad1, &record_prop_hook, &g_prop_pots);
+    r.intuition.set_gadget_hook(kGad2, &record_prop_hook, &g_prop_pots);
+
+    CHECK_EQ(r.intuition.remove_glist(window, kGad1, 1), 0u);
+    CHECK_EQ(r.intuition.add_glist(window, kGad1, -1, 1), 1u);
+
+    // Removed gadget's hook was cleared; surviving gadget's hook stays.
+    press(r, 77, 125);
+    release(r, 77, 125);
+    CHECK(g_prop_pots.empty());
+
+    press(r, 107, 125);
+    release(r, 107, 125);
+    CHECK_EQ(g_prop_pots.size(), 1u);
+}
+
 }
 
 int main() {
@@ -3468,5 +3558,8 @@ int main() {
     close_during_knob_drag();
     wheel_event_posts_newmouse_rawkey();
     gadget_lvos_from_guest_calls();
+    modify_prop_ignores_non_prop_gadget();
+    modify_prop_keeps_knobhit_during_drag();
+    remove_glist_clears_hook();
     return check::finish("test_intuition");
 }

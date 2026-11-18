@@ -1143,6 +1143,97 @@ void listener_called_on_user_changes_only() {
     CHECK_EQ(log.views.size(), 5u);
 }
 
+void resize_width_while_scrolled_keeps_top_line() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+
+    for (u32 i = 0; i < 60; ++i) {
+        u8 line[101];
+        line[0] = static_cast<u8>('0' + i / 10);
+        line[1] = static_cast<u8>('0' + i % 10);
+        line[2] = ':';
+        for (u32 j = 3; j < 100; ++j) {
+            line[j] = static_cast<u8>('a' + (j - 3) % 26);
+        }
+        line[100] = '\n';
+        shell.write(line, 101);
+    }
+
+    const u32 cols0 = columns(r, window);
+    const u32 vis0 = rows(r, window);
+    CHECK(cols0 > 50 && cols0 < 100);
+    const u32 rows_per_line0 = (100u - 1u) / cols0 + 1u;
+    const u32 total0 = 60u * rows_per_line0 + 1u;
+    CHECK(total0 > vis0 + 10u * rows_per_line0);
+    shell.scroll_by(static_cast<i32>(total0 - vis0 - 10u * rows_per_line0));
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, '1'));
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, '0'));
+    CHECK(cell_is(r, bm, ix, iy, 2, 0, ':'));
+    CHECK(cell_is(r, bm, ix, iy, 3, 0, 'a'));
+
+    const i32 cur_h = static_cast<i16>(r.get16(window + wd_Height));
+    r.intuition.size_window_to(window, 320, cur_h);
+    CHECK(columns(r, window) < cols0);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, '1'));
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, '0'));
+    CHECK(cell_is(r, bm, ix, iy, 2, 0, ':'));
+    CHECK(cell_is(r, bm, ix, iy, 3, 0, 'a'));
+}
+
+void scroll_composes_once() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const u32 visible = rows(r, window);
+    CHECK(visible >= 10);
+
+    write_lines(shell, visible + 20, 'A');
+    const usize before = r.refreshes.size();
+    shell.scroll_by(5);
+    CHECK_EQ(r.refreshes.size(), before + 1);
+    CHECK_EQ(r.refreshed_screens.back(), screen);
+
+    const i32 wl = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 wt = static_cast<i16>(r.get16(window + wd_TopEdge));
+    const i32 ww = static_cast<i16>(r.get16(window + wd_Width));
+    const i32 wh = static_cast<i16>(r.get16(window + wd_Height));
+    const Rect& dirty = r.refreshes.back();
+    CHECK(dirty.x0 >= wl && dirty.y0 >= wt);
+    CHECK(dirty.x1 < wl + ww && dirty.y1 < wt + wh);
+}
+
+void knob_moves_when_store_is_full() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const u32 gad = r.get32(window + wd_FirstGadget);
+    const u32 pi = r.get32(gad + gg_SpecialInfo);
+    CHECK(pi != 0);
+
+    write_lines(shell, ShellText::kMaxLines + 10, 'A');
+    shell.scroll_by(500);
+    CHECK_EQ(shell.view_from_bottom(), 500u);
+    const u32 pot_before = r.get16(pi + pi_VertPot);
+    CHECK(pot_before > 0u);
+
+    write_lines(shell, 50, 'B');
+    CHECK_EQ(shell.view_from_bottom(), 550u);
+    CHECK(r.get16(pi + pi_VertPot) < pot_before);
+}
+
 }
 
 int main() {
@@ -1182,5 +1273,8 @@ int main() {
     eviction_clamps_view();
     resize_while_scrolled_keeps_top_line();
     listener_called_on_user_changes_only();
+    resize_width_while_scrolled_keeps_top_line();
+    scroll_composes_once();
+    knob_moves_when_store_is_full();
     return check::finish("test_shell_window");
 }

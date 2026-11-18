@@ -75,6 +75,10 @@ bool host_builtin(void* ctx, const char* word, const char* args) {
     return !r.accept_builtin.empty() && word == r.accept_builtin;
 }
 
+void host_scroll_to_bottom(void* ctx) {
+    static_cast<Recorder*>(ctx)->calls.push_back("scroll_to_bottom");
+}
+
 ShellHost make_host(Recorder& recorder) {
     ShellHost host{};
     host.echo = host_echo;
@@ -304,6 +308,47 @@ void builtin_is_tried_first() {
     CHECK(r.calls.back() == "prompt");
 }
 
+void backspace_on_empty_line_returns_to_bottom() {
+    Recorder r;
+    ShellHost host = make_host(r);
+    host.scroll_to_bottom = host_scroll_to_bottom;
+    Shell shell;
+    shell.init(host);
+
+    shell.key('\b');
+    CHECK_EQ(r.calls.size(), 1u);
+    CHECK(r.calls[0] == "scroll_to_bottom");
+}
+
+void key_on_full_line_returns_to_bottom() {
+    Recorder r;
+    ShellHost host = make_host(r);
+    host.scroll_to_bottom = host_scroll_to_bottom;
+    Shell shell;
+    shell.init(host);
+
+    for (u32 i = 0; i < Shell::kMaxLine; ++i) {
+        shell.key('x');
+    }
+    r.calls.clear();
+
+    shell.key('y');
+    CHECK_EQ(r.calls.size(), 1u);
+    CHECK(r.calls[0] == "scroll_to_bottom");
+
+    shell.key('\t');
+    CHECK_EQ(r.calls.size(), 2u);
+    CHECK(r.calls[1] == "scroll_to_bottom");
+
+    shell.key(0x01);
+    CHECK_EQ(r.calls.size(), 2u);
+
+    shell.key('\n');
+    CHECK(r.calls.size() >= 4u);
+    CHECK(r.calls[2] == "scroll_to_bottom");
+    CHECK(r.calls[3] == "end_line");
+}
+
 }
 
 int main() {
@@ -319,5 +364,7 @@ int main() {
     second_command_after_unknown_one_works();
     control_bytes_are_ignored();
     builtin_is_tried_first();
+    backspace_on_empty_line_returns_to_bottom();
+    key_on_full_line_returns_to_bottom();
     return check::finish("test_shell");
 }

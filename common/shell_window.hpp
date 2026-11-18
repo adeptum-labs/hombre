@@ -75,6 +75,7 @@ public:
 
     // The Intuition window of the shell, 0 while it is not open.
     u32 window() const { return window_; }
+    u32 rows() const { return is_open() ? rows_ : 0; }
     void close();
 
     // Scrolls view rows back into history (negative moves toward the bottom).
