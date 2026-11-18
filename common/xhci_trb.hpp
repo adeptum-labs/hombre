@@ -121,9 +121,12 @@ constexpr Trb make_normal(u64 buffer, u16 length) {
 // cycle flips each time the Link TRB is written.
 class ProducerRing {
 public:
-    void init(Trb* base, u32 trbs) {
+    // base is where the host writes the ring; base_physical is the address
+    // the controller reads it at, which the wrap link points to.
+    void init(Trb* base, u32 trbs, u64 base_physical) {
         base_ = base;
         trbs_ = trbs;
+        base_physical_ = base_physical;
         index_ = 0;
         cycle_ = true;
     }
@@ -134,7 +137,7 @@ public:
         }
         base_[index_] = with_cycle(trb);
         if (++index_ == trbs_ - 1) {
-            base_[index_] = with_cycle(make_link(reinterpret_cast<u64>(base_), true));
+            base_[index_] = with_cycle(make_link(base_physical_, true));
             index_ = 0;
             cycle_ = !cycle_;
         }
@@ -152,6 +155,7 @@ private:
     }
 
     Trb* base_ = nullptr;
+    u64 base_physical_ = 0;
     u32 trbs_ = 0;
     u32 index_ = 0;
     bool cycle_ = true;

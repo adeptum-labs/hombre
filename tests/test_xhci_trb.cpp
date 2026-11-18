@@ -84,7 +84,7 @@ void trb_builders_set_type_and_fields() {
 void producer_ring_writes_cycle_bits_and_wraps() {
     xhci::Trb ring[8] = {};
     xhci::ProducerRing producer;
-    producer.init(ring, 8);
+    producer.init(ring, 8, 0x8000);
     CHECK(producer.cycle());
     CHECK_EQ(producer.enqueue_index(), 0u);
 
@@ -99,7 +99,8 @@ void producer_ring_writes_cycle_bits_and_wraps() {
         CHECK_EQ(ring[i].parameter, 0x1000u + i);
     }
     CHECK_EQ(xhci::trb_type(ring[7].control), 6u);
-    CHECK_EQ(ring[7].parameter, reinterpret_cast<u64>(ring));
+    // The Link TRB holds the physical base the ring was given, not the pointer.
+    CHECK_EQ(ring[7].parameter, 0x8000u);
     CHECK_EQ(ring[7].control & 1u, 1u);
     CHECK(ring[7].control & 2u);
 
@@ -120,9 +121,9 @@ void producer_ring_writes_cycle_bits_and_wraps() {
 void producer_ring_rejects_tiny_rings() {
     xhci::Trb ring[4] = {};
     xhci::ProducerRing producer;
-    producer.init(ring, 3);
+    producer.init(ring, 3, 0x8000);
     CHECK(!producer.push(xhci::make_noop_command()));
-    producer.init(nullptr, 0);
+    producer.init(nullptr, 0, 0);
     CHECK(!producer.push(xhci::make_noop_command()));
     CHECK_EQ(producer.enqueue_index(), 0u);
 }
