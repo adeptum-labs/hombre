@@ -32,6 +32,7 @@ namespace hombre {
 
 using m68k::Machine;
 using native::Bus;
+using i16 = __INT16_TYPE__;
 
 namespace {
 
@@ -175,13 +176,19 @@ void refresh_full(DisplayState& display, Machine& m, u32 screen, u32 width, u32 
     display.sink.refresh(display.sink.ctx, m, screen, full);
 }
 
-// Draws the title at pen 1 over the bar, which stays pen 2 where the glyph
-// leaves it alone.
-void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title) {
-    graphics.move(rp, 1, 7);
+// Draws the pen 1 title from x with the given baseline, inside x1.
+void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title, i32 x, i32 baseline, i32 x1) {
+    if (title == 0 || x1 < x) {
+        return;
+    }
+    u32 chars = static_cast<u32>((x1 - x + 1) / 8);
+    if (chars > kMaxTitleChars) {
+        chars = kMaxTitleChars;
+    }
+    graphics.move(rp, x, baseline);
     u8 buffer[kTitleChunk];
-    for (u32 at = 0; at < kMaxTitleChars; at += kTitleChunk) {
-        u32 n = kMaxTitleChars - at;
+    for (u32 at = 0; at < chars; at += kTitleChunk) {
+        u32 n = chars - at;
         if (n > kTitleChunk) {
             n = kTitleChunk;
         }
@@ -202,6 +209,198 @@ void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title) {
             return;
         }
     }
+}
+
+// The fields of a NewWindow as the WA_ tags can override them.
+struct WindowArgs {
+    i32 left = 0;
+    i32 top = 0;
+    u32 width = 0;
+    u32 height = 0;
+    u32 detail = 0;
+    u32 block = 1;
+    u32 flags = 0;
+    u32 title = 0;
+    u32 screen = 0;
+    u32 type = 0;
+    u32 min_width = 0;
+    u32 min_height = 0;
+    u32 max_width = 0;
+    u32 max_height = 0;
+    bool custom_screen = false;
+};
+
+void read_new_window(Bus& b, u32 nw, WindowArgs& a) {
+    if (nw == 0) {
+        return;
+    }
+    a.left = static_cast<i16>(b.r16(nw + ndk::nw_LeftEdge));
+    a.top = static_cast<i16>(b.r16(nw + ndk::nw_TopEdge));
+    a.width = b.r16(nw + ndk::nw_Width);
+    a.height = b.r16(nw + ndk::nw_Height);
+    a.detail = b.r8(nw + ndk::nw_DetailPen);
+    a.block = b.r8(nw + ndk::nw_BlockPen);
+    a.flags = b.r16(nw + ndk::nw_Flags);
+    a.title = b.r32(nw + ndk::nw_Title);
+    a.screen = b.r32(nw + ndk::nw_Screen);
+    a.min_width = b.r16(nw + ndk::nw_MinWidth);
+    a.min_height = b.r16(nw + ndk::nw_MinHeight);
+    a.max_width = b.r16(nw + ndk::nw_MaxWidth);
+    a.max_height = b.r16(nw + ndk::nw_MaxHeight);
+    a.type = b.r16(nw + ndk::nw_Type);
+}
+
+void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
+    switch (tag) {
+    case ndk::WA_Left:
+        a.left = static_cast<i16>(data);
+        break;
+    case ndk::WA_Top:
+        a.top = static_cast<i16>(data);
+        break;
+    case ndk::WA_Width:
+        a.width = data;
+        break;
+    case ndk::WA_Height:
+        a.height = data;
+        break;
+    case ndk::WA_DetailPen:
+        a.detail = data & 0xFF;
+        break;
+    case ndk::WA_BlockPen:
+        a.block = data & 0xFF;
+        break;
+    case ndk::WA_Flags:
+        a.flags = data;
+        break;
+    case ndk::WA_Title:
+        a.title = data;
+        break;
+    case ndk::WA_CustomScreen:
+        a.screen = data;
+        a.custom_screen = true;
+        break;
+    default:
+        break;
+    }
+}
+
+void read_window_tags(Bus& b, u32 tags, WindowArgs& a) {
+    u32 item = tags;
+    u32 budget = Intuition::kMaxTagItems;
+    while (item != 0 && budget != 0) {
+        const u32 tag = b.r32(item + ndk::ti_Tag);
+        const u32 data = b.r32(item + ndk::ti_Data);
+        if (!b.ok()) {
+            return;
+        }
+        --budget;
+        switch (tag) {
+        case ndk::TAG_DONE:
+            return;
+        case ndk::TAG_IGNORE:
+            item += ndk::ti_SIZEOF;
+            break;
+        case ndk::TAG_MORE:
+            item = data;
+            break;
+        case ndk::TAG_SKIP:
+            item += ndk::ti_SIZEOF * (data + 1);
+            break;
+        default:
+            apply_window_tag(a, tag, data);
+            item += ndk::ti_SIZEOF;
+            break;
+        }
+    }
+}
+
+// The Window fields a draw or a free needs.
+struct WindowView {
+    u32 window = 0;
+    u32 screen = 0;
+    u32 rp = 0;
+    u32 layer = 0;
+    i32 left = 0;
+    i32 top = 0;
+    i32 width = 0;
+    i32 height = 0;
+    u32 flags = 0;
+    u32 title = 0;
+    u32 border_top = 0;
+    bool ok = false;
+};
+
+WindowView load_window(Bus& b, u32 window) {
+    WindowView w;
+    if (window == 0) {
+        return w;
+    }
+    w.window = window;
+    w.left = static_cast<i16>(b.r16(window + ndk::wd_LeftEdge));
+    w.top = static_cast<i16>(b.r16(window + ndk::wd_TopEdge));
+    w.width = b.r16(window + ndk::wd_Width);
+    w.height = b.r16(window + ndk::wd_Height);
+    w.flags = b.r16(window + ndk::wd_Flags);
+    w.title = b.r32(window + ndk::wd_Title);
+    w.screen = b.r32(window + ndk::wd_WScreen);
+    w.rp = b.r32(window + ndk::wd_RPort);
+    w.layer = b.r32(window + ndk::wd_WLayer);
+    w.border_top = b.r8(window + ndk::wd_BorderTop);
+    w.ok = b.ok();
+    return w;
+}
+
+void draw_gadget(Graphics& graphics, u32 rp, i32 x, i32 y) {
+    graphics.set_pens(rp, 2, 1, ndk::JAM2);
+    graphics.rect_fill(rp, x, y, x + 7, y + 7);
+    graphics.set_pens(rp, 1, 0, ndk::JAM2);
+    graphics.rect_fill(rp, x, y, x + 7, y);
+    graphics.rect_fill(rp, x, y + 7, x + 7, y + 7);
+    graphics.rect_fill(rp, x, y, x, y + 7);
+    graphics.rect_fill(rp, x + 7, y, x + 7, y + 7);
+}
+
+// The 10-row title bar of a window with its gadgets, line and title.
+void draw_window_bar(Graphics& graphics, Bus& b, const WindowView& w) {
+    const u32 rp = w.screen + ndk::sc_RastPort;
+    const i32 left = w.left + 1;
+    const i32 right = w.left + w.width - 2;
+    const i32 top = w.top + 1;
+    const i32 line = w.top + static_cast<i32>(kBarHeight);
+    graphics.set_pens(rp, 2, 1, ndk::JAM2);
+    graphics.rect_fill(rp, left, top, right, line);
+    if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
+        draw_gadget(graphics, rp, left, top);
+    }
+    if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
+        draw_gadget(graphics, rp, right - 7, top);
+    }
+    graphics.set_pens(rp, 1, 0, ndk::JAM2);
+    graphics.rect_fill(rp, left, line, right, line);
+    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0 ? w.left + 11 : w.left + 2;
+    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0 ? right - 8 : right;
+    graphics.set_pens(rp, 1, 2, ndk::JAM1);
+    draw_title(graphics, b, rp, w.title, text_x, w.top + 7, text_x1);
+}
+
+void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w) {
+    const u32 rp = w.screen + ndk::sc_RastPort;
+    const i32 right = w.left + w.width - 1;
+    const i32 bottom = w.top + w.height - 1;
+    graphics.set_pens(rp, 0, 0, ndk::JAM2);
+    graphics.rect_fill(rp, w.left, w.top, right, bottom);
+    graphics.set_pens(rp, 1, 0, ndk::JAM2);
+    graphics.rect_fill(rp, w.left, w.top, right, w.top);
+    graphics.rect_fill(rp, w.left, bottom, right, bottom);
+    graphics.rect_fill(rp, w.left, w.top, w.left, bottom);
+    graphics.rect_fill(rp, right, w.top, right, bottom);
+    if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
+        draw_window_bar(graphics, b, w);
+    }
+    graphics.set_pens(rp, 0, 0, ndk::JAM2);
+    graphics.rect_fill(rp, w.left + 1, w.top + static_cast<i32>(w.border_top), right - 1,
+                       bottom - 1);
 }
 
 }
@@ -253,6 +452,24 @@ struct IntuitionNatives {
     static void open_screen_tag_list(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).open_screen(m.cpu.a[0], m.cpu.a[1]));
     }
+
+    static void close_window(void* ctx, Machine& m) { of(ctx).close_window(m.cpu.a[0]); }
+
+    static void open_window(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).open_window(m.cpu.a[0], 0));
+    }
+
+    static void open_window_tag_list(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).open_window(m.cpu.a[0], m.cpu.a[1]));
+    }
+
+    static void set_window_titles(void* ctx, Machine& m) {
+        of(ctx).set_window_titles(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2]);
+    }
+
+    static void window_to_back(void*, Machine&) {}
+
+    static void window_to_front(void* ctx, Machine& m) { of(ctx).window_to_front(m.cpu.a[0]); }
 };
 
 namespace {
@@ -265,12 +482,19 @@ struct IntuitionFunction {
 
 constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::CloseScreen, IntuitionNatives::close_screen, "CloseScreen"},
+    {intuition_lvo::CloseWindow, IntuitionNatives::close_window, "CloseWindow"},
     {intuition_lvo::OpenScreen, IntuitionNatives::open_screen, "OpenScreen"},
+    {intuition_lvo::OpenWindow, IntuitionNatives::open_window, "OpenWindow"},
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
     {intuition_lvo::ScreenToFront, IntuitionNatives::screen_to_front, "ScreenToFront"},
+    {intuition_lvo::SetWindowTitles, IntuitionNatives::set_window_titles, "SetWindowTitles"},
+    {intuition_lvo::WindowToBack, IntuitionNatives::window_to_back, "WindowToBack"},
+    {intuition_lvo::WindowToFront, IntuitionNatives::window_to_front, "WindowToFront"},
     {intuition_lvo::LockIBase, IntuitionNatives::lock_i_base, "LockIBase"},
     {intuition_lvo::UnlockIBase, IntuitionNatives::unlock_i_base, "UnlockIBase"},
     {intuition_lvo::GetScreenData, IntuitionNatives::get_screen_data, "GetScreenData"},
+    {intuition_lvo::OpenWindowTagList, IntuitionNatives::open_window_tag_list,
+     "OpenWindowTagList"},
     {intuition_lvo::OpenScreenTagList, IntuitionNatives::open_screen_tag_list,
      "OpenScreenTagList"},
 };
@@ -287,6 +511,9 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     display.front_screen = 0;
     for (u32& screen : screens_) {
         screen = 0;
+    }
+    for (u32& window : windows_) {
+        window = 0;
     }
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
@@ -493,7 +720,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
                          static_cast<i32>(kBarHeight));
     if (title != 0) {
         graphics_->set_pens(rp, 1, 2, ndk::JAM1);
-        draw_title(*graphics_, b, rp, title);
+        draw_title(*graphics_, b, rp, title, 1, 7, right);
     }
     return screen;
 }
@@ -504,6 +731,16 @@ void Intuition::close_screen(u32 screen) {
         return;
     }
     Bus b(*machine_);
+    u32 doomed[kMaxWindows];
+    u32 doomed_count = 0;
+    for (u32 window : windows_) {
+        if (window != 0 && b.r32(window + ndk::wd_WScreen) == screen) {
+            doomed[doomed_count++] = window;
+        }
+    }
+    for (u32 i = 0; i < doomed_count; ++i) {
+        close_window(doomed[i]);
+    }
     const u32 width = b.r16(screen + ndk::sc_Width);
     const u32 height = b.r16(screen + ndk::sc_Height);
     const u32 title = b.r32(screen + ndk::sc_Title);
@@ -577,6 +814,300 @@ void Intuition::screen_to_back(u32 screen) {
     display_->front_screen = front_;
     write_links();
     refresh_screen(front_);
+}
+
+u32 Intuition::find_window(u32 window) const {
+    if (window == 0) {
+        return kMaxWindows;
+    }
+    for (u32 i = 0; i < kMaxWindows; ++i) {
+        if (windows_[i] == window) {
+            return i;
+        }
+    }
+    return kMaxWindows;
+}
+
+void Intuition::remove_window_at(u32 index) {
+    for (u32 i = index; i + 1 < kMaxWindows; ++i) {
+        windows_[i] = windows_[i + 1];
+    }
+    windows_[kMaxWindows - 1] = 0;
+}
+
+u32 Intuition::open_window(u32 new_window, u32 tags) {
+    Bus b(*machine_);
+    if (new_window == 0 && tags == 0) {
+        b.r32((machine_->mem.size + 1) & ~1u);
+        return 0;
+    }
+    WindowArgs a;
+    read_new_window(b, new_window, a);
+    read_window_tags(b, tags, a);
+    if (!b.ok()) {
+        return 0;
+    }
+
+    u32 screen = 0;
+    if (a.custom_screen && a.screen != 0) {
+        screen = a.screen;
+    } else if (a.type == ndk::CUSTOMSCREEN && a.screen != 0) {
+        screen = a.screen;
+    } else {
+        screen = front_;
+    }
+    if (screen == 0 || find_screen(screen) >= kMaxScreens) {
+        LogLine().text("intuition: window without a screen").send();
+        return 0;
+    }
+    const i32 screen_w = static_cast<i32>(b.r16(screen + ndk::sc_Width));
+    const i32 screen_h = static_cast<i32>(b.r16(screen + ndk::sc_Height));
+    if (!b.ok() || screen_w <= 0 || screen_h <= 0) {
+        return 0;
+    }
+
+    u32 open = 0;
+    for (u32 window : windows_) {
+        if (window != 0) {
+            ++open;
+        }
+    }
+    if (open == kMaxWindows) {
+        LogLine().text("intuition: window limit reached").send();
+        return 0;
+    }
+
+    i32 left = a.left < 0 ? 0 : a.left;
+    i32 top = a.top < 0 ? 0 : a.top;
+    if (left >= screen_w) {
+        left = screen_w - 1;
+    }
+    if (top >= screen_h) {
+        top = screen_h - 1;
+    }
+    const u32 room_x = static_cast<u32>(screen_w - left);
+    const u32 room_y = static_cast<u32>(screen_h - top);
+    const i32 width =
+        a.width == 0 || a.width > room_x ? static_cast<i32>(room_x) : static_cast<i32>(a.width);
+    const i32 height =
+        a.height == 0 || a.height > room_y ? static_cast<i32>(room_y) : static_cast<i32>(a.height);
+    const bool borderless = (a.flags & ndk::WFLG_BORDERLESS) != 0;
+    const u32 border_top = borderless ? 1 : 11;
+
+    const u32 window = exec_->alloc(ndk::Window_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (window == 0) {
+        LogLine().text("intuition: no memory for a window").send();
+        return 0;
+    }
+    const u32 rp = exec_->alloc(ndk::RastPort_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (rp == 0) {
+        exec_->free(window, ndk::Window_SIZEOF);
+        LogLine().text("intuition: no memory for a window").send();
+        return 0;
+    }
+    const u32 layer = exec_->alloc(ndk::Layer_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (layer == 0) {
+        exec_->free(rp, ndk::RastPort_SIZEOF);
+        exec_->free(window, ndk::Window_SIZEOF);
+        LogLine().text("intuition: no memory for a window").send();
+        return 0;
+    }
+    u32 title = 0;
+    if (a.title != 0) {
+        title = copy_title(b, *exec_, a.title);
+        if (title == 0) {
+            exec_->free(layer, ndk::Layer_SIZEOF);
+            exec_->free(rp, ndk::RastPort_SIZEOF);
+            exec_->free(window, ndk::Window_SIZEOF);
+            LogLine().text("intuition: no memory for a window").send();
+            return 0;
+        }
+    }
+
+    const u32 bitmap = screen + ndk::sc_BitMap;
+    b.w16(window + ndk::wd_LeftEdge, static_cast<u32>(left));
+    b.w16(window + ndk::wd_TopEdge, static_cast<u32>(top));
+    b.w16(window + ndk::wd_Width, static_cast<u32>(width));
+    b.w16(window + ndk::wd_Height, static_cast<u32>(height));
+    b.w16(window + ndk::wd_MinWidth, a.min_width);
+    b.w16(window + ndk::wd_MinHeight, a.min_height);
+    b.w16(window + ndk::wd_MaxWidth, a.max_width);
+    b.w16(window + ndk::wd_MaxHeight, a.max_height);
+    b.w16(window + ndk::wd_Flags, a.flags);
+    b.w32(window + ndk::wd_Title, title);
+    b.w32(window + ndk::wd_WScreen, screen);
+    b.w32(window + ndk::wd_RPort, rp);
+    b.w8(window + ndk::wd_BorderLeft, 1);
+    b.w8(window + ndk::wd_BorderTop, border_top);
+    b.w8(window + ndk::wd_BorderRight, 1);
+    b.w8(window + ndk::wd_BorderBottom, 1);
+    b.w8(window + ndk::wd_DetailPen, a.detail);
+    b.w8(window + ndk::wd_BlockPen, a.block);
+    b.w32(window + ndk::wd_WLayer, layer);
+    b.w32(window + ndk::wd_IFont, graphics_->topaz_font());
+    b.w32(window + ndk::wd_NextWindow, 0);
+
+    graphics_->init_rastport(rp);
+    b.w32(rp + ndk::rp_BitMap, bitmap);
+    b.w32(rp + ndk::rp_Layer, layer);
+    b.w8(rp + ndk::rp_FgPen, 1);
+    b.w8(rp + ndk::rp_BgPen, 0);
+    b.w8(rp + ndk::rp_DrawMode, ndk::JAM2);
+    b.w16(rp + ndk::rp_cp_x, 0);
+    b.w16(rp + ndk::rp_cp_y, 6);
+
+    const i32 inner_x0 = left + 1;
+    const i32 inner_y0 = top + static_cast<i32>(border_top);
+    const i32 inner_x1 = left + width - 2;
+    const i32 inner_y1 = top + height - 2;
+    b.w32(layer + ndk::ly_rp, rp);
+    b.w16(layer + ndk::ly_MinX, static_cast<u32>(inner_x0));
+    b.w16(layer + ndk::ly_MinY, static_cast<u32>(inner_y0));
+    b.w16(layer + ndk::ly_MaxX, static_cast<u32>(inner_x1));
+    b.w16(layer + ndk::ly_MaxY, static_cast<u32>(inner_y1));
+    b.w32(layer + ndk::ly_Window, window);
+
+    const u32 head = b.r32(screen + ndk::sc_FirstWindow);
+    b.w32(window + ndk::wd_NextWindow, head);
+    b.w32(screen + ndk::sc_FirstWindow, window);
+    for (u32& slot : windows_) {
+        if (slot == 0) {
+            slot = window;
+            break;
+        }
+    }
+
+    draw_window_chrome(*graphics_, b, load_window(b, window));
+    return window;
+}
+
+void Intuition::close_window(u32 window) {
+    const u32 index = find_window(window);
+    if (index >= kMaxWindows) {
+        return;
+    }
+    Bus b(*machine_);
+    const WindowView w = load_window(b, window);
+    if (!w.ok) {
+        remove_window_at(index);
+        exec_->free(window, ndk::Window_SIZEOF);
+        return;
+    }
+    if (find_screen(w.screen) < kMaxScreens) {
+        const u32 next = b.r32(window + ndk::wd_NextWindow);
+        const u32 head = b.r32(w.screen + ndk::sc_FirstWindow);
+        if (head == window) {
+            b.w32(w.screen + ndk::sc_FirstWindow, next);
+        } else {
+            u32 prev = head;
+            for (u32 step = 0; step < kMaxWindows && prev != 0; ++step) {
+                const u32 link = b.r32(prev + ndk::wd_NextWindow);
+                if (link == window) {
+                    b.w32(prev + ndk::wd_NextWindow, next);
+                    break;
+                }
+                prev = link;
+            }
+        }
+        const u32 rp = w.screen + ndk::sc_RastPort;
+        graphics_->set_pens(rp, 0, 0, ndk::JAM2);
+        graphics_->rect_fill(rp, w.left, w.top, w.left + w.width - 1, w.top + w.height - 1);
+    }
+    const u32 title_size = title_length(b, w.title);
+    remove_window_at(index);
+    if (w.title != 0) {
+        exec_->free(w.title, title_size);
+    }
+    if (w.layer != 0) {
+        exec_->free(w.layer, ndk::Layer_SIZEOF);
+    }
+    if (w.rp != 0) {
+        exec_->free(w.rp, ndk::RastPort_SIZEOF);
+    }
+    exec_->free(window, ndk::Window_SIZEOF);
+}
+
+void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
+    const u32 index = find_window(window);
+    if (index >= kMaxWindows) {
+        return;
+    }
+    Bus b(*machine_);
+    bool redraw = false;
+    if (title != 0xFFFFFFFF) {
+        u32 copy = 0;
+        if (title != 0) {
+            copy = copy_title(b, *exec_, title);
+            if (copy == 0) {
+                return;
+            }
+        }
+        const u32 old = b.r32(window + ndk::wd_Title);
+        const u32 old_size = title_length(b, old);
+        b.w32(window + ndk::wd_Title, copy);
+        if (old != 0) {
+            exec_->free(old, old_size);
+        }
+        redraw = true;
+    }
+    if (screen_title != 0xFFFFFFFF) {
+        const WindowView w = load_window(b, window);
+        if (w.ok && find_screen(w.screen) < kMaxScreens) {
+            u32 copy = 0;
+            if (screen_title != 0) {
+                copy = copy_title(b, *exec_, screen_title);
+                if (copy == 0) {
+                    return;
+                }
+            }
+            const u32 old = b.r32(w.screen + ndk::sc_Title);
+            const u32 old_size = title_length(b, old);
+            b.w32(w.screen + ndk::sc_Title, copy);
+            b.w32(w.screen + ndk::sc_DefaultTitle, copy);
+            if (old != 0) {
+                exec_->free(old, old_size);
+            }
+        }
+    }
+    if (redraw) {
+        const WindowView w = load_window(b, window);
+        if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
+            draw_window_bar(*graphics_, b, w);
+        }
+    }
+}
+
+void Intuition::window_to_front(u32 window) {
+    const u32 index = find_window(window);
+    if (index >= kMaxWindows) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 screen = b.r32(window + ndk::wd_WScreen);
+    if (!b.ok() || screen == 0 || find_screen(screen) >= kMaxScreens) {
+        return;
+    }
+    const u32 head = b.r32(screen + ndk::sc_FirstWindow);
+    if (head == window) {
+        return;
+    }
+    u32 prev = head;
+    u32 next = 0;
+    bool found = false;
+    for (u32 step = 0; step < kMaxWindows && prev != 0; ++step) {
+        next = b.r32(prev + ndk::wd_NextWindow);
+        if (next == window) {
+            found = true;
+            break;
+        }
+        prev = next;
+    }
+    if (!found) {
+        return;
+    }
+    b.w32(prev + ndk::wd_NextWindow, b.r32(window + ndk::wd_NextWindow));
+    b.w32(window + ndk::wd_NextWindow, head);
+    b.w32(screen + ndk::sc_FirstWindow, window);
 }
 
 }

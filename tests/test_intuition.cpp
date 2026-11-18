@@ -41,6 +41,8 @@ constexpr u32 kNewScreen = kData;
 constexpr u32 kTagList = kData + 0x100;
 constexpr u32 kTitle = kData + 0x200;
 constexpr u32 kBuffer = kData + 0x300;
+constexpr u32 kNewWindow = kData + 0x500;
+constexpr u32 kWinTitle = kData + 0x600;
 
 void put_new_screen(GfxRig& r, u32 at, u32 width, u32 height, u32 depth, u32 detail,
                     u32 block, u32 title) {
@@ -103,6 +105,80 @@ u32 heap_capacity(GfxRig& r) {
         r.exec.free(at, 4096);
     }
     return count;
+}
+
+void put_new_window(GfxRig& r, u32 at, i32 left, i32 top, u32 width, u32 height, u32 flags,
+                    u32 title, u32 screen, u32 type) {
+    r.put16(at + nw_LeftEdge, static_cast<u32>(left));
+    r.put16(at + nw_TopEdge, static_cast<u32>(top));
+    r.put16(at + nw_Width, width);
+    r.put16(at + nw_Height, height);
+    r.put8(at + nw_DetailPen, 0);
+    r.put8(at + nw_BlockPen, 1);
+    r.put16(at + nw_IDCMPFlags, 0);
+    r.put16(at + nw_Flags, flags);
+    r.put32(at + nw_Title, title);
+    r.put32(at + nw_Screen, screen);
+    r.put16(at + nw_MinWidth, 0);
+    r.put16(at + nw_MinHeight, 0);
+    r.put16(at + nw_MaxWidth, 0);
+    r.put16(at + nw_MaxHeight, 0);
+    r.put16(at + nw_Type, type);
+}
+
+u32 open_win(GfxRig& r, u32 new_window) {
+    r.cpu().a[0] = new_window;
+    return r.result(Base::Intuition, intuition_lvo::OpenWindow);
+}
+
+u32 open_win_tags(GfxRig& r, u32 new_window, u32 tags) {
+    r.cpu().a[0] = new_window;
+    r.cpu().a[1] = tags;
+    return r.result(Base::Intuition, intuition_lvo::OpenWindowTagList);
+}
+
+u32 window_pixel(GfxRig& r, u32 window, i32 x, i32 y) {
+    r.cpu().a[1] = r.get32(window + wd_RPort);
+    r.cpu().d[0] = static_cast<u32>(x);
+    r.cpu().d[1] = static_cast<u32>(y);
+    return r.result(Base::Graphics, graphics_lvo::ReadPixel);
+}
+
+std::vector<u8> screen_planes(GfxRig& r, u32 screen) {
+    const u32 bitmap = screen + sc_BitMap;
+    const u32 bpr = r.get16(bitmap + bm_BytesPerRow);
+    const u32 rows = r.get16(bitmap + bm_Rows);
+    const u32 bytes = bpr * rows;
+    const u32 plane0 = r.get32(bitmap + bm_Planes);
+    const u32 plane1 = r.get32(bitmap + bm_Planes + 4);
+    std::vector<u8> out(bytes * 2);
+    for (u32 i = 0; i < bytes; ++i) {
+        out[i] = static_cast<u8>(r.get8(plane0 + i));
+        out[bytes + i] = static_cast<u8>(r.get8(plane1 + i));
+    }
+    return out;
+}
+
+bool changed_only_inside(const std::vector<u8>& before, const std::vector<u8>& after, u32 bpr,
+                         u32 rows, i32 x0, i32 y0, i32 x1, i32 y1) {
+    const u32 bytes = bpr * rows;
+    const u32 bx0 = static_cast<u32>(x0) >> 3;
+    const u32 bx1 = static_cast<u32>(x1) >> 3;
+    for (u32 plane = 0; plane < 2; ++plane) {
+        for (u32 row = 0; row < rows; ++row) {
+            for (u32 byte = 0; byte < bpr; ++byte) {
+                const u32 at = plane * bytes + row * bpr + byte;
+                if (after[at] == before[at]) {
+                    continue;
+                }
+                if (row < static_cast<u32>(y0) || row > static_cast<u32>(y1) || byte < bx0 ||
+                    byte > bx1) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 void open_screen_builds_struct_bitmap_and_colormap() {
@@ -377,9 +453,390 @@ void get_screen_data_copies_struct() {
 
 void unimplemented_vector_ends_run() {
     GfxRig r;
-    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::OpenWindow), ExitReason::Unimplemented);
-    CHECK(logged("intuition: unimplemented LVO -204"));
-    CHECK_EQ(r.cpu().pc, r.intuition.intuition_base() - intuition_lvo::OpenWindow);
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::Last), ExitReason::Unimplemented);
+    CHECK(logged("intuition: unimplemented LVO -828"));
+    CHECK_EQ(r.cpu().pc, r.intuition.intuition_base() - intuition_lvo::Last);
+}
+
+void open_window_builds_struct_rastport_and_layer() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 50u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 60u);
+    CHECK_EQ(r.get16(window + wd_Width), 200u);
+    CHECK_EQ(r.get16(window + wd_Height), 100u);
+    CHECK_EQ(r.get32(window + wd_WScreen), screen);
+    CHECK_EQ(r.get8(window + wd_BorderLeft), 1u);
+    CHECK_EQ(r.get8(window + wd_BorderTop), 11u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 1u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 1u);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), window);
+    CHECK_EQ(r.get32(window + wd_NextWindow), 0u);
+
+    const u32 rp = r.get32(window + wd_RPort);
+    const u32 layer = r.get32(window + wd_WLayer);
+    CHECK(rp != 0 && layer != 0);
+    CHECK_EQ(r.get32(rp + rp_BitMap), screen + sc_BitMap);
+    CHECK_EQ(r.get32(rp + rp_Layer), layer);
+    CHECK_EQ(r.get8(rp + rp_FgPen), 1u);
+    CHECK_EQ(r.get8(rp + rp_BgPen), 0u);
+    CHECK_EQ(r.get8(rp + rp_DrawMode), JAM2);
+    CHECK_EQ(r.get16(rp + rp_cp_x), 0u);
+    CHECK_EQ(r.get16(rp + rp_cp_y), 6u);
+    CHECK_EQ(r.get32(layer + ly_rp), rp);
+    CHECK_EQ(r.get16(layer + ly_MinX), 51u);
+    CHECK_EQ(r.get16(layer + ly_MinY), 71u);
+    CHECK_EQ(r.get16(layer + ly_MaxX), 248u);
+    CHECK_EQ(r.get16(layer + ly_MaxY), 158u);
+    CHECK_EQ(r.get32(layer + ly_Window), window);
+    CHECK_EQ(window_pixel(r, window, 0, 0), 0u);
+    CHECK_EQ(window_pixel(r, window, -1, 0), 0xFFFFFFFFu);
+}
+
+void open_window_draws_chrome() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.str(kWinTitle, "H");
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET | WFLG_DEPTHGADGET,
+                   kWinTitle, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_Flags),
+             static_cast<u32>(WFLG_CLOSEGADGET | WFLG_DEPTHGADGET));
+
+    CHECK_EQ(screen_pixel(r, screen, 50, 60), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 249, 60), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 159), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 80), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 65), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 70), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 71), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 51, 61), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 54, 64), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 61), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 244, 64), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 61, 61), 1u);
+
+    // Without the close gadget the bar has no box in that corner.
+    put_new_window(r, kNewWindow, 300, 60, 200, 100, 0, 0, 0, 0);
+    const u32 plain = open_win(r, kNewWindow);
+    CHECK(plain != 0);
+    CHECK_EQ(screen_pixel(r, screen, 301, 61), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 301, 65), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 60), 1u);
+}
+
+void open_window_default_is_full_screen_below_bar() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 0, 0, 0, 0, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 0u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 0u);
+    CHECK_EQ(r.get16(window + wd_Width), 640u);
+    CHECK_EQ(r.get16(window + wd_Height), 400u);
+    const u32 layer = r.get32(window + wd_WLayer);
+    CHECK_EQ(r.get16(layer + ly_MinX), 1u);
+    CHECK_EQ(r.get16(layer + ly_MinY), 11u);
+    CHECK_EQ(r.get16(layer + ly_MaxX), 638u);
+    CHECK_EQ(r.get16(layer + ly_MaxY), 398u);
+    CHECK_EQ(screen_pixel(r, screen, 0, 0), 1u);
+}
+
+void open_window_taglist_reads_wa_tags() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 first = open_new(r, kNewScreen);
+    const u32 second = open_new(r, kNewScreen);
+    CHECK(first != 0 && second != 0);
+    CHECK_EQ(r.display.front_screen, second);
+
+    r.str(kWinTitle, "B");
+    put_new_window(r, kNewWindow, 10, 20, 100, 50, 0, 0, second, CUSTOMSCREEN);
+    const u32 tags =
+        r.tags(kTagList, {{WA_Left, 30}, {WA_Top, 40}, {WA_Width, 200}, {WA_Height, 120},
+                          {WA_Flags, WFLG_CLOSEGADGET}, {WA_Title, kWinTitle},
+                          {WA_CustomScreen, first}, {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, kNewWindow, tags);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 30u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 40u);
+    CHECK_EQ(r.get16(window + wd_Width), 200u);
+    CHECK_EQ(r.get16(window + wd_Height), 120u);
+    CHECK_EQ(r.get32(window + wd_WScreen), first);
+    CHECK((r.get16(window + wd_Flags) & WFLG_CLOSEGADGET) != 0);
+    const u32 title = r.get32(window + wd_Title);
+    CHECK(title != 0);
+    CHECK(title != kWinTitle);
+    CHECK(r.read_str(title) == "B");
+
+    // A null NewWindow takes the tags and the front screen.
+    const u32 short_tags = r.tags(kTagList, {{WA_Left, 5}, {WA_Top, 5}, {WA_Width, 64},
+                                             {WA_Height, 32}, {TAG_DONE, 0}});
+    const u32 plain = open_win_tags(r, 0, short_tags);
+    CHECK(plain != 0);
+    CHECK_EQ(r.get16(plain + wd_Width), 64u);
+    CHECK_EQ(r.get16(plain + wd_Height), 32u);
+    CHECK_EQ(r.get32(plain + wd_WScreen), second);
+}
+
+void open_window_on_unknown_screen_gives_zero() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 10, 20, 100, 50, 0, 0, 0x123456, CUSTOMSCREEN);
+    CHECK_EQ(open_win(r, kNewWindow), 0u);
+    CHECK(logged("intuition: window without a screen"));
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
+}
+
+void open_window_null_newwindow_gives_zero_and_faults() {
+    GfxRig r;
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::OpenWindow), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+
+    GfxRig other;
+    other.cpu().a[0] = 0;
+    other.cpu().a[1] = 0;
+    CHECK_EQ(other.call(Base::Intuition, intuition_lvo::OpenWindowTagList),
+             ExitReason::BusError);
+    CHECK_EQ(other.cpu().fault_addr, kGuestBytes);
+}
+
+void open_window_alloc_failure_gives_zero_and_frees() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    std::vector<u32> big;
+    for (;;) {
+        const u32 at = r.exec.alloc(4096, MEMF_PUBLIC);
+        if (at == 0) {
+            break;
+        }
+        big.push_back(at);
+    }
+    CHECK(!big.empty());
+    std::vector<u32> tail;
+    for (;;) {
+        const u32 at = r.exec.alloc(160, MEMF_PUBLIC);
+        if (at == 0) {
+            break;
+        }
+        tail.push_back(at);
+    }
+    const u32 carved_from = big[0];
+    r.exec.free(carved_from, 4096);
+    const u32 carved = r.exec.alloc(3936, MEMF_PUBLIC);
+    CHECK(carved != 0);
+
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    CHECK_EQ(open_win(r, kNewWindow), 0u);
+    CHECK(logged("intuition: no memory for a window"));
+
+    // Everything the failed open allocated is free again.
+    const u32 restored = r.exec.alloc(160, MEMF_PUBLIC);
+    CHECK(restored != 0);
+    r.exec.free(restored, 160);
+    r.exec.free(carved, 3936);
+    for (u32 at : tail) {
+        r.exec.free(at, 160);
+    }
+    for (u32 i = 1; i < big.size(); ++i) {
+        r.exec.free(big[i], 4096);
+    }
+}
+
+void open_window_limit_gives_zero() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 0, 0, 32, 32, 0, 0, 0, 0);
+    for (u32 i = 0; i < Intuition::kMaxWindows; ++i) {
+        CHECK(open_win(r, kNewWindow) != 0);
+    }
+    CHECK_EQ(open_win(r, kNewWindow), 0u);
+    CHECK(logged("intuition: window limit reached"));
+    u32 count = 0;
+    u32 window = r.get32(screen + sc_FirstWindow);
+    while (window != 0 && count <= Intuition::kMaxWindows) {
+        ++count;
+        window = r.get32(window + wd_NextWindow);
+    }
+    CHECK_EQ(count, Intuition::kMaxWindows);
+}
+
+void window_text_goes_into_the_window_only() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+
+    const std::vector<u8> before = screen_planes(r, screen);
+    r.graphics.set_pens(rp, 3, 0, JAM1);
+    r.graphics.move(rp, 2, 7);
+    const u8 text[] = {'H', 'H'};
+    CHECK_EQ(r.graphics.text(rp, text, 2), 16u);
+    const std::vector<u8> after = screen_planes(r, screen);
+    CHECK(changed_only_inside(before, after, 80, 400, 51, 71, 248, 158));
+    CHECK_EQ(screen_pixel(r, screen, 53, 72), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 78), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 249, 78), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 70), 1u);
+}
+
+void text_longer_than_window_is_clipped() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 60, 50, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+
+    const std::vector<u8> before = screen_planes(r, screen);
+    u8 text[40];
+    for (u32 i = 0; i < 40; ++i) {
+        text[i] = 'H';
+    }
+    r.graphics.set_pens(rp, 1, 0, JAM1);
+    r.graphics.move(rp, 0, 6);
+    CHECK_EQ(r.graphics.text(rp, text, 40), 320u);
+    const std::vector<u8> after = screen_planes(r, screen);
+    CHECK(changed_only_inside(before, after, 80, 400, 51, 71, 108, 108));
+    CHECK_EQ(r.get16(rp + rp_cp_x), 320u);
+    CHECK_EQ(screen_pixel(r, screen, 109, 72), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 110, 72), 0u);
+}
+
+void close_window_repaints_and_unlinks() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 before = heap_capacity(r);
+    r.str(kWinTitle, "H");
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET, kWinTitle, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), window);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
+    CHECK_EQ(heap_capacity(r), before);
+    CHECK_EQ(screen_pixel(r, screen, 50, 60), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 65), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 249, 159), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 5), 2u);
+    CHECK(refreshed(r, screen, 50, 60, 249, 159));
+}
+
+void close_window_twice_and_null_ignored() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    const usize refreshes = r.refreshes.size();
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK_EQ(r.refreshes.size(), refreshes);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
+}
+
+void set_window_titles_redraws_title() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.str(kWinTitle, "A");
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET, kWinTitle, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(screen_pixel(r, screen, 61, 61), 2u);
+
+    r.str(kWinTitle, "B");
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kWinTitle;
+    r.cpu().a[2] = 0xFFFFFFFF;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
+    const u32 title = r.get32(window + wd_Title);
+    CHECK(title != 0);
+    CHECK(title != kWinTitle);
+    CHECK(r.read_str(title) == "B");
+    CHECK_EQ(screen_pixel(r, screen, 61, 61), 1u);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = 0;
+    r.cpu().a[2] = 0xFFFFFFFF;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
+    CHECK_EQ(r.get32(window + wd_Title), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 61, 61), 2u);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = 0xFFFFFFFF;
+    r.cpu().a[2] = 0xFFFFFFFF;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
+    CHECK_EQ(r.get32(window + wd_Title), 0u);
+
+    r.str(kWinTitle, "S");
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = 0xFFFFFFFF;
+    r.cpu().a[2] = kWinTitle;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
+    const u32 screen_title = r.get32(screen + sc_Title);
+    CHECK(screen_title != 0);
+    CHECK(screen_title != kWinTitle);
+    CHECK(r.read_str(screen_title) == "S");
+}
+
+void window_refresh_reaches_the_sink() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.refreshes.clear();
+    r.refreshed_screens.clear();
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK(refreshed(r, screen, 50, 60, 249, 159));
+    u32 whole = 0;
+    for (usize i = 0; i < r.refreshes.size(); ++i) {
+        const Rect& d = r.refreshes[i];
+        if (r.refreshed_screens[i] == screen && d.x0 == 50 && d.y0 == 60 && d.x1 == 249 &&
+            d.y1 == 159) {
+            ++whole;
+        }
+    }
+    CHECK_EQ(whole, 1u);
 }
 
 }
@@ -397,5 +854,19 @@ int main() {
     reopen_after_close_reuses_memory();
     get_screen_data_copies_struct();
     unimplemented_vector_ends_run();
+    open_window_builds_struct_rastport_and_layer();
+    open_window_draws_chrome();
+    open_window_default_is_full_screen_below_bar();
+    open_window_taglist_reads_wa_tags();
+    open_window_on_unknown_screen_gives_zero();
+    open_window_null_newwindow_gives_zero_and_faults();
+    open_window_alloc_failure_gives_zero_and_frees();
+    open_window_limit_gives_zero();
+    window_text_goes_into_the_window_only();
+    text_longer_than_window_is_clipped();
+    close_window_repaints_and_unlinks();
+    close_window_twice_and_null_ignored();
+    set_window_titles_redraws_title();
+    window_refresh_reaches_the_sink();
     return check::finish("test_intuition");
 }

@@ -82,6 +82,14 @@ public:
     void screen_to_front(u32 screen);
     u32 front_screen() const { return front_; }
 
+    // Opens a window from the NewWindow at new_window, overridden by the
+    // tags at tags. Either may be 0 but not both. Returns the Window, or 0
+    // with a log.
+    u32 open_window(u32 new_window, u32 tags);
+    void close_window(u32 window);
+    void set_window_titles(u32 window, u32 title, u32 screen_title);
+    void window_to_front(u32 window);
+
 private:
     friend struct IntuitionNatives;
 
@@ -92,6 +100,8 @@ private:
     void write_links();
     void screen_to_back(u32 screen);
     void refresh_screen(u32 screen);
+    u32 find_window(u32 window) const;
+    void remove_window_at(u32 index);
 
     m68k::Machine* machine_ = nullptr;
     Exec* exec_ = nullptr;
@@ -100,6 +110,7 @@ private:
     u32 base_ = 0;
     u32 front_ = 0;
     u32 screens_[kMaxScreens]{};
+    u32 windows_[kMaxWindows]{};
     NativeVector vectors_[kVectors]{};
 };
 
