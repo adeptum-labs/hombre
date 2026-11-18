@@ -450,9 +450,43 @@ void strings_without_regard_to_case() {
 
 }
 
+// The 32-bit math vectors: products in D0 (64-bit ones high in D1, low in
+// D0), quotient in D0 and remainder in D1.
+void math_vectors() {
+    Rig r;
+    r.cpu().d[0] = 0xFFFFFFFE;  // -2
+    r.cpu().d[1] = 7;
+    CHECK_EQ(r.result(utility_lvo::SMult32), 0xFFFFFFF2u);
+    r.cpu().d[0] = 0x10000;
+    r.cpu().d[1] = 0x10001;
+    CHECK_EQ(r.result(utility_lvo::UMult32), 0x10000u);
+    r.cpu().d[0] = 0xFFFFFFF9;  // -7
+    r.cpu().d[1] = 2;
+    CHECK_EQ(r.result(utility_lvo::SDivMod32), 0xFFFFFFFDu);
+    CHECK_EQ(r.cpu().d[1], 0xFFFFFFFFu);
+    r.cpu().d[0] = 100;
+    r.cpu().d[1] = 7;
+    CHECK_EQ(r.result(utility_lvo::UDivMod32), 14u);
+    CHECK_EQ(r.cpu().d[1], 2u);
+    r.cpu().d[0] = 0xFFFFFFFF;
+    r.cpu().d[1] = 0xFFFFFFFF;
+    CHECK_EQ(r.result(utility_lvo::UMult64), 0x00000001u);
+    CHECK_EQ(r.cpu().d[1], 0xFFFFFFFEu);
+    r.cpu().d[0] = 0xFFFFFFFF;  // -1
+    r.cpu().d[1] = 3;
+    CHECK_EQ(r.result(utility_lvo::SMult64), 0xFFFFFFFDu);
+    CHECK_EQ(r.cpu().d[1], 0xFFFFFFFFu);
+    // Division by zero gives 0 and leaves the dividend as the remainder.
+    r.cpu().d[0] = 5;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.result(utility_lvo::UDivMod32), 0u);
+    CHECK_EQ(r.cpu().d[1], 5u);
+}
+
 int main() {
     utility_base_is_built();
     unimplemented_vectors_are_logged();
+    math_vectors();
     get_tag_data_and_find_tag_item();
     next_tag_item_moves_the_walk_on();
     tag_walks_are_bounded();

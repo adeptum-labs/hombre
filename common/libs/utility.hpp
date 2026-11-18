@@ -52,10 +52,16 @@ constexpr u32 GetTagData = 36;
 constexpr u32 NextTagItem = 48;
 constexpr u32 Amiga2Date = 120;
 constexpr u32 Date2Amiga = 126;
+constexpr u32 SMult32 = 138;
+constexpr u32 UMult32 = 144;
+constexpr u32 SDivMod32 = 150;
+constexpr u32 UDivMod32 = 156;
 constexpr u32 Stricmp = 162;
 constexpr u32 Strnicmp = 168;
 constexpr u32 ToUpper = 174;
 constexpr u32 ToLower = 180;
+constexpr u32 SMult64 = 198;
+constexpr u32 UMult64 = 204;
 // The last vector of the 3.1 library; the table reaches down to it.
 constexpr u32 GetUniqueID = 270;
 

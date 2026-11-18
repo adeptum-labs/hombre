@@ -29,6 +29,7 @@ using m68k::Machine;
 using native::Bus;
 using native::LogLine;
 using namespace ndk;
+using i32 = __INT32_TYPE__;
 
 namespace {
 
@@ -239,6 +240,53 @@ void strnicmp(void*, Machine& m) {
     }
 }
 
+// The math vectors. A division by zero gives 0 and leaves the dividend as
+// the remainder instead of trapping.
+void smult32(void*, Machine& m) {
+    const i64 product = static_cast<i64>(static_cast<i32>(m.cpu.d[0])) *
+                        static_cast<i32>(m.cpu.d[1]);
+    native::set_result(m, static_cast<u32>(product));
+}
+
+void umult32(void*, Machine& m) { native::set_result(m, m.cpu.d[0] * m.cpu.d[1]); }
+
+void smult64(void*, Machine& m) {
+    const u64 product = static_cast<u64>(static_cast<i64>(static_cast<i32>(m.cpu.d[0])) *
+                                         static_cast<i32>(m.cpu.d[1]));
+    m.cpu.d[1] = static_cast<u32>(product >> 32);
+    native::set_result(m, static_cast<u32>(product));
+}
+
+void umult64(void*, Machine& m) {
+    const u64 product = static_cast<u64>(m.cpu.d[0]) * m.cpu.d[1];
+    m.cpu.d[1] = static_cast<u32>(product >> 32);
+    native::set_result(m, static_cast<u32>(product));
+}
+
+void sdivmod32(void*, Machine& m) {
+    const i32 dividend = static_cast<i32>(m.cpu.d[0]);
+    const i32 divisor = static_cast<i32>(m.cpu.d[1]);
+    if (divisor == 0 || (dividend == static_cast<i32>(0x80000000u) && divisor == -1)) {
+        m.cpu.d[1] = divisor == 0 ? static_cast<u32>(dividend) : 0;
+        native::set_result(m, divisor == 0 ? 0 : static_cast<u32>(dividend));
+        return;
+    }
+    m.cpu.d[1] = static_cast<u32>(dividend % divisor);
+    native::set_result(m, static_cast<u32>(dividend / divisor));
+}
+
+void udivmod32(void*, Machine& m) {
+    const u32 dividend = m.cpu.d[0];
+    const u32 divisor = m.cpu.d[1];
+    if (divisor == 0) {
+        m.cpu.d[1] = dividend;
+        native::set_result(m, 0);
+        return;
+    }
+    m.cpu.d[1] = dividend % divisor;
+    native::set_result(m, dividend / divisor);
+}
+
 void to_upper(void*, Machine& m) { native::set_result(m, upper(m.cpu.d[0])); }
 void to_lower(void*, Machine& m) { native::set_result(m, lower(m.cpu.d[0])); }
 
@@ -254,6 +302,12 @@ constexpr UtilityFunction kUtilityFunctions[] = {
     {utility_lvo::NextTagItem, next_tag_item, "NextTagItem"},
     {utility_lvo::Amiga2Date, amiga2date, "Amiga2Date"},
     {utility_lvo::Date2Amiga, date2amiga, "Date2Amiga"},
+    {utility_lvo::SMult32, smult32, "SMult32"},
+    {utility_lvo::UMult32, umult32, "UMult32"},
+    {utility_lvo::SDivMod32, sdivmod32, "SDivMod32"},
+    {utility_lvo::UDivMod32, udivmod32, "UDivMod32"},
+    {utility_lvo::SMult64, smult64, "SMult64"},
+    {utility_lvo::UMult64, umult64, "UMult64"},
     {utility_lvo::Stricmp, stricmp, "Stricmp"},
     {utility_lvo::Strnicmp, strnicmp, "Strnicmp"},
     {utility_lvo::ToUpper, to_upper, "ToUpper"},
