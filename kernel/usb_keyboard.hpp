@@ -60,4 +60,12 @@ bool usb_keyboard_poll(u8 report[8]);
 // Reads and discards the reports that are pending.
 void usb_keyboard_drain();
 
+// Returns true while a configured USB boot mouse is Ready.
+bool usb_mouse_present();
+
+// Pumps xHCI events and pops one pending mouse report (up to 4 bytes,
+// zero-padded). A failed transfer or unplugged mouse logs "usb: mouse lost" on
+// serial and clears usb_mouse_present() without affecting keyboard status.
+bool usb_mouse_poll(u8 report[4]);
+
 }

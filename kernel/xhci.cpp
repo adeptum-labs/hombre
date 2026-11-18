@@ -348,19 +348,12 @@ ControlResult control_transfer(Xhci& controller, u8 slot, xhci::ProducerRing& ri
     return ControlResult{false, 0};
 }
 
-struct KeyboardState {
-    u8 slot = 0;
-    u8 dci = 0;
-    u16 report_bytes = 8;
-    xhci::ProducerRing ring{};
-    u64 report_phys = 0;
-    u8* report = nullptr;
-};
-
-// Brings the device on `port` up far enough to tell what it is. A boot
-// keyboard is left configured with its interrupt ring armed.
+// Brings the device on `port` up far enough to tell what it is. The first boot
+// keyboard and the first boot mouse are left configured with their first
+// Normal TRB queued on the interrupt ring.
 Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& pages,
-                          KeyboardState& keyboard, const char*& error) {
+                          Xhci::HidDevice& keyboard, Xhci::HidDevice& mouse,
+                          const char*& error) {
     const u64 output_phys = pages.alloc_pages(1);
     const u64 input_phys = pages.alloc_pages(1);
     const u64 ep0_phys = pages.alloc_pages(1);
@@ -441,7 +434,17 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
     }
 
     xhci::KeyboardInterface info{};
-    if (!xhci::find_boot_keyboard(data, config.received, info)) {
+    Xhci::HidDevice* hid = nullptr;
+    u8 protocol = 0;
+    if (keyboard.state == Xhci::HidDevice::State::Absent &&
+        xhci::find_boot_hid(data, config.received, xhci::kKeyboardProtocol, info)) {
+        hid = &keyboard;
+        protocol = xhci::kKeyboardProtocol;
+    } else if (mouse.state == Xhci::HidDevice::State::Absent &&
+               xhci::find_boot_hid(data, config.received, xhci::kMouseProtocol, info)) {
+        hid = &mouse;
+        protocol = xhci::kMouseProtocol;
+    } else {
         return device_class == 9 ? Xhci::Scan::OnlyHub : Xhci::Scan::NoKeyboard;
     }
 
@@ -459,9 +462,9 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         error = kErrorSetProtocol;
         return Xhci::Scan::Failed;
     }
-    // A keyboard may stall SET_IDLE; EP0 is recovered by the failed transfer.
+    // A boot HID device may stall SET_IDLE; EP0 is recovered by the failed transfer.
     control_transfer(controller, slot, ep0_ring, ep0_phys, data_phys, 0, false, 0x21,
-                     0x0A, 0, info.interface_number);
+                      0x0A, 0, info.interface_number);
 
     const u64 ring_phys = pages.alloc_pages(1);
     const u64 report_phys = pages.alloc_pages(1);
@@ -470,11 +473,14 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         return Xhci::Scan::Failed;
     }
     const u16 endpoint_max = info.max_packet & 0x7FFu;
-    const u16 report_bytes = endpoint_max < 64 ? endpoint_max : 64;
-    if (report_bytes < 8) {
+    const u16 min_report = protocol == xhci::kKeyboardProtocol ? 8 : 3;
+    if (endpoint_max < min_report) {
         error = kErrorConfigurationInvalid;
         return Xhci::Scan::Failed;
     }
+    const u16 report_bytes = endpoint_max < xhci::ReportQueue::kMaxReport
+                                 ? endpoint_max
+                                 : xhci::ReportQueue::kMaxReport;
     const u8 dci = static_cast<u8>(2 * (info.endpoint_address & 0x0Fu) + 1);
     const EndpointSetup endpoint{dci, kEndpointInterruptIn, endpoint_max,
                                  xhci::endpoint_interval(speed, info.interval), ring_phys,
@@ -487,20 +493,23 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
         return Xhci::Scan::Failed;
     }
 
-    keyboard.slot = slot;
-    keyboard.dci = dci;
-    keyboard.report_bytes = report_bytes;
-    keyboard.ring.init(reinterpret_cast<xhci::Trb*>(pages.to_ptr(ring_phys)), kRingTrbs,
-                       ring_phys);
-    keyboard.report = pages.to_ptr(report_phys);
-    keyboard.report_phys = report_phys;
-    if (!keyboard.ring.push(xhci::make_normal(report_phys, report_bytes))) {
+    hid->port = port;
+    hid->slot = slot;
+    hid->dci = dci;
+    hid->protocol = protocol;
+    hid->report_bytes = report_bytes;
+    hid->ring.init(reinterpret_cast<xhci::Trb*>(pages.to_ptr(ring_phys)), kRingTrbs,
+                   ring_phys);
+    hid->report = pages.to_ptr(report_phys);
+    hid->report_phys = report_phys;
+    hid->queue.clear();
+    if (!hid->ring.push(xhci::make_normal(report_phys, report_bytes))) {
         error = kErrorDeviceMemory;
         return Xhci::Scan::Failed;
     }
-    memory_fence();
-    controller.doorbells()[slot] = dci;
-    return Xhci::Scan::Keyboard;
+    hid->state = Xhci::HidDevice::State::Ready;
+    return protocol == xhci::kKeyboardProtocol ? Xhci::Scan::Keyboard
+                                               : Xhci::Scan::NoKeyboard;
 }
 
 struct FindState {
@@ -828,7 +837,8 @@ u8 Xhci::bring_up_port(u32 port) {
 
 Xhci::Scan Xhci::scan(PhysAllocator& pages, const char*& error) {
     error = nullptr;
-    keyboard_running_ = false;
+    keyboard_ = HidDevice{};
+    mouse_ = HidDevice{};
     bool hub = false;
     const char* failure = nullptr;
     // Ports report their devices late after Run; one window covers them all.
@@ -855,21 +865,9 @@ Xhci::Scan Xhci::scan(PhysAllocator& pages, const char*& error) {
         if (speed == 0) {
             continue;
         }
-        KeyboardState keyboard;
         const char* port_error = nullptr;
         const Scan result =
-            enumerate_port(*this, port, speed, pages, keyboard, port_error);
-        if (result == Scan::Keyboard) {
-            keyboard_port_ = port;
-            keyboard_slot_ = keyboard.slot;
-            keyboard_dci_ = keyboard.dci;
-            keyboard_report_bytes_ = keyboard.report_bytes;
-            keyboard_ring_ = keyboard.ring;
-            keyboard_report_phys_ = keyboard.report_phys;
-            keyboard_report_ = keyboard.report;
-            keyboard_running_ = true;
-            return Scan::Keyboard;
-        }
+            enumerate_port(*this, port, speed, pages, keyboard_, mouse_, port_error);
         if (result == Scan::OnlyHub) {
             hub = true;
         }
@@ -877,6 +875,15 @@ Xhci::Scan Xhci::scan(PhysAllocator& pages, const char*& error) {
             failure = port_error;
         }
     }
+    if (keyboard_.state == HidDevice::State::Ready) {
+        memory_fence();
+        doorbells_[keyboard_.slot] = keyboard_.dci;
+        if (mouse_.state == HidDevice::State::Ready) {
+            doorbells_[mouse_.slot] = mouse_.dci;
+        }
+        return Scan::Keyboard;
+    }
+    mouse_ = HidDevice{};
     if (failure != nullptr) {
         error = failure;
         return Scan::Failed;
@@ -884,46 +891,93 @@ Xhci::Scan Xhci::scan(PhysAllocator& pages, const char*& error) {
     return hub ? Scan::OnlyHub : Scan::NoKeyboard;
 }
 
-Xhci::KeyEvent Xhci::poll_keyboard(u8 report[8]) {
-    if (!keyboard_running_) {
-        return KeyEvent::None;
-    }
+void Xhci::pump_events() {
     xhci::Trb event{};
     while (poll_event(event)) {
         if (xhci::event_type(event) == xhci::kTrbPortStatusChangeEvent) {
-            if (static_cast<u32>(xhci::port_id(event)) == keyboard_port_) {
-                const u32 offset = port_offset(keyboard_port_);
+            const u32 port = xhci::port_id(event);
+            const bool key_port =
+                keyboard_.state == HidDevice::State::Ready && port == keyboard_.port;
+            const bool mouse_port =
+                mouse_.state == HidDevice::State::Ready && port == mouse_.port;
+            if (key_port || mouse_port) {
+                const u32 offset = port_offset(port);
                 const u32 status = read32(operational_, offset);
                 write32(operational_, offset, status & (kPortPower | kPortChanges));
                 if ((status & kPortConnected) == 0) {
-                    keyboard_running_ = false;
-                    return KeyEvent::Lost;
+                    if (key_port) {
+                        keyboard_.state = HidDevice::State::Lost;
+                    }
+                    if (mouse_port) {
+                        mouse_.state = HidDevice::State::Lost;
+                    }
                 }
             }
             continue;
         }
-        if (xhci::event_type(event) != xhci::kTrbTransferEvent ||
-            xhci::event_slot(event) != keyboard_slot_ ||
-            xhci::event_endpoint(event) != keyboard_dci_) {
+        if (xhci::event_type(event) != xhci::kTrbTransferEvent) {
+            continue;
+        }
+        HidDevice* device = nullptr;
+        if (keyboard_.state == HidDevice::State::Ready &&
+            xhci::event_slot(event) == keyboard_.slot &&
+            xhci::event_endpoint(event) == keyboard_.dci) {
+            device = &keyboard_;
+        } else if (mouse_.state == HidDevice::State::Ready &&
+                   xhci::event_slot(event) == mouse_.slot &&
+                   xhci::event_endpoint(event) == mouse_.dci) {
+            device = &mouse_;
+        }
+        if (device == nullptr) {
             continue;
         }
         const u32 code = xhci::completion_code(event);
         if (code != 1 && code != 13) {
-            keyboard_running_ = false;
-            return KeyEvent::Lost;
+            device->state = HidDevice::State::Lost;
+            continue;
         }
-        __builtin_memcpy(report, keyboard_report_, 8);
-        __builtin_memset(keyboard_report_, 0, 8);
-        if (!keyboard_ring_.push(
-                xhci::make_normal(keyboard_report_phys_, keyboard_report_bytes_))) {
-            keyboard_running_ = false;
-            return KeyEvent::Lost;
+        const u32 requested = device->report_bytes;
+        const u32 residue = event.status & 0xFFFFFFu;
+        u32 length = residue < requested ? requested - residue : 1u;
+        if (length < 1u) {
+            length = 1u;
+        }
+        if (length > xhci::ReportQueue::kMaxReport) {
+            length = xhci::ReportQueue::kMaxReport;
+        }
+        device->queue.push(device->report, length);
+        __builtin_memset(device->report, 0, device->report_bytes);
+        if (!device->ring.push(xhci::make_normal(device->report_phys, device->report_bytes))) {
+            device->state = HidDevice::State::Lost;
+            continue;
         }
         memory_fence();
-        doorbells_[keyboard_slot_] = keyboard_dci_;
-        return KeyEvent::Report;
+        doorbells_[device->slot] = device->dci;
     }
-    return KeyEvent::None;
+}
+
+Xhci::KeyEvent Xhci::poll_hid(HidDevice& device, u8* report, u32& length) {
+    if (device.state == HidDevice::State::Absent) {
+        return KeyEvent::None;
+    }
+    pump_events();
+    if (device.state == HidDevice::State::Lost) {
+        return KeyEvent::Lost;
+    }
+    if (!device.queue.pop(report, length)) {
+        return KeyEvent::None;
+    }
+    return KeyEvent::Report;
+}
+
+Xhci::KeyEvent Xhci::poll_keyboard(u8 report[8]) {
+    __builtin_memset(report, 0, 8);
+    u32 length = 0;
+    const KeyEvent event = poll_hid(keyboard_, report, length);
+    if (event == KeyEvent::Lost) {
+        keyboard_.state = HidDevice::State::Absent;
+    }
+    return event;
 }
 
 }

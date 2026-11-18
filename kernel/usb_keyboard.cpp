@@ -51,12 +51,24 @@ void write_hex4(u32 value) {
     serial::write(text);
 }
 
+void write_line(const char* message) {
+    serial::write(message);
+    serial::write_char('\n');
+}
+
 UsbResult publish(UsbStatus result, const char* message) {
     status = result;
     last_message = message;
-    serial::write(message);
-    serial::write_char('\n');
+    write_line(message);
     return UsbResult{result, message};
+}
+
+void check_mouse_lost() {
+    Xhci::HidDevice& mouse = controllers[active_controller].mouse();
+    if (mouse.state == Xhci::HidDevice::State::Lost) {
+        mouse.state = Xhci::HidDevice::State::Absent;
+        write_line("usb: mouse lost");
+    }
 }
 
 // Builds the "usb: " line of a driver failure in `failure_text`, which then
@@ -120,7 +132,11 @@ UsbResult usb_keyboard_start(MmioMapper& mmio, PhysAllocator& pages) {
         const Xhci::Scan scan = controllers[i].scan(pages, port_error);
         if (scan == Xhci::Scan::Keyboard) {
             active_controller = i;
-            return publish(UsbStatus::Ready, "usb: keyboard ready");
+            const UsbResult result = publish(UsbStatus::Ready, "usb: keyboard ready");
+            if (controllers[i].mouse_present()) {
+                write_line("usb: mouse ready");
+            }
+            return result;
         }
         if (scan == Xhci::Scan::OnlyHub) {
             hub = true;
@@ -156,7 +172,9 @@ bool usb_keyboard_poll(u8 report[8]) {
     if (status != UsbStatus::Ready) {
         return false;
     }
-    switch (controllers[active_controller].poll_keyboard(report)) {
+    const Xhci::KeyEvent event = controllers[active_controller].poll_keyboard(report);
+    check_mouse_lost();
+    switch (event) {
     case Xhci::KeyEvent::Report:
         return true;
     case Xhci::KeyEvent::Lost:
@@ -172,6 +190,28 @@ void usb_keyboard_drain() {
     u8 report[8] = {};
     while (usb_keyboard_poll(report)) {
     }
+    u8 mouse_report[4] = {};
+    while (usb_mouse_poll(mouse_report)) {
+    }
+}
+
+bool usb_mouse_present() {
+    check_mouse_lost();
+    return controllers[active_controller].mouse_present();
+}
+
+bool usb_mouse_poll(u8 report[4]) {
+    __builtin_memset(report, 0, 4);
+    Xhci& controller = controllers[active_controller];
+    u8 raw[xhci::ReportQueue::kMaxReport] = {};
+    u32 length = 0;
+    const Xhci::KeyEvent event = controller.poll_hid(controller.mouse(), raw, length);
+    check_mouse_lost();
+    if (event != Xhci::KeyEvent::Report) {
+        return false;
+    }
+    __builtin_memcpy(report, raw, 4);
+    return true;
 }
 
 }

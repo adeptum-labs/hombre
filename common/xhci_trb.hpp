@@ -280,15 +280,17 @@ inline constexpr u8 kDescriptorEndpoint = 5;
 inline constexpr u8 kHidClass = 3;
 inline constexpr u8 kBootSubclass = 1;
 inline constexpr u8 kKeyboardProtocol = 1;
+inline constexpr u8 kMouseProtocol = 2;
 
 inline constexpr u8 kEndpointInterrupt = 3;
 inline constexpr u8 kEndpointIn = 0x80;
 
 // Walks the length and type pairs of a configuration descriptor and reports the
-// first HID boot keyboard: an interface with class 3, subclass 1 and protocol 1,
-// followed by its interrupt IN endpoint. A descriptor shorter than two bytes or
-// one that reaches past the buffer makes the whole descriptor invalid.
-constexpr bool find_boot_keyboard(const u8* config, u32 length, KeyboardInterface& out) {
+// first HID boot interface with class 3, subclass 1 and `protocol` (1 keyboard,
+// 2 mouse), followed by its interrupt IN endpoint. A descriptor shorter than
+// two bytes or one that reaches past the buffer makes the whole descriptor
+// invalid.
+constexpr bool find_boot_hid(const u8* config, u32 length, u8 protocol, KeyboardInterface& out) {
     u32 offset = 0;
     u8 configuration_value = 0;
     u8 interface_number = 0;
@@ -307,7 +309,7 @@ constexpr bool find_boot_keyboard(const u8* config, u32 length, KeyboardInterfac
         } else if (descriptor_type == kDescriptorInterface) {
             boot_interface = descriptor_length >= 9 && config[offset + 5] == kHidClass &&
                              config[offset + 6] == kBootSubclass &&
-                             config[offset + 7] == kKeyboardProtocol;
+                             config[offset + 7] == protocol;
             if (boot_interface) {
                 interface_number = config[offset + 2];
             }
@@ -326,6 +328,71 @@ constexpr bool find_boot_keyboard(const u8* config, u32 length, KeyboardInterfac
     }
     return false;
 }
+
+constexpr bool find_boot_keyboard(const u8* config, u32 length, KeyboardInterface& out) {
+    return find_boot_hid(config, length, kKeyboardProtocol, out);
+}
+
+// Fixed-capacity FIFO of boot HID reports. When full, pushing a new report
+// overwrites the oldest entry so the most recent input is kept.
+class ReportQueue {
+public:
+    static constexpr u32 kCapacity = 16;
+    static constexpr u32 kMaxReport = 8;
+
+    constexpr void clear() {
+        head_ = 0;
+        count_ = 0;
+    }
+
+    constexpr bool push(const u8* report, u32 length) {
+        if (report == nullptr || length == 0) {
+            return false;
+        }
+        const u32 capped = length > kMaxReport ? kMaxReport : length;
+        u32 slot = 0;
+        if (count_ == kCapacity) {
+            slot = head_;
+            head_ = (head_ + 1) % kCapacity;
+        } else {
+            slot = (head_ + count_) % kCapacity;
+            ++count_;
+        }
+        for (u32 i = 0; i < capped; ++i) {
+            reports_[slot][i] = report[i];
+        }
+        for (u32 i = capped; i < kMaxReport; ++i) {
+            reports_[slot][i] = 0;
+        }
+        lengths_[slot] = static_cast<u8>(capped);
+        return true;
+    }
+
+    constexpr bool pop(u8* out, u32& length) {
+        if (count_ == 0) {
+            return false;
+        }
+        const u32 slot = head_;
+        head_ = (head_ + 1) % kCapacity;
+        --count_;
+        const u32 n = lengths_[slot];
+        if (out != nullptr) {
+            for (u32 i = 0; i < n; ++i) {
+                out[i] = reports_[slot][i];
+            }
+        }
+        length = n;
+        return true;
+    }
+
+    constexpr u32 size() const { return count_; }
+
+private:
+    u8 reports_[kCapacity][kMaxReport] = {};
+    u8 lengths_[kCapacity] = {};
+    u32 head_ = 0;
+    u32 count_ = 0;
+};
 
 constexpr u8 clamp_interval(int value, int low, int high) {
     return static_cast<u8>(value < low ? low : (value > high ? high : value));

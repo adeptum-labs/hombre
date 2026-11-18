@@ -271,6 +271,124 @@ void endpoint_interval_conversion() {
     CHECK_EQ(static_cast<u32>(xhci::endpoint_interval(4, 16)), 15u);
 }
 
+constexpr u8 kBootMouse[] = {
+    9, 2, 34, 0, 1, 1, 0, 0x80, 50,
+    9, 4, 0, 0, 1, 3, 1, 2, 0,
+    9, 0x21, 0x11, 0x01, 0, 1, 0x22, 50, 0,
+    7, 5, 0x81, 3, 4, 0, 10,
+};
+
+void find_boot_hid_finds_a_mouse_interface() {
+    xhci::KeyboardInterface mouse = {};
+    CHECK(xhci::find_boot_hid(kBootMouse, sizeof(kBootMouse), xhci::kMouseProtocol, mouse));
+    CHECK_EQ(mouse.configuration_value, 1);
+    CHECK_EQ(mouse.interface_number, 0);
+    CHECK_EQ(mouse.endpoint_address, 0x81);
+    CHECK_EQ(mouse.max_packet, 4);
+    CHECK_EQ(mouse.interval, 10);
+}
+
+void find_boot_hid_rejects_the_other_protocol() {
+    xhci::KeyboardInterface out = {};
+    CHECK(!xhci::find_boot_hid(kQemuKeyboard, sizeof(kQemuKeyboard), xhci::kMouseProtocol, out));
+    CHECK(!xhci::find_boot_hid(kBootMouse, sizeof(kBootMouse), xhci::kKeyboardProtocol, out));
+}
+
+void find_boot_keyboard_still_rejects_a_mouse() {
+    xhci::KeyboardInterface out = {};
+    CHECK(!xhci::find_boot_keyboard(kBootMouse, sizeof(kBootMouse), out));
+}
+
+void report_queue_is_fifo() {
+    xhci::ReportQueue queue;
+    CHECK_EQ(queue.size(), 0u);
+
+    const u8 first[3] = {0x01, 0x10, 0x20};
+    const u8 second[4] = {0x02, 0x30, 0x40, 0x50};
+    const u8 third[8] = {0x04, 0x00, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A};
+    CHECK(queue.push(first, sizeof(first)));
+    CHECK(queue.push(second, sizeof(second)));
+    CHECK(queue.push(third, sizeof(third)));
+    CHECK_EQ(queue.size(), 3u);
+
+    u8 out[8] = {};
+    u32 length = 0;
+    CHECK(queue.pop(out, length));
+    CHECK_EQ(length, 3u);
+    CHECK_EQ(out[0], 0x01);
+    CHECK_EQ(out[1], 0x10);
+    CHECK_EQ(out[2], 0x20);
+    CHECK_EQ(queue.size(), 2u);
+
+    CHECK(queue.pop(out, length));
+    CHECK_EQ(length, 4u);
+    CHECK_EQ(out[0], 0x02);
+    CHECK_EQ(out[1], 0x30);
+    CHECK_EQ(out[2], 0x40);
+    CHECK_EQ(out[3], 0x50);
+    CHECK_EQ(queue.size(), 1u);
+
+    CHECK(queue.pop(out, length));
+    CHECK_EQ(length, 8u);
+    for (u32 i = 0; i < 8; ++i) {
+        CHECK_EQ(out[i], third[i]);
+    }
+    CHECK_EQ(queue.size(), 0u);
+}
+
+void report_queue_drops_the_oldest_when_full() {
+    xhci::ReportQueue queue;
+    for (u32 i = 0; i < xhci::ReportQueue::kCapacity + 2; ++i) {
+        const u8 report[2] = {static_cast<u8>(i), static_cast<u8>(i + 100)};
+        CHECK(queue.push(report, sizeof(report)));
+    }
+    CHECK_EQ(queue.size(), xhci::ReportQueue::kCapacity);
+
+    for (u32 i = 0; i < xhci::ReportQueue::kCapacity; ++i) {
+        u8 out[8] = {};
+        u32 length = 0;
+        CHECK(queue.pop(out, length));
+        CHECK_EQ(length, 2u);
+        CHECK_EQ(out[0], static_cast<u8>(i + 2));
+        CHECK_EQ(out[1], static_cast<u8>(i + 102));
+    }
+    CHECK_EQ(queue.size(), 0u);
+}
+
+void report_queue_truncates_long_reports_and_rejects_empty_ones() {
+    xhci::ReportQueue queue;
+    const u8 long_report[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    CHECK(!queue.push(nullptr, 4));
+    CHECK(!queue.push(long_report, 0));
+    CHECK_EQ(queue.size(), 0u);
+
+    CHECK(queue.push(long_report, sizeof(long_report)));
+    CHECK_EQ(queue.size(), 1u);
+
+    u8 out[12] = {};
+    u32 length = 0;
+    CHECK(queue.pop(out, length));
+    CHECK_EQ(length, xhci::ReportQueue::kMaxReport);
+    for (u32 i = 0; i < xhci::ReportQueue::kMaxReport; ++i) {
+        CHECK_EQ(out[i], long_report[i]);
+    }
+    CHECK_EQ(out[8], 0);
+}
+
+void report_queue_pop_on_empty_returns_false() {
+    xhci::ReportQueue queue;
+    u8 out[8] = {};
+    u32 length = 99;
+    CHECK(!queue.pop(out, length));
+    CHECK_EQ(length, 99u);
+
+    const u8 report[4] = {1, 2, 3, 4};
+    CHECK(queue.push(report, sizeof(report)));
+    queue.clear();
+    CHECK_EQ(queue.size(), 0u);
+    CHECK(!queue.pop(out, length));
+}
+
 void default_ep0_max_packet() {
     CHECK_EQ(xhci::default_ep0_max_packet(2), 8);
     CHECK_EQ(xhci::default_ep0_max_packet(1), 64);
@@ -293,6 +411,13 @@ int main() {
     find_boot_keyboard_in_a_qemu_style_descriptor();
     find_boot_keyboard_rejects_other_hid();
     find_boot_keyboard_rejects_truncated_and_zero_length_descriptors();
+    find_boot_hid_finds_a_mouse_interface();
+    find_boot_hid_rejects_the_other_protocol();
+    find_boot_keyboard_still_rejects_a_mouse();
+    report_queue_is_fifo();
+    report_queue_drops_the_oldest_when_full();
+    report_queue_truncates_long_reports_and_rejects_empty_ones();
+    report_queue_pop_on_empty_returns_false();
     endpoint_interval_conversion();
     default_ep0_max_packet();
     return check::finish("test_xhci_trb");

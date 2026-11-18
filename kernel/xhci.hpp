@@ -55,11 +55,30 @@ public:
         Failed      // a step failed; `error` says which
     };
 
-    // What polling the keyboard endpoint found.
+    // What polling a HID endpoint found.
     enum class KeyEvent {
         None,   // nothing pending
-        Report, // one 8-byte report was taken
+        Report, // one report was taken
         Lost    // the endpoint failed or the device went away
+    };
+
+    struct HidDevice {
+        enum class State {
+            Absent,
+            Ready,
+            Lost
+        };
+
+        u32 port = 0;
+        u8 slot = 0;
+        u8 dci = 0;
+        u8 protocol = 0;
+        u16 report_bytes = 0;
+        xhci::ProducerRing ring{};
+        u64 report_phys = 0;
+        u8* report = nullptr;
+        xhci::ReportQueue queue{};
+        State state = State::Absent;
     };
 
     // Brings the controller up. On failure returns false and points `error`
@@ -100,14 +119,27 @@ public:
 
     // Scans every port: each connected device is reset if it sits on a USB 2
     // port, addressed, and asked for its descriptors. The first boot keyboard
-    // is configured and left delivering reports. `error` describes a Failed
+    // and the first boot mouse (when a keyboard is also present) are
+    // configured and left delivering reports. `error` describes a Failed
     // scan and is null otherwise.
     Scan scan(PhysAllocator& pages, const char*& error);
 
-    // Takes one pending report from the configured keyboard. Events for
-    // other endpoints and ports are read and discarded; a Port Status Change
-    // that says the keyboard's port lost its device marks it lost.
+    // Pops every pending event from the event ring, routing Transfer Events to
+    // the keyboard or mouse report queues and Port Status Change events to
+    // unplug detection.
+    void pump_events();
+
+    // Pumps pending events and pops one queued report for `device`.
+    KeyEvent poll_hid(HidDevice& device, u8* report, u32& length);
+
+    // Takes one pending report from the configured keyboard.
     KeyEvent poll_keyboard(u8 report[8]);
+
+    HidDevice& keyboard() { return keyboard_; }
+    const HidDevice& keyboard() const { return keyboard_; }
+    HidDevice& mouse() { return mouse_; }
+    const HidDevice& mouse() const { return mouse_; }
+    bool mouse_present() const { return mouse_.state == HidDevice::State::Ready; }
 
 private:
     u8 bring_up_port(u32 port);
@@ -128,14 +160,8 @@ private:
     u32 ports_ = 0;
     u32 context_size_ = 32;
     u32 usb3_ports_[8] = {};
-    u32 keyboard_port_ = 0;
-    u8 keyboard_slot_ = 0;
-    u8 keyboard_dci_ = 0;
-    u16 keyboard_report_bytes_ = 8;
-    xhci::ProducerRing keyboard_ring_{};
-    u64 keyboard_report_phys_ = 0;
-    u8* keyboard_report_ = nullptr;
-    bool keyboard_running_ = false;
+    HidDevice keyboard_{};
+    HidDevice mouse_{};
 };
 
 }
