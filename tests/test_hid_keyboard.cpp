@@ -134,6 +134,32 @@ void reset_clears_caps_lock() {
     CHECK_EQ(out[0], 'a');
 }
 
+void release_all_lets_a_held_key_type_again() {
+    // A command ran while Enter went down and up: its release report was
+    // read and dropped elsewhere, so the decoder still thinks Enter is held.
+    KeyDecoder decoder;
+    u8 out[8] = {};
+    const u8 press_enter[8] = {0, 0, 0x28};
+    CHECK_EQ(decoder.feed(press_enter, out, sizeof(out)), 1u);
+    CHECK_EQ(decoder.feed(press_enter, out, sizeof(out)), 0u);
+    decoder.release_all();
+    CHECK_EQ(decoder.feed(press_enter, out, sizeof(out)), 1u);
+    CHECK_EQ(out[0], '\n');
+}
+
+void release_all_keeps_caps_lock() {
+    KeyDecoder decoder;
+    u8 out[8] = {};
+    const u8 caps[8] = {0, 0, 0x39};
+    const u8 released[8] = {};
+    const u8 press_a[8] = {0, 0, 0x04};
+    CHECK_EQ(decoder.feed(caps, out, sizeof(out)), 0u);
+    decoder.release_all();
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+    CHECK_EQ(decoder.feed(press_a, out, sizeof(out)), 1u);
+    CHECK_EQ(out[0], 'A');
+}
+
 }
 
 int main() {
@@ -147,5 +173,7 @@ int main() {
     rollover_error_report_is_ignored();
     capacity_is_respected();
     reset_clears_caps_lock();
+    release_all_lets_a_held_key_type_again();
+    release_all_keeps_caps_lock();
     return check::finish("test_hid_keyboard");
 }

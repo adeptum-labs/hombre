@@ -268,11 +268,16 @@ void typed_log(void*, const char* text) {
     serial::write_char('\n');
 }
 
+// The key decoder of the input loop. It lives here so a finished command can
+// make it forget the keys: the reports it dropped included their releases.
+constinit KeyDecoder typed_decoder;
+
 // A typed command may fault like any other; the next one starts clean. What
 // the keyboard queued while it ran is dropped.
 bool typed_run(void*, const char* path, const char* args) {
     const bool loaded = execute(path, args);
     usb_keyboard_drain();
+    typed_decoder.release_all();
     return loaded;
 }
 
@@ -284,13 +289,12 @@ bool typed_run(void*, const char* path, const char* args) {
     static constinit Shell line_editor;
     line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
                                &typed_message, &typed_prompt, &typed_log, &typed});
-    KeyDecoder decoder;
     serial::write("shell: ready\n");
     while (usb_keyboard_status() == UsbStatus::Ready) {
         u8 report[8];
         if (usb_keyboard_poll(report)) {
             u8 chars[8];
-            const usize count = decoder.feed(report, chars, sizeof(chars));
+            const usize count = typed_decoder.feed(report, chars, sizeof(chars));
             for (usize i = 0; i < count; ++i) {
                 line_editor.key(chars[i]);
             }

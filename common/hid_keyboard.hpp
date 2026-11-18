@@ -46,6 +46,10 @@ public:
     // Forgets the keys held and turns Caps Lock off.
     void reset();
 
+    // Forgets the keys held and keeps Caps Lock: for when reports were read
+    // elsewhere, so the decoder no longer knows what is down.
+    void release_all();
+
 private:
     static bool contains(const u8* slots, usize count, u8 usage);
 
@@ -95,6 +99,10 @@ inline usize KeyDecoder::feed(const u8 report[kReportBytes], u8* out, usize capa
 
 inline void KeyDecoder::reset() {
     caps_lock_ = false;
+    release_all();
+}
+
+inline void KeyDecoder::release_all() {
     for (usize i = 0; i < kKeySlots; ++i) {
         held_[i] = 0;
     }
