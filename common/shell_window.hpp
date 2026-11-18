@@ -25,6 +25,7 @@
 
 #include "types.hpp"
 #include "libs/gfx.hpp"
+#include "shell_text.hpp"
 
 // The AmigaShell console: a window with a character grid, drawn and
 // scrolled through the Graphics C++ methods. write takes console output,
@@ -74,14 +75,17 @@ public:
     // The ConsoleWrite sink of dos.hpp: writes the bytes to the window.
     static void sink(void* ctx, const u8* data, u32 bytes);
 
+    // The Intuition WindowHook called after the window is resized.
+    static void on_size(void* ctx, u32 window);
+
 private:
     void put_byte(u8 c);
     void advance_row();
     void draw_cell(u8 c);
     void draw_cursor();
     void mark_line_start();
-    bool has_typed_input() const;
 
+    m68k::Machine* machine_ = nullptr;
     Intuition* intuition_ = nullptr;
     Graphics* graphics_ = nullptr;
     u32 window_ = 0;
@@ -94,8 +98,7 @@ private:
     u32 rows_ = 0;
     u32 col_ = 0;
     u32 row_ = 0;
-    u32 line_start_row_ = 0;
-    u32 line_start_col_ = 0;
+    ShellText text_{};
 };
 
 }

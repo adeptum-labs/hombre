@@ -39,6 +39,10 @@ constexpr char kTitle[] = "AmigaShell";
 constexpr u32 kMaxWrite = 65536;
 constexpr u32 kCell = 8;
 constexpr u32 kBaseline = 6;
+constexpr u32 kMinWidth = 160;
+constexpr u32 kMinHeight = 50;
+constexpr u32 kMaxSize = 0xFFFF;
+constexpr u32 kMaxRows = 4096 / kCell;
 
 // Printable Latin-1: the ASCII range and the codes above the control block.
 constexpr bool is_printable(u8 c) {
@@ -77,13 +81,14 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     b.w8(nw + ndk::nw_BlockPen, 1);
     b.w16(nw + ndk::nw_IDCMPFlags, 0);
     b.w32(nw + ndk::nw_Flags,
-           ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET | ndk::WFLG_DRAGBAR);
+           ndk::WFLG_SIZEGADGET | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
+               ndk::WFLG_DRAGBAR);
     b.w32(nw + ndk::nw_Title, title);
     b.w32(nw + ndk::nw_Screen, display.front_screen);
-    b.w16(nw + ndk::nw_MinWidth, 0);
-    b.w16(nw + ndk::nw_MinHeight, 0);
-    b.w16(nw + ndk::nw_MaxWidth, 0);
-    b.w16(nw + ndk::nw_MaxHeight, 0);
+    b.w16(nw + ndk::nw_MinWidth, kMinWidth);
+    b.w16(nw + ndk::nw_MinHeight, kMinHeight);
+    b.w16(nw + ndk::nw_MaxWidth, kMaxSize);
+    b.w16(nw + ndk::nw_MaxHeight, kMaxSize);
     b.w16(nw + ndk::nw_Type, ndk::CUSTOMSCREEN);
     if (!b.ok()) {
         exec.free(nw, ndk::NewWindow_SIZEOF);
@@ -98,30 +103,24 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
         return false;
     }
     const u32 rp = b.r32(window + ndk::wd_RPort);
-    const u32 layer = b.r32(window + ndk::wd_WLayer);
-    if (!b.ok() || rp == 0 || layer == 0) {
-        intuition.close_window(window);
-        return false;
-    }
-    const i32 min_x = static_cast<i16>(b.r16(layer + ndk::ly_MinX));
-    const i32 min_y = static_cast<i16>(b.r16(layer + ndk::ly_MinY));
-    const i32 max_x = static_cast<i16>(b.r16(layer + ndk::ly_MaxX));
-    const i32 max_y = static_cast<i16>(b.r16(layer + ndk::ly_MaxY));
+    const i32 win_w = static_cast<i16>(b.r16(window + ndk::wd_Width));
+    const i32 win_h = static_cast<i16>(b.r16(window + ndk::wd_Height));
     const i32 border_left = static_cast<i32>(b.r8(window + ndk::wd_BorderLeft));
     const i32 border_top = static_cast<i32>(b.r8(window + ndk::wd_BorderTop));
     const i32 border_right = static_cast<i32>(b.r8(window + ndk::wd_BorderRight));
     const i32 border_bottom = static_cast<i32>(b.r8(window + ndk::wd_BorderBottom));
-    if (!b.ok()) {
+    if (!b.ok() || rp == 0) {
         intuition.close_window(window);
         return false;
     }
-    const i32 width = max_x - min_x + 1 - border_left - border_right;
-    const i32 height = max_y - min_y + 1 - border_top - border_bottom;
+    const i32 width = win_w - border_left - border_right;
+    const i32 height = win_h - border_top - border_bottom;
     if (width <= 0 || height <= 0) {
         intuition.close_window(window);
         return false;
     }
 
+    machine_ = &m;
     intuition_ = &intuition;
     graphics_ = &gfx;
     window_ = window;
@@ -134,7 +133,9 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     rows_ = static_cast<u32>(height) / kCell;
     col_ = 0;
     row_ = 0;
+    text_.clear();
     mark_line_start();
+    intuition.set_size_hook(window, &ShellWindow::on_size, this);
     gfx.set_pens(rp_, 1, 0, ndk::JAM2);
     return true;
 }
@@ -161,6 +162,7 @@ void ShellWindow::write_prompt(u32 cli_number, const char* volume) {
         return;
     }
     if (col_ != 0) {
+        text_.new_line();
         col_ = 0;
         advance_row();
     }
@@ -203,13 +205,15 @@ void ShellWindow::echo(u8 ch) {
 }
 
 void ShellWindow::erase_last() {
-    if (!is_open() || columns_ == 0 || rows_ == 0 || !has_typed_input()) {
+    if (!is_open() || columns_ == 0 || rows_ == 0 || !text_.erase_last()) {
         return;
     }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     draw_cell(' ');
     if (col_ == 0) {
-        --row_;
+        if (row_ > 0) {
+            --row_;
+        }
         col_ = columns_ - 1;
     } else {
         --col_;
@@ -224,6 +228,7 @@ void ShellWindow::end_line() {
     }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     draw_cell(' ');
+    text_.new_line();
     col_ = 0;
     advance_row();
     mark_line_start();
@@ -236,6 +241,7 @@ void ShellWindow::print_line(const char* text) {
     if (col_ != 0) {
         graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
         draw_cell(' ');
+        text_.new_line();
         col_ = 0;
         advance_row();
     }
@@ -253,6 +259,7 @@ void ShellWindow::close() {
     }
     window_ = 0;
     rp_ = 0;
+    machine_ = nullptr;
     intuition_ = nullptr;
     graphics_ = nullptr;
 }
@@ -263,18 +270,78 @@ void ShellWindow::sink(void* ctx, const u8* data, u32 bytes) {
     }
 }
 
+void ShellWindow::on_size(void* ctx, u32 window) {
+    if (ctx == nullptr) {
+        return;
+    }
+    ShellWindow& self = *static_cast<ShellWindow*>(ctx);
+    if (!self.is_open() || window != self.window_ || self.machine_ == nullptr ||
+        self.graphics_ == nullptr) {
+        return;
+    }
+    Bus b(*self.machine_);
+    const i32 win_w = static_cast<i16>(b.r16(window + ndk::wd_Width));
+    const i32 win_h = static_cast<i16>(b.r16(window + ndk::wd_Height));
+    const i32 border_left = static_cast<i32>(b.r8(window + ndk::wd_BorderLeft));
+    const i32 border_top = static_cast<i32>(b.r8(window + ndk::wd_BorderTop));
+    const i32 border_right = static_cast<i32>(b.r8(window + ndk::wd_BorderRight));
+    const i32 border_bottom = static_cast<i32>(b.r8(window + ndk::wd_BorderBottom));
+    if (!b.ok()) {
+        return;
+    }
+    const i32 width = win_w - border_left - border_right;
+    const i32 height = win_h - border_top - border_bottom;
+    self.origin_x_ = border_left;
+    self.origin_y_ = border_top;
+    self.inner_w_ = width > 0 ? width : 0;
+    self.inner_h_ = height > 0 ? height : 0;
+    self.columns_ = static_cast<u32>(self.inner_w_) / kCell;
+    self.rows_ = static_cast<u32>(self.inner_h_) / kCell;
+    if (self.inner_w_ > 0 && self.inner_h_ > 0) {
+        self.graphics_->set_pens(self.rp_, 0, 0, ndk::JAM2);
+        self.graphics_->rect_fill(self.rp_, self.origin_x_, self.origin_y_,
+                                  self.origin_x_ + self.inner_w_ - 1,
+                                  self.origin_y_ + self.inner_h_ - 1);
+    }
+    self.graphics_->set_pens(self.rp_, 1, 0, ndk::JAM2);
+    const u32 max_rows = self.rows_ < kMaxRows ? self.rows_ : kMaxRows;
+    // Static: 8 KiB is too much for the kernel stack, and there is one shell.
+    static ShellText::Row visible[kMaxRows];
+    const u32 filled =
+        self.columns_ == 0 ? 0 : self.text_.tail(self.columns_, max_rows, visible);
+    for (u32 r = 0; r < filled; ++r) {
+        if (visible[r].length != 0) {
+            self.graphics_->move(
+                self.rp_, self.origin_x_,
+                self.origin_y_ + static_cast<i32>(r * kCell + kBaseline));
+            self.graphics_->text(self.rp_, visible[r].text, visible[r].length);
+        }
+    }
+    self.row_ = filled != 0 ? filled - 1 : 0;
+    self.col_ = self.text_.cursor_column(self.columns_);
+    self.draw_cursor();
+    self.graphics_->set_pens(self.rp_, 1, 0, ndk::JAM2);
+}
+
 void ShellWindow::put_byte(u8 c) {
     if (c == '\n') {
+        text_.new_line();
         col_ = 0;
         advance_row();
         return;
     }
     if (c == '\r') {
+        // Carriage return moves the on-screen cursor to column 0 without
+        // altering the logical line in the text store.
         col_ = 0;
         return;
     }
     if (c == '\t') {
         const u32 next = (col_ / kCell + 1) * kCell;
+        const u32 end = next < columns_ ? next : columns_;
+        for (u32 i = col_; i < end; ++i) {
+            text_.put(' ');
+        }
         if (next >= columns_) {
             col_ = 0;
             advance_row();
@@ -284,6 +351,7 @@ void ShellWindow::put_byte(u8 c) {
         return;
     }
     draw_cell(c);
+    text_.put(c);
     ++col_;
     if (col_ >= columns_) {
         col_ = 0;
@@ -305,10 +373,6 @@ void ShellWindow::advance_row() {
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     graphics_->scroll(rp_, 0, static_cast<i32>(kCell), origin_x_, origin_y_,
                       origin_x_ + inner_w_ - 1, origin_y_ + inner_h_ - 1);
-    // The start of the typed line moves up with its text.
-    if (line_start_row_ != 0) {
-        --line_start_row_;
-    }
 }
 
 void ShellWindow::draw_cell(u8 c) {
@@ -318,12 +382,7 @@ void ShellWindow::draw_cell(u8 c) {
 }
 
 void ShellWindow::mark_line_start() {
-    line_start_row_ = row_;
-    line_start_col_ = col_;
-}
-
-bool ShellWindow::has_typed_input() const {
-    return row_ > line_start_row_ || col_ > line_start_col_;
+    text_.mark_input_start();
 }
 
 void ShellWindow::draw_cursor() {

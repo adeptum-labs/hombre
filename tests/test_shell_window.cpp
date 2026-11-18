@@ -655,6 +655,93 @@ void shell_is_not_open_after_its_screen_is_closed() {
     CHECK(!r.intuition.window_open(window));
 }
 
+void shell_has_size_gadget() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 10u);
+    CHECK_EQ(r.get16(window + wd_MinWidth), 160u);
+    CHECK((r.get32(window + wd_Flags) & WFLG_SIZEGADGET) != 0);
+}
+
+void shell_rewraps_on_resize() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+
+    u8 line[71];
+    for (u32 i = 0; i < 70; ++i) {
+        line[i] = static_cast<u8>('A' + (i % 26));
+    }
+    line[70] = '\n';
+    shell.write(line, 71);
+
+    const i32 cur_h = static_cast<i16>(r.get16(window + wd_Height));
+    r.intuition.size_window_to(window, 400, cur_h);
+
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 c = (400 - 1 - 10) / 8;
+    CHECK_EQ(columns(r, window), c);
+    CHECK(!cell_all(r, bm, ix, iy, 0, 1, 0));
+    CHECK(cell_is(r, bm, ix, iy, 0, 1, static_cast<char>(line[c])));
+    CHECK(!cell_all(r, bm, ix, iy, c - 1, 0, 0));
+    CHECK(cell_is(r, bm, ix, iy, c - 1, 0, static_cast<char>(line[c - 1])));
+    CHECK(cell_all(r, bm, ix, iy, 70 - c, 1, 0));
+}
+
+void shell_erase_after_resize_stops_at_prompt() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+
+    shell.write_prompt(1, "Workbench3.1");
+    shell.echo('a');
+    shell.echo('b');
+    shell.echo('c');
+
+    const i32 cur_h = static_cast<i16>(r.get16(window + wd_Height));
+    r.intuition.size_window_to(window, 160, cur_h);
+
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    CHECK_EQ(columns(r, window), 18u);
+    CHECK(cell_is(r, bm, ix, iy, 17, 0, 'a'));
+    CHECK(cell_is(r, bm, ix, iy, 0, 1, 'b'));
+    CHECK(cell_is(r, bm, ix, iy, 1, 1, 'c'));
+    CHECK(cell_all(r, bm, ix, iy, 2, 1, 1));
+
+    for (u32 i = 0; i < 3; ++i) {
+        shell.erase_last();
+    }
+    const std::vector<u8> at_prompt = screen_planes(r, screen);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, '1'));
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, '.'));
+    CHECK(cell_is(r, bm, ix, iy, 2, 0, 'W'));
+    CHECK(cell_is(r, bm, ix, iy, 15, 0, '>'));
+    CHECK(cell_all(r, bm, ix, iy, 16, 0, 0));
+    CHECK(cell_all(r, bm, ix, iy, 17, 0, 1));
+    CHECK(cell_all(r, bm, ix, iy, 0, 1, 0));
+
+    shell.erase_last();
+    shell.erase_last();
+    CHECK(screen_planes(r, screen) == at_prompt);
+}
+
 }
 
 int main() {
@@ -680,5 +767,8 @@ int main() {
     close_is_idempotent();
     shell_is_not_open_after_its_window_is_closed();
     shell_is_not_open_after_its_screen_is_closed();
+    shell_has_size_gadget();
+    shell_rewraps_on_resize();
+    shell_erase_after_resize_stops_at_prompt();
     return check::finish("test_shell_window");
 }
