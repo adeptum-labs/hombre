@@ -66,6 +66,9 @@ public:
     void print_line(const char* text);
 
     bool is_open() const;
+
+    // The Intuition window of the shell, 0 while it is not open.
+    u32 window() const { return window_; }
     void close();
 
     // The ConsoleWrite sink of dos.hpp: writes the bytes to the window.

@@ -199,7 +199,8 @@ void poll_mouse() {
         }
         const PointerState::Update update = pointer.apply(sample);
         if (update.moved) {
-            amiga_display.move_pointer(machine, amiga_screen, pointer.x(), pointer.y());
+            amiga_display.move_pointer(machine, intuition.front_screen(), pointer.x(),
+                                       pointer.y());
         }
         if (update.moved || update.pressed != 0 || update.released != 0) {
             intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), update.pressed,
@@ -234,7 +235,8 @@ bool poll_input_while_running() {
         }
     }
     asm volatile("pause");
-    return usb_keyboard_status() == UsbStatus::Ready || usb_mouse_present();
+    // Without a keyboard nothing could stop a blocked program: let the run end.
+    return usb_keyboard_status() == UsbStatus::Ready;
 }
 
 bool hook_trampoline(void*) {
@@ -286,6 +288,15 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
 }
 
 
+// What a finished program may have left behind: its windows and screens, the
+// messages it never replied to and the signals it allocated.
+void reclaim_after_program() {
+    if (amiga_screen != 0) {
+        intuition.reclaim(shell.window(), amiga_screen);
+    }
+    exec.reset_task_signals();
+}
+
 // Runs the command and reports on serial how it went. False when the
 // program cannot be loaded; any other end is reported and counts as run.
 bool execute(const char* path, const char* args) {
@@ -296,6 +307,7 @@ bool execute(const char* path, const char* args) {
     machine.cpu.exit = ExitReason::None;
     u32 result = 0;
     const bool ok = dos.run_command(path, args, result, block_budget);
+    reclaim_after_program();
     if (!console_at_line_start) {
         serial::write_char('\n');
         console_at_line_start = true;
