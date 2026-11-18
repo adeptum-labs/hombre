@@ -31,7 +31,7 @@ namespace hombre {
 // any column count on demand.
 class ShellText {
 public:
-    static constexpr u32 kMaxLines = 256;
+    static constexpr u32 kMaxLines = 1024;
     static constexpr u32 kMaxLineBytes = 640;
 
     struct Row {
@@ -82,6 +82,48 @@ public:
         return count_;
     }
 
+    // Total wrapped rows in the whole layout at columns (0 means 1), using
+    // the same rule as tail.
+    u32 total_rows(u32 columns) const {
+        const u32 cols = columns == 0 ? 1 : columns;
+        u32 total = 0;
+        for (u32 i = 0; i < count_; ++i) {
+            total += line_rows(i, cols);
+        }
+        return total;
+    }
+
+    // Fills out with rows [top_row, top_row + count) of the whole layout
+    // at columns (0 means 1), clamped to the available rows. Returns the
+    // number filled. Each Row points into the store.
+    u32 rows_from(u32 columns, u32 top_row, u32 count, Row* out) const {
+        if (count == 0 || out == nullptr) {
+            return 0;
+        }
+        const u32 cols = columns == 0 ? 1 : columns;
+        u32 row_cursor = 0;
+        u32 filled = 0;
+        for (u32 i = 0; i < count_ && filled < count; ++i) {
+            const u32 r_count = line_rows(i, cols);
+            if (row_cursor + r_count <= top_row) {
+                row_cursor += r_count;
+                continue;
+            }
+            const u32 start_r = top_row > row_cursor ? top_row - row_cursor : 0;
+            const u32 slot = slot_of(i);
+            const u32 len = lengths_[slot];
+            for (u32 r = start_r; r < r_count && filled < count; ++r) {
+                const u32 offset = r * cols;
+                const u32 rem = offset < len ? len - offset : 0;
+                const u32 row_len = rem < cols ? rem : cols;
+                const u8* ptr = lines_[slot] + (offset < kMaxLineBytes ? offset : 0);
+                out[filled++] = Row{ptr, row_len};
+            }
+            row_cursor += r_count;
+        }
+        return filled;
+    }
+
     // Layout at columns (0 means 1): a completed line takes
     // max(1, ceil(len/columns)) rows; the current line takes
     // len/columns + 1 rows, its last row is where the cursor is. Fills
@@ -92,32 +134,9 @@ public:
         if (rows == 0 || out == nullptr) {
             return 0;
         }
-        const u32 cols = columns == 0 ? 1 : columns;
-        u32 total = 0;
-        for (u32 back = 0; back < count_ && total < rows; ++back) {
-            const u32 i = count_ - 1 - back;
-            const u32 r = line_rows(i, cols);
-            if (total + r >= rows) {
-                total = rows;
-                break;
-            }
-            total += r;
-        }
-        u32 pos = total;
-        for (u32 back = 0; back < count_ && pos > 0; ++back) {
-            const u32 i = count_ - 1 - back;
-            const u32 slot = slot_of(i);
-            const u32 len = lengths_[slot];
-            const u32 r_count = line_rows(i, cols);
-            for (u32 r = r_count; r > 0 && pos > 0; --r) {
-                const u32 offset = (r - 1) * cols;
-                const u32 rem = offset < len ? len - offset : 0;
-                const u32 row_len = rem < cols ? rem : cols;
-                const u8* ptr = lines_[slot] + (offset < kMaxLineBytes ? offset : 0);
-                out[--pos] = Row{ptr, row_len};
-            }
-        }
-        return total;
+        const u32 total = total_rows(columns);
+        const u32 take = rows < total ? rows : total;
+        return rows_from(columns, total - take, rows, out);
     }
 
     u32 cursor_column(u32 columns) const {
@@ -148,5 +167,7 @@ private:
     u32 count_ = 1;
     u32 input_start_ = 0;
 };
+
+static_assert(sizeof(ShellText) <= 1024u * 1024u);
 
 }

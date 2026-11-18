@@ -99,7 +99,7 @@ void erase_stops_at_input_start() {
 
 void drops_oldest_lines() {
     ShellText text;
-    for (u32 i = 0; i < 300; ++i) {
+    for (u32 i = 0; i < 1200; ++i) {
         const std::string line = "L" + std::to_string(i);
         put_str(text, line.c_str());
         text.new_line();
@@ -107,8 +107,8 @@ void drops_oldest_lines() {
     CHECK_EQ(text.line_count(), ShellText::kMaxLines);
     ShellText::Row rows[ShellText::kMaxLines]{};
     CHECK_EQ(text.tail(16, ShellText::kMaxLines, rows), ShellText::kMaxLines);
-    CHECK(row_str(rows[0]) == "L45");
-    CHECK(row_str(rows[ShellText::kMaxLines - 2]) == "L299");
+    CHECK(row_str(rows[0]) == "L177");
+    CHECK(row_str(rows[ShellText::kMaxLines - 2]) == "L1199");
     CHECK_EQ(rows[ShellText::kMaxLines - 1].length, 0u);
 }
 
@@ -182,6 +182,95 @@ void tail_with_more_rows_than_text() {
     CHECK_EQ(rows[2].length, 0u);
 }
 
+void total_rows_matches_tail() {
+    ShellText text;
+    ShellText::Row rows[48]{};
+    CHECK_EQ(text.total_rows(10), 1u);
+    CHECK_EQ(text.tail(10, 48, rows), 1u);
+
+    put_str(text, "abcdefghijklmnopqrstuvwxy");
+    text.new_line();
+    text.new_line();
+    put_str(text, "0123456789");
+
+    const u32 total_10 = text.total_rows(10);
+    CHECK_EQ(total_10, 6u);
+    CHECK_EQ(text.tail(10, 48, rows), total_10);
+
+    const u32 total_0 = text.total_rows(0);
+    CHECK_EQ(total_0, 37u);
+    CHECK_EQ(text.tail(0, 48, rows), total_0);
+}
+
+void rows_from_top_and_middle() {
+    ShellText text;
+    put_str(text, "abcdefgh");
+    text.new_line();
+    text.new_line();
+    put_str(text, "0123456789");
+
+    CHECK_EQ(text.total_rows(5), 6u);
+
+    ShellText::Row out[6]{};
+    CHECK_EQ(text.rows_from(5, 0, 3, out), 3u);
+    CHECK(row_str(out[0]) == "abcde");
+    CHECK(row_str(out[1]) == "fgh");
+    CHECK_EQ(out[2].length, 0u);
+
+    CHECK_EQ(text.rows_from(5, 1, 4, out), 4u);
+    CHECK(row_str(out[0]) == "fgh");
+    CHECK_EQ(out[1].length, 0u);
+    CHECK(row_str(out[2]) == "01234");
+    CHECK(row_str(out[3]) == "56789");
+
+    ShellText::Row tail_out[3]{};
+    CHECK_EQ(text.tail(5, 3, tail_out), 3u);
+    CHECK_EQ(text.rows_from(5, 3, 3, out), 3u);
+    for (u32 i = 0; i < 3; ++i) {
+        CHECK(row_str(out[i]) == row_str(tail_out[i]));
+    }
+}
+
+void rows_from_clamps_past_end() {
+    ShellText text;
+    put_str(text, "abcdef");
+    text.new_line();
+    put_str(text, "gh");
+
+    const u32 total = text.total_rows(4);
+    CHECK_EQ(total, 3u);
+
+    ShellText::Row out[4]{};
+    CHECK_EQ(text.rows_from(4, 1, 10, out), 2u);
+    CHECK(row_str(out[0]) == "ef");
+    CHECK(row_str(out[1]) == "gh");
+
+    CHECK_EQ(text.rows_from(4, total, 4, out), 0u);
+    CHECK_EQ(text.rows_from(4, total + 10, 4, out), 0u);
+    CHECK_EQ(text.rows_from(4, 0, 0, out), 0u);
+    CHECK_EQ(text.rows_from(4, 0, 4, nullptr), 0u);
+    CHECK_EQ(text.rows_from(4, 1, 0xffffffffu, out), 2u);
+    CHECK(row_str(out[0]) == "ef");
+    CHECK(row_str(out[1]) == "gh");
+}
+
+void keeps_1024_lines() {
+    ShellText text;
+    for (u32 i = 0; i < 1100; ++i) {
+        if (i > 0) {
+            text.new_line();
+        }
+        const std::string line = "L" + std::to_string(i);
+        put_str(text, line.c_str());
+    }
+    CHECK_EQ(text.line_count(), 1024u);
+    CHECK_EQ(text.total_rows(16), 1024u);
+    ShellText::Row rows[ShellText::kMaxLines]{};
+    CHECK_EQ(text.rows_from(16, 0, ShellText::kMaxLines, rows), 1024u);
+    CHECK(row_str(rows[0]) == "L76");
+    CHECK(row_str(rows[1023]) == "L1099");
+}
+
 }
 
 int main() {
@@ -195,5 +284,9 @@ int main() {
     longest_typed_line_is_one_line();
     rewrap_long_input_at_minimum();
     tail_with_more_rows_than_text();
+    total_rows_matches_tail();
+    rows_from_top_and_middle();
+    rows_from_clamps_past_end();
+    keeps_1024_lines();
     return check::finish("test_shell_text");
 }
