@@ -161,16 +161,26 @@ constexpr u8 keymap_letter(u8 usage) {
 // The Swedish layout in Latin-1: the character the key types, a control code
 // for the editing keys, or zero for a dead key, an unmapped key or a key that
 // only changes state. A letter is upper case when exactly one of Shift and
-// Caps Lock is set.
+// Caps Lock is set. AltGr gives a key its AltGr character or nothing.
 constexpr u8 keymap_se(u8 usage, u8 modifiers, bool caps_lock) {
     const bool shifted = (modifiers & (kModLShift | kModRShift)) != 0;
+    const bool alt_gr = (modifiers & kModAltGr) != 0;
     const u8 lower = keymap_letter(usage);
     if (lower != 0) {
+        if (alt_gr) {
+            // Only M has an AltGr character among the letters: the micro sign.
+            return usage == 0x10 ? 0xB5 : 0;
+        }
         return shifted != caps_lock ? static_cast<u8>(lower - 0x20) : lower;
     }
     const KeyFace face = key_face(usage);
-    if ((modifiers & kModAltGr) != 0 && face.alt_gr != 0) {
-        return face.alt_gr;
+    if (alt_gr) {
+        if (face.alt_gr != 0) {
+            return face.alt_gr;
+        }
+        // AltGr on a key with no AltGr character types nothing, except that
+        // the editing keys and Space keep their meaning.
+        return face.normal <= ' ' ? face.normal : 0;
     }
     return shifted ? face.shifted : face.normal;
 }

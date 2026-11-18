@@ -91,17 +91,17 @@ void digit_row_normal_shift_altgr() {
     for (const KeyCase& c : kDigitRow) {
         CHECK_EQ(keymap_se(c.usage, 0, false), c.normal);
         CHECK_EQ(keymap_se(c.usage, kShift, false), c.shifted);
-        CHECK_EQ(keymap_se(c.usage, kAltGr, false), c.alt_gr != 0 ? c.alt_gr : c.normal);
+        CHECK_EQ(keymap_se(c.usage, kAltGr, false), c.alt_gr);
     }
     CHECK_EQ(keymap_se(0x1E, 0, true), '1');
-    CHECK_EQ(keymap_se(0x1E, kAltGr, true), '1');
+    CHECK_EQ(keymap_se(0x1E, kAltGr, true), 0);
 }
 
 void punctuation_keys() {
     for (const KeyCase& c : kPunctuation) {
         CHECK_EQ(keymap_se(c.usage, 0, false), c.normal);
         CHECK_EQ(keymap_se(c.usage, kShift, false), c.shifted);
-        CHECK_EQ(keymap_se(c.usage, kAltGr, false), c.alt_gr != 0 ? c.alt_gr : c.normal);
+        CHECK_EQ(keymap_se(c.usage, kAltGr, false), c.alt_gr);
     }
 }
 
@@ -113,6 +113,26 @@ void dead_keys_give_nothing() {
     CHECK_EQ(keymap_se(0x30, kShift, false), 0);
     CHECK_EQ(keymap_se(0x30, kAltGr, false), '~');
     CHECK_EQ(keymap_se(0x30, kAltGr, true), '~');
+}
+
+void altgr_on_a_key_without_an_altgr_character_types_nothing() {
+    CHECK_EQ(keymap_se(0x04, kAltGr, false), 0);   // a
+    CHECK_EQ(keymap_se(0x08, kAltGr, false), 0);   // e
+    CHECK_EQ(keymap_se(0x2F, kAltGr, false), 0);   // å
+    CHECK_EQ(keymap_se(0x22, kAltGr, false), 0);   // 5
+    CHECK_EQ(keymap_se(0x36, kAltGr, false), 0);   // comma
+}
+
+void altgr_m_is_the_micro_sign() {
+    CHECK_EQ(keymap_se(0x10, kAltGr, false), 0xB5);
+    CHECK_EQ(keymap_se(0x10, 0, false), 'm');
+}
+
+void altgr_keeps_the_control_keys_and_space() {
+    CHECK_EQ(keymap_se(0x28, kAltGr, false), '\n');
+    CHECK_EQ(keymap_se(0x2A, kAltGr, false), 0x08);
+    CHECK_EQ(keymap_se(0x2B, kAltGr, false), '\t');
+    CHECK_EQ(keymap_se(0x2C, kAltGr, false), ' ');
 }
 
 void control_keys() {
@@ -164,6 +184,9 @@ int main() {
     digit_row_normal_shift_altgr();
     punctuation_keys();
     dead_keys_give_nothing();
+    altgr_on_a_key_without_an_altgr_character_types_nothing();
+    altgr_m_is_the_micro_sign();
+    altgr_keeps_the_control_keys_and_space();
     control_keys();
     keypad();
     unmapped_usages_give_zero();
