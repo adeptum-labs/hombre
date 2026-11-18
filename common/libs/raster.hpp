@@ -323,4 +323,125 @@ inline Rect scroll_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip
                 static_cast<i32>(bottom)};
 }
 
+// Copies a rectangle between two distinct bitmaps; overlapping regions within
+// the same bitmap are not handled. Each destination byte is built from the one
+// or two source bytes it straddles and masked at the left and right edges.
+inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const Bitmap& dst,
+                      i32 dx, i32 dy, i32 width, i32 height) {
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    i64 s_x = sx;
+    i64 s_y = sy;
+    i64 d_x = dx;
+    i64 d_y = dy;
+    i64 w = width;
+    i64 h = height;
+    if (s_x < 0) {
+        w += s_x;
+        d_x -= s_x;
+        s_x = 0;
+    }
+    if (d_x < 0) {
+        w += d_x;
+        s_x -= d_x;
+        d_x = 0;
+    }
+    if (s_y < 0) {
+        h += s_y;
+        d_y -= s_y;
+        s_y = 0;
+    }
+    if (d_y < 0) {
+        h += d_y;
+        s_y -= d_y;
+        d_y = 0;
+    }
+    const i64 src_w = static_cast<i64>(static_cast<u64>(src.bytes_per_row) << 3);
+    const i64 dst_w = static_cast<i64>(static_cast<u64>(dst.bytes_per_row) << 3);
+    const i64 src_h = static_cast<i64>(src.rows);
+    const i64 dst_h = static_cast<i64>(dst.rows);
+    if (s_x >= src_w || d_x >= dst_w || s_y >= src_h || d_y >= dst_h) {
+        return;
+    }
+    if (s_x + w > src_w) {
+        w = src_w - s_x;
+    }
+    if (d_x + w > dst_w) {
+        w = dst_w - d_x;
+    }
+    if (s_y + h > src_h) {
+        h = src_h - s_y;
+    }
+    if (d_y + h > dst_h) {
+        h = dst_h - d_y;
+    }
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    u32 depth = src.depth < dst.depth ? src.depth : dst.depth;
+    if (depth > 8) {
+        depth = 8;
+    }
+    const u32 ux = static_cast<u32>(s_x);
+    const u32 uy = static_cast<u32>(s_y);
+    const u32 vx = static_cast<u32>(d_x);
+    const u32 vy = static_cast<u32>(d_y);
+    const u32 uw = static_cast<u32>(w);
+    const u32 uh = static_cast<u32>(h);
+
+    const u32 first_src_byte = ux >> 3;
+    const u32 last_src_byte = (ux + uw - 1) >> 3;
+    const u32 first_byte = vx >> 3;
+    const u32 last_byte = (vx + uw - 1) >> 3;
+    const u32 byte_count = last_byte - first_byte + 1;
+    const u32 s_bit = ux & 7;
+    const u32 d_bit = vx & 7;
+    const u8 left_mask = static_cast<u8>(0xFFu >> d_bit);
+    const u8 right_mask = static_cast<u8>(0xFFu << (7 - ((vx + uw - 1) & 7)));
+
+    for (u32 plane = 0; plane < depth && bus.ok(); ++plane) {
+        for (u32 row = 0; row < uh && bus.ok(); ++row) {
+            const u32 src_row = src.planes[plane] + (uy + row) * src.bytes_per_row;
+            const u32 dst_row = dst.planes[plane] + (vy + row) * dst.bytes_per_row;
+            for (u32 i = 0; i < byte_count && bus.ok(); ++i) {
+                const u32 db = first_byte + i;
+                u8 mask = 0xFF;
+                if (db == first_byte) {
+                    mask &= left_mask;
+                }
+                if (db == last_byte) {
+                    mask &= right_mask;
+                }
+                u8 src_byte = 0;
+                if (s_bit >= d_bit) {
+                    const u32 sb = first_src_byte + i;
+                    const u32 shift = s_bit - d_bit;
+                    src_byte = static_cast<u8>(bus.r8(src_row + sb) << shift);
+                    if (shift != 0 && sb < last_src_byte) {
+                        src_byte |= static_cast<u8>(bus.r8(src_row + sb + 1) >> (8 - shift));
+                    }
+                } else {
+                    const u32 sb = first_src_byte + i;
+                    const u32 shift = d_bit - s_bit;
+                    if (i > 0) {
+                        src_byte = static_cast<u8>(bus.r8(src_row + sb - 1) << (8 - shift));
+                    }
+                    if (sb <= last_src_byte) {
+                        src_byte |= static_cast<u8>(bus.r8(src_row + sb) >> shift);
+                    }
+                }
+                const u32 dst_at = dst_row + db;
+                if (mask == 0xFF) {
+                    bus.w8(dst_at, src_byte);
+                } else {
+                    const u8 dst_byte = bus.r8(dst_at);
+                    bus.w8(dst_at, static_cast<u8>((dst_byte & ~mask) | (src_byte & mask)));
+                }
+            }
+        }
+    }
+}
+
 }

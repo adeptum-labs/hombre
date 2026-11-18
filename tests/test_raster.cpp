@@ -45,6 +45,7 @@ constexpr u32 kRows = 16;
 constexpr u32 kDepth = 2;
 constexpr u32 kPlaneBytes = kBytesPerRow * kRows;
 constexpr u32 kPlanesBytes = 8 * kPlaneBytes;
+constexpr u32 kSecondPlaneBase = kPlaneBase + kPlanesBytes;
 constexpr raster::Clip kFullClip{0, 0, 639, 15};
 
 // A flat guest memory of guard bytes and a Machine without a Jit, whose
@@ -60,14 +61,16 @@ public:
     Machine& machine() { return m_; }
     native::Bus bus() { return native::Bus(m_); }
 
-    raster::Bitmap bitmap() const {
+    raster::Bitmap bitmap() const { return bitmap_at(kPlaneBase, kDepth); }
+
+    raster::Bitmap bitmap_at(u32 base, u32 depth = kDepth) const {
         raster::Bitmap bm{};
         bm.bytes_per_row = kBytesPerRow;
         bm.rows = kRows;
-        bm.depth = kDepth;
-        bm.addr = kPlaneBase;
+        bm.depth = depth;
+        bm.addr = base;
         for (u32 plane = 0; plane < 8; ++plane) {
-            bm.planes[plane] = kPlaneBase + plane * kPlaneBytes;
+            bm.planes[plane] = base + plane * kPlaneBytes;
         }
         return bm;
     }
@@ -460,6 +463,185 @@ void load_bitmap_rejects_a_depth_zero_bitmap_larger_than_guest_memory() {
     CHECK(!b.ok());
 }
 
+void copy_rect_aligned() {
+    Rig r;
+    native::Bus b = r.bus();
+    const raster::Bitmap src = r.bitmap_at(kSecondPlaneBase);
+    const raster::Bitmap dst = r.bitmap();
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 48; ++x) {
+            raster::write_pixel(b, src, x, y, static_cast<u32>((x * 3 + y * 5 + 1) & 3));
+            raster::write_pixel(b, dst, x, y, static_cast<u32>((x + y) & 3));
+        }
+    }
+    const std::vector<u8> before = r.snapshot();
+    raster::copy_rect(b, src, 8, 2, dst, 16, 10, 16, 4);
+    CHECK(b.ok());
+
+    for (i32 j = 0; j < 4; ++j) {
+        for (i32 i = 0; i < 16; ++i) {
+            CHECK_EQ(raster::read_pixel(b, dst, 16 + i, 10 + j),
+                     raster::read_pixel(b, src, 8 + i, 2 + j));
+        }
+    }
+    for (i32 y = 9; y <= 14; ++y) {
+        for (i32 x = 15; x <= 32; ++x) {
+            if (x >= 16 && x < 32 && y >= 10 && y < 14) {
+                continue;
+            }
+            CHECK_EQ(raster::read_pixel(b, dst, x, y), static_cast<u32>((x + y) & 3));
+        }
+    }
+    const std::vector<u8> after = r.snapshot();
+    for (u32 plane = 0; plane < 8; ++plane) {
+        for (u32 row = 0; row < kRows; ++row) {
+            for (u32 byte = 0; byte < kBytesPerRow; ++byte) {
+                if (plane < kDepth && row >= 10 && row < 14 && (byte == 2 || byte == 3)) {
+                    continue;
+                }
+                const u32 at = plane * kPlaneBytes + row * kBytesPerRow + byte;
+                CHECK_EQ(after[at], before[at]);
+            }
+        }
+    }
+}
+
+void copy_rect_unaligned_shift() {
+    Rig r;
+    native::Bus b = r.bus();
+    const raster::Bitmap src = r.bitmap_at(kSecondPlaneBase);
+    const raster::Bitmap dst = r.bitmap();
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 48; ++x) {
+            const u32 s_pen = static_cast<u32>((x * 7 + y * 3 + (x >> 1)) & 3);
+            const u32 d_pen = static_cast<u32>(((x ^ y) + 2) & 3);
+            raster::write_pixel(b, src, x, y, s_pen);
+            raster::write_pixel(b, dst, x, y, d_pen);
+        }
+    }
+    raster::copy_rect(b, src, 3, 1, dst, 21, 5, 13, 3);
+    CHECK(b.ok());
+
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 48; ++x) {
+            if (x >= 21 && x < 34 && y >= 5 && y < 8) {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y),
+                         raster::read_pixel(b, src, 3 + (x - 21), 1 + (y - 5)));
+            } else {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y),
+                         static_cast<u32>(((x ^ y) + 2) & 3));
+            }
+        }
+    }
+
+    // Opposite bit-shift direction (source bit offset > destination bit offset).
+    raster::copy_rect(b, src, 6, 9, dst, 18, 11, 13, 3);
+    CHECK(b.ok());
+    for (i32 y = 10; y <= 14; ++y) {
+        for (i32 x = 16; x < 34; ++x) {
+            if (x >= 18 && x < 31 && y >= 11 && y < 14) {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y),
+                         raster::read_pixel(b, src, 6 + (x - 18), 9 + (y - 11)));
+            } else {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y),
+                         static_cast<u32>(((x ^ y) + 2) & 3));
+            }
+        }
+    }
+}
+
+void copy_rect_clips_to_both_bitmaps() {
+    Rig r;
+    native::Bus b = r.bus();
+    const raster::Bitmap src = r.bitmap_at(kSecondPlaneBase);
+    const raster::Bitmap dst = r.bitmap();
+    r.clear_planes();
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 630; x < static_cast<i32>(kWidth); ++x) {
+            raster::write_pixel(b, src, x, y, static_cast<u32>((x + y * 3 + 1) & 3));
+        }
+        for (i32 x = 0; x < 16; ++x) {
+            raster::write_pixel(b, dst, x, y, static_cast<u32>((x + y + 1) & 3));
+        }
+    }
+    const std::vector<u8> before = r.snapshot();
+
+    // Source [634, 646) hangs 6 pixels off the right edge (640); destination
+    // starts at (-3, -2), so only offsets i in [3, 6) and j in [2, 6) overlap.
+    raster::copy_rect(b, src, 634, 2, dst, -3, -2, 12, 6);
+    CHECK(b.ok());
+
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 16; ++x) {
+            if (x < 3 && y < 4) {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y),
+                         raster::read_pixel(b, src, 637 + x, 4 + y));
+            } else {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y),
+                         static_cast<u32>((x + y + 1) & 3));
+            }
+        }
+    }
+    const std::vector<u8> after = r.snapshot();
+    for (u32 plane = 0; plane < 8; ++plane) {
+        for (u32 row = 0; row < kRows; ++row) {
+            for (u32 byte = 0; byte < kBytesPerRow; ++byte) {
+                if (plane < kDepth && row < 4 && byte == 0) {
+                    continue;
+                }
+                const u32 at = plane * kPlaneBytes + row * kBytesPerRow + byte;
+                CHECK_EQ(after[at], before[at]);
+            }
+        }
+    }
+
+    // Degenerate and completely off-bitmap copies leave the destination untouched.
+    const std::vector<u8> mid = r.snapshot();
+    raster::copy_rect(b, src, 0, 0, dst, 0, 0, 0, 4);
+    raster::copy_rect(b, src, 0, 0, dst, 0, 0, 4, -1);
+    raster::copy_rect(b, src, 640, 0, dst, 0, 0, 4, 4);
+    raster::copy_rect(b, src, 0, 0, dst, -8, -8, 4, 4);
+    CHECK(b.ok());
+    CHECK(r.snapshot() == mid);
+}
+
+void copy_rect_depth_mismatch() {
+    Rig r;
+    native::Bus b = r.bus();
+    const raster::Bitmap src = r.bitmap_at(kSecondPlaneBase, 1);
+    const raster::Bitmap dst = r.bitmap_at(kPlaneBase, 2);
+    r.clear_planes();
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 32; ++x) {
+            raster::write_pixel(b, src, x, y, static_cast<u32>((x + y) & 1));
+            raster::write_pixel(b, dst, x, y, static_cast<u32>(((x * 3 + y) & 3)));
+        }
+    }
+    const std::vector<u8> before = r.snapshot();
+
+    raster::copy_rect(b, src, 5, 1, dst, 11, 4, 14, 3);
+    CHECK(b.ok());
+
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 32; ++x) {
+            const u32 old_pen = static_cast<u32>((x * 3 + y) & 3);
+            if (x >= 11 && x < 25 && y >= 4 && y < 7) {
+                const u32 src_bit0 = raster::read_pixel(b, src, 5 + (x - 11), 1 + (y - 4)) & 1u;
+                const u32 expected = (old_pen & 2u) | src_bit0;
+                CHECK_EQ(raster::read_pixel(b, dst, x, y), expected);
+            } else {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y), old_pen);
+            }
+        }
+    }
+    for (u32 row = 0; row < kRows; ++row) {
+        for (u32 byte = 0; byte < kBytesPerRow; ++byte) {
+            const u32 at = 1 * kPlaneBytes + row * kBytesPerRow + byte;
+            CHECK_EQ(r.plane_byte(1, row, byte), before[at]);
+        }
+    }
+}
+
 }
 
 int main() {
@@ -479,5 +661,9 @@ int main() {
     huge_fill_stops_at_the_first_fault();
     load_bitmap_rejects_areas_wider_or_taller_than_4096();
     load_bitmap_rejects_a_depth_zero_bitmap_larger_than_guest_memory();
+    copy_rect_aligned();
+    copy_rect_unaligned_shift();
+    copy_rect_clips_to_both_bitmaps();
+    copy_rect_depth_mismatch();
     return check::finish("test_raster");
 }
