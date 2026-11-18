@@ -433,6 +433,17 @@ void huge_fill_stops_at_the_first_fault() {
     CHECK(!b.ok());
 }
 
+void load_bitmap_rejects_a_depth_zero_bitmap_larger_than_guest_memory() {
+    Rig r;
+    native::Bus b = r.bus();
+    r.put16(kStruct + ndk::bm_BytesPerRow, 0xFFFF);
+    r.put16(kStruct + ndk::bm_Rows, 0xFFFF);
+    r.put8(kStruct + ndk::bm_Depth, 0);
+    raster::Bitmap bm{};
+    CHECK(!raster::load_bitmap(b, kStruct, bm));
+    CHECK(!b.ok());
+}
+
 }
 
 int main() {
@@ -450,5 +461,6 @@ int main() {
     bad_bitmap_address_faults_the_bus();
     load_bitmap_rejects_planes_outside_guest_memory();
     huge_fill_stops_at_the_first_fault();
+    load_bitmap_rejects_a_depth_zero_bitmap_larger_than_guest_memory();
     return check::finish("test_raster");
 }

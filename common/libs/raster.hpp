@@ -124,9 +124,13 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
     if (!bus.ok() || out.depth > 8) {
         return false;
     }
-    // Every plane in use must lie inside guest memory, which bounds what a
+    // The area of one plane must fit in guest memory, whatever the depth,
+    // and every plane in use must lie inside it. Together they bound what a
     // draw over the bitmap can visit.
     const u32 plane_bytes = out.bytes_per_row * out.rows;
+    if (bus.bytes_at(0, plane_bytes) == nullptr) {
+        return false;
+    }
     for (u32 plane = 0; plane < out.depth; ++plane) {
         if (bus.bytes_at(out.planes[plane], plane_bytes) == nullptr) {
             return false;
