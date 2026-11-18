@@ -32,7 +32,7 @@ namespace hombre {
 class ShellText {
 public:
     static constexpr u32 kMaxLines = 256;
-    static constexpr u32 kMaxLineBytes = 256;
+    static constexpr u32 kMaxLineBytes = 640;
 
     struct Row {
         const u8* text;

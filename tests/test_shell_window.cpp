@@ -742,6 +742,36 @@ void shell_erase_after_resize_stops_at_prompt() {
     CHECK(screen_planes(r, screen) == at_prompt);
 }
 
+// The prompt and an input of n bytes, the window then shrunk to its minimum.
+void shrunk_shell_with_input(GfxRig& r, ShellWindow& shell, u32 n) {
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+    shell.write_prompt(1, "X");
+    for (u32 i = 0; i < n; ++i) {
+        shell.echo('a');
+    }
+    r.intuition.size_window_to(window, 160, 50);
+}
+
+void erase_past_top_row_redraws() {
+    GfxRig r;
+    ShellWindow shell;
+    // 6 prompt bytes and 80 typed ones: 5 rows of 18 columns in a window
+    // with room for 4, so the first row of the line is above the window.
+    shrunk_shell_with_input(r, shell, 80);
+    for (u32 i = 0; i < 90; ++i) {
+        shell.erase_last();
+    }
+    GfxRig fresh;
+    ShellWindow empty;
+    shrunk_shell_with_input(fresh, empty, 0);
+    const u32 screen = r.intuition.front_screen();
+    CHECK(screen_planes(r, screen) == screen_planes(fresh, fresh.intuition.front_screen()));
+}
+
 }
 
 int main() {
@@ -770,5 +800,6 @@ int main() {
     shell_has_size_gadget();
     shell_rewraps_on_resize();
     shell_erase_after_resize_stops_at_prompt();
+    erase_past_top_row_redraws();
     return check::finish("test_shell_window");
 }

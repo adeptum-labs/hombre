@@ -215,7 +215,7 @@ private:
     void remove_window_at(u32 index);
     void activate_window(u32 window);
     bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
-    void post_newsize(WindowRecord& rec, bool even_if_pending);
+    void post_newsize(WindowRecord& rec);
     void route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
     bool start_drag(u32 window, i32 x, i32 y);
     void drag_to(i32 x, i32 y);

@@ -2662,19 +2662,40 @@ void newsize_coalesced_and_final_on_release() {
     move_to(r, 460, 270);
     classes = queued_classes(r, window, &messages);
     CHECK_EQ(classes.size(), 1u);
-    // Not replied: steps post nothing, the release posts the final size.
+    // Not replied: steps and the release post no NEWSIZE, only CHANGEWINDOW.
+    const u32 pending = messages.back();
     move_to(r, 470, 275);
     move_to(r, 480, 280);
     CHECK_EQ(queued_classes(r, window).size(), 0u);
     release(r, 480, 280);
     classes = queued_classes(r, window);
-    CHECK_EQ(classes.size(), 2u);
-    if (classes.size() == 2) {
-        CHECK_EQ(classes[0], IDCMP_NEWSIZE);
-        CHECK_EQ(classes[1], IDCMP_CHANGEWINDOW);
-    }
+    CHECK_EQ(classes.size(), 1u);
+    CHECK_EQ(classes.size() > 0 ? classes[0] : 0u, IDCMP_CHANGEWINDOW);
     CHECK_EQ(r.get16(window + wd_Width), 285u);
     CHECK_EQ(r.get16(window + wd_Height), 185u);
+    // The reply to the stale NEWSIZE brings the final size.
+    reply_msg(r, pending);
+    classes = queued_classes(r, window);
+    CHECK_EQ(classes.size(), 1u);
+    CHECK_EQ(classes.size() > 0 ? classes[0] : 0u, IDCMP_NEWSIZE);
+}
+
+// A guest that never replies keeps one NEWSIZE and one CHANGEWINDOW per
+// gesture at most: 100 gestures do not use up the message pool.
+void unreplied_resizes_do_not_exhaust_messages() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_SIZEGADGET, IDCMP_NEWSIZE, 0, 0, 0xFFFF,
+                                        0xFFFF);
+    for (i32 i = 0; i < 100; ++i) {
+        const i32 grow = (i % 2 == 0) ? 10 : -10;
+        const i32 right = 200 + static_cast<i32>(r.get16(window + wd_Width)) - 1;
+        const i32 bottom = 100 + static_cast<i32>(r.get16(window + wd_Height)) - 1;
+        press(r, right - 4, bottom - 4);
+        move_to(r, right - 4 + grow, bottom - 4 + grow);
+        release(r, right - 4 + grow, bottom - 4 + grow);
+    }
+    CHECK_EQ(r.intuition.dropped_messages(), 0u);
+    CHECK_EQ(queued_classes(r, window).size(), 1u);
 }
 
 void move_posts_changewindow_only() {
@@ -2836,6 +2857,7 @@ int main() {
     resize_grows_and_clears();
     resize_clamps_to_limits();
     newsize_coalesced_and_final_on_release();
+    unreplied_resizes_do_not_exhaust_messages();
     move_posts_changewindow_only();
     drag_press_is_not_selectdown();
     size_hook_called_per_step();

@@ -22,7 +22,9 @@
  */
 
 #include "check.hpp"
+#include "shell.hpp"
 #include "shell_text.hpp"
+#include "shell_window.hpp"
 
 #include <string>
 
@@ -111,18 +113,37 @@ void drops_oldest_lines() {
 }
 
 void long_line_breaks() {
+    constexpr u32 kMax = ShellText::kMaxLineBytes;
     ShellText text;
     text.mark_input_start();
-    for (u32 i = 0; i < 300; ++i) {
+    for (u32 i = 0; i < kMax + 44; ++i) {
         text.put(static_cast<u8>('a' + i % 26));
     }
     CHECK_EQ(text.line_count(), 2u);
     ShellText::Row rows[4]{};
-    CHECK_EQ(text.tail(256, 4, rows), 2u);
-    CHECK_EQ(rows[0].length, 256u);
+    CHECK_EQ(text.tail(kMax, 4, rows), 2u);
+    CHECK_EQ(rows[0].length, kMax);
     CHECK_EQ(rows[1].length, 44u);
-    CHECK_EQ(text.cursor_column(256), 44u);
+    CHECK_EQ(text.cursor_column(kMax), 44u);
     for (u32 i = 0; i < 44; ++i) {
+        CHECK(text.erase_last());
+    }
+    CHECK(!text.erase_last());
+}
+
+// The longest line the shell's editor takes, after the longest prompt, stays
+// one logical line that erase can take back to the prompt.
+void longest_typed_line_is_one_line() {
+    ShellText text;
+    for (u32 i = 0; i < ShellWindow::kMaxPrompt + 16; ++i) {
+        text.put('p');
+    }
+    text.mark_input_start();
+    for (u32 i = 0; i < Shell::kMaxLine; ++i) {
+        text.put('a');
+    }
+    CHECK_EQ(text.line_count(), 1u);
+    for (u32 i = 0; i < Shell::kMaxLine; ++i) {
         CHECK(text.erase_last());
     }
     CHECK(!text.erase_last());
@@ -171,6 +192,7 @@ int main() {
     erase_stops_at_input_start();
     drops_oldest_lines();
     long_line_breaks();
+    longest_typed_line_is_one_line();
     rewrap_long_input_at_minimum();
     tail_with_more_rows_than_text();
     return check::finish("test_shell_text");

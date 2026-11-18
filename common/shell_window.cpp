@@ -208,12 +208,16 @@ void ShellWindow::erase_last() {
     if (!is_open() || columns_ == 0 || rows_ == 0 || !text_.erase_last()) {
         return;
     }
+    if (row_ == 0 && col_ == 0) {
+        // The erased byte is on a row above the window: lay the text out
+        // again so that row comes into view.
+        on_size(this, window_);
+        return;
+    }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     draw_cell(' ');
     if (col_ == 0) {
-        if (row_ > 0) {
-            --row_;
-        }
+        --row_;
         col_ = columns_ - 1;
     } else {
         --col_;

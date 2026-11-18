@@ -1292,6 +1292,11 @@ void Intuition::free_tracked_message(u32 message) {
                 WindowRecord* rec = find_window_record(window);
                 if (rec != nullptr) {
                     rec->newsize_pending = false;
+                    // A size reached while this NEWSIZE waited for its
+                    // reply is reported now that the window takes one again.
+                    if (drag_ == Drag::None || drag_window_ != window) {
+                        post_newsize(*rec);
+                    }
                 }
             }
             exec_->free(addr, ndk::IntuiMessage_SIZEOF);
@@ -2254,7 +2259,7 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     // The hook may close the window.
     rec = find_window_record(window);
     if (rec != nullptr && find_window(window) < kMaxWindows) {
-        post_newsize(*rec, false);
+        post_newsize(*rec);
         compose(rec->screen, old);
         compose(rec->screen,
                 Rect{rec->left, rec->top, rec->left + width - 1, rec->top + height - 1});
@@ -2262,11 +2267,9 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     end_batch();
 }
 
-void Intuition::post_newsize(WindowRecord& rec, bool even_if_pending) {
-    if (rec.newsize_pending && !even_if_pending) {
-        return;
-    }
-    if (rec.newsize_w == rec.width && rec.newsize_h == rec.height && even_if_pending) {
+void Intuition::post_newsize(WindowRecord& rec) {
+    if (rec.newsize_pending ||
+        (rec.newsize_w == rec.width && rec.newsize_h == rec.height)) {
         return;
     }
     if (post_intuimessage(rec.addr, ndk::IDCMP_NEWSIZE, 0)) {
@@ -2335,7 +2338,7 @@ void Intuition::end_drag() {
         return;
     }
     if (kind == Drag::Size) {
-        post_newsize(*rec, true);
+        post_newsize(*rec);
     }
     post_intuimessage(window, ndk::IDCMP_CHANGEWINDOW, 0);
 }
