@@ -64,11 +64,17 @@ View view(Bus& b, u32 rp) {
     }
     v.bitmap_addr = bitmap;
     if (layer != 0) {
-        v.origin_x = static_cast<i16>(b.r16(layer + ndk::ly_MinX));
-        v.origin_y = static_cast<i16>(b.r16(layer + ndk::ly_MinY));
-        v.clip = raster::Clip{v.origin_x, v.origin_y,
-                              static_cast<i16>(b.r16(layer + ndk::ly_MaxX)),
-                              static_cast<i16>(b.r16(layer + ndk::ly_MaxY))};
+        const i32 min_x = static_cast<i16>(b.r16(layer + ndk::ly_MinX));
+        const i32 min_y = static_cast<i16>(b.r16(layer + ndk::ly_MinY));
+        const i32 max_x = static_cast<i16>(b.r16(layer + ndk::ly_MaxX));
+        const i32 max_y = static_cast<i16>(b.r16(layer + ndk::ly_MaxY));
+        if (b.r32(layer + ndk::ly_SuperBitMap) == bitmap) {
+            v.clip = raster::Clip{0, 0, max_x - min_x, max_y - min_y};
+        } else {
+            v.origin_x = min_x;
+            v.origin_y = min_y;
+            v.clip = raster::Clip{min_x, min_y, max_x, max_y};
+        }
     } else {
         v.clip = raster::Clip{0, 0, static_cast<i32>(v.bitmap.bytes_per_row << 3) - 1,
                               static_cast<i32>(v.bitmap.rows) - 1};
@@ -115,17 +121,21 @@ Rect unite(Rect a, const Rect& b) {
     return a;
 }
 
-// Tells the display about the change when the RastPort draws the front
-// screen.
+// Tells the display about a change in the front screen's bitmap, or the
+// damage sink about a change in any other bitmap.
 void report(const DisplayState* display, Machine& m, const View& v, const Rect& changed) {
-    if (display == nullptr || changed.x1 < changed.x0 || display->sink.refresh == nullptr ||
-        display->front_screen == 0) {
+    if (display == nullptr || changed.x1 < changed.x0) {
         return;
     }
-    if (v.bitmap_addr != display->front_screen + ndk::sc_BitMap) {
+    if (display->front_screen != 0 && v.bitmap_addr == display->front_screen + ndk::sc_BitMap) {
+        if (display->sink.refresh != nullptr) {
+            display->sink.refresh(display->sink.ctx, m, display->front_screen, changed);
+        }
         return;
     }
-    display->sink.refresh(display->sink.ctx, m, display->front_screen, changed);
+    if (display->damage.damaged != nullptr) {
+        display->damage.damaged(display->damage.ctx, m, v.bitmap_addr, changed);
+    }
 }
 
 // The bytes AllocRaster hands out for width and height, 0 if they do not

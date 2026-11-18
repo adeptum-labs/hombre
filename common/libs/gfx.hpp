@@ -46,9 +46,17 @@ struct DisplaySink {
     void* ctx;
 };
 
+// Where a draw reports changes to any bitmap other than the front screen's.
+struct DamageSink {
+    void (*damaged)(void* ctx, m68k::Machine& m, u32 bitmap, const Rect& rect);
+    void* ctx;
+};
+
 struct DisplayState {
     DisplaySink sink{nullptr, nullptr};
     u32 front_screen = 0;
+    // Changes drawn into any bitmap other than the front screen's go here.
+    DamageSink damage{nullptr, nullptr};
 };
 
 // Offsets and values of the graphics and Intuition structures, named as the
@@ -87,6 +95,7 @@ constexpr u32 ly_MinX = 16;
 constexpr u32 ly_MinY = 18;
 constexpr u32 ly_MaxX = 20;
 constexpr u32 ly_MaxY = 22;
+constexpr u32 ly_SuperBitMap = 32;
 constexpr u32 ly_Window = 40;
 constexpr u32 Layer_SIZEOF = 160;
 static_assert(Layer_SIZEOF == 160);

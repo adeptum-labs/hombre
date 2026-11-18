@@ -59,17 +59,19 @@ struct Surface {
     u32 plane1;
 };
 
-// A 2-plane 640x400 bitmap at bitmap, an initialised RastPort at rp that
-// draws on it, and the two cleared planes.
-Surface make_surface(GfxRig& r, u32 bitmap, u32 rp) {
-    const u32 plane0 = r.exec.alloc(kPlaneBytes, MEMF_CHIP | MEMF_CLEAR);
-    const u32 plane1 = r.exec.alloc(kPlaneBytes, MEMF_CHIP | MEMF_CLEAR);
+// A 2-plane width x height bitmap at bitmap, an initialised RastPort at rp
+// that draws on it, and the two cleared planes.
+Surface make_sized_surface(GfxRig& r, u32 bitmap, u32 rp, u32 width, u32 height) {
+    const u32 row_bytes = (width + 15) / 16 * 2;
+    const u32 plane_bytes = row_bytes * height;
+    const u32 plane0 = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
+    const u32 plane1 = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
     CHECK(plane0 != 0);
     CHECK(plane1 != 0);
     r.cpu().a[0] = bitmap;
     r.cpu().d[0] = 2;
-    r.cpu().d[1] = kWidth;
-    r.cpu().d[2] = kHeight;
+    r.cpu().d[1] = width;
+    r.cpu().d[2] = height;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitBitMap), ExitReason::Halt);
     r.put32(bitmap + bm_Planes, plane0);
     r.put32(bitmap + bm_Planes + 4, plane1);
@@ -77,6 +79,10 @@ Surface make_surface(GfxRig& r, u32 bitmap, u32 rp) {
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitRastPort), ExitReason::Halt);
     r.put32(rp + rp_BitMap, bitmap);
     return {bitmap, rp, plane0, plane1};
+}
+
+Surface make_surface(GfxRig& r, u32 bitmap, u32 rp) {
+    return make_sized_surface(r, bitmap, rp, kWidth, kHeight);
 }
 
 void move(GfxRig& r, u32 rp, i32 x, i32 y) {
@@ -510,6 +516,104 @@ void null_rastport_faults_cleanly() {
     CHECK(gfx_test::g_lines.empty());
 }
 
+Surface make_superbitmap_layer(GfxRig& r) {
+    const Surface s = make_sized_surface(r, kBitmap, kRastPort, 100, 50);
+    r.put16(kLayer + ly_MinX, 100);
+    r.put16(kLayer + ly_MinY, 50);
+    r.put16(kLayer + ly_MaxX, 199);
+    r.put16(kLayer + ly_MaxY, 99);
+    r.put32(kLayer + ly_SuperBitMap, s.bitmap);
+    r.put32(s.rp + rp_Layer, kLayer);
+    r.graphics.set_pens(s.rp, 1, 0, JAM2);
+    return s;
+}
+
+void superbitmap_layer_draws_window_relative() {
+    GfxRig r;
+    const Surface screen = make_surface(r, kScreen + sc_BitMap, kData + 0x280);
+    r.display.front_screen = kScreen;
+    const std::vector<u8> screen_before = plane_snapshot(r, screen);
+    const Surface s = make_superbitmap_layer(r);
+
+    rect_fill(r, s.rp, 0, 0, 9, 9);
+    for (i32 y = 0; y < 50; ++y) {
+        for (i32 x = 0; x < 100; ++x) {
+            const u32 expected = (x <= 9 && y <= 9) ? 1u : 0u;
+            CHECK_EQ(read_pixel(r, s.rp, x, y), expected);
+        }
+    }
+    CHECK(plane_snapshot(r, screen) == screen_before);
+}
+
+void superbitmap_layer_clips_to_size() {
+    GfxRig r;
+    const Surface s = make_superbitmap_layer(r);
+
+    rect_fill(r, s.rp, 90, 40, 120, 60);
+    for (i32 y = 0; y < 50; ++y) {
+        for (i32 x = 0; x < 100; ++x) {
+            const u32 expected = (x >= 90 && y >= 40) ? 1u : 0u;
+            CHECK_EQ(read_pixel(r, s.rp, x, y), expected);
+        }
+        for (u32 x = 100; x < 112; ++x) {
+            const u32 byte = static_cast<u32>(y) * 14 + (x >> 3);
+            const u32 mask = 0x80u >> (x & 7);
+            CHECK_EQ(r.get8(s.plane0 + byte) & mask, 0u);
+            CHECK_EQ(r.get8(s.plane1 + byte) & mask, 0u);
+        }
+    }
+    CHECK_EQ(read_pixel(r, s.rp, 100, 40), 0xFFFFFFFFu);
+    CHECK_EQ(read_pixel(r, s.rp, 90, 50), 0xFFFFFFFFu);
+}
+
+struct RecordedDamage {
+    u32 bitmap;
+    Rect rect;
+};
+
+void record_damage(void* ctx, Machine&, u32 bitmap, const Rect& rect) {
+    static_cast<std::vector<RecordedDamage>*>(ctx)->push_back({bitmap, rect});
+}
+
+void damage_sink_gets_private_bitmap_rect() {
+    GfxRig r;
+    make_surface(r, kScreen + sc_BitMap, kData + 0x280);
+    r.display.front_screen = kScreen;
+    std::vector<RecordedDamage> damages;
+    r.display.damage = DamageSink{record_damage, &damages};
+    const Surface s = make_superbitmap_layer(r);
+
+    rect_fill(r, s.rp, 0, 0, 9, 9);
+    CHECK(r.refreshes.empty());
+    CHECK_EQ(damages.size(), 1u);
+    CHECK_EQ(damages[0].bitmap, s.bitmap);
+    CHECK_EQ(damages[0].rect.x0, 0);
+    CHECK_EQ(damages[0].rect.y0, 0);
+    CHECK_EQ(damages[0].rect.x1, 9);
+    CHECK_EQ(damages[0].rect.y1, 9);
+}
+
+void superbitmap_bad_pointer_is_bus_error() {
+    GfxRig r;
+    r.cpu().a[1] = kRastPort;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitRastPort), ExitReason::Halt);
+    r.put16(kLayer + ly_MinX, 100);
+    r.put16(kLayer + ly_MinY, 50);
+    r.put16(kLayer + ly_MaxX, 199);
+    r.put16(kLayer + ly_MaxY, 99);
+    r.put32(kLayer + ly_SuperBitMap, kGuestBytes);
+    r.put32(kRastPort + rp_Layer, kLayer);
+    r.put32(kRastPort + rp_BitMap, kGuestBytes);
+
+    r.cpu().a[1] = kRastPort;
+    r.cpu().d[0] = 0;
+    r.cpu().d[1] = 0;
+    r.cpu().d[2] = 9;
+    r.cpu().d[3] = 9;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::BusError);
+    CHECK(r.refreshes.empty());
+}
+
 }
 
 int main() {
@@ -531,5 +635,9 @@ int main() {
     text_clips_to_layer_bounds();
     unimplemented_vector_ends_run();
     null_rastport_faults_cleanly();
+    superbitmap_layer_draws_window_relative();
+    superbitmap_layer_clips_to_size();
+    damage_sink_gets_private_bitmap_rect();
+    superbitmap_bad_pointer_is_bus_error();
     return check::finish("test_graphics");
 }
