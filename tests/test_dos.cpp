@@ -1783,11 +1783,11 @@ void locks_and_the_current_directory() {
     g_lines.clear();
     CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
     CHECK_EQ(r.io_err(), ERROR_NO_FREE_STORE);
-    CHECK(logged("dos: lock table full, 32 entries in use"));
+    CHECK(logged("dos: lock table full, 128 entries in use"));
     g_lines.clear();
     CHECK_EQ(r.call(dos_lvo::DupLock, held), 0u);
     CHECK_EQ(r.io_err(), ERROR_NO_FREE_STORE);
-    CHECK(logged("dos: lock table full, 32 entries in use"));
+    CHECK(logged("dos: lock table full, 128 entries in use"));
 }
 
 struct Fib {
@@ -3554,10 +3554,11 @@ void date_to_str_and_str_to_date() {
     // DTF_SUBST uses the clock's current day as today.
     r.put8(dt + dat_Flags, DTF_SUBST);
     r.put32(dt + dat_StrDay, day_buf);
-    r.put32(dt + dat_StrDate, 0u);
+    r.put32(dt + dat_StrDate, date_buf);
     r.put32(dt + dat_StrTime, 0u);
     CHECK_EQ(r.call(dos_lvo::DateToStr, dt), DOSTRUE);
-    CHECK(r.read_str(day_buf) == "Today");
+    CHECK(r.read_str(date_buf) == "Today");
+    CHECK(r.read_str(day_buf) == "Wednesday");
 
     // StrToDate accepts "today" and rejects bad text.
     r.str(date_buf, "today");
@@ -4060,13 +4061,18 @@ void find_command_uses_path() {
     CHECK(g_dos.find_command("CmdD", out, sizeof out));
     CHECK(std::string(out) == "HombreTest:Devs/Sub/CmdD");
     CHECK(g_dos.find_command("TopCmd", out, sizeof out));
+    CHECK(std::string(out) == "TopCmd");
+    CHECK(g_dos.change_dir("LIBS", err));
+    CHECK(g_dos.find_command("TopCmd", out, sizeof out));
     CHECK(std::string(out) == "HombreTest:TopCmd");
+    CHECK(g_dos.change_dir(":", err));
 
-    // Path capacity is bounded at kMaxPathDirs.
-    for (u32 i = 3; i < Dos::kMaxPathDirs; ++i) {
+    // A directory already in the path is not added again.
+    const u32 count = g_dos.path_count();
+    for (u32 i = 0; i < Dos::kMaxPathDirs + 2; ++i) {
         CHECK(g_dos.path_add("C:", err));
     }
-    CHECK(!g_dos.path_add("C:", err));
+    CHECK_EQ(g_dos.path_count(), count + 1);
 
     g_dos.path_reset();
     CHECK_EQ(g_dos.path_count(), 0u);
@@ -4200,6 +4206,475 @@ void fail_level_and_return_code() {
     CHECK_EQ(r.get32(cli + cli_Result2), ERROR_OBJECT_WRONG_TYPE);
 }
 
+void leaked_match_anchor_is_reclaimed_after_command() {
+    auto build_leak = [](int mode) {
+        Asm a;
+        a.open_dos();
+        a.address(1, "pat").move_l(kData + 0x200, 2).dos(dos_lvo::MatchFirst).store_d0(kOut);
+        if (mode == 0) {
+            a.moveq(0, 0).rts();
+        } else if (mode == 1) {
+            a.moveq(5, 1).dos(dos_lvo::Exit);
+        } else if (mode == 2) {
+            a.op({0x2038, 0x0001});
+        } else {
+            a.label("spin").op({0x60FE});
+        }
+        a.string("pat", "C:#?");
+        return hunk_file(a.build());
+    };
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/LeakMatch", build_leak(0)});
+    files.push_back({"C/LeakExit", build_leak(1)});
+    files.push_back({"C/LeakFault", build_leak(2)});
+    files.push_back({"C/LeakBudget", build_leak(3)});
+    Rig r(files);
+
+    const auto before = r.chunks();
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+    const u32 anchor = kData + 0x200;
+
+    for (u32 i = 0; i < 9; ++i) {
+        clear_anchor(r, anchor, 64);
+        u32 result = 1;
+        CHECK(g_dos.run_command("C:LeakMatch", "", result, kBlocks));
+        CHECK_EQ(result, 0u);
+        CHECK_EQ(r.get32(kOut), 0u);
+        CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+        CHECK(r.chunks() == before);
+    }
+
+    // Reclaim works on Exit, fault and budget exhaustion too.
+    u32 result = 0;
+    clear_anchor(r, anchor, 64);
+    CHECK(g_dos.run_command("C:LeakExit", "", result, kBlocks));
+    CHECK_EQ(result, 5u);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+
+    clear_anchor(r, anchor, 64);
+    CHECK(!g_dos.run_command("C:LeakFault", "", result, kBlocks));
+    CHECK_EQ(r.cpu().exit, ExitReason::AddressError);
+    r.cpu().exit = ExitReason::None;
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+
+    clear_anchor(r, anchor, 64);
+    CHECK(!g_dos.run_command("C:LeakBudget", "", result, 100));
+    CHECK_EQ(r.cpu().exit, ExitReason::Budget);
+    r.cpu().exit = ExitReason::None;
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+
+    clear_anchor(r, anchor, 64);
+    r.str(kData, "C:#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, kData, anchor), 0u);
+    r.call(dos_lvo::MatchEnd, anchor);
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+}
+
+void leaked_lock_and_file_are_reclaimed() {
+    auto build_leak = [](bool exit_via_dos) {
+        Asm a;
+        a.open_dos();
+        a.address(1, "f").move_l(MODE_OLDFILE, 2).dos(dos_lvo::Open).store_d0(kOut);
+        a.address(1, "f").move_l(MODE_OLDFILE, 2).dos(dos_lvo::Open).store_d0(kOut + 4);
+        a.address(1, "d1").move_l(SHARED_LOCK, 2).dos(dos_lvo::Lock).store_d0(kOut + 8);
+        a.address(1, "d2").move_l(SHARED_LOCK, 2).dos(dos_lvo::Lock).store_d0(kOut + 12);
+        a.address(1, "d3").move_l(SHARED_LOCK, 2).dos(dos_lvo::Lock).store_d0(kOut + 16);
+        a.address(1, "aname").from_d0(2).dos(dos_lvo::AssignLock);
+        if (exit_via_dos) {
+            a.moveq(0, 1).dos(dos_lvo::Exit);
+        } else {
+            a.moveq(0, 0).rts();
+        }
+        a.string("f", "C:Echo").string("d1", "C:").string("d2", "S:").string("d3", "DEVS:");
+        a.string("aname", "CMDASS");
+        return hunk_file(a.build());
+    };
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/LeakRes", build_leak(false)});
+    files.push_back({"C/LeakResExit", build_leak(true)});
+    Rig r(files);
+
+    // Hold a shell file handle, a shell lock and an assign before the command.
+    r.str(kData, "C:Echo");
+    const u32 shell_fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(shell_fh != 0);
+    r.str(kData, "C:");
+    const u32 shell_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(shell_lock != 0);
+    r.str(kData, "S:");
+    const u32 ass_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(ass_lock != 0);
+    r.str(kData, "MYASS");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, ass_lock), DOSTRUE);
+
+    for (const char* cmd : {"C:LeakRes", "C:LeakResExit"}) {
+        u32 result = 1;
+        CHECK(g_dos.run_command(cmd, "", result, kBlocks));
+        CHECK_EQ(result, 0u);
+        const u32 fh1 = r.get32(kOut);
+        const u32 fh2 = r.get32(kOut + 4);
+        const u32 l1 = r.get32(kOut + 8);
+        const u32 l2 = r.get32(kOut + 12);
+        CHECK(fh1 != 0 && fh2 != 0 && l1 != 0 && l2 != 0);
+        CHECK_EQ(r.call(dos_lvo::Close, fh1), DOSFALSE);
+        CHECK_EQ(r.call(dos_lvo::Close, fh2), DOSFALSE);
+        CHECK_EQ(r.call(dos_lvo::DupLock, l1), 0u);
+        CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
+        CHECK_EQ(r.call(dos_lvo::DupLock, l2), 0u);
+        CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
+    }
+
+    // Shell's own handle, shell's lock and both assigns stay valid.
+    CHECK_EQ(r.call(dos_lvo::Read, shell_fh, kData + 0x100, 4), 4u);
+    const std::vector<u8> echo = echo_bytes();
+    CHECK(r.bytes(kData + 0x100, 4) == std::vector<u8>(echo.begin(), echo.begin() + 4));
+    const u32 dup = r.call(dos_lvo::DupLock, shell_lock);
+    CHECK(dup != 0);
+    r.call(dos_lvo::UnLock, dup);
+    r.str(kData, "MYASS:Startup-Sequence");
+    const u32 my_l = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(my_l != 0);
+    r.call(dos_lvo::UnLock, my_l);
+    r.str(kData, "CMDASS:Sub/Deep");
+    const u32 cmd_l = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(cmd_l != 0);
+    r.call(dos_lvo::UnLock, cmd_l);
+
+    // All remaining kMaxFiles - 1 file handle slots are available.
+    r.str(kData, "C:Echo");
+    std::vector<u32> handles;
+    for (u32 i = 1; i < Dos::kMaxFiles; ++i) {
+        const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+        CHECK(fh != 0);
+        handles.push_back(fh);
+    }
+    for (u32 fh : handles) {
+        r.call(dos_lvo::Close, fh);
+    }
+    r.call(dos_lvo::Close, shell_fh);
+    r.call(dos_lvo::UnLock, shell_lock);
+    r.str(kData, "MYASS");
+    r.call(dos_lvo::AssignLock, kData, 0);
+    r.str(kData, "CMDASS");
+    r.call(dos_lvo::AssignLock, kData, 0);
+}
+
+void current_dir_restored_after_command() {
+    auto build_chdir = [](int mode) {
+        Asm a;
+        a.open_dos();
+        a.address(1, "dir").move_l(SHARED_LOCK, 2).dos(dos_lvo::Lock).store_d0(kOut);
+        a.from_d0(1).dos(dos_lvo::CurrentDir).store_d0(kOut + 4);
+        if (mode == 0) {
+            a.moveq(0, 0).rts();
+        } else if (mode == 1) {
+            a.moveq(3, 1).dos(dos_lvo::Exit);
+        } else {
+            a.op({0x2038, 0x0001});
+        }
+        a.string("dir", ":Devs/Sub");
+        return hunk_file(a.build());
+    };
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/ChDirRet", build_chdir(0)});
+    files.push_back({"C/ChDirExit", build_chdir(1)});
+    files.push_back({"C/ChDirFault", build_chdir(2)});
+    Rig r(files);
+
+    u32 err = 0;
+    CHECK(g_dos.change_dir("S", err));
+    const u32 before_dir = r.get32(r.proc() + pr_CurrentDir);
+    CHECK(before_dir != 0);
+
+    u32 result = 1;
+    CHECK(g_dos.run_command("C:ChDirRet", "", result, kBlocks));
+    CHECK_EQ(result, 0u);
+    CHECK_EQ(r.get32(kOut + 4), before_dir);
+    CHECK_EQ(r.get32(r.proc() + pr_CurrentDir), before_dir);
+    CHECK_EQ(r.call(dos_lvo::DupLock, r.get32(kOut)), 0u);
+    CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
+
+    CHECK(g_dos.run_command("C:ChDirExit", "", result, kBlocks));
+    CHECK_EQ(result, 3u);
+    CHECK_EQ(r.get32(r.proc() + pr_CurrentDir), before_dir);
+
+    CHECK(!g_dos.run_command("C:ChDirFault", "", result, kBlocks));
+    CHECK_EQ(r.cpu().exit, ExitReason::AddressError);
+    r.cpu().exit = ExitReason::None;
+    CHECK_EQ(r.get32(r.proc() + pr_CurrentDir), before_dir);
+
+    r.str(kData, "Startup-Sequence");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    r.call(dos_lvo::Close, fh);
+}
+
+void many_locks_with_assigns_and_path() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"D1/D2/D3/D4/D5/D6/D7/Leaf", text("ok")});
+    Rig r(files);
+
+    u32 err = 0;
+    const char* path_dirs[Dos::kMaxPathDirs] = {
+        "D1", "D1/D2", "D1/D2/D3", "D1/D2/D3/D4", "D1/D2/D3/D4/D5", "D1/D2/D3/D4/D5/D6",
+        "D1/D2/D3/D4/D5/D6/D7", "C:",
+    };
+    for (u32 i = 0; i < Dos::kMaxPathDirs; ++i) {
+        CHECK(g_dos.path_add(path_dirs[i], err));
+    }
+
+    for (u32 i = 0; i < 10; ++i) {
+        r.str(kData, "D1");
+        const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(lock != 0);
+        const std::string name = "ASS" + std::to_string(i);
+        r.str(kData + 0x40, name);
+        CHECK_EQ(r.call(dos_lvo::AssignLock, kData + 0x40, lock), DOSTRUE);
+    }
+
+    CHECK(g_dos.change_dir("D1", err));
+
+    std::vector<u32> extra;
+    r.str(kData, "DF0:C");
+    for (u32 i = 0; i < 10; ++i) {
+        const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(lock != 0);
+        extra.push_back(lock);
+    }
+
+    const u32 anchor = kData + 0x200;
+    clear_anchor(r, anchor, 128);
+    r.str(kData, "DF0:D1");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, kData, anchor), 0u);
+    for (u32 lvl = 1; lvl <= 7; ++lvl) {
+        r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+        CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), 0u);
+    }
+    CHECK(read_fib(r, anchor + ap_Info).name == "Leaf");
+    CHECK(r.read_str(anchor + ap_Buf) == "DF0:D1/D2/D3/D4/D5/D6/D7/Leaf");
+    r.call(dos_lvo::MatchEnd, anchor);
+
+    for (u32 lock : extra) {
+        r.call(dos_lvo::UnLock, lock);
+    }
+    for (u32 i = 0; i < 10; ++i) {
+        r.str(kData + 0x40, "ASS" + std::to_string(i));
+        CHECK_EQ(r.call(dos_lvo::AssignLock, kData + 0x40, 0), DOSTRUE);
+    }
+    g_dos.path_reset();
+}
+
+// Adding a directory that is already in the path keeps one entry; removing
+// one unlinks it from cli_CommandDir and frees its node and lock.
+void path_add_duplicate_and_remove() {
+    Rig r;
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+    u32 err = 0;
+    CHECK(g_dos.path_add("S", err));
+    CHECK(g_dos.path_add("Devs", err));
+    CHECK(g_dos.path_add("s:", err));
+    CHECK_EQ(g_dos.path_count(), 2u);
+    CHECK(g_dos.path_remove("S:", err));
+    CHECK_EQ(g_dos.path_count(), 1u);
+    char name[128];
+    CHECK(g_dos.path_name(0, name, sizeof name));
+    CHECK(std::string(name) == "HombreTest:Devs");
+    const u32 cli = r.call(dos_lvo::Cli);
+    const u32 first = r.get32(cli + cli_CommandDir) << 2;
+    CHECK(first != 0);
+    CHECK_EQ(r.get32(first), 0u);
+    CHECK(!g_dos.path_remove("C", err));
+    CHECK_EQ(err, ERROR_OBJECT_NOT_FOUND);
+    g_dos.path_reset();
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+}
+
+void find_command_order() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/Tool", hello_command()});
+    files.push_back({"DirA/Tool", hello_command()});
+    files.push_back({"DirB/Tool", hello_command()});
+    files.push_back({"C/PathWin", hello_command()});
+    files.push_back({"DirB/PathWin", hello_command()});
+    files.push_back({"DirA/OrderWin", hello_command()});
+    files.push_back({"DirB/OrderWin", hello_command()});
+    files.push_back({"C/OnlyC", hello_command()});
+    Rig r(files);
+
+    char out[128];
+    CHECK(g_dos.find_command("Tool", out, sizeof out));
+    CHECK(std::string(out) == "C:Tool");
+    CHECK(g_dos.find_command("DirB/Tool", out, sizeof out));
+    CHECK(std::string(out) == "DirB/Tool");
+    CHECK(g_dos.find_command("C:Tool", out, sizeof out));
+    CHECK(std::string(out) == "C:Tool");
+
+    u32 err = 0;
+    CHECK(g_dos.path_add("DirB", err));
+    CHECK(g_dos.path_add("DirA", err));
+    CHECK(g_dos.find_command("PathWin", out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:DirB/PathWin");
+    CHECK(g_dos.find_command("OrderWin", out, sizeof out));
+    CHECK(std::string(out) == "HombreTest:DirB/OrderWin");
+    CHECK(g_dos.find_command("OnlyC", out, sizeof out));
+    CHECK(std::string(out) == "C:OnlyC");
+
+    // Current directory beats both the path list and C:.
+    CHECK(g_dos.change_dir("DirA", err));
+    CHECK(g_dos.find_command("Tool", out, sizeof out));
+    CHECK(std::string(out) == "Tool");
+
+    g_dos.path_reset();
+    CHECK(g_dos.find_command("Tool", out, sizeof out));
+    CHECK(std::string(out) == "Tool");
+
+    CHECK(g_dos.change_dir(":", err));
+    CHECK(g_dos.find_command("Tool", out, sizeof out));
+    CHECK(std::string(out) == "C:Tool");
+}
+
+void name_from_lock_uses_disk_case() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/Dir/File", text("hi")});
+    Rig r(files);
+    const u32 buf = kData + 0x200;
+    const u32 fib = kData + 0x300;
+
+    r.str(kData, "c:dir");
+    const u32 dir_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(dir_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, dir_lock, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C/Dir");
+    CHECK_EQ(r.call(dos_lvo::Examine, dir_lock, fib), DOSTRUE);
+    CHECK(read_fib(r, fib).name == "Dir");
+    r.call(dos_lvo::UnLock, dir_lock);
+
+    r.str(kData, "df0:c/dir/file");
+    const u32 file_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(file_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, file_lock, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C/Dir/File");
+    r.call(dos_lvo::UnLock, file_lock);
+
+    r.str(kData, "hombretest:devs/sub/deep");
+    const u32 deep_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(deep_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, deep_lock, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:Devs/Sub/Deep");
+    r.call(dos_lvo::UnLock, deep_lock);
+
+    r.str(kData, "c:dir/file");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromFH, fh, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C/Dir/File");
+    r.call(dos_lvo::Close, fh);
+
+    const u32 port = r.call(dos_lvo::GetFileSysTask);
+    const u32 bstr = kData + 0x100;
+    put_bstr_at(r, bstr, "c/dir");
+    const u32 pkt_lock =
+        r.call(dos_lvo::DoPkt, port, ACTION_LOCATE_OBJECT, 0, bstr >> 2, SHARED_LOCK);
+    CHECK(pkt_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, pkt_lock, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C/Dir");
+    r.call(dos_lvo::UnLock, pkt_lock);
+
+    u32 err = 0;
+    CHECK(g_dos.change_dir("c/dir", err));
+    char cwd[64];
+    CHECK(g_dos.current_dir_name(cwd, sizeof cwd));
+    CHECK(std::string(cwd) == "HombreTest:C/Dir");
+    CHECK(g_dos.change_dir(":", err));
+
+    const u32 anchor = kData + 0x500;
+    clear_anchor(r, anchor, 64);
+    r.str(kData, "c:dir/#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, kData, anchor), 0u);
+    const u32 cur = r.get32(anchor + ap_Current);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, r.get32(cur + an_Lock), buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C/Dir");
+    CHECK(read_fib(r, anchor + ap_Info).name == "File");
+    r.call(dos_lvo::MatchEnd, anchor);
+
+    r.str(kData, "LATE");
+    r.str(kData + 0x40, "SYS:c/dir");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+    r.str(kData + 0x80, "LATE:file");
+    const u32 late_lock = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(late_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, late_lock, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "HombreTest:C/Dir/File");
+    r.call(dos_lvo::UnLock, late_lock);
+    r.str(kData, "LATE");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+}
+
+void match_first_sets_d0_on_failure() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"D1/D2/D3/D4/D5/D6/D7/D8/Leaf", text("ok")});
+    Rig r(files);
+
+    const u32 anchor = kData + 0x200;
+    clear_anchor(r, anchor, 128);
+    r.str(kData, "D1");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, kData, anchor), 0u);
+    for (u32 lvl = 1; lvl <= 7; ++lvl) {
+        r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+        CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), 0u);
+    }
+    // Exceeding kMaxAnchorDepth fails and sets D0 to ERROR_TOO_MANY_LEVELS.
+    r.put8(anchor + ap_Flags, r.get8(anchor + ap_Flags) | APF_DODIR);
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.call(dos_lvo::MatchNext, anchor), ERROR_TOO_MANY_LEVELS);
+    CHECK_EQ(r.io_err(), ERROR_TOO_MANY_LEVELS);
+    r.call(dos_lvo::MatchEnd, anchor);
+
+    struct FailCase {
+        const char* pat;
+        u16 buf_len;
+        u32 expected;
+    };
+    const FailCase cases[] = {
+        {"C:Missing", 64, ERROR_OBJECT_NOT_FOUND},
+        {"NoDir/#?", 64, ERROR_DIR_NOT_FOUND},
+        {"C:NoSuch#?", 64, ERROR_NO_MORE_ENTRIES},
+        {"S:#?", 2, ERROR_BUFFER_OVERFLOW},
+        {"(", 64, ERROR_BAD_TEMPLATE},
+    };
+    for (const FailCase& c : cases) {
+        clear_anchor(r, anchor, c.buf_len);
+        r.str(kData, c.pat);
+        r.cpu().d[0] = 0;
+        CHECK_EQ(r.call(dos_lvo::MatchFirst, kData, anchor), c.expected);
+        CHECK_EQ(r.io_err(), c.expected);
+    }
+
+    // Lock table exhaustion in alloc_achain_node sets APF_NOMEMERR and D0.
+    std::vector<u32> locks;
+    r.str(kData, "C:");
+    for (u32 i = 0; i < Dos::kMaxLocks; ++i) {
+        const u32 l = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        if (l == 0) {
+            break;
+        }
+        locks.push_back(l);
+    }
+    clear_anchor(r, anchor, 64);
+    r.str(kData, "C:#?");
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, kData, anchor), ERROR_NO_FREE_STORE);
+    CHECK((r.get8(anchor + ap_Flags) & APF_NOMEMERR) != 0);
+    CHECK_EQ(r.io_err(), ERROR_NO_FREE_STORE);
+    for (u32 l : locks) {
+        r.call(dos_lvo::UnLock, l);
+    }
+}
+
 }
 
 int main() {
@@ -4275,9 +4750,17 @@ int main() {
     is_file_system_for_assigns_and_df0();
     change_dir_and_current_dir_name();
     find_command_uses_path();
+    path_add_duplicate_and_remove();
     console_read_uses_the_reader_after_the_arguments();
     wait_for_char_uses_ready();
     fault_text_api();
     fail_level_and_return_code();
+    leaked_match_anchor_is_reclaimed_after_command();
+    leaked_lock_and_file_are_reclaimed();
+    current_dir_restored_after_command();
+    many_locks_with_assigns_and_path();
+    find_command_order();
+    name_from_lock_uses_disk_case();
+    match_first_sets_d0_on_failure();
     return check::finish("test_dos");
 }

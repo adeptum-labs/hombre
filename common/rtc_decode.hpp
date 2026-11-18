@@ -69,7 +69,8 @@ inline bool decode_rtc_byte(u8 raw, bool binary, u32& out) {
 
 // Decodes CMOS RTC registers into out. status_b bit 2 selects binary (1) or
 // BCD (0); bit 1 selects 24-hour (1) or 12-hour (0) with bit 7 of hours as PM.
-// A century register of 0 defaults to 20 (20xx). Returns false on invalid data.
+// An invalid or out-of-range century register (outside 19..21) defaults to 20
+// (20xx). Returns false on invalid data in any other field.
 inline bool rtc_decode(const RtcRegisters& r, CivilTime& out) {
     const bool binary = (r.status_b & 0x04u) != 0u;
     const bool hour_24 = (r.status_b & 0x02u) != 0u;
@@ -86,8 +87,7 @@ inline bool rtc_decode(const RtcRegisters& r, CivilTime& out) {
         !detail::decode_rtc_byte(r.minutes, binary, minute) ||
         !detail::decode_rtc_byte(r.day, binary, day) ||
         !detail::decode_rtc_byte(r.month, binary, month) ||
-        !detail::decode_rtc_byte(r.year, binary, year) ||
-        !detail::decode_rtc_byte(r.century, binary, century)) {
+        !detail::decode_rtc_byte(r.year, binary, year)) {
         return false;
     }
 
@@ -109,11 +109,11 @@ inline bool rtc_decode(const RtcRegisters& r, CivilTime& out) {
     }
 
     if (second > 59u || minute > 59u || month < 1u || month > 12u || day < 1u || day > 31u ||
-        year > 99u || century > 99u) {
+        year > 99u) {
         return false;
     }
 
-    if (century == 0u) {
+    if (!detail::decode_rtc_byte(r.century, binary, century) || century < 19u || century > 21u) {
         century = 20u;
     }
 

@@ -86,6 +86,40 @@ void century_zero_is_2000s() {
     CHECK_EQ(out.day, 7u);
 }
 
+void century_ff_falls_back_to_2000s() {
+    const RtcRegisters bcd{0x00, 0x15, 0x08, 0x07, 0x04, 0x26, 0xFF, 0x02};
+    CivilTime out{};
+    CHECK(rtc_decode(bcd, out));
+    CHECK_EQ(out.year, 2026u);
+
+    const RtcRegisters bin{0, 15, 8, 7, 4, 26, 0xFF, 0x06};
+    CHECK(rtc_decode(bin, out));
+    CHECK_EQ(out.year, 2026u);
+}
+
+void century_bad_bcd_falls_back() {
+    const RtcRegisters bad_bcd{0x00, 0x15, 0x08, 0x07, 0x04, 0x26, 0xA0, 0x02};
+    CivilTime out{};
+    CHECK(rtc_decode(bad_bcd, out));
+    CHECK_EQ(out.year, 2026u);
+
+    const RtcRegisters low{0x00, 0x15, 0x08, 0x07, 0x04, 0x26, 0x18, 0x02};
+    CHECK(rtc_decode(low, out));
+    CHECK_EQ(out.year, 2026u);
+
+    const RtcRegisters high{0x00, 0x15, 0x08, 0x07, 0x04, 0x26, 0x22, 0x02};
+    CHECK(rtc_decode(high, out));
+    CHECK_EQ(out.year, 2026u);
+
+    const RtcRegisters c19{0x00, 0x15, 0x08, 0x07, 0x04, 0x26, 0x19, 0x02};
+    CHECK(rtc_decode(c19, out));
+    CHECK_EQ(out.year, 1926u);
+
+    const RtcRegisters c21{0x00, 0x15, 0x08, 0x07, 0x04, 0x26, 0x21, 0x02};
+    CHECK(rtc_decode(c21, out));
+    CHECK_EQ(out.year, 2126u);
+}
+
 void invalid_bcd_digit_fails() {
     CivilTime out{1, 2, 3, 4, 5, 6};
     const RtcRegisters bad_sec{0x0A, 0x00, 0x12, 0x01, 0x01, 0x26, 0x20, 0x02};
@@ -94,9 +128,6 @@ void invalid_bcd_digit_fails() {
 
     const RtcRegisters bad_hour{0x00, 0x00, 0x1F, 0x01, 0x01, 0x26, 0x20, 0x02};
     CHECK(!rtc_decode(bad_hour, out));
-
-    const RtcRegisters bad_cent{0x00, 0x00, 0x12, 0x01, 0x01, 0x26, 0xA0, 0x02};
-    CHECK(!rtc_decode(bad_cent, out));
 }
 
 void invalid_month_fails() {
@@ -128,6 +159,8 @@ int main() {
     bcd_12h_pm();
     twelve_am_is_zero();
     century_zero_is_2000s();
+    century_ff_falls_back_to_2000s();
+    century_bad_bcd_falls_back();
     invalid_bcd_digit_fails();
     invalid_month_fails();
     return check::finish("test_rtc_decode");

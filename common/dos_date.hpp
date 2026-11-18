@@ -36,8 +36,10 @@ constexpr u8 FORMAT_DOS = 0;  // DD-MMM-YY
 constexpr u8 FORMAT_INT = 1;  // YY-MM-DD
 constexpr u8 FORMAT_USA = 2;  // MM-DD-YY
 constexpr u8 FORMAT_CDN = 3;  // DD-MM-YY
+constexpr u8 FORMAT_DEF = 4;  // locale default (FORMAT_DOS)
 
-constexpr u8 DTF_SUBST = 0x02;
+constexpr u8 DTF_SUBST = 1;
+constexpr u8 DTF_FUTURE = 2;
 
 // Days since 1978-01-01, minutes past midnight (0..1439), and ticks (50 Hz).
 struct DosStamp {
@@ -208,6 +210,7 @@ inline bool parse_date_fields(const char* date, u8 format, u32& year_out, u32& m
 
     switch (format) {
     case FORMAT_DOS:
+    case FORMAT_DEF:
         if (!parse_uint_digits(date, pos, 1u, 2u, day) || !expect_char(date, pos, '-') ||
             !parse_month_abbr(date, pos, month) || !expect_char(date, pos, '-') ||
             !parse_uint_digits(date, pos, 2u, 2u, year2)) {
@@ -334,7 +337,7 @@ inline CivilTime dos_civil_from_stamp(const DosStamp& s) {
 // NUL-terminated truncated prefix and cause the function to return 0.
 inline u32 dos_format_date(const DosStamp& stamp, u8 format, u8 flags, u32 today, char* date,
                            u32 date_size, char* day, u32 day_size, char* time, u32 time_size) {
-    if (format > FORMAT_CDN || stamp.minutes >= detail::kMinutesPerDay ||
+    if (format > FORMAT_DEF || stamp.minutes >= detail::kMinutesPerDay ||
         stamp.ticks >= detail::kTicksPerMinute) {
         detail::copy_bounded(date, date_size, "", 0u);
         detail::copy_bounded(day, day_size, "", 0u);
@@ -346,65 +349,76 @@ inline u32 dos_format_date(const DosStamp& stamp, u8 format, u8 flags, u32 today
     bool ok = true;
 
     if (date != nullptr) {
-        char buf[16]{};
-        u32 len = 0;
-        const u32 yy = c.year % 100u;
-        switch (format) {
-        case FORMAT_DOS: {
-            const char* mon = detail::kMonthNames[(c.month - 1u) % 12u];
-            detail::write_two_digits(buf, c.day);
-            buf[2] = '-';
-            buf[3] = mon[0];
-            buf[4] = mon[1];
-            buf[5] = mon[2];
-            buf[6] = '-';
-            detail::write_two_digits(buf + 7, yy);
-            len = 9u;
-            break;
+        const char* subst = nullptr;
+        if ((flags & DTF_SUBST) != 0u) {
+            if (stamp.days == today) {
+                subst = "Today";
+            } else if (today > 0u && stamp.days == today - 1u) {
+                subst = "Yesterday";
+            } else if (today < 0xFFFFFFFFu && stamp.days == today + 1u) {
+                subst = "Tomorrow";
+            } else if (stamp.days < today && (today - stamp.days) < 7u) {
+                subst = detail::kWeekdayNames[dos_weekday(stamp.days)];
+            }
         }
-        case FORMAT_INT:
-            detail::write_two_digits(buf, yy);
-            buf[2] = '-';
-            detail::write_two_digits(buf + 3, c.month);
-            buf[5] = '-';
-            detail::write_two_digits(buf + 6, c.day);
-            len = 8u;
-            break;
-        case FORMAT_USA:
-            detail::write_two_digits(buf, c.month);
-            buf[2] = '-';
-            detail::write_two_digits(buf + 3, c.day);
-            buf[5] = '-';
-            detail::write_two_digits(buf + 6, yy);
-            len = 8u;
-            break;
-        case FORMAT_CDN:
-            detail::write_two_digits(buf, c.day);
-            buf[2] = '-';
-            detail::write_two_digits(buf + 3, c.month);
-            buf[5] = '-';
-            detail::write_two_digits(buf + 6, yy);
-            len = 8u;
-            break;
-        default:
-            return 0u;
-        }
-        if (!detail::copy_bounded(date, date_size, buf, len)) {
-            ok = false;
+        if (subst != nullptr) {
+            const u32 subst_len = detail::str_len_bounded(subst, LEN_DATSTRING);
+            if (!detail::copy_bounded(date, date_size, subst, subst_len)) {
+                ok = false;
+            }
+        } else {
+            char buf[16]{};
+            u32 len = 0;
+            const u32 yy = c.year % 100u;
+            switch (format) {
+            case FORMAT_DOS:
+            case FORMAT_DEF: {
+                const char* mon = detail::kMonthNames[(c.month - 1u) % 12u];
+                detail::write_two_digits(buf, c.day);
+                buf[2] = '-';
+                buf[3] = mon[0];
+                buf[4] = mon[1];
+                buf[5] = mon[2];
+                buf[6] = '-';
+                detail::write_two_digits(buf + 7, yy);
+                len = 9u;
+                break;
+            }
+            case FORMAT_INT:
+                detail::write_two_digits(buf, yy);
+                buf[2] = '-';
+                detail::write_two_digits(buf + 3, c.month);
+                buf[5] = '-';
+                detail::write_two_digits(buf + 6, c.day);
+                len = 8u;
+                break;
+            case FORMAT_USA:
+                detail::write_two_digits(buf, c.month);
+                buf[2] = '-';
+                detail::write_two_digits(buf + 3, c.day);
+                buf[5] = '-';
+                detail::write_two_digits(buf + 6, yy);
+                len = 8u;
+                break;
+            case FORMAT_CDN:
+                detail::write_two_digits(buf, c.day);
+                buf[2] = '-';
+                detail::write_two_digits(buf + 3, c.month);
+                buf[5] = '-';
+                detail::write_two_digits(buf + 6, yy);
+                len = 8u;
+                break;
+            default:
+                return 0u;
+            }
+            if (!detail::copy_bounded(date, date_size, buf, len)) {
+                ok = false;
+            }
         }
     }
 
     if (day != nullptr) {
         const char* day_str = detail::kWeekdayNames[dos_weekday(stamp.days)];
-        if ((flags & DTF_SUBST) != 0u) {
-            if (stamp.days == today) {
-                day_str = "Today";
-            } else if (today > 0u && stamp.days == today - 1u) {
-                day_str = "Yesterday";
-            } else if (today < 0xFFFFFFFFu && stamp.days == today + 1u) {
-                day_str = "Tomorrow";
-            }
-        }
         const u32 day_len = detail::str_len_bounded(day_str, LEN_DATSTRING);
         if (!detail::copy_bounded(day, day_size, day_str, day_len)) {
             ok = false;
@@ -430,13 +444,13 @@ inline u32 dos_format_date(const DosStamp& stamp, u8 format, u8 flags, u32 today
 // untouched; null time leaves out.minutes and out.ticks untouched. Returns
 // false without modifying out if either input is invalid.
 inline bool dos_parse_date(const char* date, const char* time, u8 format, u32 today,
-                           DosStamp& out) {
+                           DosStamp& out, u8 flags = 0) {
     u32 parsed_days = out.days;
     u32 parsed_minutes = out.minutes;
     u32 parsed_ticks = out.ticks;
 
     if (date != nullptr) {
-        if (format > FORMAT_CDN) {
+        if (format > FORMAT_DEF) {
             return false;
         }
         if (detail::equals_ignore_case(date, "Today", detail::kMaxDateText)) {
@@ -457,14 +471,25 @@ inline bool dos_parse_date(const char* date, const char* time, u8 format, u32 to
                 if (detail::equals_ignore_case(date, detail::kWeekdayNames[w],
                                                detail::kMaxDateText)) {
                     const u32 today_wday = dos_weekday(today);
-                    u32 delta = (today_wday + 7u - w) % 7u;
-                    if (delta == 0u) {
-                        delta = 7u;
+                    if ((flags & DTF_FUTURE) != 0u) {
+                        u32 delta = (w + 7u - today_wday) % 7u;
+                        if (delta == 0u) {
+                            delta = 7u;
+                        }
+                        if (today > 0xFFFFFFFFu - delta) {
+                            return false;
+                        }
+                        parsed_days = today + delta;
+                    } else {
+                        u32 delta = (today_wday + 7u - w) % 7u;
+                        if (delta == 0u) {
+                            delta = 7u;
+                        }
+                        if (today < delta) {
+                            return false;
+                        }
+                        parsed_days = today - delta;
                     }
-                    if (today < delta) {
-                        return false;
-                    }
-                    parsed_days = today - delta;
                     matched_wday = true;
                     break;
                 }

@@ -626,7 +626,7 @@ public:
     static constexpr u32 kMaxArgs = 512;    // bytes of a command's argument line
     static constexpr u32 kMaxPath = 256;    // bytes of a resolved path, NUL included
     static constexpr u32 kMaxFiles = 16;    // files and console streams a program opens
-    static constexpr u32 kMaxLocks = 32;
+    static constexpr u32 kMaxLocks = 128;
     static constexpr u32 kMaxPathDirs = 8;  // directories in the CLI command search path
     static constexpr u32 kMaxAssigns = 32;
     static constexpr u32 kMaxAssignDirs = 4;
@@ -704,6 +704,10 @@ public:
     // freeing the cli_CommandDir list.
     void path_reset();
 
+    // Removes dir from the command search path. False with error set when
+    // it cannot be found or is not in the path.
+    bool path_remove(const char* dir, u32& error);
+
     // Number of directories currently in the command search path.
     u32 path_count() const { return path_count_; }
 
@@ -712,9 +716,9 @@ public:
     bool path_name(u32 i, char* out, u32 size) const;
 
     // Resolves command word: if it contains ':' or '/', returns it as is
-    // when it exists as a file; otherwise checks "C:<word>", then each path
-    // directory in order. Returns false if none exists as a file or out is
-    // too small.
+    // when it exists as a file; otherwise checks the current directory (the
+    // bare name relative to it), then each path directory in order, then
+    // "C:<word>". Returns false if none exists as a file or out is too small.
     bool find_command(const char* word, char* out, u32 size);
 
     // Registers the interactive console input callbacks used after the
@@ -746,11 +750,13 @@ private:
         u8 unget;
         bool has_last;
         u8 last_char;
+        bool command_owned;
         char path[kMaxPath];
     };
 
     struct LockSlot {
         bool used;
+        bool command_owned;
         DirEntry entry;
         char path[kMaxPath];  // from the root, components separated by '/'
     };
@@ -776,6 +782,7 @@ private:
 
     struct AnchorSlot {
         bool used;
+        bool command_owned;
         u32 anchor_addr;  // masked guest AnchorPath address
         bool is_wild;
         bool leaf_empty;
@@ -834,6 +841,10 @@ private:
     ConsoleRead console_read_ = nullptr;
     ConsoleReady console_ready_ = nullptr;
     void* console_ctx_ = nullptr;
+    // The index of the path directory whose lock holds canonical, or
+    // path_count_ when none does.
+    u32 path_index_of(const char* canonical) const;
+
     u32 path_locks_[kMaxPathDirs]{};
     u32 path_nodes_[kMaxPathDirs]{};
     u32 path_count_ = 0;

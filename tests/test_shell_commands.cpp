@@ -206,6 +206,23 @@ void echo_noline_and_escapes() {
     CHECK_EQ(g_dos.last_return_code(), 0u);
 }
 
+void echo_star_outside_quotes_is_literal() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("echo", "a*nb"));
+    CHECK(out == "a*nb\n");
+
+    out.clear();
+    CHECK(cmds.run("echo", "a*eb **"));
+    CHECK(out == "a*eb **\n");
+
+    out.clear();
+    CHECK(cmds.run("echo", "a*nb \"c*nd\" e**f NOLINE"));
+    CHECK(out == "a*nb c\nd e**f");
+}
+
 void path_show_add_reset() {
     Rig rig;
     std::string out;
@@ -237,6 +254,93 @@ void path_show_add_reset() {
     CHECK_EQ(g_dos.last_return_code(), 0u);
     CHECK(cmds.run("path", ""));
     CHECK(out == "Current_directory\nC:\n");
+}
+
+void path_keywords_not_directories() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("path", "ADD"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 0u);
+
+    CHECK(cmds.run("path", "HEAD"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 0u);
+
+    CHECK(cmds.run("path", "QUIET"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 0u);
+
+    CHECK(cmds.run("path", "QUIET NoSuchDir"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+
+    CHECK(cmds.run("path", "NoSuchDir QUIET"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+
+    // S: is not in the path yet.
+    CHECK(cmds.run("path", "REMOVE S:"));
+    CHECK(out == "S: not found\n");
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+    CHECK_EQ(g_dos.path_count(), 0u);
+
+    out.clear();
+    CHECK(cmds.run("path", "QUIET REMOVE S:"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+    CHECK_EQ(g_dos.path_count(), 0u);
+
+    CHECK(cmds.run("path", "HEAD S: SHOW"));
+    CHECK(out == "Current_directory\nHombreTest:S\nC:\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 1u);
+
+    out.clear();
+    CHECK(cmds.run("path", "SHOW Devs/Sub"));
+    CHECK(out == "Current_directory\nHombreTest:S\nHombreTest:Devs/Sub\nC:\n");
+
+    out.clear();
+    CHECK(cmds.run("path", "REMOVE S: SHOW"));
+    CHECK(out == "Current_directory\nHombreTest:Devs/Sub\nC:\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 1u);
+
+    out.clear();
+    CHECK(cmds.run("path", "RESET"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 0u);
+}
+
+void path_add_duplicate_once() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("path", "ADD S:"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 1u);
+
+    CHECK(cmds.run("path", "S:"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 1u);
+
+    CHECK(cmds.run("path", "HombreTest:s"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 1u);
+
+    CHECK(cmds.run("path", "Devs/Sub devs/sub"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.path_count(), 2u);
+
+    CHECK(cmds.run("path", "SHOW"));
+    CHECK(out == "Current_directory\nHombreTest:S\nHombreTest:Devs/Sub\nC:\n");
 }
 
 void why_messages() {
@@ -340,16 +444,34 @@ void failat() {
     CHECK_EQ(g_dos.fail_level(), 20u);
 }
 
+void failat_minimum_is_one() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("failat", "0"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.fail_level(), 1u);
+
+    CHECK(cmds.run("failat", ""));
+    CHECK(out == "Fail limit: 1\n");
+}
+
 }
 
 int main() {
     cd_prints_and_changes();
     cd_errors();
     echo_noline_and_escapes();
+    echo_star_outside_quotes_is_literal();
     path_show_add_reset();
+    path_keywords_not_directories();
+    path_add_duplicate_once();
     why_messages();
     prompt_format();
     ask_yes_and_no();
     failat();
+    failat_minimum_is_one();
     return check::finish("test_shell_commands");
 }

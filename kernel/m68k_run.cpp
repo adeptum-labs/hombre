@@ -117,13 +117,13 @@ void log_line(const char* line) {
     serial::write_char('\n');
 }
 
-// What the program writes to the console. Newlines and tabs are kept.
 void poll_keys_while_running();
 
 // True while a command runs: its console output is also when the keyboard
 // is read, so keys typed during a long listing are not lost.
 constinit bool command_running = false;
 
+// What the program writes to the console. Newlines and tabs are kept.
 void console_write(void*, const u8* data, u32 bytes) {
     for (u32 i = 0; i < bytes; ++i) {
         const u8 c = data[i];
@@ -599,7 +599,7 @@ bool typed_run(void*, const char* path, const char* args) {
     if (loaded && (machine.cpu.exit == ExitReason::None ||
                    machine.cpu.exit == ExitReason::Returned)) {
         const u32 rc = dos.last_return_code();
-        if (rc >= dos.fail_level()) {
+        if (rc != 0 && rc >= dos.fail_level()) {
             if (!console_at_line_start) {
                 console_write(nullptr, reinterpret_cast<const u8*>("\n"), 1);
             }

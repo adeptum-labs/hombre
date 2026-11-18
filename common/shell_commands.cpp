@@ -280,12 +280,14 @@ void ShellCommands::cmd_echo(const char* args) {
 
     char out[kLineBuf];
     u32 pos = 0;
+    in_quote = false;
     for (u32 i = 0; i < end; ++i) {
         const char c = p[i];
         if (c == '"') {
+            in_quote = !in_quote;
             continue;
         }
-        if (c == '*' && i + 1 < end) {
+        if (in_quote && c == '*' && i + 1 < end) {
             const char next = p[++i];
             if (next == 'n' || next == 'N') {
                 pos = append_char(out, sizeof out, pos, '\n');
@@ -317,47 +319,60 @@ void ShellCommands::cmd_path(const char* args) {
             }
         }
         emit_line("C:");
-        dos_->set_return_code(0);
     };
 
-    const char* p = args;
+    const char* scan = args;
     char tok[Dos::kMaxPath];
-    if (!next_token(p, tok, sizeof tok)) {
-        show_path();
-        return;
-    }
-    if (eq_nocase(tok, "SHOW")) {
-        char extra[Dos::kMaxPath];
-        if (!next_token(p, extra, sizeof extra)) {
-            show_path();
-            return;
-        }
-    }
-    if (eq_nocase(tok, "RESET")) {
-        dos_->path_reset();
-        if (!next_token(p, tok, sizeof tok)) {
-            dos_->set_return_code(0);
-            return;
+    bool has_tokens = false;
+    bool quiet = false;
+    bool show = false;
+    bool has_remove = false;
+    while (next_token(scan, tok, sizeof tok)) {
+        has_tokens = true;
+        if (eq_nocase(tok, "QUIET")) {
+            quiet = true;
+        } else if (eq_nocase(tok, "SHOW")) {
+            show = true;
+        } else if (eq_nocase(tok, "REMOVE")) {
+            has_remove = true;
         }
     }
 
-    for (;;) {
-        if (!eq_nocase(tok, "ADD")) {
-            u32 err = 0;
-            if (!dos_->path_add(tok, err)) {
-                dos_->set_last_error(err);
-                dos_->set_return_code(10);
+    if (!has_tokens) {
+        show_path();
+        dos_->set_return_code(0);
+        return;
+    }
+    const char* p = args;
+    while (next_token(p, tok, sizeof tok)) {
+        if (eq_nocase(tok, "SHOW") || eq_nocase(tok, "ADD") || eq_nocase(tok, "QUIET") ||
+            eq_nocase(tok, "HEAD") || eq_nocase(tok, "REMOVE")) {
+            continue;
+        }
+        if (eq_nocase(tok, "RESET")) {
+            dos_->path_reset();
+            continue;
+        }
+        // path_add keeps a directory that is already in the path once.
+        u32 err = 0;
+        const bool done =
+            has_remove ? dos_->path_remove(tok, err) : dos_->path_add(tok, err);
+        if (!done) {
+            dos_->set_last_error(err);
+            dos_->set_return_code(10);
+            if (!quiet) {
                 char msg[kLineBuf];
                 u32 pos = append_str(msg, sizeof msg, 0, tok);
                 pos = append_str(msg, sizeof msg, pos, " not found\n");
                 msg[pos] = '\0';
                 emit(msg);
-                return;
             }
+            return;
         }
-        if (!next_token(p, tok, sizeof tok)) {
-            break;
-        }
+    }
+
+    if (show) {
+        show_path();
     }
     dos_->set_return_code(0);
 }
@@ -467,6 +482,9 @@ void ShellCommands::cmd_failat(const char* args) {
         dos_->set_return_code(20);
         emit_line("Bad number");
         return;
+    }
+    if (level < 1u) {
+        level = 1u;
     }
     dos_->set_fail_level(level);
     dos_->set_return_code(0);

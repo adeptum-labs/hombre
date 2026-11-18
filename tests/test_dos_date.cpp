@@ -137,25 +137,35 @@ void format_int_usa_cdn() {
     CHECK(std::string(date) == "05-Jan-78");
 }
 
+void dtf_values_match_ndk() {
+    CHECK_EQ(DTF_SUBST, 1u);
+    CHECK_EQ(DTF_FUTURE, 2u);
+}
+
 void subst_today_yesterday_tomorrow() {
+    char date[LEN_DATSTRING]{};
     char day[LEN_DATSTRING]{};
 
-    CHECK(dos_format_date(DosStamp{kSampleDay, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay, nullptr, 0,
-                          day, sizeof day, nullptr, 0) != 0u);
-    CHECK(std::string(day) == "Today");
+    CHECK(dos_format_date(DosStamp{kSampleDay, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay, date,
+                          sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "Today");
+    CHECK(std::string(day) == "Wednesday");
 
     CHECK(dos_format_date(DosStamp{kSampleDay - 1u, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay,
-                          nullptr, 0, day, sizeof day, nullptr, 0) != 0u);
-    CHECK(std::string(day) == "Yesterday");
+                          date, sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "Yesterday");
+    CHECK(std::string(day) == "Tuesday");
 
     CHECK(dos_format_date(DosStamp{kSampleDay + 1u, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay,
-                          nullptr, 0, day, sizeof day, nullptr, 0) != 0u);
-    CHECK(std::string(day) == "Tomorrow");
+                          date, sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "Tomorrow");
+    CHECK(std::string(day) == "Thursday");
 
     // Day 0 with today == 0 must not underflow when checking Yesterday.
-    CHECK(dos_format_date(DosStamp{0, 0, 0}, FORMAT_DOS, DTF_SUBST, 0, nullptr, 0, day, sizeof day,
-                          nullptr, 0) != 0u);
-    CHECK(std::string(day) == "Today");
+    CHECK(dos_format_date(DosStamp{0, 0, 0}, FORMAT_DOS, DTF_SUBST, 0, date, sizeof date, day,
+                          sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "Today");
+    CHECK(std::string(day) == "Sunday");
 }
 
 void subst_weekday_within_week() {
@@ -165,13 +175,62 @@ void subst_weekday_within_week() {
     // 2 days before Wednesday 2026-11-18 is Monday 2026-11-16.
     CHECK(dos_format_date(DosStamp{kSampleDay - 2u, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay, date,
                           sizeof date, day, sizeof day, nullptr, 0) != 0u);
-    CHECK(std::string(date) == "16-Nov-26");
+    CHECK(std::string(date) == "Monday");
     CHECK(std::string(day) == "Monday");
 
     // 6 days before Wednesday is Thursday.
     CHECK(dos_format_date(DosStamp{kSampleDay - 6u, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay,
-                          nullptr, 0, day, sizeof day, nullptr, 0) != 0u);
+                          date, sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "Thursday");
     CHECK(std::string(day) == "Thursday");
+}
+
+void subst_goes_to_the_date_string() {
+    char date[LEN_DATSTRING]{};
+    char day[LEN_DATSTRING]{};
+
+    // Today, Yesterday, Tomorrow, and recent weekdays go to date; day keeps weekday.
+    CHECK(dos_format_date(DosStamp{kSampleDay, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay, date,
+                          sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "Today");
+    CHECK(std::string(day) == "Wednesday");
+
+    CHECK(dos_format_date(DosStamp{kSampleDay - 2u, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay, date,
+                          sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "Monday");
+    CHECK(std::string(day) == "Monday");
+
+    // 7 days before today and 2 days after today fall back to numeric date.
+    CHECK(dos_format_date(DosStamp{kSampleDay - 7u, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay, date,
+                          sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "11-Nov-26");
+    CHECK(std::string(day) == "Wednesday");
+
+    CHECK(dos_format_date(DosStamp{kSampleDay + 2u, 0, 0}, FORMAT_DOS, DTF_SUBST, kSampleDay, date,
+                          sizeof date, day, sizeof day, nullptr, 0) != 0u);
+    CHECK(std::string(date) == "20-Nov-26");
+    CHECK(std::string(day) == "Friday");
+}
+
+void format_def_is_dos() {
+    CHECK_EQ(FORMAT_DEF, 4u);
+    const DosStamp s = dos_stamp_from_civil(CivilTime{2026, 11, 18, 17, 30, 45});
+    char date[LEN_DATSTRING]{};
+    char day[LEN_DATSTRING]{};
+    char time[LEN_DATSTRING]{};
+    CHECK(dos_format_date(s, FORMAT_DEF, 0, 0, date, sizeof date, day, sizeof day, time,
+                          sizeof time) != 0u);
+    CHECK(std::string(date) == "18-Nov-26");
+    CHECK(std::string(day) == "Wednesday");
+    CHECK(std::string(time) == "17:30:45");
+
+    DosStamp out{};
+    CHECK(dos_parse_date("18-Nov-26", nullptr, FORMAT_DEF, 0, out));
+    CHECK_EQ(out.days, kSampleDay);
+
+    CHECK_EQ(dos_format_date(s, FORMAT_DEF + 1u, 0, 0, date, sizeof date, nullptr, 0, nullptr, 0),
+             0u);
+    CHECK(!dos_parse_date("18-Nov-26", nullptr, FORMAT_DEF + 1u, 0, out));
 }
 
 void parse_dos_date_and_time() {
@@ -233,6 +292,26 @@ void parse_words_today_and_weekday() {
     CHECK_EQ(out.days, kSampleDay - 7u);
 }
 
+void parse_weekday_future() {
+    DosStamp out{};
+
+    // kSampleDay is Wednesday: next Thursday is +1, next Monday is +5, next Wednesday is +7.
+    CHECK(dos_parse_date("thursday", nullptr, FORMAT_DOS, kSampleDay, out, DTF_FUTURE));
+    CHECK_EQ(out.days, kSampleDay + 1u);
+
+    CHECK(dos_parse_date("monday", nullptr, FORMAT_DOS, kSampleDay, out, DTF_FUTURE));
+    CHECK_EQ(out.days, kSampleDay + 5u);
+
+    CHECK(dos_parse_date("wednesday", nullptr, FORMAT_DOS, kSampleDay, out, DTF_FUTURE));
+    CHECK_EQ(out.days, kSampleDay + 7u);
+
+    // Without DTF_FUTURE, Wednesday resolves to 7 days earlier.
+    CHECK(dos_parse_date("wednesday", nullptr, FORMAT_DOS, kSampleDay, out, 0));
+    CHECK_EQ(out.days, kSampleDay - 7u);
+
+    CHECK(!dos_parse_date("thursday", nullptr, FORMAT_DOS, 0xFFFFFFFFu, out, DTF_FUTURE));
+}
+
 void parse_bad_text_fails() {
     const DosStamp sentinel{123u, 456u, 789u};
     DosStamp out = sentinel;
@@ -284,10 +363,14 @@ int main() {
     leap_years();
     format_dos();
     format_int_usa_cdn();
+    dtf_values_match_ndk();
     subst_today_yesterday_tomorrow();
     subst_weekday_within_week();
+    subst_goes_to_the_date_string();
+    format_def_is_dos();
     parse_dos_date_and_time();
     parse_words_today_and_weekday();
+    parse_weekday_future();
     parse_bad_text_fails();
     small_buffers_truncate_safely();
     return check::finish("test_dos_date");
