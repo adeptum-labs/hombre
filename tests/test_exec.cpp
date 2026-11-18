@@ -1970,12 +1970,16 @@ bool hook_returns_false(void* ctx) {
 void wait_with_a_hook_that_returns_false_ends_the_run() {
     Rig r;
     make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
     u32 calls = 0;
     g_exec.set_idle_hook(IdleHook{hook_returns_false, &calls});
-    r.cpu().d[0] = 1u << 16;
+    r.cpu().d[0] = 1u << r.get8(port + mp_SigBit);
     CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
     CHECK_EQ(calls, 1u);
     CHECK(logged("exec: Wait with no signals pending"));
+    r.cpu().exit = ExitReason::None;
+    g_exec.delete_port(port);
 }
 
 void wait_without_a_hook_is_unchanged() {
@@ -1991,6 +1995,205 @@ void wait_without_a_hook_is_unchanged() {
     r.cpu().d[0] = 0x0001;
     CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
     CHECK(logged("exec: Wait with no signals pending"));
+}
+
+void wait_on_an_unraisable_signal_ends_the_run_even_with_a_hook() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    u32 calls = 0;
+    g_exec.set_idle_hook(IdleHook{hook_returns_false, &calls});
+
+    // No port exists: bit 16 cannot be raised.
+    r.cpu().d[0] = 1u << 16;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
+    CHECK_EQ(calls, 0u);
+    CHECK(logged("exec: Wait with no signals pending"));
+
+    // A port someone else AddPort-ed does not count as exec-created.
+    g_lines.clear();
+    r.cpu().exit = ExitReason::None;
+    const u32 foreign = kData + 0x300;
+    for (u32 i = 0; i < MP_SIZE; ++i) {
+        r.put8(foreign + i, 0);
+    }
+    r.put8(foreign + LN_TYPE, NT_MSGPORT);
+    r.put8(foreign + mp_Flags, PA_SIGNAL);
+    r.put8(foreign + mp_SigBit, 20);
+    r.put32(foreign + mp_SigTask, task);
+    r.put32(foreign + LN_NAME, r.str(kNames, "foreign.port"));
+    r.new_list(foreign + mp_MsgList);
+    r.cpu().a[1] = foreign;
+    CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::Halt);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
+    CHECK_EQ(calls, 0u);
+    CHECK(logged("exec: Wait with no signals pending"));
+
+    // Deleting an exec-created port removes its bit from the raisable mask.
+    g_lines.clear();
+    r.cpu().exit = ExitReason::None;
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    const u32 sig_bit = r.get8(port + mp_SigBit);
+    g_exec.delete_port(port);
+    r.cpu().d[0] = 1u << sig_bit;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
+    CHECK_EQ(calls, 0u);
+    CHECK(logged("exec: Wait with no signals pending"));
+}
+
+void wait_zero_mask_ends_the_run() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    r.put32(task + TC_SIGRECVD, SIGBREAKF_CTRL_C);
+    u32 calls = 0;
+    g_exec.set_idle_hook(IdleHook{hook_returns_false, &calls});
+
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
+    CHECK_EQ(calls, 0u);
+    CHECK(logged("exec: Wait with no signals pending"));
+    r.cpu().exit = ExitReason::None;
+    g_exec.delete_port(port);
+}
+
+void wait_on_a_raisable_port_bit_with_a_hook_wakes_when_a_message_arrives() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+    const u32 sig_bit = r.get8(port + mp_SigBit);
+    const u32 msg = kData + 0x200;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg + i, 0);
+    }
+    HookPostState state{0, port, msg};
+    g_exec.set_idle_hook(IdleHook{hook_posts_on_third_call, &state});
+
+    r.cpu().d[0] = 1u << sig_bit;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(state.calls, 3u);
+    CHECK_EQ(r.cpu().d[0], 1u << sig_bit);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD) & (1u << sig_bit), 0u);
+    CHECK_EQ(g_exec.get_message(port), msg);
+    g_exec.delete_port(port);
+}
+
+bool hook_raises_ctrl_c(void* ctx) {
+    u32& calls = *static_cast<u32*>(ctx);
+    ++calls;
+    g_exec.signal_current_task(SIGBREAKF_CTRL_C);
+    return true;
+}
+
+void wait_for_unwanted_ctrl_c_ends_the_run_with_break() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    const u32 sig_bit = r.get8(port + mp_SigBit);
+    u32 calls = 0;
+    g_exec.set_idle_hook(IdleHook{hook_raises_ctrl_c, &calls});
+
+    r.cpu().d[0] = 1u << sig_bit;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Break);
+    CHECK_EQ(calls, 1u);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD) & SIGBREAKF_CTRL_C, 0u);
+    CHECK(logged("exec: Wait interrupted by Ctrl+C"));
+    r.cpu().exit = ExitReason::None;
+    g_exec.delete_port(port);
+}
+
+void wait_for_wanted_ctrl_c_returns_it() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    u32 calls = 0;
+    g_exec.set_idle_hook(IdleHook{hook_raises_ctrl_c, &calls});
+
+    r.cpu().d[0] = SIGBREAKF_CTRL_C;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(calls, 1u);
+    CHECK_EQ(r.cpu().d[0], SIGBREAKF_CTRL_C);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD) & SIGBREAKF_CTRL_C, 0u);
+    CHECK(g_lines.empty());
+}
+
+void waitport_never_returns_null_on_a_stale_signal() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    const u32 sig_bit = r.get8(port + mp_SigBit);
+    const u32 msg1 = kData + 0x200;
+    const u32 msg2 = kData + 0x240;
+    const u32 msg3 = kData + 0x280;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg1 + i, 0);
+        r.put8(msg2 + i, 0);
+        r.put8(msg3 + i, 0);
+    }
+    CHECK(g_exec.post_message(port, msg1));
+    CHECK(g_exec.post_message(port, msg2));
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], msg1);
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], msg1);
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], msg2);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 1u << sig_bit);
+
+    HookPostState state{0, port, msg3};
+    g_exec.set_idle_hook(IdleHook{hook_posts_on_third_call, &state});
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], msg3);
+    CHECK_EQ(state.calls, 3u);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD) & (1u << sig_bit), 0u);
+    CHECK_EQ(g_exec.get_message(port), msg3);
+    g_exec.delete_port(port);
+}
+
+void reset_task_signals_restores_the_initial_state() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    r.cpu().d[0] = 25;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 25u);
+    g_exec.signal_current_task(0x00F0 | SIGBREAKF_CTRL_C);
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), 0x0000FFFFu | (1u << 16) | (1u << 25));
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0x00F0u | SIGBREAKF_CTRL_C);
+
+    g_exec.reset_task_signals();
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), 0x0000FFFFu);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0u);
+
+    u32 calls = 0;
+    g_exec.set_idle_hook(IdleHook{hook_returns_false, &calls});
+    r.cpu().d[0] = 1u << 16;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
+    CHECK_EQ(calls, 0u);
+    CHECK(logged("exec: Wait with no signals pending"));
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().d[0] = 0xFFFFFFFF;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 16u);
+    g_exec.free(port, MP_SIZE);
+}
+
+void exit_reason_break_has_a_name() {
+    static_assert(exit_reason_name(ExitReason::Break)[0] == 'B');
+    CHECK(std::string(exit_reason_name(ExitReason::Break)) == "Break");
 }
 
 void reply_msg_to_a_reply_port_queues_it_as_replymsg() {
@@ -2260,6 +2463,14 @@ int main() {
     wait_with_idle_hook_returns_when_the_hook_posts_a_message();
     wait_with_a_hook_that_returns_false_ends_the_run();
     wait_without_a_hook_is_unchanged();
+    wait_on_an_unraisable_signal_ends_the_run_even_with_a_hook();
+    wait_zero_mask_ends_the_run();
+    wait_on_a_raisable_port_bit_with_a_hook_wakes_when_a_message_arrives();
+    wait_for_unwanted_ctrl_c_ends_the_run_with_break();
+    wait_for_wanted_ctrl_c_returns_it();
+    waitport_never_returns_null_on_a_stale_signal();
+    reset_task_signals_restores_the_initial_state();
+    exit_reason_break_has_a_name();
     reply_msg_to_a_reply_port_queues_it_as_replymsg();
     reply_msg_without_a_reply_port_marks_the_message_free();
     reply_msg_runs_the_registered_handler_instead_of_queueing();

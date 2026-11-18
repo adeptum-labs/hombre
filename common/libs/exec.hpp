@@ -207,6 +207,8 @@ constexpr u32 TC_SIGWAIT = 22;
 constexpr u32 TC_SIGRECVD = 26;
 constexpr u32 TC_SIZE = 92;
 
+constexpr u32 SIGBREAKF_CTRL_C = 1u << 12;
+
 // struct MsgPort and struct Message
 constexpr u32 mp_Flags = 14;
 constexpr u32 mp_SigBit = 15;
@@ -312,6 +314,10 @@ public:
     // Sets the bits of mask in the current task's tc_SigRecvd.
     void signal_current_task(u32 mask);
 
+    // Restores the current task's tc_SigAlloc to 0x0000FFFF and tc_SigRecvd
+    // to 0, and clears the tracked raisable-port mask.
+    void reset_task_signals();
+
     // Registers a reply port whose replies go to handler instead of being
     // queued on the port. A second call replaces the first.
     void set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx);
@@ -338,6 +344,7 @@ private:
     u32 task_ = 0;
     u32 sig_alloc_ = 0x0000FFFF;  // while no task is set
     u32 signals_ = 0;             // while no task is set
+    u32 port_signals_ = 0;        // mp_SigBit mask of live exec-created ports
     u32 call_depth_ = 0;
     u32 load_depth_ = 0;
     u16 open_id_ = 0;

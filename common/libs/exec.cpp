@@ -594,9 +594,9 @@ struct ExecOps {
         free_signal(of(ctx), b, m.cpu.d[0]);
     }
 
-    // Waits for any bit in wanted. While none is pending and an idle hook
-    // is set, polls the hook; ends the run as Unimplemented when no hook is
-    // set or the hook returns false.
+    // Waits for any bit in wanted. While none is pending, polls the idle
+    // hook if any wanted bit can be raised; ends the run with Break on an
+    // unwanted Ctrl+C, or Unimplemented when nothing can wake the wait.
     static u32 wait_signals(Exec& e, Bus& b, u32 wanted) {
         Machine& m = b.machine();
         for (;;) {
@@ -609,7 +609,9 @@ struct ExecOps {
                 store_signals(e, b, pending & ~got);
                 return got;
             }
-            if (e.idle_.poll == nullptr || !e.idle_.poll(e.idle_.ctx)) {
+            const u32 raisable = e.port_signals_ | SIGBREAKF_CTRL_C;
+            if ((wanted & raisable) == 0 || e.idle_.poll == nullptr ||
+                !e.idle_.poll(e.idle_.ctx)) {
                 if (m.cpu.exit == ExitReason::None) {
                     LogLine().text("exec: Wait with no signals pending").send();
                     end_run(m, ExitReason::Unimplemented);
@@ -620,6 +622,19 @@ struct ExecOps {
             if (m.cpu.exit != ExitReason::None) {
                 b.stop();
                 return 0;
+            }
+            if ((wanted & SIGBREAKF_CTRL_C) == 0) {
+                const u32 after = signals(e, b);
+                if (!b.ok()) {
+                    return 0;
+                }
+                if ((after & SIGBREAKF_CTRL_C) != 0) {
+                    store_signals(e, b, after & ~SIGBREAKF_CTRL_C);
+                    LogLine().text("exec: Wait interrupted by Ctrl+C").send();
+                    end_run(m, ExitReason::Break);
+                    b.stop();
+                    return 0;
+                }
             }
         }
     }
@@ -806,25 +821,23 @@ struct ExecOps {
             fault_null(b);
             return;
         }
-        u32 msg = peek_head(b, port);
-        if (!b.ok()) {
-            return;
-        }
-        if (msg != 0) {
-            native::set_result(m, msg);
-            return;
-        }
-        const u32 sig_bit = b.r8(port + mp_SigBit);
-        if (!b.ok()) {
-            return;
-        }
-        const u32 mask = sig_bit < 32 ? (1u << sig_bit) : 0;
-        if (wait_signals(e, b, mask) == 0 || !b.ok()) {
-            return;
-        }
-        msg = peek_head(b, port);
-        if (b.ok()) {
-            native::set_result(m, msg);
+        for (;;) {
+            const u32 msg = peek_head(b, port);
+            if (!b.ok()) {
+                return;
+            }
+            if (msg != 0) {
+                native::set_result(m, msg);
+                return;
+            }
+            const u32 sig_bit = b.r8(port + mp_SigBit);
+            if (!b.ok()) {
+                return;
+            }
+            const u32 mask = sig_bit < 32 ? (1u << sig_bit) : 0;
+            if (wait_signals(e, b, mask) == 0 || !b.ok()) {
+                return;
+            }
         }
     }
 
@@ -1678,6 +1691,7 @@ u32 Exec::create_port() {
         free(port, MP_SIZE);
         return 0;
     }
+    port_signals_ |= 1u << sig;
     return port;
 }
 
@@ -1689,6 +1703,9 @@ void Exec::delete_port(u32 port) {
     const u32 sig = b.r8(port + mp_SigBit);
     if (!b.ok()) {
         return;
+    }
+    if (sig < 32) {
+        port_signals_ &= ~(1u << sig);
     }
     ExecOps::free_signal(*this, b, sig);
     free(port, MP_SIZE);
@@ -1717,6 +1734,17 @@ void Exec::signal_current_task(u32 mask) {
     }
     Bus b(*m_);
     ExecOps::store_signals(*this, b, ExecOps::signals(*this, b) | mask);
+}
+
+void Exec::reset_task_signals() {
+    sig_alloc_ = 0x0000FFFF;
+    signals_ = 0;
+    port_signals_ = 0;
+    if (m_ != nullptr && task_ != 0) {
+        Bus b(*m_);
+        b.w32(task_ + TC_SIGALLOC, 0x0000FFFF);
+        b.w32(task_ + TC_SIGRECVD, 0);
+    }
 }
 
 void Exec::set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx) {

@@ -105,6 +105,7 @@ void exit_reasons_have_names() {
     CHECK(std::string_view(exit_reason_name(ExitReason::Budget)) == "Budget");
     CHECK(std::string_view(exit_reason_name(ExitReason::AddressError)) == "AddressError");
     CHECK(std::string_view(exit_reason_name(ExitReason::Unimplemented)) == "Unimplemented");
+    CHECK(std::string_view(exit_reason_name(ExitReason::Break)) == "Break");
     CHECK(std::string_view(exit_reason_name(static_cast<ExitReason>(99))) == "?");
 }
 
