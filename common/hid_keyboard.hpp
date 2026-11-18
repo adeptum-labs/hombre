@@ -29,18 +29,19 @@
 namespace hombre {
 
 // Decodes HID boot keyboard reports. A report holds the modifiers in byte 0,
-// a reserved byte and six key slots; feed appends the character of every key
-// that is in the new report but was not in the one before, in slot order.
-// Caps Lock is state rather than a character, so it is tracked here and
-// handed to keymap_se. The rollover error report, in which every slot is
-// 0x01, is ignored without disturbing that state.
+// a reserved byte and six key slots; feed appends the bytes of every key that
+// is in the new report but was not in the one before, in slot order. Editing
+// and cursor keys emit Amiga CSI sequences (0x9B ...), and Caps Lock is tracked
+// as state and handed to keymap_se. The rollover error report, in which every
+// slot is 0x01, is ignored without disturbing that state.
 class KeyDecoder {
 public:
     static constexpr usize kReportBytes = 8;
     static constexpr usize kKeySlots = 6;
+    static constexpr usize kMaxBytesPerKey = 4;
 
-    // Appends the new characters to out and returns how many were written.
-    // Nothing is written past capacity; characters left out are gone.
+    // Appends the new bytes to out and returns how many were written. Nothing is
+    // written past capacity; keys whose sequence does not fit are dropped.
     usize feed(const u8 report[kReportBytes], u8* out, usize capacity);
 
     // Forgets the keys held and turns Caps Lock off.
@@ -52,6 +53,8 @@ public:
 
 private:
     static bool contains(const u8* slots, usize count, u8 usage);
+    static usize write_csi(u8* out, u8 b0, u8 b1 = 0, u8 b2 = 0);
+    static usize decode_key(u8 usage, u8 modifiers, bool caps_lock, u8 out[kMaxBytesPerKey]);
 
     bool caps_lock_ = false;
     u8 held_[kKeySlots] = {};
@@ -64,6 +67,48 @@ inline bool KeyDecoder::contains(const u8* slots, usize count, u8 usage) {
         }
     }
     return false;
+}
+
+inline usize KeyDecoder::write_csi(u8* out, u8 b0, u8 b1, u8 b2) {
+    out[0] = 0x9B;
+    out[1] = b0;
+    if (b1 == 0) {
+        return 2;
+    }
+    out[2] = b1;
+    out[3] = b2;
+    return 4;
+}
+
+inline usize KeyDecoder::decode_key(u8 usage, u8 modifiers, bool caps_lock,
+                                    u8 out[kMaxBytesPerKey]) {
+    const bool shifted = (modifiers & (kModLShift | kModRShift)) != 0;
+    switch (usage) {
+    case 0x4A:
+        return write_csi(out, shifted ? '5' : '4', '4', '~');
+    case 0x4B:
+        return write_csi(out, '4', '1', '~');
+    case 0x4D:
+        return write_csi(out, shifted ? '5' : '4', '5', '~');
+    case 0x4E:
+        return write_csi(out, '4', '2', '~');
+    case 0x4F:
+        return write_csi(out, 'C');
+    case 0x50:
+        return write_csi(out, 'D');
+    case 0x51:
+        return write_csi(out, shifted ? 'S' : 'B');
+    case 0x52:
+        return write_csi(out, shifted ? 'T' : 'A');
+    default: {
+        const u8 c = keymap_se(usage, modifiers, caps_lock);
+        if (c == 0) {
+            return 0;
+        }
+        out[0] = c;
+        return 1;
+    }
+    }
 }
 
 inline usize KeyDecoder::feed(const u8 report[kReportBytes], u8* out, usize capacity) {
@@ -86,9 +131,12 @@ inline usize KeyDecoder::feed(const u8 report[kReportBytes], u8* out, usize capa
             caps_lock_ = !caps_lock_;
             continue;
         }
-        const u8 c = keymap_se(usage, report[0], caps_lock_);
-        if (c != 0 && out != nullptr && written < capacity) {
-            out[written++] = c;
+        u8 seq[kMaxBytesPerKey]{};
+        const usize len = decode_key(usage, report[0], caps_lock_, seq);
+        if (len != 0 && out != nullptr && len <= capacity && written <= capacity - len) {
+            for (usize j = 0; j < len; ++j) {
+                out[written++] = seq[j];
+            }
         }
     }
     for (usize i = 0; i < kKeySlots; ++i) {

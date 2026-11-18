@@ -38,12 +38,14 @@ struct MouseSample {
     u8 buttons = 0;
     i32 dx = 0;
     i32 dy = 0;
+    i8 wheel = 0;
 };
 
-// Decodes a USB HID boot protocol mouse report. Byte 0 contains the button
-// bitmask (left, right, middle in bits 0..2; bits 3..7 are ignored). Byte 1
-// and byte 2 provide signed 8-bit X and Y relative displacements. Any bytes
-// beyond the third (such as a wheel delta) are ignored.
+// Decodes a USB HID mouse report. Byte 0 contains the button bitmask (left,
+// right, middle in bits 0..2; bits 3..7 are ignored). Bytes 1 and 2 provide
+// signed 8-bit X and Y relative displacements. Byte 3, when present, provides
+// a signed 8-bit wheel delta (positive away from the user); any bytes beyond
+// the fourth are ignored.
 inline bool decode_mouse_report(const u8* report, usize length, MouseSample& out) {
     if (report == nullptr || length < 3u) {
         return false;
@@ -51,6 +53,7 @@ inline bool decode_mouse_report(const u8* report, usize length, MouseSample& out
     out.buttons = static_cast<u8>(report[0] & 7u);
     out.dx = static_cast<i32>(static_cast<i8>(report[1]));
     out.dy = static_cast<i32>(static_cast<i8>(report[2]));
+    out.wheel = (length >= 4u) ? static_cast<i8>(report[3]) : static_cast<i8>(0);
     return true;
 }
 
@@ -61,6 +64,7 @@ public:
         bool moved;
         u8 pressed;
         u8 released;
+        i32 wheel;
     };
 
     PointerState() = default;
@@ -113,7 +117,7 @@ inline PointerState::Update PointerState::apply(const MouseSample& sample) {
     const u8 released = static_cast<u8>(prev & ~cur);
     buttons_ = cur;
 
-    return Update{moved, pressed, released};
+    return Update{moved, pressed, released, static_cast<i32>(sample.wheel)};
 }
 
 inline void PointerState::set_position(i32 x, i32 y) {

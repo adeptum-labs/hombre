@@ -160,6 +160,143 @@ void release_all_keeps_caps_lock() {
     CHECK_EQ(out[0], 'A');
 }
 
+void arrows_give_csi_sequences() {
+    KeyDecoder decoder;
+    u8 out[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey] = {};
+    const u8 released[8] = {};
+
+    const u8 up[8] = {0, 0, 0x52};
+    CHECK_EQ(decoder.feed(up, out, sizeof(out)), 2u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], 'A');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 down[8] = {0, 0, 0x51};
+    CHECK_EQ(decoder.feed(down, out, sizeof(out)), 2u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], 'B');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 right[8] = {0, 0, 0x4F};
+    CHECK_EQ(decoder.feed(right, out, sizeof(out)), 2u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], 'C');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 left[8] = {0, 0, 0x50};
+    CHECK_EQ(decoder.feed(left, out, sizeof(out)), 2u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], 'D');
+}
+
+void shift_up_down_give_t_and_s() {
+    KeyDecoder decoder;
+    u8 out[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey] = {};
+    const u8 released[8] = {};
+
+    const u8 lshift_up[8] = {kModLShift, 0, 0x52};
+    CHECK_EQ(decoder.feed(lshift_up, out, sizeof(out)), 2u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], 'T');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 rshift_down[8] = {kModRShift, 0, 0x51};
+    CHECK_EQ(decoder.feed(rshift_down, out, sizeof(out)), 2u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], 'S');
+}
+
+void page_home_end_sequences() {
+    KeyDecoder decoder;
+    u8 out[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey] = {};
+    const u8 released[8] = {};
+
+    const u8 page_up[8] = {0, 0, 0x4B};
+    CHECK_EQ(decoder.feed(page_up, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '4');
+    CHECK_EQ(out[2], '1');
+    CHECK_EQ(out[3], '~');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 shift_page_up[8] = {kModLShift, 0, 0x4B};
+    CHECK_EQ(decoder.feed(shift_page_up, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '4');
+    CHECK_EQ(out[2], '1');
+    CHECK_EQ(out[3], '~');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 page_down[8] = {0, 0, 0x4E};
+    CHECK_EQ(decoder.feed(page_down, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '4');
+    CHECK_EQ(out[2], '2');
+    CHECK_EQ(out[3], '~');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 shift_page_down[8] = {kModRShift, 0, 0x4E};
+    CHECK_EQ(decoder.feed(shift_page_down, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '4');
+    CHECK_EQ(out[2], '2');
+    CHECK_EQ(out[3], '~');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 home[8] = {0, 0, 0x4A};
+    CHECK_EQ(decoder.feed(home, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '4');
+    CHECK_EQ(out[2], '4');
+    CHECK_EQ(out[3], '~');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 end[8] = {0, 0, 0x4D};
+    CHECK_EQ(decoder.feed(end, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '4');
+    CHECK_EQ(out[2], '5');
+    CHECK_EQ(out[3], '~');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 shift_home[8] = {kModLShift, 0, 0x4A};
+    CHECK_EQ(decoder.feed(shift_home, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '5');
+    CHECK_EQ(out[2], '4');
+    CHECK_EQ(out[3], '~');
+    CHECK_EQ(decoder.feed(released, out, sizeof(out)), 0u);
+
+    const u8 shift_end[8] = {kModRShift, 0, 0x4D};
+    CHECK_EQ(decoder.feed(shift_end, out, sizeof(out)), 4u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], '5');
+    CHECK_EQ(out[2], '5');
+    CHECK_EQ(out[3], '~');
+}
+
+void six_keys_fit_the_buffer() {
+    KeyDecoder decoder;
+    u8 out[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey] = {};
+    CHECK_EQ(sizeof(out), 24u);
+
+    const u8 six[8] = {0, 0, 0x4A, 0x4B, 0x4D, 0x4E, 0x52, 0x51};
+    const usize n = decoder.feed(six, out, sizeof(out));
+    CHECK_EQ(n, 20u);
+
+    const u8 expected[20] = {
+        0x9B, '4', '4', '~',
+        0x9B, '4', '1', '~',
+        0x9B, '4', '5', '~',
+        0x9B, '4', '2', '~',
+        0x9B, 'A',
+        0x9B, 'B',
+    };
+    for (usize i = 0; i < n; ++i) {
+        CHECK_EQ(out[i], expected[i]);
+    }
+}
+
 }
 
 int main() {
@@ -175,5 +312,9 @@ int main() {
     reset_clears_caps_lock();
     release_all_lets_a_held_key_type_again();
     release_all_keeps_caps_lock();
+    arrows_give_csi_sequences();
+    shift_up_down_give_t_and_s();
+    page_home_end_sequences();
+    six_keys_fit_the_buffer();
     return check::finish("test_hid_keyboard");
 }

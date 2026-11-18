@@ -300,6 +300,44 @@ void set_position_clamps() {
     CHECK_EQ(state.y(), 200);
 }
 
+void wheel_byte_is_decoded() {
+    const u8 up_report[4] = {0, 0, 0, 0x01};
+    MouseSample sample{};
+    CHECK(decode_mouse_report(up_report, sizeof(up_report), sample));
+    CHECK_EQ(sample.wheel, 1);
+
+    const u8 down_report[4] = {0, 0, 0, 0xFF};
+    CHECK(decode_mouse_report(down_report, sizeof(down_report), sample));
+    CHECK_EQ(sample.wheel, -1);
+}
+
+void three_byte_report_has_no_wheel() {
+    const u8 four_byte[4] = {0, 0, 0, 0x05};
+    MouseSample sample{};
+    CHECK(decode_mouse_report(four_byte, sizeof(four_byte), sample));
+    CHECK_EQ(sample.wheel, 5);
+
+    const u8 three_byte[3] = {kMouseLeft, 3, 4};
+    CHECK(decode_mouse_report(three_byte, sizeof(three_byte), sample));
+    CHECK_EQ(sample.wheel, 0);
+}
+
+void update_carries_wheel() {
+    PointerState state;
+    state.init(640, 400, 100, 100);
+
+    const PointerState::Update u_up = state.apply(MouseSample{0, 0, 0, 1});
+    CHECK(!u_up.moved);
+    CHECK_EQ(u_up.wheel, 1);
+
+    const PointerState::Update u_down = state.apply(MouseSample{0, 2, -3, -1});
+    CHECK(u_down.moved);
+    CHECK_EQ(u_down.wheel, -1);
+
+    const PointerState::Update u_zero = state.apply(MouseSample{0, 0, 0, 0});
+    CHECK_EQ(u_zero.wheel, 0);
+}
+
 }
 
 int main() {
@@ -314,5 +352,8 @@ int main() {
     init_clamps_a_start_position_outside_the_screen();
     zero_size_screen_pins_to_zero();
     set_position_clamps();
+    wheel_byte_is_decoded();
+    three_byte_report_has_no_wheel();
+    update_carries_wheel();
     return check::finish("test_hid_mouse");
 }
