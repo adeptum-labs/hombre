@@ -72,6 +72,16 @@ constexpr u32 FindName = 276;
 constexpr u32 FindTask = 294;
 constexpr u32 SetSignal = 306;
 constexpr u32 Wait = 318;
+constexpr u32 Signal = 324;
+constexpr u32 AllocSignal = 330;
+constexpr u32 FreeSignal = 336;
+constexpr u32 AddPort = 354;
+constexpr u32 RemPort = 360;
+constexpr u32 PutMsg = 366;
+constexpr u32 GetMsg = 372;
+constexpr u32 ReplyMsg = 378;
+constexpr u32 WaitPort = 384;
+constexpr u32 FindPort = 390;
 constexpr u32 AddLibrary = 396;
 constexpr u32 OldOpenLibrary = 408;
 constexpr u32 CloseLibrary = 414;
@@ -82,6 +92,8 @@ constexpr u32 CopyMem = 624;
 constexpr u32 CopyMemQuick = 630;
 constexpr u32 CacheClearU = 636;
 constexpr u32 CacheClearE = 642;
+constexpr u32 CreateMsgPort = 666;
+constexpr u32 DeleteMsgPort = 672;
 constexpr u32 AllocVec = 684;
 constexpr u32 FreeVec = 690;
 
@@ -195,9 +207,28 @@ constexpr u32 TC_SIGWAIT = 22;
 constexpr u32 TC_SIGRECVD = 26;
 constexpr u32 TC_SIZE = 92;
 
+// struct MsgPort and struct Message
+constexpr u32 mp_Flags = 14;
+constexpr u32 mp_SigBit = 15;
+constexpr u32 mp_SigTask = 16;
+constexpr u32 mp_MsgList = 20;
+constexpr u32 MP_SIZE = 34;
+
+constexpr u8 PA_SIGNAL = 0;
+constexpr u8 PA_SOFTINT = 1;
+constexpr u8 PA_IGNORE = 2;
+
+constexpr u32 mn_ReplyPort = 14;
+constexpr u32 mn_Length = 18;
+constexpr u32 MN_SIZE = 20;
+
 // Node types
 constexpr u8 NT_TASK = 1;
 constexpr u8 NT_DEVICE = 3;
+constexpr u8 NT_MSGPORT = 4;
+constexpr u8 NT_MESSAGE = 5;
+constexpr u8 NT_FREEMSG = 6;
+constexpr u8 NT_REPLYMSG = 7;
 constexpr u8 NT_RESOURCE = 8;
 constexpr u8 NT_LIBRARY = 9;
 constexpr u8 NT_MEMORY = 10;
@@ -208,6 +239,13 @@ constexpr u8 NT_MEMORY = 10;
 // The segments must come from Exec::alloc, so that exec can free them.
 struct SegmentLoader {
     bool (*load)(void* ctx, const char* path, u32& seglist_bptr);
+    void* ctx;
+};
+
+// Runs while Wait or WaitPort blocks with no wanted signal pending. False
+// stops the wait.
+struct IdleHook {
+    bool (*poll)(void* ctx);
     void* ctx;
 };
 
@@ -248,10 +286,35 @@ public:
     // It may be set before init and is kept across it.
     void set_segment_loader(const SegmentLoader& loader) { loader_ = loader; }
 
+    // Wait and WaitPort call this while no wanted signal is pending. It may
+    // be set before init and is kept across it.
+    void set_idle_hook(const IdleHook& hook) { idle_ = hook; }
+
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
     // tc_SigRecvd SetSignal and Wait use. It may be set before init and is
     // kept across it.
     void set_this_task(u32 task_addr);
+
+    // Allocates and initialises a PA_SIGNAL MsgPort for the current task, or
+    // returns 0 if memory or signals are exhausted.
+    u32 create_port();
+
+    // Frees a port made by create_port or CreateMsgPort; ignores 0.
+    void delete_port(u32 port);
+
+    // Queues message at the tail of port and signals mp_SigTask when
+    // mp_Flags is PA_SIGNAL. False if port or message is 0 or faults.
+    bool post_message(u32 port, u32 message);
+
+    // Removes and returns the head message of port, or 0 if it is empty.
+    u32 get_message(u32 port);
+
+    // Sets the bits of mask in the current task's tc_SigRecvd.
+    void signal_current_task(u32 mask);
+
+    // Registers a reply port whose replies go to handler instead of being
+    // queued on the port. A second call replaces the first.
+    void set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx);
 
 private:
     friend struct ExecOps;
@@ -273,7 +336,8 @@ private:
     u32 upper_ = 0;
     u32 free_bytes_ = 0;
     u32 task_ = 0;
-    u32 signals_ = 0;  // while no task is set
+    u32 sig_alloc_ = 0x0000FFFF;  // while no task is set
+    u32 signals_ = 0;             // while no task is set
     u32 call_depth_ = 0;
     u32 load_depth_ = 0;
     u16 open_id_ = 0;
@@ -281,6 +345,10 @@ private:
     u16 expunge_id_ = 0;
     u16 reserved_id_ = 0;
     SegmentLoader loader_{nullptr, nullptr};
+    IdleHook idle_{nullptr, nullptr};
+    u32 reply_port_ = 0;
+    void (*reply_handler_)(void* ctx, u32 message) = nullptr;
+    void* reply_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;
     u32 loaded_[kMaxLoaded]{};  // seglists of libraries exec loaded

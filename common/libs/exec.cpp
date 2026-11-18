@@ -49,7 +49,7 @@ constexpr u32 kMaxVectors = 0xFFFC / LIB_VECTSIZE;  // lib_NegSize is a UWORD
 constexpr u32 kMaxName = 256;
 constexpr u32 kMaxSegments = 64;
 constexpr u32 kMaxInitCommands = 1u << 16;
-constexpr u8 NT_MSGPORT = 4;
+constexpr u32 kMaxQueued = 4096;
 constexpr char kExecName[] = "exec.library";
 constexpr char kExecIdString[] = "exec 60.0 (Hombre)\r\n";
 constexpr char kMemoryName[] = "memory";
@@ -63,6 +63,11 @@ void end_run(Machine& m, ExitReason why) {
     if (m.cpu.exit == ExitReason::None) {
         m.cpu.exit = why;
     }
+}
+
+// Ends the run with BusError when a native is given a null guest pointer.
+void fault_null(Bus& b) {
+    b.bytes_at(0, b.machine().mem.size + 1);
 }
 
 // Reads the free chunk at addr and checks it: 8-aligned, at or above floor,
@@ -505,6 +510,18 @@ struct ExecOps {
         native::set_result(m, found);
     }
 
+    static u32 sig_alloc(Exec& e, Bus& b) {
+        return e.task_ != 0 ? b.r32(e.task_ + TC_SIGALLOC) : e.sig_alloc_;
+    }
+
+    static void store_sig_alloc(Exec& e, Bus& b, u32 value) {
+        if (e.task_ != 0) {
+            b.w32(e.task_ + TC_SIGALLOC, value);
+        } else {
+            e.sig_alloc_ = value;
+        }
+    }
+
     static u32 signals(Exec& e, Bus& b) {
         return e.task_ != 0 ? b.r32(e.task_ + TC_SIGRECVD) : e.signals_;
     }
@@ -526,23 +543,289 @@ struct ExecOps {
         native::set_result(m, old);
     }
 
-    // Nothing else runs that could signal, so a Wait for signals that are
-    // not already pending would never return.
+    static void signal_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        const u32 target = native::guest_address(m, m.cpu.a[1]);
+        if (target == 0 || target != native::guest_address(m, e.task_)) {
+            return;
+        }
+        Bus b(m);
+        store_signals(e, b, signals(e, b) | m.cpu.d[0]);
+    }
+
+    static u32 alloc_signal(Exec& e, Bus& b, u32 signal_num) {
+        const u32 alloc = sig_alloc(e, b);
+        if (!b.ok()) {
+            return 0xFFFFFFFF;
+        }
+        u32 chosen = 0xFFFFFFFF;
+        if (signal_num == 0xFFFFFFFF || signal_num == 0xFF) {
+            for (u32 bit = 16; bit < 32; ++bit) {
+                if ((alloc & (1u << bit)) == 0) {
+                    chosen = bit;
+                    break;
+                }
+            }
+        } else if (signal_num < 32 && (alloc & (1u << signal_num)) == 0) {
+            chosen = signal_num;
+        }
+        if (chosen >= 32) {
+            return 0xFFFFFFFF;
+        }
+        const u32 mask = 1u << chosen;
+        store_sig_alloc(e, b, alloc | mask);
+        store_signals(e, b, signals(e, b) & ~mask);
+        return b.ok() ? chosen : 0xFFFFFFFF;
+    }
+
+    static void alloc_signal_lvo(void* ctx, Machine& m) {
+        Bus b(m);
+        native::set_result(m, alloc_signal(of(ctx), b, m.cpu.d[0]));
+    }
+
+    static void free_signal(Exec& e, Bus& b, u32 signal_num) {
+        if (signal_num < 32) {
+            store_sig_alloc(e, b, sig_alloc(e, b) & ~(1u << signal_num));
+        }
+    }
+
+    static void free_signal_lvo(void* ctx, Machine& m) {
+        Bus b(m);
+        free_signal(of(ctx), b, m.cpu.d[0]);
+    }
+
+    // Waits for any bit in wanted. While none is pending and an idle hook
+    // is set, polls the hook; ends the run as Unimplemented when no hook is
+    // set or the hook returns false.
+    static u32 wait_signals(Exec& e, Bus& b, u32 wanted) {
+        Machine& m = b.machine();
+        for (;;) {
+            const u32 pending = signals(e, b);
+            const u32 got = pending & wanted;
+            if (!b.ok()) {
+                return 0;
+            }
+            if (got != 0) {
+                store_signals(e, b, pending & ~got);
+                return got;
+            }
+            if (e.idle_.poll == nullptr || !e.idle_.poll(e.idle_.ctx)) {
+                if (m.cpu.exit == ExitReason::None) {
+                    LogLine().text("exec: Wait with no signals pending").send();
+                    end_run(m, ExitReason::Unimplemented);
+                }
+                b.stop();
+                return 0;
+            }
+            if (m.cpu.exit != ExitReason::None) {
+                b.stop();
+                return 0;
+            }
+        }
+    }
+
     static void wait(void* ctx, Machine& m) {
         Exec& e = of(ctx);
         Bus b(m);
-        const u32 pending = signals(e, b);
-        const u32 got = pending & m.cpu.d[0];
+        const u32 got = wait_signals(e, b, m.cpu.d[0]);
+        if (b.ok()) {
+            native::set_result(m, got);
+        }
+    }
+
+    // --- message ports ---------------------------------------------------
+
+    static u32 peek_head(Bus& b, u32 port) {
+        const u32 list = port + mp_MsgList;
+        const u32 head = b.r32(list + LH_HEAD);
+        if (!b.ok()) {
+            return 0;
+        }
+        if (head == 0) {
+            fault_null(b);
+            return 0;
+        }
+        const u32 succ = b.r32(head + LN_SUCC);
+        if (!b.ok() || succ == 0) {
+            return 0;
+        }
+        return head;
+    }
+
+    static u32 get_msg(Bus& b, u32 port) {
+        const u32 head = peek_head(b, port);
+        if (head == 0 || !b.ok()) {
+            return 0;
+        }
+        const u32 list = port + mp_MsgList;
+        const u32 succ = b.r32(head + LN_SUCC);
+        b.w32(list + LH_HEAD, succ);
+        b.w32(succ + LN_PRED, list + LH_HEAD);
+        return b.ok() ? head : 0;
+    }
+
+    static bool queue_message(Exec& e, Bus& b, u32 port, u32 message, u8 type) {
+        const u32 list = port + mp_MsgList;
+        u32 n = b.r32(list + LH_HEAD);
+        if (!b.ok()) {
+            return false;
+        }
+        if (n == 0) {
+            fault_null(b);
+            return false;
+        }
+        for (u32 count = 0;; ++count) {
+            const u32 succ = b.r32(n + LN_SUCC);
+            if (!b.ok()) {
+                return false;
+            }
+            if (succ == 0) {
+                break;
+            }
+            if (count + 1 >= kMaxQueued) {
+                LogLine().text("exec: message port at ").hex(port).text(" is full").send();
+                return false;
+            }
+            n = succ;
+        }
+        const u32 flags = b.r8(port + mp_Flags);
+        const u32 sig_bit = b.r8(port + mp_SigBit);
+        const u32 sig_task = b.r32(port + mp_SigTask);
+        b.w8(message + LN_TYPE, type);
+        add_tail(b, list, message);
+        if (!b.ok()) {
+            return false;
+        }
+        if ((flags & 3) == PA_SIGNAL && sig_bit < 32 &&
+            native::guest_address(*e.m_, sig_task) == native::guest_address(*e.m_, e.task_)) {
+            store_signals(e, b, signals(e, b) | (1u << sig_bit));
+        }
+        return b.ok();
+    }
+
+    static void create_msg_port_lvo(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).create_port());
+    }
+
+    static void delete_msg_port_lvo(void* ctx, Machine& m) {
+        of(ctx).delete_port(m.cpu.a[0]);
+    }
+
+    static void add_port_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 port = m.cpu.a[1];
+        if (native::guest_address(m, port) == 0) {
+            fault_null(b);
+            return;
+        }
+        add_tail(b, e.base_ + PortList, port);
+    }
+
+    static void rem_port_lvo(void*, Machine& m) {
+        Bus b(m);
+        const u32 port = m.cpu.a[1];
+        if (native::guest_address(m, port) == 0) {
+            fault_null(b);
+            return;
+        }
+        remove(b, port);
+    }
+
+    static void find_port_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 name = m.cpu.a[1];
+        if (native::guest_address(m, name) == 0) {
+            fault_null(b);
+            return;
+        }
+        b.r8(name);
         if (!b.ok()) {
             return;
         }
-        if (got == 0) {
-            LogLine().text("exec: Wait with no signals pending").send();
-            end_run(m, ExitReason::Unimplemented);
+        const u32 found =
+            find_node(b, e.base_ + PortList, [&](u32 n) { return b.equals(n, name); });
+        native::set_result(m, found);
+    }
+
+    static void put_msg_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 port = m.cpu.a[0];
+        const u32 message = m.cpu.a[1];
+        if (native::guest_address(m, port) == 0 || native::guest_address(m, message) == 0) {
+            fault_null(b);
             return;
         }
-        store_signals(e, b, pending & ~got);
-        native::set_result(m, got);
+        queue_message(e, b, port, message, NT_MESSAGE);
+    }
+
+    static void get_msg_lvo(void*, Machine& m) {
+        Bus b(m);
+        const u32 port = m.cpu.a[0];
+        if (native::guest_address(m, port) == 0) {
+            fault_null(b);
+            return;
+        }
+        const u32 msg = get_msg(b, port);
+        if (b.ok()) {
+            native::set_result(m, msg);
+        }
+    }
+
+    static void reply_msg_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 message = m.cpu.a[1];
+        if (native::guest_address(m, message) == 0) {
+            fault_null(b);
+            return;
+        }
+        const u32 reply_port = b.r32(message + mn_ReplyPort);
+        if (!b.ok()) {
+            return;
+        }
+        if (native::guest_address(m, reply_port) == 0) {
+            b.w8(message + LN_TYPE, NT_FREEMSG);
+            return;
+        }
+        if (e.reply_handler_ != nullptr && e.reply_port_ != 0 &&
+            native::guest_address(m, reply_port) == native::guest_address(m, e.reply_port_)) {
+            e.reply_handler_(e.reply_ctx_, message);
+            return;
+        }
+        queue_message(e, b, reply_port, message, NT_REPLYMSG);
+    }
+
+    static void wait_port_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 port = m.cpu.a[0];
+        if (native::guest_address(m, port) == 0) {
+            fault_null(b);
+            return;
+        }
+        u32 msg = peek_head(b, port);
+        if (!b.ok()) {
+            return;
+        }
+        if (msg != 0) {
+            native::set_result(m, msg);
+            return;
+        }
+        const u32 sig_bit = b.r8(port + mp_SigBit);
+        if (!b.ok()) {
+            return;
+        }
+        const u32 mask = sig_bit < 32 ? (1u << sig_bit) : 0;
+        if (wait_signals(e, b, mask) == 0 || !b.ok()) {
+            return;
+        }
+        msg = peek_head(b, port);
+        if (b.ok()) {
+            native::set_result(m, msg);
+        }
     }
 
     // --- libraries -------------------------------------------------------
@@ -1041,6 +1324,16 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::FindTask, ExecOps::find_task, "FindTask"},
     {exec_lvo::SetSignal, ExecOps::set_signal, "SetSignal"},
     {exec_lvo::Wait, ExecOps::wait, "Wait"},
+    {exec_lvo::Signal, ExecOps::signal_lvo, "Signal"},
+    {exec_lvo::AllocSignal, ExecOps::alloc_signal_lvo, "AllocSignal"},
+    {exec_lvo::FreeSignal, ExecOps::free_signal_lvo, "FreeSignal"},
+    {exec_lvo::AddPort, ExecOps::add_port_lvo, "AddPort"},
+    {exec_lvo::RemPort, ExecOps::rem_port_lvo, "RemPort"},
+    {exec_lvo::PutMsg, ExecOps::put_msg_lvo, "PutMsg"},
+    {exec_lvo::GetMsg, ExecOps::get_msg_lvo, "GetMsg"},
+    {exec_lvo::ReplyMsg, ExecOps::reply_msg_lvo, "ReplyMsg"},
+    {exec_lvo::WaitPort, ExecOps::wait_port_lvo, "WaitPort"},
+    {exec_lvo::FindPort, ExecOps::find_port_lvo, "FindPort"},
     {exec_lvo::AddLibrary, ExecOps::add_library_lvo, "AddLibrary"},
     {exec_lvo::OldOpenLibrary, ExecOps::old_open_library, "OldOpenLibrary"},
     {exec_lvo::CloseLibrary, ExecOps::close_library, "CloseLibrary"},
@@ -1051,6 +1344,8 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::CopyMemQuick, ExecOps::copy_mem, "CopyMemQuick"},
     {exec_lvo::CacheClearU, ExecOps::cache_clear, "CacheClearU"},
     {exec_lvo::CacheClearE, ExecOps::cache_clear, "CacheClearE"},
+    {exec_lvo::CreateMsgPort, ExecOps::create_msg_port_lvo, "CreateMsgPort"},
+    {exec_lvo::DeleteMsgPort, ExecOps::delete_msg_port_lvo, "DeleteMsgPort"},
     {exec_lvo::AllocVec, ExecOps::alloc_vec, "AllocVec"},
     {exec_lvo::FreeVec, ExecOps::free_vec, "FreeVec"},
 };
@@ -1058,12 +1353,15 @@ constexpr ExecFunction kExecFunctions[] = {
 }
 
 bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
-    // The task and the segment loader may be set before init; they stay.
+    // The task, the segment loader and the idle hook may be set before init;
+    // they stay.
     const u32 task = task_;
     const SegmentLoader loader = loader_;
+    const IdleHook idle = idle_;
     *this = Exec{};
     task_ = task;
     loader_ = loader;
+    idle_ = idle;
     if (m.jit == nullptr || m.mem.base == nullptr || free_start < kLowestFree ||
         free_end <= free_start || free_end > m.mem.size) {
         return false;
@@ -1354,6 +1652,77 @@ void Exec::set_this_task(u32 task_addr) {
     if (m_ != nullptr) {
         m_->mem.write32(base_ + ThisTask, task_addr);
     }
+}
+
+u32 Exec::create_port() {
+    if (m_ == nullptr) {
+        return 0;
+    }
+    const u32 port = alloc(MP_SIZE, MEMF_PUBLIC | MEMF_CLEAR);
+    if (port == 0) {
+        return 0;
+    }
+    Bus b(*m_);
+    const u32 sig = ExecOps::alloc_signal(*this, b, 0xFFFFFFFF);
+    if (sig >= 32 || !b.ok()) {
+        free(port, MP_SIZE);
+        return 0;
+    }
+    b.w8(port + LN_TYPE, NT_MSGPORT);
+    b.w8(port + mp_Flags, PA_SIGNAL);
+    b.w8(port + mp_SigBit, sig);
+    b.w32(port + mp_SigTask, task_);
+    new_list(b, port + mp_MsgList, NT_MESSAGE);
+    if (!b.ok()) {
+        ExecOps::free_signal(*this, b, sig);
+        free(port, MP_SIZE);
+        return 0;
+    }
+    return port;
+}
+
+void Exec::delete_port(u32 port) {
+    if (m_ == nullptr || native::guest_address(*m_, port) == 0) {
+        return;
+    }
+    Bus b(*m_);
+    const u32 sig = b.r8(port + mp_SigBit);
+    if (!b.ok()) {
+        return;
+    }
+    ExecOps::free_signal(*this, b, sig);
+    free(port, MP_SIZE);
+}
+
+bool Exec::post_message(u32 port, u32 message) {
+    if (m_ == nullptr || native::guest_address(*m_, port) == 0 ||
+        native::guest_address(*m_, message) == 0) {
+        return false;
+    }
+    Bus b(*m_);
+    return ExecOps::queue_message(*this, b, port, message, NT_MESSAGE);
+}
+
+u32 Exec::get_message(u32 port) {
+    if (m_ == nullptr || native::guest_address(*m_, port) == 0) {
+        return 0;
+    }
+    Bus b(*m_);
+    return ExecOps::get_msg(b, port);
+}
+
+void Exec::signal_current_task(u32 mask) {
+    if (m_ == nullptr) {
+        return;
+    }
+    Bus b(*m_);
+    ExecOps::store_signals(*this, b, ExecOps::signals(*this, b) | mask);
+}
+
+void Exec::set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx) {
+    reply_port_ = port;
+    reply_handler_ = handler;
+    reply_ctx_ = ctx;
 }
 
 }

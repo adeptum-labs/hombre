@@ -102,11 +102,13 @@ public:
         m.cpu.a[7] = kStack;
     }
 
-    // exec keeps the task and the loader across init: the next rig starts
-    // without them.
+    // exec keeps the task, the loader and the idle hook across init: the next
+    // rig starts without them.
     ~Rig() {
         g_exec.set_this_task(0);
         g_exec.set_segment_loader(SegmentLoader{nullptr, nullptr});
+        g_exec.set_idle_hook(IdleHook{nullptr, nullptr});
+        g_exec.set_reply_handler(0, nullptr, nullptr);
         g_log = nullptr;
         munmap(rw_, kRegion);
         munmap(const_cast<u8*>(rx_), kRegion);
@@ -254,6 +256,16 @@ void layout_matches_the_ndk() {
     CHECK_EQ(exec_lvo::FindTask, 294u);
     CHECK_EQ(exec_lvo::SetSignal, 306u);
     CHECK_EQ(exec_lvo::Wait, 318u);
+    CHECK_EQ(exec_lvo::Signal, 324u);
+    CHECK_EQ(exec_lvo::AllocSignal, 330u);
+    CHECK_EQ(exec_lvo::FreeSignal, 336u);
+    CHECK_EQ(exec_lvo::AddPort, 354u);
+    CHECK_EQ(exec_lvo::RemPort, 360u);
+    CHECK_EQ(exec_lvo::PutMsg, 366u);
+    CHECK_EQ(exec_lvo::GetMsg, 372u);
+    CHECK_EQ(exec_lvo::ReplyMsg, 378u);
+    CHECK_EQ(exec_lvo::WaitPort, 384u);
+    CHECK_EQ(exec_lvo::FindPort, 390u);
     CHECK_EQ(exec_lvo::AddLibrary, 396u);
     CHECK_EQ(exec_lvo::OldOpenLibrary, 408u);
     CHECK_EQ(exec_lvo::CloseLibrary, 414u);
@@ -264,6 +276,8 @@ void layout_matches_the_ndk() {
     CHECK_EQ(exec_lvo::CopyMemQuick, 630u);
     CHECK_EQ(exec_lvo::CacheClearU, 636u);
     CHECK_EQ(exec_lvo::CacheClearE, 642u);
+    CHECK_EQ(exec_lvo::CreateMsgPort, 666u);
+    CHECK_EQ(exec_lvo::DeleteMsgPort, 672u);
     CHECK_EQ(exec_lvo::AllocVec, 684u);
     CHECK_EQ(exec_lvo::FreeVec, 690u);
     CHECK_EQ(lib_lvo::Open, 6u);
@@ -366,6 +380,17 @@ void layout_matches_the_ndk() {
     CHECK_EQ(TC_SIGWAIT, 22u);
     CHECK_EQ(TC_SIGRECVD, 26u);
     CHECK_EQ(TC_SIZE, 92u);
+    CHECK_EQ(mp_Flags, 14u);
+    CHECK_EQ(mp_SigBit, 15u);
+    CHECK_EQ(mp_SigTask, 16u);
+    CHECK_EQ(mp_MsgList, 20u);
+    CHECK_EQ(MP_SIZE, 34u);
+    CHECK_EQ(mn_ReplyPort, 14u);
+    CHECK_EQ(mn_Length, 18u);
+    CHECK_EQ(MN_SIZE, 20u);
+    CHECK_EQ(PA_SIGNAL, 0u);
+    CHECK_EQ(PA_SOFTINT, 1u);
+    CHECK_EQ(PA_IGNORE, 2u);
 
     CHECK_EQ(RTC_MATCHWORD, 0x4AFCu);
     CHECK_EQ(RTF_AUTOINIT, 0x80u);
@@ -377,6 +402,10 @@ void layout_matches_the_ndk() {
     CHECK_EQ(MEMF_TOTAL, 0x80000u);
     CHECK_EQ(NT_TASK, 1u);
     CHECK_EQ(NT_DEVICE, 3u);
+    CHECK_EQ(NT_MSGPORT, 4u);
+    CHECK_EQ(NT_MESSAGE, 5u);
+    CHECK_EQ(NT_FREEMSG, 6u);
+    CHECK_EQ(NT_REPLYMSG, 7u);
     CHECK_EQ(NT_RESOURCE, 8u);
     CHECK_EQ(NT_LIBRARY, 9u);
     CHECK_EQ(NT_MEMORY, 10u);
@@ -1704,6 +1733,488 @@ void raw_do_fmt_output_is_capped() {
     CHECK_EQ(r.cpu().d[0], 0x5A5A5A5Au);  // stopped: no result
 }
 
+// --- message ports and signals ------------------------------------------
+
+u32 make_test_task(Rig& r, u32 at = kData) {
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        r.put8(at + i, 0);
+    }
+    r.put8(at + LN_TYPE, NT_TASK);
+    r.put32(at + TC_SIGALLOC, 0x0000FFFF);
+    g_exec.set_this_task(at);
+    return at;
+}
+
+void create_and_delete_port_balance_memory_and_signals() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const auto before = r.chunks();
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+    CHECK_EQ(r.get8(port + LN_TYPE), NT_MSGPORT);
+    CHECK_EQ(r.get8(port + mp_Flags), PA_SIGNAL);
+    CHECK_EQ(r.get8(port + mp_SigBit), 16u);
+    CHECK_EQ(r.get32(port + mp_SigTask), task);
+    CHECK_EQ(r.get8(port + mp_MsgList + LH_TYPE), NT_MESSAGE);
+    CHECK(r.walk(port + mp_MsgList).empty());
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), 0x0001FFFFu);
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::DeleteMsgPort), ExitReason::Halt);
+    CHECK(r.chunks() == before);
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), 0x0000FFFFu);
+
+    // DeleteMsgPort(0) is a no-op.
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::DeleteMsgPort), ExitReason::Halt);
+    CHECK(r.chunks() == before);
+
+    // C++ helpers balance memory and signals too.
+    const u32 cpp_port = g_exec.create_port();
+    CHECK(cpp_port != 0);
+    CHECK_EQ(r.get8(cpp_port + mp_SigBit), 16u);
+    g_exec.delete_port(cpp_port);
+    g_exec.delete_port(0);
+    CHECK(r.chunks() == before);
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), 0x0000FFFFu);
+
+    // When no signal is free, CreateMsgPort frees the port block and returns 0.
+    r.put32(task + TC_SIGALLOC, 0xFFFFFFFF);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK(r.chunks() == before);
+}
+
+void alloc_signal_picks_bit_16_first_and_free_signal_releases_it() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    r.put32(task + TC_SIGRECVD, 1u << 16);
+
+    r.cpu().d[0] = 0xFFFFFFFF;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 16u);
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), 0x0001FFFFu);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0u);  // cleared on allocation
+
+    r.cpu().d[0] = 0xFFFFFFFF;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 17u);
+
+    r.cpu().d[0] = 16;
+    CHECK_EQ(r.exec(exec_lvo::FreeSignal), ExitReason::Halt);
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), 0x0002FFFFu);
+
+    r.cpu().d[0] = 0xFFFFFFFF;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 16u);
+}
+
+void alloc_signal_specific_bit_and_taken_bit_fails() {
+    Rig r;
+    const u32 task = make_test_task(r);
+
+    r.cpu().d[0] = 20;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 20u);
+
+    // Allocating the same bit again fails with -1.
+    r.cpu().d[0] = 20;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0xFFFFFFFFu);
+
+    // Bits 0..15 are reserved in tc_SigAlloc.
+    r.cpu().d[0] = 5;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0xFFFFFFFFu);
+
+    // Out-of-range bit numbers fail cleanly.
+    r.cpu().d[0] = 32;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0xFFFFFFFFu);
+
+    // Exhausting all 16 user signals leaves none for AllocSignal(-1).
+    r.put32(task + TC_SIGALLOC, 0xFFFFFFFF);
+    r.cpu().d[0] = 0xFFFFFFFF;
+    CHECK_EQ(r.exec(exec_lvo::AllocSignal), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0xFFFFFFFFu);
+}
+
+void put_and_get_msg_preserve_order_and_signal_the_task() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    const u32 sig_bit = r.get8(port + mp_SigBit);
+    const u32 msg1 = kData + 0x200;
+    const u32 msg2 = kData + 0x240;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg1 + i, 0);
+        r.put8(msg2 + i, 0);
+    }
+
+    r.cpu().a[0] = port;
+    r.cpu().a[1] = msg1;
+    CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::Halt);
+    CHECK_EQ(r.get8(msg1 + LN_TYPE), NT_MESSAGE);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 1u << sig_bit);
+
+    r.put32(task + TC_SIGRECVD, 0);
+    r.cpu().a[0] = port;
+    r.cpu().a[1] = msg2;
+    CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::Halt);
+    CHECK_EQ(r.get8(msg2 + LN_TYPE), NT_MESSAGE);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 1u << sig_bit);
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], msg1);
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], msg2);
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    // PA_IGNORE queues the message without signaling the task.
+    r.put32(task + TC_SIGRECVD, 0);
+    r.put8(port + mp_Flags, PA_IGNORE);
+    CHECK(g_exec.post_message(port, msg1));
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0u);
+    CHECK_EQ(g_exec.get_message(port), msg1);
+    g_exec.delete_port(port);
+}
+
+void get_msg_on_empty_port_returns_zero() {
+    Rig r;
+    make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(g_exec.get_message(port), 0u);
+    g_exec.delete_port(port);
+}
+
+void waitport_returns_a_queued_message_without_removing_it() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    const u32 sig_bit = r.get8(port + mp_SigBit);
+    const u32 msg1 = kData + 0x200;
+    const u32 msg2 = kData + 0x240;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg1 + i, 0);
+        r.put8(msg2 + i, 0);
+    }
+    CHECK(g_exec.post_message(port, msg1));
+    CHECK(g_exec.post_message(port, msg2));
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 1u << sig_bit);
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], msg1);
+    // The signal bit is not consumed when a message was already queued.
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 1u << sig_bit);
+    // The head message is still in the port.
+    CHECK_EQ(g_exec.get_message(port), msg1);
+    CHECK_EQ(g_exec.get_message(port), msg2);
+    g_exec.delete_port(port);
+}
+
+struct HookPostState {
+    u32 calls = 0;
+    u32 port = 0;
+    u32 msg = 0;
+};
+
+bool hook_posts_on_third_call(void* ctx) {
+    HookPostState& s = *static_cast<HookPostState*>(ctx);
+    ++s.calls;
+    if (s.calls == 3) {
+        CHECK(g_exec.post_message(s.port, s.msg));
+    }
+    return true;
+}
+
+void wait_with_idle_hook_returns_when_the_hook_posts_a_message() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    const u32 sig_bit = r.get8(port + mp_SigBit);
+    const u32 msg = kData + 0x200;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg + i, 0);
+    }
+    HookPostState state{0, port, msg};
+    g_exec.set_idle_hook(IdleHook{hook_posts_on_third_call, &state});
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::Halt);
+    CHECK_EQ(state.calls, 3u);
+    CHECK_EQ(r.cpu().d[0], msg);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD) & (1u << sig_bit), 0u);
+    CHECK_EQ(g_exec.get_message(port), msg);
+    g_exec.delete_port(port);
+}
+
+bool hook_returns_false(void* ctx) {
+    u32& calls = *static_cast<u32*>(ctx);
+    ++calls;
+    return false;
+}
+
+void wait_with_a_hook_that_returns_false_ends_the_run() {
+    Rig r;
+    make_test_task(r);
+    u32 calls = 0;
+    g_exec.set_idle_hook(IdleHook{hook_returns_false, &calls});
+    r.cpu().d[0] = 1u << 16;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
+    CHECK_EQ(calls, 1u);
+    CHECK(logged("exec: Wait with no signals pending"));
+}
+
+void wait_without_a_hook_is_unchanged() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    r.put32(task + TC_SIGRECVD, 0x0030);
+    r.cpu().d[0] = 0x0010;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x0010u);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0x0020u);
+    CHECK(g_lines.empty());
+
+    r.cpu().d[0] = 0x0001;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Unimplemented);
+    CHECK(logged("exec: Wait with no signals pending"));
+}
+
+void reply_msg_to_a_reply_port_queues_it_as_replymsg() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 reply_port = g_exec.create_port();
+    CHECK(reply_port != 0);
+    const u32 sig_bit = r.get8(reply_port + mp_SigBit);
+    const u32 msg = kData + 0x200;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg + i, 0);
+    }
+    r.put8(msg + LN_TYPE, NT_MESSAGE);
+    r.put32(msg + mn_ReplyPort, reply_port);
+
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::Halt);
+    CHECK_EQ(r.get8(msg + LN_TYPE), NT_REPLYMSG);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 1u << sig_bit);
+    CHECK_EQ(g_exec.get_message(reply_port), msg);
+    g_exec.delete_port(reply_port);
+}
+
+void reply_msg_without_a_reply_port_marks_the_message_free() {
+    Rig r;
+    make_test_task(r);
+    const u32 msg = kData + 0x200;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg + i, 0);
+    }
+    r.put8(msg + LN_TYPE, NT_MESSAGE);
+    r.put32(msg + mn_ReplyPort, 0);
+
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::Halt);
+    CHECK_EQ(r.get8(msg + LN_TYPE), NT_FREEMSG);
+}
+
+struct ReplyCapture {
+    u32 calls = 0;
+    u32 last_msg = 0;
+};
+
+void capture_reply(void* ctx, u32 message) {
+    ReplyCapture& c = *static_cast<ReplyCapture*>(ctx);
+    ++c.calls;
+    c.last_msg = message;
+}
+
+void reply_msg_runs_the_registered_handler_instead_of_queueing() {
+    Rig r;
+    const u32 task = make_test_task(r);
+    const u32 reply_port = g_exec.create_port();
+    CHECK(reply_port != 0);
+    ReplyCapture cap{};
+    g_exec.set_reply_handler(reply_port, capture_reply, &cap);
+
+    const u32 msg = kData + 0x200;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg + i, 0);
+    }
+    r.put8(msg + LN_TYPE, NT_MESSAGE);
+    r.put32(msg + mn_ReplyPort, reply_port);
+
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::Halt);
+    CHECK_EQ(cap.calls, 1u);
+    CHECK_EQ(cap.last_msg, msg);
+    CHECK_EQ(g_exec.get_message(reply_port), 0u);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0u);
+    g_exec.delete_port(reply_port);
+}
+
+void add_find_remove_port_by_name() {
+    Rig r;
+    make_test_task(r);
+    const u32 port1 = g_exec.create_port();
+    const u32 port2 = g_exec.create_port();
+    CHECK(port1 != 0 && port2 != 0);
+    r.put32(port1 + LN_NAME, r.str(kNames, "port.one"));
+    r.put32(port2 + LN_NAME, r.str(kNames + 0x20, "port.two"));
+
+    r.cpu().a[1] = port1;
+    CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::Halt);
+    r.cpu().a[1] = port2;
+    CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::Halt);
+
+    r.cpu().a[1] = r.str(kNames + 0x40, "port.one");
+    CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], port1);
+
+    r.cpu().a[1] = r.str(kNames + 0x40, "port.two");
+    CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], port2);
+
+    r.cpu().a[1] = r.str(kNames + 0x40, "port.three");
+    CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[1] = port1;
+    CHECK_EQ(r.exec(exec_lvo::RemPort), ExitReason::Halt);
+    r.cpu().a[1] = r.str(kNames + 0x40, "port.one");
+    CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[1] = port2;
+    CHECK_EQ(r.exec(exec_lvo::RemPort), ExitReason::Halt);
+    g_exec.delete_port(port1);
+    g_exec.delete_port(port2);
+}
+
+void signal_sets_the_bit_for_the_current_task_only() {
+    Rig r;
+    const u32 task = make_test_task(r);
+
+    // Null and foreign task pointers are ignored.
+    r.cpu().a[1] = 0;
+    r.cpu().d[0] = 0x0100;
+    CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0u);
+
+    r.cpu().a[1] = task + 0x100;
+    r.cpu().d[0] = 0x0100;
+    CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0u);
+
+    r.cpu().a[1] = task;
+    r.cpu().d[0] = 0x0100;
+    CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0x0100u);
+
+    r.cpu().a[1] = task;
+    r.cpu().d[0] = 0x0040;
+    CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0x0140u);
+
+    g_exec.signal_current_task(0x0008);
+    CHECK_EQ(r.get32(task + TC_SIGRECVD), 0x0148u);
+}
+
+void null_and_unreadable_port_pointers_fault_cleanly() {
+    Rig r;
+    make_test_task(r);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    const u32 msg = kData + 0x200;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg + i, 0);
+    }
+
+    CHECK(!g_exec.post_message(0, msg));
+    CHECK(!g_exec.post_message(port, 0));
+    CHECK_EQ(g_exec.get_message(0), 0u);
+
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[0] = port;
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = kGuestBytes;
+    CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = kGuestBytes;
+    CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::RemPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = kGuestBytes;
+    CHECK_EQ(r.exec(exec_lvo::RemPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[1] = kGuestBytes;
+    CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    r.cpu().a[0] = kGuestBytes;
+    CHECK_EQ(r.exec(exec_lvo::DeleteMsgPort), ExitReason::BusError);
+
+    r.cpu().exit = ExitReason::None;
+    g_exec.delete_port(port);
+}
+
 }
 
 int main() {
@@ -1740,5 +2251,20 @@ int main() {
     raw_do_fmt_on_bad_input();
     calls_from_natives_share_the_block_budget();
     raw_do_fmt_output_is_capped();
+    create_and_delete_port_balance_memory_and_signals();
+    alloc_signal_picks_bit_16_first_and_free_signal_releases_it();
+    alloc_signal_specific_bit_and_taken_bit_fails();
+    put_and_get_msg_preserve_order_and_signal_the_task();
+    get_msg_on_empty_port_returns_zero();
+    waitport_returns_a_queued_message_without_removing_it();
+    wait_with_idle_hook_returns_when_the_hook_posts_a_message();
+    wait_with_a_hook_that_returns_false_ends_the_run();
+    wait_without_a_hook_is_unchanged();
+    reply_msg_to_a_reply_port_queues_it_as_replymsg();
+    reply_msg_without_a_reply_port_marks_the_message_free();
+    reply_msg_runs_the_registered_handler_instead_of_queueing();
+    add_find_remove_port_by_name();
+    signal_sets_the_bit_for_the_current_task_only();
+    null_and_unreadable_port_pointers_fault_cleanly();
     return check::finish("test_exec");
 }

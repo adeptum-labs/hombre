@@ -119,7 +119,6 @@ constexpr u32 SetOwner = 996;
 // named as the NDK assembler includes name them.
 namespace ndk {
 
-constexpr u8 NT_MSGPORT = 4;
 constexpr u8 NT_PROCESS = 13;
 constexpr u8 NT_SIGNALSEM = 15;
 constexpr u8 TS_RUN = 2;
@@ -136,7 +135,6 @@ constexpr u32 MP_FLAGS = 14;
 constexpr u32 MP_SIGBIT = 15;
 constexpr u32 MP_SIGTASK = 16;
 constexpr u32 MP_MSGLIST = 20;
-constexpr u32 MP_SIZE = 34;
 
 // struct MinList
 constexpr u32 MLH_HEAD = 0;
