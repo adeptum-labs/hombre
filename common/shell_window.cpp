@@ -40,6 +40,11 @@ constexpr u32 kMaxWrite = 65536;
 constexpr u32 kCell = 8;
 constexpr u32 kBaseline = 6;
 
+// Printable Latin-1: the ASCII range and the codes above the control block.
+constexpr bool is_printable(u8 c) {
+    return (c >= 0x20 && c <= 0x7e) || c >= 0xa0;
+}
+
 }
 
 bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuition,
@@ -129,6 +134,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     rows_ = static_cast<u32>(height) / kCell;
     col_ = 0;
     row_ = 0;
+    mark_line_start();
     gfx.set_pens(rp_, 1, 0, ndk::JAM2);
     return true;
 }
@@ -184,6 +190,61 @@ void ShellWindow::write_prompt(u32 cli_number, const char* volume) {
     prompt[length++] = ' ';
     write(reinterpret_cast<const u8*>(prompt), length);
     draw_cursor();
+    mark_line_start();
+}
+
+void ShellWindow::echo(u8 ch) {
+    if (!is_open() || !is_printable(ch) || columns_ == 0 || rows_ == 0) {
+        return;
+    }
+    graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
+    put_byte(ch);
+    draw_cursor();
+}
+
+void ShellWindow::erase_last() {
+    if (!is_open() || columns_ == 0 || rows_ == 0 || !has_typed_input()) {
+        return;
+    }
+    graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
+    draw_cell(' ');
+    if (col_ == 0) {
+        --row_;
+        col_ = columns_ - 1;
+    } else {
+        --col_;
+    }
+    draw_cell(' ');
+    draw_cursor();
+}
+
+void ShellWindow::end_line() {
+    if (!is_open() || columns_ == 0 || rows_ == 0) {
+        return;
+    }
+    graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
+    draw_cell(' ');
+    col_ = 0;
+    advance_row();
+    mark_line_start();
+}
+
+void ShellWindow::print_line(const char* text) {
+    if (!is_open() || text == nullptr) {
+        return;
+    }
+    if (col_ != 0) {
+        graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
+        draw_cell(' ');
+        col_ = 0;
+        advance_row();
+    }
+    u32 length = 0;
+    while (length < kMaxWrite && text[length] != '\0') {
+        ++length;
+    }
+    write(reinterpret_cast<const u8*>(text), length);
+    end_line();
 }
 
 void ShellWindow::close() {
@@ -244,12 +305,25 @@ void ShellWindow::advance_row() {
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     graphics_->scroll(rp_, 0, static_cast<i32>(kCell), origin_x_, origin_y_,
                       origin_x_ + inner_w_ - 1, origin_y_ + inner_h_ - 1);
+    // The start of the typed line moves up with its text.
+    if (line_start_row_ != 0) {
+        --line_start_row_;
+    }
 }
 
 void ShellWindow::draw_cell(u8 c) {
     graphics_->move(rp_, origin_x_ + static_cast<i32>(col_ * kCell),
                     origin_y_ + static_cast<i32>(row_ * kCell) + static_cast<i32>(kBaseline));
     graphics_->text(rp_, &c, 1);
+}
+
+void ShellWindow::mark_line_start() {
+    line_start_row_ = row_;
+    line_start_col_ = col_;
+}
+
+bool ShellWindow::has_typed_input() const {
+    return row_ > line_start_row_ || col_ > line_start_col_;
 }
 
 void ShellWindow::draw_cursor() {

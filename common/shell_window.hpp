@@ -28,8 +28,10 @@
 
 // The AmigaShell console: a window with a character grid, drawn and
 // scrolled through the Graphics C++ methods. write takes console output,
-// write_prompt prints the CLI prompt and leaves a block cursor after it.
-// The window is opened on the front screen.
+// write_prompt prints the CLI prompt and leaves a block cursor after it,
+// echo draws a typed byte at the cursor, erase_last takes it back and
+// print_line writes a message on a line of its own. The window is opened
+// on the front screen.
 
 namespace hombre {
 
@@ -48,6 +50,21 @@ public:
 
     void write(const u8* data, u32 bytes);
     void write_prompt(u32 cli_number, const char* volume);
+
+    // Draws one printable byte at the cursor and moves the block cursor
+    // past it, wrapping and scrolling like write.
+    void echo(u8 ch);
+
+    // Takes the cursor back one cell and clears the cells it leaves and
+    // enters. Does nothing once the cursor is back at the prompt's end.
+    void erase_last();
+
+    // Clears the block cursor and moves to column 0 of the next row.
+    void end_line();
+
+    // Writes the text on a row of its own and ends that line.
+    void print_line(const char* text);
+
     bool is_open() const;
     void close();
 
@@ -59,6 +76,8 @@ private:
     void advance_row();
     void draw_cell(u8 c);
     void draw_cursor();
+    void mark_line_start();
+    bool has_typed_input() const;
 
     Intuition* intuition_ = nullptr;
     Graphics* graphics_ = nullptr;
@@ -72,6 +91,8 @@ private:
     u32 rows_ = 0;
     u32 col_ = 0;
     u32 row_ = 0;
+    u32 line_start_row_ = 0;
+    u32 line_start_col_ = 0;
 };
 
 }

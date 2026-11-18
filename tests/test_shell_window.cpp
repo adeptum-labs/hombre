@@ -360,6 +360,238 @@ void sink_forwards_to_write() {
     CHECK(cell_is(r, bm, ix, iy, 0, 0, 'H'));
 }
 
+void echo_draws_the_char_and_moves_the_cursor_block() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+
+    shell.echo('A');
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_all(r, bm, ix, iy, 1, 0, 1));
+    CHECK(cell_all(r, bm, ix, iy, 2, 0, 0));
+
+    shell.echo('B');
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 2, 0, 1));
+    CHECK(cell_all(r, bm, ix, iy, 3, 0, 0));
+}
+
+void echo_wraps_at_the_last_column_and_scrolls() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 cells = columns(r, window);
+    const u32 cell_rows = rows(r, window);
+    CHECK(cells >= 4 && cells < 200);
+    CHECK(cell_rows >= 4);
+
+    for (u32 i = 0; i < cells; ++i) {
+        shell.echo('A');
+    }
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_is(r, bm, ix, iy, cells - 1, 0, 'A'));
+    CHECK(cell_all(r, bm, ix, iy, 0, 1, 1));
+
+    // End the filled line so the row below stays blank, then fill the last
+    // row, which has to scroll at the wrap.
+    shell.end_line();
+    for (u32 row = 2; row + 1 < cell_rows; ++row) {
+        write_str(shell, "\n");
+    }
+    for (u32 i = 0; i < cells; ++i) {
+        shell.echo('B');
+    }
+    CHECK(cell_all(r, bm, ix, iy, 0, 0, 0));
+    CHECK(cell_is(r, bm, ix, iy, 0, cell_rows - 2, 'B'));
+    CHECK(cell_is(r, bm, ix, iy, cells - 1, cell_rows - 2, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 0, cell_rows - 1, 1));
+}
+
+void erase_last_clears_the_cell_and_moves_the_block_back() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+
+    shell.echo('A');
+    shell.echo('B');
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 2, 0, 1));
+
+    shell.erase_last();
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_all(r, bm, ix, iy, 1, 0, 1));
+    CHECK(cell_all(r, bm, ix, iy, 2, 0, 0));
+}
+
+void erase_last_at_the_prompt_start_does_nothing() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+
+    shell.write_prompt(1, "X");
+    const std::vector<u8> prompt = screen_planes(r, screen);
+    shell.erase_last();
+    CHECK(screen_planes(r, screen) == prompt);
+
+    shell.echo('A');
+    shell.erase_last();
+    CHECK(screen_planes(r, screen) == prompt);
+    shell.erase_last();
+    CHECK(screen_planes(r, screen) == prompt);
+}
+
+void erase_last_across_a_wrapped_row() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 cells = columns(r, window);
+    CHECK(cells >= 4 && cells < 200);
+
+    for (u32 i = 0; i < cells; ++i) {
+        shell.echo('A');
+    }
+    CHECK(cell_all(r, bm, ix, iy, 0, 1, 1));
+
+    shell.erase_last();
+    CHECK(cell_all(r, bm, ix, iy, 0, 1, 0));
+    CHECK(cell_all(r, bm, ix, iy, cells - 1, 0, 1));
+    CHECK(cell_is(r, bm, ix, iy, cells - 2, 0, 'A'));
+
+    for (u32 i = 1; i < cells; ++i) {
+        shell.erase_last();
+    }
+    CHECK(cell_all(r, bm, ix, iy, 0, 0, 1));
+    CHECK(cell_all(r, bm, ix, iy, cells - 1, 0, 0));
+
+    const std::vector<u8> erased = screen_planes(r, screen);
+    shell.erase_last();
+    CHECK(screen_planes(r, screen) == erased);
+}
+
+void end_line_clears_the_cursor_and_starts_a_new_row() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 cell_rows = rows(r, window);
+    CHECK(cell_rows >= 4);
+
+    shell.echo('A');
+    shell.end_line();
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_all(r, bm, ix, iy, 1, 0, 0));
+
+    shell.echo('B');
+    CHECK(cell_is(r, bm, ix, iy, 0, 1, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 1, 1, 1));
+
+    for (u32 row = 1; row + 1 < cell_rows; ++row) {
+        shell.end_line();
+    }
+    CHECK(cell_all(r, bm, ix, iy, 1, 1, 0));
+    shell.end_line();
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 0, cell_rows - 1, 0));
+}
+
+void echo_latin1_letter_is_not_a_question_mark() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+
+    shell.echo(0xE5);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, static_cast<char>(0xE5)));
+    CHECK(!cell_is(r, bm, ix, iy, 0, 0, '?'));
+    CHECK(cell_all(r, bm, ix, iy, 1, 0, 1));
+}
+
+void typing_functions_do_nothing_after_the_window_closed() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    CHECK(window != 0);
+
+    r.intuition.close_window(window);
+    CHECK(!shell.is_open());
+    const std::vector<u8> before = screen_planes(r, screen);
+    const usize refreshes = r.refreshes.size();
+
+    shell.echo('A');
+    shell.erase_last();
+    shell.end_line();
+    shell.print_line("gone");
+    CHECK(screen_planes(r, screen) == before);
+    CHECK_EQ(r.refreshes.size(), refreshes);
+}
+
+void print_line_starts_a_fresh_row() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    CHECK(rows(r, window) >= 5);
+
+    write_str(shell, "AB");
+    shell.print_line("CD");
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 2, 0, 0));
+    CHECK(cell_is(r, bm, ix, iy, 0, 1, 'C'));
+    CHECK(cell_is(r, bm, ix, iy, 1, 1, 'D'));
+    CHECK(cell_all(r, bm, ix, iy, 2, 1, 0));
+
+    shell.print_line("EF");
+    CHECK(cell_is(r, bm, ix, iy, 0, 2, 'E'));
+    CHECK(cell_is(r, bm, ix, iy, 1, 2, 'F'));
+    shell.echo('G');
+    CHECK(cell_is(r, bm, ix, iy, 0, 3, 'G'));
+}
+
 void close_is_idempotent() {
     GfxRig r;
     const u32 screen = open_screen(r);
@@ -436,6 +668,15 @@ int main() {
     prompt_starts_on_a_new_row_when_mid_line();
     non_printable_bytes_draw_question_mark();
     sink_forwards_to_write();
+    echo_draws_the_char_and_moves_the_cursor_block();
+    echo_wraps_at_the_last_column_and_scrolls();
+    erase_last_clears_the_cell_and_moves_the_block_back();
+    erase_last_at_the_prompt_start_does_nothing();
+    erase_last_across_a_wrapped_row();
+    end_line_clears_the_cursor_and_starts_a_new_row();
+    echo_latin1_letter_is_not_a_question_mark();
+    typing_functions_do_nothing_after_the_window_closed();
+    print_line_starts_a_fresh_row();
     close_is_idempotent();
     shell_is_not_open_after_its_window_is_closed();
     shell_is_not_open_after_its_screen_is_closed();
