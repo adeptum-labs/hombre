@@ -23,8 +23,8 @@
 
 #pragma once
 
-#include "../types.hpp"
-#include "gfx.hpp"
+#include "types.hpp"
+#include "libs/gfx.hpp"
 
 // The AmigaShell console: a window with a character grid, drawn and
 // scrolled through the Graphics C++ methods. write takes console output,

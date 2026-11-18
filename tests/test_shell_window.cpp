@@ -25,7 +25,7 @@
 #include "gfx_rig.hpp"
 #include "libs/dos.hpp"
 #include "libs/raster.hpp"
-#include "libs/shell_window.hpp"
+#include "shell_window.hpp"
 
 #include <vector>
 

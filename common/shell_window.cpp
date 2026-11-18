@@ -23,9 +23,9 @@
 
 #include "shell_window.hpp"
 
-#include "exec.hpp"
-#include "graphics.hpp"
-#include "intuition.hpp"
+#include "libs/exec.hpp"
+#include "libs/graphics.hpp"
+#include "libs/intuition.hpp"
 
 namespace hombre {
 
