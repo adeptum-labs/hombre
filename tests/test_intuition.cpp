@@ -1680,6 +1680,526 @@ void openwindow_with_activate_flag_activates() {
     reply_msg(r, m2);
 }
 
+void shared_userport_is_adopted_and_not_deleted() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 before = avail_mem(r);
+
+    const u32 shared = r.exec.create_port();
+    CHECK(shared != 0);
+    const u32 with_port = avail_mem(r);
+
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_UserPort), 0u);
+    const u32 with_window = avail_mem(r);
+
+    r.put32(window + wd_UserPort, shared);
+    r.cpu().a[0] = window;
+    r.cpu().d[0] = IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+    CHECK_EQ(r.get32(window + wd_UserPort), shared);
+    CHECK_EQ(r.get32(window + wd_IDCMPFlags),
+             static_cast<u32>(IDCMP_CLOSEWINDOW | IDCMP_MOUSEBUTTONS));
+    CHECK_EQ(avail_mem(r), with_window);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK_EQ(r.get32(window + wd_UserPort), shared);
+    CHECK_EQ(avail_mem(r), with_port);
+
+    r.exec.delete_port(shared);
+    CHECK_EQ(avail_mem(r), before);
+}
+
+void shared_userport_gets_messages_for_the_window() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 before = avail_mem(r);
+
+    const u32 shared = r.exec.create_port();
+    CHECK(shared != 0);
+
+    put_new_window(r, kNewWindow, 20, 30, 100, 80, 0, 0, 0, 0);
+    const u32 w1 = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 200, 40, 100, 80, 0, 0, 0, 0);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w1 != 0 && w2 != 0);
+
+    r.put32(w1 + wd_UserPort, shared);
+    r.cpu().a[0] = w1;
+    r.cpu().d[0] = IDCMP_MOUSEBUTTONS | IDCMP_ACTIVEWINDOW;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+
+    r.put32(w2 + wd_UserPort, shared);
+    r.cpu().a[0] = w2;
+    r.cpu().d[0] = IDCMP_MOUSEBUTTONS | IDCMP_ACTIVEWINDOW;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+
+    r.intuition.pointer_event(50, 60, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(250, 70, kMouseLeft, kMouseLeft, 0, false);
+
+    const u32 m1 = get_msg(r, shared);
+    CHECK(m1 != 0);
+    CHECK_EQ(r.get32(m1 + im_Class), IDCMP_ACTIVEWINDOW);
+    CHECK_EQ(r.get32(m1 + im_IDCMPWindow), w1);
+    reply_msg(r, m1);
+
+    const u32 m2 = get_msg(r, shared);
+    CHECK(m2 != 0);
+    CHECK_EQ(r.get32(m2 + im_Class), IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(r.get16(m2 + im_Code), SELECTDOWN);
+    CHECK_EQ(r.get16(m2 + im_MouseX), 30u);
+    CHECK_EQ(r.get16(m2 + im_MouseY), 30u);
+    CHECK_EQ(r.get32(m2 + im_IDCMPWindow), w1);
+    reply_msg(r, m2);
+
+    const u32 m3 = get_msg(r, shared);
+    CHECK(m3 != 0);
+    CHECK_EQ(r.get32(m3 + im_Class), IDCMP_ACTIVEWINDOW);
+    CHECK_EQ(r.get32(m3 + im_IDCMPWindow), w2);
+    reply_msg(r, m3);
+
+    const u32 m4 = get_msg(r, shared);
+    CHECK(m4 != 0);
+    CHECK_EQ(r.get32(m4 + im_Class), IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(r.get16(m4 + im_Code), SELECTDOWN);
+    CHECK_EQ(r.get16(m4 + im_MouseX), 50u);
+    CHECK_EQ(r.get16(m4 + im_MouseY), 30u);
+    CHECK_EQ(r.get32(m4 + im_IDCMPWindow), w2);
+    reply_msg(r, m4);
+
+    CHECK_EQ(get_msg(r, shared), 0u);
+    r.intuition.close_window(w2);
+    r.intuition.close_window(w1);
+    r.exec.delete_port(shared);
+    CHECK_EQ(avail_mem(r), before);
+}
+
+void shared_userport_close_removes_only_that_windows_messages() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 before = avail_mem(r);
+
+    const u32 shared = r.exec.create_port();
+    CHECK(shared != 0);
+
+    put_new_window(r, kNewWindow, 20, 30, 100, 80, 0, 0, 0, 0);
+    const u32 w1 = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 200, 40, 100, 80, 0, 0, 0, 0);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w1 != 0 && w2 != 0);
+
+    r.put32(w1 + wd_UserPort, shared);
+    r.cpu().a[0] = w1;
+    r.cpu().d[0] = IDCMP_MOUSEBUTTONS;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+
+    r.put32(w2 + wd_UserPort, shared);
+    r.cpu().a[0] = w2;
+    r.cpu().d[0] = IDCMP_MOUSEBUTTONS;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+
+    r.intuition.pointer_event(40, 50, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(40, 50, 0, 0, kMouseLeft, false);
+    r.intuition.pointer_event(220, 60, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(45, 55, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(225, 65, kMouseLeft, kMouseLeft, 0, false);
+
+    r.intuition.close_window(w1);
+
+    const u32 m1 = get_msg(r, shared);
+    CHECK(m1 != 0);
+    CHECK_EQ(r.get32(m1 + im_IDCMPWindow), w2);
+    CHECK_EQ(r.get16(m1 + im_Code), SELECTDOWN);
+    CHECK_EQ(r.get16(m1 + im_MouseX), 20u);
+    CHECK_EQ(r.get16(m1 + im_MouseY), 20u);
+    reply_msg(r, m1);
+
+    const u32 m2 = get_msg(r, shared);
+    CHECK(m2 != 0);
+    CHECK_EQ(r.get32(m2 + im_IDCMPWindow), w2);
+    CHECK_EQ(r.get16(m2 + im_Code), SELECTDOWN);
+    CHECK_EQ(r.get16(m2 + im_MouseX), 25u);
+    CHECK_EQ(r.get16(m2 + im_MouseY), 25u);
+    reply_msg(r, m2);
+
+    CHECK_EQ(get_msg(r, shared), 0u);
+    r.intuition.close_window(w2);
+    r.exec.delete_port(shared);
+    CHECK_EQ(avail_mem(r), before);
+}
+
+void shared_userport_modify_idcmp_zero_leaves_the_program_port() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 before = avail_mem(r);
+
+    const u32 shared = r.exec.create_port();
+    CHECK(shared != 0);
+
+    put_new_window(r, kNewWindow, 20, 30, 100, 80, 0, 0, 0, 0);
+    const u32 w1 = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 200, 40, 100, 80, 0, 0, 0, 0);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w1 != 0 && w2 != 0);
+
+    r.put32(w1 + wd_UserPort, shared);
+    r.cpu().a[0] = w1;
+    r.cpu().d[0] = IDCMP_MOUSEBUTTONS;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+
+    r.put32(w2 + wd_UserPort, shared);
+    r.cpu().a[0] = w2;
+    r.cpu().d[0] = IDCMP_MOUSEBUTTONS;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+
+    r.intuition.pointer_event(40, 50, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(220, 60, kMouseLeft, kMouseLeft, 0, false);
+
+    r.cpu().a[0] = w1;
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+    CHECK_EQ(r.get32(w1 + wd_IDCMPFlags), 0u);
+    CHECK_EQ(r.get32(w1 + wd_UserPort), shared);
+
+    const u32 remaining = get_msg(r, shared);
+    CHECK(remaining != 0);
+    CHECK_EQ(r.get32(remaining + im_IDCMPWindow), w2);
+    reply_msg(r, remaining);
+    CHECK_EQ(get_msg(r, shared), 0u);
+
+    r.cpu().a[0] = w1;
+    r.cpu().d[0] = IDCMP_MOUSEBUTTONS;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ModifyIDCMP), 1u);
+    CHECK_EQ(r.get32(w1 + wd_UserPort), shared);
+    r.intuition.pointer_event(50, 70, kMouseLeft, kMouseLeft, 0, false);
+    const u32 again = get_msg(r, shared);
+    CHECK(again != 0);
+    CHECK_EQ(r.get32(again + im_IDCMPWindow), w1);
+    reply_msg(r, again);
+
+    r.intuition.close_window(w2);
+    r.intuition.close_window(w1);
+    r.exec.delete_port(shared);
+    CHECK_EQ(avail_mem(r), before);
+}
+
+void buttons_go_to_the_active_window_not_the_one_under_the_pointer() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_new_window(r, kNewWindow, 20, 30, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 active = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 200, 50, 100, 80, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 under = open_win(r, kNewWindow);
+    CHECK(active != 0 && under != 0);
+    CHECK_EQ(r.intuition.active_window(), active);
+
+    const u32 active_port = r.get32(active + wd_UserPort);
+    const u32 under_port = r.get32(under + wd_UserPort);
+
+    r.intuition.pointer_event(230, 90, 0, 0, kMouseLeft, false);
+    r.intuition.pointer_event(230, 90, kMouseRight, kMouseRight, 0, false);
+    r.intuition.pointer_event(230, 90, 0, 0, kMouseRight, false);
+    r.intuition.pointer_event(230, 90, kMouseMiddle, kMouseMiddle, 0, false);
+    r.intuition.pointer_event(230, 90, 0, 0, kMouseMiddle, false);
+
+    CHECK_EQ(get_msg(r, under_port), 0u);
+    const u32 codes[5] = {SELECTUP, MENUDOWN, MENUUP, MIDDLEDOWN, MIDDLEUP};
+    for (u32 expected : codes) {
+        const u32 msg = get_msg(r, active_port);
+        CHECK(msg != 0);
+        CHECK_EQ(r.get32(msg + im_Class), IDCMP_MOUSEBUTTONS);
+        CHECK_EQ(r.get16(msg + im_Code), expected);
+        CHECK_EQ(static_cast<i16>(r.get16(msg + im_MouseX)), 210);
+        CHECK_EQ(static_cast<i16>(r.get16(msg + im_MouseY)), 60);
+        CHECK_EQ(r.get32(msg + im_IDCMPWindow), active);
+        reply_msg(r, msg);
+    }
+    CHECK_EQ(get_msg(r, active_port), 0u);
+}
+
+void drag_release_outside_still_reaches_the_active_window() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_new_window(r, kNewWindow, 100, 120, 100, 80, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    r.intuition.pointer_event(130, 150, kMouseLeft, kMouseLeft, 0, false);
+    const u32 down = get_msg(r, port);
+    CHECK(down != 0);
+    CHECK_EQ(r.get16(down + im_Code), SELECTDOWN);
+    CHECK_EQ(static_cast<i16>(r.get16(down + im_MouseX)), 30);
+    CHECK_EQ(static_cast<i16>(r.get16(down + im_MouseY)), 30);
+    reply_msg(r, down);
+
+    r.intuition.pointer_event(40, 50, 0, 0, kMouseLeft, true);
+    const u32 up_neg = get_msg(r, port);
+    CHECK(up_neg != 0);
+    CHECK_EQ(r.get32(up_neg + im_Class), IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(r.get16(up_neg + im_Code), SELECTUP);
+    CHECK_EQ(static_cast<i16>(r.get16(up_neg + im_MouseX)), -60);
+    CHECK_EQ(static_cast<i16>(r.get16(up_neg + im_MouseY)), -70);
+    CHECK_EQ(r.get32(up_neg + im_IDCMPWindow), window);
+    reply_msg(r, up_neg);
+
+    r.intuition.pointer_event(110, 130, kMouseLeft, kMouseLeft, 0, false);
+    const u32 down2 = get_msg(r, port);
+    CHECK(down2 != 0);
+    reply_msg(r, down2);
+
+    r.intuition.pointer_event(350, 300, 0, 0, kMouseLeft, true);
+    const u32 up_far = get_msg(r, port);
+    CHECK(up_far != 0);
+    CHECK_EQ(r.get16(up_far + im_Code), SELECTUP);
+    CHECK_EQ(static_cast<i16>(r.get16(up_far + im_MouseX)), 250);
+    CHECK_EQ(static_cast<i16>(r.get16(up_far + im_MouseY)), 180);
+    CHECK_EQ(r.get32(up_far + im_IDCMPWindow), window);
+    reply_msg(r, up_far);
+}
+
+void press_in_inactive_window_activates_then_delivers_selectdown() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_new_window(r, kNewWindow, 20, 30, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_INACTIVEWINDOW | IDCMP_MOUSEBUTTONS);
+    const u32 w1 = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 200, 40, 100, 80, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_ACTIVEWINDOW | IDCMP_MOUSEBUTTONS);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w1 != 0 && w2 != 0);
+    CHECK_EQ(r.intuition.active_window(), w1);
+
+    r.intuition.pointer_event(225, 55, kMouseLeft, kMouseLeft, 0, false);
+    CHECK_EQ(r.intuition.active_window(), w2);
+
+    const u32 p1 = r.get32(w1 + wd_UserPort);
+    const u32 inactive = get_msg(r, p1);
+    CHECK(inactive != 0);
+    CHECK_EQ(r.get32(inactive + im_Class), IDCMP_INACTIVEWINDOW);
+    CHECK_EQ(r.get32(inactive + im_IDCMPWindow), w1);
+    reply_msg(r, inactive);
+    CHECK_EQ(get_msg(r, p1), 0u);
+
+    const u32 p2 = r.get32(w2 + wd_UserPort);
+    const u32 active = get_msg(r, p2);
+    CHECK(active != 0);
+    CHECK_EQ(r.get32(active + im_Class), IDCMP_ACTIVEWINDOW);
+    CHECK_EQ(r.get32(active + im_IDCMPWindow), w2);
+    reply_msg(r, active);
+
+    const u32 down = get_msg(r, p2);
+    CHECK(down != 0);
+    CHECK_EQ(r.get32(down + im_Class), IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(r.get16(down + im_Code), SELECTDOWN);
+    CHECK_EQ(static_cast<i16>(r.get16(down + im_MouseX)), 25);
+    CHECK_EQ(static_cast<i16>(r.get16(down + im_MouseY)), 15);
+    CHECK_EQ(r.get32(down + im_IDCMPWindow), w2);
+    reply_msg(r, down);
+    CHECK_EQ(get_msg(r, p2), 0u);
+}
+
+void menu_and_middle_buttons_go_to_the_active_window() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_new_window(r, kNewWindow, 100, 100, 120, 80, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 w1 = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 20, 20, 60, 60, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w1 != 0 && w2 != 0);
+
+    r.intuition.pointer_event(30, 40, kMouseRight, kMouseRight, 0, false);
+    r.intuition.pointer_event(30, 40, 0, 0, kMouseRight, false);
+    r.intuition.pointer_event(10, 15, kMouseMiddle, kMouseMiddle, 0, false);
+    r.intuition.pointer_event(10, 15, 0, 0, kMouseMiddle, false);
+
+    CHECK_EQ(r.intuition.active_window(), w1);
+    CHECK_EQ(get_msg(r, r.get32(w2 + wd_UserPort)), 0u);
+
+    const u32 p1 = r.get32(w1 + wd_UserPort);
+    const u32 codes[4] = {MENUDOWN, MENUUP, MIDDLEDOWN, MIDDLEUP};
+    const i16 xs[4] = {-70, -70, -90, -90};
+    const i16 ys[4] = {-60, -60, -85, -85};
+    for (u32 i = 0; i < 4; ++i) {
+        const u32 msg = get_msg(r, p1);
+        CHECK(msg != 0);
+        CHECK_EQ(r.get32(msg + im_Class), IDCMP_MOUSEBUTTONS);
+        CHECK_EQ(r.get16(msg + im_Code), codes[i]);
+        CHECK_EQ(static_cast<i16>(r.get16(msg + im_MouseX)), xs[i]);
+        CHECK_EQ(static_cast<i16>(r.get16(msg + im_MouseY)), ys[i]);
+        CHECK_EQ(r.get32(msg + im_IDCMPWindow), w1);
+        reply_msg(r, msg);
+    }
+    CHECK_EQ(get_msg(r, p1), 0u);
+}
+
+void reclaim_closes_windows_and_screens_but_keeps_the_given_ones() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 keep_scr = open_new(r, kNewScreen);
+    CHECK(keep_scr != 0);
+    put_new_window(r, kNewWindow, 10, 20, 100, 60, 0, 0, 0, 0);
+    const u32 keep_win = open_win(r, kNewWindow);
+    CHECK(keep_win != 0);
+    const u32 baseline = avail_mem(r);
+
+    r.str(kWinTitle, "Extra");
+    put_new_window(r, kNewWindow, 150, 40, 120, 80, 0, kWinTitle, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 extra_win1 = open_win(r, kNewWindow);
+    CHECK(extra_win1 != 0);
+    r.intuition.pointer_event(170, 60, kMouseLeft, kMouseLeft, 0, false);
+
+    r.str(kTitle, "ProgramScreen");
+    put_new_screen(r, kNewScreen, 320, 200, 2, 0, 1, kTitle);
+    const u32 prog_scr = open_new(r, kNewScreen);
+    CHECK(prog_scr != 0);
+    put_new_window(r, kNewWindow, 20, 20, 80, 50, 0, kWinTitle, prog_scr, CUSTOMSCREEN);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 extra_win2 = open_win(r, kNewWindow);
+    CHECK(extra_win2 != 0);
+    r.intuition.pointer_event(40, 40, kMouseLeft, kMouseLeft, 0, false);
+
+    r.intuition.reclaim(keep_win, keep_scr);
+    CHECK(r.intuition.window_open(keep_win));
+    CHECK(!r.intuition.window_open(extra_win1));
+    CHECK(!r.intuition.window_open(extra_win2));
+    CHECK_EQ(r.intuition.front_screen(), keep_scr);
+    CHECK_EQ(r.display.front_screen, keep_scr);
+    CHECK_EQ(r.get32(keep_scr + sc_FirstWindow), keep_win);
+    CHECK_EQ(r.get32(keep_win + wd_NextWindow), 0u);
+    CHECK_EQ(r.get32(keep_scr), 0u);
+    CHECK_EQ(avail_mem(r), baseline);
+
+    r.intuition.reclaim(0, 0);
+    CHECK(!r.intuition.window_open(keep_win));
+    CHECK_EQ(r.intuition.front_screen(), 0u);
+    CHECK_EQ(r.display.front_screen, 0u);
+}
+
+void reclaim_frees_delivered_unreplied_messages_and_balances_memory() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 keep_scr = open_new(r, kNewScreen);
+    CHECK(keep_scr != 0);
+    put_new_window(r, kNewWindow, 10, 20, 100, 60, 0, 0, 0, 0);
+    const u32 keep_win = open_win(r, kNewWindow);
+    CHECK(keep_win != 0);
+    const u32 baseline = avail_mem(r);
+
+    put_new_window(r, kNewWindow, 120, 50, 160, 90, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS | IDCMP_ACTIVEWINDOW);
+    const u32 prog_win = open_win(r, kNewWindow);
+    CHECK(prog_win != 0);
+    const u32 port = r.get32(prog_win + wd_UserPort);
+
+    r.intuition.pointer_event(140, 70, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(140, 70, 0, 0, kMouseLeft, false);
+    r.intuition.pointer_event(140, 70, kMouseRight, kMouseRight, 0, false);
+    r.intuition.pointer_event(140, 70, 0, 0, kMouseRight, false);
+
+    // Dequeue two messages without replying, and leave the rest queued.
+    CHECK(get_msg(r, port) != 0);
+    CHECK(get_msg(r, port) != 0);
+
+    r.intuition.reclaim(keep_win, keep_scr);
+    CHECK_EQ(avail_mem(r), baseline);
+
+    // All message slots are free again.
+    put_new_window(r, kNewWindow, 120, 50, 160, 90, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 check_win = open_win(r, kNewWindow);
+    CHECK(check_win != 0);
+    for (u32 i = 0; i < Intuition::kMaxMessages; ++i) {
+        r.intuition.pointer_event(140, 70, kMouseLeft, kMouseLeft, 0, false);
+    }
+    CHECK_EQ(r.intuition.dropped_messages(), 0u);
+    r.intuition.reclaim(keep_win, keep_scr);
+    CHECK_EQ(avail_mem(r), baseline);
+}
+
+void reclaim_clears_a_closed_active_window() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 keep_scr = open_new(r, kNewScreen);
+    CHECK(keep_scr != 0);
+    put_new_window(r, kNewWindow, 10, 20, 100, 60, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 keep_win = open_win(r, kNewWindow);
+    CHECK(keep_win != 0);
+    CHECK_EQ(r.intuition.active_window(), keep_win);
+
+    put_new_window(r, kNewWindow, 150, 40, 120, 80, WFLG_ACTIVATE | WFLG_CLOSEGADGET, 0, 0, 0);
+    const u32 prog_win = open_win(r, kNewWindow);
+    CHECK(prog_win != 0);
+    CHECK_EQ(r.intuition.active_window(), prog_win);
+
+    const Rect box = Intuition::close_box_rect(150, 40);
+    r.intuition.pointer_event(box.x0 + 1, box.y0 + 1, kMouseLeft, kMouseLeft, 0, false);
+
+    r.intuition.reclaim(keep_win, keep_scr);
+    CHECK_EQ(r.intuition.active_window(), 0u);
+    CHECK(r.intuition.window_open(keep_win));
+
+    // When keep_win is the active window, reclaim leaves it active.
+    r.intuition.pointer_event(30, 40, kMouseLeft, kMouseLeft, 0, false);
+    CHECK_EQ(r.intuition.active_window(), keep_win);
+    put_new_window(r, kNewWindow, 150, 40, 120, 80, 0, 0, 0, 0);
+    const u32 inactive_win = open_win(r, kNewWindow);
+    CHECK(inactive_win != 0);
+    r.intuition.reclaim(keep_win, keep_scr);
+    CHECK_EQ(r.intuition.active_window(), keep_win);
+}
+
+void reclaim_restores_the_front_screen() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 keep_scr = open_new(r, kNewScreen);
+    CHECK(keep_scr != 0);
+
+    put_new_screen(r, kNewScreen, 320, 200, 2, 0, 1, 0);
+    const u32 s2 = open_new(r, kNewScreen);
+    const u32 s3 = open_new(r, kNewScreen);
+    CHECK(s2 != 0 && s3 != 0);
+    CHECK_EQ(r.intuition.front_screen(), s3);
+
+    r.cpu().a[0] = keep_scr;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ScreenToBack), ExitReason::Halt);
+    CHECK_EQ(r.intuition.front_screen(), s3);
+
+    r.intuition.reclaim(0, keep_scr);
+    CHECK_EQ(r.intuition.front_screen(), keep_scr);
+    CHECK_EQ(r.display.front_screen, keep_scr);
+    CHECK_EQ(r.get32(keep_scr), 0u);
+}
+
 }
 
 int main() {
@@ -1742,5 +2262,17 @@ int main() {
     full_message_table_drops_events_without_leaking();
     events_for_windows_of_other_screens_are_ignored();
     openwindow_with_activate_flag_activates();
+    shared_userport_is_adopted_and_not_deleted();
+    shared_userport_gets_messages_for_the_window();
+    shared_userport_close_removes_only_that_windows_messages();
+    shared_userport_modify_idcmp_zero_leaves_the_program_port();
+    buttons_go_to_the_active_window_not_the_one_under_the_pointer();
+    drag_release_outside_still_reaches_the_active_window();
+    press_in_inactive_window_activates_then_delivers_selectdown();
+    menu_and_middle_buttons_go_to_the_active_window();
+    reclaim_closes_windows_and_screens_but_keeps_the_given_ones();
+    reclaim_frees_delivered_unreplied_messages_and_balances_memory();
+    reclaim_clears_a_closed_active_window();
+    reclaim_restores_the_front_screen();
     return check::finish("test_intuition");
 }

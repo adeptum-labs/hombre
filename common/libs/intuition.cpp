@@ -936,6 +936,22 @@ void Intuition::reply_message(void* ctx, u32 message) {
     static_cast<Intuition*>(ctx)->free_tracked_message(message);
 }
 
+bool Intuition::is_tracked_message(u32 message) const {
+    if (machine_ == nullptr) {
+        return false;
+    }
+    const u32 addr = native::guest_address(*machine_, message);
+    if (addr == 0) {
+        return false;
+    }
+    for (u32 slot : messages_) {
+        if (slot == addr) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Intuition::free_tracked_message(u32 message) {
     if (exec_ == nullptr || machine_ == nullptr) {
         return;
@@ -963,6 +979,34 @@ void Intuition::flush_window_messages(u32 port) {
             break;
         }
         free_tracked_message(msg);
+    }
+}
+
+void Intuition::remove_window_messages(u32 port, u32 window) {
+    if (port == 0 || window == 0 || exec_ == nullptr || machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 list = port + ndk::mp_MsgList;
+    u32 node = b.r32(list + ndk::LH_HEAD);
+    for (u32 step = 0; step < kMaxMessages * 32 && node != 0; ++step) {
+        const u32 succ = b.r32(node + ndk::LN_SUCC);
+        if (!b.ok() || succ == 0) {
+            break;
+        }
+        if (is_tracked_message(node) && b.r32(node + ndk::im_IDCMPWindow) == window) {
+            const u32 pred = b.r32(node + ndk::LN_PRED);
+            if (!b.ok()) {
+                break;
+            }
+            b.w32(pred + ndk::LN_SUCC, succ);
+            b.w32(succ + ndk::LN_PRED, pred);
+            if (!b.ok()) {
+                break;
+            }
+            free_tracked_message(node);
+        }
+        node = succ;
     }
 }
 
@@ -1169,17 +1213,22 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         }
     }
     u32 user_port = 0;
+    bool user_port_owned = false;
     if (a.idcmp != 0) {
-        user_port = exec_->create_port();
+        user_port = b.r32(window + ndk::wd_UserPort);
         if (user_port == 0) {
-            if (title != 0) {
-                exec_->free(title, title_bytes);
+            user_port = exec_->create_port();
+            if (user_port == 0) {
+                if (title != 0) {
+                    exec_->free(title, title_bytes);
+                }
+                exec_->free(layer, ndk::Layer_SIZEOF);
+                exec_->free(rp, ndk::RastPort_SIZEOF);
+                exec_->free(window, ndk::Window_SIZEOF);
+                LogLine().text("intuition: no memory for a window").send();
+                return 0;
             }
-            exec_->free(layer, ndk::Layer_SIZEOF);
-            exec_->free(rp, ndk::RastPort_SIZEOF);
-            exec_->free(window, ndk::Window_SIZEOF);
-            LogLine().text("intuition: no memory for a window").send();
-            return 0;
+            user_port_owned = true;
         }
     }
 
@@ -1241,6 +1290,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->title = title;
     rec->title_bytes = title_bytes;
     rec->user_port = user_port;
+    rec->user_port_owned = user_port_owned;
     srec->first_window = window;
     write_window_links(screen);
     for (u32& slot : windows_) {
@@ -1306,8 +1356,13 @@ void Intuition::close_window(u32 window) {
 
     remove_window_at(index);
     if (rec->user_port != 0) {
-        flush_window_messages(rec->user_port);
-        exec_->delete_port(rec->user_port);
+        if (rec->user_port_owned) {
+            flush_window_messages(rec->user_port);
+            exec_->delete_port(rec->user_port);
+            Bus(*machine_).w32(window + ndk::wd_UserPort, 0);
+        } else {
+            remove_window_messages(rec->user_port, window);
+        }
     }
     if (rec->title != 0) {
         exec_->free(rec->title, rec->title_bytes);
@@ -1331,14 +1386,38 @@ bool Intuition::modify_idcmp(u32 window, u32 flags) {
         return false;
     }
     Bus b(*machine_);
+    const u32 guest_port = b.r32(window + ndk::wd_UserPort);
+    if (!b.ok()) {
+        return false;
+    }
+    if (guest_port != 0 && !(rec->user_port_owned && guest_port == rec->user_port)) {
+        if (rec->user_port != 0 && rec->user_port != guest_port) {
+            if (rec->user_port_owned) {
+                flush_window_messages(rec->user_port);
+                exec_->delete_port(rec->user_port);
+            } else {
+                remove_window_messages(rec->user_port, window);
+            }
+        }
+        rec->user_port = guest_port;
+        rec->user_port_owned = false;
+    } else if (guest_port == 0 && !rec->user_port_owned && rec->user_port != 0) {
+        remove_window_messages(rec->user_port, window);
+        rec->user_port = 0;
+    }
     if (flags == 0) {
         if (rec->user_port != 0) {
-            flush_window_messages(rec->user_port);
-            exec_->delete_port(rec->user_port);
+            if (rec->user_port_owned) {
+                flush_window_messages(rec->user_port);
+                exec_->delete_port(rec->user_port);
+                b.w32(window + ndk::wd_UserPort, 0);
+            } else {
+                remove_window_messages(rec->user_port, window);
+            }
             rec->user_port = 0;
+            rec->user_port_owned = false;
         }
         b.w32(window + ndk::wd_IDCMPFlags, 0);
-        b.w32(window + ndk::wd_UserPort, 0);
         return b.ok();
     }
     if (rec->user_port == 0) {
@@ -1347,6 +1426,7 @@ bool Intuition::modify_idcmp(u32 window, u32 flags) {
             return false;
         }
         rec->user_port = port;
+        rec->user_port_owned = true;
         b.w32(window + ndk::wd_UserPort, port);
     }
     b.w32(window + ndk::wd_IDCMPFlags, flags);
@@ -1551,24 +1631,24 @@ void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         }
     }
 
-    if (hit != 0) {
+    if (active_window_ != 0) {
         if ((pressed & kMouseLeft) != 0 && !left_press_consumed) {
-            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTDOWN);
+            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTDOWN);
         }
         if ((released & kMouseLeft) != 0 && !left_release_consumed) {
-            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTUP);
+            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTUP);
         }
         if ((pressed & kMouseRight) != 0) {
-            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUDOWN);
+            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUDOWN);
         }
         if ((released & kMouseRight) != 0) {
-            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUUP);
+            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUUP);
         }
         if ((pressed & kMouseMiddle) != 0) {
-            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEDOWN);
+            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEDOWN);
         }
         if ((released & kMouseMiddle) != 0) {
-            post_intuimessage(hit, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEUP);
+            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEUP);
         }
     }
 
@@ -1578,6 +1658,55 @@ void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
             post_intuimessage(active_window_, ndk::IDCMP_MOUSEMOVE, 0);
         }
     }
+}
+
+void Intuition::reclaim(u32 keep_window, u32 keep_screen) {
+    u32 win_to_close[kMaxWindows]{};
+    u32 win_count = 0;
+    for (u32 window : windows_) {
+        if (window != 0 && window != keep_window) {
+            win_to_close[win_count++] = window;
+        }
+    }
+    for (u32 i = 0; i < win_count; ++i) {
+        close_window(win_to_close[i]);
+    }
+
+    u32 scr_to_close[kMaxScreens]{};
+    u32 scr_count = 0;
+    for (u32 screen : screens_) {
+        if (screen != 0 && screen != keep_screen) {
+            scr_to_close[scr_count++] = screen;
+        }
+    }
+    for (u32 i = 0; i < scr_count; ++i) {
+        close_screen(scr_to_close[i]);
+    }
+    if (keep_screen != 0 && front_ != keep_screen && find_screen(keep_screen) < kMaxScreens) {
+        screen_to_front(keep_screen);
+    }
+
+    if (keep_window != 0) {
+        if (const WindowRecord* krec = find_window_record(keep_window);
+            krec != nullptr && krec->user_port != 0) {
+            remove_window_messages(krec->user_port, keep_window);
+        }
+    }
+    for (u32& slot : messages_) {
+        if (slot != 0) {
+            const u32 msg = slot;
+            slot = 0;
+            if (exec_ != nullptr) {
+                exec_->free(msg, ndk::IntuiMessage_SIZEOF);
+            }
+        }
+    }
+
+    if (active_window_ != 0 && find_window(active_window_) >= kMaxWindows) {
+        active_window_ = 0;
+    }
+    pressed_gadget_window_ = 0;
+    pressed_gadget_ = GadgetKind::None;
 }
 
 bool Intuition::window_open(u32 window) const {

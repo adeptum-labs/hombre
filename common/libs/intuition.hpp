@@ -104,6 +104,7 @@ public:
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
     void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
+    void reclaim(u32 keep_window = 0, u32 keep_screen = 0);
 
 private:
     friend struct IntuitionNatives;
@@ -145,6 +146,7 @@ private:
         u32 title = 0;
         u32 title_bytes = 0;
         u32 user_port = 0;
+        bool user_port_owned = false;
     };
 
     enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2 };
@@ -167,6 +169,8 @@ private:
     void activate_window(u32 window);
     void post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
     void flush_window_messages(u32 port);
+    void remove_window_messages(u32 port, u32 window);
+    bool is_tracked_message(u32 message) const;
     void free_tracked_message(u32 message);
     u32 window_at(i32 x, i32 y) const;
 
