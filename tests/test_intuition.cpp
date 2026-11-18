@@ -2764,6 +2764,598 @@ void close_during_drag_ends_drag() {
     CHECK_EQ(r.get16(again + wd_LeftEdge), 200u);
 }
 
+void put_prop_info(GfxRig& r, u32 at, u32 flags, u32 hpot, u32 vpot, u32 hbody, u32 vbody) {
+    for (u32 i = 0; i < PropInfo_SIZEOF; ++i) {
+        r.put8(at + i, 0);
+    }
+    r.put16(at + pi_Flags, flags);
+    r.put16(at + pi_HorizPot, hpot);
+    r.put16(at + pi_VertPot, vpot);
+    r.put16(at + pi_HorizBody, hbody);
+    r.put16(at + pi_VertBody, vbody);
+}
+
+void put_gadget(GfxRig& r, u32 at, u32 next, i32 left, i32 top, i32 width, i32 height, u32 flags,
+                u32 activation, u32 type, u32 special) {
+    for (u32 i = 0; i < Gadget_SIZEOF; ++i) {
+        r.put8(at + i, 0);
+    }
+    r.put32(at + gg_NextGadget, next);
+    r.put16(at + gg_LeftEdge, static_cast<u32>(left));
+    r.put16(at + gg_TopEdge, static_cast<u32>(top));
+    r.put16(at + gg_Width, static_cast<u32>(width));
+    r.put16(at + gg_Height, static_cast<u32>(height));
+    r.put16(at + gg_Flags, flags);
+    r.put16(at + gg_Activation, activation);
+    r.put16(at + gg_GadgetType, type);
+    r.put32(at + gg_SpecialInfo, special);
+}
+
+constexpr u32 kProp1 = kData + 0x700;
+constexpr u32 kGad1 = kData + 0x740;
+constexpr u32 kProp2 = kData + 0x780;
+constexpr u32 kGad2 = kData + 0x7C0;
+constexpr u32 kProp3 = kData + 0x800;
+constexpr u32 kGad3 = kData + 0x840;
+constexpr u32 kProp4 = kData + 0x880;
+constexpr u32 kGad4 = kData + 0x8C0;
+
+void open_window_links_and_draws_prop_gadget() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 prop = r.exec.alloc(PropInfo_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(gad != 0 && prop != 0);
+    put_prop_info(r, prop, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, gad, 0, 20, 20, 16, 60, 0, 0, GTYP_PROPGADGET, prop);
+    const u32 before_open = avail_mem(r);
+
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), gad);
+
+    // Container frame (pen 1) at (20,20)..(35,79).
+    CHECK_EQ(window_pixel(r, window, 20, 20), 1u);
+    CHECK_EQ(window_pixel(r, window, 35, 20), 1u);
+    CHECK_EQ(window_pixel(r, window, 20, 79), 1u);
+    CHECK_EQ(window_pixel(r, window, 35, 79), 1u);
+    // Knob at top (inner 21..34 x 21..78, height = 58 * 0x4000 / 0xFFFF = 14 -> y 21..34).
+    CHECK_EQ(window_pixel(r, window, 21, 21), 1u);
+    CHECK_EQ(window_pixel(r, window, 34, 34), 1u);
+    CHECK_EQ(window_pixel(r, window, 22, 22), 2u);
+    CHECK_EQ(window_pixel(r, window, 33, 33), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 72, 72), 2u);
+    // Container interior below knob is pen 0.
+    CHECK_EQ(window_pixel(r, window, 25, 40), 0u);
+    CHECK_EQ(window_pixel(r, window, 25, 78), 0u);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), 0u);
+    CHECK_EQ(avail_mem(r), before_open);
+    CHECK_EQ(r.get16(gad + gg_GadgetType), GTYP_PROPGADGET);
+    CHECK_EQ(r.get16(prop + pi_VertBody), MAXBODY / 4);
+    r.exec.free(prop, PropInfo_SIZEOF);
+    r.exec.free(gad, Gadget_SIZEOF);
+}
+
+void wa_gadgets_tag_links_list() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_prop_info(r, kProp2, AUTOKNOB | FREEHORIZ, 0, 0, MAXBODY / 2, MAXBODY);
+    put_gadget(r, kGad1, kGad2, 10, 15, 12, 40, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_gadget(r, kGad2, 0, 40, 15, 60, 12, 0, 0, GTYP_PROPGADGET, kProp2);
+
+    const u32 tags = r.tags(kTagList, {{WA_Left, 20}, {WA_Top, 30}, {WA_Width, 160},
+                                       {WA_Height, 80}, {WA_Gadgets, kGad1}, {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, 0, tags);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad1);
+    CHECK_EQ(r.get32(kGad1 + gg_NextGadget), kGad2);
+    CHECK_EQ(r.get32(kGad2 + gg_NextGadget), 0u);
+    CHECK_EQ(window_pixel(r, window, 12, 17), 2u);
+    CHECK_EQ(window_pixel(r, window, 42, 17), 2u);
+}
+
+void add_and_remove_glist_positions() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 20, 20, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_prop_info(r, kProp2, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_prop_info(r, kProp3, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_prop_info(r, kProp4, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_gadget(r, kGad1, kGad2, 10, 15, 10, 30, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_gadget(r, kGad2, 0, 30, 15, 10, 30, 0, 0, GTYP_PROPGADGET, kProp2);
+    put_gadget(r, kGad3, 0, 50, 15, 10, 30, 0, 0, GTYP_PROPGADGET, kProp3);
+    put_gadget(r, kGad4, 0, 70, 15, 10, 30, 0, 0, GTYP_PROPGADGET, kProp4);
+
+    // Add only 1 gadget from kGad1 (ignoring kGad2 link).
+    CHECK_EQ(r.intuition.add_glist(window, kGad1, -1, 1), 0u);
+    CHECK_EQ(r.get32(kGad1 + gg_NextGadget), 0u);
+    CHECK_EQ(r.intuition.add_glist(window, kGad2, -1, 1), 1u);
+    CHECK_EQ(r.intuition.add_glist(window, kGad3, 0, 1), 0u);
+    CHECK_EQ(r.intuition.add_glist(window, kGad4, 1, 1), 1u);
+
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad3);
+    CHECK_EQ(r.get32(kGad3 + gg_NextGadget), kGad4);
+    CHECK_EQ(r.get32(kGad4 + gg_NextGadget), kGad1);
+    CHECK_EQ(r.get32(kGad1 + gg_NextGadget), kGad2);
+    CHECK_EQ(r.get32(kGad2 + gg_NextGadget), 0u);
+
+    CHECK_EQ(r.intuition.remove_glist(window, kGad4, 1), 1u);
+    CHECK_EQ(r.intuition.remove_glist(window, kGad4, 1), 0xFFFFFFFFu);
+    CHECK_EQ(r.intuition.remove_glist(window, kGad1, 2), 1u);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad3);
+    CHECK_EQ(r.get32(kGad3 + gg_NextGadget), 0u);
+    CHECK_EQ(r.intuition.remove_glist(window, kGad3, 1), 0u);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), 0u);
+
+    // Re-link two gadgets at once with count -1.
+    r.put32(kGad1 + gg_NextGadget, kGad2);
+    r.put32(kGad2 + gg_NextGadget, 0);
+    CHECK_EQ(r.intuition.add_glist(window, kGad1, -1, -1), 0u);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad1);
+    CHECK_EQ(r.get32(kGad1 + gg_NextGadget), kGad2);
+}
+
+void new_modify_prop_moves_knob() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, kGad1, 0, 20, 20, 14, 50, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 160, 100, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    // Initially knob is at top (inner y 21..68, knob_h = 12 -> y 21..32).
+    CHECK_EQ(window_pixel(r, window, 25, 22), 2u);
+    CHECK_EQ(window_pixel(r, window, 25, 65), 0u);
+
+    r.intuition.new_modify_prop(kGad1, window, AUTOKNOB | FREEVERT, 0, MAXPOT, MAXBODY,
+                                MAXBODY / 4, 1);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT);
+    // Knob moved to bottom (y 57..68).
+    CHECK_EQ(window_pixel(r, window, 25, 22), 0u);
+    CHECK_EQ(window_pixel(r, window, 25, 65), 2u);
+}
+
+void relative_geometry_follows_resize() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT | PROPBORDERLESS, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, kGad1, 0, -8, 11, 8, -21, GFLG_RELRIGHT | GFLG_RELHEIGHT, 0, GTYP_PROPGADGET,
+               kProp1);
+    put_new_window(r, kNewWindow, 40, 40, 200, 100, WFLG_SIZEGADGET, 0, 0, 0);
+    r.put16(kNewWindow + nw_MaxWidth, 0xFFFF);
+    r.put16(kNewWindow + nw_MaxHeight, 0xFFFF);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    // At 200x100: box x = 191..198, y = 11..89; knob at x 192..197, y 12..30.
+    CHECK_EQ(window_pixel(r, window, 195, 20), 2u);
+    CHECK_EQ(window_pixel(r, window, 195, 80), 0u);
+
+    r.intuition.size_window_to(window, 300, 160);
+    // At 300x160: box x = 291..298, y = 11..149; knob at x 292..297, y 12..45.
+    CHECK_EQ(window_pixel(r, window, 195, 20), 0u);
+    CHECK_EQ(window_pixel(r, window, 295, 20), 2u);
+    CHECK_EQ(window_pixel(r, window, 295, 140), 0u);
+}
+
+std::vector<u32> g_prop_pots;
+u32 g_prop_hook_gadget = 0;
+
+void record_prop_hook(void* ctx, u32 gadget, u32 vert_pot) {
+    CHECK(ctx == &g_prop_pots);
+    g_prop_hook_gadget = gadget;
+    g_prop_pots.push_back(vert_pot);
+}
+
+void knob_drag_updates_pot_and_hook() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    // Window at (50, 50); gadget at (20, 20) 14x62 -> inner y 21..80 (h=60);
+    // knob_h = 60 * 16383 / 65535 rounded down = 14, so the travel is 46.
+    put_gadget(r, kGad1, 0, 20, 20, 14, 62, 0, GACT_IMMEDIATE | GACT_RELVERIFY, GTYP_PROPGADGET,
+               kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    g_prop_pots.clear();
+    g_prop_hook_gadget = 0;
+    r.intuition.set_gadget_hook(kGad1, &record_prop_hook, &g_prop_pots);
+
+    // Grab near bottom of knob (screen y = 50 + 30 = 80, offset = 9 inside 21..35).
+    press(r, 77, 80);
+    CHECK((r.get16(kProp1 + pi_Flags) & KNOBHIT) != 0);
+    CHECK((r.get16(kGad1 + gg_Flags) & GFLG_SELECTED) != 0);
+
+    // Move slightly down: grab offset preserved -> knob top moves 5px -> pot ~ 5/45 * 65535.
+    move_to(r, 77, 85);
+    move_to(r, 77, 95);
+    move_to(r, 77, 110);
+    move_to(r, 77, 126);
+    release(r, 77, 126);
+
+    CHECK((r.get16(kProp1 + pi_Flags) & KNOBHIT) == 0);
+    CHECK((r.get16(kGad1 + gg_Flags) & GFLG_SELECTED) == 0);
+    CHECK_EQ(g_prop_hook_gadget, kGad1);
+    CHECK_EQ(g_prop_pots.size(), 4u);
+    for (usize i = 1; i < g_prop_pots.size(); ++i) {
+        CHECK(g_prop_pots[i] > g_prop_pots[i - 1]);
+    }
+    CHECK(g_prop_pots.back() >= MAXPOT - 1000);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), g_prop_pots.back());
+}
+
+void container_click_pages_by_body() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, 0x4000);
+    put_gadget(r, kGad1, 0, 20, 20, 14, 62, 0, GACT_IMMEDIATE | GACT_RELVERIFY, GTYP_PROPGADGET,
+               kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    g_prop_pots.clear();
+    r.intuition.set_gadget_hook(kGad1, &record_prop_hook, &g_prop_pots);
+
+    // Click below knob (screen y = 50 + 75 = 125).
+    press(r, 77, 125);
+    release(r, 77, 125);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), 0x4000u);
+
+    press(r, 77, 125);
+    release(r, 77, 125);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), 0x8000u);
+
+    // Repeat to clamp at MAXPOT.
+    press(r, 77, 128);
+    release(r, 77, 128);
+    press(r, 77, 128);
+    release(r, 77, 128);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT);
+
+    // Click above knob (screen y = 50 + 23 = 73).
+    press(r, 77, 73);
+    release(r, 77, 73);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT - 0x4000u);
+    CHECK_EQ(g_prop_pots.size(), 5u);
+    // Knob visually moved up from bottom.
+    CHECK_EQ(window_pixel(r, window, 25, 75), 0u);
+}
+
+void gadget_idcmp_down_move_up() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, kGad1, 0, 20, 20, 14, 62, 0,
+               GACT_IMMEDIATE | GACT_RELVERIFY | GACT_FOLLOWMOUSE, GTYP_PROPGADGET, kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    // No WFLG_REPORTMOUSE: MOUSEMOVE must still arrive via GACT_FOLLOWMOUSE.
+    r.put32(kNewWindow + nw_IDCMPFlags,
+            IDCMP_GADGETDOWN | IDCMP_GADGETUP | IDCMP_MOUSEMOVE | IDCMP_MOUSEBUTTONS);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    press(r, 77, 75);
+    move_to(r, 77, 90);
+    release(r, 77, 90);
+
+    std::vector<u32> msgs;
+    const std::vector<u32> classes = queued_classes(r, window, &msgs);
+    CHECK_EQ(classes.size(), 3u);
+    CHECK_EQ(classes[0], IDCMP_GADGETDOWN);
+    CHECK_EQ(classes[1], IDCMP_MOUSEMOVE);
+    CHECK_EQ(classes[2], IDCMP_GADGETUP);
+    for (u32 msg : msgs) {
+        CHECK_EQ(r.get32(msg + im_IAddress), kGad1);
+        reply_msg(r, msg);
+    }
+
+    // Container click posts GADGETDOWN and GADGETUP without SELECTDOWN/SELECTUP.
+    press(r, 77, 73);
+    release(r, 77, 73);
+    msgs.clear();
+    const std::vector<u32> page_classes = queued_classes(r, window, &msgs);
+    CHECK_EQ(page_classes.size(), 2u);
+    CHECK_EQ(page_classes[0], IDCMP_GADGETDOWN);
+    CHECK_EQ(page_classes[1], IDCMP_GADGETUP);
+    for (u32 msg : msgs) {
+        CHECK_EQ(r.get32(msg + im_IAddress), kGad1);
+        reply_msg(r, msg);
+    }
+}
+
+void disabled_gadget_ignores_input() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, 0x4000);
+    put_gadget(r, kGad1, 0, 20, 20, 14, 62, 0, GACT_IMMEDIATE | GACT_RELVERIFY, GTYP_PROPGADGET,
+               kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETDOWN | IDCMP_GADGETUP | IDCMP_MOUSEBUTTONS);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    g_prop_pots.clear();
+    r.intuition.set_gadget_hook(kGad1, &record_prop_hook, &g_prop_pots);
+
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::OffGadget), ExitReason::Halt);
+    CHECK((r.get16(kGad1 + gg_Flags) & GFLG_DISABLED) != 0);
+
+    press(r, 77, 120);
+    release(r, 77, 120);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), 0u);
+    CHECK_EQ(g_prop_pots.size(), 0u);
+    const std::vector<u32> dis_classes = queued_classes(r, window);
+    CHECK_EQ(dis_classes.size(), 2u);
+    CHECK_EQ(dis_classes[0], IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(dis_classes[1], IDCMP_MOUSEBUTTONS);
+
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::OnGadget), ExitReason::Halt);
+    CHECK((r.get16(kGad1 + gg_Flags) & GFLG_DISABLED) == 0);
+
+    press(r, 77, 120);
+    release(r, 77, 120);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), 0x4000u);
+    CHECK_EQ(g_prop_pots.size(), 1u);
+}
+
+void non_prop_gadget_is_linked_not_hit() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_gadget(r, kGad1, 0, 20, 20, 40, 20, 0, GACT_IMMEDIATE, 1, 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETDOWN | IDCMP_MOUSEBUTTONS);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad1);
+
+    r.intuition.refresh_glist(kGad1, window, -1);
+    press(r, 80, 80);
+    release(r, 80, 80);
+
+    u32 count = 0;
+    for (const std::string& line : gfx_test::g_lines) {
+        if (line == "intuition: gadget type 1 not handled") {
+            ++count;
+        }
+    }
+    CHECK_EQ(count, 1u);
+    const std::vector<u32> classes = queued_classes(r, window);
+    CHECK_EQ(classes.size(), 2u);
+    CHECK_EQ(classes[0], IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(classes[1], IDCMP_MOUSEBUTTONS);
+}
+
+void gadget_list_cycle_is_bounded() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_prop_info(r, kProp2, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_gadget(r, kGad1, kGad2, 10, 15, 10, 30, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_gadget(r, kGad2, kGad1, 30, 15, 10, 30, 0, 0, GTYP_PROPGADGET, kProp2);
+
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    r.intuition.refresh_glist(kGad1, window, -1);
+    press(r, 120, 120);
+    release(r, 120, 120);
+    CHECK_EQ(r.intuition.remove_glist(window, kGad3, -1), 0xFFFFFFFFu);
+    r.intuition.close_window(window);
+    CHECK(!r.intuition.window_open(window));
+}
+
+void close_during_knob_drag() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, kGad1, 0, 20, 20, 14, 62, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    g_prop_pots.clear();
+    r.intuition.set_gadget_hook(kGad1, &record_prop_hook, &g_prop_pots);
+    press(r, 77, 75);
+    move_to(r, 77, 90);
+    const usize calls_before_close = g_prop_pots.size();
+    CHECK(calls_before_close >= 1u);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+
+    move_to(r, 77, 110);
+    release(r, 77, 110);
+    CHECK_EQ(g_prop_pots.size(), calls_before_close);
+
+    // Reopen with the same gadget address: hook was cleared on close.
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 again = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(again != 0);
+    press(r, 77, 120);
+    release(r, 77, 120);
+    CHECK_EQ(g_prop_pots.size(), calls_before_close);
+}
+
+void wheel_event_posts_newmouse_rawkey() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_RAWKEY);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.intuition.window_under(100, 100), window);
+    CHECK_EQ(r.intuition.window_under(10, 10), 0u);
+
+    r.intuition.wheel_event(2);
+    r.intuition.wheel_event(-3);
+    r.intuition.wheel_event(0);
+
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 expected[5] = {NM_WHEEL_UP, NM_WHEEL_UP, NM_WHEEL_DOWN, NM_WHEEL_DOWN,
+                             NM_WHEEL_DOWN};
+    for (u32 code : expected) {
+        const u32 msg = get_msg(r, port);
+        CHECK(msg != 0);
+        CHECK_EQ(r.get32(msg + im_Class), IDCMP_RAWKEY);
+        CHECK_EQ(r.get16(msg + im_Code), code);
+        reply_msg(r, msg);
+    }
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    put_new_window(r, kNewWindow, 300, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 no_raw = open_win(r, kNewWindow);
+    CHECK(no_raw != 0);
+    r.intuition.wheel_event(2);
+    CHECK_EQ(get_msg(r, r.get32(no_raw + wd_UserPort)), 0u);
+}
+
+void gadget_lvos_from_guest_calls() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_prop_info(r, kProp2, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 2);
+    put_gadget(r, kGad1, kGad2, 20, 20, 14, 50, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_gadget(r, kGad2, 0, 50, 20, 14, 50, 0, 0, GTYP_PROPGADGET, kProp2);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kGad1;
+    r.cpu().d[0] = 0xFFFF;
+    r.cpu().d[1] = 2;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::AddGList), 0u);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad1);
+
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = 2;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshGList), ExitReason::Halt);
+    CHECK_EQ(window_pixel(r, window, 25, 22), 2u);
+
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = AUTOKNOB | FREEVERT;
+    r.cpu().d[1] = 0;
+    r.cpu().d[2] = MAXPOT;
+    r.cpu().d[3] = MAXBODY;
+    r.cpu().d[4] = MAXBODY / 4;
+    r.cpu().d[5] = 1;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::NewModifyProp), ExitReason::Halt);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT);
+    CHECK_EQ(window_pixel(r, window, 25, 65), 2u);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kGad1;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::RemoveGList), 0u);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad2);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kGad1;
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::AddGadget), 0u);
+    CHECK_EQ(r.get32(window + wd_FirstGadget), kGad1);
+
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = AUTOKNOB | FREEVERT;
+    r.cpu().d[1] = 0;
+    r.cpu().d[2] = 0;
+    r.cpu().d[3] = MAXBODY;
+    r.cpu().d[4] = MAXBODY / 4;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ModifyProp), ExitReason::Halt);
+    CHECK_EQ(r.get16(kProp1 + pi_VertPot), 0u);
+    CHECK_EQ(window_pixel(r, window, 25, 22), 2u);
+
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshGadgets), ExitReason::Halt);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kGad2;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::RemoveGadget), 1u);
+    CHECK_EQ(r.get32(kGad1 + gg_NextGadget), 0u);
+}
+
 }
 
 int main() {
@@ -2862,5 +3454,19 @@ int main() {
     drag_press_is_not_selectdown();
     size_hook_called_per_step();
     close_during_drag_ends_drag();
+    open_window_links_and_draws_prop_gadget();
+    wa_gadgets_tag_links_list();
+    add_and_remove_glist_positions();
+    new_modify_prop_moves_knob();
+    relative_geometry_follows_resize();
+    knob_drag_updates_pot_and_hook();
+    container_click_pages_by_body();
+    gadget_idcmp_down_move_up();
+    disabled_gadget_ignores_input();
+    non_prop_gadget_is_linked_not_hit();
+    gadget_list_cycle_is_bounded();
+    close_during_knob_drag();
+    wheel_event_posts_newmouse_rawkey();
+    gadget_lvos_from_guest_calls();
     return check::finish("test_intuition");
 }

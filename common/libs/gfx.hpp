@@ -171,6 +171,7 @@ constexpr u32 wd_BorderLeft = 54;
 constexpr u32 wd_BorderTop = 55;
 constexpr u32 wd_BorderRight = 56;
 constexpr u32 wd_BorderBottom = 57;
+constexpr u32 wd_FirstGadget = 62;
 constexpr u32 wd_IDCMPFlags = 82;
 constexpr u32 wd_UserPort = 86;
 constexpr u32 wd_WindowPort = 90;
@@ -192,6 +193,7 @@ constexpr u32 nw_DetailPen = 8;
 constexpr u32 nw_BlockPen = 9;
 constexpr u32 nw_IDCMPFlags = 10;
 constexpr u32 nw_Flags = 14;
+constexpr u32 nw_FirstGadget = 18;
 constexpr u32 nw_Title = 26;
 constexpr u32 nw_Screen = 30;
 constexpr u32 nw_MinWidth = 38;
@@ -215,6 +217,40 @@ constexpr u32 im_IDCMPWindow = 44;
 constexpr u32 im_SpecialLink = 48;
 constexpr u32 IntuiMessage_SIZEOF = 52;
 static_assert(IntuiMessage_SIZEOF == 52);
+
+// struct Gadget
+constexpr u32 gg_NextGadget = 0;
+constexpr u32 gg_LeftEdge = 4;
+constexpr u32 gg_TopEdge = 6;
+constexpr u32 gg_Width = 8;
+constexpr u32 gg_Height = 10;
+constexpr u32 gg_Flags = 12;
+constexpr u32 gg_Activation = 14;
+constexpr u32 gg_GadgetType = 16;
+constexpr u32 gg_GadgetRender = 18;
+constexpr u32 gg_SelectRender = 22;
+constexpr u32 gg_GadgetText = 26;
+constexpr u32 gg_MutualExclude = 30;
+constexpr u32 gg_SpecialInfo = 34;
+constexpr u32 gg_GadgetID = 38;
+constexpr u32 gg_UserData = 40;
+constexpr u32 Gadget_SIZEOF = 44;
+static_assert(Gadget_SIZEOF == 44);
+
+// struct PropInfo
+constexpr u32 pi_Flags = 0;
+constexpr u32 pi_HorizPot = 2;
+constexpr u32 pi_VertPot = 4;
+constexpr u32 pi_HorizBody = 6;
+constexpr u32 pi_VertBody = 8;
+constexpr u32 pi_CWidth = 10;
+constexpr u32 pi_CHeight = 12;
+constexpr u32 pi_HPotRes = 14;
+constexpr u32 pi_VPotRes = 16;
+constexpr u32 pi_LeftBorder = 18;
+constexpr u32 pi_TopBorder = 20;
+constexpr u32 PropInfo_SIZEOF = 22;
+static_assert(PropInfo_SIZEOF == 22);
 
 // struct TextAttr and struct TextFont
 constexpr u32 ta_Name = 0;
@@ -252,11 +288,40 @@ constexpr u32 WFLG_REPORTMOUSE = 0x200;
 constexpr u32 WFLG_BORDERLESS = 0x800;
 constexpr u32 WFLG_ACTIVATE = 0x1000;
 
+// Gadget flags, activation, types and PropInfo constants
+constexpr u32 GFLG_RELBOTTOM = 0x8;
+constexpr u32 GFLG_RELRIGHT = 0x10;
+constexpr u32 GFLG_RELWIDTH = 0x20;
+constexpr u32 GFLG_RELHEIGHT = 0x40;
+constexpr u32 GFLG_SELECTED = 0x80;
+constexpr u32 GFLG_DISABLED = 0x100;
+
+constexpr u32 GACT_RELVERIFY = 0x1;
+constexpr u32 GACT_IMMEDIATE = 0x2;
+constexpr u32 GACT_FOLLOWMOUSE = 0x8;
+constexpr u32 GACT_RIGHTBORDER = 0x10;
+
+constexpr u32 GTYP_PROPGADGET = 3;
+constexpr u32 GTYP_GTYPEMASK = 7;
+
+constexpr u32 AUTOKNOB = 0x1;
+constexpr u32 FREEHORIZ = 0x2;
+constexpr u32 FREEVERT = 0x4;
+constexpr u32 PROPBORDERLESS = 0x8;
+constexpr u32 PROPNEWLOOK = 0x10;
+constexpr u32 KNOBHIT = 0x100;
+
+constexpr u32 MAXBODY = 0xFFFF;
+constexpr u32 MAXPOT = 0xFFFF;
+
 // IDCMP flags
 constexpr u32 IDCMP_NEWSIZE = 0x2;
 constexpr u32 IDCMP_MOUSEBUTTONS = 0x8;
 constexpr u32 IDCMP_MOUSEMOVE = 0x10;
+constexpr u32 IDCMP_GADGETDOWN = 0x20;
+constexpr u32 IDCMP_GADGETUP = 0x40;
 constexpr u32 IDCMP_CLOSEWINDOW = 0x200;
+constexpr u32 IDCMP_RAWKEY = 0x400;
 constexpr u32 IDCMP_ACTIVEWINDOW = 0x40000;
 constexpr u32 IDCMP_INACTIVEWINDOW = 0x80000;
 constexpr u32 IDCMP_CHANGEWINDOW = 0x02000000;
@@ -268,6 +333,8 @@ constexpr u32 MENUDOWN = 0x69;
 constexpr u32 MENUUP = 0xE9;
 constexpr u32 MIDDLEDOWN = 0x6A;
 constexpr u32 MIDDLEUP = 0xEA;
+constexpr u32 NM_WHEEL_UP = 0x7A;
+constexpr u32 NM_WHEEL_DOWN = 0x7B;
 
 // Window and screen tags
 constexpr u32 WA_Left = 0x80000064;
@@ -278,6 +345,7 @@ constexpr u32 WA_DetailPen = 0x80000068;
 constexpr u32 WA_BlockPen = 0x80000069;
 constexpr u32 WA_IDCMP = 0x8000006A;
 constexpr u32 WA_Flags = 0x8000006B;
+constexpr u32 WA_Gadgets = 0x8000006C;
 constexpr u32 WA_Title = 0x8000006E;
 constexpr u32 WA_ScreenTitle = 0x8000006F;
 constexpr u32 WA_CustomScreen = 0x80000070;

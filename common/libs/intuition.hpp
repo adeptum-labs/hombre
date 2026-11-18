@@ -48,11 +48,17 @@ class Graphics;
 // function description numbers them.
 namespace intuition_lvo {
 
+constexpr u32 AddGadget = 42;
 constexpr u32 CloseScreen = 66;
 constexpr u32 CloseWindow = 72;
 constexpr u32 ModifyIDCMP = 150;
+constexpr u32 ModifyProp = 156;
+constexpr u32 OffGadget = 174;
+constexpr u32 OnGadget = 186;
 constexpr u32 OpenScreen = 198;
 constexpr u32 OpenWindow = 204;
+constexpr u32 RefreshGadgets = 222;
+constexpr u32 RemoveGadget = 228;
 constexpr u32 ScreenToBack = 246;
 constexpr u32 ScreenToFront = 252;
 constexpr u32 SetWindowTitles = 276;
@@ -61,6 +67,10 @@ constexpr u32 WindowToFront = 312;
 constexpr u32 LockIBase = 414;
 constexpr u32 UnlockIBase = 420;
 constexpr u32 GetScreenData = 426;
+constexpr u32 RefreshGList = 432;
+constexpr u32 AddGList = 438;
+constexpr u32 RemoveGList = 444;
+constexpr u32 NewModifyProp = 468;
 constexpr u32 OpenWindowTagList = 606;
 constexpr u32 OpenScreenTagList = 612;
 // The last vector of the 3.9 library; the table reaches down to it.
@@ -71,11 +81,14 @@ constexpr u32 Last = 828;
 class Intuition {
 public:
     using WindowHook = void (*)(void* ctx, u32 window);
+    using GadgetHook = void (*)(void* ctx, u32 gadget, u32 vert_pot);
 
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
     static constexpr u32 kMaxTagItems = 256;
     static constexpr u32 kMaxMessages = 128;
+    static constexpr u32 kMaxGadgets = 64;
+    static constexpr u32 kMaxGadgetHooks = 8;
 
     static Rect close_box_rect(i32 left, i32 top);
     static Rect depth_box_rect(i32 left, i32 top, i32 width);
@@ -109,6 +122,16 @@ public:
     void window_to_back(u32 window);
     bool window_open(u32 window) const;
     void set_size_hook(u32 window, WindowHook hook, void* ctx);
+    u32 add_glist(u32 window, u32 gadget, i32 position, i32 count);
+    u32 remove_glist(u32 window, u32 gadget, i32 count);
+    void refresh_glist(u32 gadget, u32 window, i32 count);
+    void new_modify_prop(u32 gadget, u32 window, u32 flags, u32 hpot, u32 vpot, u32 hbody,
+                         u32 vbody, i32 count);
+    void on_gadget(u32 gadget, u32 window);
+    void off_gadget(u32 gadget, u32 window);
+    void set_gadget_hook(u32 gadget, GadgetHook hook, void* ctx);
+    void wheel_event(i32 steps);
+    u32 window_under(i32 x, i32 y) const { return window_at(x, y); }
     void begin_batch();
     void end_batch();
     u32 active_window() const { return active_window_; }
@@ -193,8 +216,15 @@ private:
         i32 newsize_h = 0;
     };
 
-    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2 };
-    enum class Drag : u8 { None = 0, Move = 1, Size = 2 };
+    struct GadgetHookEntry {
+        u32 gadget = 0;
+        u32 window = 0;
+        GadgetHook hook = nullptr;
+        void* ctx = nullptr;
+    };
+
+    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2, Prop = 3 };
+    enum class Drag : u8 { None = 0, Move = 1, Size = 2, Prop = 3 };
 
     static void reply_message(void* ctx, u32 message);
     static void on_damage(void* ctx, m68k::Machine& m, u32 bitmap, const Rect& rect);
@@ -225,6 +255,15 @@ private:
     bool is_tracked_message(u32 message) const;
     void free_tracked_message(u32 message);
     u32 window_at(i32 x, i32 y) const;
+    void set_gadget_disabled(u32 gadget, u32 window, bool disabled);
+    void draw_gadget_list(native::Bus& b, u32 window, u32 first, u32 max_count);
+    bool hit_prop_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    void drag_prop(i32 x, i32 y);
+    void end_prop_drag();
+    void call_gadget_hook(u32 gadget, u32 vert_pot);
+    void clear_window_gadget_hooks(u32 window);
+    void log_unhandled_gadget_type(u32 gtype);
+    u32 find_gadget_window(u32 gadget) const;
 
     m68k::Machine* machine_ = nullptr;
     Exec* exec_ = nullptr;
@@ -238,9 +277,11 @@ private:
     u32 pressed_gadget_window_ = 0;
     GadgetKind pressed_gadget_ = GadgetKind::None;
     // The window the left button drags, and the pointer's offset from its
-    // top-left corner (Move) or to its bottom-right corner (Size).
+    // top-left corner (Move) or to its bottom-right corner (Size), or from
+    // the knob's top-left corner (Prop).
     Drag drag_ = Drag::None;
     u32 drag_window_ = 0;
+    u32 drag_gadget_ = 0;
     i32 grab_x_ = 0;
     i32 grab_y_ = 0;
     i32 mouse_x_ = 0;
@@ -252,6 +293,8 @@ private:
     u32 messages_[kMaxMessages]{};
     ScreenRecord screen_records_[kMaxScreens]{};
     WindowRecord window_records_[kMaxWindows]{};
+    GadgetHookEntry gadget_hooks_[kMaxGadgetHooks]{};
+    bool unhandled_gadget_types_[8]{};
     NativeVector vectors_[kVectors]{};
 };
 

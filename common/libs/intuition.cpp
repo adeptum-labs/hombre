@@ -223,6 +223,7 @@ struct WindowArgs {
     u32 min_height = 0;
     u32 max_width = 0;
     u32 max_height = 0;
+    u32 gadgets = 0;
     bool custom_screen = false;
 };
 
@@ -238,6 +239,7 @@ void read_new_window(Bus& b, u32 nw, WindowArgs& a) {
     a.block = b.r8(nw + ndk::nw_BlockPen);
     a.idcmp = b.r32(nw + ndk::nw_IDCMPFlags);
     a.flags = b.r32(nw + ndk::nw_Flags);
+    a.gadgets = b.r32(nw + ndk::nw_FirstGadget);
     a.title = b.r32(nw + ndk::nw_Title);
     a.screen = b.r32(nw + ndk::nw_Screen);
     a.min_width = b.r16(nw + ndk::nw_MinWidth);
@@ -280,6 +282,9 @@ void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
         break;
     case ndk::WA_Flags:
         a.flags = data;
+        break;
+    case ndk::WA_Gadgets:
+        a.gadgets = data;
         break;
     case ndk::WA_Title:
         a.title = data;
@@ -424,6 +429,7 @@ struct WindowView {
     u32 border_top = 0;
     u32 border_right = 0;
     u32 border_bottom = 0;
+    u32 first_gadget = 0;
     bool ok = false;
 };
 
@@ -445,6 +451,7 @@ WindowView load_window(Bus& b, u32 window) {
     w.border_top = b.r8(window + ndk::wd_BorderTop);
     w.border_right = b.r8(window + ndk::wd_BorderRight);
     w.border_bottom = b.r8(window + ndk::wd_BorderBottom);
+    w.first_gadget = b.r32(window + ndk::wd_FirstGadget);
     w.ok = b.ok();
     return w;
 }
@@ -453,14 +460,162 @@ constexpr bool in_rect(const Rect& r, i32 x, i32 y) {
     return x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1;
 }
 
-void draw_gadget(Graphics& graphics, u32 rp, const Rect& box) {
-    graphics.set_pens(rp, 2, 1, ndk::JAM2);
+i32 clamp_i32(i32 v, i32 lo, i32 hi) {
+    if (v < lo) {
+        return lo;
+    }
+    return v > hi ? hi : v;
+}
+
+i32 prop_knob_span(i32 inner_span, u32 body) {
+    i32 span = static_cast<i32>((static_cast<u64>(inner_span) * body) / ndk::MAXBODY);
+    if (span < 4) {
+        span = 4;
+    }
+    return span > inner_span ? inner_span : span;
+}
+
+u16 pot_from_offset(i32 offset, i32 travel) {
+    if (travel <= 0) {
+        return 0;
+    }
+    offset = clamp_i32(offset, 0, travel);
+    const u64 num = static_cast<u64>(offset) * ndk::MAXPOT + static_cast<u64>(travel) / 2;
+    const u64 val = num / static_cast<u64>(travel);
+    return static_cast<u16>(val > ndk::MAXPOT ? ndk::MAXPOT : val);
+}
+
+struct PropGeometry {
+    Rect box{};
+    Rect inner{};
+    Rect knob{};
+    u32 pi = 0;
+    u16 pflags = 0;
+    u16 hpot = 0;
+    u16 vpot = 0;
+    u16 hbody = 0;
+    u16 vbody = 0;
+    i32 travel_x = 0;
+    i32 travel_y = 0;
+    bool ok = false;
+};
+
+Rect resolve_gadget_box(Bus& b, const WindowView& w, u32 gadget) {
+    i32 x = static_cast<i16>(b.r16(gadget + ndk::gg_LeftEdge));
+    i32 y = static_cast<i16>(b.r16(gadget + ndk::gg_TopEdge));
+    i32 gw = static_cast<i16>(b.r16(gadget + ndk::gg_Width));
+    i32 gh = static_cast<i16>(b.r16(gadget + ndk::gg_Height));
+    const u32 flags = b.r16(gadget + ndk::gg_Flags);
+    if (!b.ok()) {
+        return Rect{0, 0, -1, -1};
+    }
+    if ((flags & ndk::GFLG_RELRIGHT) != 0) {
+        x += w.width - 1;
+    }
+    if ((flags & ndk::GFLG_RELBOTTOM) != 0) {
+        y += w.height - 1;
+    }
+    if ((flags & ndk::GFLG_RELWIDTH) != 0) {
+        gw += w.width;
+    }
+    if ((flags & ndk::GFLG_RELHEIGHT) != 0) {
+        gh += w.height;
+    }
+    if (gw <= 0 || gh <= 0) {
+        return Rect{0, 0, -1, -1};
+    }
+    return Rect{x, y, x + gw - 1, y + gh - 1};
+}
+
+PropGeometry load_prop_geometry(Bus& b, const WindowView& w, u32 gadget) {
+    PropGeometry g;
+    g.box = resolve_gadget_box(b, w, gadget);
+    if (g.box.x1 < g.box.x0 || g.box.y1 < g.box.y0) {
+        return g;
+    }
+    g.pi = b.r32(gadget + ndk::gg_SpecialInfo);
+    if (g.pi == 0 || !b.ok()) {
+        return g;
+    }
+    g.pflags = static_cast<u16>(b.r16(g.pi + ndk::pi_Flags));
+    g.hpot = static_cast<u16>(b.r16(g.pi + ndk::pi_HorizPot));
+    g.vpot = static_cast<u16>(b.r16(g.pi + ndk::pi_VertPot));
+    g.hbody = static_cast<u16>(b.r16(g.pi + ndk::pi_HorizBody));
+    g.vbody = static_cast<u16>(b.r16(g.pi + ndk::pi_VertBody));
+    if (!b.ok()) {
+        return g;
+    }
+    g.inner = Rect{g.box.x0 + 1, g.box.y0 + 1, g.box.x1 - 1, g.box.y1 - 1};
+    const i32 inner_w = g.inner.x1 - g.inner.x0 + 1;
+    const i32 inner_h = g.inner.y1 - g.inner.y0 + 1;
+    if (inner_w <= 0 || inner_h <= 0) {
+        g.knob = Rect{0, 0, -1, -1};
+        g.ok = true;
+        return g;
+    }
+    i32 knob_w = inner_w;
+    i32 knob_x0 = g.inner.x0;
+    if ((g.pflags & ndk::FREEHORIZ) != 0) {
+        knob_w = prop_knob_span(inner_w, g.hbody);
+        g.travel_x = inner_w - knob_w;
+        knob_x0 = g.inner.x0 +
+                  static_cast<i32>((static_cast<u64>(g.travel_x) * g.hpot) / ndk::MAXPOT);
+    }
+    i32 knob_h = inner_h;
+    i32 knob_y0 = g.inner.y0;
+    if ((g.pflags & ndk::FREEVERT) != 0) {
+        knob_h = prop_knob_span(inner_h, g.vbody);
+        g.travel_y = inner_h - knob_h;
+        knob_y0 = g.inner.y0 +
+                  static_cast<i32>((static_cast<u64>(g.travel_y) * g.vpot) / ndk::MAXPOT);
+    }
+    g.knob = Rect{knob_x0, knob_y0, knob_x0 + knob_w - 1, knob_y0 + knob_h - 1};
+    g.ok = true;
+    return g;
+}
+
+void draw_frame_box(Graphics& graphics, u32 rp, const Rect& box, u32 fill_pen) {
+    graphics.set_pens(rp, fill_pen, 0, ndk::JAM2);
     graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
     graphics.set_pens(rp, 1, 0, ndk::JAM2);
     graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y0);
     graphics.rect_fill(rp, box.x0, box.y1, box.x1, box.y1);
     graphics.rect_fill(rp, box.x0, box.y0, box.x0, box.y1);
     graphics.rect_fill(rp, box.x1, box.y0, box.x1, box.y1);
+}
+
+void draw_gadget(Graphics& graphics, u32 rp, const Rect& box) {
+    draw_frame_box(graphics, rp, box, 2);
+}
+
+void draw_prop_gadget(Graphics& graphics, Bus& b, const WindowView& w, u32 gadget) {
+    const u32 rp = w.rp;
+    if (rp == 0) {
+        return;
+    }
+    const PropGeometry g = load_prop_geometry(b, w, gadget);
+    if (!g.ok) {
+        return;
+    }
+    const u8 fg = static_cast<u8>(b.r8(rp + ndk::rp_FgPen));
+    const u8 bg = static_cast<u8>(b.r8(rp + ndk::rp_BgPen));
+    const u8 mode = static_cast<u8>(b.r8(rp + ndk::rp_DrawMode));
+    const u16 cx = static_cast<u16>(b.r16(rp + ndk::rp_cp_x));
+    const u16 cy = static_cast<u16>(b.r16(rp + ndk::rp_cp_y));
+    if ((g.pflags & ndk::PROPBORDERLESS) != 0) {
+        graphics.set_pens(rp, 0, 0, ndk::JAM2);
+        graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
+    } else {
+        draw_frame_box(graphics, rp, g.box, 0);
+    }
+    if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1) {
+        draw_frame_box(graphics, rp, g.knob, 2);
+    }
+    b.w8(rp + ndk::rp_FgPen, fg);
+    b.w8(rp + ndk::rp_BgPen, bg);
+    b.w8(rp + ndk::rp_DrawMode, mode);
+    b.w16(rp + ndk::rp_cp_x, cx);
+    b.w16(rp + ndk::rp_cp_y, cy);
 }
 
 // The 10-row title bar of a window with its gadgets, line and title, drawn in
@@ -638,6 +793,57 @@ struct IntuitionNatives {
     static void window_to_back(void* ctx, Machine& m) { of(ctx).window_to_back(m.cpu.a[0]); }
 
     static void window_to_front(void* ctx, Machine& m) { of(ctx).window_to_front(m.cpu.a[0]); }
+
+    static void add_gadget(void* ctx, Machine& m) {
+        native::set_result(
+            m, of(ctx).add_glist(m.cpu.a[0], m.cpu.a[1],
+                                 static_cast<i16>(m.cpu.d[0] & 0xFFFF), 1));
+    }
+
+    static void modify_prop(void* ctx, Machine& m) {
+        of(ctx).new_modify_prop(m.cpu.a[0], m.cpu.a[1], m.cpu.d[0] & 0xFFFF,
+                                m.cpu.d[1] & 0xFFFF, m.cpu.d[2] & 0xFFFF, m.cpu.d[3] & 0xFFFF,
+                                m.cpu.d[4] & 0xFFFF, 1);
+    }
+
+    static void off_gadget(void* ctx, Machine& m) {
+        of(ctx).off_gadget(m.cpu.a[0], m.cpu.a[1]);
+    }
+
+    static void on_gadget(void* ctx, Machine& m) {
+        of(ctx).on_gadget(m.cpu.a[0], m.cpu.a[1]);
+    }
+
+    static void refresh_gadgets(void* ctx, Machine& m) {
+        of(ctx).refresh_glist(m.cpu.a[0], m.cpu.a[1], -1);
+    }
+
+    static void remove_gadget(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).remove_glist(m.cpu.a[0], m.cpu.a[1], 1));
+    }
+
+    static void refresh_glist(void* ctx, Machine& m) {
+        of(ctx).refresh_glist(m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF));
+    }
+
+    static void add_glist(void* ctx, Machine& m) {
+        native::set_result(
+            m, of(ctx).add_glist(m.cpu.a[0], m.cpu.a[1],
+                                 static_cast<i16>(m.cpu.d[0] & 0xFFFF),
+                                 static_cast<i16>(m.cpu.d[1] & 0xFFFF)));
+    }
+
+    static void remove_glist(void* ctx, Machine& m) {
+        native::set_result(
+            m, of(ctx).remove_glist(m.cpu.a[0], m.cpu.a[1],
+                                    static_cast<i16>(m.cpu.d[0] & 0xFFFF)));
+    }
+
+    static void new_modify_prop(void* ctx, Machine& m) {
+        of(ctx).new_modify_prop(m.cpu.a[0], m.cpu.a[1], m.cpu.d[0] & 0xFFFF,
+                                m.cpu.d[1] & 0xFFFF, m.cpu.d[2] & 0xFFFF, m.cpu.d[3] & 0xFFFF,
+                                m.cpu.d[4] & 0xFFFF, static_cast<i16>(m.cpu.d[5] & 0xFFFF));
+    }
 };
 
 namespace {
@@ -649,11 +855,17 @@ struct IntuitionFunction {
 };
 
 constexpr IntuitionFunction kIntuitionFunctions[] = {
+    {intuition_lvo::AddGadget, IntuitionNatives::add_gadget, "AddGadget"},
     {intuition_lvo::CloseScreen, IntuitionNatives::close_screen, "CloseScreen"},
     {intuition_lvo::CloseWindow, IntuitionNatives::close_window, "CloseWindow"},
     {intuition_lvo::ModifyIDCMP, IntuitionNatives::modify_idcmp, "ModifyIDCMP"},
+    {intuition_lvo::ModifyProp, IntuitionNatives::modify_prop, "ModifyProp"},
+    {intuition_lvo::OffGadget, IntuitionNatives::off_gadget, "OffGadget"},
+    {intuition_lvo::OnGadget, IntuitionNatives::on_gadget, "OnGadget"},
     {intuition_lvo::OpenScreen, IntuitionNatives::open_screen, "OpenScreen"},
     {intuition_lvo::OpenWindow, IntuitionNatives::open_window, "OpenWindow"},
+    {intuition_lvo::RefreshGadgets, IntuitionNatives::refresh_gadgets, "RefreshGadgets"},
+    {intuition_lvo::RemoveGadget, IntuitionNatives::remove_gadget, "RemoveGadget"},
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
     {intuition_lvo::ScreenToFront, IntuitionNatives::screen_to_front, "ScreenToFront"},
     {intuition_lvo::SetWindowTitles, IntuitionNatives::set_window_titles, "SetWindowTitles"},
@@ -662,6 +874,10 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::LockIBase, IntuitionNatives::lock_i_base, "LockIBase"},
     {intuition_lvo::UnlockIBase, IntuitionNatives::unlock_i_base, "UnlockIBase"},
     {intuition_lvo::GetScreenData, IntuitionNatives::get_screen_data, "GetScreenData"},
+    {intuition_lvo::RefreshGList, IntuitionNatives::refresh_glist, "RefreshGList"},
+    {intuition_lvo::AddGList, IntuitionNatives::add_glist, "AddGList"},
+    {intuition_lvo::RemoveGList, IntuitionNatives::remove_glist, "RemoveGList"},
+    {intuition_lvo::NewModifyProp, IntuitionNatives::new_modify_prop, "NewModifyProp"},
     {intuition_lvo::OpenWindowTagList, IntuitionNatives::open_window_tag_list,
      "OpenWindowTagList"},
     {intuition_lvo::OpenScreenTagList, IntuitionNatives::open_screen_tag_list,
@@ -697,6 +913,9 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     active_window_ = 0;
     pressed_gadget_window_ = 0;
     pressed_gadget_ = GadgetKind::None;
+    drag_ = Drag::None;
+    drag_window_ = 0;
+    drag_gadget_ = 0;
     mouse_x_ = 0;
     mouse_y_ = 0;
     dropped_messages_ = 0;
@@ -716,6 +935,12 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     }
     for (WindowRecord& rec : window_records_) {
         rec = WindowRecord{};
+    }
+    for (GadgetHookEntry& entry : gadget_hooks_) {
+        entry = GadgetHookEntry{};
+    }
+    for (bool& seen : unhandled_gadget_types_) {
+        seen = false;
     }
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
@@ -1688,6 +1913,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w8(window + ndk::wd_BlockPen, a.block);
     b.w32(window + ndk::wd_WLayer, layer);
     b.w32(window + ndk::wd_IFont, graphics_->topaz_font());
+    b.w32(window + ndk::wd_FirstGadget, a.gadgets);
     b.w32(window + ndk::wd_NextWindow, 0);
 
     graphics_->init_rastport(rp);
@@ -1753,6 +1979,9 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     WindowView w = load_window(b, window);
     w.rp = rp;
     draw_window_chrome(*graphics_, b, w);
+    if (a.gadgets != 0) {
+        draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
+    }
     compose(screen, Rect{left, top, right, bottom});
     end_batch();
     if ((a.flags & ndk::WFLG_ACTIVATE) != 0) {
@@ -1775,8 +2004,11 @@ void Intuition::close_window(u32 window) {
     }
     if (drag_window_ == window) {
         drag_window_ = 0;
+        drag_gadget_ = 0;
         drag_ = Drag::None;
     }
+    clear_window_gadget_hooks(window);
+    Bus(*machine_).w32(window + ndk::wd_FirstGadget, 0);
     WindowRecord* rec = find_window_record(window);
     if (rec == nullptr) {
         remove_window_at(index);
@@ -2090,18 +2322,21 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         if (hit != 0) {
             activate_window(hit);
             const WindowView w = load_window(b, hit);
-            if (w.ok && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
-                if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
+            if (w.ok) {
+                const bool bordered = (w.flags & ndk::WFLG_BORDERLESS) == 0;
+                if (bordered && (w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
                     in_rect(close_box_rect(w.left, w.top), x, y)) {
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Close;
                     left_press_consumed = true;
-                } else if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
+                } else if (bordered && (w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
                            in_rect(depth_box_rect(w.left, w.top, w.width), x, y)) {
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Depth;
                     left_press_consumed = true;
-                } else if (!dragging && start_drag(hit, x, y)) {
+                } else if (!dragging && hit_prop_gadget(b, hit, x, y)) {
+                    left_press_consumed = true;
+                } else if (bordered && !dragging && start_drag(hit, x, y)) {
                     left_press_consumed = true;
                 }
             }
@@ -2118,7 +2353,7 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         pressed_gadget_window_ = 0;
         pressed_gadget_ = GadgetKind::None;
         left_release_consumed = true;
-        if (gad_window != 0 && hit == gad_window) {
+        if (gad_window != 0 && hit == gad_window && gad_kind != GadgetKind::Prop) {
             const WindowView w = load_window(b, gad_window);
             if (w.ok && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
                 if (gad_kind == GadgetKind::Close && (w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
@@ -2253,6 +2488,9 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     w.height = height;
     w.rp = rec->rp;
     draw_window_chrome(*graphics_, b, w, &keep);
+    if (w.first_gadget != 0) {
+        draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
+    }
     if (rec->size_hook != nullptr) {
         rec->size_hook(rec->size_ctx, window);
     }
@@ -2312,10 +2550,15 @@ bool Intuition::start_drag(u32 window, i32 x, i32 y) {
 }
 
 void Intuition::drag_to(i32 x, i32 y) {
+    if (drag_ == Drag::Prop) {
+        drag_prop(x, y);
+        return;
+    }
     const WindowRecord* rec = drag_window_ != 0 ? find_window_record(drag_window_) : nullptr;
     if (rec == nullptr) {
         drag_ = Drag::None;
         drag_window_ = 0;
+        drag_gadget_ = 0;
         return;
     }
     if (drag_ == Drag::Move) {
@@ -2326,10 +2569,15 @@ void Intuition::drag_to(i32 x, i32 y) {
 }
 
 void Intuition::end_drag() {
+    if (drag_ == Drag::Prop) {
+        end_prop_drag();
+        return;
+    }
     const u32 window = drag_window_;
     const Drag kind = drag_;
     drag_ = Drag::None;
     drag_window_ = 0;
+    drag_gadget_ = 0;
     if (window == 0) {
         return;
     }
@@ -2394,6 +2642,497 @@ void Intuition::reclaim(u32 keep_window, u32 keep_screen) {
 
 bool Intuition::window_open(u32 window) const {
     return find_window(window) < kMaxWindows;
+}
+
+void Intuition::log_unhandled_gadget_type(u32 gtype) {
+    const u32 idx = gtype & ndk::GTYP_GTYPEMASK;
+    if (!unhandled_gadget_types_[idx]) {
+        unhandled_gadget_types_[idx] = true;
+        LogLine().text("intuition: gadget type ").dec(idx).text(" not handled").send();
+    }
+}
+
+u32 Intuition::find_gadget_window(u32 gadget) const {
+    if (gadget == 0 || machine_ == nullptr) {
+        return 0;
+    }
+    const u32 target = native::guest_address(*machine_, gadget);
+    Bus b(*machine_);
+    for (u32 window : windows_) {
+        if (window == 0) {
+            continue;
+        }
+        u32 cur = b.r32(window + ndk::wd_FirstGadget);
+        for (u32 step = 0; step < kMaxGadgets && cur != 0; ++step) {
+            if (native::guest_address(*machine_, cur) == target) {
+                return window;
+            }
+            cur = b.r32(cur + ndk::gg_NextGadget);
+            if (!b.ok()) {
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+void Intuition::clear_window_gadget_hooks(u32 window) {
+    if (window == 0 || machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    u32 gadget = b.r32(window + ndk::wd_FirstGadget);
+    for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
+        const u32 target = native::guest_address(*machine_, gadget);
+        for (GadgetHookEntry& entry : gadget_hooks_) {
+            if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == target) {
+                entry = GadgetHookEntry{};
+            }
+        }
+        gadget = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            break;
+        }
+    }
+    for (GadgetHookEntry& entry : gadget_hooks_) {
+        if (entry.window == window) {
+            entry = GadgetHookEntry{};
+        }
+    }
+}
+
+void Intuition::call_gadget_hook(u32 gadget, u32 vert_pot) {
+    if (gadget == 0 || machine_ == nullptr) {
+        return;
+    }
+    const u32 target = native::guest_address(*machine_, gadget);
+    for (const GadgetHookEntry& entry : gadget_hooks_) {
+        if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == target &&
+            entry.hook != nullptr) {
+            entry.hook(entry.ctx, gadget, vert_pot);
+            return;
+        }
+    }
+}
+
+void Intuition::set_gadget_hook(u32 gadget, GadgetHook hook, void* ctx) {
+    if (gadget == 0 || machine_ == nullptr) {
+        return;
+    }
+    const u32 target = native::guest_address(*machine_, gadget);
+    GadgetHookEntry* slot = nullptr;
+    for (GadgetHookEntry& entry : gadget_hooks_) {
+        if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == target) {
+            slot = &entry;
+            break;
+        }
+    }
+    if (hook == nullptr) {
+        if (slot != nullptr) {
+            *slot = GadgetHookEntry{};
+        }
+        return;
+    }
+    if (slot == nullptr) {
+        for (GadgetHookEntry& entry : gadget_hooks_) {
+            if (entry.gadget == 0) {
+                slot = &entry;
+                break;
+            }
+        }
+    }
+    if (slot == nullptr) {
+        return;
+    }
+    slot->gadget = gadget;
+    slot->window = find_gadget_window(gadget);
+    slot->hook = hook;
+    slot->ctx = ctx;
+}
+
+void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
+    if (window == 0 || first == 0 || max_count == 0) {
+        return;
+    }
+    const WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+        return;
+    }
+    WindowView w = load_window(b, window);
+    if (!w.ok) {
+        return;
+    }
+    w.rp = rec->rp;
+    const u32 limit = max_count < kMaxGadgets ? max_count : kMaxGadgets;
+    u32 gadget = first;
+    for (u32 step = 0; step < limit && gadget != 0; ++step) {
+        const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return;
+        }
+        if (gtype == ndk::GTYP_PROPGADGET) {
+            draw_prop_gadget(*graphics_, b, w, gadget);
+        } else {
+            log_unhandled_gadget_type(gtype);
+        }
+        gadget = next;
+    }
+}
+
+u32 Intuition::add_glist(u32 window, u32 gadget, i32 position, i32 count) {
+    if (window == 0 || gadget == 0 || count == 0 || !window_open(window)) {
+        return 0xFFFFFFFF;
+    }
+    Bus b(*machine_);
+    const u32 max_add = count < 0 ? kMaxGadgets : static_cast<u32>(count);
+    const u32 add_limit = max_add < kMaxGadgets ? max_add : kMaxGadgets;
+    u32 last = gadget;
+    u32 added = 1;
+    while (added < add_limit) {
+        const u32 next = b.r32(last + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return 0xFFFFFFFF;
+        }
+        if (next == 0) {
+            break;
+        }
+        last = next;
+        ++added;
+    }
+
+    u32 cur = b.r32(window + ndk::wd_FirstGadget);
+    if (!b.ok()) {
+        return 0xFFFFFFFF;
+    }
+    u32 prev = 0;
+    u32 pos = 0;
+    const u32 target = position < 0 ? kMaxGadgets : static_cast<u32>(position);
+    while (cur != 0 && pos < target && pos < kMaxGadgets) {
+        prev = cur;
+        cur = b.r32(cur + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return 0xFFFFFFFF;
+        }
+        ++pos;
+    }
+
+    b.w32(last + ndk::gg_NextGadget, cur);
+    if (prev == 0) {
+        b.w32(window + ndk::wd_FirstGadget, gadget);
+    } else {
+        b.w32(prev + ndk::gg_NextGadget, gadget);
+    }
+    if (!b.ok()) {
+        return 0xFFFFFFFF;
+    }
+    u32 linked = gadget;
+    for (u32 step = 0; step < added && linked != 0; ++step) {
+        const u32 masked = native::guest_address(*machine_, linked);
+        for (GadgetHookEntry& entry : gadget_hooks_) {
+            if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == masked) {
+                entry.window = window;
+            }
+        }
+        linked = b.r32(linked + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            break;
+        }
+    }
+    return pos;
+}
+
+u32 Intuition::remove_glist(u32 window, u32 gadget, i32 count) {
+    if (window == 0 || gadget == 0 || count == 0 || !window_open(window)) {
+        return 0xFFFFFFFF;
+    }
+    Bus b(*machine_);
+    const u32 target = native::guest_address(*machine_, gadget);
+    const u32 max_rem = count < 0 ? kMaxGadgets : static_cast<u32>(count);
+    const u32 rem_limit = max_rem < kMaxGadgets ? max_rem : kMaxGadgets;
+    u32 prev = 0;
+    u32 cur = b.r32(window + ndk::wd_FirstGadget);
+    if (!b.ok()) {
+        return 0xFFFFFFFF;
+    }
+    for (u32 pos = 0; pos < kMaxGadgets && cur != 0; ++pos) {
+        if (native::guest_address(*machine_, cur) == target) {
+            u32 tail = cur;
+            u32 after = b.r32(tail + ndk::gg_NextGadget);
+            if (!b.ok()) {
+                return 0xFFFFFFFF;
+            }
+            if (drag_ == Drag::Prop && drag_window_ == window &&
+                native::guest_address(*machine_, drag_gadget_) == target) {
+                drag_ = Drag::None;
+                drag_window_ = 0;
+                drag_gadget_ = 0;
+            }
+            u32 removed = 1;
+            while (removed < rem_limit && after != 0) {
+                if (drag_ == Drag::Prop && drag_window_ == window &&
+                    native::guest_address(*machine_, drag_gadget_) ==
+                        native::guest_address(*machine_, after)) {
+                    drag_ = Drag::None;
+                    drag_window_ = 0;
+                    drag_gadget_ = 0;
+                }
+                tail = after;
+                after = b.r32(tail + ndk::gg_NextGadget);
+                if (!b.ok()) {
+                    return 0xFFFFFFFF;
+                }
+                ++removed;
+            }
+            if (prev == 0) {
+                b.w32(window + ndk::wd_FirstGadget, after);
+            } else {
+                b.w32(prev + ndk::gg_NextGadget, after);
+            }
+            b.w32(tail + ndk::gg_NextGadget, 0);
+            return b.ok() ? pos : 0xFFFFFFFF;
+        }
+        prev = cur;
+        cur = b.r32(cur + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return 0xFFFFFFFF;
+        }
+    }
+    return 0xFFFFFFFF;
+}
+
+void Intuition::refresh_glist(u32 gadget, u32 window, i32 count) {
+    if (window == 0 || gadget == 0 || count == 0 || !window_open(window)) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 max_count = count < 0 ? kMaxGadgets : static_cast<u32>(count);
+    begin_batch();
+    draw_gadget_list(b, window, gadget, max_count);
+    end_batch();
+}
+
+void Intuition::new_modify_prop(u32 gadget, u32 window, u32 flags, u32 hpot, u32 vpot, u32 hbody,
+                                u32 vbody, i32 count) {
+    if (window == 0 || gadget == 0 || !window_open(window)) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 pi = b.r32(gadget + ndk::gg_SpecialInfo);
+    if (!b.ok() || pi == 0) {
+        return;
+    }
+    b.w16(pi + ndk::pi_Flags, flags & 0xFFFF);
+    b.w16(pi + ndk::pi_HorizPot, hpot & 0xFFFF);
+    b.w16(pi + ndk::pi_VertPot, vpot & 0xFFFF);
+    b.w16(pi + ndk::pi_HorizBody, hbody & 0xFFFF);
+    b.w16(pi + ndk::pi_VertBody, vbody & 0xFFFF);
+    if (!b.ok()) {
+        return;
+    }
+    refresh_glist(gadget, window, count);
+}
+
+void Intuition::set_gadget_disabled(u32 gadget, u32 window, bool disabled) {
+    if (window == 0 || gadget == 0 || !window_open(window)) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 flags = b.r16(gadget + ndk::gg_Flags);
+    if (!b.ok()) {
+        return;
+    }
+    const u32 updated = disabled ? (flags | ndk::GFLG_DISABLED) : (flags & ~ndk::GFLG_DISABLED);
+    b.w16(gadget + ndk::gg_Flags, updated);
+    if (b.ok()) {
+        refresh_glist(gadget, window, 1);
+    }
+}
+
+void Intuition::on_gadget(u32 gadget, u32 window) {
+    set_gadget_disabled(gadget, window, false);
+}
+
+void Intuition::off_gadget(u32 gadget, u32 window) {
+    set_gadget_disabled(gadget, window, true);
+}
+
+void Intuition::wheel_event(i32 steps) {
+    if (steps == 0 || active_window_ == 0) {
+        return;
+    }
+    const u16 code = steps > 0 ? static_cast<u16>(ndk::NM_WHEEL_UP)
+                               : static_cast<u16>(ndk::NM_WHEEL_DOWN);
+    const i64 abs_steps = steps > 0 ? static_cast<i64>(steps) : -static_cast<i64>(steps);
+    for (i64 i = 0; i < abs_steps; ++i) {
+        if (!post_intuimessage(active_window_, ndk::IDCMP_RAWKEY, code)) {
+            break;
+        }
+    }
+}
+
+bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
+    const WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return false;
+    }
+    const WindowView w = load_window(b, window);
+    if (!w.ok) {
+        return false;
+    }
+    const i32 wx = x - w.left;
+    const i32 wy = y - w.top;
+    u32 gadget = w.first_gadget;
+    for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
+        const u32 gflags = b.r16(gadget + ndk::gg_Flags);
+        const u32 activation = b.r16(gadget + ndk::gg_Activation);
+        const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return false;
+        }
+        if (gtype != ndk::GTYP_PROPGADGET) {
+            log_unhandled_gadget_type(gtype);
+            gadget = next;
+            continue;
+        }
+        if ((gflags & ndk::GFLG_DISABLED) != 0) {
+            gadget = next;
+            continue;
+        }
+        const PropGeometry g = load_prop_geometry(b, w, gadget);
+        if (!g.ok || !in_rect(g.box, wx, wy)) {
+            gadget = next;
+            continue;
+        }
+        if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1 && in_rect(g.knob, wx, wy)) {
+            b.w16(g.pi + ndk::pi_Flags, g.pflags | ndk::KNOBHIT);
+            b.w16(gadget + ndk::gg_Flags, gflags | ndk::GFLG_SELECTED);
+            drag_ = Drag::Prop;
+            drag_window_ = window;
+            drag_gadget_ = gadget;
+            grab_x_ = wx - g.knob.x0;
+            grab_y_ = wy - g.knob.y0;
+            if ((activation & ndk::GACT_IMMEDIATE) != 0) {
+                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+            }
+            return true;
+        }
+        u32 new_hpot = g.hpot;
+        u32 new_vpot = g.vpot;
+        if ((g.pflags & ndk::FREEVERT) != 0 && g.knob.y0 <= g.knob.y1) {
+            if (wy < g.knob.y0) {
+                const i32 dec = static_cast<i32>(g.vpot) - static_cast<i32>(g.vbody);
+                new_vpot = dec < 0 ? 0 : static_cast<u32>(dec);
+            } else if (wy > g.knob.y1) {
+                const u32 inc = static_cast<u32>(g.vpot) + static_cast<u32>(g.vbody);
+                new_vpot = inc > ndk::MAXPOT ? ndk::MAXPOT : inc;
+            }
+        }
+        if ((g.pflags & ndk::FREEHORIZ) != 0 && g.knob.x0 <= g.knob.x1) {
+            if (wx < g.knob.x0) {
+                const i32 dec = static_cast<i32>(g.hpot) - static_cast<i32>(g.hbody);
+                new_hpot = dec < 0 ? 0 : static_cast<u32>(dec);
+            } else if (wx > g.knob.x1) {
+                const u32 inc = static_cast<u32>(g.hpot) + static_cast<u32>(g.hbody);
+                new_hpot = inc > ndk::MAXPOT ? ndk::MAXPOT : inc;
+            }
+        }
+        b.w16(g.pi + ndk::pi_HorizPot, new_hpot);
+        b.w16(g.pi + ndk::pi_VertPot, new_vpot);
+        WindowView draw_w = w;
+        draw_w.rp = rec->rp;
+        draw_prop_gadget(*graphics_, b, draw_w, gadget);
+        call_gadget_hook(gadget, new_vpot);
+        if (window_open(window)) {
+            if ((activation & ndk::GACT_IMMEDIATE) != 0) {
+                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+            }
+            if ((activation & ndk::GACT_RELVERIFY) != 0) {
+                post_intuimessage(window, ndk::IDCMP_GADGETUP, 0, gadget);
+            }
+            pressed_gadget_window_ = window;
+            pressed_gadget_ = GadgetKind::Prop;
+        }
+        return true;
+    }
+    return false;
+}
+
+void Intuition::drag_prop(i32 x, i32 y) {
+    if (drag_window_ == 0 || drag_gadget_ == 0 || !window_open(drag_window_)) {
+        drag_ = Drag::None;
+        drag_window_ = 0;
+        drag_gadget_ = 0;
+        return;
+    }
+    const WindowRecord* rec = find_window_record(drag_window_);
+    if (rec == nullptr) {
+        drag_ = Drag::None;
+        drag_window_ = 0;
+        drag_gadget_ = 0;
+        return;
+    }
+    Bus b(*machine_);
+    WindowView w = load_window(b, drag_window_);
+    if (!w.ok) {
+        return;
+    }
+    w.rp = rec->rp;
+    const PropGeometry g = load_prop_geometry(b, w, drag_gadget_);
+    const u32 activation = b.r16(drag_gadget_ + ndk::gg_Activation);
+    if (!g.ok || !b.ok()) {
+        return;
+    }
+    const i32 wx = x - w.left;
+    const i32 wy = y - w.top;
+    u16 new_hpot = g.hpot;
+    u16 new_vpot = g.vpot;
+    if ((g.pflags & ndk::FREEHORIZ) != 0 && g.travel_x > 0) {
+        new_hpot = pot_from_offset((wx - grab_x_) - g.inner.x0, g.travel_x);
+    }
+    if ((g.pflags & ndk::FREEVERT) != 0 && g.travel_y > 0) {
+        new_vpot = pot_from_offset((wy - grab_y_) - g.inner.y0, g.travel_y);
+    }
+    const u32 window = drag_window_;
+    const u32 gadget = drag_gadget_;
+    if (new_hpot != g.hpot || new_vpot != g.vpot) {
+        b.w16(g.pi + ndk::pi_HorizPot, new_hpot);
+        b.w16(g.pi + ndk::pi_VertPot, new_vpot);
+        draw_prop_gadget(*graphics_, b, w, gadget);
+        call_gadget_hook(gadget, new_vpot);
+    }
+    if (window_open(window) && (activation & ndk::GACT_FOLLOWMOUSE) != 0) {
+        post_intuimessage(window, ndk::IDCMP_MOUSEMOVE, 0, gadget);
+    }
+}
+
+void Intuition::end_prop_drag() {
+    const u32 window = drag_window_;
+    const u32 gadget = drag_gadget_;
+    drag_ = Drag::None;
+    drag_window_ = 0;
+    drag_gadget_ = 0;
+    if (window == 0 || gadget == 0 || !window_open(window)) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 gflags = b.r16(gadget + ndk::gg_Flags);
+    const u32 activation = b.r16(gadget + ndk::gg_Activation);
+    const u32 pi = b.r32(gadget + ndk::gg_SpecialInfo);
+    if (!b.ok()) {
+        return;
+    }
+    b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
+    if (pi != 0) {
+        const u32 pflags = b.r16(pi + ndk::pi_Flags);
+        if (b.ok()) {
+            b.w16(pi + ndk::pi_Flags, pflags & ~ndk::KNOBHIT);
+        }
+    }
+    if ((activation & ndk::GACT_RELVERIFY) != 0) {
+        post_intuimessage(window, ndk::IDCMP_GADGETUP, 0, gadget);
+    }
 }
 
 }
