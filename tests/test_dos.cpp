@@ -886,10 +886,19 @@ void dos_library_is_built() {
     CHECK_EQ(r.get32(vol + dol_Type), DLT_VOLUME);
     CHECK(r.read_bstr(r.get32(vol + dol_Name)) == "HombreTest");
     CHECK_EQ(r.get32(vol + dol_DiskType), ID_DOS_DISK);
-    const u32 dev = r.get32(vol + dol_Next) << 2;
+    const u32 ram_vol = r.get32(vol + dol_Next) << 2;
+    CHECK(ram_vol != 0);
+    CHECK_EQ(r.get32(ram_vol + dol_Type), DLT_VOLUME);
+    CHECK(r.read_bstr(r.get32(ram_vol + dol_Name)) == "Ram Disk");
+    CHECK_EQ(r.get32(ram_vol + dol_DiskType), ID_DOS_DISK);
+    const u32 dev = r.get32(ram_vol + dol_Next) << 2;
     CHECK(dev != 0);
     CHECK_EQ(r.get32(dev + dol_Type), DLT_DEVICE);
     CHECK(r.read_bstr(r.get32(dev + dol_Name)) == "DF0");
+    const u32 ram_dev = r.get32(dev + dol_Next) << 2;
+    CHECK(ram_dev != 0);
+    CHECK_EQ(r.get32(ram_dev + dol_Type), DLT_DEVICE);
+    CHECK(r.read_bstr(r.get32(ram_dev + dol_Name)) == "RAM");
     const u32 tasks = r.get32(root + rn_TaskArray) << 2;
     CHECK_EQ(r.get32(tasks), 1u);
     CHECK_EQ(r.get32(tasks + 4), r.proc() + pr_MsgPort);
@@ -3860,7 +3869,9 @@ void dos_list_walk() {
     CHECK_EQ(cur, 0u);
     CHECK(entries == (std::vector<std::pair<u32, std::string>>{
                          {DLT_VOLUME, "HombreTest"},
+                         {DLT_VOLUME, "Ram Disk"},
                          {DLT_DEVICE, "DF0"},
+                         {DLT_DEVICE, "RAM"},
                          {DLT_DIRECTORY, "SYS"},
                          {DLT_DIRECTORY, "C"},
                          {DLT_DIRECTORY, "S"},
@@ -4675,6 +4686,244 @@ void match_first_sets_d0_on_failure() {
     }
 }
 
+void ram_volume_read_operations() {
+    Rig r;
+    RamFs& ram = g_dos.ram();
+
+    u32 dir = RamFs::kNone;
+    u32 sub_file = RamFs::kNone;
+    u32 top_file = RamFs::kNone;
+    CHECK_EQ(ram.create_dir(0, "Dir", dir), 0u);
+    CHECK_EQ(ram.create_file(dir, "File", sub_file), 0u);
+    CHECK_EQ(ram.create_file(0, "Top", top_file), 0u);
+
+    const std::string payload = "hello from ram disk!";
+    CHECK_EQ(ram.write(sub_file, 0, reinterpret_cast<const u8*>(payload.data()),
+                       static_cast<u32>(payload.size())),
+             0u);
+    CHECK_EQ(ram.set_protection(sub_file, 0x0A), 0u);
+    CHECK_EQ(ram.set_comment(sub_file, "ram note"), 0u);
+    CHECK_EQ(ram.set_date(sub_file, 123, 456, 789), 0u);
+
+    const u32 fib = kData + 0x400;
+    const u32 buf = kData + 0x600;
+
+    // Lock("RAM:") + Examine -> name "Ram Disk", DirEntryType 1.
+    r.str(kData, "RAM:");
+    const u32 ram_root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(ram_root != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, ram_root, fib), DOSTRUE);
+    const Fib root_fib = read_fib(r, fib);
+    CHECK(root_fib.name == "Ram Disk");
+    CHECK_EQ(root_fib.type, static_cast<i32>(ST_ROOT));
+    CHECK_EQ(as_signed(r.get32(fib + fib_EntryType)), static_cast<i32>(ST_ROOT));
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, ram_root, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Ram Disk:");
+
+    // ExNext lists RAM root children in order, then ERROR_NO_MORE_ENTRIES.
+    std::vector<std::string> root_children;
+    while (r.call(dos_lvo::ExNext, ram_root, fib) == DOSTRUE) {
+        root_children.push_back(read_fib(r, fib).name);
+    }
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK(root_children == (std::vector<std::string>{"Dir", "Top"}));
+
+    // ParentDir of RAM root -> 0 with IoErr 0.
+    r.set_io_err(ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(r.call(dos_lvo::ParentDir, ram_root), 0u);
+    CHECK_EQ(r.io_err(), 0u);
+
+    // Lock("Ram Disk:Dir/File") case-insensitive + Examine metadata + NameFromLock + ParentDir.
+    r.str(kData, "ram disk:dir/file");
+    const u32 file_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(file_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, file_lock, fib), DOSTRUE);
+    const Fib file_fib = read_fib(r, fib);
+    CHECK(file_fib.name == "File");
+    CHECK_EQ(file_fib.type, static_cast<i32>(ST_FILE));
+    CHECK_EQ(file_fib.size, payload.size());
+    CHECK_EQ(file_fib.blocks, 1u);
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x0Au);
+    CHECK(r.read_str(fib + fib_Comment) == "ram note");
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 123u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 456u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 789u);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, file_lock, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Ram Disk:Dir/File");
+
+    const u32 parent = r.call(dos_lvo::ParentDir, file_lock);
+    CHECK(parent != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, parent, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Ram Disk:Dir");
+    CHECK_EQ(r.call(dos_lvo::Examine, parent, fib), DOSTRUE);
+    CHECK_EQ(read_fib(r, fib).type, static_cast<i32>(ST_USERDIR));
+    CHECK_EQ(r.call(dos_lvo::SameLock, file_lock, parent), LOCK_SAME_VOLUME);
+
+    // Open MODE_OLDFILE + Read + live size after writing more via ram().
+    r.str(kData, "RAM:Dir/File");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromFH, fh, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Ram Disk:Dir/File");
+    CHECK_EQ(r.call(dos_lvo::Read, fh, buf, 5), 5u);
+    CHECK(std::string(reinterpret_cast<const char*>(r.bytes(buf, 5).data()), 5) == "hello");
+
+    const std::string extra = "+more";
+    CHECK_EQ(ram.write(sub_file, static_cast<u32>(payload.size()),
+                       reinterpret_cast<const u8*>(extra.data()), static_cast<u32>(extra.size())),
+             0u);
+    CHECK_EQ(as_signed(r.call(dos_lvo::Seek, fh, 0, OFFSET_END)), 5);
+    CHECK_EQ(as_signed(r.call(dos_lvo::Seek, fh, -5, OFFSET_END)),
+             static_cast<i32>(payload.size() + extra.size()));
+    CHECK_EQ(r.call(dos_lvo::Read, fh, buf, 16), extra.size());
+    CHECK(std::string(reinterpret_cast<const char*>(
+                          r.bytes(buf, static_cast<u32>(extra.size())).data()),
+                      extra.size()) == extra);
+    r.call(dos_lvo::Close, fh);
+
+    // CurrentDir on a RAM lock -> relative Lock("x") and Lock(":") -> RAM root.
+    const u32 prev_cd = r.call(dos_lvo::CurrentDir, parent);
+    CHECK_EQ(prev_cd, 0u);
+    r.str(kData, "file");
+    const u32 rel = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(rel != 0);
+    CHECK_EQ(r.call(dos_lvo::SameLock, rel, file_lock), LOCK_SAME);
+    r.call(dos_lvo::UnLock, rel);
+    r.str(kData, ":");
+    const u32 colon_root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(colon_root != 0);
+    CHECK_EQ(r.call(dos_lvo::SameLock, colon_root, ram_root), LOCK_SAME);
+    r.call(dos_lvo::UnLock, colon_root);
+
+    // ACTION_CURRENT_VOLUME reflects RAM when CurrentDir is on RAM.
+    const u32 port = r.call(dos_lvo::GetFileSysTask);
+    const u32 head = r.call(dos_lvo::LockDosList, LDF_VOLUMES | LDF_READ);
+    r.str(kData, "Ram Disk");
+    const u32 ram_vol_node = r.call(dos_lvo::FindDosEntry, head, kData, LDF_VOLUMES);
+    CHECK(ram_vol_node != 0);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_CURRENT_VOLUME), ram_vol_node >> 2);
+    r.call(dos_lvo::UnLockDosList, LDF_VOLUMES | LDF_READ);
+    r.call(dos_lvo::CurrentDir, prev_cd);
+
+    // Info on RAM lock -> ID_VALIDATED, 512 bytes/block, Ram Disk volume node.
+    const u32 id = kData + 0x800;
+    CHECK_EQ(r.call(dos_lvo::Info, ram_root, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_DiskState), ID_VALIDATED);
+    CHECK_EQ(r.get32(id + id_BytesPerBlock), 512u);
+    CHECK_EQ(r.get32(id + id_DiskType), ID_DOS_DISK);
+    CHECK_EQ(r.get32(id + id_UnitNumber), 0u);
+    CHECK(r.get32(id + id_NumBlocks) >= 1u);
+    CHECK_EQ(r.get32(id + id_NumBlocksUsed), r.get32(id + id_NumBlocks));
+    CHECK_EQ(r.get32(id + id_VolumeNode), ram_vol_node >> 2);
+
+    // Assigns pointing into RAM work.
+    r.str(kData, "T");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, parent), DOSTRUE);
+    r.str(kData + 0x40, "T:File");
+    const u32 t_lock = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK(t_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::SameLock, t_lock, file_lock), LOCK_SAME);
+    r.call(dos_lvo::UnLock, t_lock);
+    r.str(kData, "T");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+
+    // SameLock RAM vs ADF with equal keys -> LOCK_DIFFERENT.
+    CHECK_EQ(r.call(dos_lvo::Examine, 0, fib), DOSTRUE);
+    const u32 adf_root_key = r.get32(fib + fib_DiskKey);
+    CHECK(adf_root_key < RamFs::kMaxNodes);
+    u32 dummy = RamFs::kNone;
+    while (ram.used_nodes() < adf_root_key) {
+        char name[16];
+        std::snprintf(name, sizeof name, "k%u", ram.used_nodes());
+        CHECK_EQ(ram.create_file(0, name, dummy), 0u);
+    }
+    CHECK_EQ(dummy + 1, adf_root_key);
+    r.str(kData, std::string("RAM:") + ram.node(dummy).name);
+    const u32 same_key_ram = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(same_key_ram != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, same_key_ram, fib), DOSTRUE);
+    CHECK_EQ(r.get32(fib + fib_DiskKey), adf_root_key);
+    CHECK_EQ(r.call(dos_lvo::SameLock, same_key_ram, 0), LOCK_DIFFERENT);
+    r.call(dos_lvo::UnLock, same_key_ram);
+
+    r.call(dos_lvo::UnLock, file_lock);
+    r.call(dos_lvo::UnLock, ram_root);
+}
+
+void ram_dos_list_match_and_exall() {
+    Rig r;
+    RamFs& ram = g_dos.ram();
+    u32 d1 = RamFs::kNone;
+    u32 f1 = RamFs::kNone;
+    u32 f2 = RamFs::kNone;
+    CHECK_EQ(ram.create_dir(0, "Alpha", d1), 0u);
+    CHECK_EQ(ram.create_file(0, "Beta", f1), 0u);
+    CHECK_EQ(ram.create_file(d1, "Inner", f2), 0u);
+    const u8 bytes[4] = {'t', 'e', 's', 't'};
+    CHECK_EQ(ram.write(f1, 0, bytes, sizeof bytes), 0u);
+    CHECK_EQ(ram.set_protection(f1, 0x05), 0u);
+    CHECK_EQ(ram.set_comment(f1, "beta comment"), 0u);
+    CHECK_EQ(ram.set_date(f1, 50, 60, 70), 0u);
+
+    // DosList walk with LDF_VOLUMES finds both volumes.
+    const u32 head = r.call(dos_lvo::LockDosList, LDF_VOLUMES | LDF_READ);
+    std::vector<std::string> volumes;
+    u32 cur = head;
+    for (u32 i = 0; i < 16; ++i) {
+        cur = r.call(dos_lvo::NextDosEntry, cur, LDF_VOLUMES);
+        if (cur == 0) {
+            break;
+        }
+        volumes.push_back(r.read_bstr(r.get32(cur + dol_Name)));
+    }
+    CHECK(volumes == (std::vector<std::string>{"HombreTest", "Ram Disk"}));
+    r.call(dos_lvo::UnLockDosList, LDF_VOLUMES | LDF_READ);
+
+    // MatchFirst("RAM:#?") lists RAM entries.
+    const u32 anchor = kData + 0x200;
+    clear_anchor(r, anchor, 64);
+    r.str(kData, "RAM:#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, kData, anchor), 0u);
+    std::vector<std::string> matched;
+    matched.push_back(read_fib(r, anchor + ap_Info).name);
+    while (r.call(dos_lvo::MatchNext, anchor) == 0u) {
+        matched.push_back(read_fib(r, anchor + ap_Info).name);
+    }
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK(matched == (std::vector<std::string>{"Alpha", "Beta"}));
+    r.call(dos_lvo::MatchEnd, anchor);
+
+    // ExAll on RAM root with ED_COMMENT.
+    r.str(kData, "RAM:");
+    const u32 ram_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(ram_lock != 0);
+    const u32 eac = r.call(dos_lvo::AllocDosObject, DOS_EXALLCONTROL, 0);
+    CHECK(eac != 0);
+    const u32 ex_buf = kData + 0x400;
+    CHECK_EQ(r.call(dos_lvo::ExAll, ram_lock, ex_buf, 512, ED_COMMENT, eac), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK_EQ(r.get32(eac + eac_Entries), 2u);
+
+    const u32 e0 = ex_buf;
+    CHECK(r.read_str(r.get32(e0 + ed_Name)) == "Alpha");
+    CHECK_EQ(as_signed(r.get32(e0 + ed_Type)), static_cast<i32>(ST_USERDIR));
+    const u32 e1 = r.get32(e0 + ed_Next);
+    CHECK(e1 != 0);
+    CHECK_EQ(r.get32(e1 + ed_Next), 0u);
+    CHECK(r.read_str(r.get32(e1 + ed_Name)) == "Beta");
+    CHECK_EQ(as_signed(r.get32(e1 + ed_Type)), static_cast<i32>(ST_FILE));
+    CHECK_EQ(r.get32(e1 + ed_Size), 4u);
+    CHECK_EQ(r.get32(e1 + ed_Prot), 0x05u);
+    CHECK_EQ(r.get32(e1 + ed_Days), 50u);
+    CHECK_EQ(r.get32(e1 + ed_Mins), 60u);
+    CHECK_EQ(r.get32(e1 + ed_Ticks), 70u);
+    CHECK(r.read_str(r.get32(e1 + ed_Comment)) == "beta comment");
+
+    r.call(dos_lvo::ExAllEnd, ram_lock, ex_buf, 512, ED_COMMENT, eac);
+    r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
+    r.call(dos_lvo::UnLock, ram_lock);
+}
+
 }
 
 int main() {
@@ -4762,5 +5011,7 @@ int main() {
     find_command_order();
     name_from_lock_uses_disk_case();
     match_first_sets_d0_on_failure();
+    ram_volume_read_operations();
+    ram_dos_list_match_and_exall();
     return check::finish("test_dos");
 }

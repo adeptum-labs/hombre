@@ -29,6 +29,7 @@
 #include "../dos_pattern.hpp"
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
+#include "../ram_fs.hpp"
 #include "../types.hpp"
 #include "exec.hpp"
 #include "native.hpp"
@@ -415,6 +416,7 @@ constexpr u32 id_VolumeNode = 28;
 constexpr u32 id_InUse = 32;
 constexpr u32 id_SIZEOF = 36;
 constexpr u32 ID_WRITE_PROTECTED = 80;
+constexpr u32 ID_VALIDATED = 82;
 constexpr u32 ID_DOS_DISK = 0x444F5300;  // 'DOS\0'
 
 // struct CSource and struct RDArgs
@@ -623,6 +625,8 @@ public:
     using ConsoleRead = hombre::ConsoleRead;
     using ConsoleReady = hombre::ConsoleReady;
 
+    static constexpr u8 kVolAdf = 0;
+    static constexpr u8 kVolRam = 1;
     static constexpr u32 kStackBytes = 4096;
     static constexpr u32 kMaxArgs = 512;    // bytes of a command's argument line
     static constexpr u32 kMaxPath = 256;    // bytes of a resolved path, NUL included
@@ -734,6 +738,8 @@ public:
 
     u32 dos_base() const { return base_; }
     u32 process() const { return process_; }
+    RamFs& ram() { return ram_; }
+    const RamFs& ram() const { return ram_; }
 
 private:
     friend struct DosOps;
@@ -808,6 +814,7 @@ private:
     m68k::Machine* m_ = nullptr;
     Exec* exec_ = nullptr;
     AdfVolume volume_{};
+    RamFs ram_{};
     ConsoleWrite out_ = nullptr;
     void* out_ctx_ = nullptr;
 
@@ -816,7 +823,9 @@ private:
     u32 block_ = 0;
     u32 root_ = 0;
     u32 volume_node_ = 0;
+    u32 ram_volume_node_ = 0;
     u32 device_node_ = 0;
+    u32 ram_device_node_ = 0;
     u32 port_ = 0;  // the file system's MsgPort
     u32 process_ = 0;
     u32 cli_ = 0;
@@ -842,9 +851,9 @@ private:
     ConsoleRead console_read_ = nullptr;
     ConsoleReady console_ready_ = nullptr;
     void* console_ctx_ = nullptr;
-    // The index of the path directory whose lock holds canonical, or
+    // The index of the path directory whose lock holds (vol, canonical), or
     // path_count_ when none does.
-    u32 path_index_of(const char* canonical) const;
+    u32 path_index_of(u8 vol, const char* canonical) const;
 
     u32 path_locks_[kMaxPathDirs]{};
     u32 path_nodes_[kMaxPathDirs]{};

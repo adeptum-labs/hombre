@@ -98,6 +98,7 @@ struct DirEntry {
     bool is_dir;
     u32 size;
     u32 header_block;
+    u8 volume;
 };
 
 using DirVisitor = void (*)(void* ctx, const DirEntry& entry);
@@ -233,6 +234,7 @@ inline void fill_entry(const u8* header, u32 number, DirEntry& out) {
     out.is_dir = is_dir_type(long_at(header, l_sec_type));
     out.size = out.is_dir ? 0 : long_at(header, l_size);
     out.header_block = number;
+    out.volume = 0;
 }
 
 // The directory header `dir` and a name: walks the bucket's chain. The chain

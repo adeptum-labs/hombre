@@ -69,9 +69,13 @@ constexpr u32 kInfoAt = kRootAt + rn_SIZEOF;
 constexpr u32 kTaskArrayAt = align4(kInfoAt + di_SIZEOF);
 constexpr u32 kVolumeAt = kTaskArrayAt + 8;
 constexpr u32 kVolumeNameAt = kVolumeAt + DosList_SIZEOF;  // a BSTR of up to 30 characters
-constexpr u32 kDeviceAt = kVolumeNameAt + 32;
+constexpr u32 kRamVolumeAt = kVolumeNameAt + 32;
+constexpr u32 kRamVolumeNameAt = kRamVolumeAt + DosList_SIZEOF;  // "Ram Disk" BSTR
+constexpr u32 kDeviceAt = kRamVolumeNameAt + 12;
 constexpr u32 kDeviceNameAt = kDeviceAt + DosList_SIZEOF;  // "DF0" BSTR
-constexpr u32 kPortAt = kDeviceNameAt + 8;
+constexpr u32 kRamDeviceAt = kDeviceNameAt + 8;
+constexpr u32 kRamDeviceNameAt = kRamDeviceAt + DosList_SIZEOF;  // "RAM" BSTR
+constexpr u32 kPortAt = kRamDeviceNameAt + 8;
 constexpr u32 kProcessAt = align4(kPortAt + MP_SIZE);
 constexpr u32 kProcessNameAt = kProcessAt + pr_SIZEOF;
 constexpr u32 kCliAt = align4(kProcessNameAt + sizeof kProcessName);
@@ -223,16 +227,16 @@ u32 copy_fault_message(u32 code, char* out, u32 size) {
     return n;
 }
 
-bool format_volume_path(const AdfVolume& volume, const char* path, char* out, u32 size) {
+bool format_volume_path(const char* vol_name, const char* path, char* out, u32 size) {
     if (out == nullptr || size == 0) {
         return false;
     }
-    const u32 vol_len = length_of(volume.name);
+    const u32 vol_len = length_of(vol_name);
     const u32 path_len = length_of(path);
     const u32 total = vol_len + 1 + path_len;
     u32 at = 0;
     for (u32 i = 0; i < vol_len && at + 1 < size; ++i) {
-        out[at++] = volume.name[i];
+        out[at++] = vol_name[i];
     }
     if (at + 1 < size) {
         out[at++] = ':';
@@ -242,47 +246,6 @@ bool format_volume_path(const AdfVolume& volume, const char* path, char* out, u3
     }
     out[at] = '\0';
     return total + 1 <= size;
-}
-
-void canonicalize_path(const AdfVolume& volume, const char* resolved, char (&out)[Dos::kMaxPath]) {
-    if (resolved[0] == '\0') {
-        out[0] = '\0';
-        return;
-    }
-    char probe[Dos::kMaxPath];
-    u32 out_pos = 0;
-    u32 i = 0;
-    while (resolved[i] != '\0') {
-        u32 comp_len = 0;
-        while (resolved[i + comp_len] != '\0' && resolved[i + comp_len] != '/') {
-            ++comp_len;
-        }
-        if (out_pos != 0 && out_pos + 1 < Dos::kMaxPath) {
-            probe[out_pos] = '/';
-            out[out_pos] = '/';
-            ++out_pos;
-        }
-        u32 p_pos = out_pos;
-        for (u32 k = 0; k < comp_len && p_pos + 1 < Dos::kMaxPath; ++k) {
-            probe[p_pos++] = resolved[i + k];
-        }
-        probe[p_pos] = '\0';
-        DirEntry e{};
-        const char* name = probe + out_pos;
-        if (adf_find(volume, probe, e) == FsError::Ok && e.name[0] != '\0') {
-            name = e.name;
-        }
-        for (u32 k = 0; name[k] != '\0' && out_pos + 1 < Dos::kMaxPath; ++k) {
-            out[out_pos] = name[k];
-            probe[out_pos] = name[k];
-            ++out_pos;
-        }
-        i += comp_len;
-        if (resolved[i] == '/') {
-            ++i;
-        }
-    }
-    out[out_pos] = '\0';
 }
 
 void put_string(Bus& b, u32 at, const char* s) {
@@ -870,6 +833,236 @@ struct DosOps {
         }
     }
 
+    // --- volume dispatch ---------------------------------------------------
+
+    static const char* volume_name(const Dos& d, u8 vol) {
+        return vol == Dos::kVolRam ? "Ram Disk" : d.volume_.name;
+    }
+
+    static u32 volume_node(const Dos& d, u8 vol) {
+        return vol == Dos::kVolRam ? d.ram_volume_node_ : d.volume_node_;
+    }
+
+    static DirEntry ram_entry(const Dos& d, u32 node) {
+        const RamFs::Node& n = d.ram_.node(node);
+        DirEntry e{};
+        copy_cstr(e.name, n.name, sizeof e.name);
+        e.is_dir = n.is_dir;
+        e.size = n.is_dir ? 0 : n.size;
+        e.header_block = node + 1;
+        e.volume = Dos::kVolRam;
+        return e;
+    }
+
+    static bool is_root_entry(const Dos& d, const DirEntry& entry) {
+        return entry.volume == Dos::kVolRam ? entry.header_block == 1
+                                            : entry.header_block == d.volume_.root_block;
+    }
+
+    static u32 ram_alloc(void* ctx, u32 bytes) {
+        return of(ctx).exec_->alloc(bytes, MEMF_PUBLIC);
+    }
+
+    static void ram_free(void* ctx, u32 addr, u32 bytes) {
+        Dos& d = of(ctx);
+        if (addr != 0 && d.m_ != nullptr) {
+            d.exec_->free(native::guest_address(*d.m_, addr), bytes);
+        }
+    }
+
+    static void ram_read(void* ctx, u32 addr, u8* dst, u32 n) {
+        Dos& d = of(ctx);
+        if (n == 0 || d.m_ == nullptr) {
+            return;
+        }
+        Bus b(*d.m_);
+        const u8* src = b.bytes_at(addr, n);
+        if (src != nullptr) {
+            for (u32 i = 0; i < n; ++i) {
+                dst[i] = src[i];
+            }
+        }
+    }
+
+    static void ram_write(void* ctx, u32 addr, const u8* src, u32 n) {
+        Dos& d = of(ctx);
+        if (n == 0 || d.m_ == nullptr) {
+            return;
+        }
+        Bus b(*d.m_);
+        u8* dst = b.bytes_at(addr, n);
+        if (dst != nullptr) {
+            for (u32 i = 0; i < n; ++i) {
+                dst[i] = src[i];
+            }
+        }
+    }
+
+    static void ram_now(void* ctx, u32& days, u32& minute, u32& tick) {
+        const DosStamp s = current_stamp(of(ctx));
+        days = s.days;
+        minute = s.minutes;
+        tick = s.ticks;
+    }
+
+    static u32 fs_find(const Dos& d, u8 vol, const char* path, DirEntry& out) {
+        if (vol == Dos::kVolRam) {
+            u32 node = RamFs::kNone;
+            const u32 err = d.ram_.find_path(path, node);
+            if (err != 0) {
+                return err;
+            }
+            out = ram_entry(d, node);
+            return 0;
+        }
+        const FsError err = adf_find(d.volume_, path, out);
+        return err == FsError::Ok ? 0 : io_error_of(err);
+    }
+
+    static u32 fs_list(const Dos& d, u8 vol, const char* path, DirVisitor visitor, void* ctx) {
+        if (vol == Dos::kVolRam) {
+            u32 dir = RamFs::kNone;
+            const u32 err = d.ram_.find_path(path, dir);
+            if (err != 0) {
+                return err;
+            }
+            if (!d.ram_.node(dir).is_dir) {
+                return ERROR_OBJECT_WRONG_TYPE;
+            }
+            for (u32 child = d.ram_.next_child(dir, RamFs::kNone); child != RamFs::kNone;
+                 child = d.ram_.next_child(dir, child)) {
+                if (visitor != nullptr) {
+                    visitor(ctx, ram_entry(d, child));
+                }
+            }
+            return 0;
+        }
+        const FsError err = adf_list(d.volume_, path, visitor, ctx);
+        return err == FsError::Ok ? 0 : io_error_of(err);
+    }
+
+    static u32 fs_read(const Dos& d, const DirEntry& entry, u32 pos, u8* dst, u32 n, u32& got) {
+        if (entry.volume == Dos::kVolRam) {
+            if (entry.header_block == 0) {
+                got = 0;
+                return ERROR_OBJECT_NOT_FOUND;
+            }
+            return d.ram_.read(entry.header_block - 1, pos, dst, n, got);
+        }
+        const FsError err = adf_read(d.volume_, entry, pos, dst, n, got);
+        return err == FsError::Ok ? 0 : io_error_of(err);
+    }
+
+    static u32 fs_size(const Dos& d, const DirEntry& entry) {
+        if (entry.volume == Dos::kVolRam) {
+            if (entry.header_block == 0) {
+                return 0;
+            }
+            const u32 node = entry.header_block - 1;
+            if (!d.ram_.valid(node) || d.ram_.node(node).is_dir) {
+                return 0;
+            }
+            return d.ram_.node(node).size;
+        }
+        return entry.size;
+    }
+
+    static void fs_canonical(const Dos& d, u8 vol, const char* resolved,
+                             char (&out)[Dos::kMaxPath]) {
+        if (resolved[0] == '\0') {
+            out[0] = '\0';
+            return;
+        }
+        char probe[Dos::kMaxPath];
+        u32 out_pos = 0;
+        u32 i = 0;
+        while (resolved[i] != '\0') {
+            u32 comp_len = 0;
+            while (resolved[i + comp_len] != '\0' && resolved[i + comp_len] != '/') {
+                ++comp_len;
+            }
+            if (out_pos != 0 && out_pos + 1 < Dos::kMaxPath) {
+                probe[out_pos] = '/';
+                out[out_pos] = '/';
+                ++out_pos;
+            }
+            u32 p_pos = out_pos;
+            for (u32 k = 0; k < comp_len && p_pos + 1 < Dos::kMaxPath; ++k) {
+                probe[p_pos++] = resolved[i + k];
+            }
+            probe[p_pos] = '\0';
+            DirEntry e{};
+            const char* name = probe + out_pos;
+            if (fs_find(d, vol, probe, e) == 0 && e.name[0] != '\0') {
+                name = e.name;
+            }
+            for (u32 k = 0; name[k] != '\0' && out_pos + 1 < Dos::kMaxPath; ++k) {
+                out[out_pos] = name[k];
+                probe[out_pos] = name[k];
+                ++out_pos;
+            }
+            i += comp_len;
+            if (resolved[i] == '/') {
+                ++i;
+            }
+        }
+        out[out_pos] = '\0';
+    }
+
+    struct FsMeta {
+        u32 type;
+        u32 size;
+        u32 num_blocks;
+        u32 protection;
+        u32 days;
+        u32 minute;
+        u32 tick;
+        const char* comment;
+        u32 comment_len;
+    };
+
+    static u32 fs_meta(const Dos& d, const DirEntry& entry, FsMeta& out) {
+        if (entry.volume == Dos::kVolRam) {
+            if (entry.header_block == 0) {
+                return ERROR_OBJECT_NOT_FOUND;
+            }
+            const u32 node = entry.header_block - 1;
+            if (!d.ram_.valid(node)) {
+                return ERROR_OBJECT_NOT_FOUND;
+            }
+            const RamFs::Node& n = d.ram_.node(node);
+            out.type = node == 0 ? ST_ROOT : (n.is_dir ? ST_USERDIR : ST_FILE);
+            out.size = n.is_dir ? 0 : n.size;
+            out.num_blocks = n.is_dir || n.size == 0 ? 0 : (n.size - 1) / 512 + 1;
+            out.protection = n.protection;
+            out.days = n.date.days;
+            out.minute = n.date.minute;
+            out.tick = n.date.tick;
+            out.comment = n.comment;
+            const u32 clen = length_of(n.comment);
+            out.comment_len = clen < 79 ? clen : 79;
+            return 0;
+        }
+        using namespace amiga_fs_detail;
+        FsError error = FsError::Ok;
+        const u8* header = load_header(d.volume_, entry.header_block, error);
+        if (header == nullptr) {
+            return io_error_of(error);
+        }
+        const u32 payload = d.volume_.ffs ? block_bytes : block_bytes - ofs_header_bytes;
+        out.type = long_at(header, l_sec_type);
+        out.size = entry.size;
+        out.num_blocks = entry.is_dir ? 0 : (entry.size + payload - 1) / payload;
+        out.protection = long_at(header, block_longs - 48);
+        out.days = long_at(header, block_longs - 23);
+        out.minute = long_at(header, block_longs - 22);
+        out.tick = long_at(header, block_longs - 21);
+        const u8* comment = header + (block_longs - 46) * 4;
+        out.comment_len = comment[0] < 79 ? comment[0] : 79;
+        out.comment = reinterpret_cast<const char*>(comment + 1);
+        return 0;
+    }
+
     // --- names and paths ---------------------------------------------------
 
     // Reads a guest name; false if it faults (b.ok() is then false) or is
@@ -889,9 +1082,13 @@ struct DosOps {
                same_name(name, length_of(name), "CONSOLE:");
     }
 
+    static bool is_volume_or_device(const Dos& d, const char* name, u32 len) {
+        return same_name(name, len, d.volume_.name) || same_name(name, len, "DF0") ||
+               same_name(name, len, "Ram Disk") || same_name(name, len, "RAM");
+    }
+
     static bool is_mounted_device(const Dos& d, const char* name, u32 colon) {
-        if (colon == 0 || same_name(name, colon, d.volume_.name) ||
-            same_name(name, colon, "DF0")) {
+        if (colon == 0 || is_volume_or_device(d, name, colon)) {
             return true;
         }
         return find_assign(d, name, colon) >= 0;
@@ -941,10 +1138,10 @@ struct DosOps {
                 l.command_owned = false;
                 l.entry = entry;
                 char canonical[Dos::kMaxPath];
-                canonicalize_path(d.volume_, path, canonical);
+                fs_canonical(d, entry.volume, path, canonical);
                 copy_cstr(l.path, canonical, Dos::kMaxPath);
-                init_lock_at(d, b, d.assign_locks_ + i * fl_SIZEOF, entry.header_block,
-                             SHARED_LOCK);
+                init_lock_at(d, b, d.assign_locks_ + i * fl_SIZEOF, entry.volume,
+                             entry.header_block, SHARED_LOCK);
                 out_bptr = assign_lock_bptr(d, i);
                 return b.ok();
             }
@@ -953,8 +1150,10 @@ struct DosOps {
     }
 
     static void relink_dos_list(Dos& d, Bus& b) {
-        b.w32(d.volume_node_ + dol_Next, d.device_node_ >> 2);
-        u32 prev = d.device_node_;
+        b.w32(d.volume_node_ + dol_Next, d.ram_volume_node_ >> 2);
+        b.w32(d.ram_volume_node_ + dol_Next, d.device_node_ >> 2);
+        b.w32(d.device_node_ + dol_Next, d.ram_device_node_ >> 2);
+        u32 prev = d.ram_device_node_;
         for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
             if (d.assigns_[i].used && d.assigns_[i].node != 0) {
                 b.w32(prev + dol_Next, d.assigns_[i].node >> 2);
@@ -1014,14 +1213,15 @@ struct DosOps {
     }
 
     static bool resolve_late_assign(Dos& d, Bus& b, Dos::AssignEntry& e, u32& error, u32 depth) {
+        u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
-        if (!resolve(d, b, e.path, resolved, error, depth)) {
+        if (!resolve(d, b, e.path, vol, resolved, error, depth)) {
             return false;
         }
         DirEntry entry{};
-        const FsError found = adf_find(d.volume_, resolved, entry);
-        if (found != FsError::Ok) {
-            error = io_error_of(found);
+        const u32 err = fs_find(d, vol, resolved, entry);
+        if (err != 0) {
+            error = err;
             return false;
         }
         if (!entry.is_dir) {
@@ -1265,12 +1465,12 @@ struct DosOps {
         return true;
     }
 
-    // Turns an AmigaDOS name into a path from the volume's root, its
-    // components separated by '/'. A name with a device starts where the
+    // Turns an AmigaDOS name into a volume and a path from that volume's root,
+    // its components separated by '/'. A name with a device starts where the
     // volume, device or assign points; one without starts at the current
     // directory.
-    static bool resolve(Dos& d, Bus& b, const char* name, char (&out)[Dos::kMaxPath], u32& error,
-                        u32 depth = 0) {
+    static bool resolve(Dos& d, Bus& b, const char* name, u8& vol, char (&out)[Dos::kMaxPath],
+                        u32& error, u32 depth = 0) {
         if (depth >= kMaxAssignDepth) {
             error = ERROR_TOO_MANY_LEVELS;
             return false;
@@ -1281,8 +1481,28 @@ struct DosOps {
         }
         if (name[colon] == ':') {
             const char* rest = name + colon + 1;
-            if (colon == 0 || same_name(name, colon, d.volume_.name) ||
-                same_name(name, colon, "DF0")) {
+            if (colon == 0) {
+                const u32 current = b.r32(d.process_ + pr_CurrentDir);
+                if (!b.ok()) {
+                    return false;
+                }
+                vol = Dos::kVolAdf;
+                if (current != 0) {
+                    const Dos::LockSlot* slot = find_lock_slot(d, current);
+                    if (slot == nullptr) {
+                        error = ERROR_INVALID_LOCK;
+                        return false;
+                    }
+                    vol = slot->entry.volume;
+                }
+                return apply_relative_path("", rest, out, error);
+            }
+            if (same_name(name, colon, d.volume_.name) || same_name(name, colon, "DF0")) {
+                vol = Dos::kVolAdf;
+                return apply_relative_path("", rest, out, error);
+            }
+            if (same_name(name, colon, "Ram Disk") || same_name(name, colon, "RAM")) {
+                vol = Dos::kVolRam;
                 return apply_relative_path("", rest, out, error);
             }
             const i64 idx = find_assign(d, name, colon);
@@ -1296,10 +1516,12 @@ struct DosOps {
                     return false;
                 }
             } else if (e.type == DLT_NONBINDING) {
+                u8 base_vol = Dos::kVolAdf;
                 char base[Dos::kMaxPath];
-                if (!resolve(d, b, e.path, base, error, depth + 1)) {
+                if (!resolve(d, b, e.path, base_vol, base, error, depth + 1)) {
                     return false;
                 }
+                vol = base_vol;
                 return apply_relative_path(base, rest, out, error);
             }
             if (e.dir_count == 0) {
@@ -1312,6 +1534,7 @@ struct DosOps {
                     error = ERROR_INVALID_LOCK;
                     return false;
                 }
+                vol = slot->entry.volume;
                 return apply_relative_path(slot->path, rest, out, error);
             }
             for (u32 i = 0; i < e.dir_count; ++i) {
@@ -1329,7 +1552,8 @@ struct DosOps {
                     continue;
                 }
                 DirEntry tmp{};
-                if (adf_find(d.volume_, cand, tmp) == FsError::Ok) {
+                if (fs_find(d, slot->entry.volume, cand, tmp) == 0) {
+                    vol = slot->entry.volume;
                     copy_cstr(out, cand, Dos::kMaxPath);
                     return true;
                 }
@@ -1339,12 +1563,14 @@ struct DosOps {
                 error = ERROR_INVALID_LOCK;
                 return false;
             }
+            vol = slot0->entry.volume;
             return apply_relative_path(slot0->path, rest, out, error);
         }
         const u32 current = b.r32(d.process_ + pr_CurrentDir);
         if (!b.ok()) {
             return false;
         }
+        vol = Dos::kVolAdf;
         const char* base = "";
         if (current != 0) {
             const Dos::LockSlot* slot = find_lock_slot(d, current);
@@ -1352,24 +1578,25 @@ struct DosOps {
                 error = ERROR_INVALID_LOCK;
                 return false;
             }
+            vol = slot->entry.volume;
             base = slot->path;
         }
         return apply_relative_path(base, name, out, error);
     }
 
     // Resolves a name and looks it up on the volume.
-    static bool locate(Dos& d, Bus& b, const char* name, char (&path)[Dos::kMaxPath],
+    static bool locate(Dos& d, Bus& b, const char* name, u8& vol, char (&path)[Dos::kMaxPath],
                        DirEntry& entry, u32& error) {
-        if (!resolve(d, b, name, path, error)) {
+        if (!resolve(d, b, name, vol, path, error)) {
             return false;
         }
-        const FsError found = adf_find(d.volume_, path, entry);
-        if (found != FsError::Ok) {
-            error = io_error_of(found);
+        const u32 err = fs_find(d, vol, path, entry);
+        if (err != 0) {
+            error = err;
             return false;
         }
         char canonical[Dos::kMaxPath];
-        canonicalize_path(d.volume_, path, canonical);
+        fs_canonical(d, vol, path, canonical);
         copy_cstr(path, canonical, Dos::kMaxPath);
         return true;
     }
@@ -1414,7 +1641,8 @@ struct DosOps {
             const u32 left = d.input_length_ > d.input_pos_ ? d.input_length_ - d.input_pos_ : 0u;
             return buffered + left;
         }
-        const u32 left = f.pos < f.entry.size ? f.entry.size - f.pos : 0u;
+        const u32 size = fs_size(d, f.entry);
+        const u32 left = f.pos < size ? size - f.pos : 0u;
         return buffered + left;
     }
 
@@ -1449,12 +1677,14 @@ struct DosOps {
             d.input_pos_ += n;
             got += n;
         } else {
-            const u32 left = f.pos < f.entry.size ? f.entry.size - f.pos : 0u;
+            const u32 size = fs_size(d, f.entry);
+            const u32 left = f.pos < size ? size - f.pos : 0u;
             const u32 n = rem < left ? rem : left;
             if (n != 0) {
                 u32 n_got = 0;
-                if (adf_read(d.volume_, f.entry, f.pos, to + got, n, n_got) != FsError::Ok) {
-                    set_io_err(d, b, ERROR_NOT_A_DOS_DISK);
+                const u32 err = fs_read(d, f.entry, f.pos, to + got, n, n_got);
+                if (err != 0) {
+                    set_io_err(d, b, f.entry.volume == Dos::kVolRam ? err : ERROR_NOT_A_DOS_DISK);
                     return false;
                 }
                 f.pos += n_got;
@@ -1498,10 +1728,11 @@ struct DosOps {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, 0);
             return;
         }
+        u8 vol = Dos::kVolAdf;
         char path[Dos::kMaxPath];
         DirEntry entry{};
         u32 error = 0;
-        if (!locate(d, b, name, path, entry, error)) {
+        if (!locate(d, b, name, vol, path, entry, error)) {
             if (b.ok()) {
                 fail(d, b, error, 0);
             }
@@ -1632,6 +1863,7 @@ struct DosOps {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, 0xFFFFFFFF);
             return;
         }
+        const u32 size = fs_size(d, f.entry);
         const u32 mode = m.cpu.d[3];
         i64 from = 0;
         if (mode == OFFSET_BEGINNING) {
@@ -1639,13 +1871,13 @@ struct DosOps {
         } else if (mode == OFFSET_CURRENT) {
             from = f.pos;
         } else if (mode == OFFSET_END) {
-            from = f.entry.size;
+            from = size;
         } else {
             fail(d, b, ERROR_SEEK_ERROR, 0xFFFFFFFF);
             return;
         }
         const i64 to = from + static_cast<i64>(static_cast<__INT32_TYPE__>(m.cpu.d[2]));
-        if (to < 0 || to > static_cast<i64>(f.entry.size)) {
+        if (to < 0 || to > static_cast<i64>(size)) {
             fail(d, b, ERROR_SEEK_ERROR, 0xFFFFFFFF);
             return;
         }
@@ -2970,16 +3202,16 @@ struct DosOps {
 
     // --- locks -----------------------------------------------------------------
 
-    static void init_lock_at(Dos& d, Bus& b, u32 at, u32 key, u32 access) {
+    static void init_lock_at(Dos& d, Bus& b, u32 at, u8 vol, u32 key, u32 access) {
         b.w32(at + fl_Link, 0);
         b.w32(at + fl_Key, key);
         b.w32(at + fl_Access, access == EXCLUSIVE_LOCK ? EXCLUSIVE_LOCK : SHARED_LOCK);
         b.w32(at + fl_Task, d.port_);
-        b.w32(at + fl_Volume, d.volume_node_ >> 2);
+        b.w32(at + fl_Volume, volume_node(d, vol) >> 2);
     }
 
-    static void init_lock(Dos& d, Bus& b, u32 slot, u32 key, u32 access) {
-        init_lock_at(d, b, d.locks_ + slot * fl_SIZEOF, key, access);
+    static void init_lock(Dos& d, Bus& b, u32 slot, u8 vol, u32 key, u32 access) {
+        init_lock_at(d, b, d.locks_ + slot * fl_SIZEOF, vol, key, access);
     }
 
     static i64 free_lock(const Dos& d) {
@@ -3003,9 +3235,9 @@ struct DosOps {
         l.command_owned = command_owned;
         l.entry = entry;
         char canonical[Dos::kMaxPath];
-        canonicalize_path(d.volume_, path, canonical);
+        fs_canonical(d, entry.volume, path, canonical);
         copy_cstr(l.path, canonical, Dos::kMaxPath);
-        init_lock(d, b, static_cast<u32>(slot), l.entry.header_block, access);
+        init_lock(d, b, static_cast<u32>(slot), entry.volume, l.entry.header_block, access);
         bptr_out = lock_bptr(d, static_cast<u32>(slot));
         return b.ok();
     }
@@ -3036,10 +3268,11 @@ struct DosOps {
             native::set_result(m, 0);
             return;
         }
+        u8 vol = Dos::kVolAdf;
         char path[Dos::kMaxPath];
         DirEntry entry{};
         u32 error = 0;
-        if (!locate(d, b, name, path, entry, error)) {
+        if (!locate(d, b, name, vol, path, entry, error)) {
             if (b.ok()) {
                 fail(d, b, error, 0);
             }
@@ -3146,13 +3379,13 @@ struct DosOps {
         }
     }
 
-    static bool lock_parent_of_path(Dos& d, Bus& b, const char* path) {
+    static bool lock_parent_of_path(Dos& d, Bus& b, u8 vol, const char* path) {
         char parent[Dos::kMaxPath];
         parent_path_of(path, parent);
         DirEntry entry{};
-        const FsError found = adf_find(d.volume_, parent, entry);
-        if (found != FsError::Ok) {
-            fail(d, b, io_error_of(found), 0);
+        const u32 err = fs_find(d, vol, parent, entry);
+        if (err != 0) {
+            fail(d, b, err, 0);
             return false;
         }
         u32 bptr = 0;
@@ -3179,7 +3412,7 @@ struct DosOps {
             native::set_result(b.machine(), 0);
             return true;
         }
-        return lock_parent_of_path(d, b, from->path);
+        return lock_parent_of_path(d, b, from->entry.volume, from->path);
     }
 
     static void parent_dir(void* ctx, Machine& m) {
@@ -3206,7 +3439,7 @@ struct DosOps {
             native::set_result(m, 0);
             return;
         }
-        lock_parent_of_path(d, b, f.path);
+        lock_parent_of_path(d, b, f.entry.volume, f.path);
     }
 
     static bool same_lock_impl(Dos& d, Bus& b, u32 lock1, u32 lock2) {
@@ -3218,7 +3451,10 @@ struct DosOps {
             native::set_result(b.machine(), LOCK_DIFFERENT);
             return false;
         }
-        const u32 res = e1.header_block == e2.header_block ? LOCK_SAME : LOCK_SAME_VOLUME;
+        u32 res = LOCK_DIFFERENT;
+        if (e1.volume == e2.volume) {
+            res = e1.header_block == e2.header_block ? LOCK_SAME : LOCK_SAME_VOLUME;
+        }
         native::set_result(b.machine(), res);
         return true;
     }
@@ -3229,12 +3465,13 @@ struct DosOps {
         same_lock_impl(d, b, m.cpu.d[1], m.cpu.d[2]);
     }
 
-    static void write_volume_path(Dos& d, Bus& b, const char* path, u32 buffer, u32 len) {
+    static void write_volume_path(Dos& d, Bus& b, u8 vol, const char* path, u32 buffer, u32 len) {
         if (buffer == 0 || len == 0 || (len & 0x80000000) != 0) {
             fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
             return;
         }
-        const u32 vol_len = length_of(d.volume_.name);
+        const char* vname = volume_name(d, vol);
+        const u32 vol_len = length_of(vname);
         const u32 path_len = length_of(path);
         const u32 total = vol_len + 1 + path_len;
         if (total + 1 > len) {
@@ -3243,7 +3480,7 @@ struct DosOps {
         }
         u32 at = 0;
         for (u32 i = 0; i < vol_len; ++i) {
-            b.w8(buffer + at++, static_cast<u8>(d.volume_.name[i]));
+            b.w8(buffer + at++, static_cast<u8>(vname[i]));
         }
         b.w8(buffer + at++, ':');
         for (u32 i = 0; i < path_len; ++i) {
@@ -3264,7 +3501,7 @@ struct DosOps {
             native::set_result(m, DOSFALSE);
             return;
         }
-        write_volume_path(d, b, path, m.cpu.d[2], m.cpu.d[3]);
+        write_volume_path(d, b, entry.volume, path, m.cpu.d[2], m.cpu.d[3]);
     }
 
     static void name_from_fh(void* ctx, Machine& m) {
@@ -3280,7 +3517,7 @@ struct DosOps {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, DOSFALSE);
             return;
         }
-        write_volume_path(d, b, f.path, m.cpu.d[2], m.cpu.d[3]);
+        write_volume_path(d, b, f.entry.volume, f.path, m.cpu.d[2], m.cpu.d[3]);
     }
 
     static void current_dir(void* ctx, Machine& m) { select(m, of(ctx), pr_CurrentDir); }
@@ -3290,9 +3527,9 @@ struct DosOps {
     static bool lock_entry(Dos& d, Bus& b, u32 bptr, DirEntry& entry, const char*& path) {
         if (bptr == 0) {
             path = "";
-            const FsError error = adf_find(d.volume_, "", entry);
-            if (error != FsError::Ok) {
-                set_io_err(d, b, io_error_of(error));
+            const u32 err = fs_find(d, Dos::kVolAdf, "", entry);
+            if (err != 0) {
+                set_io_err(d, b, err);
                 return false;
             }
             return true;
@@ -3363,7 +3600,7 @@ struct DosOps {
             }
             return;
         }
-        if (same_name(name, name_len, "DF0") || same_name(name, name_len, d.volume_.name)) {
+        if (is_volume_or_device(d, name, name_len)) {
             fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
             return;
         }
@@ -3430,7 +3667,7 @@ struct DosOps {
             return;
         }
         const u32 name_len = length_of(name);
-        if (same_name(name, name_len, "DF0") || same_name(name, name_len, d.volume_.name)) {
+        if (is_volume_or_device(d, name, name_len)) {
             fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
             return;
         }
@@ -3546,6 +3783,7 @@ struct DosOps {
             return;
         }
         const u32 target_key = target->entry.header_block;
+        const u8 target_vol = target->entry.volume;
         const i64 idx = find_assign(d, name, length_of(name));
         if (idx < 0) {
             fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
@@ -3559,7 +3797,8 @@ struct DosOps {
         i64 match = -1;
         for (u32 i = 0; i < e.dir_count; ++i) {
             const Dos::LockSlot* s = find_lock_slot(d, e.locks[i]);
-            if (s != nullptr && s->entry.header_block == target_key) {
+            if (s != nullptr && s->entry.volume == target_vol &&
+                s->entry.header_block == target_key) {
                 match = static_cast<i64>(i);
                 break;
             }
@@ -3676,19 +3915,43 @@ struct DosOps {
             if (!b.ok()) {
                 return;
             }
-            if (current != 0 && find_lock_slot(d, current) == nullptr) {
-                fail(d, b, ERROR_INVALID_LOCK, 0);
-                return;
+            u8 cur_vol = Dos::kVolAdf;
+            if (current != 0) {
+                const Dos::LockSlot* slot = find_lock_slot(d, current);
+                if (slot == nullptr) {
+                    fail(d, b, ERROR_INVALID_LOCK, 0);
+                    return;
+                }
+                cur_vol = slot->entry.volume;
             }
             dvp_lock = current;
-            dvp_node = d.volume_node_;
+            dvp_node = volume_node(d, cur_vol);
         } else if (is_console(name)) {
             fail(d, b, ERROR_DEVICE_NOT_MOUNTED, 0);
             return;
-        } else if (colon == 0 || same_name(name, colon, d.volume_.name)) {
+        } else if (colon == 0) {
+            const u32 current = b.r32(d.process_ + pr_CurrentDir);
+            if (!b.ok()) {
+                return;
+            }
+            u8 cur_vol = Dos::kVolAdf;
+            if (current != 0) {
+                const Dos::LockSlot* slot = find_lock_slot(d, current);
+                if (slot == nullptr) {
+                    fail(d, b, ERROR_INVALID_LOCK, 0);
+                    return;
+                }
+                cur_vol = slot->entry.volume;
+            }
+            dvp_node = volume_node(d, cur_vol);
+        } else if (same_name(name, colon, d.volume_.name)) {
             dvp_node = d.volume_node_;
         } else if (same_name(name, colon, "DF0")) {
             dvp_node = d.device_node_;
+        } else if (same_name(name, colon, "Ram Disk")) {
+            dvp_node = d.ram_volume_node_;
+        } else if (same_name(name, colon, "RAM")) {
+            dvp_node = d.ram_device_node_;
         } else {
             const i64 idx = find_assign(d, name, colon);
             if (idx < 0) {
@@ -3706,18 +3969,19 @@ struct DosOps {
                 }
             }
             if (e.type == DLT_NONBINDING) {
+                u8 vol = Dos::kVolAdf;
                 char resolved[Dos::kMaxPath];
                 u32 error = 0;
-                if (!resolve(d, b, e.path, resolved, error, 1)) {
+                if (!resolve(d, b, e.path, vol, resolved, error, 1)) {
                     if (b.ok()) {
                         fail(d, b, error, 0);
                     }
                     return;
                 }
                 DirEntry entry{};
-                const FsError found = adf_find(d.volume_, resolved, entry);
-                if (found != FsError::Ok) {
-                    fail(d, b, io_error_of(found), 0);
+                const u32 err = fs_find(d, vol, resolved, entry);
+                if (err != 0) {
+                    fail(d, b, err, 0);
                     return;
                 }
                 if (!entry.is_dir) {
@@ -3861,38 +4125,32 @@ struct DosOps {
         }
     }
 
-    // Fills a FileInfoBlock from an entry and its header block.
+    // Fills a FileInfoBlock from an entry and its metadata.
     static bool fill_fib(Dos& d, Bus& b, u32 fib, const DirEntry& entry) {
-        using namespace amiga_fs_detail;
-        FsError error = FsError::Ok;
-        const u8* header = load_header(d.volume_, entry.header_block, error);
-        if (header == nullptr) {
-            set_io_err(d, b, io_error_of(error));
+        FsMeta meta{};
+        const u32 err = fs_meta(d, entry, meta);
+        if (err != 0) {
+            set_io_err(d, b, err);
             return false;
         }
-        const u32 type = long_at(header, l_sec_type);
-        const u32 payload = d.volume_.ffs ? block_bytes : block_bytes - ofs_header_bytes;
         b.w32(fib + fib_DiskKey, entry.header_block);
-        b.w32(fib + fib_DirEntryType, type);
+        b.w32(fib + fib_DirEntryType, meta.type);
         u32 i = 0;
         for (; entry.name[i] != '\0' && i < 107; ++i) {
             b.w8(fib + fib_FileName + i, static_cast<u8>(entry.name[i]));
         }
         b.w8(fib + fib_FileName + i, 0);
-        b.w32(fib + fib_Protection, long_at(header, block_longs - 48));
-        b.w32(fib + fib_EntryType, type);
-        b.w32(fib + fib_Size, entry.size);
-        b.w32(fib + fib_NumBlocks, entry.is_dir ? 0 : (entry.size + payload - 1) / payload);
-        b.w32(fib + fib_DateStamp + ds_Days, long_at(header, block_longs - 23));
-        b.w32(fib + fib_DateStamp + ds_Minute, long_at(header, block_longs - 22));
-        b.w32(fib + fib_DateStamp + ds_Tick, long_at(header, block_longs - 21));
-        // The comment is a BSTR of at most 79 characters in the header.
-        const u8* comment = header + (block_longs - 46) * 4;
-        const u32 length = comment[0] < 79 ? comment[0] : 79;
-        for (u32 k = 0; k < length; ++k) {
-            b.w8(fib + fib_Comment + k, comment[1 + k]);
+        b.w32(fib + fib_Protection, meta.protection);
+        b.w32(fib + fib_EntryType, meta.type);
+        b.w32(fib + fib_Size, meta.size);
+        b.w32(fib + fib_NumBlocks, meta.num_blocks);
+        b.w32(fib + fib_DateStamp + ds_Days, meta.days);
+        b.w32(fib + fib_DateStamp + ds_Minute, meta.minute);
+        b.w32(fib + fib_DateStamp + ds_Tick, meta.tick);
+        for (u32 k = 0; k < meta.comment_len; ++k) {
+            b.w8(fib + fib_Comment + k, static_cast<u8>(meta.comment[k]));
         }
-        b.w8(fib + fib_Comment + length, 0);
+        b.w8(fib + fib_Comment + meta.comment_len, 0);
         b.w16(fib + fib_OwnerUID, 0);
         b.w16(fib + fib_OwnerGID, 0);
         return b.ok();
@@ -3972,9 +4230,9 @@ struct DosOps {
             return false;
         }
         NextEntry next{after, after == dir.header_block, false, false, DirEntry{}};
-        const FsError error = adf_list(d.volume_, path, NextEntry::visit, &next);
-        if (error != FsError::Ok) {
-            fail(d, b, io_error_of(error), DOSFALSE);
+        const u32 err = fs_list(d, dir.volume, path, NextEntry::visit, &next);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
             return false;
         }
         if (!next.found) {
@@ -4429,10 +4687,11 @@ struct DosOps {
             } else {
                 join_path(prefix, reinterpret_cast<const char*>(tokens), lookup, sizeof lookup);
             }
+            u8 vol = Dos::kVolAdf;
             char resolved[Dos::kMaxPath];
             DirEntry entry{};
             u32 error = 0;
-            if (!locate(d, b, lookup, resolved, entry, error)) {
+            if (!locate(d, b, lookup, vol, resolved, entry, error)) {
                 if (b.ok()) {
                     fail(d, b, error, error);
                 }
@@ -4441,10 +4700,9 @@ struct DosOps {
             char parent_path[Dos::kMaxPath];
             parent_path_of(resolved, parent_path);
             DirEntry parent_entry{};
-            const FsError p_err = adf_find(d.volume_, parent_path, parent_entry);
-            if (p_err != FsError::Ok) {
-                const u32 err = io_error_of(p_err);
-                fail(d, b, err, err);
+            const u32 p_err = fs_find(d, vol, parent_path, parent_entry);
+            if (p_err != 0) {
+                fail(d, b, p_err, p_err);
                 return;
             }
             bool oom = false;
@@ -4483,10 +4741,11 @@ struct DosOps {
             return;
         }
 
+        u8 vol = Dos::kVolAdf;
         char dir_path[Dos::kMaxPath];
         DirEntry dir_entry{};
         u32 error = 0;
-        if (!locate(d, b, prefix, dir_path, dir_entry, error)) {
+        if (!locate(d, b, prefix, vol, dir_path, dir_entry, error)) {
             if (b.ok()) {
                 if (error == ERROR_OBJECT_NOT_FOUND) {
                     error = ERROR_DIR_NOT_FOUND;
@@ -4500,10 +4759,9 @@ struct DosOps {
             return;
         }
         MatchVisitor mv{0, true, false, false, tokens, DirEntry{}};
-        const FsError list_err = adf_list(d.volume_, dir_path, MatchVisitor::visit, &mv);
-        if (list_err != FsError::Ok) {
-            const u32 err = io_error_of(list_err);
-            fail(d, b, err, err);
+        const u32 list_err = fs_list(d, vol, dir_path, MatchVisitor::visit, &mv);
+        if (list_err != 0) {
+            fail(d, b, list_err, list_err);
             return;
         }
         if (!mv.found) {
@@ -4594,7 +4852,7 @@ struct DosOps {
             }
             Dos::AnchorLevel& parent = s.levels[s.depth - 1];
             char sub_path[Dos::kMaxPath];
-            if (s.cur_entry.header_block == d.volume_.root_block) {
+            if (is_root_entry(d, s.cur_entry)) {
                 sub_path[0] = '\0';
             } else if (!join_volume_path(parent.dir_path, s.cur_entry.name, sub_path)) {
                 b.w8(anchor + ap_Flags, flags);
@@ -4616,11 +4874,10 @@ struct DosOps {
                 return;
             }
             MatchVisitor mv{0, true, false, false, s.tokens, DirEntry{}};
-            const FsError list_err = adf_list(d.volume_, child.dir_path, MatchVisitor::visit, &mv);
-            if (list_err != FsError::Ok) {
+            const u32 list_err = fs_list(d, child.dir.volume, child.dir_path, MatchVisitor::visit, &mv);
+            if (list_err != 0) {
                 free_achain_level(d, child);
-                const u32 err = io_error_of(list_err);
-                fail(d, b, err, err);
+                fail(d, b, list_err, list_err);
                 return;
             }
             if (!mv.found) {
@@ -4661,10 +4918,9 @@ struct DosOps {
             return;
         }
         MatchVisitor mv{cur.after, cur.first, false, false, s.tokens, DirEntry{}};
-        const FsError list_err = adf_list(d.volume_, cur.dir_path, MatchVisitor::visit, &mv);
-        if (list_err != FsError::Ok) {
-            const u32 err = io_error_of(list_err);
-            fail(d, b, err, err);
+        const u32 list_err = fs_list(d, cur.dir.volume, cur.dir_path, MatchVisitor::visit, &mv);
+        if (list_err != 0) {
+            fail(d, b, list_err, list_err);
             return;
         }
         if (mv.found) {
@@ -4735,7 +4991,6 @@ struct DosOps {
         bool error;
 
         static void visit(void* ctx, const DirEntry& e) {
-            using namespace amiga_fs_detail;
             ExAllCollector& c = *static_cast<ExAllCollector*>(ctx);
             if (c.error || c.full) {
                 if (!c.error) {
@@ -4753,22 +5008,16 @@ struct DosOps {
                                    true)) {
                 return;
             }
-            const u8* header = nullptr;
+            FsMeta meta{};
             if (c.type >= ED_PROTECTION) {
-                FsError err = FsError::Ok;
-                header = load_header(c.d.volume_, e.header_block, err);
-                if (header == nullptr) {
-                    set_io_err(c.d, c.b, io_error_of(err));
+                const u32 err = fs_meta(c.d, e, meta);
+                if (err != 0) {
+                    set_io_err(c.d, c.b, err);
                     c.error = true;
                     return;
                 }
             }
-            const u8* comment = nullptr;
-            u32 comment_len = 0;
-            if (c.type >= ED_COMMENT) {
-                comment = header + (block_longs - 46) * 4;
-                comment_len = comment[0] < 79 ? comment[0] : 79;
-            }
+            const u32 comment_len = c.type >= ED_COMMENT ? meta.comment_len : 0;
             const u32 name_at = c.offset + c.hdr_size;
             const u32 comment_at = name_at + name_len + 1;
             const u32 end = c.type >= ED_COMMENT ? comment_at + comment_len + 1 : comment_at;
@@ -4793,17 +5042,17 @@ struct DosOps {
                 c.b.w32(at + ed_Size, e.is_dir ? 0 : e.size);
             }
             if (c.type >= ED_PROTECTION) {
-                c.b.w32(at + ed_Prot, long_at(header, block_longs - 48));
+                c.b.w32(at + ed_Prot, meta.protection);
             }
             if (c.type >= ED_DATE) {
-                c.b.w32(at + ed_Days, long_at(header, block_longs - 23));
-                c.b.w32(at + ed_Mins, long_at(header, block_longs - 22));
-                c.b.w32(at + ed_Ticks, long_at(header, block_longs - 21));
+                c.b.w32(at + ed_Days, meta.days);
+                c.b.w32(at + ed_Mins, meta.minute);
+                c.b.w32(at + ed_Ticks, meta.tick);
             }
             if (c.type >= ED_COMMENT) {
                 c.b.w32(at + ed_Comment, c.buffer + comment_at);
                 for (u32 i = 0; i < comment_len; ++i) {
-                    c.b.w8(c.buffer + comment_at + i, comment[1 + i]);
+                    c.b.w8(c.buffer + comment_at + i, static_cast<u8>(meta.comment[i]));
                 }
                 c.b.w8(c.buffer + comment_at + comment_len, 0);
             }
@@ -4868,7 +5117,7 @@ struct DosOps {
         }
         ExAllCollector col{d, b, buffer, size, type, hdr_size, after, match_pat,
                            false, 0, 0, 0, after, false, false, false};
-        const FsError error = adf_list(d.volume_, path, ExAllCollector::visit, &col);
+        const u32 err = fs_list(d, dir.volume, path, ExAllCollector::visit, &col);
         if (!b.ok()) {
             return;
         }
@@ -4876,8 +5125,8 @@ struct DosOps {
             native::set_result(m, DOSFALSE);
             return;
         }
-        if (error != FsError::Ok) {
-            fail(d, b, io_error_of(error), DOSFALSE);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
             return;
         }
         b.w32(control + eac_Entries, col.entries);
@@ -4905,15 +5154,26 @@ struct DosOps {
             native::set_result(b.machine(), DOSFALSE);
             return false;
         }
-        const u32 blocks = d.volume_.block_count - 2;  // the bootblock is not counted
         b.w32(id + id_NumSoftErrors, 0);
         b.w32(id + id_UnitNumber, 0);
-        b.w32(id + id_DiskState, ID_WRITE_PROTECTED);
-        b.w32(id + id_NumBlocks, blocks);
-        b.w32(id + id_NumBlocksUsed, blocks);
-        b.w32(id + id_BytesPerBlock, d.volume_.ffs ? 512 : 488);
-        b.w32(id + id_DiskType, ID_DOS_DISK | d.volume_.image[3]);
-        b.w32(id + id_VolumeNode, d.volume_node_ >> 2);
+        if (entry.volume == Dos::kVolRam) {
+            const u32 blocks = (d.ram_.bytes_used() + 511u) / 512u + d.ram_.used_nodes();
+            const u32 used = blocks > 1u ? blocks : 1u;
+            b.w32(id + id_DiskState, ID_VALIDATED);
+            b.w32(id + id_NumBlocks, used);
+            b.w32(id + id_NumBlocksUsed, used);
+            b.w32(id + id_BytesPerBlock, 512);
+            b.w32(id + id_DiskType, ID_DOS_DISK);
+            b.w32(id + id_VolumeNode, d.ram_volume_node_ >> 2);
+        } else {
+            const u32 blocks = d.volume_.block_count - 2;  // the bootblock is not counted
+            b.w32(id + id_DiskState, ID_WRITE_PROTECTED);
+            b.w32(id + id_NumBlocks, blocks);
+            b.w32(id + id_NumBlocksUsed, blocks);
+            b.w32(id + id_BytesPerBlock, d.volume_.ffs ? 512 : 488);
+            b.w32(id + id_DiskType, ID_DOS_DISK | d.volume_.image[3]);
+            b.w32(id + id_VolumeNode, d.volume_node_ >> 2);
+        }
         b.w32(id + id_InUse, 0);
         if (b.ok()) {
             native::set_result(b.machine(), DOSTRUE);
@@ -4973,9 +5233,10 @@ struct DosOps {
         if (!b.ok()) {
             return;
         }
+        u8 vol = base_entry.volume;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        const bool ok = has_colon ? resolve(d, b, name, resolved, error)
+        const bool ok = has_colon ? resolve(d, b, name, vol, resolved, error)
                                   : apply_relative_path(base_path, name, resolved, error);
         if (!ok) {
             if (b.ok()) {
@@ -4984,9 +5245,9 @@ struct DosOps {
             return;
         }
         DirEntry entry{};
-        const FsError found = adf_find(d.volume_, resolved, entry);
-        if (found != FsError::Ok) {
-            fail(d, b, io_error_of(found), 0);
+        const u32 err = fs_find(d, vol, resolved, entry);
+        if (err != 0) {
+            fail(d, b, err, 0);
             return;
         }
         u32 out_bptr = 0;
@@ -5023,10 +5284,22 @@ struct DosOps {
             set_io_err(d, b, 0);
             native::set_result(m, DOSTRUE);
             return;
-        case ACTION_CURRENT_VOLUME:
+        case ACTION_CURRENT_VOLUME: {
+            const u32 current = b.r32(d.process_ + pr_CurrentDir);
+            if (!b.ok()) {
+                return;
+            }
+            u8 vol = Dos::kVolAdf;
+            if (current != 0) {
+                const Dos::LockSlot* slot = find_lock_slot(d, current);
+                if (slot != nullptr) {
+                    vol = slot->entry.volume;
+                }
+            }
             set_io_err(d, b, 0);
-            native::set_result(m, d.volume_node_ >> 2);
+            native::set_result(m, volume_node(d, vol) >> 2);
             return;
+        }
         case ACTION_SAME_LOCK:
             if (same_lock_impl(d, b, arg1, arg2)) {
                 set_io_err(d, b, 0);
@@ -5787,6 +6060,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     m_ = nullptr;
     exec_ = &exec;
     volume_ = volume;
+    ram_ = RamFs{};
     out_ = out;
     out_ctx_ = ctx;
     base_ = 0;
@@ -5840,7 +6114,9 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     m_ = &m;
     root_ = block_ + kRootAt;
     volume_node_ = block_ + kVolumeAt;
+    ram_volume_node_ = block_ + kRamVolumeAt;
     device_node_ = block_ + kDeviceAt;
+    ram_device_node_ = block_ + kRamDeviceAt;
     port_ = block_ + kPortAt;
     process_ = block_ + kProcessAt;
     cli_ = block_ + kCliAt;
@@ -5866,6 +6142,15 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
         m_ = nullptr;
         return false;
     }
+
+    ram_.init(RamFs::Store{
+        this,
+        DosOps::ram_alloc,
+        DosOps::ram_free,
+        DosOps::ram_read,
+        DosOps::ram_write,
+        DosOps::ram_now,
+    });
 
     Bus b(m);
     const u32 info = block_ + kInfoAt;
@@ -5895,11 +6180,23 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     b.w32(volume_node_ + dol_DiskType, ID_DOS_DISK | volume.image[3]);
     put_bstr(b, block_ + kVolumeNameAt, volume.name, 30);
     b.w32(volume_node_ + dol_Name, (block_ + kVolumeNameAt) >> 2);
-    b.w32(volume_node_ + dol_Next, device_node_ >> 2);
+    b.w32(ram_volume_node_ + dol_Type, DLT_VOLUME);
+    b.w32(ram_volume_node_ + dol_Task, port_);
+    const RamFs::Date& ram_date = ram_.node(0).date;
+    b.w32(ram_volume_node_ + dol_VolumeDate + ds_Days, ram_date.days);
+    b.w32(ram_volume_node_ + dol_VolumeDate + ds_Minute, ram_date.minute);
+    b.w32(ram_volume_node_ + dol_VolumeDate + ds_Tick, ram_date.tick);
+    b.w32(ram_volume_node_ + dol_DiskType, ID_DOS_DISK);
+    put_bstr(b, block_ + kRamVolumeNameAt, "Ram Disk", 30);
+    b.w32(ram_volume_node_ + dol_Name, (block_ + kRamVolumeNameAt) >> 2);
     b.w32(device_node_ + dol_Type, DLT_DEVICE);
     b.w32(device_node_ + dol_Task, port_);
     put_bstr(b, block_ + kDeviceNameAt, "DF0", 30);
     b.w32(device_node_ + dol_Name, (block_ + kDeviceNameAt) >> 2);
+    b.w32(ram_device_node_ + dol_Type, DLT_DEVICE);
+    b.w32(ram_device_node_ + dol_Task, port_);
+    put_bstr(b, block_ + kRamDeviceNameAt, "RAM", 30);
+    b.w32(ram_device_node_ + dol_Name, (block_ + kRamDeviceNameAt) >> 2);
 
     // The file system's port, which nothing sends to.
     b.w8(port_ + LN_TYPE, NT_MSGPORT);
@@ -5970,7 +6267,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     };
     for (const DefaultAssign& def : kDefaultAssigns) {
         DirEntry entry{};
-        if (adf_find(volume_, def.path, entry) != FsError::Ok || !entry.is_dir) {
+        if (DosOps::fs_find(*this, kVolAdf, def.path, entry) != 0 || !entry.is_dir) {
             continue;
         }
         char lock_path[kMaxPath];
@@ -5978,7 +6275,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
             lock_path[0] = '\0';
         } else if (same_name(def.name, length_of(def.name), "ENVARC")) {
             DirEntry prefs{};
-            if (adf_find(volume_, "Prefs", prefs) == FsError::Ok && prefs.is_dir) {
+            if (DosOps::fs_find(*this, kVolAdf, "Prefs", prefs) == 0 && prefs.is_dir) {
                 u32 p = 0;
                 for (u32 i = 0; prefs.name[i] != '\0' && p + 2 < kMaxPath; ++i) {
                     lock_path[p++] = prefs.name[i];
@@ -6041,10 +6338,11 @@ u32 Dos::load_seg(const char* path) {
     for (u32 i = 0; i <= length; ++i) {
         name[i] = path[i];
     }
+    u8 vol = kVolAdf;
     char resolved[kMaxPath];
     DirEntry entry{};
     u32 error = 0;
-    if (!DosOps::locate(*this, b, name, resolved, entry, error)) {
+    if (!DosOps::locate(*this, b, name, vol, resolved, entry, error)) {
         if (b.ok()) {
             DosOps::set_io_err(*this, b, error);
         }
@@ -6054,19 +6352,20 @@ u32 Dos::load_seg(const char* path) {
         DosOps::set_io_err(*this, b, ERROR_OBJECT_WRONG_TYPE);
         return 0;
     }
-    if (entry.size == 0) {
+    const u32 file_size = DosOps::fs_size(*this, entry);
+    if (file_size == 0) {
         DosOps::set_io_err(*this, b, ERROR_FILE_NOT_OBJECT);
         return 0;
     }
     // The file is read into guest memory for the loader and dropped after.
-    const u32 file = exec_->alloc(entry.size, MEMF_PUBLIC);
+    const u32 file = exec_->alloc(file_size, MEMF_PUBLIC);
     if (file == 0) {
         DosOps::set_io_err(*this, b, ERROR_NO_FREE_STORE);
         return 0;
     }
     u32 got = 0;
-    if (adf_read(volume_, entry, 0, m_->mem.base + file, entry.size, got) != FsError::Ok) {
-        exec_->free(file, entry.size);
+    if (DosOps::fs_read(*this, entry, 0, m_->mem.base + file, file_size, got) != 0) {
+        exec_->free(file, file_size);
         DosOps::set_io_err(*this, b, ERROR_NOT_A_DOS_DISK);
         return 0;
     }
@@ -6074,7 +6373,7 @@ u32 Dos::load_seg(const char* path) {
     // that does but fails to load is a bad one.
     u32 magic = 0;
     if (got < 4 || !m_->mem.read32(file, magic) || magic != hunk_detail::kHunkHeader) {
-        exec_->free(file, entry.size);
+        exec_->free(file, file_size);
         DosOps::set_io_err(*this, b, ERROR_FILE_NOT_OBJECT);
         return 0;
     }
@@ -6082,7 +6381,7 @@ u32 Dos::load_seg(const char* path) {
     u32 seglist = 0;
     const HunkError loaded = hunk_load(m_->mem.base + file, got, m_->mem,
                                        HunkAllocator{SegmentTracker::alloc, &tracker}, seglist);
-    exec_->free(file, entry.size);
+    exec_->free(file, file_size);
     if (loaded != HunkError::Ok) {
         tracker.free_all();
         DosOps::set_io_err(*this, b,
@@ -6201,9 +6500,10 @@ bool Dos::change_dir(const char* path, u32& error) {
         return false;
     }
     Bus b(*m_);
+    u8 vol = kVolAdf;
     char resolved[kMaxPath];
     DirEntry entry{};
-    if (!DosOps::locate(*this, b, path, resolved, entry, error)) {
+    if (!DosOps::locate(*this, b, path, vol, resolved, entry, error)) {
         if (b.ok()) {
             set_last_error(error);
         }
@@ -6215,7 +6515,7 @@ bool Dos::change_dir(const char* path, u32& error) {
         return false;
     }
     char canonical[kMaxPath];
-    canonicalize_path(volume_, resolved, canonical);
+    DosOps::fs_canonical(*this, vol, resolved, canonical);
     u32 new_lock = 0;
     if (!DosOps::alloc_user_lock(*this, b, canonical, entry, SHARED_LOCK, new_lock, false)) {
         error = b.r32(process_ + pr_Result2);
@@ -6227,7 +6527,7 @@ bool Dos::change_dir(const char* path, u32& error) {
         DosOps::free_user_lock(*this, old_lock);
     }
     char full_name[kMaxName];
-    format_volume_path(volume_, canonical, full_name, sizeof full_name);
+    format_volume_path(DosOps::volume_name(*this, vol), canonical, full_name, sizeof full_name);
     put_bstr(b, set_name_, full_name, 255);
     b.w32(cli_ + cli_SetName, set_name_ >> 2);
     error = 0;
@@ -6330,9 +6630,10 @@ bool Dos::path_add(const char* dir, u32& error) {
         return false;
     }
     Bus b(*m_);
+    u8 vol = kVolAdf;
     char resolved[kMaxPath];
     DirEntry entry{};
-    if (!DosOps::locate(*this, b, dir, resolved, entry, error)) {
+    if (!DosOps::locate(*this, b, dir, vol, resolved, entry, error)) {
         if (b.ok()) {
             set_last_error(error);
         }
@@ -6344,8 +6645,8 @@ bool Dos::path_add(const char* dir, u32& error) {
         return false;
     }
     char canonical[kMaxPath];
-    canonicalize_path(volume_, resolved, canonical);
-    if (path_index_of(canonical) < path_count_) {
+    DosOps::fs_canonical(*this, vol, resolved, canonical);
+    if (path_index_of(vol, canonical) < path_count_) {
         error = 0;
         return true;  // already in the path
     }
@@ -6382,10 +6683,10 @@ bool Dos::path_add(const char* dir, u32& error) {
     return true;
 }
 
-u32 Dos::path_index_of(const char* canonical) const {
+u32 Dos::path_index_of(u8 vol, const char* canonical) const {
     for (u32 i = 0; i < path_count_ && i < kMaxPathDirs; ++i) {
         const i64 slot = DosOps::lock_slot(*this, path_locks_[i]);
-        if (slot < 0) {
+        if (slot < 0 || lock_slots_[slot].entry.volume != vol) {
             continue;
         }
         const char* held = lock_slots_[slot].path;
@@ -6402,17 +6703,18 @@ bool Dos::path_remove(const char* dir, u32& error) {
         return false;
     }
     Bus b(*m_);
+    u8 vol = kVolAdf;
     char resolved[kMaxPath];
     DirEntry entry{};
-    if (!DosOps::locate(*this, b, dir, resolved, entry, error)) {
+    if (!DosOps::locate(*this, b, dir, vol, resolved, entry, error)) {
         if (b.ok()) {
             set_last_error(error);
         }
         return false;
     }
     char canonical[kMaxPath];
-    canonicalize_path(volume_, resolved, canonical);
-    const u32 index = path_index_of(canonical);
+    DosOps::fs_canonical(*this, vol, resolved, canonical);
+    const u32 index = path_index_of(vol, canonical);
     if (index >= path_count_) {
         error = ERROR_OBJECT_NOT_FOUND;
         set_last_error(error);
@@ -6468,7 +6770,8 @@ bool Dos::path_name(u32 i, char* out, u32 size) const {
         out[0] = '\0';
         return false;
     }
-    return format_volume_path(volume_, lock_slots_[slot].path, out, size);
+    return format_volume_path(DosOps::volume_name(*this, lock_slots_[slot].entry.volume),
+                              lock_slots_[slot].path, out, size);
 }
 
 bool Dos::find_command(const char* word, char* out, u32 size) {
@@ -6488,10 +6791,11 @@ bool Dos::find_command(const char* word, char* out, u32 size) {
     }
     Bus b(*m_);
     auto exists_file = [&](const char* candidate) -> bool {
+        u8 vol = kVolAdf;
         char resolved[kMaxPath];
         DirEntry entry{};
         u32 error = 0;
-        return DosOps::locate(*this, b, candidate, resolved, entry, error) && !entry.is_dir;
+        return DosOps::locate(*this, b, candidate, vol, resolved, entry, error) && !entry.is_dir;
     };
     auto copy_out = [&](const char* candidate) -> bool {
         const u32 len = length_of(candidate);
