@@ -25,6 +25,7 @@
 
 #include "../amiga_fs.hpp"
 #include "../dos_date.hpp"
+#include "../dos_errors.hpp"
 #include "../dos_pattern.hpp"
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
@@ -554,54 +555,54 @@ constexpr u32 DDF_AllBit = 8;
 constexpr u32 DDF_Single = 16;
 
 // IoErr() codes
-constexpr u32 ERROR_NO_FREE_STORE = 103;
-constexpr u32 ERROR_TASK_TABLE_FULL = 105;
-constexpr u32 ERROR_BAD_TEMPLATE = 114;
-constexpr u32 ERROR_BAD_NUMBER = 115;
-constexpr u32 ERROR_REQUIRED_ARG_MISSING = 116;
-constexpr u32 ERROR_KEY_NEEDS_ARG = 117;
-constexpr u32 ERROR_TOO_MANY_ARGS = 118;
-constexpr u32 ERROR_UNMATCHED_QUOTES = 119;
-constexpr u32 ERROR_LINE_TOO_LONG = 120;
-constexpr u32 ERROR_FILE_NOT_OBJECT = 121;
-constexpr u32 ERROR_INVALID_RESIDENT_LIBRARY = 122;
-constexpr u32 ERROR_NO_DEFAULT_DIR = 201;
-constexpr u32 ERROR_OBJECT_IN_USE = 202;
-constexpr u32 ERROR_OBJECT_EXISTS = 203;
-constexpr u32 ERROR_DIR_NOT_FOUND = 204;
-constexpr u32 ERROR_OBJECT_NOT_FOUND = 205;
-constexpr u32 ERROR_BAD_STREAM_NAME = 206;
-constexpr u32 ERROR_OBJECT_TOO_LARGE = 207;
-constexpr u32 ERROR_ACTION_NOT_KNOWN = 209;
-constexpr u32 ERROR_INVALID_COMPONENT_NAME = 210;
-constexpr u32 ERROR_INVALID_LOCK = 211;
-constexpr u32 ERROR_OBJECT_WRONG_TYPE = 212;
-constexpr u32 ERROR_DISK_NOT_VALIDATED = 213;
-constexpr u32 ERROR_DISK_WRITE_PROTECTED = 214;
-constexpr u32 ERROR_RENAME_ACROSS_DEVICES = 215;
-constexpr u32 ERROR_DIRECTORY_NOT_EMPTY = 216;
-constexpr u32 ERROR_TOO_MANY_LEVELS = 217;
-constexpr u32 ERROR_DEVICE_NOT_MOUNTED = 218;
-constexpr u32 ERROR_SEEK_ERROR = 219;
-constexpr u32 ERROR_COMMENT_TOO_BIG = 220;
-constexpr u32 ERROR_DISK_FULL = 221;
-constexpr u32 ERROR_DELETE_PROTECTED = 222;
-constexpr u32 ERROR_WRITE_PROTECTED = 223;
-constexpr u32 ERROR_READ_PROTECTED = 224;
-constexpr u32 ERROR_NOT_A_DOS_DISK = 225;
-constexpr u32 ERROR_NO_DISK = 226;
-constexpr u32 ERROR_NO_MORE_ENTRIES = 232;
-constexpr u32 ERROR_IS_SOFT_LINK = 233;
-constexpr u32 ERROR_OBJECT_LINKED = 234;
-constexpr u32 ERROR_BAD_HUNK = 235;
-constexpr u32 ERROR_NOT_IMPLEMENTED = 236;
-constexpr u32 ERROR_RECORD_NOT_LOCKED = 240;
-constexpr u32 ERROR_LOCK_COLLISION = 241;
-constexpr u32 ERROR_LOCK_TIMEOUT = 242;
-constexpr u32 ERROR_UNLOCK_ERROR = 243;
-constexpr u32 ERROR_BUFFER_OVERFLOW = 303;
-constexpr u32 ERROR_BREAK = 304;
-constexpr u32 ERROR_NOT_EXECUTABLE = 305;
+using hombre::ERROR_NO_FREE_STORE;
+using hombre::ERROR_TASK_TABLE_FULL;
+using hombre::ERROR_BAD_TEMPLATE;
+using hombre::ERROR_BAD_NUMBER;
+using hombre::ERROR_REQUIRED_ARG_MISSING;
+using hombre::ERROR_KEY_NEEDS_ARG;
+using hombre::ERROR_TOO_MANY_ARGS;
+using hombre::ERROR_UNMATCHED_QUOTES;
+using hombre::ERROR_LINE_TOO_LONG;
+using hombre::ERROR_FILE_NOT_OBJECT;
+using hombre::ERROR_INVALID_RESIDENT_LIBRARY;
+using hombre::ERROR_NO_DEFAULT_DIR;
+using hombre::ERROR_OBJECT_IN_USE;
+using hombre::ERROR_OBJECT_EXISTS;
+using hombre::ERROR_DIR_NOT_FOUND;
+using hombre::ERROR_OBJECT_NOT_FOUND;
+using hombre::ERROR_BAD_STREAM_NAME;
+using hombre::ERROR_OBJECT_TOO_LARGE;
+using hombre::ERROR_ACTION_NOT_KNOWN;
+using hombre::ERROR_INVALID_COMPONENT_NAME;
+using hombre::ERROR_INVALID_LOCK;
+using hombre::ERROR_OBJECT_WRONG_TYPE;
+using hombre::ERROR_DISK_NOT_VALIDATED;
+using hombre::ERROR_DISK_WRITE_PROTECTED;
+using hombre::ERROR_RENAME_ACROSS_DEVICES;
+using hombre::ERROR_DIRECTORY_NOT_EMPTY;
+using hombre::ERROR_TOO_MANY_LEVELS;
+using hombre::ERROR_DEVICE_NOT_MOUNTED;
+using hombre::ERROR_SEEK_ERROR;
+using hombre::ERROR_COMMENT_TOO_BIG;
+using hombre::ERROR_DISK_FULL;
+using hombre::ERROR_DELETE_PROTECTED;
+using hombre::ERROR_WRITE_PROTECTED;
+using hombre::ERROR_READ_PROTECTED;
+using hombre::ERROR_NOT_A_DOS_DISK;
+using hombre::ERROR_NO_DISK;
+using hombre::ERROR_NO_MORE_ENTRIES;
+using hombre::ERROR_IS_SOFT_LINK;
+using hombre::ERROR_OBJECT_LINKED;
+using hombre::ERROR_BAD_HUNK;
+using hombre::ERROR_NOT_IMPLEMENTED;
+using hombre::ERROR_RECORD_NOT_LOCKED;
+using hombre::ERROR_LOCK_COLLISION;
+using hombre::ERROR_LOCK_TIMEOUT;
+using hombre::ERROR_UNLOCK_ERROR;
+using hombre::ERROR_BUFFER_OVERFLOW;
+using hombre::ERROR_BREAK;
+using hombre::ERROR_NOT_EXECUTABLE;
 
 }
 
