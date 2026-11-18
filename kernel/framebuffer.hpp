@@ -24,8 +24,8 @@
 #pragma once
 
 #include "../common/boot_info.hpp"
+#include "../common/font.hpp"
 #include "../common/types.hpp"
-#include "font.hpp"
 
 namespace hombre {
 

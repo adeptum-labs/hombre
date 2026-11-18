@@ -21,8 +21,8 @@
  * Contact: info@adeptum.se
  */
 
+#include "../common/font.hpp"
 #include "check.hpp"
-#include "font.hpp"
 #include "framebuffer.hpp"
 
 #include <cstring>
