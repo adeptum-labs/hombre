@@ -181,6 +181,17 @@ bool changed_only_inside(const std::vector<u8>& before, const std::vector<u8>& a
     return true;
 }
 
+void screen_font_is_a_textattr_naming_topaz() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 attr = r.get32(screen + sc_Font);
+    CHECK(attr != 0);
+    CHECK_EQ(r.get16(attr + ta_YSize), 8u);
+    CHECK(r.read_str(r.get32(attr + ta_Name)) == "topaz.font");
+}
+
 void open_screen_builds_struct_bitmap_and_colormap() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -842,6 +853,7 @@ void window_refresh_reaches_the_sink() {
 }
 
 int main() {
+    screen_font_is_a_textattr_naming_topaz();
     open_screen_builds_struct_bitmap_and_colormap();
     open_screen_clears_and_draws_title_bar();
     open_screen_makes_it_front_and_refreshes_the_whole_screen();

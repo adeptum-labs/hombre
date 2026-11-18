@@ -84,6 +84,8 @@ public:
 
     u32 graphics_base() const { return base_; }
     u32 topaz_font() const { return topaz_; }
+    // The TextAttr that names the built-in font, as Screen.Font points to one.
+    u32 topaz_attr() const { return topaz_attr_; }
 
     void init_rastport(u32 rp);
     void set_pens(u32 rp, u32 fg, u32 bg, u32 mode);
@@ -105,6 +107,7 @@ private:
     u32 base_ = 0;
     u32 topaz_ = 0;
     u32 topaz_name_ = 0;
+    u32 topaz_attr_ = 0;
     NativeVector vectors_[kVectors]{};
 };
 

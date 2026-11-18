@@ -113,6 +113,11 @@ void plot(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i64 x, i64 y
 
 }
 
+// The largest bitmap a draw works on: 4096 x 4096 pixels, which bounds the
+// work one native call can do.
+constexpr u32 kMaxBytesPerRow = 512;
+constexpr u32 kMaxRows = 4096;
+
 inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
     out.bytes_per_row = bus.r16(bitmap_addr + ndk::bm_BytesPerRow);
     out.rows = bus.r16(bitmap_addr + ndk::bm_Rows);
@@ -127,6 +132,9 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
     // The area of one plane must fit in guest memory, whatever the depth,
     // and every plane in use must lie inside it. Together they bound what a
     // draw over the bitmap can visit.
+    if (out.bytes_per_row > kMaxBytesPerRow || out.rows > kMaxRows) {
+        return false;
+    }
     const u32 plane_bytes = out.bytes_per_row * out.rows;
     if (bus.bytes_at(0, plane_bytes) == nullptr) {
         return false;

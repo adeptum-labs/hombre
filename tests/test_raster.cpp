@@ -405,8 +405,8 @@ void bad_bitmap_address_faults_the_bus() {
 void load_bitmap_rejects_planes_outside_guest_memory() {
     Rig r;
     native::Bus b = r.bus();
-    r.put16(kStruct + ndk::bm_BytesPerRow, 0xFFFF);
-    r.put16(kStruct + ndk::bm_Rows, 0xFFFF);
+    r.put16(kStruct + ndk::bm_BytesPerRow, 512);
+    r.put16(kStruct + ndk::bm_Rows, 4096);
     r.put8(kStruct + ndk::bm_Depth, 2);
     r.put32(kStruct + ndk::bm_Planes, kPlaneBase);
     r.put32(kStruct + ndk::bm_Planes + 4, kPlaneBase + 0x100);
@@ -414,6 +414,22 @@ void load_bitmap_rejects_planes_outside_guest_memory() {
     CHECK(!raster::load_bitmap(b, kStruct, bm));
     CHECK(!b.ok());
     CHECK(r.machine().cpu.exit == ExitReason::BusError);
+}
+
+void load_bitmap_rejects_areas_wider_or_taller_than_4096() {
+    Rig r;
+    native::Bus b = r.bus();
+    r.put16(kStruct + ndk::bm_BytesPerRow, 513);
+    r.put16(kStruct + ndk::bm_Rows, 1);
+    r.put8(kStruct + ndk::bm_Depth, 0);
+    raster::Bitmap bm{};
+    CHECK(!raster::load_bitmap(b, kStruct, bm));
+    r.put16(kStruct + ndk::bm_BytesPerRow, 1);
+    r.put16(kStruct + ndk::bm_Rows, 4097);
+    CHECK(!raster::load_bitmap(b, kStruct, bm));
+    r.put16(kStruct + ndk::bm_BytesPerRow, 512);
+    r.put16(kStruct + ndk::bm_Rows, 1);
+    CHECK(raster::load_bitmap(b, kStruct, bm));
 }
 
 void huge_fill_stops_at_the_first_fault() {
@@ -436,8 +452,8 @@ void huge_fill_stops_at_the_first_fault() {
 void load_bitmap_rejects_a_depth_zero_bitmap_larger_than_guest_memory() {
     Rig r;
     native::Bus b = r.bus();
-    r.put16(kStruct + ndk::bm_BytesPerRow, 0xFFFF);
-    r.put16(kStruct + ndk::bm_Rows, 0xFFFF);
+    r.put16(kStruct + ndk::bm_BytesPerRow, 512);
+    r.put16(kStruct + ndk::bm_Rows, 4096);
     r.put8(kStruct + ndk::bm_Depth, 0);
     raster::Bitmap bm{};
     CHECK(!raster::load_bitmap(b, kStruct, bm));
@@ -461,6 +477,7 @@ int main() {
     bad_bitmap_address_faults_the_bus();
     load_bitmap_rejects_planes_outside_guest_memory();
     huge_fill_stops_at_the_first_fault();
+    load_bitmap_rejects_areas_wider_or_taller_than_4096();
     load_bitmap_rejects_a_depth_zero_bitmap_larger_than_guest_memory();
     return check::finish("test_raster");
 }

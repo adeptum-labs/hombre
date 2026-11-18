@@ -400,9 +400,7 @@ struct GraphicsNatives {
         b.w16(bitmap + ndk::bm_Rows, m.cpu.d[2]);
         b.w8(bitmap + ndk::bm_Flags, 0);
         b.w8(bitmap + ndk::bm_Depth, m.cpu.d[0]);
-        for (u32 plane = 0; plane < 8; ++plane) {
-            b.w32(bitmap + ndk::bm_Planes + plane * 4, 0);
-        }
+        b.w16(bitmap + 6, 0);  // the pad word
     }
 
     static void scroll_raster(void* ctx, Machine& m) {
@@ -507,6 +505,7 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     base_ = 0;
     topaz_ = 0;
     topaz_name_ = 0;
+    topaz_attr_ = 0;
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -516,12 +515,16 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
 
     const u32 font = exec.alloc(ndk::TextFont_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     const u32 name = exec.alloc(sizeof kTopazName, ndk::MEMF_PUBLIC);
-    if (font == 0 || name == 0) {
+    const u32 attr = exec.alloc(ndk::TextAttr_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (font == 0 || name == 0 || attr == 0) {
         if (font != 0) {
             exec.free(font, ndk::TextFont_SIZEOF);
         }
         if (name != 0) {
             exec.free(name, sizeof kTopazName);
+        }
+        if (attr != 0) {
+            exec.free(attr, ndk::TextAttr_SIZEOF);
         }
         return false;
     }
@@ -529,6 +532,8 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     for (u32 i = 0; i < sizeof kTopazName; ++i) {
         b.w8(name + i, static_cast<u8>(kTopazName[i]));
     }
+    b.w32(attr + ndk::ta_Name, name);
+    b.w16(attr + ndk::ta_YSize, 8);
     b.w16(font + ndk::tf_YSize, 8);
     b.w16(font + ndk::tf_XSize, 8);
     b.w16(font + ndk::tf_Baseline, 6);
@@ -537,6 +542,7 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     if (!b.ok()) {
         exec.free(font, ndk::TextFont_SIZEOF);
         exec.free(name, sizeof kTopazName);
+        exec.free(attr, ndk::TextAttr_SIZEOF);
         return false;
     }
 
@@ -545,8 +551,10 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     if (base == 0) {
         exec.free(font, ndk::TextFont_SIZEOF);
         exec.free(name, sizeof kTopazName);
+        exec.free(attr, ndk::TextAttr_SIZEOF);
         return false;
     }
+    topaz_attr_ = attr;
     topaz_ = font;
     topaz_name_ = name;
     base_ = base;

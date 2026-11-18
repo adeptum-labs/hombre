@@ -120,6 +120,10 @@ std::vector<u8> plane_snapshot(GfxRig& r, const Surface& s) {
 
 void init_bitmap_fills_the_fields() {
     GfxRig r;
+    // The plane pointers belong to the caller: InitBitMap leaves them alone.
+    for (u32 plane = 0; plane < 8; ++plane) {
+        r.put32(kBitmap + bm_Planes + plane * 4, 0x1234 + plane);
+    }
     r.cpu().a[0] = kBitmap;
     r.cpu().d[0] = 2;
     r.cpu().d[1] = kWidth;
@@ -130,7 +134,7 @@ void init_bitmap_fills_the_fields() {
     CHECK_EQ(r.get8(kBitmap + bm_Depth), 2u);
     CHECK_EQ(r.get8(kBitmap + bm_Flags), 0u);
     for (u32 plane = 0; plane < 8; ++plane) {
-        CHECK_EQ(r.get32(kBitmap + bm_Planes + plane * 4), 0u);
+        CHECK_EQ(r.get32(kBitmap + bm_Planes + plane * 4), 0x1234u + plane);
     }
 
     // A width that is not a multiple of 16 is rounded up to whole words.

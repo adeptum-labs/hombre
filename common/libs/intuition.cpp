@@ -676,7 +676,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w8(screen + ndk::sc_BlockPen, a.block);
     b.w32(screen + ndk::sc_Title, title);
     b.w32(screen + ndk::sc_DefaultTitle, title);
-    b.w32(screen + ndk::sc_Font, graphics_->topaz_font());
+    b.w32(screen + ndk::sc_Font, graphics_->topaz_attr());
     b.w32(screen + kScNextScreen, 0);
 
     b.w16(bitmap + ndk::bm_BytesPerRow, bpr);
