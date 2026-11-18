@@ -402,6 +402,37 @@ void bad_bitmap_address_faults_the_bus() {
     CHECK_EQ(r.machine().cpu.fault_addr, kMemoryBytes);
 }
 
+void load_bitmap_rejects_planes_outside_guest_memory() {
+    Rig r;
+    native::Bus b = r.bus();
+    r.put16(kStruct + ndk::bm_BytesPerRow, 0xFFFF);
+    r.put16(kStruct + ndk::bm_Rows, 0xFFFF);
+    r.put8(kStruct + ndk::bm_Depth, 2);
+    r.put32(kStruct + ndk::bm_Planes, kPlaneBase);
+    r.put32(kStruct + ndk::bm_Planes + 4, kPlaneBase + 0x100);
+    raster::Bitmap bm{};
+    CHECK(!raster::load_bitmap(b, kStruct, bm));
+    CHECK(!b.ok());
+    CHECK(r.machine().cpu.exit == ExitReason::BusError);
+}
+
+void huge_fill_stops_at_the_first_fault() {
+    Rig r;
+    native::Bus b = r.bus();
+    raster::Bitmap bm{};
+    bm.bytes_per_row = 0xFFFF;
+    bm.rows = 0xFFFF;
+    bm.depth = 2;
+    bm.planes[0] = kPlaneBase;
+    bm.planes[1] = kPlaneBase;
+    const raster::Clip clip{0, 0, 0x7FFFFFF, 0x7FFFFFF};
+    raster::fill_rect(b, bm, clip, Rect{0, 0, 0x7FFFFFF, 0x7FFFFFF}, 3);
+    CHECK(!b.ok());
+    CHECK(r.machine().cpu.exit == ExitReason::BusError);
+    raster::scroll_rect(b, bm, clip, 0, 1, Rect{0, 0, 0x7FFFFFF, 0x7FFFFFF}, 0);
+    CHECK(!b.ok());
+}
+
 }
 
 int main() {
@@ -417,5 +448,7 @@ int main() {
     scroll_rect_up_one_row_moves_and_clears_bottom();
     load_bitmap_rejects_depth_over_8();
     bad_bitmap_address_faults_the_bus();
+    load_bitmap_rejects_planes_outside_guest_memory();
+    huge_fill_stops_at_the_first_fault();
     return check::finish("test_raster");
 }

@@ -121,7 +121,18 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
         out.planes[plane] = bus.r32(bitmap_addr + ndk::bm_Planes + plane * 4);
     }
     out.addr = bitmap_addr;
-    return bus.ok() && out.depth <= 8;
+    if (!bus.ok() || out.depth > 8) {
+        return false;
+    }
+    // Every plane in use must lie inside guest memory, which bounds what a
+    // draw over the bitmap can visit.
+    const u32 plane_bytes = out.bytes_per_row * out.rows;
+    for (u32 plane = 0; plane < out.depth; ++plane) {
+        if (bus.bytes_at(out.planes[plane], plane_bytes) == nullptr) {
+            return false;
+        }
+    }
+    return true;
 }
 
 inline u32 read_pixel(native::Bus& bus, const Bitmap& bitmap, i32 x, i32 y) {
@@ -178,8 +189,8 @@ inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     if (left > right || top > bottom) {
         return empty_rect();
     }
-    for (i64 y = top; y <= bottom; ++y) {
-        for (i64 x = left; x <= right; ++x) {
+    for (i64 y = top; y <= bottom && bus.ok(); ++y) {
+        for (i64 x = left; x <= right && bus.ok(); ++x) {
             write_pixel(bus, bitmap, static_cast<i32>(x), static_cast<i32>(y), pen);
         }
     }
@@ -282,9 +293,9 @@ inline Rect scroll_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip
     // Each source pixel is read before a write can reach it: a downward
     // move walks from the top, an upward one from the bottom, and the same
     // holds for the horizontal direction.
-    for (i64 row = 0; row <= bottom - top; ++row) {
+    for (i64 row = 0; row <= bottom - top && bus.ok(); ++row) {
         const i64 y = dy > 0 ? top + row : bottom - row;
-        for (i64 column = 0; column <= right - left; ++column) {
+        for (i64 column = 0; column <= right - left && bus.ok(); ++column) {
             const i64 x = dx > 0 ? left + column : right - column;
             const i64 source_x = x + dx;
             const i64 source_y = y + dy;
