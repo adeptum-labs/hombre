@@ -2485,6 +2485,264 @@ void tags_set_gadgets_and_limits() {
     CHECK_EQ(r.get16(window + wd_MaxWidth), 640u);
 }
 
+// A window at (200,100) 240x160 on a fresh 640x400 screen with the given
+// flags, IDCMP and limits; returns the window.
+u32 open_drag_window(GfxRig& r, u32 flags, u32 idcmp, u32 min_w, u32 min_h, u32 max_w,
+                     u32 max_h) {
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 200, 100, 240, 160, flags, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, idcmp);
+    r.put16(kNewWindow + nw_MinWidth, min_w);
+    r.put16(kNewWindow + nw_MinHeight, min_h);
+    r.put16(kNewWindow + nw_MaxWidth, max_w);
+    r.put16(kNewWindow + nw_MaxHeight, max_h);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    return window;
+}
+
+void press(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, kMouseLeft, kMouseLeft, 0, false);
+}
+
+void move_to(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, kMouseLeft, 0, 0, true);
+}
+
+void release(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, 0, 0, kMouseLeft, false);
+}
+
+// The IDCMP classes queued on the window's port, in order, replying to none.
+std::vector<u32> queued_classes(GfxRig& r, u32 window, std::vector<u32>* messages = nullptr) {
+    std::vector<u32> classes;
+    const u32 port = r.get32(window + wd_UserPort);
+    for (u32 i = 0; i < 64; ++i) {
+        const u32 msg = get_msg(r, port);
+        if (msg == 0) {
+            break;
+        }
+        classes.push_back(r.get32(msg + im_Class));
+        if (messages != nullptr) {
+            messages->push_back(msg);
+        }
+    }
+    return classes;
+}
+
+void drag_moves_window() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_DRAGBAR, 0, 0, 0, 0, 0);
+    const u32 screen = r.get32(window + wd_WScreen);
+    press(r, 220, 105);
+    move_to(r, 270, 125);
+    release(r, 270, 125);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 250u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 120u);
+    const u32 layer = r.get32(window + wd_WLayer);
+    CHECK_EQ(r.get16(layer + ly_MinX), 250u);
+    CHECK_EQ(r.get16(layer + ly_MaxY), 279u);
+    // The title bar (pen 2 inside the frame) is now at y 121..129.
+    CHECK_EQ(screen_pixel(r, screen, 300, 125), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 120), 1u);
+    for (i32 y = 100; y < 120; ++y) {
+        for (i32 x = 200; x < 250; ++x) {
+            CHECK_EQ(screen_pixel(r, screen, x, y), 0u);
+        }
+    }
+}
+
+void drag_clamps_to_screen() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_DRAGBAR, 0, 0, 0, 0, 0);
+    press(r, 220, 105);
+    move_to(r, -50, -50);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 0u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 0u);
+    move_to(r, 2000, 2000);
+    release(r, 2000, 2000);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 400u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 240u);
+}
+
+void drag_under_other_window_keeps_order() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    put_new_window(r, kNewWindow, 20, 20, 100, 60, WFLG_DRAGBAR, 0, 0, 0);
+    const u32 back = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 300, 200, 200, 100, 0, 0, 0, 0);
+    const u32 front = open_win(r, kNewWindow);
+    CHECK(back != 0 && front != 0);
+    const u32 rp = r.get32(back + wd_RPort);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 1;
+    r.cpu().d[1] = 11;
+    r.cpu().d[2] = 98;
+    r.cpu().d[3] = 58;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+    // Drag the back window so that its interior overlaps the front one.
+    press(r, 50, 25);
+    move_to(r, 320, 215);
+    release(r, 320, 215);
+    CHECK_EQ(r.get16(back + wd_LeftEdge), 290u);
+    // Overlap: the front window's interior, pen 0.
+    CHECK_EQ(screen_pixel(r, screen, 330, 240), 0u);
+    // Outside the front window: the back window's pen 3.
+    CHECK_EQ(screen_pixel(r, screen, 295, 240), 3u);
+}
+
+void resize_grows_and_clears() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_SIZEGADGET, 0, 0, 0, 0xFFFF, 0xFFFF);
+    const u32 screen = r.get32(window + wd_WScreen);
+    // Mark the interior next to the old right border.
+    const u32 rp = r.get32(window + wd_RPort);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 1;
+    r.cpu().d[1] = 11;
+    r.cpu().d[2] = 228;
+    r.cpu().d[3] = 148;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+    press(r, 435, 255);
+    move_to(r, 475, 285);
+    release(r, 475, 285);
+    CHECK_EQ(r.get16(window + wd_Width), 280u);
+    CHECK_EQ(r.get16(window + wd_Height), 190u);
+    // The kept interior keeps its pixels, the new area and the old border
+    // strips are cleared.
+    CHECK_EQ(window_pixel(r, window, 100, 100), 3u);
+    CHECK_EQ(window_pixel(r, window, 232, 100), 0u);
+    CHECK_EQ(window_pixel(r, window, 250, 170), 0u);
+    CHECK_EQ(window_pixel(r, window, 100, 155), 0u);
+    // The size gadget at the new corner, in the window and on screen.
+    CHECK_EQ(window_pixel(r, window, 275, 185), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 475, 285), 2u);
+    // The old gadget position is interior now.
+    CHECK_EQ(screen_pixel(r, screen, 435, 255), 0u);
+}
+
+void resize_clamps_to_limits() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_SIZEGADGET, 0, 100, 50, 0xFFFF, 0xFFFF);
+    press(r, 435, 255);
+    move_to(r, 200, 100);
+    CHECK_EQ(r.get16(window + wd_Width), 100u);
+    CHECK_EQ(r.get16(window + wd_Height), 50u);
+    move_to(r, 900, 900);
+    release(r, 900, 900);
+    CHECK_EQ(r.get16(window + wd_Width), 440u);
+    CHECK_EQ(r.get16(window + wd_Height), 300u);
+}
+
+void newsize_coalesced_and_final_on_release() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_SIZEGADGET, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW,
+                                        0, 0, 0xFFFF, 0xFFFF);
+    press(r, 435, 255);
+    for (i32 i = 1; i <= 5; ++i) {
+        move_to(r, 435 + i * 4, 255 + i * 2);
+    }
+    std::vector<u32> messages;
+    std::vector<u32> classes = queued_classes(r, window, &messages);
+    CHECK_EQ(classes.size(), 1u);
+    CHECK_EQ(classes.size() > 0 ? classes[0] : 0u, IDCMP_NEWSIZE);
+    // Replying frees the slot; a further step posts again.
+    for (u32 msg : messages) {
+        reply_msg(r, msg);
+    }
+    move_to(r, 460, 270);
+    classes = queued_classes(r, window, &messages);
+    CHECK_EQ(classes.size(), 1u);
+    // Not replied: steps post nothing, the release posts the final size.
+    move_to(r, 470, 275);
+    move_to(r, 480, 280);
+    CHECK_EQ(queued_classes(r, window).size(), 0u);
+    release(r, 480, 280);
+    classes = queued_classes(r, window);
+    CHECK_EQ(classes.size(), 2u);
+    if (classes.size() == 2) {
+        CHECK_EQ(classes[0], IDCMP_NEWSIZE);
+        CHECK_EQ(classes[1], IDCMP_CHANGEWINDOW);
+    }
+    CHECK_EQ(r.get16(window + wd_Width), 285u);
+    CHECK_EQ(r.get16(window + wd_Height), 185u);
+}
+
+void move_posts_changewindow_only() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_DRAGBAR, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW, 0,
+                                        0, 0, 0);
+    press(r, 220, 105);
+    move_to(r, 230, 115);
+    release(r, 230, 115);
+    const std::vector<u32> classes = queued_classes(r, window);
+    CHECK_EQ(classes.size(), 1u);
+    CHECK_EQ(classes.size() > 0 ? classes[0] : 0u, IDCMP_CHANGEWINDOW);
+}
+
+void drag_press_is_not_selectdown() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_DRAGBAR | WFLG_REPORTMOUSE,
+                                        IDCMP_MOUSEBUTTONS | IDCMP_MOUSEMOVE, 0, 0, 0, 0);
+    press(r, 220, 105);
+    move_to(r, 240, 110);
+    release(r, 240, 110);
+    CHECK_EQ(queued_classes(r, window).size(), 0u);
+    // A press in the interior is still a SELECTDOWN.
+    press(r, 300, 200);
+    const std::vector<u32> classes = queued_classes(r, window);
+    CHECK_EQ(classes.size(), 1u);
+    CHECK_EQ(classes.size() > 0 ? classes[0] : 0u, IDCMP_MOUSEBUTTONS);
+}
+
+u32 g_hook_calls = 0;
+u32 g_hook_window = 0;
+
+void count_hook(void* ctx, u32 window) {
+    CHECK(ctx == &g_hook_calls);
+    g_hook_window = window;
+    ++g_hook_calls;
+}
+
+void size_hook_called_per_step() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_SIZEGADGET, 0, 0, 0, 0xFFFF, 0xFFFF);
+    g_hook_calls = 0;
+    r.intuition.set_size_hook(window, &count_hook, &g_hook_calls);
+    r.intuition.size_window_to(window, 300, 200);
+    r.intuition.size_window_to(window, 300, 200);
+    r.intuition.size_window_to(window, 250, 180);
+    CHECK_EQ(g_hook_calls, 2u);
+    CHECK_EQ(g_hook_window, window);
+}
+
+void close_during_drag_ends_drag() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_DRAGBAR, 0, 0, 0, 0, 0);
+    press(r, 220, 105);
+    move_to(r, 230, 110);
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    move_to(r, 260, 130);
+    release(r, 260, 130);
+    // A new window where the old one was: a move without a press drags
+    // nothing.
+    put_new_window(r, kNewWindow, 200, 100, 240, 160, WFLG_DRAGBAR, 0, 0, 0);
+    const u32 again = open_win(r, kNewWindow);
+    CHECK(again != 0);
+    move_to(r, 300, 300);
+    CHECK_EQ(r.get16(again + wd_LeftEdge), 200u);
+}
+
 }
 
 int main() {
@@ -2572,5 +2830,15 @@ int main() {
     limits_ffff_mean_screen();
     limits_clamp_to_floor();
     tags_set_gadgets_and_limits();
+    drag_moves_window();
+    drag_clamps_to_screen();
+    drag_under_other_window_keeps_order();
+    resize_grows_and_clears();
+    resize_clamps_to_limits();
+    newsize_coalesced_and_final_on_release();
+    move_posts_changewindow_only();
+    drag_press_is_not_selectdown();
+    size_hook_called_per_step();
+    close_during_drag_ends_drag();
     return check::finish("test_intuition");
 }

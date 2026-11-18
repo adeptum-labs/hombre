@@ -500,7 +500,12 @@ void draw_window_bar(Graphics& graphics, Bus& b, const WindowView& w) {
     b.w16(rp + ndk::rp_cp_y, cy);
 }
 
-void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w) {
+// Draws the frame of a window in its own bitmap. Without keep the whole
+// window is cleared first; with keep, the interior rectangle keep (window
+// coordinates) keeps its pixels and only what lies right of or below it is
+// cleared.
+void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w,
+                        const Rect* keep = nullptr) {
     const u32 rp = w.rp;
     if (rp == 0 || w.width <= 0 || w.height <= 0) {
         return;
@@ -513,7 +518,18 @@ void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w) {
     const i32 right = w.width - 1;
     const i32 bottom = w.height - 1;
     graphics.set_pens(rp, 0, 0, ndk::JAM2);
-    graphics.rect_fill(rp, 0, 0, right, bottom);
+    if (keep != nullptr) {
+        // Clears what lies right of and below the kept interior; the frame
+        // drawn next covers the rest.
+        if (keep->x1 < right) {
+            graphics.rect_fill(rp, keep->x1 + 1, 0, right, bottom);
+        }
+        if (keep->y1 < bottom) {
+            graphics.rect_fill(rp, 0, keep->y1 + 1, right, bottom);
+        }
+    } else {
+        graphics.rect_fill(rp, 0, 0, right, bottom);
+    }
     graphics.set_pens(rp, 1, 0, ndk::JAM2);
     graphics.rect_fill(rp, 0, 0, right, 0);
     graphics.rect_fill(rp, 0, bottom, right, bottom);
@@ -538,7 +554,7 @@ void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w) {
     const i32 iy0 = static_cast<i32>(w.border_top);
     const i32 ix1 = w.width - static_cast<i32>(w.border_right) - 1;
     const i32 iy1 = w.height - static_cast<i32>(w.border_bottom) - 1;
-    if (ix0 <= ix1 && iy0 <= iy1) {
+    if (keep == nullptr && ix0 <= ix1 && iy0 <= iy1) {
         graphics.set_pens(rp, 0, 0, ndk::JAM2);
         graphics.rect_fill(rp, ix0, iy0, ix1, iy1);
     }
@@ -1269,6 +1285,15 @@ void Intuition::free_tracked_message(u32 message) {
     for (u32& slot : messages_) {
         if (slot == addr) {
             slot = 0;
+            Bus b(*machine_);
+            const u32 idcmp_class = b.r32(addr + ndk::im_Class);
+            const u32 window = b.r32(addr + ndk::im_IDCMPWindow);
+            if (b.ok() && idcmp_class == ndk::IDCMP_NEWSIZE && window != 0) {
+                WindowRecord* rec = find_window_record(window);
+                if (rec != nullptr) {
+                    rec->newsize_pending = false;
+                }
+            }
             exec_->free(addr, ndk::IntuiMessage_SIZEOF);
             return;
         }
@@ -1316,18 +1341,18 @@ void Intuition::remove_window_messages(u32 port, u32 window) {
     }
 }
 
-void Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress) {
+bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress) {
     if (window == 0 || find_window(window) >= kMaxWindows) {
-        return;
+        return false;
     }
     const WindowRecord* rec = find_window_record(window);
     if (rec == nullptr || rec->screen != front_ || rec->user_port == 0) {
-        return;
+        return false;
     }
     Bus b(*machine_);
     const u32 idcmp = b.r32(window + ndk::wd_IDCMPFlags);
     if (!b.ok() || (idcmp & idcmp_class) == 0) {
-        return;
+        return false;
     }
     u32* slot = nullptr;
     for (u32& entry : messages_) {
@@ -1338,11 +1363,11 @@ void Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     }
     if (slot == nullptr) {
         ++dropped_messages_;
-        return;
+        return false;
     }
     const u32 msg = exec_->alloc(ndk::IntuiMessage_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (msg == 0) {
-        return;
+        return false;
     }
     const u64 us = clock_ != nullptr ? clock_() : 0;
     const u32 seconds = static_cast<u32>(us / 1000000);
@@ -1363,9 +1388,10 @@ void Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     b.w32(msg + ndk::im_SpecialLink, 0);
     if (!b.ok() || !exec_->post_message(rec->user_port, msg)) {
         exec_->free(msg, ndk::IntuiMessage_SIZEOF);
-        return;
+        return false;
     }
     *slot = msg;
+    return true;
 }
 
 void Intuition::activate_window(u32 window) {
@@ -1706,6 +1732,9 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->user_port_owned = user_port_owned;
     rec->size_hook = nullptr;
     rec->size_ctx = nullptr;
+    rec->newsize_pending = false;
+    rec->newsize_w = width;
+    rec->newsize_h = height;
     srec->first_window = window;
     write_window_links(screen);
     for (u32& slot : windows_) {
@@ -1738,6 +1767,10 @@ void Intuition::close_window(u32 window) {
     if (pressed_gadget_window_ == window) {
         pressed_gadget_window_ = 0;
         pressed_gadget_ = GadgetKind::None;
+    }
+    if (drag_window_ == window) {
+        drag_window_ = 0;
+        drag_ = Drag::None;
     }
     WindowRecord* rec = find_window_record(window);
     if (rec == nullptr) {
@@ -2021,6 +2054,12 @@ void Intuition::set_size_hook(u32 window, WindowHook hook, void* ctx) {
 }
 
 void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
+    begin_batch();
+    route_pointer(x, y, buttons, pressed, released, moved);
+    end_batch();
+}
+
+void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
     (void)buttons;
     mouse_x_ = x;
     mouse_y_ = y;
@@ -2028,9 +2067,19 @@ void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         return;
     }
     Bus b(*machine_);
+    // A drag owns the pointer: the window follows it and gets no mouse
+    // messages until the left button is released.
+    const bool dragging = drag_ != Drag::None;
+    if (dragging && moved) {
+        drag_to(x, y);
+    }
     const u32 hit = window_at(x, y);
     bool left_press_consumed = false;
     bool left_release_consumed = false;
+    if (dragging && (released & kMouseLeft) != 0) {
+        end_drag();
+        left_release_consumed = true;
+    }
 
     if ((pressed & kMouseLeft) != 0) {
         if (hit != 0) {
@@ -2046,6 +2095,8 @@ void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                            in_rect(depth_box_rect(w.left, w.top, w.width), x, y)) {
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Depth;
+                    left_press_consumed = true;
+                } else if (!dragging && start_drag(hit, x, y)) {
                     left_press_consumed = true;
                 }
             }
@@ -2103,12 +2154,190 @@ void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         }
     }
 
-    if (moved && active_window_ != 0) {
+    if (moved && !dragging && active_window_ != 0) {
         const WindowView w = load_window(b, active_window_);
         if (w.ok && (w.flags & ndk::WFLG_REPORTMOUSE) != 0) {
             post_intuimessage(active_window_, ndk::IDCMP_MOUSEMOVE, 0);
         }
     }
+}
+
+void Intuition::move_window_to(u32 window, i32 left, i32 top) {
+    if (window == 0) {
+        return;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+        return;
+    }
+    const ScreenRecord* srec = find_screen_record(rec->screen);
+    if (srec == nullptr) {
+        return;
+    }
+    const i32 max_left = static_cast<i32>(srec->width) - rec->width;
+    const i32 max_top = static_cast<i32>(srec->height) - rec->height;
+    left = left > max_left ? max_left : left;
+    top = top > max_top ? max_top : top;
+    left = left < 0 ? 0 : left;
+    top = top < 0 ? 0 : top;
+    if (left == rec->left && top == rec->top) {
+        return;
+    }
+    const Rect old{rec->left, rec->top, rec->left + rec->width - 1, rec->top + rec->height - 1};
+    rec->left = left;
+    rec->top = top;
+    Bus b(*machine_);
+    b.w16(window + ndk::wd_LeftEdge, static_cast<u32>(left));
+    b.w16(window + ndk::wd_TopEdge, static_cast<u32>(top));
+    b.w16(rec->layer + ndk::ly_MinX, static_cast<u32>(left));
+    b.w16(rec->layer + ndk::ly_MinY, static_cast<u32>(top));
+    b.w16(rec->layer + ndk::ly_MaxX, static_cast<u32>(left + rec->width - 1));
+    b.w16(rec->layer + ndk::ly_MaxY, static_cast<u32>(top + rec->height - 1));
+    begin_batch();
+    compose(rec->screen, old);
+    compose(rec->screen, Rect{left, top, left + rec->width - 1, top + rec->height - 1});
+    end_batch();
+}
+
+void Intuition::size_window_to(u32 window, i32 width, i32 height) {
+    if (window == 0) {
+        return;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+        return;
+    }
+    const ScreenRecord* srec = find_screen_record(rec->screen);
+    if (srec == nullptr) {
+        return;
+    }
+    const i32 room_w = static_cast<i32>(srec->width) - rec->left;
+    const i32 room_h = static_cast<i32>(srec->height) - rec->top;
+    const i32 max_w = rec->lim_w < room_w ? rec->lim_w : room_w;
+    const i32 max_h = rec->lim_h < room_h ? rec->lim_h : room_h;
+    width = width > max_w ? max_w : width;
+    height = height > max_h ? max_h : height;
+    width = width < rec->min_w ? rec->min_w : width;
+    height = height < rec->min_h ? rec->min_h : height;
+    if (width == rec->width && height == rec->height) {
+        return;
+    }
+    Bus b(*machine_);
+    WindowView w = load_window(b, window);
+    if (!w.ok) {
+        return;
+    }
+    const i32 ix0 = static_cast<i32>(w.border_left);
+    const i32 iy0 = static_cast<i32>(w.border_top);
+    const i32 old_ix1 = rec->width - static_cast<i32>(w.border_right) - 1;
+    const i32 old_iy1 = rec->height - static_cast<i32>(w.border_bottom) - 1;
+    const i32 new_ix1 = width - static_cast<i32>(w.border_right) - 1;
+    const i32 new_iy1 = height - static_cast<i32>(w.border_bottom) - 1;
+    const Rect keep{ix0, iy0, old_ix1 < new_ix1 ? old_ix1 : new_ix1,
+                    old_iy1 < new_iy1 ? old_iy1 : new_iy1};
+    const Rect old{rec->left, rec->top, rec->left + rec->width - 1, rec->top + rec->height - 1};
+
+    begin_batch();
+    rec->width = width;
+    rec->height = height;
+    b.w16(window + ndk::wd_Width, static_cast<u32>(width));
+    b.w16(window + ndk::wd_Height, static_cast<u32>(height));
+    b.w16(rec->layer + ndk::ly_MaxX, static_cast<u32>(rec->left + width - 1));
+    b.w16(rec->layer + ndk::ly_MaxY, static_cast<u32>(rec->top + height - 1));
+    w.width = width;
+    w.height = height;
+    w.rp = rec->rp;
+    draw_window_chrome(*graphics_, b, w, &keep);
+    if (rec->size_hook != nullptr) {
+        rec->size_hook(rec->size_ctx, window);
+    }
+    // The hook may close the window.
+    rec = find_window_record(window);
+    if (rec != nullptr && find_window(window) < kMaxWindows) {
+        post_newsize(*rec, false);
+        compose(rec->screen, old);
+        compose(rec->screen,
+                Rect{rec->left, rec->top, rec->left + width - 1, rec->top + height - 1});
+    }
+    end_batch();
+}
+
+void Intuition::post_newsize(WindowRecord& rec, bool even_if_pending) {
+    if (rec.newsize_pending && !even_if_pending) {
+        return;
+    }
+    if (rec.newsize_w == rec.width && rec.newsize_h == rec.height && even_if_pending) {
+        return;
+    }
+    if (post_intuimessage(rec.addr, ndk::IDCMP_NEWSIZE, 0)) {
+        rec.newsize_pending = true;
+        rec.newsize_w = rec.width;
+        rec.newsize_h = rec.height;
+    }
+}
+
+bool Intuition::start_drag(u32 window, i32 x, i32 y) {
+    if (window == 0) {
+        return false;
+    }
+    const WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 flags = b.r32(window + ndk::wd_Flags);
+    if (!b.ok() || (flags & ndk::WFLG_BORDERLESS) != 0) {
+        return false;
+    }
+    const i32 right = rec->left + rec->width - 1;
+    const i32 bottom = rec->top + rec->height - 1;
+    if ((flags & ndk::WFLG_SIZEGADGET) != 0 &&
+        in_rect(size_box_rect(rec->left, rec->top, rec->width, rec->height), x, y)) {
+        drag_ = Drag::Size;
+        grab_x_ = right - x;
+        grab_y_ = bottom - y;
+    } else if ((flags & ndk::WFLG_DRAGBAR) != 0 && x >= rec->left && x <= right &&
+               y >= rec->top && y <= rec->top + static_cast<i32>(kBarHeight)) {
+        drag_ = Drag::Move;
+        grab_x_ = x - rec->left;
+        grab_y_ = y - rec->top;
+    } else {
+        return false;
+    }
+    drag_window_ = window;
+    return true;
+}
+
+void Intuition::drag_to(i32 x, i32 y) {
+    const WindowRecord* rec = drag_window_ != 0 ? find_window_record(drag_window_) : nullptr;
+    if (rec == nullptr) {
+        drag_ = Drag::None;
+        drag_window_ = 0;
+        return;
+    }
+    if (drag_ == Drag::Move) {
+        move_window_to(drag_window_, x - grab_x_, y - grab_y_);
+    } else if (drag_ == Drag::Size) {
+        size_window_to(drag_window_, x + grab_x_ - rec->left + 1, y + grab_y_ - rec->top + 1);
+    }
+}
+
+void Intuition::end_drag() {
+    const u32 window = drag_window_;
+    const Drag kind = drag_;
+    drag_ = Drag::None;
+    drag_window_ = 0;
+    if (window == 0) {
+        return;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+        return;
+    }
+    if (kind == Drag::Size) {
+        post_newsize(*rec, true);
+    }
+    post_intuimessage(window, ndk::IDCMP_CHANGEWINDOW, 0);
 }
 
 void Intuition::reclaim(u32 keep_window, u32 keep_screen) {

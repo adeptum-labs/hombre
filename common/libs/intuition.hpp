@@ -114,6 +114,16 @@ public:
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
     void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
+
+    // Moves the window, kept entirely on its screen, and recomposes the
+    // screen where it was and where it is.
+    void move_window_to(u32 window, i32 left, i32 top);
+
+    // Sizes the window within its limits and its screen: the interior it
+    // had keeps its pixels, new area is cleared, the frame is redrawn, the
+    // size hook runs and IDCMP_NEWSIZE is posted when the window asked for
+    // it and has no NEWSIZE waiting for a reply.
+    void size_window_to(u32 window, i32 width, i32 height);
     void reclaim(u32 keep_window = 0, u32 keep_screen = 0);
 
 private:
@@ -176,9 +186,15 @@ private:
         bool user_port_owned = false;
         WindowHook size_hook = nullptr;
         void* size_ctx = nullptr;
+        // A NEWSIZE is queued and not yet replied to, and the size the last
+        // NEWSIZE reported.
+        bool newsize_pending = false;
+        i32 newsize_w = 0;
+        i32 newsize_h = 0;
     };
 
     enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2 };
+    enum class Drag : u8 { None = 0, Move = 1, Size = 2 };
 
     static void reply_message(void* ctx, u32 message);
     static void on_damage(void* ctx, m68k::Machine& m, u32 bitmap, const Rect& rect);
@@ -198,7 +214,12 @@ private:
     WindowRecord* free_window_record();
     void remove_window_at(u32 index);
     void activate_window(u32 window);
-    void post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
+    bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
+    void post_newsize(WindowRecord& rec, bool even_if_pending);
+    void route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
+    bool start_drag(u32 window, i32 x, i32 y);
+    void drag_to(i32 x, i32 y);
+    void end_drag();
     void flush_window_messages(u32 port);
     void remove_window_messages(u32 port, u32 window);
     bool is_tracked_message(u32 message) const;
@@ -216,6 +237,12 @@ private:
     u32 active_window_ = 0;
     u32 pressed_gadget_window_ = 0;
     GadgetKind pressed_gadget_ = GadgetKind::None;
+    // The window the left button drags, and the pointer's offset from its
+    // top-left corner (Move) or to its bottom-right corner (Size).
+    Drag drag_ = Drag::None;
+    u32 drag_window_ = 0;
+    i32 grab_x_ = 0;
+    i32 grab_y_ = 0;
     i32 mouse_x_ = 0;
     i32 mouse_y_ = 0;
     u32 dropped_messages_ = 0;
