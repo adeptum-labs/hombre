@@ -51,14 +51,14 @@
 // opened, read and seeked in; anything that would write to the volume
 // fails with ERROR_DISK_WRITE_PROTECTED.
 //
-// Variables are the Process's local ones, LocalVar nodes on pr_LocalVars
-// as SetVar makes them. There are no global variables: ENV: is not
-// mounted.
+// Variables can be local (LocalVar nodes on pr_LocalVars, as SetVar
+// creates by default) or global (files under ENV: on the RAM volume).
 //
-// Paths are AmigaDOS paths: DF0:, C:, LIBS:, S:, SYS:, the volume name, ":"
-// and any active assign; any other device is not mounted. A path without a
-// device is relative to the current directory, a leading or doubled '/' goes
-// up one level, and names compare without regard to case.
+// Paths are AmigaDOS paths: DF0:, RAM:, T:, ENV:, C:, LIBS:, S:, SYS:,
+// the volume name, ":" and any active assign; any other device is not
+// mounted. A path without a device is relative to the current directory, a
+// leading or doubled '/' goes up one level, and names compare without
+// regard to case.
 //
 // Every guest pointer a native takes goes through native::Bus, so a bad
 // one ends the run with BusError or AddressError; walks over guest strings

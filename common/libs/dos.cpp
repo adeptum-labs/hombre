@@ -1369,6 +1369,151 @@ struct DosOps {
         return true;
     }
 
+    static bool add_default_assign(Dos& d, Bus& b, const char* name, const char* lock_path,
+                                   const DirEntry& entry, bool& table_full_out) {
+        table_full_out = false;
+        const i64 idx = free_assign_slot(d);
+        if (idx < 0) {
+            table_full_out = true;
+            return false;
+        }
+        u32 lock_bptr = 0;
+        if (!alloc_assign_lock(d, b, lock_path, entry, lock_bptr)) {
+            return false;
+        }
+        Dos::AssignEntry& e = d.assigns_[idx];
+        e.used = true;
+        e.type = DLT_DIRECTORY;
+        copy_cstr(e.name, name, sizeof e.name);
+        e.dir_count = 1;
+        e.locks[0] = lock_bptr;
+        if (!build_assign_node(d, b, e)) {
+            release_lock(d, lock_bptr);
+            e = Dos::AssignEntry{};
+            return false;
+        }
+        return true;
+    }
+
+    static void log_envarc_copy_failure(bool& failed, u32 err) {
+        if (!failed) {
+            failed = true;
+            LogLine().text("dos: failed to copy ENVARC: to ENV: (error ").dec(err).text(")").send();
+        }
+    }
+
+    static void copy_entry_meta(Dos& d, const DirEntry& entry, u32 dst_node) {
+        FsMeta meta{};
+        if (fs_meta(d, entry, meta) != 0) {
+            return;
+        }
+        char comment[RamFs::kMaxComment + 1];
+        const u32 clen =
+            meta.comment_len < RamFs::kMaxComment ? meta.comment_len : RamFs::kMaxComment;
+        for (u32 i = 0; i < clen; ++i) {
+            comment[i] = meta.comment[i];
+        }
+        comment[clen] = '\0';
+        d.ram_.set_protection(dst_node, meta.protection);
+        d.ram_.set_comment(dst_node, comment);
+        d.ram_.set_date(dst_node, meta.days, meta.minute, meta.tick);
+    }
+
+    static bool copy_envarc_file(Dos& d, const DirEntry& entry, u32 dst_dir, bool& failed) {
+        u32 file_node = RamFs::kNone;
+        const u32 c_err = d.ram_.create_file(dst_dir, entry.name, file_node);
+        if (c_err != 0) {
+            log_envarc_copy_failure(failed, c_err);
+            return false;
+        }
+        u8 buf[512];
+        u32 offset = 0;
+        while (offset < entry.size) {
+            u32 want = entry.size - offset;
+            if (want > sizeof buf) {
+                want = sizeof buf;
+            }
+            u32 got = 0;
+            const FsError r_err = adf_read(d.volume_, entry, offset, buf, want, got);
+            if (r_err != FsError::Ok || got == 0) {
+                d.ram_.remove(file_node);
+                log_envarc_copy_failure(
+                    failed, r_err != FsError::Ok ? io_error_of(r_err) : ERROR_NOT_A_DOS_DISK);
+                return false;
+            }
+            const u32 w_err = d.ram_.write(file_node, offset, buf, got);
+            if (w_err != 0) {
+                d.ram_.remove(file_node);
+                log_envarc_copy_failure(failed, w_err);
+                return false;
+            }
+            offset += got;
+        }
+        copy_entry_meta(d, entry, file_node);
+        return true;
+    }
+
+    struct EnvarcCopy {
+        Dos* d;
+        const char* src_dir;
+        u32 dst_dir;
+        u32 depth;
+        bool failed;
+    };
+
+    static void copy_envarc_visitor(void* ctx, const DirEntry& entry) {
+        EnvarcCopy& c = *static_cast<EnvarcCopy*>(ctx);
+        if (c.failed) {
+            return;
+        }
+        if (entry.is_dir) {
+            if (c.depth + 1 >= 16) {
+                log_envarc_copy_failure(c.failed, ERROR_TOO_MANY_LEVELS);
+                return;
+            }
+            char sub_path[Dos::kMaxPath];
+            u32 pos = 0;
+            for (u32 i = 0; c.src_dir[i] != '\0'; ++i) {
+                if (pos + 2 >= Dos::kMaxPath) {
+                    log_envarc_copy_failure(c.failed, ERROR_INVALID_COMPONENT_NAME);
+                    return;
+                }
+                sub_path[pos++] = c.src_dir[i];
+            }
+            if (pos != 0) {
+                sub_path[pos++] = '/';
+            }
+            for (u32 i = 0; entry.name[i] != '\0'; ++i) {
+                if (pos + 1 >= Dos::kMaxPath) {
+                    log_envarc_copy_failure(c.failed, ERROR_INVALID_COMPONENT_NAME);
+                    return;
+                }
+                sub_path[pos++] = entry.name[i];
+            }
+            sub_path[pos] = '\0';
+
+            u32 sub_dir = RamFs::kNone;
+            const u32 d_err = c.d->ram_.create_dir(c.dst_dir, entry.name, sub_dir);
+            if (d_err != 0) {
+                log_envarc_copy_failure(c.failed, d_err);
+                return;
+            }
+            copy_entry_meta(*c.d, entry, sub_dir);
+            copy_envarc_dir(*c.d, sub_path, sub_dir, c.depth + 1, c.failed);
+            return;
+        }
+        copy_envarc_file(*c.d, entry, c.dst_dir, c.failed);
+    }
+
+    static void copy_envarc_dir(Dos& d, const char* src_dir, u32 dst_dir, u32 depth, bool& failed) {
+        EnvarcCopy ctx{&d, src_dir, dst_dir, depth, failed};
+        const FsError err = adf_list(d.volume_, src_dir, copy_envarc_visitor, &ctx);
+        failed = ctx.failed;
+        if (err != FsError::Ok && !failed) {
+            log_envarc_copy_failure(failed, io_error_of(err));
+        }
+    }
+
     static bool resolve_late_assign(Dos& d, Bus& b, Dos::AssignEntry& e, u32& error, u32 depth) {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
@@ -2848,10 +2993,180 @@ struct DosOps {
         }
     }
 
-    // SetVar(name, buffer, size, flags): sets the local variable of the
-    // type in the low byte of flags to size bytes from buffer (up to its
-    // NUL for a size of -1), replacing one of the same name and type; a
-    // null buffer deletes it. Local is the default; GVF_GLOBAL_ONLY fails.
+    static bool resolve_env(Dos& d, Bus& b, const char* name, u8& vol,
+                            char (&resolved)[Dos::kMaxPath], u32& error) {
+        char env_path[kMaxName + 4];
+        env_path[0] = 'E';
+        env_path[1] = 'N';
+        env_path[2] = 'V';
+        env_path[3] = ':';
+        copy_cstr(env_path + 4, name, sizeof env_path - 4);
+        return resolve(d, b, env_path, vol, resolved, error);
+    }
+
+    static bool write_env_var(Dos& d, Bus& b, const char* name, const u8* from, u32 size) {
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_env(d, b, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return false;
+        }
+        if (resolved[0] == '\0') {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return false;
+        }
+        char parent[Dos::kMaxPath];
+        const char* leaf = nullptr;
+        split_parent_and_leaf(resolved, parent, leaf);
+        u32 parent_node = RamFs::kNone;
+        const u32 p_err = d.ram_.find_path(parent, parent_node);
+        if (p_err != 0) {
+            fail(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err, DOSFALSE);
+            return false;
+        }
+        if (!d.ram_.node(parent_node).is_dir) {
+            fail(d, b, ERROR_DIR_NOT_FOUND, DOSFALSE);
+            return false;
+        }
+        u32 node = RamFs::kNone;
+        const u32 c_err = d.ram_.create_file(parent_node, leaf, node);
+        if (c_err != 0) {
+            fail(d, b, c_err, DOSFALSE);
+            return false;
+        }
+        if (size != 0) {
+            const u32 w_err = d.ram_.write(node, 0, from, size);
+            if (w_err != 0) {
+                d.ram_.remove(node);
+                fail(d, b, w_err, DOSFALSE);
+                return false;
+            }
+        }
+        if (b.ok()) {
+            native::set_result(b.machine(), DOSTRUE);
+        }
+        return b.ok();
+    }
+
+    static bool delete_env_var(Dos& d, Bus& b, const char* name) {
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_env(d, b, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return false;
+        }
+        if (resolved[0] == '\0') {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return false;
+        }
+        u32 node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(resolved, node);
+        if (find_err != 0) {
+            fail(d, b, find_err, DOSFALSE);
+            return false;
+        }
+        if (node == 0 || d.ram_.node(node).is_dir) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return false;
+        }
+        const u32 err = d.ram_.remove(node);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        if (b.ok()) {
+            native::set_result(b.machine(), DOSTRUE);
+        }
+        return b.ok();
+    }
+
+    static bool read_env_var(Dos& d, Bus& b, const char* name, u32 buffer, u32 size, u32 flags) {
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_env(d, b, name, vol, resolved, error)) {
+            b.w8(buffer, 0);
+            if (b.ok()) {
+                fail(d, b, error, 0xFFFFFFFF);
+            }
+            return false;
+        }
+        DirEntry entry{};
+        const u32 f_err = fs_find(d, vol, resolved, entry);
+        if (f_err != 0) {
+            b.w8(buffer, 0);
+            fail(d, b, f_err, 0xFFFFFFFF);
+            return false;
+        }
+        if (entry.is_dir) {
+            b.w8(buffer, 0);
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0xFFFFFFFF);
+            return false;
+        }
+        const u32 length = fs_size(d, entry);
+        const bool terminate = (flags & GVF_DONT_NULL_TERM) == 0;
+        const bool binary = (flags & GVF_BINARY_VAR) != 0;
+        const u32 room = terminate ? size - 1 : size;
+        const u32 limit = length < room ? length : room;
+        u8 chunk[kChunk];
+        u32 n = 0;
+        bool stop = false;
+        while (n < limit && !stop) {
+            u32 want = limit - n;
+            if (want > sizeof chunk) {
+                want = sizeof chunk;
+            }
+            u32 got = 0;
+            const u32 r_err = fs_read(d, entry, n, chunk, want, got);
+            if (r_err != 0) {
+                b.w8(buffer, 0);
+                fail(d, b, entry.volume == Dos::kVolRam ? r_err : ERROR_NOT_A_DOS_DISK,
+                     0xFFFFFFFF);
+                return false;
+            }
+            if (got == 0) {
+                break;
+            }
+            for (u32 i = 0; i < got; ++i) {
+                if (!binary && chunk[i] == '\n') {
+                    stop = true;
+                    break;
+                }
+                b.w8(buffer + n, chunk[i]);
+                if (!b.ok()) {
+                    return false;
+                }
+                ++n;
+            }
+        }
+        if (terminate) {
+            b.w8(buffer + n, 0);
+        }
+        set_io_err(d, b, length);
+        if (b.ok()) {
+            native::set_result(b.machine(), n);
+        }
+        return b.ok();
+    }
+
+    // SetVar(name, buffer, size, flags): sets a local variable of the type
+    // in the low byte of flags (default), or writes ENV:<name> when
+    // GVF_GLOBAL_ONLY is set, to size bytes from buffer (up to NUL for -1);
+    // a null buffer deletes it. GVF_SAVE_VAR is ignored for ENVARC: (read-only).
     static void set_var(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -2864,7 +3179,21 @@ struct DosOps {
             return;
         }
         if ((flags & GVF_GLOBAL_ONLY) != 0) {
-            fail(d, b, ERROR_DEVICE_NOT_MOUNTED, DOSFALSE);  // ENV:
+            if (buffer == 0) {
+                delete_env_var(d, b, name);
+                return;
+            }
+            if (size == 0xFFFFFFFF) {
+                size = 0;
+                while (b.r8(buffer + size) != 0 && b.ok()) {
+                    ++size;
+                }
+            }
+            const u8* from = b.ok() && size != 0 ? b.bytes_at(buffer, size) : nullptr;
+            if (!b.ok()) {
+                return;
+            }
+            write_env_var(d, b, name, from, size);
             return;
         }
         u32 node = find_var(d, b, name, type);
@@ -2928,12 +3257,13 @@ struct DosOps {
     }
 
     // GetVar(name, buffer, size, flags): copies the local variable of the
-    // type in the low byte of flags into buffer, up to its first newline
-    // unless GVF_BINARY_VAR is set, and ends it with a NUL unless
-    // GVF_DONT_NULL_TERM is set. D0 is the number of bytes copied, the NUL
-    // left out, and IoErr the size of the whole variable. A variable that
-    // does not exist gives -1 and an empty buffer; a null buffer or a size
-    // that is not positive gives -1 and ERROR_BAD_NUMBER.
+    // type in the low byte of flags, or reads ENV:<name> when no local is
+    // found (unless GVF_LOCAL_ONLY) or when GVF_GLOBAL_ONLY is set, into
+    // buffer, up to its first newline unless GVF_BINARY_VAR is set, and
+    // ends it with a NUL unless GVF_DONT_NULL_TERM is set. D0 is the number
+    // of bytes copied, the NUL left out, and IoErr the size of the whole
+    // variable. A missing variable gives -1 and an empty buffer; a null
+    // buffer or a size that is not positive gives -1 and ERROR_BAD_NUMBER.
     static void get_var(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -2949,37 +3279,47 @@ struct DosOps {
         if (!b.ok()) {
             return;
         }
-        const u32 node = named && (flags & GVF_GLOBAL_ONLY) == 0 ? find_var(d, b, name, flags & 0xFF)
-                                                                 : 0;
-        if (!b.ok()) {
-            return;
-        }
-        if (node == 0) {
+        if (!named) {
             b.w8(buffer, 0);
-            if (named) {
-                fail(d, b, ERROR_OBJECT_NOT_FOUND, 0xFFFFFFFF);
-            }
             return;
         }
-        const u32 value = b.r32(node + lv_Value);
-        const u32 length = b.r32(node + lv_Len);
-        const bool terminate = (flags & GVF_DONT_NULL_TERM) == 0;
-        const u32 room = terminate ? size - 1 : size;
-        u32 n = 0;
-        for (; n < length && n < room; ++n) {
-            const u32 c = b.r8(value + n);
-            if (!b.ok() || ((flags & GVF_BINARY_VAR) == 0 && c == '\n')) {
-                break;
+        const u32 type = flags & 0xFF;
+        const bool global_only = (flags & GVF_GLOBAL_ONLY) != 0;
+        const bool local_only = (flags & GVF_LOCAL_ONLY) != 0;
+        if (!global_only) {
+            const u32 node = find_var(d, b, name, type);
+            if (!b.ok()) {
+                return;
             }
-            b.w8(buffer + n, c);
+            if (node != 0) {
+                const u32 value = b.r32(node + lv_Value);
+                const u32 length = b.r32(node + lv_Len);
+                const bool terminate = (flags & GVF_DONT_NULL_TERM) == 0;
+                const u32 room = terminate ? size - 1 : size;
+                u32 n = 0;
+                for (; n < length && n < room; ++n) {
+                    const u32 c = b.r8(value + n);
+                    if (!b.ok() || ((flags & GVF_BINARY_VAR) == 0 && c == '\n')) {
+                        break;
+                    }
+                    b.w8(buffer + n, c);
+                }
+                if (terminate) {
+                    b.w8(buffer + n, 0);
+                }
+                set_io_err(d, b, length);
+                if (b.ok()) {
+                    native::set_result(m, n);
+                }
+                return;
+            }
         }
-        if (terminate) {
-            b.w8(buffer + n, 0);
+        if (!local_only && (global_only || type == LV_VAR)) {
+            read_env_var(d, b, name, buffer, size, flags);
+            return;
         }
-        set_io_err(d, b, length);
-        if (b.ok()) {
-            native::set_result(m, n);
-        }
+        b.w8(buffer, 0);
+        fail(d, b, ERROR_OBJECT_NOT_FOUND, 0xFFFFFFFF);
     }
 
     static void find_var_lvo(void* ctx, Machine& m) {
@@ -3009,22 +3349,27 @@ struct DosOps {
         if (!var_name(d, b, name, DOSFALSE)) {
             return;
         }
-        if ((flags & GVF_GLOBAL_ONLY) != 0) {
-            fail(d, b, ERROR_DEVICE_NOT_MOUNTED, DOSFALSE);
+        const u32 type = flags & 0xFF;
+        const bool global_only = (flags & GVF_GLOBAL_ONLY) != 0;
+        const bool local_only = (flags & GVF_LOCAL_ONLY) != 0;
+        if (!global_only) {
+            const u32 node = find_var(d, b, name, type);
+            if (!b.ok()) {
+                return;
+            }
+            if (node != 0) {
+                delete_var(d, b, node);
+                if (b.ok()) {
+                    native::set_result(m, DOSTRUE);
+                }
+                return;
+            }
+        }
+        if (!local_only && (global_only || type == LV_VAR)) {
+            delete_env_var(d, b, name);
             return;
         }
-        const u32 node = find_var(d, b, name, flags & 0xFF);
-        if (!b.ok()) {
-            return;
-        }
-        if (node == 0) {
-            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
-            return;
-        }
-        delete_var(d, b, node);
-        if (b.ok()) {
-            native::set_result(m, DOSTRUE);
-        }
+        fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
     }
 
     // StrToLong(string, value): the decimal number at the start of string,
@@ -7161,22 +7506,38 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
         } else {
             copy_cstr(lock_path, entry.name, kMaxPath);
         }
-        const i64 idx = DosOps::free_assign_slot(*this);
-        if (idx < 0) {
-            break;
-        }
-        u32 lock_bptr = 0;
-        if (!DosOps::alloc_assign_lock(*this, b, lock_path, entry, lock_bptr)) {
+        bool table_full = false;
+        if (!DosOps::add_default_assign(*this, b, def.name, lock_path, entry, table_full)) {
+            if (table_full) {
+                break;
+            }
             m_ = nullptr;
             return false;
         }
-        AssignEntry& e = assigns_[idx];
-        e.used = true;
-        e.type = DLT_DIRECTORY;
-        copy_cstr(e.name, def.name, sizeof e.name);
-        e.dir_count = 1;
-        e.locks[0] = lock_bptr;
-        if (!DosOps::build_assign_node(*this, b, e)) {
+    }
+
+    // Standard RAM: directories and T: / ENV: assigns.
+    u32 t_node = RamFs::kNone;
+    u32 env_node = RamFs::kNone;
+    u32 clip_node = RamFs::kNone;
+    if (ram_.create_dir(0, "T", t_node) != 0 || ram_.create_dir(0, "Env", env_node) != 0 ||
+        ram_.create_dir(0, "Clipboards", clip_node) != 0) {
+        m_ = nullptr;
+        return false;
+    }
+    struct RamAssign {
+        const char* name;
+        const char* path;
+        u32 node;
+    };
+    const RamAssign ram_assigns[] = {
+        {"T", "T", t_node},
+        {"ENV", "Env", env_node},
+    };
+    for (const RamAssign& ra : ram_assigns) {
+        bool table_full = false;
+        if (!DosOps::add_default_assign(*this, b, ra.name, ra.path, DosOps::ram_entry(*this, ra.node),
+                                        table_full)) {
             m_ = nullptr;
             return false;
         }
@@ -7187,6 +7548,14 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
         m_ = nullptr;
         return false;
     }
+
+    DirEntry envarc_dir{};
+    if (DosOps::fs_find(*this, kVolAdf, "Prefs/Env-Archive", envarc_dir) == 0 &&
+        envarc_dir.is_dir) {
+        bool copy_failed = false;
+        DosOps::copy_envarc_dir(*this, "Prefs/Env-Archive", env_node, 0, copy_failed);
+    }
+
     exec.set_this_task(process_);
     exec.set_segment_loader(SegmentLoader{DosOps::load_segment, this});
     return true;

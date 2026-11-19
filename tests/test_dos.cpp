@@ -299,7 +299,10 @@ std::vector<AdfFile> standard_files() {
 class Rig {
 public:
     explicit Rig(const std::vector<AdfFile>& files = standard_files(), bool ffs = false)
-        : memory_(kGuestBytes), image_(build_adf("HombreTest", ffs, files)) {
+        : Rig(build_adf("HombreTest", ffs, files)) {}
+
+    explicit Rig(std::vector<u8> image, u32 free_end = kFreeEnd)
+        : memory_(kGuestBytes), image_(std::move(image)) {
         fd_ = memfd_create("dos", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -316,7 +319,7 @@ public:
         g_lines.clear();
         g_console.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, free_end));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         CHECK(g_dos.init(m, g_exec, volume, console, &g_console));
         m.cpu.a[7] = kStack;
@@ -1369,13 +1372,10 @@ void local_variables() {
     CHECK_EQ(get_var(r, "Planet", 32, LV_ALIAS), -1);
     r.put8(alias + LN_TYPE, LV_ALIAS);
 
-    // There are no global variables.
+    // GVF_GLOBAL_ONLY does not see local variables.
     CHECK_EQ(get_var(r, "Planet", 32, GVF_GLOBAL_ONLY), -1);
     CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
     CHECK_EQ(r.get8(kData + 0x100), 0u);
-    CHECK_EQ(set_var(r, "Moon", "Io", GVF_GLOBAL_ONLY), DOSFALSE);
-    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
-    CHECK_EQ(get_var(r, "Moon", 32), -1);
 
     // A null buffer deletes, and every block goes back to exec.
     for (const char* name : {"planet", "TWO", "Part", "Empty"}) {
@@ -3680,11 +3680,17 @@ void default_assigns_resolve() {
         CHECK(r.read_str(buf) == "HombreTest:C/Echo");
         r.call(dos_lvo::UnLock, c_echo);
 
-        // Absent directories and ENV/T have no assigns.
-        for (const char* missing : {"FONTS:", "L:", "ENV:", "T:", "ENVARC:"}) {
+        // Absent directories have no assigns; T: and ENV: point to RAM:.
+        for (const char* missing : {"FONTS:", "L:", "ENVARC:"}) {
             r.str(kData, missing);
             CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
             CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+        }
+        for (const char* ram_assign : {"T:", "ENV:"}) {
+            r.str(kData, ram_assign);
+            const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+            CHECK(lock != 0);
+            r.call(dos_lvo::UnLock, lock);
         }
     }
 
@@ -3706,10 +3712,11 @@ void default_assigns_resolve() {
     const u32 font = wb.call(dos_lvo::Lock, kData, SHARED_LOCK);
     CHECK(font != 0);
     wb.call(dos_lvo::UnLock, font);
-    for (const char* skipped : {"ENV:", "T:"}) {
-        wb.str(kData, skipped);
+    // ENV: and T: still resolve on RAM:, not DF0:ENV / DF0:T.
+    for (const char* on_adf_only : {"ENV:var", "T:tmp"}) {
+        wb.str(kData, on_adf_only);
         CHECK_EQ(wb.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
-        CHECK_EQ(wb.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+        CHECK_EQ(wb.io_err(), ERROR_OBJECT_NOT_FOUND);
     }
 }
 
@@ -3893,6 +3900,8 @@ void dos_list_walk() {
                          {DLT_DIRECTORY, "S"},
                          {DLT_DIRECTORY, "LIBS"},
                          {DLT_DIRECTORY, "DEVS"},
+                         {DLT_DIRECTORY, "T"},
+                         {DLT_DIRECTORY, "ENV"},
                      }));
 
     // FindDosEntry is case-insensitive and respects flags.
@@ -4742,7 +4751,7 @@ void ram_volume_read_operations() {
         root_children.push_back(read_fib(r, fib).name);
     }
     CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
-    CHECK(root_children == (std::vector<std::string>{"Dir", "Top"}));
+    CHECK(root_children == (std::vector<std::string>{"T", "Env", "Clipboards", "Dir", "Top"}));
 
     // ParentDir of RAM root -> 0 with IoErr 0.
     r.set_io_err(ERROR_OBJECT_NOT_FOUND);
@@ -4906,7 +4915,7 @@ void ram_dos_list_match_and_exall() {
         matched.push_back(read_fib(r, anchor + ap_Info).name);
     }
     CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
-    CHECK(matched == (std::vector<std::string>{"Alpha", "Beta"}));
+    CHECK(matched == (std::vector<std::string>{"T", "Env", "Clipboards", "Alpha", "Beta"}));
     r.call(dos_lvo::MatchEnd, anchor);
 
     // ExAll on RAM root with ED_COMMENT.
@@ -4918,22 +4927,32 @@ void ram_dos_list_match_and_exall() {
     const u32 ex_buf = kData + 0x400;
     CHECK_EQ(r.call(dos_lvo::ExAll, ram_lock, ex_buf, 512, ED_COMMENT, eac), DOSFALSE);
     CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
-    CHECK_EQ(r.get32(eac + eac_Entries), 2u);
+    CHECK_EQ(r.get32(eac + eac_Entries), 5u);
 
-    const u32 e0 = ex_buf;
-    CHECK(r.read_str(r.get32(e0 + ed_Name)) == "Alpha");
-    CHECK_EQ(as_signed(r.get32(e0 + ed_Type)), static_cast<i32>(ST_USERDIR));
-    const u32 e1 = r.get32(e0 + ed_Next);
-    CHECK(e1 != 0);
-    CHECK_EQ(r.get32(e1 + ed_Next), 0u);
-    CHECK(r.read_str(r.get32(e1 + ed_Name)) == "Beta");
-    CHECK_EQ(as_signed(r.get32(e1 + ed_Type)), static_cast<i32>(ST_FILE));
-    CHECK_EQ(r.get32(e1 + ed_Size), 4u);
-    CHECK_EQ(r.get32(e1 + ed_Prot), 0x05u);
-    CHECK_EQ(r.get32(e1 + ed_Days), 50u);
-    CHECK_EQ(r.get32(e1 + ed_Mins), 60u);
-    CHECK_EQ(r.get32(e1 + ed_Ticks), 70u);
-    CHECK(r.read_str(r.get32(e1 + ed_Comment)) == "beta comment");
+    std::vector<std::string> ex_names;
+    u32 alpha_node = 0;
+    u32 beta_node = 0;
+    for (u32 cur = ex_buf, i = 0; i < 5 && cur != 0; ++i, cur = r.get32(cur + ed_Next)) {
+        const std::string name = r.read_str(r.get32(cur + ed_Name));
+        ex_names.push_back(name);
+        if (name == "Alpha") {
+            alpha_node = cur;
+        } else if (name == "Beta") {
+            beta_node = cur;
+        }
+    }
+    CHECK(ex_names == (std::vector<std::string>{"T", "Env", "Clipboards", "Alpha", "Beta"}));
+    CHECK(alpha_node != 0);
+    CHECK_EQ(as_signed(r.get32(alpha_node + ed_Type)), static_cast<i32>(ST_USERDIR));
+    CHECK(beta_node != 0);
+    CHECK_EQ(r.get32(beta_node + ed_Next), 0u);
+    CHECK_EQ(as_signed(r.get32(beta_node + ed_Type)), static_cast<i32>(ST_FILE));
+    CHECK_EQ(r.get32(beta_node + ed_Size), 4u);
+    CHECK_EQ(r.get32(beta_node + ed_Prot), 0x05u);
+    CHECK_EQ(r.get32(beta_node + ed_Days), 50u);
+    CHECK_EQ(r.get32(beta_node + ed_Mins), 60u);
+    CHECK_EQ(r.get32(beta_node + ed_Ticks), 70u);
+    CHECK(r.read_str(r.get32(beta_node + ed_Comment)) == "beta comment");
 
     r.call(dos_lvo::ExAllEnd, ram_lock, ex_buf, 512, ED_COMMENT, eac);
     r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
@@ -5367,7 +5386,7 @@ void ram_enumeration_after_delete_info_and_cleanup() {
         }
     }
     CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
-    CHECK(ex_names == (std::vector<std::string>{"A", "B", "C"}));
+    CHECK(ex_names == (std::vector<std::string>{"T", "Env", "Clipboards", "A", "B", "C"}));
 
     // ExAll continues after deleting the last returned entry.
     r.str(kData + 0x40, "RAM:A");
@@ -5379,7 +5398,7 @@ void ram_enumeration_after_delete_info_and_cleanup() {
     const u32 ex_buf = kData + 0x700;
     std::vector<std::string> exall_names;
     for (;;) {
-        const u32 more = r.call(dos_lvo::ExAll, ram_lock, ex_buf, 16, ED_NAME, eac);
+        const u32 more = r.call(dos_lvo::ExAll, ram_lock, ex_buf, 20, ED_NAME, eac);
         const u32 count = r.get32(eac + eac_Entries);
         for (u32 cur = ex_buf, i = 0; i < count && cur != 0; ++i, cur = r.get32(cur + ed_Next)) {
             exall_names.push_back(r.read_str(r.get32(cur + ed_Name)));
@@ -5393,8 +5412,8 @@ void ram_enumeration_after_delete_info_and_cleanup() {
             CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
         }
     }
-    CHECK(exall_names == (std::vector<std::string>{"A", "B", "C"}));
-    r.call(dos_lvo::ExAllEnd, ram_lock, ex_buf, 16, ED_NAME, eac);
+    CHECK(exall_names == (std::vector<std::string>{"T", "Env", "Clipboards", "A", "B", "C"}));
+    r.call(dos_lvo::ExAllEnd, ram_lock, ex_buf, 20, ED_NAME, eac);
     r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
 
     // MatchNext continues after deleting the current entry.
@@ -5404,13 +5423,16 @@ void ram_enumeration_after_delete_info_and_cleanup() {
     CHECK_EQ(r.call(dos_lvo::MatchFirst, kData + 0x40, anchor), 0u);
     std::vector<std::string> match_names;
     match_names.push_back(read_fib(r, anchor + ap_Info).name);
-    r.str(kData + 0x40, std::string("RAM:") + match_names.back());
-    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
     while (r.call(dos_lvo::MatchNext, anchor) == 0u) {
-        match_names.push_back(read_fib(r, anchor + ap_Info).name);
+        const std::string cur = read_fib(r, anchor + ap_Info).name;
+        match_names.push_back(cur);
+        if (cur == "A") {
+            r.str(kData + 0x40, "RAM:A");
+            CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
+        }
     }
     CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
-    CHECK(match_names == (std::vector<std::string>{"A", "C"}));
+    CHECK(match_names == (std::vector<std::string>{"T", "Env", "Clipboards", "A", "C"}));
     r.call(dos_lvo::MatchEnd, anchor);
     r.call(dos_lvo::UnLock, ram_lock);
 
@@ -5428,6 +5450,252 @@ void ram_enumeration_after_delete_info_and_cleanup() {
     CHECK(r.read_str(kData + 0x80) == "abc");
     CHECK_EQ(r.call(dos_lvo::Close, leaked_rd), DOSTRUE);
     CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
+}
+
+void t_and_env_assigns_and_envarc_copy() {
+    // Default assigns T: and ENV: and RAM:Clipboards exist on Ram Disk.
+    {
+        Rig r;
+        const u32 fib = kData + 0x200;
+        const u32 buf = kData + 0x400;
+
+        struct RamDir {
+            const char* lock_path;
+            const char* name;
+            const char* full_path;
+        };
+        const RamDir dirs[] = {
+            {"T:", "T", "Ram Disk:T"},
+            {"ENV:", "Env", "Ram Disk:Env"},
+            {"RAM:Clipboards", "Clipboards", "Ram Disk:Clipboards"},
+        };
+        for (const RamDir& d : dirs) {
+            r.str(kData, d.lock_path);
+            const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+            CHECK(lock != 0);
+            CHECK_EQ(r.call(dos_lvo::Examine, lock, fib), DOSTRUE);
+            const Fib f = read_fib(r, fib);
+            CHECK(f.name == d.name);
+            CHECK_EQ(f.type, static_cast<i32>(ST_USERDIR));
+            CHECK_EQ(r.call(dos_lvo::NameFromLock, lock, buf, 64), DOSTRUE);
+            CHECK(r.read_str(buf) == d.full_path);
+            r.call(dos_lvo::UnLock, lock);
+        }
+
+        // Assign locks keep T: and ENV: from being deleted.
+        for (const char* busy : {"RAM:T", "RAM:Env"}) {
+            r.str(kData, busy);
+            CHECK_EQ(r.call(dos_lvo::DeleteFile, kData), DOSFALSE);
+            CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+        }
+    }
+
+    // ENVARC: tree (contents, protection, date, comment, subdirs) copies into ENV:.
+    {
+        std::vector<AdfFile> files = standard_files();
+        files.push_back({"Prefs/Env-Archive/greeting", text("hello from envarc")});
+        files.push_back({"Prefs/Env-Archive/Empty", {}});
+        files.push_back({"Prefs/Env-Archive/Sys/def_disk", {'a', 'b', '\n', 'c'}});
+        files.push_back({"Prefs/Env-Archive/Sys/Sub/deep", text("nested")});
+        std::vector<u8> image = build_adf("HombreTest", false, files);
+
+        AdfVolume vol{};
+        CHECK(adf_mount(image.data(), image.size(), vol) == FsError::Ok);
+        DirEntry greeting{};
+        CHECK(adf_find(vol, "Prefs/Env-Archive/greeting", greeting) == FsError::Ok);
+        const auto put_be32_at = [&](u32 block, u32 long_idx, u32 value) {
+            const usize off = static_cast<usize>(block) * 512 + long_idx * 4;
+            image[off + 0] = static_cast<u8>(value >> 24);
+            image[off + 1] = static_cast<u8>(value >> 16);
+            image[off + 2] = static_cast<u8>(value >> 8);
+            image[off + 3] = static_cast<u8>(value);
+        };
+        put_be32_at(greeting.header_block, 80, 0x0A);   // protection
+        put_be32_at(greeting.header_block, 105, 42);    // days
+        put_be32_at(greeting.header_block, 106, 100);   // minute
+        put_be32_at(greeting.header_block, 107, 200);   // tick
+        const std::string note = "env note";
+        const usize c_off = static_cast<usize>(greeting.header_block) * 512 + 82 * 4;
+        image[c_off] = static_cast<u8>(note.size());
+        for (usize i = 0; i < note.size(); ++i) {
+            image[c_off + 1 + i] = static_cast<u8>(note[i]);
+        }
+        adf_fix_checksum(image, greeting.header_block);
+
+        Rig r(std::move(image));
+        CHECK(g_lines.empty());
+
+        const u32 buf = kData + 0x200;
+        const u32 fib = kData + 0x400;
+
+        r.str(kData, "ENV:greeting");
+        const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+        CHECK(fh != 0);
+        CHECK_EQ(r.call(dos_lvo::Read, fh, buf, 32), 17u);
+        CHECK(r.bytes(buf, 17) == text("hello from envarc"));
+        CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+
+        const u32 g_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(g_lock != 0);
+        CHECK_EQ(r.call(dos_lvo::Examine, g_lock, fib), DOSTRUE);
+        CHECK_EQ(r.get32(fib + fib_Protection), 0x0Au);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 42u);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 100u);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 200u);
+        CHECK(r.read_str(fib + fib_Comment) == "env note");
+        r.call(dos_lvo::UnLock, g_lock);
+
+        r.str(kData, "ENV:Empty");
+        const u32 empty_fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+        CHECK(empty_fh != 0);
+        CHECK_EQ(r.call(dos_lvo::Read, empty_fh, buf, 16), 0u);
+        CHECK_EQ(r.call(dos_lvo::Close, empty_fh), DOSTRUE);
+
+        CHECK_EQ(get_var(r, "Sys/def_disk", 32, GVF_GLOBAL_ONLY | GVF_BINARY_VAR), 4);
+        CHECK(r.bytes(kData + 0x100, 4) == (std::vector<u8>{'a', 'b', '\n', 'c'}));
+
+        r.str(kData, "ENV:Sys/Sub/deep");
+        const u32 deep_fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+        CHECK(deep_fh != 0);
+        CHECK_EQ(r.call(dos_lvo::Read, deep_fh, buf, 16), 6u);
+        CHECK(r.bytes(buf, 6) == text("nested"));
+        CHECK_EQ(r.call(dos_lvo::Close, deep_fh), DOSTRUE);
+    }
+
+    // A copy failure from ENVARC: (e.g. disk full) is logged once and non-fatal.
+    {
+        std::vector<AdfFile> files = standard_files();
+        files.push_back({"Prefs/Env-Archive/huge1", std::vector<u8>(32768, 'A')});
+        files.push_back({"Prefs/Env-Archive/huge2", std::vector<u8>(32768, 'B')});
+        Rig r(build_adf("HombreTest", false, files), kFreeStart + 65536);
+        CHECK_EQ(g_lines.size(), 1u);
+        CHECK(logged_containing("ENVARC:"));
+        r.str(kData, "ENV:");
+        const u32 env_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(env_lock != 0);
+        r.call(dos_lvo::UnLock, env_lock);
+    }
+}
+
+void global_variables() {
+    Rig r;
+    const u32 buf = kData + 0x400;
+
+    // SetVar GVF_GLOBAL_ONLY creates ENV:<name> readable via Open.
+    CHECK_EQ(set_var(r, "Foo", "hello world", GVF_GLOBAL_ONLY), DOSTRUE);
+    r.str(kData, "ENV:Foo");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::Read, fh, buf, 32), 11u);
+    CHECK(r.bytes(buf, 11) == text("hello world"));
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+
+    // GVF_SAVE_VAR ignores read-only ENVARC: and succeeds if ENV: worked.
+    CHECK_EQ(set_var(r, "Foo", "next", GVF_GLOBAL_ONLY | GVF_SAVE_VAR), DOSTRUE);
+    CHECK_EQ(get_var(r, "Foo", 32, GVF_GLOBAL_ONLY), 4);
+    CHECK(r.read_str(kData + 0x100) == "next");
+
+    // GetVar GVF_GLOBAL_ONLY round trip, newline truncation, BINARY and DONT_NULL_TERM.
+    CHECK_EQ(set_var(r, "Lines", "first\nsecond", GVF_GLOBAL_ONLY, 12), DOSTRUE);
+    CHECK_EQ(get_var(r, "lines", 32, GVF_GLOBAL_ONLY), 5);
+    CHECK(r.read_str(kData + 0x100) == "first");
+    CHECK_EQ(r.io_err(), 12u);
+
+    CHECK_EQ(get_var(r, "Lines", 32, GVF_GLOBAL_ONLY | GVF_BINARY_VAR), 12);
+    CHECK(r.bytes(kData + 0x100, 12) == text("first\nsecond"));
+    CHECK_EQ(r.io_err(), 12u);
+
+    CHECK_EQ(get_var(r, "Lines", 4, GVF_GLOBAL_ONLY), 3);
+    CHECK(r.read_str(kData + 0x100) == "fir");
+    CHECK_EQ(r.get8(kData + 0x104), 0xEEu);
+    CHECK_EQ(r.io_err(), 12u);
+
+    CHECK_EQ(get_var(r, "Lines", 4, GVF_GLOBAL_ONLY | GVF_DONT_NULL_TERM), 4);
+    CHECK(r.bytes(kData + 0x100, 5) == (std::vector<u8>{'f', 'i', 'r', 's', 0xEE}));
+    CHECK_EQ(r.io_err(), 12u);
+
+    // Fallback when no local, GVF_LOCAL_ONLY stays local, FindVar stays local-only.
+    CHECK_EQ(get_var(r, "Lines", 32, 0), 5);
+    CHECK(r.read_str(kData + 0x100) == "first");
+    CHECK_EQ(get_var(r, "Lines", 32, GVF_LOCAL_ONLY), -1);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    r.str(kData, "Lines");
+    CHECK_EQ(r.call(dos_lvo::FindVar, kData, LV_VAR), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+
+    // Local shadows global; GVF_GLOBAL_ONLY ignores local.
+    CHECK_EQ(set_var(r, "Lines", "localval", 0), DOSTRUE);
+    CHECK_EQ(get_var(r, "Lines", 32, 0), 8);
+    CHECK(r.read_str(kData + 0x100) == "localval");
+    CHECK_EQ(get_var(r, "Lines", 32, GVF_GLOBAL_ONLY), 5);
+    CHECK(r.read_str(kData + 0x100) == "first");
+
+    // DeleteVar without flags deletes local first, then global on the next call.
+    r.str(kData, "Lines");
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, 0), DOSTRUE);
+    CHECK_EQ(get_var(r, "Lines", 32, GVF_LOCAL_ONLY), -1);
+    CHECK_EQ(get_var(r, "Lines", 32, GVF_GLOBAL_ONLY), 5);
+    r.str(kData, "Lines");
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, 0), DOSTRUE);
+    CHECK_EQ(get_var(r, "Lines", 32, GVF_GLOBAL_ONLY), -1);
+
+    // DeleteVar GVF_GLOBAL_ONLY removes ENV:<name>; SetVar with null buffer also deletes.
+    r.str(kData, "Foo");
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, GVF_GLOBAL_ONLY), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, GVF_GLOBAL_ONLY), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    r.str(kData, "ENV:Foo");
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+
+    CHECK_EQ(set_var(r, "Temp", "123", GVF_GLOBAL_ONLY), DOSTRUE);
+    r.str(kData, "Temp");
+    CHECK_EQ(r.call(dos_lvo::SetVar, kData, 0, 0, GVF_GLOBAL_ONLY), DOSTRUE);
+    CHECK_EQ(get_var(r, "Temp", 32, GVF_GLOBAL_ONLY), -1);
+
+    // Subdirectory variable: missing ENV:a fails; works after CreateDir("ENV:a").
+    CHECK_EQ(set_var(r, "a/b", "sub", GVF_GLOBAL_ONLY), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DIR_NOT_FOUND);
+    r.str(kData, "ENV:a");
+    const u32 sub_lock = r.call(dos_lvo::CreateDir, kData);
+    CHECK(sub_lock != 0);
+    r.call(dos_lvo::UnLock, sub_lock);
+    CHECK_EQ(set_var(r, "a/b", "sub", GVF_GLOBAL_ONLY), DOSTRUE);
+    CHECK_EQ(get_var(r, "a/b", 32, 0), 3);
+    CHECK(r.read_str(kData + 0x100) == "sub");
+
+    // Reassigning ENV: follows the assign; pointing ENV: to ADF rejects writes.
+    r.str(kData, "RAM:AltEnv");
+    const u32 alt_dir = r.call(dos_lvo::CreateDir, kData);
+    CHECK(alt_dir != 0);
+    r.call(dos_lvo::UnLock, alt_dir);
+    const u32 alt_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(alt_lock != 0);
+    r.str(kData, "ENV");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, alt_lock), DOSTRUE);
+    CHECK_EQ(set_var(r, "Alt", "val", GVF_GLOBAL_ONLY), DOSTRUE);
+    r.str(kData, "RAM:AltEnv/Alt");
+    const u32 alt_fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(alt_fh != 0);
+    CHECK_EQ(r.call(dos_lvo::Read, alt_fh, buf, 16), 3u);
+    CHECK(r.bytes(buf, 3) == text("val"));
+    CHECK_EQ(r.call(dos_lvo::Close, alt_fh), DOSTRUE);
+    r.str(kData, "Alt");
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, GVF_GLOBAL_ONLY), DOSTRUE);
+
+    r.str(kData, "DF0:S");
+    const u32 adf_s = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(adf_s != 0);
+    r.str(kData, "ENV");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, adf_s), DOSTRUE);
+    CHECK_EQ(get_var(r, "Startup-Sequence", 32, GVF_GLOBAL_ONLY), 10);
+    CHECK(r.read_str(kData + 0x100) == "echo hello");
+    CHECK_EQ(r.io_err(), 11u);
+    CHECK_EQ(set_var(r, "ReadOnly", "x", GVF_GLOBAL_ONLY), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    r.str(kData, "Startup-Sequence");
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, GVF_GLOBAL_ONLY), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
 }
 
 }
@@ -5524,5 +5792,7 @@ int main() {
     ram_delete_createdir_rename_and_metadata();
     ram_exclusive_locks_and_dopkt();
     ram_enumeration_after_delete_info_and_cleanup();
+    t_and_env_assigns_and_envarc_copy();
+    global_variables();
     return check::finish("test_dos");
 }
