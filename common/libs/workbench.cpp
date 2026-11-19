@@ -75,6 +75,7 @@ constexpr u32 NewMenu_SIZEOF = 20;
 constexpr u8 NM_END = 0;
 constexpr u8 NM_TITLE = 1;
 constexpr u8 NM_ITEM = 2;
+constexpr u8 NM_SUB = 3;
 constexpr u16 NM_ITEMDISABLED = 0x0010;
 constexpr u16 CHECKIT = 0x0001;
 constexpr u16 MENUTOGGLE = 0x0008;
@@ -126,6 +127,8 @@ struct MenuItemSpec {
     const char* label;
     bool enabled;
     bool toggle = false;  // a check mark each pick turns on or off
+    const MenuItemSpec* subs = nullptr;  // the items of its submenu
+    u32 sub_count = 0;
 };
 
 struct MenuSpec {
@@ -140,15 +143,26 @@ constexpr MenuItemSpec kWorkbenchItems[] = {
     {"Quit", false},
 };
 
+constexpr MenuItemSpec kSnapshotItems[] = {
+    {"Window", true},
+    {"All", true},
+};
+
 constexpr MenuItemSpec kWindowItems[] = {
-    {"New Drawer", false},     {"Open Parent", true}, {"Close", true},
-    {"Update", false},         {"Select Contents", true}, {"Clean Up", true},
-    {"Snapshot", false},       {"Show", false},      {"View By", false},
+    {"New Drawer", false},
+    {"Open Parent", true},
+    {"Close", true},
+    {"Update", false},
+    {"Select Contents", true},
+    {"Clean Up", true},
+    {"Snapshot", true, false, kSnapshotItems, sizeof kSnapshotItems / sizeof kSnapshotItems[0]},
+    {"Show", false},
+    {"View By", false},
 };
 
 constexpr MenuItemSpec kIconsItems[] = {
     {"Open", true},          {"Copy", false},         {"Rename...", false},
-    {"Information...", false}, {"Snapshot", false},   {"Unsnapshot", false},
+    {"Information...", false}, {"Snapshot", true},    {"Unsnapshot", true},
     {"Leave Out", false},    {"Put Away", false},     {"Delete...", false},
     {"Format Disk...", false}, {"Empty Trash", false},
 };
@@ -170,6 +184,11 @@ constexpr u32 kMenuWorkbench = 0;
 constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
 constexpr u32 kItemBackdrop = 0;
+constexpr u32 kItemWindowSnapshot = 6;
+constexpr u32 kItemIconSnapshot = 4;
+constexpr u32 kItemIconUnsnapshot = 5;
+constexpr u32 kSubAll = 1;
+constexpr u32 kNoSub = 31;
 
 constexpr u32 text_length(const char* text) {
     u32 n = 0;
@@ -335,7 +354,12 @@ u32 Workbench::build_menu_strip() {
         entries += 1 + kMenus[m].count;
         label_bytes += text_length(kMenus[m].title) + 1;
         for (u32 i = 0; i < kMenus[m].count; ++i) {
-            label_bytes += text_length(kMenus[m].items[i].label) + 1;
+            const MenuItemSpec& spec = kMenus[m].items[i];
+            label_bytes += text_length(spec.label) + 1;
+            entries += spec.sub_count;
+            for (u32 k = 0; k < spec.sub_count; ++k) {
+                label_bytes += text_length(spec.subs[k].label) + 1;
+            }
         }
     }
     const u32 bytes = entries * NewMenu_SIZEOF + label_bytes;
@@ -373,6 +397,9 @@ u32 Workbench::build_menu_strip() {
                 flags |= CHECKIT | MENUTOGGLE | (backdrop_ ? CHECKED : 0);
             }
             put_entry(NM_ITEM, spec.label, flags);
+            for (u32 k = 0; k < spec.sub_count; ++k) {
+                put_entry(NM_SUB, spec.subs[k].label, spec.subs[k].enabled ? 0 : kDisabled);
+            }
         }
     }
     put_entry(NM_END, nullptr, 0);
@@ -446,13 +473,15 @@ void Workbench::open_root() {
     b.w16(new_window + ndk::nw_Height, 0);
     if (backdrop_) {
         b.w32(new_window + ndk::nw_IDCMPFlags,
-              ndk::IDCMP_MOUSEBUTTONS | kIdcmpMenuPick | kIdcmpRefreshWindow);
+              ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | kIdcmpMenuPick |
+                  kIdcmpRefreshWindow);
         b.w32(new_window + ndk::nw_Flags, ndk::WFLG_BACKDROP | ndk::WFLG_BORDERLESS);
     } else {
         b.w8(new_window + ndk::nw_DetailPen, 0);
         b.w8(new_window + ndk::nw_BlockPen, 1);
-        b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_NEWSIZE |
-                                                   kIdcmpMenuPick | kIdcmpRefreshWindow);
+        b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
+                                                   ndk::IDCMP_NEWSIZE | kIdcmpMenuPick |
+                                                   kIdcmpRefreshWindow);
         b.w32(new_window + ndk::nw_Flags,
               ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_SIZEGADGET |
                   ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM | ndk::WFLG_ACTIVATE);
@@ -489,12 +518,41 @@ void Workbench::place_root_icon(IconEntry& icon) {
     volume_top_ = top + icon.height + static_cast<i32>(kLabelRows) + kIconGapY;
 }
 
+// Icons with a place of their own keep it, moved inside the window when
+// it no longer reaches there; the others go down the right-hand column.
 void Workbench::place_root_icons() {
     volume_top_ = 0;
+    const DrawerWindow& root = windows_[0];
     for (IconEntry& icon : icons_) {
-        if (icon.used && icon.owner == 0) {
-            place_root_icon(icon);
+        if (!icon.used || icon.owner != 0) {
+            continue;
         }
+        if (!icon.placed) {
+            place_root_icon(icon);
+            continue;
+        }
+        const i32 max_left = root.inner_width - icon.width;
+        const i32 max_top = root.inner_height - icon.height - static_cast<i32>(kLabelRows);
+        icon.left = icon.left > max_left ? max_left : icon.left;
+        icon.top = icon.top > max_top ? max_top : icon.top;
+        icon.left = icon.left < 0 ? 0 : icon.left;
+        icon.top = icon.top < 0 ? 0 : icon.top;
+    }
+}
+
+// The place the icon's DiskObject keeps, if it keeps one.
+void Workbench::read_position(IconEntry& icon) {
+    icon.placed = false;
+    if (icon.object == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 x = b.r32(icon.object + do_CurrentX);
+    const u32 y = b.r32(icon.object + do_CurrentY);
+    if (b.ok() && x != kNoIconPosition && y != kNoIconPosition) {
+        icon.left = static_cast<i32>(x);
+        icon.top = static_cast<i32>(y);
+        icon.placed = true;
     }
 }
 
@@ -514,6 +572,7 @@ void Workbench::set_backdrop(bool on) {
     if (!desktop_open_ || !windows_[0].used || on == backdrop_) {
         return;
     }
+    cancel_drag();
     const u32 old_window = windows_[0].window;
     intuition_->clear_menu_strip(old_window);
     intuition_->close_window(old_window);
@@ -604,7 +663,10 @@ void Workbench::add_volume(const char* label, const char* icon_path) {
     copy_text(icon->name, sizeof icon->name, label);
     copy_text(icon->file, sizeof icon->file, "Disk");
     measure(*icon);
-    place_root_icon(*icon);
+    read_position(*icon);
+    if (!icon->placed) {
+        place_root_icon(*icon);
+    }
     LogLine().text("workbench: volume ").text(label).send();
 }
 
@@ -623,7 +685,7 @@ void Workbench::add_volume_icons() {
             }
         }
     }
-    add_volume(kRamDiskName, nullptr);
+    add_volume(kRamDiskName, "RAM:Disk");
 }
 
 // --- drawer windows ------------------------------------------------------
@@ -659,16 +721,14 @@ void Workbench::add_dir_icon(u32 window_index, const char* entry, bool is_dir) {
     icon->object = object;
     icon->owned = true;
     icon->type = static_cast<u8>(b.r8(object + do_Type));
-    icon->left = static_cast<i32>(b.r32(object + do_CurrentX));
-    icon->top = static_cast<i32>(b.r32(object + do_CurrentY));
-    icon->placed = static_cast<u32>(icon->left) != kNoIconPosition &&
-                   static_cast<u32>(icon->top) != kNoIconPosition;
+    read_position(*icon);
     copy_text(icon->name, sizeof icon->name, stem);
     copy_text(icon->file, sizeof icon->file, stem);
     measure(*icon);
 }
 
 void Workbench::fill_drawer(u32 window_index) {
+    cancel_drag();
     free_icons(window_index);
     // The icon the selection named is gone with the others.
     clicks_[window_index].clear();
@@ -724,20 +784,44 @@ u32 Workbench::free_window_slot() const {
 
 void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     char path[Dos::kMaxPath];
-    if (window_index == 0 && icon.type == kDisk) {
-        const u32 length = text_length(icon.name);
-        if (length + 2 > sizeof path) {
-            return;
-        }
-        for (u32 i = 0; i < length; ++i) {
-            path[i] = icon.name[i];
-        }
-        path[length] = ':';
-        path[length + 1] = '\0';
-    } else if (!join_path(windows_[window_index].path, icon.file, path)) {
+    if (!icon_target_path(window_index, icon, path)) {
         return;
     }
-    open_drawer_window(path, icon.name, icon.object);
+    // The window's box comes from the icon as it is saved now, so a
+    // Snapshot since the icon was read counts.
+    char info[Dos::kMaxPath];
+    const u32 fresh = icon_path(window_index, icon, info) ? icon_->load_object(info) : 0;
+    open_drawer_window(path, icon.name, fresh != 0 ? fresh : icon.object);
+    if (fresh != 0) {
+        icon_->free_object(fresh);
+    }
+}
+
+// The drawer a disk or drawer icon stands for: "Name:" for a disk, the
+// drawer's path for a drawer.
+bool Workbench::icon_target_path(u32 window_index, const IconEntry& icon,
+                                 char (&out)[Dos::kMaxPath]) const {
+    if (icon.type == kDisk) {
+        const u32 length = text_length(icon.name);
+        if (length + 2 > sizeof out) {
+            return false;
+        }
+        copy_text(out, sizeof out, icon.name);
+        out[length] = ':';
+        out[length + 1] = '\0';
+        return true;
+    }
+    return join_path(windows_[window_index].path, icon.file, out);
+}
+
+// The path of the icon's .info without the suffix: "Name:Disk" for a disk.
+bool Workbench::icon_path(u32 window_index, const IconEntry& icon,
+                          char (&out)[Dos::kMaxPath]) const {
+    if (icon.type == kDisk) {
+        char volume[Dos::kMaxPath];
+        return icon_target_path(window_index, icon, volume) && join_path(volume, "Disk", out);
+    }
+    return join_path(windows_[window_index].path, icon.file, out);
 }
 
 void Workbench::open_drawer_window(const char* path, const char* name, u32 object) {
@@ -800,8 +884,8 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     b.w8(new_window + ndk::nw_DetailPen, 0);
     b.w8(new_window + ndk::nw_BlockPen, 1);
     b.w32(new_window + ndk::nw_IDCMPFlags,
-          ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_NEWSIZE | kIdcmpMenuPick |
-              kIdcmpRefreshWindow);
+          ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
+              ndk::IDCMP_NEWSIZE | kIdcmpMenuPick | kIdcmpRefreshWindow);
     b.w32(new_window + ndk::nw_Flags,
           ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
               ndk::WFLG_SIZEGADGET | ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM |
@@ -834,6 +918,7 @@ void Workbench::close_drawer(u32 window_index) {
     if (window_index == 0 || !windows_[window_index].used) {
         return;
     }
+    cancel_drag();
     free_icons(window_index);
     clicks_[window_index].clear();
     intuition_->close_window(windows_[window_index].window);
@@ -983,9 +1068,13 @@ void Workbench::mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us) {
     if (!windows_[window_index].used) {
         return;
     }
+    cancel_drag();
     const DrawerWindow& drawer = windows_[window_index];
-    const u32 hit = icon_at(window_index, mx - drawer.inner_left, my - drawer.inner_top);
-    switch (clicks_[window_index].click(hit, now_us)) {
+    const i32 x = mx - drawer.inner_left;
+    const i32 y = my - drawer.inner_top;
+    const u32 hit = icon_at(window_index, x, y);
+    const ClickAction action = clicks_[window_index].click(hit, now_us);
+    switch (action) {
     case ClickAction::Select:
     case ClickAction::Clear:
         draw_window(window_index);
@@ -996,6 +1085,167 @@ void Workbench::mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us) {
         break;
     case ClickAction::None:
         break;
+    }
+    // The press that does not open the icon may start dragging it.
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    if (hit == kNoIcon || action == ClickAction::Open ||
+        !screen_origin(window_index, origin_x, origin_y)) {
+        return;
+    }
+    drag_ = IconDrag{};
+    drag_.armed = true;
+    drag_.window = window_index;
+    drag_.icon = hit;
+    drag_.grab_x = x - icons_[hit].left;
+    drag_.grab_y = y - icons_[hit].top;
+    drag_.start_x = origin_x + mx;
+    drag_.start_y = origin_y + my;
+    intuition_->report_mouse(windows_[window_index].window, true);
+}
+
+// The window's top-left corner on the screen; the pointer positions its
+// messages carry are relative to it.
+bool Workbench::screen_origin(u32 window_index, i32& x, i32& y) const {
+    if (window_index >= kMaxWindows || !windows_[window_index].used) {
+        return false;
+    }
+    Bus b(*machine_);
+    x = static_cast<i16>(b.r16(windows_[window_index].window + ndk::wd_LeftEdge));
+    y = static_cast<i16>(b.r16(windows_[window_index].window + ndk::wd_TopEdge));
+    return b.ok();
+}
+
+void Workbench::drag_to(u32 window_index, i32 mx, i32 my) {
+    if (!drag_.armed || window_index != drag_.window) {
+        return;
+    }
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    if (!screen_origin(window_index, origin_x, origin_y)) {
+        return;
+    }
+    const i32 sx = origin_x + mx;
+    const i32 sy = origin_y + my;
+    if (!drag_.active) {
+        const i32 dx = sx - drag_.start_x;
+        const i32 dy = sy - drag_.start_y;
+        if (dx <= kDragThreshold && dx >= -kDragThreshold && dy <= kDragThreshold &&
+            dy >= -kDragThreshold) {
+            return;
+        }
+        drag_.active = true;
+    }
+    Bus b(*machine_);
+    const IconArt art = art_of(b, icons_[drag_.icon].object);
+    if (art.render == 0) {
+        return;
+    }
+    // The image's corner goes where the icon's corner would be.
+    intuition_->set_drag_image(screen_, art.render, sx - drag_.grab_x, sy - drag_.grab_y);
+}
+
+void Workbench::end_drag(u32 window_index, i32 mx, i32 my) {
+    if (!drag_.armed || window_index != drag_.window) {
+        return;
+    }
+    const IconDrag ended = drag_;
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    const bool placed = screen_origin(window_index, origin_x, origin_y);
+    cancel_drag();
+    if (!ended.active || !placed) {
+        return;
+    }
+    // A drag is no first click of a double click.
+    clicks_[window_index].forget();
+    drop(ended, origin_x + mx, origin_y + my);
+}
+
+void Workbench::cancel_drag() {
+    if (!drag_.armed) {
+        return;
+    }
+    if (drag_.window < kMaxWindows && windows_[drag_.window].used) {
+        intuition_->report_mouse(windows_[drag_.window].window, false);
+    }
+    intuition_->clear_drag_image();
+    drag_ = IconDrag{};
+}
+
+// Where a dragged icon lands: its own window takes it at the new place; a
+// drawer or disk icon, or another drawer's window, takes the file.
+void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
+    if (drag.icon >= kMaxIcons || !icons_[drag.icon].used ||
+        icons_[drag.icon].owner != drag.window || !windows_[drag.window].used) {
+        return;
+    }
+    const u32 under = intuition_->window_under(sx, sy);
+    u32 target = kMaxWindows;
+    for (u32 i = 0; i < kMaxWindows; ++i) {
+        if (windows_[i].used && windows_[i].window == under) {
+            target = i;
+            break;
+        }
+    }
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    if (target == kMaxWindows || !screen_origin(target, origin_x, origin_y)) {
+        LogLine().text("workbench: ").text(icons_[drag.icon].name).text(" dropped nowhere").send();
+        return;
+    }
+    const DrawerWindow& to = windows_[target];
+    const i32 px = sx - origin_x - to.inner_left;
+    const i32 py = sy - origin_y - to.inner_top;
+    const i32 left = px - drag.grab_x;
+    const i32 top = py - drag.grab_y;
+    u32 on = icon_at(target, px, py);
+    if (on == drag.icon) {
+        on = kNoIcon;
+    }
+    const bool into_icon =
+        on != kNoIcon && (icons_[on].type == kDrawer || icons_[on].type == kDisk);
+    IconEntry& icon = icons_[drag.icon];
+    if (target == drag.window && !into_icon) {
+        icon.left = left < 0 ? 0 : left;
+        icon.top = top < 0 ? 0 : top;
+        icon.placed = true;
+        draw_window(target);
+        return;
+    }
+    if (icon.type != kTool && icon.type != kProject) {
+        LogLine().text("workbench: ").text(icon.name).text(" cannot be moved there").send();
+        return;
+    }
+    char dest[Dos::kMaxPath];
+    if (into_icon) {
+        if (!icon_target_path(target, icons_[on], dest)) {
+            return;
+        }
+    } else if (target == 0) {
+        LogLine().text("workbench: ").text(icon.name).text(" cannot be left out").send();
+        return;
+    } else {
+        copy_text(dest, sizeof dest, to.path);
+    }
+    char from[Dos::kMaxPath];
+    copy_text(from, sizeof from, windows_[drag.window].path);
+    if (same_ci(dest, from)) {
+        return;
+    }
+    // The windows are filled again, so the icon is copied first.
+    const IconEntry moving = icon;
+    const i32 keep_left = into_icon ? static_cast<i32>(kNoIconPosition) : (left < 0 ? 0 : left);
+    const i32 keep_top = into_icon ? static_cast<i32>(kNoIconPosition) : (top < 0 ? 0 : top);
+    if (!transfer(moving, from, dest, keep_left, keep_top)) {
+        return;
+    }
+    for (u32 i = 1; i < kMaxWindows; ++i) {
+        if (windows_[i].used && (same_ci(windows_[i].path, from) ||
+                                 same_ci(windows_[i].path, dest))) {
+            fill_drawer(i);
+            draw_window(i);
+        }
     }
 }
 
@@ -1081,6 +1331,304 @@ void Workbench::open_selected(u32 window_index) {
     }
 }
 
+namespace {
+
+// The volume a path is on, RAM: by the Ram Disk's name.
+void volume_of(const char* path, char (&out)[Dos::kMaxPath]) {
+    copy_text(out, sizeof out, path);
+    for (u32 i = 0; out[i] != '\0'; ++i) {
+        if (out[i] == ':') {
+            out[i] = '\0';
+            break;
+        }
+    }
+    if (same_ci(out, "RAM")) {
+        copy_text(out, sizeof out, "Ram Disk");
+    }
+}
+
+bool same_volume(const char* a, const char* b) {
+    char va[Dos::kMaxPath];
+    char vb[Dos::kMaxPath];
+    volume_of(a, va);
+    volume_of(b, vb);
+    return same_ci(va, vb);
+}
+
+const char* error_text(u32 error) {
+    switch (error) {
+    case ERROR_DISK_WRITE_PROTECTED:
+        return "Disk is write-protected";
+    case ERROR_OBJECT_EXISTS:
+        return "Object already exists";
+    case ERROR_OBJECT_NOT_FOUND:
+        return "Object not found";
+    case ERROR_NO_FREE_STORE:
+        return "Not enough memory";
+    default:
+        return nullptr;
+    }
+}
+
+}  // namespace
+
+// Copies the file and its icon from one drawer to another, the icon at
+// left, top; on the same volume the originals then go, so the file moves.
+bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to, i32 left,
+                         i32 top) {
+    char src[Dos::kMaxPath];
+    char dst[Dos::kMaxPath];
+    if (!join_path(from, icon.file, src) || !join_path(to, icon.file, dst)) {
+        LogLine().text("workbench: path too long for ").text(icon.file).send();
+        return false;
+    }
+    if (dos_->examine(dst).kind != Dos::TargetKind::Missing) {
+        show_error("cannot copy", icon.file, ERROR_OBJECT_EXISTS);
+        return false;
+    }
+    const Dos::Target source = dos_->examine(src);
+    if (source.kind != Dos::TargetKind::File) {
+        show_error("cannot copy", icon.file, ERROR_OBJECT_NOT_FOUND);
+        return false;
+    }
+    // The bytes go through exec memory: the task's stack is small.
+    u32 error = 0;
+    u32 got = 0;
+    bool copied = false;
+    if (source.size == 0) {
+        copied = dos_->write_file(dst, nullptr, 0, error);
+    } else {
+        const u32 block = exec_->alloc(source.size, ndk::MEMF_PUBLIC);
+        if (block == 0) {
+            show_error("cannot copy", icon.file, ERROR_NO_FREE_STORE);
+            return false;
+        }
+        Bus b(*machine_);
+        u8* data = b.bytes_at(block, source.size);
+        copied = data != nullptr && dos_->read_file(src, data, source.size, got, error) &&
+                 dos_->write_file(dst, data, got, error);
+        exec_->free(block, source.size);
+    }
+    if (!copied) {
+        show_error("cannot copy", icon.file, error);
+        return false;
+    }
+    const u32 object = icon_->load_object(src);
+    bool saved = false;
+    if (object != 0) {
+        Bus b(*machine_);
+        b.w32(object + do_CurrentX, static_cast<u32>(left));
+        b.w32(object + do_CurrentY, static_cast<u32>(top));
+        saved = b.ok() && icon_->save_object(dst, object, error);
+        icon_->free_object(object);
+    }
+    if (!saved) {
+        u32 ignored = 0;
+        dos_->delete_file(dst, ignored);
+        show_error("cannot copy", icon.file, error);
+        return false;
+    }
+    if (!same_volume(from, to)) {
+        LogLine().text("workbench: copied ").text(src).text(" to ").text(to).send();
+        return true;
+    }
+    char src_info[Dos::kMaxPath];
+    u32 ignored = 0;
+    dos_->delete_file(src, ignored);
+    if (join_path(from, icon.file, src_info) && text_length(src_info) + 6 <= sizeof src_info) {
+        copy_text(src_info + text_length(src_info), 6, ".info");
+        dos_->delete_file(src_info, ignored);
+    }
+    LogLine().text("workbench: moved ").text(src).text(" to ").text(to).send();
+    return true;
+}
+
+void Workbench::show_error(const char* what, const char* name, u32 error) {
+    char text[kMaxWindowTitle * 2];
+    u32 at = 0;
+    auto put = [&](const char* part) {
+        for (u32 i = 0; part[i] != '\0' && at + 1 < sizeof text; ++i) {
+            text[at++] = part[i];
+        }
+    };
+    put(name);
+    put(": ");
+    const char* reason = error_text(error);
+    if (reason != nullptr) {
+        put(reason);
+    } else {
+        char digits[16];
+        format_u64(digits, sizeof digits, error, 10);
+        put("Error ");
+        put(digits);
+    }
+    text[at] = '\0';
+    LogLine().text("workbench: ").text(what).text(" ").text(text).send();
+    show_requester("Workbench Request", text);
+}
+
+// A requester with the text and an Ok button. Only the running desktop
+// shows one: it waits for the button, which nothing presses in a test.
+void Workbench::show_requester(const char* title, const char* text) {
+    if (!running_ || machine_ == nullptr || exec_ == nullptr || intuition_ == nullptr) {
+        return;
+    }
+    constexpr char kFormat[] = "%s";
+    constexpr char kGadgets[] = "Ok";
+    const u32 title_bytes = text_length(title) + 1;
+    const u32 text_bytes = text_length(text) + 1;
+    const u32 bytes =
+        ndk::EasyStruct_SIZEOF + 4 + sizeof kFormat + sizeof kGadgets + title_bytes + text_bytes;
+    const u32 block = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (block == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 args = block + ndk::EasyStruct_SIZEOF;
+    u32 at = args + 4;
+    auto put = [&](const char* part, u32 length) {
+        const u32 start = at;
+        for (u32 i = 0; i < length; ++i) {
+            b.w8(at + i, static_cast<u8>(part[i]));
+        }
+        at += length;
+        return start;
+    };
+    const u32 format_at = put(kFormat, sizeof kFormat);
+    const u32 gadgets_at = put(kGadgets, sizeof kGadgets);
+    const u32 title_at = put(title, title_bytes);
+    const u32 text_at = put(text, text_bytes);
+    b.w32(block + ndk::es_StructSize, ndk::EasyStruct_SIZEOF);
+    b.w32(block + ndk::es_Flags, 0);
+    b.w32(block + ndk::es_Title, title_at);
+    b.w32(block + ndk::es_TextFormat, format_at);
+    b.w32(block + ndk::es_GadgetFormat, gadgets_at);
+    b.w32(args, text_at);
+    const u32 window = windows_[0].used ? windows_[0].window : 0;
+    if (b.ok()) {
+        intuition_->easy_request(window, block, 0, args);
+    }
+    exec_->free(block, bytes);
+}
+
+// --- snapshots -----------------------------------------------------------
+
+bool Workbench::snapshot_icon(u32 window_index, u32 icon_index) {
+    if (window_index >= kMaxWindows || icon_index >= kMaxIcons || !icons_[icon_index].used ||
+        icons_[icon_index].owner != window_index) {
+        return false;
+    }
+    IconEntry& icon = icons_[icon_index];
+    if (!icon.owned || icon.type == kAppIcon || icon.object == 0) {
+        LogLine().text("workbench: ").text(icon.name).text(" keeps no snapshot").send();
+        return false;
+    }
+    char path[Dos::kMaxPath];
+    if (!icon_path(window_index, icon, path)) {
+        return false;
+    }
+    Bus b(*machine_);
+    b.w32(icon.object + do_CurrentX, static_cast<u32>(icon.left));
+    b.w32(icon.object + do_CurrentY, static_cast<u32>(icon.top));
+    u32 error = 0;
+    if (!b.ok() || !icon_->save_object(path, icon.object, error)) {
+        show_error("cannot snapshot", icon.name, error);
+        return false;
+    }
+    icon.placed = true;
+    LogLine().text("workbench: snapshot ").text(path).send();
+    return true;
+}
+
+bool Workbench::unsnapshot_icon(u32 window_index, u32 icon_index) {
+    if (window_index >= kMaxWindows || icon_index >= kMaxIcons || !icons_[icon_index].used ||
+        icons_[icon_index].owner != window_index) {
+        return false;
+    }
+    IconEntry& icon = icons_[icon_index];
+    if (!icon.owned || icon.type == kAppIcon || icon.object == 0) {
+        LogLine().text("workbench: ").text(icon.name).text(" keeps no snapshot").send();
+        return false;
+    }
+    char path[Dos::kMaxPath];
+    if (!icon_path(window_index, icon, path)) {
+        return false;
+    }
+    Bus b(*machine_);
+    b.w32(icon.object + do_CurrentX, kNoIconPosition);
+    b.w32(icon.object + do_CurrentY, kNoIconPosition);
+    u32 error = 0;
+    if (!b.ok() || !icon_->save_object(path, icon.object, error)) {
+        show_error("cannot unsnapshot", icon.name, error);
+        return false;
+    }
+    icon.placed = false;
+    if (window_index == 0) {
+        place_root_icons();
+    } else {
+        place_icons(window_index);
+    }
+    draw_window(window_index);
+    LogLine().text("workbench: unsnapshot ").text(path).send();
+    return true;
+}
+
+bool Workbench::snapshot_window(u32 window_index, bool all) {
+    if (window_index >= kMaxWindows || !windows_[window_index].used) {
+        return false;
+    }
+    if (window_index == 0) {
+        LogLine().text("workbench: the Workbench window keeps no snapshot").send();
+        return false;
+    }
+    const DrawerWindow& drawer = windows_[window_index];
+    // A disk keeps its window in Disk.info, a drawer in its own icon.
+    char path[Dos::kMaxPath];
+    const bool volume = is_volume_root(drawer.path);
+    if (volume) {
+        if (!join_path(drawer.path, "Disk", path)) {
+            return false;
+        }
+    } else {
+        copy_text(path, sizeof path, drawer.path);
+    }
+    u32 object = icon_->load_object(path);
+    if (object == 0) {
+        object = icon_->default_object(volume ? kDisk : kDrawer);
+    }
+    if (object == 0) {
+        show_error("cannot snapshot", drawer.name, ERROR_NO_FREE_STORE);
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 data = b.r32(object + do_DrawerData);
+    u32 error = ERROR_OBJECT_NOT_FOUND;
+    bool saved = false;
+    if (b.ok() && data != 0) {
+        b.w16(data + ndk::nw_LeftEdge, b.r16(drawer.window + ndk::wd_LeftEdge));
+        b.w16(data + ndk::nw_TopEdge, b.r16(drawer.window + ndk::wd_TopEdge));
+        b.w16(data + ndk::nw_Width, b.r16(drawer.window + ndk::wd_Width));
+        b.w16(data + ndk::nw_Height, b.r16(drawer.window + ndk::wd_Height));
+        saved = b.ok() && icon_->save_object(path, object, error);
+    }
+    icon_->free_object(object);
+    if (!saved) {
+        show_error("cannot snapshot", drawer.name, error);
+        return false;
+    }
+    LogLine().text("workbench: snapshot ").text(path).send();
+    bool every = true;
+    if (all) {
+        for (u32 i = 0; i < kMaxIcons; ++i) {
+            if (icons_[i].used && icons_[i].owner == window_index &&
+                !snapshot_icon(window_index, i)) {
+                every = false;
+            }
+        }
+    }
+    return every;
+}
+
 void Workbench::update_all() {
     for (u32 i = 1; i < kMaxWindows; ++i) {
         if (!windows_[i].used) {
@@ -1143,6 +1691,7 @@ void Workbench::show_about() {
 void Workbench::menu_pick(u32 window_index, u32 number) {
     const u32 menu = number & 0x1F;
     const u32 item = (number >> 5) & 0x3F;
+    const u32 sub = (number >> 11) & 0x1F;
     if (number == kMenuNull || item == 0x3F) {
         return;
     }
@@ -1173,10 +1722,17 @@ void Workbench::menu_pick(u32 window_index, u32 number) {
             select_contents(window_index);
         } else if (item == 5) {
             clean_up(window_index);
+        } else if (item == kItemWindowSnapshot && sub != kNoSub) {
+            snapshot_window(window_index, sub == kSubAll);
         }
     } else if (menu == kMenuIcons) {
+        const u32 selected = clicks_[window_index].selected();
         if (item == 0) {
             open_selected(window_index);
+        } else if (item == kItemIconSnapshot && selected != kNoIcon) {
+            snapshot_icon(window_index, selected);
+        } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {
+            unsnapshot_icon(window_index, selected);
         }
     }
 }
@@ -1204,6 +1760,10 @@ void Workbench::handle_message(u32 window_index, u32 message) {
         draw_window(window_index);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTDOWN) {
         mouse_click(window_index, mx, my, when);
+    } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTUP) {
+        end_drag(window_index, mx, my);
+    } else if (idcmp_class == ndk::IDCMP_MOUSEMOVE) {
+        drag_to(window_index, mx, my);
     } else if (idcmp_class == kIdcmpMenuPick) {
         menu_pick(window_index, code);
     }
@@ -1724,6 +2284,9 @@ void Workbench::drop_app_icon(const App& app) {
     }
     IconEntry& icon = icons_[app.icon];
     if (icon.used && icon.owner == 0) {
+        if (drag_.armed && drag_.icon == app.icon) {
+            cancel_drag();
+        }
         icon = IconEntry{};
         if (clicks_[0].selected() == app.icon) {
             clicks_[0].clear();

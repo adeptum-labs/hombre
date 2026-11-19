@@ -40,8 +40,12 @@
 // of its own: a root window on the default screen with the volume icons of
 // the boot volume and the Ram Disk, and a drawer window for every icon
 // opened. The root window is a backdrop until the Workbench menu's Backdrop
-// item turns it into an ordinary window. A drawer shows the "<name>.info" files of its directory;
-// opening an icon starts its program with a WBStartup message. The other
+// item turns it into an ordinary window. A drawer shows the "<name>.info"
+// files of its directory; opening an icon starts its program with a
+// WBStartup message. An icon dragged within its window takes the new
+// place; dropped on another drawer, or a drawer's or disk's icon, its file
+// moves there on the same volume and is copied to another. Snapshot keeps
+// an icon's place, or a drawer window's box, in the .info. The other
 // vectors register application windows, icons and menu items, or rescan a
 // drawer. The vector gap at LVO -84 logs "workbench: unimplemented LVO
 // -<n>" and ends the run with Unimplemented.
@@ -137,6 +141,8 @@ public:
         ClickAction click(u32 icon, u64 now_us);
         u32 selected() const { return selected_; }
         void clear() { selected_ = kNoIcon; }
+        // The last click starts no double click: a drag ended it.
+        void forget() { last_icon_ = kNoIcon; }
         void select(u32 icon) {
             selected_ = icon;
             last_icon_ = kNoIcon;
@@ -160,6 +166,21 @@ public:
         u32 lock_count = 0;
         char name[32]{};
     };
+
+    // An icon held by the left button: armed by the press on it, active
+    // once the pointer has moved further than kDragThreshold. grab is the
+    // pointer's offset from the icon's corner; the start is on the screen.
+    struct IconDrag {
+        bool armed = false;
+        bool active = false;
+        u32 window = 0;
+        u32 icon = kNoIcon;
+        i32 grab_x = 0;
+        i32 grab_y = 0;
+        i32 start_x = 0;
+        i32 start_y = 0;
+    };
+    static constexpr i32 kDragThreshold = 2;
 
     enum class AppKind : u8 { Window = 1, Icon = 2, MenuItem = 3 };
 
@@ -198,6 +219,7 @@ public:
     const IconEntry& icon(u32 index) const { return icons_[index]; }
     const RunningTool& tool(u32 index) const { return tools_[index]; }
     const App& app(u32 index) const { return apps_[index]; }
+    const IconDrag& drag() const { return drag_; }
 
     // StartWorkbench: starts the Workbench as a detached task with a
     // Process of its own and returns DOSTRUE. A call while it runs returns
@@ -272,6 +294,16 @@ public:
     // Does what the menu item numbered number picks in the window.
     void menu_pick(u32 window_index, u32 number);
 
+    // Icons > Snapshot: stores the icon's place in its .info. Unsnapshot
+    // stores "no place" and puts it back on the grid. False, logged, when
+    // the .info cannot be written; an AppIcon's object is left alone.
+    bool snapshot_icon(u32 window_index, u32 icon_index);
+    bool unsnapshot_icon(u32 window_index, u32 icon_index);
+
+    // Window > Snapshot: stores the drawer window's place and size in the
+    // icon of its drawer or disk, and with all every icon's place too.
+    bool snapshot_window(u32 window_index, bool all);
+
     // Handles the replies of ended programs and the messages waiting at
     // the windows' ports. True when a window had more messages than one
     // pass takes.
@@ -301,6 +333,7 @@ private:
     void open_root();
     void place_root_icon(IconEntry& icon);
     void place_root_icons();
+    void read_position(IconEntry& icon);
     u32 backdrop_item() const;
     void add_volume_icons();
     void add_dir_icon(u32 window_index, const char* entry, bool is_dir);
@@ -315,6 +348,17 @@ private:
     void clean_up(u32 window_index);
     void open_selected(u32 window_index);
     void mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us);
+    void drag_to(u32 window_index, i32 mx, i32 my);
+    void end_drag(u32 window_index, i32 mx, i32 my);
+    void cancel_drag();
+    void drop(const IconDrag& drag, i32 sx, i32 sy);
+    bool transfer(const IconEntry& icon, const char* from, const char* to, i32 left, i32 top);
+    bool icon_path(u32 window_index, const IconEntry& icon, char (&out)[Dos::kMaxPath]) const;
+    bool icon_target_path(u32 window_index, const IconEntry& icon,
+                          char (&out)[Dos::kMaxPath]) const;
+    bool screen_origin(u32 window_index, i32& x, i32& y) const;
+    void show_error(const char* what, const char* name, u32 error);
+    void show_requester(const char* title, const char* text);
     u32 icon_at(u32 window_index, i32 x, i32 y) const;
     void start_wbstartup();
 
@@ -354,6 +398,7 @@ private:
     RunningTool tools_[kMaxTools]{};
     App apps_[kMaxApps]{};
     Clicks clicks_[kMaxWindows]{};
+    IconDrag drag_{};
     NativeVector vectors_[kVectors]{};
 };
 

@@ -65,6 +65,7 @@ constexpr u32 mu_FirstItem = 18;
 constexpr u32 mi_NextItem = 0;
 constexpr u32 mi_Flags = 12;
 constexpr u32 mi_ItemFill = 18;
+constexpr u32 mi_SubItem = 28;
 constexpr u16 MENUENABLED = 0x0001;
 constexpr u16 ITEMTEXT = 0x0002;
 constexpr u16 ITEMENABLED = 0x0010;
@@ -72,6 +73,11 @@ constexpr u16 CHECKIT = 0x0001;
 constexpr u16 MENUTOGGLE = 0x0008;
 constexpr u16 CHECKED = 0x0100;
 constexpr u32 it_IText = 12;
+
+// struct DiskObject and its DrawerData's NewWindow
+constexpr u32 do_CurrentX = 58;
+constexpr u32 do_CurrentY = 62;
+constexpr u32 do_DrawerData = 66;
 
 // struct WBStartup and struct WBArg
 constexpr u32 sm_Process = 20;
@@ -437,6 +443,85 @@ public:
         g_intuition.pointer_event(sx, sy, 1, 1, 0, true);
         g_intuition.pointer_event(sx, sy, 0, 0, 1, false);
         workbench.pump();
+    }
+
+    // The screen point of x, y in the window's inner area.
+    i32 screen_x(u32 window_index, i32 x) const {
+        const Workbench::DrawerWindow& w = workbench.window(window_index);
+        return static_cast<i16>(get16(w.window + wd_LeftEdge)) + w.inner_left + x;
+    }
+    i32 screen_y(u32 window_index, i32 y) const {
+        const Workbench::DrawerWindow& w = workbench.window(window_index);
+        return static_cast<i16>(get16(w.window + wd_TopEdge)) + w.inner_top + y;
+    }
+
+    // The left button pressed at x, y of the window's inner area, the
+    // pointer moved with it held to the screen point sx, sy, and released
+    // there; the desktop answers each step.
+    void press(u32 window_index, i32 x, i32 y) {
+        g_intuition.pointer_event(screen_x(window_index, x), screen_y(window_index, y), 1, 1, 0,
+                                  true);
+        workbench.pump();
+    }
+    void move_held(i32 sx, i32 sy) {
+        g_intuition.pointer_event(sx, sy, 1, 0, 0, true);
+        workbench.pump();
+    }
+    void release(i32 sx, i32 sy) {
+        g_intuition.pointer_event(sx, sy, 0, 0, 1, false);
+        workbench.pump();
+    }
+    void drag(u32 window_index, i32 x, i32 y, i32 sx, i32 sy) {
+        press(window_index, x, y);
+        move_held((screen_x(window_index, x) + sx) / 2, (screen_y(window_index, y) + sy) / 2);
+        move_held(sx, sy);
+        release(sx, sy);
+    }
+
+    u32 find_icon_in(u32 window_index, const std::string& name) const {
+        for (u32 i = 0; i < Workbench::kMaxIcons; ++i) {
+            const Workbench::IconEntry& icon = workbench.icon(i);
+            if (icon.used && icon.owner == window_index && name == icon.name) {
+                return i;
+            }
+        }
+        return Workbench::kNoIcon;
+    }
+
+    bool exists(const std::string& path) const {
+        return g_dos.examine(path.c_str()).kind != Dos::TargetKind::Missing;
+    }
+
+    // The icon's place as its .info keeps it.
+    std::pair<u32, u32> saved_place(const std::string& path) const {
+        const u32 object = g_icon.load_object(path.c_str());
+        CHECK(object != 0);
+        if (object == 0) {
+            return {0, 0};
+        }
+        const std::pair<u32, u32> place{get32(object + do_CurrentX), get32(object + do_CurrentY)};
+        g_icon.free_object(object);
+        return place;
+    }
+
+    u32 put_string(u32 at, const std::string& text) {
+        for (usize i = 0; i <= text.size(); ++i) {
+            put8(at + static_cast<u32>(i), i < text.size() ? static_cast<u8>(text[i]) : 0);
+        }
+        return at;
+    }
+
+    void rescan(const std::string& path) {
+        CHECK(workbench.update_workbench(put_string(kData + 0x400, path)));
+    }
+
+    // CreateDir and UnLock through dos.library.
+    void make_dir(const std::string& path) {
+        m.cpu.d[1] = put_string(kData + 0x500, path);
+        const u32 lock = result(g_dos.dos_base(), dos_lvo::CreateDir);
+        CHECK(lock != 0);
+        m.cpu.d[1] = lock;
+        result(g_dos.dos_base(), dos_lvo::UnLock);
     }
 
 private:
@@ -1029,6 +1114,30 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     CHECK(r.str(r.get32(r.get32(about + mi_ItemFill) + it_IText)) == "About...");
     CHECK_EQ(r.get16(about + mi_Flags) & ITEMENABLED, ITEMENABLED);
     CHECK_EQ(r.get16(about + mi_Flags) & ITEMTEXT, ITEMTEXT);
+
+    // Window > Snapshot opens Window and All; Icons > Snapshot and
+    // Unsnapshot are on.
+    u32 window_item = r.get32(windows + mu_FirstItem);
+    for (u32 i = 0; i < 6; ++i) {
+        window_item = r.get32(window_item + mi_NextItem);
+    }
+    CHECK(r.str(r.get32(r.get32(window_item + mi_ItemFill) + it_IText)) == "Snapshot");
+    CHECK_EQ(r.get16(window_item + mi_Flags) & ITEMENABLED, ITEMENABLED);
+    const u32 sub_window = r.get32(window_item + mi_SubItem);
+    CHECK(sub_window != 0);
+    CHECK(r.str(r.get32(r.get32(sub_window + mi_ItemFill) + it_IText)) == "Window");
+    const u32 sub_all = r.get32(sub_window + mi_NextItem);
+    CHECK(r.str(r.get32(r.get32(sub_all + mi_ItemFill) + it_IText)) == "All");
+    CHECK_EQ(r.get32(sub_all + mi_NextItem), 0u);
+    u32 icon_item = r.get32(icons + mu_FirstItem);
+    for (u32 i = 0; i < 4; ++i) {
+        icon_item = r.get32(icon_item + mi_NextItem);
+    }
+    CHECK(r.str(r.get32(r.get32(icon_item + mi_ItemFill) + it_IText)) == "Snapshot");
+    CHECK_EQ(r.get16(icon_item + mi_Flags) & ITEMENABLED, ITEMENABLED);
+    const u32 unsnapshot = r.get32(icon_item + mi_NextItem);
+    CHECK(r.str(r.get32(r.get32(unsnapshot + mi_ItemFill) + it_IText)) == "Unsnapshot");
+    CHECK_EQ(r.get16(unsnapshot + mi_Flags) & ITEMENABLED, ITEMENABLED);
 }
 
 void backdrop_toggles_the_root_window() {
@@ -1109,6 +1218,224 @@ void backdrop_toggles_the_root_window() {
     CHECK_EQ(r.free_bytes(), before);
 }
 
+
+
+// The ADF's drawer and the Ram Disk's window side by side.
+struct TwoWindows {
+    u32 tools = Workbench::kMaxWindows;
+    u32 ram = Workbench::kMaxWindows;
+};
+
+TwoWindows open_tools_and_ram(Rig& r) {
+    TwoWindows w;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon_in(root, "Tools"));
+    w.tools = r.find_window("HombreTest:Tools");
+    CHECK(w.tools != Workbench::kMaxWindows);
+    r.workbench.close_drawer(root);
+    g_intuition.move_window_to(r.workbench.window(w.tools).window, 20, 30);
+    r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+    w.ram = r.find_window("Ram Disk:");
+    CHECK(w.ram != Workbench::kMaxWindows);
+    g_intuition.move_window_to(r.workbench.window(w.ram).window, 330, 200);
+    return w;
+}
+
+void put_ram_project(const std::string& name) {
+    u32 error = 0;
+    const u8 byte = 'x';
+    CHECK(g_dos.write_file(("RAM:" + name).c_str(), &byte, 1, error));
+    const u32 object = g_icon.default_object(kWBProject);
+    CHECK(object != 0);
+    CHECK(g_icon.save_object(("RAM:" + name).c_str(), object, error));
+    g_icon.free_object(object);
+}
+
+void an_icon_dragged_in_its_window_takes_the_new_place() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 window = r.workbench.window(w.tools).window;
+
+    // A press with a pixel of movement stays a click.
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    r.press(w.tools, 103, 43);
+    CHECK(r.workbench.drag().armed);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, WFLG_REPORTMOUSE);
+    r.move_held(r.screen_x(w.tools, 104), r.screen_y(w.tools, 43));
+    CHECK(!r.workbench.drag().active);
+    r.release(r.screen_x(w.tools, 104), r.screen_y(w.tools, 43));
+    CHECK(!r.workbench.drag().armed);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, 0u);
+    CHECK_EQ(r.workbench.icon(tool).left, 100);
+    CHECK_EQ(r.workbench.icon(tool).top, 40);
+
+    // A drag moves the icon by where the pointer went.
+    const u32 proj = r.find_icon_in(w.tools, "Proj");
+    r.press(w.tools, 63, 83);
+    r.move_held(r.screen_x(w.tools, 120), r.screen_y(w.tools, 30));
+    CHECK(r.workbench.drag().active);
+    r.release(r.screen_x(w.tools, 160), r.screen_y(w.tools, 23));
+    CHECK(!r.workbench.drag().armed);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, 0u);
+    CHECK_EQ(r.workbench.icon(proj).left, 157);
+    CHECK_EQ(r.workbench.icon(proj).top, 20);
+    CHECK(r.workbench.icon(proj).placed);
+    // Only in memory: the disk keeps the old place.
+    CHECK(r.saved_place("HombreTest:Tools/Proj") == std::make_pair(60u, 80u));
+}
+
+void a_dragged_file_is_copied_moved_or_refused() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+
+    // From the disk to the Ram Disk: a copy, the icon where it was dropped.
+    r.drag(w.tools, 63, 83, r.screen_x(w.ram, 153), r.screen_y(w.ram, 43));
+    CHECK(logged("workbench: copied HombreTest:Tools/Proj to Ram Disk:"));
+    CHECK(r.exists("RAM:Proj"));
+    CHECK(r.exists("RAM:Proj.info"));
+    CHECK(r.exists("HombreTest:Tools/Proj"));
+    CHECK(r.saved_place("RAM:Proj") == std::make_pair(150u, 40u));
+    const u32 copy = r.find_icon_in(w.ram, "Proj");
+    CHECK(copy != Workbench::kNoIcon);
+    CHECK_EQ(r.workbench.icon(copy).left, 150);
+    CHECK_EQ(r.workbench.icon(copy).top, 40);
+    CHECK(r.find_icon_in(w.tools, "Proj") != Workbench::kNoIcon);
+
+    // Back to the disk: it cannot be written, and nothing changes.
+    r.drag(w.ram, 153, 43, r.screen_x(w.tools, 200), r.screen_y(w.tools, 20));
+    CHECK(logged("workbench: cannot copy Proj: Disk is write-protected"));
+    CHECK(r.exists("RAM:Proj"));
+    CHECK_EQ(r.workbench.icon(r.find_icon_in(w.ram, "Proj")).left, 150);
+
+    // Onto a drawer of the same volume: a move, the icon without a place.
+    r.make_dir("RAM:Box");
+    u32 error = 0;
+    const u32 drawer = g_icon.default_object(kWBDrawer);
+    CHECK(g_icon.save_object("RAM:Box", drawer, error));
+    g_icon.free_object(drawer);
+    r.rescan("Ram Disk:");
+    const Workbench::IconEntry box = r.workbench.icon(r.find_icon_in(w.ram, "Box"));
+    r.drag(w.ram, 153, 43, r.screen_x(w.ram, box.left + 3), r.screen_y(w.ram, box.top + 3));
+    CHECK(logged("workbench: moved Ram Disk:Proj to Ram Disk:Box"));
+    CHECK(!r.exists("RAM:Proj"));
+    CHECK(!r.exists("RAM:Proj.info"));
+    CHECK(r.exists("RAM:Box/Proj"));
+    CHECK(r.saved_place("RAM:Box/Proj") == std::make_pair(kNoIconPosition, kNoIconPosition));
+    CHECK_EQ(r.find_icon_in(w.ram, "Proj"), Workbench::kNoIcon);
+
+    // A drawer is no file to move.
+    r.drag(w.tools, 203, 23, r.screen_x(w.ram, 200), r.screen_y(w.ram, 60));
+    CHECK(logged("workbench: Sub cannot be moved there"));
+}
+
+void a_drag_ends_when_its_window_is_filled_again() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 window = r.workbench.window(w.tools).window;
+    r.press(w.tools, 63, 83);
+    r.move_held(r.screen_x(w.tools, 120), r.screen_y(w.tools, 30));
+    CHECK(r.workbench.drag().active);
+    r.rescan("HombreTest:Tools");
+    CHECK(!r.workbench.drag().armed);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, 0u);
+    r.release(r.screen_x(w.tools, 120), r.screen_y(w.tools, 30));
+    const u32 proj = r.find_icon_in(w.tools, "Proj");
+    CHECK_EQ(r.workbench.icon(proj).left, 60);
+    CHECK_EQ(r.workbench.icon(proj).top, 80);
+}
+
+void a_dragged_disk_keeps_its_place_over_a_backdrop_toggle() {
+    Rig r;
+    r.workbench.open_desktop();
+    const u32 disk = r.find_icon("HombreTest");
+    const Workbench::IconEntry before = r.workbench.icon(disk);
+    r.drag(0, before.left + 3, before.top + 3, r.screen_x(0, 103), r.screen_y(0, 123));
+    CHECK_EQ(r.workbench.icon(disk).left, 100);
+    CHECK_EQ(r.workbench.icon(disk).top, 120);
+    r.workbench.set_backdrop(false);
+    CHECK_EQ(r.workbench.icon(disk).left, 100);
+    CHECK_EQ(r.workbench.icon(disk).top, 120);
+    r.workbench.set_backdrop(true);
+    CHECK_EQ(r.workbench.icon(disk).left, 100);
+    CHECK_EQ(r.workbench.icon(disk).top, 120);
+}
+
+void snapshot_and_unsnapshot_store_the_icon_place() {
+    Rig r;
+    put_ram_project("Note");
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 note = r.find_icon_in(w.ram, "Note");
+    CHECK(note != Workbench::kNoIcon);
+    const Workbench::IconEntry start = r.workbench.icon(note);
+    r.drag(w.ram, start.left + 3, start.top + 3, r.screen_x(w.ram, 123), r.screen_y(w.ram, 33));
+
+    // Icons > Snapshot on the selected icon.
+    r.workbench.menu_pick(w.ram, 2 | (4 << 5) | (31 << 11));
+    CHECK(r.saved_place("RAM:Note") == std::make_pair(120u, 30u));
+    r.rescan("Ram Disk:");
+    const u32 again = r.find_icon_in(w.ram, "Note");
+    CHECK(r.workbench.icon(again).placed);
+    CHECK_EQ(r.workbench.icon(again).left, 120);
+    CHECK_EQ(r.workbench.icon(again).top, 30);
+
+    CHECK(r.workbench.unsnapshot_icon(w.ram, again));
+    CHECK(r.saved_place("RAM:Note") == std::make_pair(kNoIconPosition, kNoIconPosition));
+    CHECK(!r.workbench.icon(again).placed);
+    CHECK_EQ(r.workbench.icon(again).left, start.left);
+    CHECK_EQ(r.workbench.icon(again).top, start.top);
+
+    // The disk cannot keep one.
+    CHECK(!r.workbench.snapshot_icon(w.tools, r.find_icon_in(w.tools, "Tool")));
+    CHECK(logged("workbench: cannot snapshot Tool: Disk is write-protected"));
+}
+
+void a_window_snapshot_is_used_when_the_window_opens_again() {
+    Rig r;
+    put_ram_project("Note");
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 window = r.workbench.window(w.ram).window;
+    g_intuition.move_window_to(window, 100, 120);
+    g_intuition.size_window_to(window, 250, 90);
+    r.workbench.pump();
+
+    // Window > Snapshot > Window.
+    r.workbench.menu_pick(w.ram, 1 | (6 << 5) | (0 << 11));
+    CHECK(r.exists("RAM:Disk.info"));
+    const u32 object = g_icon.load_object("RAM:Disk");
+    CHECK(object != 0);
+    const u32 data = r.get32(object + do_DrawerData);
+    CHECK(data != 0);
+    CHECK_EQ(r.get16(data + nw_LeftEdge), 100u);
+    CHECK_EQ(r.get16(data + nw_TopEdge), 120u);
+    CHECK_EQ(r.get16(data + nw_Width), 250u);
+    CHECK_EQ(r.get16(data + nw_Height), 90u);
+    g_icon.free_object(object);
+    // Window alone leaves the icons' places as they were.
+    CHECK(r.saved_place("RAM:Note") == std::make_pair(kNoIconPosition, kNoIconPosition));
+
+    r.workbench.close_drawer(w.ram);
+    r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+    const u32 ram = r.find_window("Ram Disk:");
+    CHECK(ram != Workbench::kMaxWindows);
+    const u32 reopened = r.workbench.window(ram).window;
+    CHECK_EQ(r.get16(reopened + wd_LeftEdge), 100u);
+    CHECK_EQ(r.get16(reopened + wd_TopEdge), 120u);
+    CHECK_EQ(r.get16(reopened + wd_Width), 250u);
+    CHECK_EQ(r.get16(reopened + wd_Height), 90u);
+
+    // Window > Snapshot > All also keeps every icon's place.
+    r.workbench.menu_pick(ram, 1 | (6 << 5) | (1 << 11));
+    const Workbench::IconEntry note = r.workbench.icon(r.find_icon_in(ram, "Note"));
+    CHECK(r.saved_place("RAM:Note") ==
+          std::make_pair(static_cast<u32>(note.left), static_cast<u32>(note.top)));
+
+    // The disk's drawer cannot keep one.
+    CHECK(!r.workbench.snapshot_window(w.tools, false));
+    CHECK(logged("workbench: cannot snapshot Tools: Disk is write-protected"));
+    CHECK(!r.workbench.snapshot_window(0, false));
+}
 }
 
 int main() {
@@ -1132,5 +1459,11 @@ int main() {
     the_startup_message_signals_the_started_process();
     a_program_that_ends_without_replying_gives_back_what_it_held();
     backdrop_toggles_the_root_window();
+    an_icon_dragged_in_its_window_takes_the_new_place();
+    a_dragged_file_is_copied_moved_or_refused();
+    a_drag_ends_when_its_window_is_filled_again();
+    a_dragged_disk_keeps_its_place_over_a_backdrop_toggle();
+    snapshot_and_unsnapshot_store_the_icon_place();
+    a_window_snapshot_is_used_when_the_window_opens_again();
     return check::finish("test_workbench");
 }
