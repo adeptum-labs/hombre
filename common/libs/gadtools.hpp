@@ -75,6 +75,12 @@ public:
 
     u32 gadtools_base() const { return base_; }
 
+    // CreateMenusA and LayoutMenusA for code that is not the guest's: the
+    // strip made from the NewMenu array at array, and the layout of the
+    // strip starting at menu. False for an empty or faulty array.
+    u32 create_menus(u32 array);
+    bool layout_menus(u32 menu);
+
 private:
     friend struct GadToolsNatives;
 

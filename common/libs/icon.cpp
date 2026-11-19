@@ -986,18 +986,7 @@ u32 Icon::build_object(const icon_detail::IconFile& info) {
     return base;
 }
 
-u32 Icon::get_disk_object(Bus& b, u32 name) {
-    if (name == 0) {
-        // No name asks for a DiskObject to fill in: one with no parts.
-        return build_object(icon_detail::IconFile{});
-    }
-    char text[kMaxNameChars + 1];
-    if (!b.string(name, text, sizeof text)) {
-        if (b.ok()) {
-            set_io_error(ndk::ERROR_INVALID_COMPONENT_NAME);
-        }
-        return 0;
-    }
+u32 Icon::load_object(const char* text) {
     char path[kNameBytes];
     if (!info_path(text, path)) {
         set_io_error(ndk::ERROR_INVALID_COMPONENT_NAME);
@@ -1014,6 +1003,23 @@ u32 Icon::get_disk_object(Bus& b, u32 name) {
         return 0;
     }
     return build_object(info);
+}
+
+u32 Icon::default_object(u32 type) { return get_default_disk_object(type); }
+
+u32 Icon::get_disk_object(Bus& b, u32 name) {
+    if (name == 0) {
+        // No name asks for a DiskObject to fill in: one with no parts.
+        return build_object(icon_detail::IconFile{});
+    }
+    char text[kMaxNameChars + 1];
+    if (!b.string(name, text, sizeof text)) {
+        if (b.ok()) {
+            set_io_error(ndk::ERROR_INVALID_COMPONENT_NAME);
+        }
+        return 0;
+    }
+    return load_object(text);
 }
 
 u32 Icon::get_disk_object_new(Bus& b, u32 name) {

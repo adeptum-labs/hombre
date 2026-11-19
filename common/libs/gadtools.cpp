@@ -196,129 +196,8 @@ struct GadToolsNatives {
         return n;
     }
 
-    // Builds a Menu, MenuItem and IntuiText strip from the NewMenu array
-    // at a0, ending at NM_END. Items follow the last title and subitems
-    // the last item; bar labels become separator images. Positions come
-    // from LayoutMenusA.
     static void create_menus(void* ctx, Machine& m) {
-        GadTools& g = of(ctx);
-        Bus b(m);
-        const u32 array = m.cpu.a[0];
-        if (array == 0) {
-            native::set_result(m, 0);
-            return;
-        }
-        u32 count = 0;
-        u32 bytes = kMenuBlockHeader;
-        for (; count < kMaxNewMenus; ++count) {
-            const u8 type = static_cast<u8>(b.r8(array + count * NewMenu_SIZEOF + nm_Type));
-            if (!b.ok()) {
-                native::set_result(m, 0);
-                return;
-            }
-            if (type == NM_END) {
-                break;
-            }
-            const u8 kind = type & ~MENU_IMAGE;
-            bytes += kind == NM_TITLE ? Menu_SIZEOF + 4
-                                      : MenuItem_SIZEOF + 4 + IntuiText_SIZEOF + Image_SIZEOF;
-        }
-        if (count == kMaxNewMenus) {
-            native::set_result(m, 0);
-            return;
-        }
-        const u32 block = g.exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-        if (block == 0) {
-            native::set_result(m, 0);
-            return;
-        }
-        b.w32(block, kMenuBlockMagic);
-        b.w32(block + 4, bytes);
-        u32 at = block + kMenuBlockHeader;
-        u32 first_menu = 0;
-        u32 menu = 0;
-        u32 item = 0;
-        u32 last_item = 0;
-        u32 last_sub = 0;
-        for (u32 i = 0; i < count && b.ok(); ++i) {
-            const u32 nm = array + i * NewMenu_SIZEOF;
-            const u8 kind = static_cast<u8>(b.r8(nm + nm_Type)) & ~MENU_IMAGE;
-            const u32 label = b.r32(nm + nm_Label);
-            const u32 comm = b.r32(nm + nm_CommKey);
-            const u16 flags = static_cast<u16>(b.r16(nm + nm_Flags));
-            const u32 exclude = b.r32(nm + nm_MutualExclude);
-            const u32 user = b.r32(nm + nm_UserData);
-            if (kind == NM_TITLE) {
-                const u32 mu = at;
-                at += Menu_SIZEOF + 4;
-                b.w16(mu + mu_Flags, (flags & NM_MENUDISABLED) != 0 ? 0 : MENUENABLED);
-                b.w32(mu + mu_MenuName, label);
-                b.w32(mu + Menu_SIZEOF, user);
-                if (menu != 0) {
-                    b.w32(menu + mu_NextMenu, mu);
-                } else {
-                    first_menu = mu;
-                }
-                menu = mu;
-                item = 0;
-                last_item = 0;
-                continue;
-            }
-            if (menu == 0 || (kind == NM_SUB && last_item == 0)) {
-                continue;  // an item before any title, or a subitem before any item
-            }
-            const u32 mi = at;
-            at += MenuItem_SIZEOF + 4;
-            const u32 fill = at;
-            at += IntuiText_SIZEOF + Image_SIZEOF;
-            u16 item_flags = HIGHCOMP | ((flags & NM_ITEMDISABLED) != 0 ? 0 : ITEMENABLED);
-            item_flags |= flags & (CHECKIT | CHECKED | MENUTOGGLE);
-            if (label == NM_BARLABEL) {
-                b.w32(mi + mi_ItemFill, fill + IntuiText_SIZEOF);
-                item_flags &= static_cast<u16>(~ITEMENABLED);
-            } else {
-                item_flags |= ITEMTEXT;
-                b.w8(fill + it_FrontPen, 0);
-                b.w8(fill + it_DrawMode, ndk::JAM1);
-                b.w16(fill + it_LeftEdge, 2);
-                b.w16(fill + it_TopEdge, 1);
-                b.w32(fill + it_IText, label);
-                b.w32(mi + mi_ItemFill, fill);
-            }
-            if (comm != 0) {
-                const u32 key = b.r8(comm);
-                if (key != 0) {
-                    item_flags |= COMMSEQ;
-                    b.w8(mi + mi_Command, key);
-                }
-            }
-            b.w16(mi + mi_Flags, item_flags);
-            b.w32(mi + mi_MutualExclude, exclude);
-            b.w32(mi + MenuItem_SIZEOF, user);
-            if (kind == NM_ITEM) {
-                if (item == 0) {
-                    b.w32(menu + mu_FirstItem, mi);
-                } else {
-                    b.w32(item + mi_NextItem, mi);
-                }
-                item = mi;
-                last_item = mi;
-                last_sub = 0;
-            } else {
-                if (last_sub == 0) {
-                    b.w32(last_item + mi_SubItem, mi);
-                } else {
-                    b.w32(last_sub + mi_NextItem, mi);
-                }
-                last_sub = mi;
-            }
-        }
-        if (!b.ok() || first_menu == 0) {
-            g.exec_->free(block, bytes);
-            native::set_result(m, 0);
-            return;
-        }
-        native::set_result(m, first_menu);
+        native::set_result(m, of(ctx).create_menus(m.cpu.a[0]));
     }
 
     static void free_menus(void* ctx, Machine& m) {
@@ -389,21 +268,8 @@ struct GadToolsNatives {
         return widest;
     }
 
-    static void layout_menus(void*, Machine& m) {
-        Bus b(m);
-        i32 left = 0;
-        u32 count = 0;
-        for (u32 mu = m.cpu.a[0]; mu != 0 && count < kMaxNewMenus && b.ok();
-             mu = b.r32(mu + mu_NextMenu), ++count) {
-            const u32 width = (label_length(b, b.r32(mu + mu_MenuName)) + 2) * kMenuText;
-            b.w16(mu + mu_LeftEdge, static_cast<u16>(left));
-            b.w16(mu + mu_TopEdge, 0);
-            b.w16(mu + mu_Width, static_cast<u16>(width));
-            b.w16(mu + mu_Height, static_cast<u16>(kItemHeight));
-            layout_items(b, b.r32(mu + mu_FirstItem), 0, 0);
-            left += static_cast<i32>(width);
-        }
-        native::set_result(m, b.ok() ? 1 : 0);
+    static void layout_menus(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).layout_menus(m.cpu.a[0]) ? 1 : 0);
     }
 
     static void layout_menu_items(void*, Machine& m) {
@@ -481,6 +347,147 @@ struct GadToolsNatives {
         gfx.draw_line(rp, left + 1, bottom);
     }
 };
+
+// Builds a Menu, MenuItem and IntuiText strip from the NewMenu array at
+// array, ending at NM_END. Items follow the last title and subitems the
+// last item; bar labels become separator images. Positions come from
+// layout_menus.
+u32 GadTools::create_menus(u32 array) {
+    if (machine_ == nullptr || exec_ == nullptr || array == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    u32 count = 0;
+    u32 bytes = kMenuBlockHeader;
+    for (; count < kMaxNewMenus; ++count) {
+        const u8 type = static_cast<u8>(b.r8(array + count * NewMenu_SIZEOF + nm_Type));
+        if (!b.ok()) {
+            return 0;
+        }
+        if (type == NM_END) {
+            break;
+        }
+        const u8 kind = type & ~MENU_IMAGE;
+        bytes += kind == NM_TITLE ? Menu_SIZEOF + 4
+                                  : MenuItem_SIZEOF + 4 + IntuiText_SIZEOF + Image_SIZEOF;
+    }
+    if (count == kMaxNewMenus) {
+        return 0;
+    }
+    const u32 block = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (block == 0) {
+        return 0;
+    }
+    b.w32(block, kMenuBlockMagic);
+    b.w32(block + 4, bytes);
+    u32 at = block + kMenuBlockHeader;
+    u32 first_menu = 0;
+    u32 menu = 0;
+    u32 item = 0;
+    u32 last_item = 0;
+    u32 last_sub = 0;
+    for (u32 i = 0; i < count && b.ok(); ++i) {
+        const u32 nm = array + i * NewMenu_SIZEOF;
+        const u8 kind = static_cast<u8>(b.r8(nm + nm_Type)) & ~MENU_IMAGE;
+        const u32 label = b.r32(nm + nm_Label);
+        const u32 comm = b.r32(nm + nm_CommKey);
+        const u16 flags = static_cast<u16>(b.r16(nm + nm_Flags));
+        const u32 exclude = b.r32(nm + nm_MutualExclude);
+        const u32 user = b.r32(nm + nm_UserData);
+        if (kind == NM_TITLE) {
+            const u32 mu = at;
+            at += Menu_SIZEOF + 4;
+            b.w16(mu + mu_Flags, (flags & NM_MENUDISABLED) != 0 ? 0 : MENUENABLED);
+            b.w32(mu + mu_MenuName, label);
+            b.w32(mu + Menu_SIZEOF, user);
+            if (menu != 0) {
+                b.w32(menu + mu_NextMenu, mu);
+            } else {
+                first_menu = mu;
+            }
+            menu = mu;
+            item = 0;
+            last_item = 0;
+            continue;
+        }
+        if (menu == 0 || (kind == NM_SUB && last_item == 0)) {
+            continue;  // an item before any title, or a subitem before any item
+        }
+        const u32 mi = at;
+        at += MenuItem_SIZEOF + 4;
+        const u32 fill = at;
+        at += IntuiText_SIZEOF + Image_SIZEOF;
+        u16 item_flags = HIGHCOMP | ((flags & NM_ITEMDISABLED) != 0 ? 0 : ITEMENABLED);
+        item_flags |= flags & (CHECKIT | CHECKED | MENUTOGGLE);
+        if (label == NM_BARLABEL) {
+            b.w32(mi + mi_ItemFill, fill + IntuiText_SIZEOF);
+            item_flags &= static_cast<u16>(~ITEMENABLED);
+        } else {
+            item_flags |= ITEMTEXT;
+            b.w8(fill + it_FrontPen, 0);
+            b.w8(fill + it_DrawMode, ndk::JAM1);
+            b.w16(fill + it_LeftEdge, 2);
+            b.w16(fill + it_TopEdge, 1);
+            b.w32(fill + it_IText, label);
+            b.w32(mi + mi_ItemFill, fill);
+        }
+        if (comm != 0) {
+            const u32 key = b.r8(comm);
+            if (key != 0) {
+                item_flags |= COMMSEQ;
+                b.w8(mi + mi_Command, key);
+            }
+        }
+        b.w16(mi + mi_Flags, item_flags);
+        b.w32(mi + mi_MutualExclude, exclude);
+        b.w32(mi + MenuItem_SIZEOF, user);
+        if (kind == NM_ITEM) {
+            if (item == 0) {
+                b.w32(menu + mu_FirstItem, mi);
+            } else {
+                b.w32(item + mi_NextItem, mi);
+            }
+            item = mi;
+            last_item = mi;
+            last_sub = 0;
+        } else {
+            if (last_sub == 0) {
+                b.w32(last_item + mi_SubItem, mi);
+            } else {
+                b.w32(last_sub + mi_NextItem, mi);
+            }
+            last_sub = mi;
+        }
+    }
+    if (!b.ok() || first_menu == 0) {
+        exec_->free(block, bytes);
+        return 0;
+    }
+    return first_menu;
+}
+
+// Lays the titles of the strip out side by side and every item column
+// below its title.
+bool GadTools::layout_menus(u32 menu) {
+    if (machine_ == nullptr) {
+        return false;
+    }
+    Bus b(*machine_);
+    i32 left = 0;
+    u32 count = 0;
+    for (u32 mu = menu; mu != 0 && count < kMaxNewMenus && b.ok();
+         mu = b.r32(mu + mu_NextMenu), ++count) {
+        const u32 width =
+            (GadToolsNatives::label_length(b, b.r32(mu + mu_MenuName)) + 2) * kMenuText;
+        b.w16(mu + mu_LeftEdge, static_cast<u16>(left));
+        b.w16(mu + mu_TopEdge, 0);
+        b.w16(mu + mu_Width, static_cast<u16>(width));
+        b.w16(mu + mu_Height, static_cast<u16>(kItemHeight));
+        GadToolsNatives::layout_items(b, b.r32(mu + mu_FirstItem), 0, 0);
+        left += static_cast<i32>(width);
+    }
+    return b.ok();
+}
 
 namespace {
 

@@ -88,6 +88,13 @@ public:
 
     u32 base() const { return base_; }
 
+    // GetDiskObject and GetDefDiskObject for code that is not the guest's:
+    // the DiskObject of a host path, and the built-in shape of an object
+    // type. Both return a block free_object gives back.
+    u32 load_object(const char* path);
+    u32 default_object(u32 type);
+    void free_object(u32 object) { free_disk_object(object); }
+
 private:
     friend struct IconNatives;
 
