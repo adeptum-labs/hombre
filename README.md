@@ -37,7 +37,8 @@ Targets:
   virtio-blk disk: a generated test disk by default, or the file given as
   `DISK=`, for example `make run DISK="path/to/disk.dms"`. The file may be
   a DMS archive or a raw ADF image, and its path may contain spaces.
-  The QEMU window shows a Hombre Workbench screen with a HombreShell window
+  The QEMU window shows a 256-colour Hombre Workbench screen with a
+  HombreShell window
   that holds what the disk's `C:Version` prints and a `1.<volume>:>` prompt;
   the kernel's own messages stay on the serial port. The QEMU window's keyboard
   is a USB keyboard on an xHCI controller (Swedish layout): type at the
@@ -70,6 +71,9 @@ Targets:
   and Amiga programs get mouse events in windows that ask for them; Ctrl+C
   stops a program waiting for events. On the test disk, `mousetest` opens a
   window and prints the mouse and window events it receives.
+  Windows have a shaded title bar, blue when active and grey when not,
+  round close and depth buttons, rounded top corners and a soft shadow;
+  on screens of fewer than 256 colours they are drawn flat.
   Windows can be dragged by their title bar and resized live by the size
   gadget in the bottom-right corner. The HombreShell window rewraps its text
   when resized; it opens full screen, so shrink it first to move it.
