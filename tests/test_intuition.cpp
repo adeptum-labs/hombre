@@ -5158,27 +5158,123 @@ void draw_image_reads_plane_pick_and_plane_on_off() {
     }
 }
 
-void erase_image_fills_the_background_pen() {
+void erase_image_clears_the_image_box() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 100, 50, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
     const u32 rp = screen + sc_RastPort;
+    // The pens of the RastPort are not what erasing draws with.
     r.cpu().a[1] = rp;
-    r.cpu().d[0] = 3;
+    r.cpu().d[0] = 2;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetBPen), ExitReason::Halt);
+
+    const u32 solid = put_image(r, kData + 0x1080, 0, 0, 12, 6, 0, 0, 0, 3);
+    draw_image_at(r, rp, solid, 2, 2);
+    CHECK_EQ(screen_pixel(r, screen, 5, 5), 3u);
 
     const u32 data = kData + 0x1800;
     r.put8(data, 0xFF);
-    const u32 image = put_image(r, kData + 0x1000, 0, 0, 4, 2, 1, data, 1, 0);
-    erase_image_at(r, rp, image, 5, 5);
+    const u32 image = put_image(r, kData + 0x1000, 1, 2, 4, 2, 1, data, 1, 0);
+    erase_image_at(r, rp, image, 4, 3);
     for (i32 y = 5; y < 7; ++y) {
         for (i32 x = 5; x < 9; ++x) {
-            CHECK_EQ(screen_pixel(r, screen, x, y), 3u);
+            CHECK_EQ(screen_pixel(r, screen, x, y), 0u);
         }
     }
-    CHECK_EQ(screen_pixel(r, screen, 9, 5), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 4, 5), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 9, 5), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 4, 5), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 4), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 7), 3u);
+}
+
+void draw_image_takes_word_offsets_and_follows_the_chain() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 100, 50, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 rp = screen + sc_RastPort;
+
+    // Two images in a chain, each at its own LeftEdge and TopEdge.
+    const u32 second = put_image(r, kData + 0x1040, 6, 3, 2, 1, 0, 0, 0, 2);
+    const u32 first = put_image(r, kData + 0x1000, 1, 1, 2, 1, 0, 0, 0, 1, second);
+    // What a caller leaves in the high halves of D0 and D1 does not count.
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = first;
+    r.cpu().d[0] = 0xABCD0000u | 10;
+    r.cpu().d[1] = 0x7FFF0000u | 20;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DrawImage), ExitReason::Halt);
+    CHECK_EQ(screen_pixel(r, screen, 10, 21), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 11, 21), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 12, 21), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 13, 21), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 16, 23), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 17, 23), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 18, 23), 0u);
+
+    // A negative WORD offset moves the image left and up.
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = second;
+    r.cpu().d[0] = 0x0000FFFCu;  // -4
+    r.cpu().d[1] = 0x0001FFFEu;  // -2
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DrawImage), ExitReason::Halt);
+    CHECK_EQ(screen_pixel(r, screen, 2, 1), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 3, 1), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 4, 1), 0u);
+
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = first;
+    r.cpu().d[0] = 0x12340000u | 10;
+    r.cpu().d[1] = 0xFFFF0000u | 20;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::EraseImage), ExitReason::Halt);
+    CHECK_EQ(screen_pixel(r, screen, 11, 21), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 12, 21), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 16, 23), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 17, 23), 0u);
+}
+
+void draw_image_leaves_out_what_it_cannot_draw() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 100, 50, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 rp = screen + sc_RastPort;
+    const u32 data = kData + 0x1800;
+    for (u32 i = 0; i < 8; ++i) {
+        r.put8(data + i, 0xFF);
+    }
+    // A chain that loops, images of no size and of too many planes: the
+    // call returns and only the drawable image shows.
+    const u32 empty = put_image(r, kData + 0x1000, 0, 0, 0, 4, 1, data, 1, 0);
+    const u32 negative = put_image(r, kData + 0x1040, 0, 0, 0xFFF0, 4, 1, data, 1, 0);
+    const u32 deep = put_image(r, kData + 0x1080, 0, 0, 4, 1, 9, data, 1, 0);
+    const u32 good = put_image(r, kData + 0x10C0, 20, 0, 4, 1, 1, data, 1, 0);
+    r.put32(empty + img_NextImage, negative);
+    r.put32(negative + img_NextImage, deep);
+    r.put32(deep + img_NextImage, good);
+    r.put32(good + img_NextImage, empty);
+    draw_image_at(r, rp, empty, 10, 10);
+    for (i32 x = 8; x < 20; ++x) {
+        CHECK_EQ(screen_pixel(r, screen, x, 10), 0u);
+    }
+    for (i32 x = 30; x < 34; ++x) {
+        CHECK_EQ(screen_pixel(r, screen, x, 10), 1u);
+    }
+    CHECK_EQ(screen_pixel(r, screen, 34, 10), 0u);
+
+    // PlanePick asks for a second plane the image's Depth does not have:
+    // that bit of the pen stays clear.
+    const u32 shallow = put_image(r, kData + 0x1100, 0, 0, 4, 1, 1, data, 3, 0);
+    draw_image_at(r, rp, shallow, 40, 10);
+    CHECK_EQ(screen_pixel(r, screen, 40, 10), 1u);
+
+    // An image wholly outside the bitmap draws nothing.
+    draw_image_at(r, rp, good, 200, 10);
+    draw_image_at(r, rp, good, 10, 200);
+    draw_image_at(r, rp, good, -100, -100);
+    CHECK_EQ(screen_pixel(r, screen, 99, 10), 0u);
+    draw_image_at(r, 0, good, 10, 10);
+    draw_image_at(r, rp, 0, 10, 10);
 }
 
 void draw_image_clips_at_the_window_edge() {
@@ -5362,7 +5458,9 @@ int main() {
     menu_mode_ends_without_a_pick_when_the_strip_or_window_goes();
     open_window_logs_the_title();
     draw_image_reads_plane_pick_and_plane_on_off();
-    erase_image_fills_the_background_pen();
+    erase_image_clears_the_image_box();
+    draw_image_takes_word_offsets_and_follows_the_chain();
+    draw_image_leaves_out_what_it_cannot_draw();
     draw_image_clips_at_the_window_edge();
     return check::finish("test_intuition");
 }

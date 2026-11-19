@@ -1006,14 +1006,15 @@ struct IntuitionNatives {
         native::set_result(m, of(ctx).remove_glist(m.cpu.a[0], m.cpu.a[1], 1));
     }
 
+    // The offsets are WORDs: only the low half of D0 and D1 counts.
     static void draw_image(void* ctx, Machine& m) {
-        of(ctx).draw_image(m.cpu.a[0], m.cpu.a[1], static_cast<i32>(m.cpu.d[0]),
-                           static_cast<i32>(m.cpu.d[1]));
+        of(ctx).draw_image(m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF),
+                           static_cast<i16>(m.cpu.d[1] & 0xFFFF));
     }
 
     static void erase_image(void* ctx, Machine& m) {
-        of(ctx).erase_image(m.cpu.a[0], m.cpu.a[1], static_cast<i32>(m.cpu.d[0]),
-                            static_cast<i32>(m.cpu.d[1]));
+        of(ctx).erase_image(m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF),
+                            static_cast<i16>(m.cpu.d[1] & 0xFFFF));
     }
 
     static void refresh_glist(void* ctx, Machine& m) {
@@ -3713,7 +3714,8 @@ void Intuition::erase_image(u32 rp, u32 image, i32 left, i32 top) {
     if (!view.ok) {
         return;
     }
-    const u32 pen = b.r8(rp + ndk::rp_BgPen);
+    // Erasing clears, as EraseRect does where no backfill hook draws.
+    const u32 pen = 0;
     const i64 origin_x = static_cast<i64>(left) + view.origin_x;
     const i64 origin_y = static_cast<i64>(top) + view.origin_y;
     u32 current = image;

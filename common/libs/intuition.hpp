@@ -160,7 +160,8 @@ public:
     // PlanePick selects, the bits of unselected planes from PlaneOnOff.
     void draw_image(u32 rp, u32 image, i32 left, i32 top);
 
-    // Fills each image's rectangle with the RastPort's background pen.
+    // Clears each image's rectangle to pen 0, as EraseImage does through
+    // EraseRect on a RastPort without a backfill hook.
     void erase_image(u32 rp, u32 image, i32 left, i32 top);
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
