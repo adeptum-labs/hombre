@@ -730,6 +730,31 @@ public:
     // BPTR, or 0 with the Process's IoErr set. Flushes the translations.
     u32 load_seg(const char* path);
 
+    // What a name resolves to, for callers that pick behaviour by object
+    // type, such as GetDiskObjectNew's choice of default icon.
+    enum class TargetKind : u8 { Missing, File, Dir, VolumeRoot };
+
+    struct Target {
+        TargetKind kind = TargetKind::Missing;
+        u32 size = 0;
+    };
+
+    // Looks the name up as dos resolves it, setting IoErr when the path
+    // names no mounted volume. A name that is not there reports Missing,
+    // with IoErr ERROR_OBJECT_NOT_FOUND.
+    Target examine(const char* name);
+
+    // Reads the whole of the file name into data, at most capacity bytes,
+    // setting got, error and IoErr. False unless the whole file was read.
+    bool read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error);
+
+    // Replaces the file name with the bytes; RAM: is the only writable
+    // volume. False with error and IoErr set otherwise.
+    bool write_file(const char* name, const u8* data, u32 bytes, u32& error);
+
+    // Deletes the file name, on RAM: only.
+    bool delete_file(const char* name, u32& error);
+
     // Sets the clock source returning 50 Hz AmigaDOS ticks since 1978-01-01,
     // or null to report 0/0/0. Stamps any RAM: nodes whose date is still zero.
     void set_clock(u64 (*now_ticks)());

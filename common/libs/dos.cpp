@@ -8952,6 +8952,178 @@ u32 Dos::load_seg(const char* path) {
     return seglist;
 }
 
+Dos::Target Dos::examine(const char* name) {
+    Target target;
+    if (m_ == nullptr || name == nullptr) {
+        return target;
+    }
+    Bus b(*m_);
+    u8 vol = kVolAdf;
+    char resolved[kMaxPath];
+    u32 error = 0;
+    if (!DosOps::resolve(*this, b, name, vol, resolved, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return target;
+    }
+    if (resolved[0] == '\0') {
+        target.kind = TargetKind::VolumeRoot;
+        return target;
+    }
+    DirEntry entry{};
+    const u32 err = DosOps::fs_find(*this, vol, resolved, entry);
+    if (err != 0) {
+        if (b.ok()) {
+            set_last_error(err);
+        }
+        return target;
+    }
+    target.kind = entry.is_dir ? TargetKind::Dir : TargetKind::File;
+    target.size = entry.is_dir ? 0 : DosOps::fs_size(*this, entry);
+    return target;
+}
+
+bool Dos::read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error) {
+    got = 0;
+    error = 0;
+    if (m_ == nullptr || name == nullptr || data == nullptr) {
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolAdf;
+    char resolved[kMaxPath];
+    DirEntry entry{};
+    if (!DosOps::locate(*this, b, name, vol, resolved, entry, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    if (entry.is_dir) {
+        error = ERROR_OBJECT_WRONG_TYPE;
+        set_last_error(error);
+        return false;
+    }
+    const u32 size = DosOps::fs_size(*this, entry);
+    if (size > capacity) {
+        error = ERROR_OBJECT_TOO_LARGE;
+        set_last_error(error);
+        return false;
+    }
+    u32 read = 0;
+    const u32 err = DosOps::fs_read(*this, entry, 0, data, size, read);
+    if (err != 0) {
+        error = err;
+        set_last_error(err);
+        return false;
+    }
+    got = read;
+    return true;
+}
+
+bool Dos::write_file(const char* name, const u8* data, u32 bytes, u32& error) {
+    error = 0;
+    if (m_ == nullptr || name == nullptr || (data == nullptr && bytes != 0)) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolAdf;
+    char resolved[kMaxPath];
+    if (!DosOps::resolve(*this, b, name, vol, resolved, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    if (vol != kVolRam) {
+        error = ERROR_DISK_WRITE_PROTECTED;
+        set_last_error(error);
+        return false;
+    }
+    if (resolved[0] == '\0') {
+        error = ERROR_OBJECT_WRONG_TYPE;
+        set_last_error(error);
+        return false;
+    }
+    char parent[kMaxPath];
+    const char* leaf = nullptr;
+    DosOps::split_parent_and_leaf(resolved, parent, leaf);
+    u32 parent_node = RamFs::kNone;
+    const u32 p_err = ram_.find_path(parent, parent_node);
+    if (p_err != 0) {
+        error = p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err;
+        set_last_error(error);
+        return false;
+    }
+    if (!ram_.node(parent_node).is_dir) {
+        error = ERROR_DIR_NOT_FOUND;
+        set_last_error(error);
+        return false;
+    }
+    u32 node = RamFs::kNone;
+    const u32 c_err = ram_.create_file(parent_node, leaf, node);
+    if (c_err != 0) {
+        error = c_err;
+        set_last_error(error);
+        return false;
+    }
+    const u32 w_err = ram_.write(node, 0, data, bytes);
+    if (w_err != 0) {
+        error = w_err;
+        set_last_error(error);
+        return false;
+    }
+    return true;
+}
+
+bool Dos::delete_file(const char* name, u32& error) {
+    error = 0;
+    if (m_ == nullptr || name == nullptr) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolAdf;
+    char resolved[kMaxPath];
+    if (!DosOps::resolve(*this, b, name, vol, resolved, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    if (vol != kVolRam) {
+        error = ERROR_DISK_WRITE_PROTECTED;
+        set_last_error(error);
+        return false;
+    }
+    if (resolved[0] == '\0') {
+        error = ERROR_OBJECT_WRONG_TYPE;
+        set_last_error(error);
+        return false;
+    }
+    u32 node = RamFs::kNone;
+    const u32 f_err = ram_.find_path(resolved, node);
+    if (f_err != 0) {
+        error = f_err;
+        set_last_error(error);
+        return false;
+    }
+    if (node == 0 || ram_.node(node).is_dir) {
+        error = ERROR_OBJECT_WRONG_TYPE;
+        set_last_error(error);
+        return false;
+    }
+    const u32 r_err = ram_.remove(node);
+    if (r_err != 0) {
+        error = r_err;
+        set_last_error(error);
+        return false;
+    }
+    return true;
+}
+
 bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_blocks) {
     return run_command_in(procs_[0].process, path, args, result, max_blocks);
 }
