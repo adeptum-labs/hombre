@@ -1867,7 +1867,19 @@ struct ExecOps {
             cpu.d[1] = d1;
             cpu.a[1] = a1;
             cpu.a[6] = dev;
-            if (e.m_->jit->call_native(id)) {
+            // A device vector may name any native, OpenDevice itself
+            // included, so direct calls nest under the same limit as calls
+            // into 68000 code.
+            if (e.call_depth_ >= kMaxCallDepth) {
+                LogLine().text("exec: device calls nested too deep").send();
+                end_run(*e.m_, ExitReason::Unimplemented);
+                b.stop();
+                return false;
+            }
+            ++e.call_depth_;
+            const bool called = e.m_->jit->call_native(id);
+            --e.call_depth_;
+            if (called) {
                 if (cpu.exit != ExitReason::None) {
                     b.stop();
                     return false;

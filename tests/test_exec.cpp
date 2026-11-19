@@ -3698,6 +3698,51 @@ void device_create_open_do_send_check_wait_abort() {
     g_exec.delete_port(port);
 }
 
+// A device whose Open vector is exec's own OpenDevice stub: each Open call
+// opens the device again, so the nesting limit must end the run instead of
+// recursing until the host stack runs out.
+void device_vector_calling_open_device_stops_at_the_nesting_limit() {
+    Rig r;
+    make_test_task(r, kData);
+    const u32 vecs = kData + 0x200;
+    for (u32 i = 0; i < 6; ++i) {
+        r.put32(vecs + i * 4, kCode);
+    }
+    r.put32(vecs + 24, 0xFFFFFFFF);
+    r.code(kCode, {0x7000, 0x4E75});
+    r.cpu().a[0] = vecs;
+    r.cpu().a[1] = 0;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = LIB_SIZE;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::MakeLibrary), ExitReason::Halt);
+    const u32 dev = r.cpu().d[0];
+    CHECK(dev != 0);
+    r.put8(dev + LN_TYPE, NT_DEVICE);
+    r.put32(dev + LN_NAME, r.str(kNames, "loop.device"));
+    const u32 open_device = r.base() - exec_lvo::OpenDevice;
+    r.put16(dev - lib_lvo::Open, r.get16(open_device));
+    r.put16(dev - lib_lvo::Open + 2, r.get16(open_device + 2));
+    r.cpu().a[0] = r.base() + DeviceList;
+    r.cpu().a[1] = dev;
+    CHECK_EQ(r.exec(exec_lvo::AddTail), ExitReason::Halt);
+    g_jit.flush();
+
+    const u32 port = g_exec.create_port();
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = IOSTD_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    const u32 req = r.cpu().d[0];
+
+    g_lines.clear();
+    r.cpu().a[0] = r.str(kNames + 0x20, "loop.device");
+    r.cpu().d[0] = 0;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Unimplemented);
+    CHECK(logged("exec: device calls nested too deep"));
+}
+
 void guest_68k_device_vectors_use_call_guest() {
     Rig r;
     make_test_task(r, kData);
@@ -3840,6 +3885,7 @@ int main() {
     reset_nest_counts_clears_forbid_and_disable();
     yield_in_native_and_per_task_state();
     device_create_open_do_send_check_wait_abort();
+    device_vector_calling_open_device_stops_at_the_nesting_limit();
     guest_68k_device_vectors_use_call_guest();
     return check::finish("test_exec");
 }
