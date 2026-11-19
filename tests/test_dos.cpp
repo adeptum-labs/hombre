@@ -4959,6 +4959,50 @@ void ram_dos_list_match_and_exall() {
     r.call(dos_lvo::UnLock, ram_lock);
 }
 
+void ram_deep_paths_stay_valid() {
+    Rig r;
+    const u32 buf = kData + 0x200;
+
+    // A chain deeper than 64 directories keeps a correct name.
+    std::string path = "RAM:a";
+    for (u32 i = 0; i < 70; ++i) {
+        r.str(kData, path.c_str());
+        const u32 lock = r.call(dos_lvo::CreateDir, kData);
+        CHECK(lock != 0);
+        if (i + 1 == 70) {
+            CHECK_EQ(r.call(dos_lvo::NameFromLock, lock, buf, 256), DOSTRUE);
+            CHECK(r.read_str(buf) == "Ram Disk:" + path.substr(4));
+        }
+        r.call(dos_lvo::UnLock, lock);
+        path += "/a";
+    }
+
+    // A rename that would push a held descendant past the path limit is
+    // refused and changes nothing.
+    const std::string part(30, 'p');
+    std::string deep = "RAM:d";
+    r.str(kData, deep.c_str());
+    r.call(dos_lvo::UnLock, r.call(dos_lvo::CreateDir, kData));
+    for (u32 i = 0; i < 8; ++i) {
+        deep += "/" + part;
+        r.str(kData, deep.c_str());
+        r.call(dos_lvo::UnLock, r.call(dos_lvo::CreateDir, kData));
+    }
+    r.str(kData, deep.c_str());
+    const u32 held = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(held != 0);
+    r.str(kData, "RAM:d");
+    r.str(kData + 0x100, ("RAM:" + std::string(25, 'n')).c_str());
+    CHECK_EQ(r.call(dos_lvo::Rename, kData, kData + 0x100), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_INVALID_COMPONENT_NAME);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, held, buf, 320), DOSTRUE);
+    CHECK(r.read_str(buf) == "Ram Disk:" + deep.substr(4));
+    const u32 still = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(still != 0);
+    r.call(dos_lvo::UnLock, still);
+    r.call(dos_lvo::UnLock, held);
+}
+
 void ram_protection_bits_are_enforced() {
     Rig r;
     const u32 buf = kData + 0x200;
@@ -5952,6 +5996,7 @@ int main() {
     ram_dos_list_match_and_exall();
     ram_open_write_read_and_seek();
     ram_protection_bits_are_enforced();
+    ram_deep_paths_stay_valid();
     ram_buffered_output_and_set_file_size();
     ram_delete_createdir_rename_and_metadata();
     ram_exclusive_locks_and_dopkt();

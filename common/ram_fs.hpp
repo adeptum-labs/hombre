@@ -68,6 +68,16 @@ public:
 
     constexpr RamFs() = default;
 
+    // Forgets every node and the store without freeing anything, for a
+    // store whose memory is gone. Clears in place: a RamFs is too large for
+    // a temporary on a kernel stack.
+    void reset() {
+        for (u32 i = 0; i < kMaxNodes; ++i) {
+            nodes_[i] = Node{};
+        }
+        store_ = Store{};
+    }
+
     void init(const Store& store) {
         if (store_.free != nullptr) {
             for (u32 i = 0; i < kMaxNodes; ++i) {

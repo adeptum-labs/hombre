@@ -951,10 +951,14 @@ struct DosOps {
             out[0] = '\0';
             return true;
         }
-        u32 chain[64];
+        // Every component takes at least two bytes with its '/', so a path
+        // that fits has fewer than kMaxPath / 2 of them.
+        constexpr u32 kMaxDepth = Dos::kMaxPath / 2;
+        u32 chain[kMaxDepth];
         u32 depth = 0;
         for (u32 cur = node; cur != 0 && cur != RamFs::kNone; cur = ram.parent(cur)) {
-            if (depth >= 64) {
+            if (depth >= kMaxDepth) {
+                out[0] = '\0';
                 return false;
             }
             chain[depth++] = cur;
@@ -964,12 +968,14 @@ struct DosOps {
             const char* name = ram.node(chain[i]).name;
             if (pos != 0) {
                 if (pos + 1 >= Dos::kMaxPath) {
+                    out[pos] = '\0';
                     return false;
                 }
                 out[pos++] = '/';
             }
             for (u32 k = 0; name[k] != '\0'; ++k) {
                 if (pos + 1 >= Dos::kMaxPath) {
+                    out[pos] = '\0';
                     return false;
                 }
                 out[pos++] = name[k];
@@ -5998,6 +6004,24 @@ struct DosOps {
         return apply_relative_path(base_path, name, resolved, error);
     }
 
+    // True if the path of root and of everything below it fits in kMaxPath.
+    static bool ram_subtree_paths_fit(const RamFs& ram, u32 root) {
+        char path[Dos::kMaxPath];
+        for (u32 i = 0; i < RamFs::kMaxNodes; ++i) {
+            if (!ram.valid(i)) {
+                continue;
+            }
+            u32 cur = i;
+            while (cur != root && cur != RamFs::kNone) {
+                cur = ram.parent(cur);
+            }
+            if (cur == root && !ram_node_path(ram, i, path)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     static void update_renamed_paths(Dos& d, Bus& b, u32 renamed_node) {
         auto update_lock_slot = [&](Dos::LockSlot& l) {
             if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block > 0) {
@@ -6174,9 +6198,17 @@ struct DosOps {
             fail(d, b, ERROR_DIR_NOT_FOUND, DOSFALSE);
             return false;
         }
+        const u32 old_parent = d.ram_.parent(old_node);
+        char prev_name[RamFs::kMaxName + 1];
+        copy_cstr(prev_name, d.ram_.node(old_node).name, sizeof prev_name);
         const u32 err = d.ram_.rename(old_node, new_parent, new_leaf);
         if (err != 0) {
             fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        if (!ram_subtree_paths_fit(d.ram_, old_node)) {
+            d.ram_.rename(old_node, old_parent, prev_name);
+            fail(d, b, ERROR_INVALID_COMPONENT_NAME, DOSFALSE);
             return false;
         }
         update_renamed_paths(d, b, old_node);
@@ -7361,7 +7393,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     m_ = nullptr;
     exec_ = &exec;
     volume_ = volume;
-    ram_ = RamFs{};
+    ram_.reset();
     out_ = out;
     out_ctx_ = ctx;
     base_ = 0;
