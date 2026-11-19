@@ -606,75 +606,10 @@ struct ExecOps {
 
     static void add_task_lvo(void* ctx, Machine& m) {
         Exec& e = of(ctx);
-        Bus b(m);
         const u32 task_raw = m.cpu.a[1];
         const u32 task = native::guest_address(m, task_raw);
-        if (task == 0) {
-            fault_null(b);
-            return;
-        }
-        if (e.sched_.find(task) >= 0) {
-            LogLine().text("exec: AddTask of already scheduled task at ").hex(task).send();
-            native::set_result(m, 0);
-            return;
-        }
-        const u32 init_pc = m.cpu.a[2];
-        const u32 final_pc = m.cpu.a[3];
-        const i8 pri = static_cast<i8>(b.r8(task + LN_PRI));
-        const u32 sp_reg = b.r32(task + TC_SPREG);
-        const u32 existing_alloc = b.r32(task + TC_SIGALLOC);
-        if (!b.ok()) {
-            return;
-        }
-        const u32 child_sp = sp_reg - 4;
-        b.w32(child_sp, final_pc != 0 ? final_pc : e.task_exit_stub_);
-        if (!b.ok()) {
-            return;
-        }
-        const i32 id = e.sched_.add(task, pri);
-        if (id < 0) {
-            native::set_result(m, 0);
-            return;
-        }
-        if (e.task_host_.create != nullptr &&
-            !e.task_host_.create(e.task_host_.ctx, static_cast<u32>(id))) {
-            e.sched_.remove(id);
-            e.sched_.release(id);
-            native::set_result(m, 0);
-            return;
-        }
-        if (b.r8(task + LN_TYPE) == 0) {
-            b.w8(task + LN_TYPE, NT_TASK);
-        }
-        b.w8(task + TC_STATE, TS_READY);
-        b.w8(task + TC_IDNESTCNT, 0xFF);
-        b.w8(task + TC_TDNESTCNT, 0xFF);
-        if (existing_alloc == 0) {
-            b.w32(task + TC_SIGALLOC, 0x0000FFFF);
-        }
-        b.w32(task + TC_SIGWAIT, 0);
-        b.w32(task + TC_SIGRECVD, 0);
-        b.w32(task + TC_SPREG, child_sp);
-        enqueue(b, e.base_ + TaskReady, task);
-        if (!b.ok()) {
-            e.sched_.remove(id);
-            e.reap_removed();
-            return;
-        }
-        Exec::TaskContext& tc = e.tasks_[id];
-        tc = Exec::TaskContext{};
-        tc.cpu.pc = init_pc;
-        tc.cpu.a[7] = child_sp;
-        tc.run_state = m68k::Jit::RunState{~0ull, 0};
-        tc.call_depth = 0;
-        tc.task_addr = task;
-        tc.budget = ~0ull;
-        tc.td_nest = 0xFF;
-        tc.id_nest = 0xFF;
-        native::set_result(m, task_raw);
-        if (e.sched_.should_switch_now()) {
-            e.pending_switch_ = true;
-        }
+        const u32 spawned = e.spawn(task, m.cpu.a[2], m.cpu.a[3], false);
+        native::set_result(m, spawned != 0 ? task_raw : 0);
     }
 
     static bool restore_task_from_wait(Exec& e, Bus& b, i32 cur, u32 cur_addr) {
@@ -841,6 +776,9 @@ struct ExecOps {
             b.w8(target_addr + TC_STATE, TS_REMOVED);
         }
         e.sched_.remove(target_id);
+        if (e.task_end_hook_ != nullptr) {
+            e.task_end_hook_(e.task_end_ctx_, target_addr, target_id == cur);
+        }
         if (target_id != cur) {
             e.reap_removed();
             return;
@@ -2739,6 +2677,8 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     reply_port_ = 0;
     reply_handler_ = nullptr;
     reply_ctx_ = nullptr;
+    task_end_hook_ = nullptr;
+    task_end_ctx_ = nullptr;
     timer_hook_ = TimerHook{};
     for (LibraryInfo& info : libraries_) {
         info = LibraryInfo{};
@@ -3059,6 +2999,86 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
 u32 Exec::make_native_device(const char* name, u16 version, const NativeVector* fns, u32 count,
                              void* ctx, u32 pos_size) {
     return make_native_node(name, version, NT_DEVICE, DeviceList, fns, count, ctx, pos_size);
+}
+
+u32 Exec::spawn(u32 task, u32 init_pc, u32 final_pc, bool detached) {
+    if (m_ == nullptr) {
+        return 0;
+    }
+    Bus b(*m_);
+    if (task == 0) {
+        fault_null(b);
+        return 0;
+    }
+    if (sched_.find(task) >= 0) {
+        LogLine().text("exec: AddTask of already scheduled task at ").hex(task).send();
+        return 0;
+    }
+    const i8 pri = static_cast<i8>(b.r8(task + LN_PRI));
+    const u32 sp_reg = b.r32(task + TC_SPREG);
+    const u32 existing_alloc = b.r32(task + TC_SIGALLOC);
+    if (!b.ok()) {
+        return 0;
+    }
+    const u32 child_sp = sp_reg - 4;
+    b.w32(child_sp, final_pc != 0 ? final_pc : task_exit_stub_);
+    if (!b.ok()) {
+        return 0;
+    }
+    const i32 id = sched_.add(task, pri);
+    if (id < 0) {
+        return 0;
+    }
+    if (task_host_.create != nullptr &&
+        !task_host_.create(task_host_.ctx, static_cast<u32>(id))) {
+        sched_.remove(id);
+        sched_.release(id);
+        return 0;
+    }
+    if (b.r8(task + LN_TYPE) == 0) {
+        b.w8(task + LN_TYPE, NT_TASK);
+    }
+    b.w8(task + TC_STATE, TS_READY);
+    b.w8(task + TC_IDNESTCNT, 0xFF);
+    b.w8(task + TC_TDNESTCNT, 0xFF);
+    if (existing_alloc == 0) {
+        b.w32(task + TC_SIGALLOC, 0x0000FFFF);
+    }
+    b.w32(task + TC_SIGWAIT, 0);
+    b.w32(task + TC_SIGRECVD, 0);
+    b.w32(task + TC_SPREG, child_sp);
+    enqueue(b, base_ + TaskReady, task);
+    if (!b.ok()) {
+        sched_.remove(id);
+        reap_removed();
+        return 0;
+    }
+    TaskContext& tc = tasks_[id];
+    tc = TaskContext{};
+    tc.cpu.pc = init_pc;
+    tc.cpu.a[7] = child_sp;
+    tc.run_state = m68k::Jit::RunState{~0ull, 0};
+    tc.call_depth = 0;
+    tc.task_addr = task;
+    tc.budget = ~0ull;
+    tc.td_nest = 0xFF;
+    tc.id_nest = 0xFF;
+    tc.detached = detached;
+    // A detached task starts with the caller's D0 and A0, which carry a
+    // command's argument line.
+    if (detached) {
+        tc.cpu.d[0] = m_->cpu.d[0];
+        tc.cpu.a[0] = m_->cpu.a[0];
+    }
+    if (sched_.should_switch_now()) {
+        pending_switch_ = true;
+    }
+    return task;
+}
+
+void Exec::set_task_end_hook(void (*hook)(void* ctx, u32 task, bool self), void* ctx) {
+    task_end_hook_ = hook;
+    task_end_ctx_ = ctx;
 }
 
 void Exec::set_this_task(u32 task_addr) {
@@ -3593,9 +3613,13 @@ void Exec::end_child_tasks() {
         m_->mem.write32(base_ + ThisTask, task_);
     }
     for (u32 i = 1; i < Scheduler::kMaxTasks; ++i) {
+        const Scheduler::Slot s = sched_.slot(i);
+        if (s.state != TaskState::Free && s.state != TaskState::Removed &&
+            tasks_[i].detached) {
+            continue;
+        }
         tasks_[i].sleeping = false;
         tasks_[i].sleep_deadline_us = 0;
-        const Scheduler::Slot s = sched_.slot(i);
         if (s.state == TaskState::Free || s.state == TaskState::Removed) {
             continue;
         }
@@ -3611,6 +3635,9 @@ void Exec::end_child_tasks() {
         }
         remove_sem_waiter(i);
         sched_.remove(static_cast<i32>(i));
+        if (task_end_hook_ != nullptr) {
+            task_end_hook_(task_end_ctx_, s.task_addr, false);
+        }
     }
     reap_removed();
 }

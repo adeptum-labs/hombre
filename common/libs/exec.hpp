@@ -459,6 +459,17 @@ public:
     // The running task's guest address.
     u32 this_task() const { return task_; }
 
+    // Adds task to the scheduler, starting at init_pc; final_pc is written
+    // where its final RTS returns, the exit stub when it is 0. A detached
+    // task outlives the command that started it: end_child_tasks leaves it
+    // running. Returns task, or 0 if it could not be started.
+    u32 spawn(u32 task, u32 init_pc, u32 final_pc, bool detached);
+
+    // Called for every task exec removes, before the task's slot is
+    // released. self is true when the task removed itself, in which case D0
+    // holds its return value.
+    void set_task_end_hook(void (*hook)(void* ctx, u32 task, bool self), void* ctx);
+
     // Allocates and initialises a PA_SIGNAL MsgPort for the current task, or
     // returns 0 if memory or signals are exhausted.
     u32 create_port();
@@ -526,6 +537,7 @@ private:
         u8 td_nest = 0xFF;
         u8 id_nest = 0xFF;
         bool sleeping = false;
+        bool detached = false;
         u64 sleep_deadline_us = 0;
     };
 
@@ -580,6 +592,8 @@ private:
     u32 reply_port_ = 0;
     void (*reply_handler_)(void* ctx, u32 message) = nullptr;
     void* reply_ctx_ = nullptr;
+    void (*task_end_hook_)(void* ctx, u32 task, bool self) = nullptr;
+    void* task_end_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;
     u32 loaded_[kMaxLoaded]{};  // seglists of libraries exec loaded
