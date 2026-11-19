@@ -766,14 +766,32 @@ struct DosOps {
     // Hands bytes to the stream; false, with IoErr set, if it cannot take
     // them.
     static bool write_slot(Dos& d, Bus& b, u32 slot, const u8* data, u32 bytes) {
-        if (d.files_[slot].stream == Dos::Stream::Console) {
+        Dos::FileSlot& f = d.files_[slot];
+        if (f.stream == Dos::Stream::Console) {
             if (d.out_ != nullptr && bytes != 0) {
                 d.out_(d.out_ctx_, data, bytes);
             }
             return true;
         }
-        set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
-        return false;
+        if (f.entry.volume != Dos::kVolRam) {
+            set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
+            return false;
+        }
+        if (f.entry.header_block == 0) {
+            set_io_err(d, b, ERROR_OBJECT_NOT_FOUND);
+            return false;
+        }
+        f.has_unget = false;
+        f.has_last = false;
+        const u32 node = f.entry.header_block - 1;
+        const u32 err = d.ram_.write(node, f.pos, data, bytes);
+        if (err != 0) {
+            set_io_err(d, b, err);
+            return false;
+        }
+        f.pos += bytes;
+        f.entry.size = d.ram_.node(node).size;
+        return true;
     }
 
     // Characters bound for a stream, passed on in pieces.
@@ -859,6 +877,109 @@ struct DosOps {
                                             : entry.header_block == d.volume_.root_block;
     }
 
+    static void retain_entry(Dos& d, const DirEntry& entry) {
+        if (entry.volume == Dos::kVolRam && entry.header_block > 0) {
+            d.ram_.retain(entry.header_block - 1);
+        }
+    }
+
+    static void release_entry(Dos& d, const DirEntry& entry) {
+        if (entry.volume == Dos::kVolRam && entry.header_block > 0) {
+            d.ram_.release(entry.header_block - 1);
+        }
+    }
+
+    static bool ram_node_busy(const Dos& d, u32 node, bool want_exclusive) {
+        const u32 key = node + 1;
+        for (const Dos::LockSlot& l : d.lock_slots_) {
+            if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block == key &&
+                (want_exclusive || l.exclusive)) {
+                return true;
+            }
+        }
+        for (const Dos::LockSlot& l : d.assign_lock_slots_) {
+            if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block == key &&
+                (want_exclusive || l.exclusive)) {
+                return true;
+            }
+        }
+        for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
+            const Dos::FileSlot& f = d.files_[i];
+            if (f.stream == Dos::Stream::File && f.entry.volume == Dos::kVolRam &&
+                f.entry.header_block == key && (want_exclusive || f.exclusive)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool ram_is_at_or_below(const RamFs& ram, u32 node, u32 ancestor) {
+        for (u32 cur = node; cur != RamFs::kNone && ram.valid(cur); cur = ram.parent(cur)) {
+            if (cur == ancestor) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool ram_node_path(const RamFs& ram, u32 node, char (&out)[Dos::kMaxPath]) {
+        if (!ram.valid(node)) {
+            return false;
+        }
+        if (node == 0) {
+            out[0] = '\0';
+            return true;
+        }
+        u32 chain[64];
+        u32 depth = 0;
+        for (u32 cur = node; cur != 0 && cur != RamFs::kNone; cur = ram.parent(cur)) {
+            if (depth >= 64) {
+                return false;
+            }
+            chain[depth++] = cur;
+        }
+        u32 pos = 0;
+        for (u32 i = depth; i-- > 0;) {
+            const char* name = ram.node(chain[i]).name;
+            if (pos != 0) {
+                if (pos + 1 >= Dos::kMaxPath) {
+                    return false;
+                }
+                out[pos++] = '/';
+            }
+            for (u32 k = 0; name[k] != '\0'; ++k) {
+                if (pos + 1 >= Dos::kMaxPath) {
+                    return false;
+                }
+                out[pos++] = name[k];
+            }
+        }
+        out[pos] = '\0';
+        return true;
+    }
+
+    static void split_parent_and_leaf(const char* resolved, char (&parent)[Dos::kMaxPath],
+                                      const char*& leaf) {
+        u32 slash = 0;
+        bool has_slash = false;
+        for (u32 i = 0; resolved[i] != '\0'; ++i) {
+            if (resolved[i] == '/') {
+                slash = i;
+                has_slash = true;
+            }
+        }
+        if (has_slash) {
+            for (u32 i = 0; i < slash && i + 1 < Dos::kMaxPath; ++i) {
+                parent[i] = resolved[i];
+            }
+            parent[slash < Dos::kMaxPath ? slash : Dos::kMaxPath - 1] = '\0';
+            leaf = resolved + slash + 1;
+        } else {
+            parent[0] = '\0';
+            leaf = resolved;
+        }
+    }
+
     static u32 ram_alloc(void* ctx, u32 bytes) {
         return of(ctx).exec_->alloc(bytes, MEMF_PUBLIC);
     }
@@ -931,6 +1052,32 @@ struct DosOps {
             }
             for (u32 child = d.ram_.next_child(dir, RamFs::kNone); child != RamFs::kNone;
                  child = d.ram_.next_child(dir, child)) {
+                if (visitor != nullptr) {
+                    visitor(ctx, ram_entry(d, child));
+                }
+            }
+            return 0;
+        }
+        const FsError err = adf_list(d.volume_, path, visitor, ctx);
+        return err == FsError::Ok ? 0 : io_error_of(err);
+    }
+
+    static u32 fs_list_from(const Dos& d, const DirEntry& dir, const char* path, u32 after_key,
+                            bool from_start, DirVisitor visitor, void* ctx) {
+        if (dir.volume == Dos::kVolRam) {
+            if (dir.header_block == 0) {
+                return ERROR_OBJECT_NOT_FOUND;
+            }
+            const u32 dir_node = dir.header_block - 1;
+            if (!d.ram_.valid(dir_node)) {
+                return ERROR_OBJECT_NOT_FOUND;
+            }
+            if (!d.ram_.node(dir_node).is_dir) {
+                return ERROR_OBJECT_WRONG_TYPE;
+            }
+            const u32 start = (from_start || after_key == 0) ? RamFs::kNone : (after_key - 1);
+            for (u32 child = d.ram_.next_child(dir_node, start); child != RamFs::kNone;
+                 child = d.ram_.next_child(dir_node, child)) {
                 if (visitor != nullptr) {
                     visitor(ctx, ram_entry(d, child));
                 }
@@ -1118,28 +1265,38 @@ struct DosOps {
         }
         const i64 user = lock_slot(d, bptr);
         if (user >= 0) {
+            release_entry(d, d.lock_slots_[user].entry);
             d.lock_slots_[user].used = false;
             d.lock_slots_[user].command_owned = false;
+            d.lock_slots_[user].exclusive = false;
             return;
         }
         const i64 assign = assign_lock_slot(d, bptr);
         if (assign >= 0) {
+            release_entry(d, d.assign_lock_slots_[assign].entry);
             d.assign_lock_slots_[assign].used = false;
             d.assign_lock_slots_[assign].command_owned = false;
+            d.assign_lock_slots_[assign].exclusive = false;
         }
     }
 
     static bool alloc_assign_lock(Dos& d, Bus& b, const char* path, const DirEntry& entry,
                                   u32& out_bptr) {
+        if (entry.volume == Dos::kVolRam && entry.header_block > 0 &&
+            ram_node_busy(d, entry.header_block - 1, false)) {
+            return false;
+        }
         for (u32 i = 0; i < Dos::kMaxAssignLocks; ++i) {
             if (!d.assign_lock_slots_[i].used) {
                 Dos::LockSlot& l = d.assign_lock_slots_[i];
                 l.used = true;
                 l.command_owned = false;
+                l.exclusive = false;
                 l.entry = entry;
                 char canonical[Dos::kMaxPath];
                 fs_canonical(d, entry.volume, path, canonical);
                 copy_cstr(l.path, canonical, Dos::kMaxPath);
+                retain_entry(d, entry);
                 init_lock_at(d, b, d.assign_locks_ + i * fl_SIZEOF, entry.volume,
                              entry.header_block, SHARED_LOCK);
                 out_bptr = assign_lock_bptr(d, i);
@@ -1230,7 +1387,10 @@ struct DosOps {
         }
         u32 lock_bptr = 0;
         if (!alloc_assign_lock(d, b, resolved, entry, lock_bptr)) {
-            error = ERROR_NO_FREE_STORE;
+            error = (entry.volume == Dos::kVolRam && entry.header_block > 0 &&
+                     ram_node_busy(d, entry.header_block - 1, false))
+                        ? ERROR_OBJECT_IN_USE
+                        : ERROR_NO_FREE_STORE;
             return false;
         }
         char saved_path[Dos::kMaxPath];
@@ -1604,7 +1764,8 @@ struct DosOps {
     // --- console and files -------------------------------------------------
 
     static Dos::FileSlot make_file_slot(Dos::Stream stream, const DirEntry& entry,
-                                          const char* path, bool command_owned = false) {
+                                          const char* path, bool command_owned = false,
+                                          bool exclusive = false) {
         Dos::FileSlot s{};
         s.stream = stream;
         s.entry = entry;
@@ -1614,6 +1775,7 @@ struct DosOps {
         s.has_last = false;
         s.last_char = 0;
         s.command_owned = command_owned;
+        s.exclusive = exclusive;
         copy_cstr(s.path, path, Dos::kMaxPath);
         return s;
     }
@@ -1720,33 +1882,112 @@ struct DosOps {
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
         }
-        if (mode == MODE_NEWFILE || mode == MODE_READWRITE) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0);
-            return;
-        }
-        if (mode != MODE_OLDFILE) {
+        if (mode != MODE_OLDFILE && mode != MODE_NEWFILE && mode != MODE_READWRITE) {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, 0);
             return;
         }
         u8 vol = Dos::kVolAdf;
-        char path[Dos::kMaxPath];
-        DirEntry entry{};
+        char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!locate(d, b, name, vol, path, entry, error)) {
+        if (!resolve(d, b, name, vol, resolved, error)) {
             if (b.ok()) {
                 fail(d, b, error, 0);
             }
             return;
         }
-        if (entry.is_dir) {
-            fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
+        if (vol != Dos::kVolRam) {
+            if (mode == MODE_NEWFILE || mode == MODE_READWRITE) {
+                fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0);
+                return;
+            }
+            DirEntry entry{};
+            const u32 err = fs_find(d, vol, resolved, entry);
+            if (err != 0) {
+                fail(d, b, err, 0);
+                return;
+            }
+            if (entry.is_dir) {
+                fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
+                return;
+            }
+            if (slot < 0) {
+                table_full(d, b, "file handle", Dos::kMaxFiles);
+                return;
+            }
+            char canonical[Dos::kMaxPath];
+            fs_canonical(d, vol, resolved, canonical);
+            d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.running_);
+            init_handle(d, b, static_cast<u32>(slot), false);
+            native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
         }
-        if (slot < 0) {
-            table_full(d, b, "file handle", Dos::kMaxFiles);
-            return;
+
+        u32 node = RamFs::kNone;
+        bool exclusive = false;
+        auto create_ram_leaf = [&]() -> bool {
+            if (resolved[0] == '\0') {
+                fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
+                return false;
+            }
+            char parent[Dos::kMaxPath];
+            const char* leaf = nullptr;
+            split_parent_and_leaf(resolved, parent, leaf);
+            u32 parent_node = RamFs::kNone;
+            const u32 p_err = d.ram_.find_path(parent, parent_node);
+            if (p_err != 0) {
+                fail(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err, 0);
+                return false;
+            }
+            if (!d.ram_.node(parent_node).is_dir) {
+                fail(d, b, ERROR_DIR_NOT_FOUND, 0);
+                return false;
+            }
+            if (slot < 0) {
+                table_full(d, b, "file handle", Dos::kMaxFiles);
+                return false;
+            }
+            const u32 c_err = d.ram_.create_file(parent_node, leaf, node);
+            if (c_err != 0) {
+                fail(d, b, c_err, 0);
+                return false;
+            }
+            return true;
+        };
+
+        if (mode == MODE_NEWFILE) {
+            if (!create_ram_leaf()) {
+                return;
+            }
+            exclusive = true;
+        } else {
+            const u32 err = d.ram_.find_path(resolved, node);
+            if (err == 0) {
+                if (d.ram_.node(node).is_dir) {
+                    fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
+                    return;
+                }
+                if (ram_node_busy(d, node, false)) {
+                    fail(d, b, ERROR_OBJECT_IN_USE, 0);
+                    return;
+                }
+                if (slot < 0) {
+                    table_full(d, b, "file handle", Dos::kMaxFiles);
+                    return;
+                }
+            } else if (mode == MODE_READWRITE && err == ERROR_OBJECT_NOT_FOUND) {
+                if (!create_ram_leaf()) {
+                    return;
+                }
+            } else {
+                fail(d, b, err, 0);
+                return;
+            }
         }
-        d.files_[slot] = make_file_slot(Dos::Stream::File, entry, path, d.running_);
+        const DirEntry entry = ram_entry(d, node);
+        char canonical[Dos::kMaxPath];
+        ram_node_path(d.ram_, node, canonical);
+        d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.running_, exclusive);
+        retain_entry(d, entry);
         init_handle(d, b, static_cast<u32>(slot), false);
         native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
     }
@@ -1767,8 +2008,8 @@ struct DosOps {
             return;
         }
         if (slot > kConsoleOut) {
-            d.files_[slot].stream = Dos::Stream::Closed;
-            d.files_[slot].command_owned = false;
+            release_entry(d, d.files_[slot].entry);
+            d.files_[slot] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
         }
         native::set_result(m, DOSTRUE);
     }
@@ -1888,6 +2129,63 @@ struct DosOps {
         native::set_result(m, old);
     }
 
+    static void set_file_size(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 fh = m.cpu.d[1];
+        const i64 slot = handle_slot(d, fh);
+        if (slot < 0) {
+            log_bad_handle("SetFileSize on", fh);
+            fail(d, b, ERROR_INVALID_LOCK, 0xFFFFFFFF);
+            return;
+        }
+        Dos::FileSlot& f = d.files_[slot];
+        if (f.stream == Dos::Stream::Console) {
+            fail(d, b, ERROR_ACTION_NOT_KNOWN, 0xFFFFFFFF);
+            return;
+        }
+        if (f.entry.volume != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0xFFFFFFFF);
+            return;
+        }
+        if (f.entry.header_block == 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, 0xFFFFFFFF);
+            return;
+        }
+        const u32 node = f.entry.header_block - 1;
+        const u32 cur_size = fs_size(d, f.entry);
+        const u32 mode = m.cpu.d[3];
+        i64 from = 0;
+        if (mode == OFFSET_BEGINNING) {
+            from = 0;
+        } else if (mode == OFFSET_CURRENT) {
+            from = f.pos;
+        } else if (mode == OFFSET_END) {
+            from = cur_size;
+        } else {
+            fail(d, b, ERROR_SEEK_ERROR, 0xFFFFFFFF);
+            return;
+        }
+        const i64 new_size = from + static_cast<i64>(static_cast<__INT32_TYPE__>(m.cpu.d[2]));
+        if (new_size < 0 || new_size > 0xFFFFFFFFll) {
+            fail(d, b, ERROR_SEEK_ERROR, 0xFFFFFFFF);
+            return;
+        }
+        const u32 target = static_cast<u32>(new_size);
+        const u32 err = d.ram_.set_size(node, target);
+        if (err != 0) {
+            fail(d, b, err, 0xFFFFFFFF);
+            return;
+        }
+        f.entry.size = target;
+        if (f.pos > target) {
+            f.pos = target;
+            f.has_unget = false;
+            f.has_last = false;
+        }
+        native::set_result(m, target);
+    }
+
     static void input(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -2000,8 +2298,15 @@ struct DosOps {
         }
     }
 
-    // Nothing is buffered.
-    static void flush(void*, Machine& m) { native::set_result(m, DOSTRUE); }
+    static void flush(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (handle_slot(d, m.cpu.d[1]) < 0) {
+            fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
+            return;
+        }
+        native::set_result(m, DOSTRUE);
+    }
 
     // The console takes raw and cooked mode alike; a file has no mode.
     static void set_mode(void* ctx, Machine& m) {
@@ -3225,6 +3530,12 @@ struct DosOps {
 
     static bool alloc_user_lock(Dos& d, Bus& b, const char* path, const DirEntry& entry,
                                 u32 access, u32& bptr_out, bool command_owned) {
+        const bool exclusive = access == EXCLUSIVE_LOCK;
+        if (entry.volume == Dos::kVolRam && entry.header_block > 0 &&
+            ram_node_busy(d, entry.header_block - 1, exclusive)) {
+            fail(d, b, ERROR_OBJECT_IN_USE, 0);
+            return false;
+        }
         const i64 slot = free_lock(d);
         if (slot < 0) {
             table_full(d, b, "lock", Dos::kMaxLocks);
@@ -3233,10 +3544,12 @@ struct DosOps {
         Dos::LockSlot& l = d.lock_slots_[slot];
         l.used = true;
         l.command_owned = command_owned;
+        l.exclusive = exclusive;
         l.entry = entry;
         char canonical[Dos::kMaxPath];
         fs_canonical(d, entry.volume, path, canonical);
         copy_cstr(l.path, canonical, Dos::kMaxPath);
+        retain_entry(d, entry);
         init_lock(d, b, static_cast<u32>(slot), entry.volume, l.entry.header_block, access);
         bptr_out = lock_bptr(d, static_cast<u32>(slot));
         return b.ok();
@@ -3255,8 +3568,10 @@ struct DosOps {
         if (slot < 0) {
             return false;
         }
+        release_entry(d, d.lock_slots_[slot].entry);
         d.lock_slots_[slot].used = false;
         d.lock_slots_[slot].command_owned = false;
+        d.lock_slots_[slot].exclusive = false;
         return true;
     }
 
@@ -3353,10 +3668,12 @@ struct DosOps {
             table_full(d, b, "file handle", Dos::kMaxFiles);
             return;
         }
-        d.files_[fslot] = make_file_slot(Dos::Stream::File, l.entry, l.path, d.running_);
+        d.files_[fslot] = make_file_slot(Dos::Stream::File, l.entry, l.path, d.running_,
+                                         l.exclusive);
         init_handle(d, b, static_cast<u32>(fslot), false);
         l.used = false;
         l.command_owned = false;
+        l.exclusive = false;
         native::set_result(m, handle_bptr(d, static_cast<u32>(fslot)));
     }
 
@@ -3989,7 +4306,11 @@ struct DosOps {
                     return;
                 }
                 if (!alloc_assign_lock(d, b, resolved, entry, dvp_lock)) {
-                    fail(d, b, ERROR_NO_FREE_STORE, 0);
+                    const u32 lock_err = (entry.volume == Dos::kVolRam && entry.header_block > 0 &&
+                                          ram_node_busy(d, entry.header_block - 1, false))
+                                             ? ERROR_OBJECT_IN_USE
+                                             : ERROR_NO_FREE_STORE;
+                    fail(d, b, lock_err, 0);
                     return;
                 }
                 dvp_flags = DVPF_ASSIGN | DVPF_UNLOCK;
@@ -4229,8 +4550,11 @@ struct DosOps {
             fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
             return false;
         }
-        NextEntry next{after, after == dir.header_block, false, false, DirEntry{}};
-        const u32 err = fs_list(d, dir.volume, path, NextEntry::visit, &next);
+        NextEntry next{after, dir.volume == Dos::kVolRam || after == dir.header_block, false,
+                       false, DirEntry{}};
+        const u32 err = fs_list_from(d, dir, path, after,
+                                     after == dir.header_block || after == 0,
+                                     NextEntry::visit, &next);
         if (err != 0) {
             fail(d, b, err, DOSFALSE);
             return false;
@@ -4527,7 +4851,7 @@ struct DosOps {
         oom = false;
         u32 lock_bptr = 0;
         if (!alloc_user_lock(d, b, dir_path, dir_entry, SHARED_LOCK, lock_bptr)) {
-            oom = b.ok();
+            oom = b.ok() && b.r32(d.process_ + pr_Result2) == ERROR_NO_FREE_STORE;
             return false;
         }
         const u32 label_len = length_of(label);
@@ -4917,8 +5241,10 @@ struct DosOps {
             fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
             return;
         }
-        MatchVisitor mv{cur.after, cur.first, false, false, s.tokens, DirEntry{}};
-        const u32 list_err = fs_list(d, cur.dir.volume, cur.dir_path, MatchVisitor::visit, &mv);
+        MatchVisitor mv{cur.after, cur.dir.volume == Dos::kVolRam || cur.first, false, false,
+                        s.tokens, DirEntry{}};
+        const u32 list_err =
+            fs_list_from(d, cur.dir, cur.dir_path, cur.after, cur.first, MatchVisitor::visit, &mv);
         if (list_err != 0) {
             fail(d, b, list_err, list_err);
             return;
@@ -5116,8 +5442,9 @@ struct DosOps {
             match_pat = match_tokens;
         }
         ExAllCollector col{d, b, buffer, size, type, hdr_size, after, match_pat,
-                           false, 0, 0, 0, after, false, false, false};
-        const u32 err = fs_list(d, dir.volume, path, ExAllCollector::visit, &col);
+                           dir.volume == Dos::kVolRam, 0, 0, 0, after, false, false, false};
+        const u32 err =
+            fs_list_from(d, dir, path, after, after == 0, ExAllCollector::visit, &col);
         if (!b.ok()) {
             return;
         }
@@ -5200,45 +5527,517 @@ struct DosOps {
         LogLine().text("dos: DoPkt action ").dec(action).text(" not handled").send();
     }
 
-    static void pkt_locate_object(Dos& d, Bus& b, u32 lock_bptr, u32 name_bstr, u32 mode) {
-        DirEntry base_entry{};
-        const char* base_path = nullptr;
-        if (!lock_entry(d, b, lock_bptr, base_entry, base_path)) {
-            native::set_result(b.machine(), 0);
-            return;
+    static bool read_bstr_arg(Dos& d, Bus& b, u32 bstr_bptr, char* out, u32 max_len,
+                              u32 too_big_err, u32 fail_res, bool allow_null) {
+        if (bstr_bptr == 0) {
+            if (allow_null) {
+                out[0] = '\0';
+                return true;
+            }
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, fail_res);
+            return false;
         }
-        if (name_bstr == 0) {
-            fail(d, b, ERROR_REQUIRED_ARG_MISSING, 0);
-            return;
-        }
-        const u32 bstr = name_bstr << 2;
+        const u32 bstr = bstr_bptr << 2;
         const u32 len = b.r8(bstr);
         if (!b.ok()) {
-            return;
+            return false;
         }
-        if (len >= kMaxName) {
-            fail(d, b, ERROR_INVALID_COMPONENT_NAME, 0);
+        if (len > max_len) {
+            fail(d, b, too_big_err, fail_res);
+            return false;
+        }
+        for (u32 i = 0; i < len; ++i) {
+            out[i] = static_cast<char>(b.r8(bstr + 1 + i));
+        }
+        out[len] = '\0';
+        return b.ok();
+    }
+
+    static bool resolve_from_lock(Dos& d, Bus& b, u32 base_lock, const char* name, u8& vol,
+                                  char (&resolved)[Dos::kMaxPath], u32& error) {
+        DirEntry base_entry{};
+        const char* base_path = nullptr;
+        if (!lock_entry(d, b, base_lock, base_entry, base_path)) {
+            error = b.ok() ? b.r32(d.process_ + pr_Result2) : 0;
+            return false;
+        }
+        u32 colon = 0;
+        while (name[colon] != '\0' && name[colon] != ':') {
+            ++colon;
+        }
+        if (name[colon] == ':') {
+            if (colon == 0) {
+                vol = base_entry.volume;
+                return apply_relative_path("", name + 1, resolved, error);
+            }
+            return resolve(d, b, name, vol, resolved, error);
+        }
+        vol = base_entry.volume;
+        return apply_relative_path(base_path, name, resolved, error);
+    }
+
+    static void update_renamed_paths(Dos& d, Bus& b, u32 renamed_node) {
+        auto update_lock_slot = [&](Dos::LockSlot& l) {
+            if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block > 0) {
+                const u32 node = l.entry.header_block - 1;
+                if (ram_is_at_or_below(d.ram_, node, renamed_node)) {
+                    ram_node_path(d.ram_, node, l.path);
+                    if (node == renamed_node) {
+                        copy_cstr(l.entry.name, d.ram_.node(node).name, sizeof l.entry.name);
+                    }
+                }
+            }
+        };
+        for (Dos::LockSlot& l : d.lock_slots_) {
+            update_lock_slot(l);
+        }
+        for (Dos::LockSlot& l : d.assign_lock_slots_) {
+            update_lock_slot(l);
+        }
+        for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
+            Dos::FileSlot& f = d.files_[i];
+            if (f.stream == Dos::Stream::File && f.entry.volume == Dos::kVolRam &&
+                f.entry.header_block > 0) {
+                const u32 node = f.entry.header_block - 1;
+                if (ram_is_at_or_below(d.ram_, node, renamed_node)) {
+                    ram_node_path(d.ram_, node, f.path);
+                    if (node == renamed_node) {
+                        copy_cstr(f.entry.name, d.ram_.node(node).name, sizeof f.entry.name);
+                    }
+                }
+            }
+        }
+        for (Dos::AnchorSlot& a : d.anchors_) {
+            if (!a.used) {
+                continue;
+            }
+            for (u32 i = 0; i < a.depth && i < Dos::kMaxAnchorDepth; ++i) {
+                Dos::AnchorLevel& lvl = a.levels[i];
+                if (lvl.dir.volume == Dos::kVolRam && lvl.dir.header_block > 0) {
+                    const u32 node = lvl.dir.header_block - 1;
+                    if (ram_is_at_or_below(d.ram_, node, renamed_node)) {
+                        ram_node_path(d.ram_, node, lvl.dir_path);
+                        if (node == renamed_node) {
+                            copy_cstr(lvl.dir.name, d.ram_.node(node).name, sizeof lvl.dir.name);
+                            copy_cstr(lvl.dir_label, d.ram_.node(node).name, sizeof lvl.dir_label);
+                        }
+                    }
+                }
+            }
+        }
+        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        if (b.ok() && cur != 0 && d.cli_ != 0) {
+            const Dos::LockSlot* cur_slot = find_lock_slot(d, cur);
+            if (cur_slot != nullptr && cur_slot->entry.volume == Dos::kVolRam &&
+                cur_slot->entry.header_block > 0 &&
+                ram_is_at_or_below(d.ram_, cur_slot->entry.header_block - 1, renamed_node)) {
+                char full_name[kMaxName];
+                format_volume_path(volume_name(d, Dos::kVolRam), cur_slot->path, full_name,
+                                   sizeof full_name);
+                put_bstr(b, d.set_name_, full_name, 255);
+                b.w32(d.cli_ + cli_SetName, d.set_name_ >> 2);
+            }
+        }
+    }
+
+    static bool delete_file_impl(Dos& d, Bus& b, u32 base_lock, const char* name) {
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return false;
+        }
+        if (resolved[0] == '\0') {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return false;
+        }
+        u32 node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(resolved, node);
+        if (find_err != 0) {
+            fail(d, b, find_err, DOSFALSE);
+            return false;
+        }
+        if (node == 0) {
+            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            return false;
+        }
+        const u32 err = d.ram_.remove(node);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        native::set_result(b.machine(), DOSTRUE);
+        return true;
+    }
+
+    static void delete_file(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
             return;
         }
         char name[kMaxName];
-        bool has_colon = false;
-        for (u32 i = 0; i < len; ++i) {
-            const char c = static_cast<char>(b.r8(bstr + 1 + i));
-            name[i] = c;
-            if (c == ':') {
-                has_colon = true;
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
             }
-        }
-        name[len] = '\0';
-        if (!b.ok()) {
             return;
         }
-        u8 vol = base_entry.volume;
+        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        if (b.ok()) {
+            delete_file_impl(d, b, cur, name);
+        }
+    }
+
+    static bool rename_impl(Dos& d, Bus& b, u32 old_lock, const char* old_name, u32 new_lock,
+                            const char* new_name) {
+        u8 old_vol = Dos::kVolAdf;
+        char old_resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_from_lock(d, b, old_lock, old_name, old_vol, old_resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        u8 new_vol = Dos::kVolAdf;
+        char new_resolved[Dos::kMaxPath];
+        if (!resolve_from_lock(d, b, new_lock, new_name, new_vol, new_resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        if (old_vol != new_vol) {
+            fail(d, b, ERROR_RENAME_ACROSS_DEVICES, DOSFALSE);
+            return false;
+        }
+        if (old_vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return false;
+        }
+        u32 old_node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(old_resolved, old_node);
+        if (find_err != 0) {
+            fail(d, b, find_err, DOSFALSE);
+            return false;
+        }
+        if (old_node == 0) {
+            fail(d, b, ERROR_OBJECT_IN_USE, DOSFALSE);
+            return false;
+        }
+        if (new_resolved[0] == '\0') {
+            fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
+            return false;
+        }
+        char new_parent_path[Dos::kMaxPath];
+        const char* new_leaf = nullptr;
+        split_parent_and_leaf(new_resolved, new_parent_path, new_leaf);
+        u32 new_parent = RamFs::kNone;
+        const u32 p_err = d.ram_.find_path(new_parent_path, new_parent);
+        if (p_err != 0) {
+            fail(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err, DOSFALSE);
+            return false;
+        }
+        if (!d.ram_.node(new_parent).is_dir) {
+            fail(d, b, ERROR_DIR_NOT_FOUND, DOSFALSE);
+            return false;
+        }
+        const u32 err = d.ram_.rename(old_node, new_parent, new_leaf);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        update_renamed_paths(d, b, old_node);
+        if (b.ok()) {
+            native::set_result(b.machine(), DOSTRUE);
+            return true;
+        }
+        return false;
+    }
+
+    static void rename_lvo(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0 || m.cpu.d[2] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char old_name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], old_name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        char new_name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[2], new_name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        if (b.ok()) {
+            rename_impl(d, b, cur, old_name, cur, new_name);
+        }
+    }
+
+    static bool create_dir_impl(Dos& d, Bus& b, u32 base_lock, const char* name) {
+        u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        const bool ok = has_colon ? resolve(d, b, name, vol, resolved, error)
-                                  : apply_relative_path(base_path, name, resolved, error);
-        if (!ok) {
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, 0);
+            }
+            return false;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0);
+            return false;
+        }
+        if (resolved[0] == '\0') {
+            fail(d, b, ERROR_OBJECT_EXISTS, 0);
+            return false;
+        }
+        char parent_path[Dos::kMaxPath];
+        const char* leaf = nullptr;
+        split_parent_and_leaf(resolved, parent_path, leaf);
+        u32 parent_node = RamFs::kNone;
+        const u32 p_err = d.ram_.find_path(parent_path, parent_node);
+        if (p_err != 0) {
+            fail(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err, 0);
+            return false;
+        }
+        if (!d.ram_.node(parent_node).is_dir) {
+            fail(d, b, ERROR_DIR_NOT_FOUND, 0);
+            return false;
+        }
+        if (free_lock(d) < 0) {
+            table_full(d, b, "lock", Dos::kMaxLocks);
+            return false;
+        }
+        u32 new_node = RamFs::kNone;
+        const u32 err = d.ram_.create_dir(parent_node, leaf, new_node);
+        if (err != 0) {
+            fail(d, b, err, 0);
+            return false;
+        }
+        const DirEntry entry = ram_entry(d, new_node);
+        char canonical[Dos::kMaxPath];
+        ram_node_path(d.ram_, new_node, canonical);
+        u32 bptr = 0;
+        if (!alloc_user_lock(d, b, canonical, entry, EXCLUSIVE_LOCK, bptr)) {
+            return false;
+        }
+        native::set_result(b.machine(), bptr);
+        return true;
+    }
+
+    static void create_dir(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, 0);
+            return;
+        }
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, 0);
+            }
+            return;
+        }
+        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        if (b.ok()) {
+            create_dir_impl(d, b, cur, name);
+        }
+    }
+
+    static bool set_protection_impl(Dos& d, Bus& b, u32 base_lock, const char* name, u32 mask) {
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return false;
+        }
+        u32 node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(resolved, node);
+        if (find_err != 0) {
+            fail(d, b, find_err, DOSFALSE);
+            return false;
+        }
+        const u32 err = d.ram_.set_protection(node, mask);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        native::set_result(b.machine(), DOSTRUE);
+        return true;
+    }
+
+    static void set_protection(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        if (b.ok()) {
+            set_protection_impl(d, b, cur, name, m.cpu.d[2]);
+        }
+    }
+
+    static bool set_comment_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
+                                 const char* comment) {
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return false;
+        }
+        u32 node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(resolved, node);
+        if (find_err != 0) {
+            fail(d, b, find_err, DOSFALSE);
+            return false;
+        }
+        const u32 err = d.ram_.set_comment(node, comment);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        native::set_result(b.machine(), DOSTRUE);
+        return true;
+    }
+
+    static void set_comment(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        char comment[RamFs::kMaxComment + 2]{};
+        if (m.cpu.d[2] != 0 && !b.string(m.cpu.d[2], comment, sizeof comment)) {
+            if (b.ok()) {
+                fail(d, b, ERROR_COMMENT_TOO_BIG, DOSFALSE);
+            }
+            return;
+        }
+        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        if (b.ok()) {
+            set_comment_impl(d, b, cur, name, comment);
+        }
+    }
+
+    static bool set_file_date_impl(Dos& d, Bus& b, u32 base_lock, const char* name, u32 ds_addr) {
+        if (ds_addr == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return false;
+        }
+        const u32 days = b.r32(ds_addr + ds_Days);
+        const u32 minute = b.r32(ds_addr + ds_Minute);
+        const u32 tick = b.r32(ds_addr + ds_Tick);
+        if (!b.ok()) {
+            return false;
+        }
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return false;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return false;
+        }
+        u32 node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(resolved, node);
+        if (find_err != 0) {
+            fail(d, b, find_err, DOSFALSE);
+            return false;
+        }
+        const u32 err = d.ram_.set_date(node, days, minute, tick);
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        native::set_result(b.machine(), DOSTRUE);
+        return true;
+    }
+
+    static void set_file_date(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        if (b.ok()) {
+            set_file_date_impl(d, b, cur, name, m.cpu.d[2]);
+        }
+    }
+
+    static void pkt_locate_object(Dos& d, Bus& b, u32 lock_bptr, u32 name_bstr, u32 mode) {
+        char name[kMaxName];
+        if (!read_bstr_arg(d, b, name_bstr, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME, 0,
+                           false)) {
+            return;
+        }
+        u8 vol = Dos::kVolAdf;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_from_lock(d, b, lock_bptr, name, vol, resolved, error)) {
             if (b.ok()) {
                 fail(d, b, error, 0);
             }
@@ -5265,6 +6064,7 @@ struct DosOps {
         const u32 arg1 = m.cpu.d[3];
         const u32 arg2 = m.cpu.d[4];
         const u32 arg3 = m.cpu.d[5];
+        const u32 arg4 = m.cpu.d[6];
         if (port == 0 || native::guest_address(m, port) != d.port_) {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, DOSFALSE);
             return;
@@ -5316,6 +6116,66 @@ struct DosOps {
                 fail(d, b, ERROR_INVALID_LOCK, DOSFALSE);
             }
             return;
+        case ACTION_DELETE_OBJECT: {
+            char name[kMaxName];
+            if (read_bstr_arg(d, b, arg2, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
+                              DOSFALSE, false) &&
+                delete_file_impl(d, b, arg1, name)) {
+                set_io_err(d, b, 0);
+            }
+            return;
+        }
+        case ACTION_RENAME_OBJECT: {
+            char old_name[kMaxName];
+            char new_name[kMaxName];
+            if (read_bstr_arg(d, b, arg2, old_name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
+                              DOSFALSE, false) &&
+                read_bstr_arg(d, b, arg4, new_name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
+                              DOSFALSE, false) &&
+                rename_impl(d, b, arg1, old_name, arg3, new_name)) {
+                set_io_err(d, b, 0);
+            }
+            return;
+        }
+        case ACTION_CREATE_DIR: {
+            char name[kMaxName];
+            if (read_bstr_arg(d, b, arg2, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME, 0,
+                              false) &&
+                create_dir_impl(d, b, arg1, name)) {
+                set_io_err(d, b, 0);
+            }
+            return;
+        }
+        case ACTION_SET_PROTECT: {
+            char name[kMaxName];
+            if (read_bstr_arg(d, b, arg3, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
+                              DOSFALSE, false) &&
+                set_protection_impl(d, b, arg2, name, arg4)) {
+                set_io_err(d, b, 0);
+            }
+            return;
+        }
+        case ACTION_SET_COMMENT: {
+            char name[kMaxName];
+            char comment[RamFs::kMaxComment + 1];
+            if (read_bstr_arg(d, b, arg3, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
+                              DOSFALSE, false) &&
+                read_bstr_arg(d, b, arg4, comment, RamFs::kMaxComment, ERROR_COMMENT_TOO_BIG,
+                              DOSFALSE, true) &&
+                set_comment_impl(d, b, arg2, name, comment)) {
+                set_io_err(d, b, 0);
+            }
+            return;
+        }
+        case ACTION_SET_DATE: {
+            char name[kMaxName];
+            if (read_bstr_arg(d, b, arg3, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
+                              DOSFALSE, false) &&
+                set_file_date_impl(d, b, arg2, name, arg4)) {
+                set_io_err(d, b, 0);
+            }
+            return;
+        }
         case ACTION_COPY_DIR:
             if (dup_lock_impl(d, b, arg1)) {
                 set_io_err(d, b, 0);
@@ -5924,13 +6784,16 @@ struct DosOps {
         }
         for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
             if (d.files_[i].stream != Dos::Stream::Closed && d.files_[i].command_owned) {
+                release_entry(d, d.files_[i].entry);
                 d.files_[i] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
             }
         }
         for (u32 i = 0; i < Dos::kMaxLocks; ++i) {
             if (d.lock_slots_[i].used && d.lock_slots_[i].command_owned) {
+                release_entry(d, d.lock_slots_[i].entry);
                 d.lock_slots_[i].used = false;
                 d.lock_slots_[i].command_owned = false;
+                d.lock_slots_[i].exclusive = false;
             }
         }
     }
@@ -5952,17 +6815,22 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::Input, DosOps::input, "Input"},
     {dos_lvo::Output, DosOps::output, "Output"},
     {dos_lvo::Seek, DosOps::seek, "Seek"},
+    {dos_lvo::DeleteFile, DosOps::delete_file, "DeleteFile"},
+    {dos_lvo::Rename, DosOps::rename_lvo, "Rename"},
     {dos_lvo::Lock, DosOps::lock, "Lock"},
     {dos_lvo::UnLock, DosOps::unlock, "UnLock"},
     {dos_lvo::DupLock, DosOps::dup_lock, "DupLock"},
     {dos_lvo::Examine, DosOps::examine, "Examine"},
     {dos_lvo::ExNext, DosOps::ex_next, "ExNext"},
     {dos_lvo::Info, DosOps::info, "Info"},
+    {dos_lvo::CreateDir, DosOps::create_dir, "CreateDir"},
     {dos_lvo::CurrentDir, DosOps::current_dir, "CurrentDir"},
     {dos_lvo::IoErr, DosOps::io_err, "IoErr"},
     {dos_lvo::Exit, DosOps::exit, "Exit"},
     {dos_lvo::LoadSeg, DosOps::load_seg_lvo, "LoadSeg"},
     {dos_lvo::UnLoadSeg, DosOps::unload_seg, "UnLoadSeg"},
+    {dos_lvo::SetComment, DosOps::set_comment, "SetComment"},
+    {dos_lvo::SetProtection, DosOps::set_protection, "SetProtection"},
     {dos_lvo::DateStamp, DosOps::date_stamp, "DateStamp"},
     {dos_lvo::Delay, DosOps::delay, "Delay"},
     {dos_lvo::WaitForChar, DosOps::wait_for_char, "WaitForChar"},
@@ -5988,11 +6856,13 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::OpenFromLock, DosOps::open_from_lock, "OpenFromLock"},
     {dos_lvo::ParentOfFH, DosOps::parent_of_fh, "ParentOfFH"},
     {dos_lvo::ExamineFH, DosOps::examine_fh, "ExamineFH"},
+    {dos_lvo::SetFileDate, DosOps::set_file_date, "SetFileDate"},
     {dos_lvo::NameFromLock, DosOps::name_from_lock, "NameFromLock"},
     {dos_lvo::NameFromFH, DosOps::name_from_fh, "NameFromFH"},
     {dos_lvo::SameLock, DosOps::same_lock, "SameLock"},
     {dos_lvo::SetMode, DosOps::set_mode, "SetMode"},
     {dos_lvo::ExAll, DosOps::ex_all, "ExAll"},
+    {dos_lvo::SetFileSize, DosOps::set_file_size, "SetFileSize"},
     {dos_lvo::SetIoErr, DosOps::set_io_err_lvo, "SetIoErr"},
     {dos_lvo::Fault, DosOps::fault, "Fault"},
     {dos_lvo::PrintFault, DosOps::print_fault, "PrintFault"},

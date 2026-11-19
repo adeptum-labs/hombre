@@ -399,13 +399,16 @@ public:
         return g_jit.run(kBlocks);
     }
 
-    // D1..D5 set, the vector called, D0 returned; the run must halt.
-    u32 call(u32 lvo, u32 d1 = 0, u32 d2 = 0, u32 d3 = 0, u32 d4 = 0, u32 d5 = 0) {
+    // D1..D7 set, the vector called, D0 returned; the run must halt.
+    u32 call(u32 lvo, u32 d1 = 0, u32 d2 = 0, u32 d3 = 0, u32 d4 = 0, u32 d5 = 0, u32 d6 = 0,
+             u32 d7 = 0) {
         m.cpu.d[1] = d1;
         m.cpu.d[2] = d2;
         m.cpu.d[3] = d3;
         m.cpu.d[4] = d4;
         m.cpu.d[5] = d5;
+        m.cpu.d[6] = d6;
+        m.cpu.d[7] = d7;
         CHECK_EQ(dos(lvo), ExitReason::Halt);
         return m.cpu.d[0];
     }
@@ -447,17 +450,22 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::Input, 54u);
     CHECK_EQ(dos_lvo::Output, 60u);
     CHECK_EQ(dos_lvo::Seek, 66u);
+    CHECK_EQ(dos_lvo::DeleteFile, 72u);
+    CHECK_EQ(dos_lvo::Rename, 78u);
     CHECK_EQ(dos_lvo::Lock, 84u);
     CHECK_EQ(dos_lvo::UnLock, 90u);
     CHECK_EQ(dos_lvo::DupLock, 96u);
     CHECK_EQ(dos_lvo::Examine, 102u);
     CHECK_EQ(dos_lvo::ExNext, 108u);
     CHECK_EQ(dos_lvo::Info, 114u);
+    CHECK_EQ(dos_lvo::CreateDir, 120u);
     CHECK_EQ(dos_lvo::CurrentDir, 126u);
     CHECK_EQ(dos_lvo::IoErr, 132u);
     CHECK_EQ(dos_lvo::Exit, 144u);
     CHECK_EQ(dos_lvo::LoadSeg, 150u);
     CHECK_EQ(dos_lvo::UnLoadSeg, 156u);
+    CHECK_EQ(dos_lvo::SetComment, 180u);
+    CHECK_EQ(dos_lvo::SetProtection, 186u);
     CHECK_EQ(dos_lvo::DateStamp, 192u);
     CHECK_EQ(dos_lvo::Delay, 198u);
     CHECK_EQ(dos_lvo::WaitForChar, 204u);
@@ -483,11 +491,13 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::OpenFromLock, 378u);
     CHECK_EQ(dos_lvo::ParentOfFH, 384u);
     CHECK_EQ(dos_lvo::ExamineFH, 390u);
+    CHECK_EQ(dos_lvo::SetFileDate, 396u);
     CHECK_EQ(dos_lvo::NameFromLock, 402u);
     CHECK_EQ(dos_lvo::NameFromFH, 408u);
     CHECK_EQ(dos_lvo::SameLock, 420u);
     CHECK_EQ(dos_lvo::SetMode, 426u);
     CHECK_EQ(dos_lvo::ExAll, 432u);
+    CHECK_EQ(dos_lvo::SetFileSize, 456u);
     CHECK_EQ(dos_lvo::SetIoErr, 462u);
     CHECK_EQ(dos_lvo::Fault, 468u);
     CHECK_EQ(dos_lvo::PrintFault, 474u);
@@ -772,6 +782,12 @@ void layout_matches_the_ndk() {
     CHECK_EQ(DOS_STDPKT, 3u);
     CHECK_EQ(DOS_CLI, 4u);
     CHECK_EQ(DOS_RDARGS, 5u);
+    CHECK_EQ(ACTION_DELETE_OBJECT, 16u);
+    CHECK_EQ(ACTION_RENAME_OBJECT, 17u);
+    CHECK_EQ(ACTION_SET_PROTECT, 21u);
+    CHECK_EQ(ACTION_CREATE_DIR, 22u);
+    CHECK_EQ(ACTION_SET_COMMENT, 28u);
+    CHECK_EQ(ACTION_SET_DATE, 34u);
     CHECK_EQ(ED_NAME, 1u);
     CHECK_EQ(ED_TYPE, 2u);
     CHECK_EQ(ED_SIZE, 3u);
@@ -1020,8 +1036,8 @@ void unknown_vector_ends_the_run() {
     g_lines.clear();
     CHECK_EQ(r.dos(dos_lvo::SetOwner), ExitReason::Unimplemented);
     CHECK(logged("dos: unimplemented LVO -996"));
-    CHECK_EQ(r.dos(72), ExitReason::Unimplemented);  // DeleteFile
-    CHECK(logged("dos: unimplemented LVO -72"));
+    CHECK_EQ(r.dos(138), ExitReason::Unimplemented);  // CreateProc
+    CHECK(logged("dos: unimplemented LVO -138"));
 }
 
 void commands_that_cannot_run() {
@@ -4924,6 +4940,496 @@ void ram_dos_list_match_and_exall() {
     r.call(dos_lvo::UnLock, ram_lock);
 }
 
+void ram_open_write_read_and_seek() {
+    Rig r;
+    const u32 buf = kData + 0x200;
+
+    // MODE_NEWFILE + Write + Close, then MODE_OLDFILE + Read.
+    r.str(kData, "RAM:hello.txt");
+    const u32 fh1 = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh1 != 0);
+    r.str(buf, "hello ram");
+    CHECK_EQ(r.call(dos_lvo::Write, fh1, buf, 9), 9u);
+
+    // MODE_NEWFILE while another handle has it open -> ERROR_OBJECT_IN_USE.
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+
+    // Read after write on same handle sees the bytes; Seek past end fails.
+    CHECK_EQ(r.call(dos_lvo::Seek, fh1, 0, OFFSET_BEGINNING), 9u);
+    for (u32 i = 0; i < 16; ++i) {
+        r.put8(buf + 0x40 + i, 0);
+    }
+    CHECK_EQ(r.call(dos_lvo::Read, fh1, buf + 0x40, 16), 9u);
+    CHECK(r.read_str(buf + 0x40) == "hello ram");
+    CHECK_EQ(as_signed(r.call(dos_lvo::Seek, fh1, 10, OFFSET_BEGINNING)), -1);
+    CHECK_EQ(r.io_err(), ERROR_SEEK_ERROR);
+    CHECK_EQ(r.call(dos_lvo::Seek, fh1, 0, OFFSET_CURRENT), 9u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh1), DOSTRUE);
+
+    // Reopen with MODE_OLDFILE and verify contents.
+    const u32 fh2 = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh2 != 0);
+    for (u32 i = 0; i < 16; ++i) {
+        r.put8(buf + 0x40 + i, 0);
+    }
+    CHECK_EQ(r.call(dos_lvo::Read, fh2, buf + 0x40, 16), 9u);
+    CHECK(r.read_str(buf + 0x40) == "hello ram");
+    CHECK_EQ(r.call(dos_lvo::Close, fh2), DOSTRUE);
+
+    // MODE_NEWFILE over an existing file truncates it.
+    const u32 fh3 = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh3 != 0);
+    r.str(buf, "xy");
+    CHECK_EQ(r.call(dos_lvo::Write, fh3, buf, 2), 2u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh3), DOSTRUE);
+    const u32 fh4 = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh4 != 0);
+    for (u32 i = 0; i < 16; ++i) {
+        r.put8(buf + 0x40 + i, 0);
+    }
+    CHECK_EQ(r.call(dos_lvo::Read, fh4, buf + 0x40, 16), 2u);
+    CHECK(r.read_str(buf + 0x40) == "xy");
+    CHECK_EQ(r.call(dos_lvo::Close, fh4), DOSTRUE);
+
+    // Missing parent -> ERROR_DIR_NOT_FOUND.
+    r.str(kData + 0x80, "RAM:NoSuchDir/file");
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x80, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DIR_NOT_FOUND);
+
+    // MODE_READWRITE creates when missing and opens shared when present.
+    r.str(kData + 0x80, "RAM:rw.dat");
+    const u32 rw1 = r.call(dos_lvo::Open, kData + 0x80, MODE_READWRITE);
+    CHECK(rw1 != 0);
+    r.str(buf, "abcd");
+    CHECK_EQ(r.call(dos_lvo::Write, rw1, buf, 4), 4u);
+    const u32 rw2 = r.call(dos_lvo::Open, kData + 0x80, MODE_READWRITE);
+    CHECK(rw2 != 0);
+    CHECK_EQ(r.call(dos_lvo::Read, rw2, buf + 0x40, 8), 4u);
+    CHECK(std::string(reinterpret_cast<const char*>(r.bytes(buf + 0x40, 4).data()), 4) == "abcd");
+    CHECK_EQ(r.call(dos_lvo::Close, rw2), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::Close, rw1), DOSTRUE);
+
+    // ADF stays read-only for both write modes and Write.
+    r.str(kData + 0x80, "DF0:NewFile");
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x80, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x80, MODE_READWRITE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+
+    // Disk full -> ERROR_DISK_FULL, return -1.
+    r.str(kData + 0x80, "RAM:big");
+    const u32 big = r.call(dos_lvo::Open, kData + 0x80, MODE_NEWFILE);
+    CHECK(big != 0);
+    CHECK_EQ(as_signed(r.call(dos_lvo::Seek, big, 0, OFFSET_BEGINNING)), 0);
+    // Write 1 byte first, then SetFileSize beyond guest memory capacity.
+    CHECK_EQ(as_signed(r.call(dos_lvo::SetFileSize, big, 0x01000000u, OFFSET_BEGINNING)), -1);
+    CHECK_EQ(r.io_err(), ERROR_DISK_FULL);
+    CHECK_EQ(as_signed(r.call(dos_lvo::Write, big, kData, 0x00800000u)), -1);
+    CHECK_EQ(r.io_err(), ERROR_DISK_FULL);
+    CHECK_EQ(r.call(dos_lvo::Close, big), DOSTRUE);
+}
+
+void ram_buffered_output_and_set_file_size() {
+    Rig r;
+    r.str(kData, "RAM:stream.txt");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh != 0);
+
+    // FPuts, FPutC, FWrite, VFPrintf, VFWritef, PutStr, WriteChars.
+    r.str(kData + 0x100, "line1\n");
+    CHECK_EQ(r.call(dos_lvo::FPuts, fh, kData + 0x100), 0u);
+    CHECK_EQ(r.call(dos_lvo::FPutC, fh, '>'), static_cast<u32>('>'));
+    r.str(kData + 0x120, "AB");
+    CHECK_EQ(r.call(dos_lvo::FWrite, fh, kData + 0x120, 1, 2), 2u);
+
+    r.str(kData + 0x140, ":%ld:");
+    r.put32(kData + 0x160, 42);
+    CHECK_EQ(r.call(dos_lvo::VFPrintf, fh, kData + 0x140, kData + 0x160), 4u);
+
+    r.str(kData + 0x180, "%S");
+    r.str(kData + 0x190, "end");
+    r.put32(kData + 0x1A0, kData + 0x190);
+    CHECK_EQ(r.call(dos_lvo::VFWritef, fh, kData + 0x180, kData + 0x1A0), 3u);
+
+    const u32 old_out = r.call(dos_lvo::SelectOutput, fh);
+    r.str(kData + 0x1C0, "!");
+    CHECK_EQ(r.call(dos_lvo::PutStr, kData + 0x1C0), 0u);
+    r.str(kData + 0x1D0, "ok");
+    CHECK_EQ(r.call(dos_lvo::WriteChars, kData + 0x1D0, 2), 2u);
+    r.call(dos_lvo::SelectOutput, old_out);
+
+    CHECK_EQ(r.call(dos_lvo::Flush, fh), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+
+    const u32 rd = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(rd != 0);
+    const u32 out_buf = kData + 0x300;
+    for (u32 i = 0; i < 64; ++i) {
+        r.put8(out_buf + i, 0);
+    }
+    const u32 got = r.call(dos_lvo::Read, rd, out_buf, 64);
+    CHECK_EQ(got, 19u);
+    CHECK(r.read_str(out_buf) == "line1\n>AB:42:end!ok");
+    CHECK_EQ(r.call(dos_lvo::Close, rd), DOSTRUE);
+
+    // SetFileSize grow and shrink, clamping pos.
+    const u32 sz_fh = r.call(dos_lvo::Open, kData, MODE_READWRITE);
+    CHECK(sz_fh != 0);
+    CHECK_EQ(r.call(dos_lvo::SetFileSize, sz_fh, 24, OFFSET_BEGINNING), 24u);
+    CHECK_EQ(r.call(dos_lvo::Seek, sz_fh, 22, OFFSET_BEGINNING), 0u);
+    CHECK_EQ(r.call(dos_lvo::SetFileSize, sz_fh, 5, OFFSET_BEGINNING), 5u);
+    // Position was clamped to 5.
+    CHECK_EQ(r.call(dos_lvo::Seek, sz_fh, 0, OFFSET_CURRENT), 5u);
+    CHECK_EQ(r.call(dos_lvo::SetFileSize, sz_fh, 2, OFFSET_CURRENT), 7u);
+    CHECK_EQ(r.call(dos_lvo::SetFileSize, sz_fh, static_cast<u32>(-4), OFFSET_END), 3u);
+    CHECK_EQ(r.call(dos_lvo::Seek, sz_fh, 0, OFFSET_CURRENT), 3u);
+    // Negative target fails with ERROR_SEEK_ERROR.
+    CHECK_EQ(as_signed(r.call(dos_lvo::SetFileSize, sz_fh, static_cast<u32>(-10), OFFSET_END)), -1);
+    CHECK_EQ(r.io_err(), ERROR_SEEK_ERROR);
+    CHECK_EQ(r.call(dos_lvo::Seek, sz_fh, 0, OFFSET_END), 3u);
+    CHECK_EQ(r.call(dos_lvo::Close, sz_fh), DOSTRUE);
+
+    // SetFileSize on ADF fails with ERROR_DISK_WRITE_PROTECTED.
+    r.str(kData + 0x40, "C:Echo");
+    const u32 adf_fh = r.call(dos_lvo::Open, kData + 0x40, MODE_OLDFILE);
+    CHECK(adf_fh != 0);
+    CHECK_EQ(as_signed(r.call(dos_lvo::SetFileSize, adf_fh, 10, OFFSET_BEGINNING)), -1);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::Close, adf_fh), DOSTRUE);
+}
+
+void ram_delete_createdir_rename_and_metadata() {
+    Rig r;
+    const u32 fib = kData + 0x400;
+    const u32 buf = kData + 0x600;
+
+    // CreateDir returns an EXCLUSIVE_LOCK; duplicate fails; missing parent fails; ADF fails.
+    r.str(kData, "RAM:DirA");
+    const u32 d_lock = r.call(dos_lvo::CreateDir, kData);
+    CHECK(d_lock != 0);
+    CHECK_EQ(r.get32((d_lock << 2) + fl_Access), EXCLUSIVE_LOCK);
+    // Duplicate CreateDir fails (even after unlock, and while locked).
+    CHECK_EQ(r.call(dos_lvo::CreateDir, kData), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_EXISTS);
+    // Exclusive lock blocks shared Lock on DirA until unlocked.
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::UnLock, d_lock);
+
+    CHECK_EQ(r.call(dos_lvo::CreateDir, kData), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_EXISTS);
+    r.str(kData + 0x40, "RAM:MissingParent/Sub");
+    CHECK_EQ(r.call(dos_lvo::CreateDir, kData + 0x40), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DIR_NOT_FOUND);
+    r.str(kData + 0x40, "DF0:NewDir");
+    CHECK_EQ(r.call(dos_lvo::CreateDir, kData + 0x40), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+
+    // Create file inside DirA.
+    r.str(kData + 0x40, "RAM:DirA/Item");
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x40, MODE_NEWFILE);
+    CHECK(fh != 0);
+    r.str(buf, "data");
+    CHECK_EQ(r.call(dos_lvo::Write, fh, buf, 4), 4u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+
+    // DeleteFile: non-empty dir fails, open/locked file fails, root fails, ADF fails.
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DIRECTORY_NOT_EMPTY);
+    r.str(kData + 0x80, "RAM:");
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x80), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_WRONG_TYPE);
+    r.str(kData + 0x80, "C:Echo");
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x80), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+
+    const u32 item_lock = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK(item_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::UnLock, item_lock);
+
+    // SetProtection, SetComment, SetFileDate visible via Examine.
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData + 0x40, 0x0F), DOSTRUE);
+    r.str(kData + 0x80, "hello comment");
+    CHECK_EQ(r.call(dos_lvo::SetComment, kData + 0x40, kData + 0x80), DOSTRUE);
+    const u32 ds = kData + 0x100;
+    r.put32(ds + ds_Days, 111);
+    r.put32(ds + ds_Minute, 222);
+    r.put32(ds + ds_Tick, 333);
+    CHECK_EQ(r.call(dos_lvo::SetFileDate, kData + 0x40, ds), DOSTRUE);
+
+    const u32 check_lock = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK(check_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, check_lock, fib), DOSTRUE);
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x0Fu);
+    CHECK(r.read_str(fib + fib_Comment) == "hello comment");
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 111u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 222u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 333u);
+    r.call(dos_lvo::UnLock, check_lock);
+
+    // Delete-protected file refuses delete; clearing protection allows delete.
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DELETE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData + 0x40, 0), DOSTRUE);
+
+    // Rename within RAM, into a subdir, across volumes, onto existing, and locked parent.
+    r.str(kData + 0x80, "RAM:DirB");
+    const u32 dir_b = r.call(dos_lvo::CreateDir, kData + 0x80);
+    CHECK(dir_b != 0);
+    r.call(dos_lvo::UnLock, dir_b);
+
+    // Lock DirA/Item, then rename DirA -> DirX and verify NameFromLock updates!
+    const u32 locked_child = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+    CHECK(locked_child != 0);
+    r.str(kData + 0xC0, "RAM:DirX");
+    CHECK_EQ(r.call(dos_lvo::Rename, kData, kData + 0xC0), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, locked_child, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Ram Disk:DirX/Item");
+
+    // Rename into DirB while child is locked.
+    r.str(kData + 0x100, "RAM:DirX/Item");
+    r.str(kData + 0x140, "RAM:DirB/Moved");
+    CHECK_EQ(r.call(dos_lvo::Rename, kData + 0x100, kData + 0x140), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, locked_child, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Ram Disk:DirB/Moved");
+    r.call(dos_lvo::UnLock, locked_child);
+
+    // Rename across volumes, onto existing, on ADF.
+    r.str(kData + 0x180, "C:Echo");
+    CHECK_EQ(r.call(dos_lvo::Rename, kData + 0x140, kData + 0x180), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_RENAME_ACROSS_DEVICES);
+    CHECK_EQ(r.call(dos_lvo::Rename, kData + 0x140, kData + 0xC0), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_EXISTS);
+    r.str(kData + 0x1C0, "DF0:Other");
+    CHECK_EQ(r.call(dos_lvo::Rename, kData + 0x180, kData + 0x1C0), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+
+    // Delete moved file and empty dirs.
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x140), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x80), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0xC0), DOSTRUE);
+}
+
+void ram_exclusive_locks_and_dopkt() {
+    Rig r;
+    const u32 buf = kData + 0x200;
+    const u32 fib = kData + 0x400;
+
+    r.str(kData, "RAM:target");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh != 0);
+    // MODE_NEWFILE handle is exclusive: blocks shared and exclusive locks and opens.
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    CHECK_EQ(r.call(dos_lvo::DupLockFromFH, fh), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::Close, fh);
+
+    // Shared lock blocks EXCLUSIVE_LOCK; EXCLUSIVE_LOCK blocks shared lock & Open.
+    const u32 sh = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(sh != 0);
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, EXCLUSIVE_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::UnLock, sh);
+
+    const u32 ex = r.call(dos_lvo::Lock, kData, EXCLUSIVE_LOCK);
+    CHECK(ex != 0);
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    CHECK_EQ(r.call(dos_lvo::DupLock, ex), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::UnLock, ex);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData), DOSTRUE);
+
+    // DoPkt: ACTION_CREATE_DIR, ACTION_SET_PROTECT, ACTION_SET_COMMENT,
+    // ACTION_SET_DATE, ACTION_RENAME_OBJECT, ACTION_DELETE_OBJECT.
+    const u32 port = r.call(dos_lvo::GetFileSysTask);
+    r.str(kData, "RAM:");
+    const u32 ram_root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(ram_root != 0);
+
+    const u32 b1 = kData + 0x80;
+    const u32 b2 = kData + 0x100;
+    const u32 b3 = kData + 0x180;
+    put_bstr_at(r, b1, "PktDir");
+    const u32 pkt_dir = r.call(dos_lvo::DoPkt, port, ACTION_CREATE_DIR, ram_root, b1 >> 2);
+    CHECK(pkt_dir != 0);
+    CHECK_EQ(r.get32((pkt_dir << 2) + fl_Access), EXCLUSIVE_LOCK);
+    r.call(dos_lvo::UnLock, pkt_dir);
+
+    const u32 pkt_dir_sh =
+        r.call(dos_lvo::DoPkt, port, ACTION_LOCATE_OBJECT, ram_root, b1 >> 2, SHARED_LOCK);
+    CHECK(pkt_dir_sh != 0);
+
+    r.str(kData + 0x20, "RAM:PktDir/Leaf");
+    const u32 leaf_fh = r.call(dos_lvo::Open, kData + 0x20, MODE_NEWFILE);
+    CHECK(leaf_fh != 0);
+    r.call(dos_lvo::Close, leaf_fh);
+
+    put_bstr_at(r, b2, "Leaf");
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_SET_PROTECT, 0, pkt_dir_sh, b2 >> 2, 0x0A),
+             DOSTRUE);
+    put_bstr_at(r, b3, "pkt note");
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_SET_COMMENT, 0, pkt_dir_sh, b2 >> 2, b3 >> 2),
+             DOSTRUE);
+    const u32 ds = kData + 0x300;
+    r.put32(ds + ds_Days, 7);
+    r.put32(ds + ds_Minute, 8);
+    r.put32(ds + ds_Tick, 9);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_SET_DATE, 0, pkt_dir_sh, b2 >> 2, ds), DOSTRUE);
+
+    const u32 leaf_lock =
+        r.call(dos_lvo::DoPkt, port, ACTION_LOCATE_OBJECT, pkt_dir_sh, b2 >> 2, SHARED_LOCK);
+    CHECK(leaf_lock != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, leaf_lock, fib), DOSTRUE);
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x0Au);
+    CHECK(r.read_str(fib + fib_Comment) == "pkt note");
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 7u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 8u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 9u);
+    r.call(dos_lvo::UnLock, leaf_lock);
+
+    put_bstr_at(r, b3, "RenamedLeaf");
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_RENAME_OBJECT, pkt_dir_sh, b2 >> 2, ram_root,
+                    b3 >> 2),
+             DOSTRUE);
+    r.str(buf, "RAM:RenamedLeaf");
+    const u32 moved = r.call(dos_lvo::Lock, buf, SHARED_LOCK);
+    CHECK(moved != 0);
+    r.call(dos_lvo::UnLock, moved);
+
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_DELETE_OBJECT, ram_root, b3 >> 2), DOSTRUE);
+    r.call(dos_lvo::UnLock, pkt_dir_sh);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_DELETE_OBJECT, ram_root, b1 >> 2), DOSTRUE);
+    r.call(dos_lvo::UnLock, ram_root);
+}
+
+void ram_enumeration_after_delete_info_and_cleanup() {
+    auto leak_ram_cmd = []() {
+        Asm a;
+        a.open_dos()
+            .address(1, "name")
+            .move_l(MODE_NEWFILE, 2)
+            .dos(dos_lvo::Open)
+            .store_d0(kOut)
+            .from_d0(1)
+            .address(2, "data")
+            .moveq(3, 3)
+            .dos(dos_lvo::Write)
+            .moveq(0, 0)
+            .rts()
+            .string("name", "RAM:leaked")
+            .string("data", "abc");
+        return hunk_file(a.build());
+    };
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/LeakRam", leak_ram_cmd()});
+    Rig r(files);
+
+    // Info NumBlocksUsed grows after a write.
+    r.str(kData, "RAM:");
+    const u32 ram_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(ram_lock != 0);
+    const u32 id = kData + 0x200;
+    CHECK_EQ(r.call(dos_lvo::Info, ram_lock, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_DiskState), ID_VALIDATED);
+    const u32 initial_used = r.get32(id + id_NumBlocksUsed);
+
+    for (const char* name : {"RAM:A", "RAM:B", "RAM:C"}) {
+        r.str(kData + 0x40, name);
+        const u32 fh = r.call(dos_lvo::Open, kData + 0x40, MODE_NEWFILE);
+        CHECK(fh != 0);
+        r.str(kData + 0x80, std::string(1024, 'x'));
+        CHECK_EQ(r.call(dos_lvo::Write, fh, kData + 0x80, 1024), 1024u);
+        r.call(dos_lvo::Close, fh);
+    }
+    CHECK_EQ(r.call(dos_lvo::Info, ram_lock, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_DiskState), ID_VALIDATED);
+    CHECK(r.get32(id + id_NumBlocksUsed) > initial_used);
+
+    // ExNext continues after deleting the current entry.
+    const u32 fib = kData + 0x500;
+    CHECK_EQ(r.call(dos_lvo::Examine, ram_lock, fib), DOSTRUE);
+    std::vector<std::string> ex_names;
+    while (r.call(dos_lvo::ExNext, ram_lock, fib) == DOSTRUE) {
+        const std::string cur = read_fib(r, fib).name;
+        ex_names.push_back(cur);
+        if (cur == "A") {
+            r.str(kData + 0x40, "RAM:A");
+            CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
+        }
+    }
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK(ex_names == (std::vector<std::string>{"A", "B", "C"}));
+
+    // ExAll continues after deleting the last returned entry.
+    r.str(kData + 0x40, "RAM:A");
+    const u32 recreate_a = r.call(dos_lvo::Open, kData + 0x40, MODE_NEWFILE);
+    CHECK(recreate_a != 0);
+    r.call(dos_lvo::Close, recreate_a);
+    const u32 eac = r.call(dos_lvo::AllocDosObject, DOS_EXALLCONTROL, 0);
+    CHECK(eac != 0);
+    const u32 ex_buf = kData + 0x700;
+    std::vector<std::string> exall_names;
+    for (;;) {
+        const u32 more = r.call(dos_lvo::ExAll, ram_lock, ex_buf, 16, ED_NAME, eac);
+        const u32 count = r.get32(eac + eac_Entries);
+        for (u32 cur = ex_buf, i = 0; i < count && cur != 0; ++i, cur = r.get32(cur + ed_Next)) {
+            exall_names.push_back(r.read_str(r.get32(cur + ed_Name)));
+        }
+        if (more == DOSFALSE) {
+            CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+            break;
+        }
+        if (!exall_names.empty() && exall_names.back() == "B") {
+            r.str(kData + 0x40, "RAM:B");
+            CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
+        }
+    }
+    CHECK(exall_names == (std::vector<std::string>{"A", "B", "C"}));
+    r.call(dos_lvo::ExAllEnd, ram_lock, ex_buf, 16, ED_NAME, eac);
+    r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
+
+    // MatchNext continues after deleting the current entry.
+    const u32 anchor = kData + 0x800;
+    clear_anchor(r, anchor, 64);
+    r.str(kData + 0x40, "RAM:#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, kData + 0x40, anchor), 0u);
+    std::vector<std::string> match_names;
+    match_names.push_back(read_fib(r, anchor + ap_Info).name);
+    r.str(kData + 0x40, std::string("RAM:") + match_names.back());
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
+    while (r.call(dos_lvo::MatchNext, anchor) == 0u) {
+        match_names.push_back(read_fib(r, anchor + ap_Info).name);
+    }
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    CHECK(match_names == (std::vector<std::string>{"A", "C"}));
+    r.call(dos_lvo::MatchEnd, anchor);
+    r.call(dos_lvo::UnLock, ram_lock);
+
+    // cleanup_command releases a command's leftover RAM handle so the file can be deleted.
+    u32 result = 99;
+    CHECK(g_dos.run_command("C:LeakRam", "", result, kBlocks));
+    CHECK_EQ(result, 0u);
+    r.str(kData + 0x40, "RAM:leaked");
+    const u32 leaked_rd = r.call(dos_lvo::Open, kData + 0x40, MODE_OLDFILE);
+    CHECK(leaked_rd != 0);
+    for (u32 i = 0; i < 8; ++i) {
+        r.put8(kData + 0x80 + i, 0);
+    }
+    CHECK_EQ(r.call(dos_lvo::Read, leaked_rd, kData + 0x80, 8), 3u);
+    CHECK(r.read_str(kData + 0x80) == "abc");
+    CHECK_EQ(r.call(dos_lvo::Close, leaked_rd), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
+}
+
 }
 
 int main() {
@@ -5013,5 +5519,10 @@ int main() {
     match_first_sets_d0_on_failure();
     ram_volume_read_operations();
     ram_dos_list_match_and_exall();
+    ram_open_write_read_and_seek();
+    ram_buffered_output_and_set_file_size();
+    ram_delete_createdir_rename_and_metadata();
+    ram_exclusive_locks_and_dopkt();
+    ram_enumeration_after_delete_info_and_cleanup();
     return check::finish("test_dos");
 }
