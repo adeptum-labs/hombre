@@ -158,10 +158,11 @@ public:
 
     // Switches the Running slot to next_id. If the previous current task is
     // still Running, it becomes Ready at the back of its priority's queue;
-    // Waiting and Removed tasks keep their state.
-    void switch_to(i32 next_id) {
+    // Waiting and Removed tasks keep their state. False if next_id is not
+    // valid and Ready.
+    bool switch_to(i32 next_id) {
         if (!valid_id(next_id) || slots_[next_id].state != TaskState::Ready) {
-            return;
+            return false;
         }
         if (valid_id(current_) && slots_[current_].state == TaskState::Running) {
             slots_[current_].state = TaskState::Ready;
@@ -169,6 +170,7 @@ public:
         }
         slots_[next_id].state = TaskState::Running;
         current_ = next_id;
+        return true;
     }
 
     i32 current() const { return current_; }

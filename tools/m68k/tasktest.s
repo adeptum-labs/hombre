@@ -19,8 +19,9 @@
 | Website: https://www.adeptum.se
 | Contact: info@adeptum.se
 
-| Exercises Exec task creation, Signal/Wait, default finalPC exit, timer
-| preemption between equal-priority tasks, and RemTask.
+| Exercises Exec task creation, Signal/Wait, blocked Wait on a lower-priority
+| child, default finalPC exit, timer preemption between equal-priority tasks,
+| RemTask, and early child fault recovery.
 
         .set    AllocMem, -198
         .set    FreeMem, -210
@@ -56,10 +57,18 @@
         .globl  _start
 
 | A5 = dos.library, A4 = child Task, A3 = child stack, D7 = allocated signal,
-| D2 = return code.
+| D6 = mode (0 = normal, 1 = fault, 2 = second run), D2 = return code.
 _start:
         movem.l %d2-%d7/%a2-%a6,-(%sp)
-        moveq   #RETURN_FAIL,%d2
+        moveq   #0,%d6
+        cmpi.b  #'f',(%a0)
+        bne.s   1f
+        moveq   #1,%d6
+        bra.s   2f
+1:      cmpi.b  #'2',(%a0)
+        bne.s   2f
+        moveq   #2,%d6
+2:      moveq   #RETURN_FAIL,%d2
         movea.l 4.w,%a6
         lea     dosname(%pc),%a1
         moveq   #0,%d0
@@ -77,40 +86,23 @@ _start:
         move.l  %d0,%d7
         bmi     close_dos
 
+        cmpi.l  #1,%d6
+        beq     part_fault
+
         | Part 1: child waits for CTRL_F, signals parent CTRL_E, returns.
-        move.l  #TC_SIZE,%d0
-        move.l  #MEMF_PUBLIC_CLEAR,%d1
-        jsr     AllocMem(%a6)
-        movea.l %d0,%a4
-        tst.l   %d0
+        lea     name_child1,%a0
+        moveq   #1,%d0
+        bsr     alloc_child
         beq     free_sig
 
-        move.l  #STACK_BYTES,%d0
-        move.l  #MEMF_PUBLIC_CLEAR,%d1
-        jsr     AllocMem(%a6)
-        movea.l %d0,%a3
-        tst.l   %d0
-        beq     free_task1
-
-        move.b  #NT_TASK,LN_TYPE(%a4)
-        move.b  #1,LN_PRI(%a4)
-        lea     name_child1,%a0
-        move.l  %a0,LN_NAME(%a4)
-        move.l  %a3,TC_SPLOWER(%a4)
-        lea     STACK_BYTES(%a3),%a0
-        move.l  %a0,TC_SPUPPER(%a4)
-        move.l  %a0,TC_SPREG(%a4)
-
+        move.l  %a3,-(%sp)
         movea.l %a4,%a1
         lea     child1_entry(%pc),%a2
-        suba.l  %a3,%a3
-        movea.l TC_SPLOWER(%a4),%a3
-        move.l  %a3,-(%sp)
         suba.l  %a3,%a3
         jsr     AddTask(%a6)
         movea.l (%sp)+,%a3
         tst.l   %d0
-        beq     free_stack1
+        beq     free_child
 
         movea.l %a4,%a1
         move.l  #SIGBREAKF_CTRL_F,%d0
@@ -121,38 +113,14 @@ _start:
 
         lea     msg_signalled(%pc),%a0
         bsr     print
-
-        movea.l %a3,%a1
-        move.l  #STACK_BYTES,%d0
-        jsr     FreeMem(%a6)
-        movea.l %a4,%a1
-        move.l  #TC_SIZE,%d0
-        jsr     FreeMem(%a6)
+        bsr     release_child
 
         | Part 2: priority-0 spinner child vs priority-0 parent loop.
         clr.l   spin_counter
-        move.l  #TC_SIZE,%d0
-        move.l  #MEMF_PUBLIC_CLEAR,%d1
-        jsr     AllocMem(%a6)
-        movea.l %d0,%a4
-        tst.l   %d0
-        beq     free_sig
-
-        move.l  #STACK_BYTES,%d0
-        move.l  #MEMF_PUBLIC_CLEAR,%d1
-        jsr     AllocMem(%a6)
-        movea.l %d0,%a3
-        tst.l   %d0
-        beq     free_task1
-
-        move.b  #NT_TASK,LN_TYPE(%a4)
-        move.b  #0,LN_PRI(%a4)
         lea     name_spinner,%a0
-        move.l  %a0,LN_NAME(%a4)
-        move.l  %a3,TC_SPLOWER(%a4)
-        lea     STACK_BYTES(%a3),%a0
-        move.l  %a0,TC_SPUPPER(%a4)
-        move.l  %a0,TC_SPREG(%a4)
+        moveq   #0,%d0
+        bsr     alloc_child
+        beq     free_sig
 
         move.l  %a3,-(%sp)
         movea.l %a4,%a1
@@ -161,7 +129,7 @@ _start:
         jsr     AddTask(%a6)
         movea.l (%sp)+,%a3
         tst.l   %d0
-        beq     free_stack1
+        beq     free_child
 
 spin_wait:
         tst.l   spin_counter
@@ -172,19 +140,63 @@ spin_wait:
 
         movea.l %a4,%a1
         jsr     RemTask(%a6)
+        bsr     release_child
 
-        lea     msg_done(%pc),%a0
+        | Part 3: priority -1 child so parent really blocks in Wait before
+        | the child can signal CTRL_E.
+        lea     name_low,%a0
+        moveq   #-1,%d0
+        bsr     alloc_child
+        beq     free_sig
+
+        move.l  %a3,-(%sp)
+        movea.l %a4,%a1
+        lea     low_entry(%pc),%a2
+        suba.l  %a3,%a3
+        jsr     AddTask(%a6)
+        movea.l (%sp)+,%a3
+        tst.l   %d0
+        beq     free_child
+
+        move.l  #SIGBREAKF_CTRL_E,%d0
+        jsr     Wait(%a6)
+
+        lea     msg_blocked(%pc),%a0
+        bsr     print
+        bsr     release_child
+
+        cmpi.l  #2,%d6
+        bne.s   3f
+        lea     msg_run2(%pc),%a0
+        bsr     print
+3:      lea     msg_done(%pc),%a0
         bsr     print
         moveq   #0,%d2
+        bra     free_sig
 
-free_stack1:
-        movea.l %a3,%a1
-        move.l  #STACK_BYTES,%d0
-        jsr     FreeMem(%a6)
-free_task1:
+        | Part 4: child ends early on an unknown opcode while parent waits on
+        | a timeout-free signal the child never sends.
+part_fault:
+        lea     name_fault,%a0
+        moveq   #-1,%d0
+        bsr     alloc_child
+        beq     free_sig
+
+        move.l  %a3,-(%sp)
         movea.l %a4,%a1
-        move.l  #TC_SIZE,%d0
-        jsr     FreeMem(%a6)
+        lea     fault_entry(%pc),%a2
+        suba.l  %a3,%a3
+        jsr     AddTask(%a6)
+        movea.l (%sp)+,%a3
+        tst.l   %d0
+        beq     free_child
+
+        move.l  #SIGBREAKF_CTRL_E,%d0
+        jsr     Wait(%a6)
+
+        moveq   #0,%d2
+free_child:
+        bsr     release_child
 free_sig:
         move.l  %d7,%d0
         jsr     FreeSignal(%a6)
@@ -194,6 +206,53 @@ close_dos:
 done:
         move.l  %d2,%d0
         movem.l (%sp)+,%d2-%d7/%a2-%a6
+        rts
+
+| Allocates Task in A4 and stack in A3 with LN_NAME = A0, LN_PRI = D0.B.
+| Sets Z on failure (freeing Task if stack allocation failed).
+alloc_child:
+        movem.l %d2/%a2,-(%sp)
+        move.l  %d0,%d2
+        movea.l %a0,%a2
+        move.l  #TC_SIZE,%d0
+        move.l  #MEMF_PUBLIC_CLEAR,%d1
+        jsr     AllocMem(%a6)
+        movea.l %d0,%a4
+        tst.l   %d0
+        beq.s   1f
+
+        move.l  #STACK_BYTES,%d0
+        move.l  #MEMF_PUBLIC_CLEAR,%d1
+        jsr     AllocMem(%a6)
+        movea.l %d0,%a3
+        tst.l   %d0
+        bne.s   2f
+
+        movea.l %a4,%a1
+        move.l  #TC_SIZE,%d0
+        jsr     FreeMem(%a6)
+        suba.l  %a4,%a4
+        moveq   #0,%d0
+        bra.s   1f
+
+2:      move.b  #NT_TASK,LN_TYPE(%a4)
+        move.b  %d2,LN_PRI(%a4)
+        move.l  %a2,LN_NAME(%a4)
+        move.l  %a3,TC_SPLOWER(%a4)
+        lea     STACK_BYTES(%a3),%a0
+        move.l  %a0,TC_SPUPPER(%a4)
+        move.l  %a0,TC_SPREG(%a4)
+        moveq   #1,%d0
+1:      movem.l (%sp)+,%d2/%a2
+        rts
+
+release_child:
+        movea.l %a3,%a1
+        move.l  #STACK_BYTES,%d0
+        jsr     FreeMem(%a6)
+        movea.l %a4,%a1
+        move.l  #TC_SIZE,%d0
+        jsr     FreeMem(%a6)
         rts
 
 child1_entry:
@@ -209,6 +268,16 @@ spinner_entry:
         lea     spin_counter,%a0
 1:      addq.l  #1,(%a0)
         bra.s   1b
+
+low_entry:
+        movea.l 4.w,%a6
+        movea.l parent_task,%a1
+        move.l  #SIGBREAKF_CTRL_E,%d0
+        jsr     Signal(%a6)
+        rts
+
+fault_entry:
+        .word   0xF000
 
 | Prints NUL-terminated string at A0 through dos Write(Output()).
 print:
@@ -230,6 +299,8 @@ print:
 dosname:        .asciz  "dos.library"
 msg_signalled:  .asciz  "tasktest: signalled\n"
 msg_preempted:  .asciz  "tasktest: preempted\n"
+msg_blocked:    .asciz  "tasktest: blocked wait ok\n"
+msg_run2:       .asciz  "tasktest: run2\n"
 msg_done:       .asciz  "tasktest: done\n"
         .even
 
@@ -237,6 +308,8 @@ msg_done:       .asciz  "tasktest: done\n"
         .even
 name_child1:    .asciz  "tasktest.child1"
 name_spinner:   .asciz  "tasktest.spinner"
+name_low:       .asciz  "tasktest.low"
+name_fault:     .asciz  "tasktest.fault"
         .even
 parent_task:    .long   0
 spin_counter:   .long   0

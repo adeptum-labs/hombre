@@ -444,17 +444,17 @@ void poll_keys_while_running() {
     }
 }
 
-bool poll_input_while_running() {
+void task_host_poll(void*) {
+    intuition.flush_palette();
     poll_mouse();
     poll_keys_while_running();
-    idle_wait();
-    // Without a keyboard nothing could stop a blocked program: let the run end.
-    return usb_keyboard_status() == UsbStatus::Ready;
 }
 
 bool hook_trampoline(void*) {
-    intuition.flush_palette();
-    return poll_input_while_running();
+    task_host_poll(nullptr);
+    idle_wait();
+    // Without a keyboard nothing could stop a blocked program: let the run end.
+    return usb_keyboard_status() == UsbStatus::Ready;
 }
 
 void task_entry(void* arg) {
@@ -497,7 +497,10 @@ u32 console_read(void*, u8* buf, u32 size) {
                 }
                 return 0;
             }
-            poll_input_while_running();
+            task_host_poll(nullptr);
+            if (key_queue_count == 0 && !exec.yield_in_native()) {
+                idle_wait();
+            }
             continue;
         }
         if (ch == ctrl_backslash) {
@@ -544,11 +547,15 @@ bool console_ready(void*, u32 timeout_us) {
     }
     const Deadline deadline = deadline_in_us(timeout_us);
     while (!expired(deadline)) {
-        if (!poll_input_while_running()) {
-            return key_queue_count > 0;
-        }
+        task_host_poll(nullptr);
         if (key_queue_count > 0) {
             return true;
+        }
+        if (usb_keyboard_status() != UsbStatus::Ready) {
+            return false;
+        }
+        if (!exec.yield_in_native()) {
+            idle_wait();
         }
     }
     return false;
@@ -585,7 +592,8 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         return false;
     }
     exec.set_task_host(TaskHost{&task_host_create, &task_host_switch, &task_host_destroy,
-                                &task_host_slice_over, &hook_trampoline, nullptr});
+                                &task_host_slice_over, &task_host_poll, &hook_trampoline,
+                                nullptr});
     if (!exec.init(machine, free_start, m68k::kGuestBytes)) {
         fail("exec init failed");
         return false;
@@ -610,6 +618,8 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
 // What a finished program may have left behind: its windows and screens, the
 // messages it never replied to and the signals it allocated.
 void reclaim_after_program() {
+    exec.end_child_tasks();
+    exec.reset_nest_counts();
     if (amiga_screen != 0) {
         intuition.reclaim(shell.window(), amiga_screen);
     }

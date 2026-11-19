@@ -2429,6 +2429,11 @@ struct FakeHostState {
     bool create_ok = true;
     bool slice_over = false;
     bool idle_ok = false;
+    u32 poll_calls = 0;
+    void (*on_poll)(void* ctx) = nullptr;
+    void* on_poll_ctx = nullptr;
+    bool (*on_idle)(void* ctx) = nullptr;
+    void* on_idle_ctx = nullptr;
     std::vector<u32> created;
     std::vector<u32> destroyed;
     std::vector<Switch> switches;
@@ -2455,12 +2460,25 @@ bool fake_slice_over(void* ctx) {
     return static_cast<FakeHostState*>(ctx)->slice_over;
 }
 
+void fake_poll(void* ctx) {
+    FakeHostState& s = *static_cast<FakeHostState*>(ctx);
+    ++s.poll_calls;
+    if (s.on_poll != nullptr) {
+        s.on_poll(s.on_poll_ctx);
+    }
+}
+
 bool fake_idle(void* ctx) {
-    return static_cast<FakeHostState*>(ctx)->idle_ok;
+    FakeHostState& s = *static_cast<FakeHostState*>(ctx);
+    if (s.on_idle != nullptr) {
+        return s.on_idle(s.on_idle_ctx);
+    }
+    return s.idle_ok;
 }
 
 TaskHost make_fake_host(FakeHostState& state) {
-    return TaskHost{fake_create, fake_switch, fake_destroy, fake_slice_over, fake_idle, &state};
+    return TaskHost{fake_create, fake_switch, fake_destroy, fake_slice_over,
+                    fake_poll,   fake_idle,   &state};
 }
 
 u32 setup_child_task(Rig& r, u32 task_addr, u32 stack_top, i8 pri, const char* name,
@@ -2779,8 +2797,8 @@ void semaphores_exclusive_shared_nesting_and_attempt() {
     // Switch to `other` (via Wait on boot) -> AttemptSemaphore fails when owned by boot.
     r.cpu().d[0] = 0x0010;
     CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
-    // Scheduler current is now `other`; align `ThisTask`? Note Wait kept boot's
-    // m.cpu while fake switch_to updated ThisTask/task_ to `other`!
+    // Scheduler current is now `other`; Wait switched ThisTask to `other`
+    // while keeping boot's CPU registers in tasks_[0].
     r.cpu().a[0] = sem;
     CHECK_EQ(r.exec(exec_lvo::AttemptSemaphore), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[0], 0u);
@@ -2789,11 +2807,8 @@ void semaphores_exclusive_shared_nesting_and_attempt() {
     CHECK_EQ(r.exec(exec_lvo::AttemptSemaphoreShared), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[0], 0u);
 
-    // `other` calls ObtainSemaphore(sem) -> blocks and switches back to... wait:
-    // boot is Waiting on 0x0010, so `other` blocking leaves both waiting and
-    // idle_ok == false -> logs "every task waits" and aborts to boot.
-    // Instead, wake boot first with Signal(boot, 0x0010), then `other` obtains
-    // and blocks, switching back to boot!
+    // Wake boot first so `other` blocking on ObtainSemaphore switches back
+    // to boot rather than triggering the all-tasks-waiting abort.
     r.cpu().a[1] = boot;
     r.cpu().d[0] = 0x0010;
     CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
@@ -2883,6 +2898,531 @@ void put_msg_pa_softint_logs_once_and_signals_other_task() {
     g_exec.delete_port(port);
 }
 
+struct WakeBootOnSecondIdle {
+    u32 calls = 0;
+    u32 boot = 0;
+};
+
+bool wake_boot_on_second_idle(void* ctx) {
+    WakeBootOnSecondIdle& st = *static_cast<WakeBootOnSecondIdle*>(ctx);
+    ++st.calls;
+    if (st.calls == 2) {
+        g_exec.signal_current_task(0x0010);
+    }
+    return true;
+}
+
+bool send_ctrl_c_on_idle(void* ctx) {
+    u32& calls = *static_cast<u32*>(ctx);
+    ++calls;
+    g_exec.signal_current_task(SIGBREAKF_CTRL_C);
+    return true;
+}
+
+void task_main_clears_exit_logs_name_and_switches_away() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    // Child at kCode executes ILLEGAL (0x4AFC) while boot waits on 0x0010.
+    r.code(kCode, {0x4AFC});
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child.bad", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = kCode;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    r.cpu().d[0] = 0x0010;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+
+    WakeBootOnSecondIdle idle_state{0, kData};
+    host.on_idle = wake_boot_on_second_idle;
+    host.on_idle_ctx = &idle_state;
+    host.switches.clear();
+    g_lines.clear();
+
+    g_exec.task_main(1);
+
+    CHECK(logged("exec: task child.bad ended with Illegal"));
+    CHECK_EQ(idle_state.calls, 2u);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Removed);
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].from, 1u);
+    CHECK_EQ(host.switches[0].to, 0u);
+    CHECK_EQ(r.cpu().exit, ExitReason::None);
+}
+
+void ctrl_c_wakes_boot_task_regardless_of_sigwait() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    // Boot waits for bit 0x0001 only; Ctrl+C must still wake it.
+    r.cpu().d[0] = 0x0001;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_WAIT);
+
+    r.cpu().a[1] = boot;
+    r.cpu().d[0] = SIGBREAKF_CTRL_C;
+    CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_READY);
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{boot});
+}
+
+void add_task_rejects_duplicate_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "dup", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], child);
+    CHECK_EQ(g_exec.scheduler().active_count(), 2u);
+
+    g_lines.clear();
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2100;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(g_exec.scheduler().active_count(), 2u);
+    CHECK(!g_lines.empty());
+}
+
+void semaphores_abort_break_release_guard_and_sigwait() {
+    // 5a + 5d: aborted semaphore wait (every task waits) and Break both dequeue
+    // the waiter, restore ss_QueueCount, zero tc_SigWait and end the run.
+    {
+        Rig r;
+        FakeHostState host{};
+        g_exec.set_task_host(make_fake_host(host));
+        const u32 boot = make_test_task(r, kData);
+        const u32 holder = setup_child_task(r, kData + 0x100, kData + 0x2000, 1, "holder", kNames);
+        const u32 sem = kData + 0x300;
+        for (u32 i = 0; i < SS_SIZE; ++i) {
+            r.put8(sem + i, 0);
+        }
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::InitSemaphore), ExitReason::Halt);
+
+        // Add holder (pri 1 -> runs), holder obtains sem, then waits on 0x0010 -> back to boot.
+        r.cpu().a[1] = holder;
+        r.cpu().a[2] = 0x2000;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+        r.cpu().d[0] = 0x0010;
+        CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+        CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+
+        // Boot has stale tc_SigWait; ObtainSemaphore must clear it and abort cleanly
+        // when idle_ok is false.
+        r.put32(boot + TC_SIGWAIT, 0x000F);
+        host.idle_ok = false;
+        g_lines.clear();
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Unimplemented);
+        CHECK(logged("exec: every task waits"));
+        CHECK_EQ(r.get32(boot + TC_SIGWAIT), 0u);
+        CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+
+        // Reset exit and test Ctrl+C interrupting ObtainSemaphore on boot.
+        r.cpu().exit = ExitReason::None;
+        g_exec.reset_task_signals();
+        u32 idle_calls = 0;
+        host.on_idle = send_ctrl_c_on_idle;
+        host.on_idle_ctx = &idle_calls;
+        g_lines.clear();
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Break);
+        CHECK_EQ(idle_calls, 1u);
+        CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+        CHECK_EQ(r.get32(boot + TC_SIGRECVD) & SIGBREAKF_CTRL_C, 0u);
+        CHECK(r.walk(r.base() + TaskReady).empty());
+        CHECK(r.walk(r.base() + TaskWait) == std::vector<u32>{holder});
+
+        // Wake holder so holder releases sem cleanly back to -1 (0xFFFF).
+        r.cpu().exit = ExitReason::None;
+        r.cpu().a[1] = holder;
+        r.cpu().d[0] = 0x0010;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        // Boot waits on 0x0020 so holder (pri 1) runs and releases sem.
+        r.cpu().d[0] = 0x0020;
+        CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+        CHECK_EQ(r.get32(sem + SS_OWNER), 0u);
+        CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 0u);
+        CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0xFFFFu);
+    }
+
+    // 5c + 5d: Signal cannot wake a semaphore waiter, and ReleaseSemaphore never
+    // hands a semaphore to a task that is no longer Waiting.
+    {
+        Rig r;
+        FakeHostState host{};
+        g_exec.set_task_host(make_fake_host(host));
+        const u32 boot = make_test_task(r, kData);
+        const u32 holder = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "holder", kNames);
+        const u32 sem = kData + 0x300;
+        for (u32 i = 0; i < SS_SIZE; ++i) {
+            r.put8(sem + i, 0);
+        }
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::InitSemaphore), ExitReason::Halt);
+
+        // Add holder (pri 0), boot waits on 0x0010 to switch to holder.
+        r.cpu().a[1] = holder;
+        r.cpu().a[2] = 0x2000;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+        r.cpu().d[0] = 0x0010;
+        CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+
+        // Holder obtains sem, wakes boot, waits on 0x0020 -> switches to boot.
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+        r.cpu().a[1] = boot;
+        r.cpu().d[0] = 0x0010;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        r.cpu().d[0] = 0x0020;
+        CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+
+        // Now boot is Running, holder is Waiting on 0x0020. Boot sets stale
+        // tc_SigWait = 0x0001 and blocks on sem -> switches to holder (via Signal).
+        r.put32(boot + TC_SIGWAIT, 0x0001);
+        r.cpu().a[1] = holder;
+        r.cpu().d[0] = 0x0020;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+        CHECK_EQ(r.get32(boot + TC_SIGWAIT), 0u);
+        CHECK_EQ(r.get8(boot + TC_STATE), TS_WAIT);
+
+        // Signal(boot, 0x0001) must NOT wake boot while blocked on sem.
+        r.cpu().a[1] = boot;
+        r.cpu().d[0] = 0x0001;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        CHECK_EQ(r.get8(boot + TC_STATE), TS_WAIT);
+
+        // Ctrl+C wakes boot to Ready (before boot resumes), then holder releases sem:
+        // holder must NOT hand ownership to boot or corrupt TaskReady.
+        r.cpu().a[1] = boot;
+        r.cpu().d[0] = SIGBREAKF_CTRL_C;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        CHECK_EQ(r.get8(boot + TC_STATE), TS_READY);
+
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+        CHECK_EQ(r.get32(sem + SS_OWNER), 0u);
+        CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 0u);
+        CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0xFFFFu);
+        CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{boot});
+    }
+}
+
+void shared_semaphore_nests_while_exclusive_waiter_queues() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    const u32 writer = setup_child_task(r, kData + 0x100, kData + 0x2000, 1, "writer", kNames);
+    const u32 sem = kData + 0x300;
+    for (u32 i = 0; i < SS_SIZE; ++i) {
+        r.put8(sem + i, 0);
+    }
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::InitSemaphore), ExitReason::Halt);
+
+    // Boot acquires shared access.
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphoreShared), ExitReason::Halt);
+    CHECK_EQ(r.get32(sem + SS_OWNER), 0u);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 1u);
+
+    // Higher-priority writer runs and blocks on ObtainSemaphore -> switches back to boot.
+    r.cpu().a[1] = writer;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get8(writer + TC_STATE), TS_WAIT);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+
+    // Boot must still succeed on AttemptSemaphoreShared and nested ObtainSemaphoreShared.
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AttemptSemaphoreShared), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 1u);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 2u);
+
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphoreShared), ExitReason::Halt);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 3u);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+
+    // Releasing all 3 shared nests hands exclusive ownership to writer.
+    for (u32 i = 0; i < 3; ++i) {
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    }
+    CHECK_EQ(r.get32(sem + SS_OWNER), writer);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 1u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+    CHECK_EQ(r.get8(writer + TC_STATE), TS_RUN);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+}
+
+}  // namespace
+
+namespace hombre {
+struct ExecTest {
+    static void fill_sem_queue(Exec& e, u32 sem_addr) {
+        Exec::SemWaitQueue* q = e.sem_queue(sem_addr, true);
+        CHECK(q != nullptr);
+        q->count = Scheduler::kMaxTasks;
+    }
+
+    static void fill_all_sem_queues(Exec& e, u32 base_addr) {
+        for (u32 i = 0; i < Exec::kMaxSemaphores; ++i) {
+            Exec::SemWaitQueue* q = e.sem_queue(base_addr + i * 0x40, true);
+            CHECK(q != nullptr);
+            q->count = 1;
+        }
+    }
+
+    static u32& load_depth(Exec& e) { return e.load_depth_; }
+    static u32 task_load_depth(const Exec& e, u32 id) { return e.tasks_[id].load_depth; }
+};
+}  // namespace hombre
+
+namespace {
+
+void semaphore_wait_queue_full_logs_and_ends_run() {
+    // Waiter array full on a single semaphore.
+    {
+        Rig r;
+        FakeHostState host{};
+        g_exec.set_task_host(make_fake_host(host));
+        make_test_task(r, kData);
+        const u32 other = setup_child_task(r, kData + 0x100, kData + 0x2000, 1, "other", kNames);
+        const u32 sem = kData + 0x300;
+        for (u32 i = 0; i < SS_SIZE; ++i) {
+            r.put8(sem + i, 0);
+        }
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::InitSemaphore), ExitReason::Halt);
+
+        r.cpu().a[1] = other;
+        r.cpu().a[2] = 0x2000;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+
+        // Wait on other to switch back to boot.
+        r.cpu().d[0] = 0x0010;
+        CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+
+        ExecTest::fill_sem_queue(g_exec, sem);
+        g_lines.clear();
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Unimplemented);
+        CHECK(logged("exec: semaphore wait queue full"));
+    }
+
+    // All host semaphore queue slots occupied.
+    {
+        Rig r;
+        FakeHostState host{};
+        g_exec.set_task_host(make_fake_host(host));
+        make_test_task(r, kData);
+        const u32 other = setup_child_task(r, kData + 0x100, kData + 0x2000, 1, "other", kNames);
+        const u32 sem = kData + 0x300;
+        for (u32 i = 0; i < SS_SIZE; ++i) {
+            r.put8(sem + i, 0);
+        }
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::InitSemaphore), ExitReason::Halt);
+
+        r.cpu().a[1] = other;
+        r.cpu().a[2] = 0x2000;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+        r.cpu().d[0] = 0x0010;
+        CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+
+        ExecTest::fill_all_sem_queues(g_exec, kData + 0x1000);
+        g_lines.clear();
+        r.cpu().a[0] = sem;
+        CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Unimplemented);
+        CHECK(logged("exec: semaphore wait queue full"));
+    }
+}
+
+void clear_slice_on_poll(void* ctx) {
+    static_cast<FakeHostState*>(ctx)->slice_over = false;
+}
+
+void slice_end_calls_task_host_poll() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    // Run with slice_over true: poll runs at slice end and switches to child.
+    host.slice_over = true;
+    host.on_poll = clear_slice_on_poll;
+    host.on_poll_ctx = &host;
+    r.code(kCode, {0x4E71, 0x4EF8, 0x0400});  // NOP ; JMP $400.w
+    g_jit.flush();
+    CHECK_EQ(r.go(kCode), ExitReason::Halt);
+    CHECK_EQ(host.poll_calls, 1u);
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].from, 0u);
+    CHECK_EQ(host.switches[0].to, 1u);
+}
+
+void end_child_tasks_removes_reaps_and_clears_sem_waiters() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    const u32 sem = kData + 0x300;
+    for (u32 i = 0; i < SS_SIZE; ++i) {
+        r.put8(sem + i, 0);
+    }
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::InitSemaphore), ExitReason::Halt);
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+
+    const u32 c1 = setup_child_task(r, kData + 0x100, kData + 0x2000, -1, "child.ready", kNames);
+    r.cpu().a[1] = c1;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    // Higher-priority c2 runs immediately and blocks on sem held by boot.
+    const u32 c2 =
+        setup_child_task(r, kData + 0x200, kData + 0x3000, 2, "child.wait", kNames + 0x20);
+    r.cpu().a[1] = c2;
+    r.cpu().a[2] = 0x2100;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 1u);
+
+    g_lines.clear();
+    g_exec.end_child_tasks();
+
+    CHECK(logged("exec: ended task child.ready"));
+    CHECK(logged("exec: ended task child.wait"));
+    CHECK_EQ(g_exec.scheduler().active_count(), 1u);
+    CHECK_EQ(host.destroyed.size(), 2u);
+    CHECK(r.walk(r.base() + TaskReady).empty());
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+
+    // Releasing sem returns it to free (-1 / 0xFFFF).
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get32(sem + SS_OWNER), 0u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0xFFFFu);
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+}
+
+void reset_nest_counts_clears_forbid_and_disable() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK_EQ(r.exec(exec_lvo::Disable), ExitReason::Halt);
+    CHECK_EQ(r.get8(r.base() + TDNestCnt), 1u);
+    CHECK_EQ(r.get8(r.base() + IDNestCnt), 0u);
+
+    // Tamper with guest Task nest counts: host copy must still govern switches.
+    r.put8(boot + TC_TDNESTCNT, 0xFF);
+    r.put8(boot + TC_IDNESTCNT, 0xFF);
+
+    g_exec.reset_nest_counts();
+    CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
+    CHECK_EQ(r.get8(r.base() + IDNestCnt), 0xFFu);
+    CHECK_EQ(r.get8(boot + TC_TDNESTCNT), 0xFFu);
+    CHECK_EQ(r.get8(boot + TC_IDNESTCNT), 0xFFu);
+
+    const u32 hi = setup_child_task(r, kData + 0x100, kData + 0x2000, 3, "hi", kNames);
+    r.cpu().a[1] = hi;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].to, 1u);
+}
+
+void yield_in_native_and_per_task_state() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    // No other task Ready -> yield_in_native returns false.
+    CHECK(!g_exec.yield_in_native());
+
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    // Corrupt guest nest counts on child and boot; host copies must be used.
+    r.put8(boot + TC_TDNESTCNT, 0x12);
+    r.put8(child + TC_TDNESTCNT, 0x34);
+    ExecTest::load_depth(g_exec) = 2;
+
+    // Forbid blocks yield_in_native.
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK(!g_exec.yield_in_native());
+    CHECK_EQ(r.exec(exec_lvo::Permit), ExitReason::Halt);
+
+    CHECK(g_exec.yield_in_native());
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].from, 0u);
+    CHECK_EQ(host.switches[0].to, 1u);
+    CHECK_EQ(ExecTest::task_load_depth(g_exec, 0), 2u);
+    CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
+}
+
 }
 
 int main() {
@@ -2949,5 +3489,15 @@ int main() {
     forbid_holds_off_switch_until_permit();
     semaphores_exclusive_shared_nesting_and_attempt();
     put_msg_pa_softint_logs_once_and_signals_other_task();
+    task_main_clears_exit_logs_name_and_switches_away();
+    ctrl_c_wakes_boot_task_regardless_of_sigwait();
+    add_task_rejects_duplicate_task();
+    semaphores_abort_break_release_guard_and_sigwait();
+    shared_semaphore_nests_while_exclusive_waiter_queues();
+    semaphore_wait_queue_full_logs_and_ends_run();
+    slice_end_calls_task_host_poll();
+    end_child_tasks_removes_reaps_and_clears_sem_waiters();
+    reset_nest_counts_clears_forbid_and_disable();
+    yield_in_native_and_per_task_state();
     return check::finish("test_exec");
 }

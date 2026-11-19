@@ -210,9 +210,16 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "mousetest: change at 250,120 size 240x160" "mousetest: newsize 200x130" \
 	    "mousetest: change at 250,120 size 200x130" "mousetest: break" \
 	    "m68k: C:mousetest returned 0"
-	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t ret" \
-	    "tasktest: signalled" "tasktest: preempted" "tasktest: done" \
-	    "m68k: C:tasktest returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t ret t a s k t e s t spc 2 ret" \
+	    "tasktest: signalled" "tasktest: preempted" "tasktest: blocked wait ok" \
+	    "tasktest: run2" "tasktest: done" "m68k: C:tasktest returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t spc f a u l t ret" \
+	    --mouse-after "exec: task tasktest.fault ended with Illegal" \
+	    --mouse "sendkey ctrl-c;sendkey v;sendkey e;sendkey r;sendkey s;sendkey i;sendkey o;sendkey n;sendkey ret" \
+	    "exec: task tasktest.fault ended with Illegal" \
+	    "exec: Wait interrupted by Ctrl+C" \
+	    "m68k: Break at pc=" \
+	    "m68k: C:version returned 0"
 # Scrollback boot check: the full-screen shell shows 46 rows, so PageUp
 # steps 45 rows. Enough empty lines pass one page; Shift+Up, PageUp and one
 # wheel notch up (QEMU's mouse_move dz 1) scroll back, and a typed key

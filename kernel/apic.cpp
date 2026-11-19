@@ -272,6 +272,9 @@ u64 timer_ticks() {
 }
 
 bool take_need_resched() {
+    if (!__atomic_load_n(&need_resched, __ATOMIC_RELAXED)) {
+        return false;
+    }
     const u64 flags = irq_save();
     const bool pending = need_resched;
     need_resched = false;

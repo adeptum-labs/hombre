@@ -290,6 +290,8 @@ struct TaskHost {
     void (*destroy)(void* ctx, u32 id);
     // True once per time slice (take_need_resched).
     bool (*slice_over)(void* ctx);
+    // Polls input and flushes the display without halting; called at slice end.
+    void (*poll)(void* ctx);
     // Polls input and halts until the next interrupt; called while no
     // task can run. False when nothing can ever wake a waiter (no
     // keyboard).
@@ -362,6 +364,19 @@ public:
     // permitted.
     void yield_if_ready();
 
+    // Yields from inside a native call when another task is Ready and
+    // scheduling is permitted, returning true after switching back or false
+    // when no switch took place.
+    bool yield_in_native();
+
+    // Removes and reaps every non-boot task and clears their semaphore wait
+    // queue entries.
+    void end_child_tasks();
+
+    // Resets TDNestCnt and IDNestCnt to -1 (0xFF) in ExecBase, the host
+    // context, and the boot task's Task structure.
+    void reset_nest_counts();
+
     const Scheduler& scheduler() const { return sched_; }
 
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
@@ -396,6 +411,7 @@ public:
 
 private:
     friend struct ExecOps;
+    friend struct ExecTest;
 
     static constexpr u32 kMaxLibraries = 32;
     static constexpr u32 kMaxLoaded = 32;
@@ -412,6 +428,7 @@ private:
         m68k::CpuState cpu{};
         m68k::Jit::RunState run_state{};
         u32 call_depth = 0;
+        u32 load_depth = 0;
         u32 task_addr = 0;
         u64 budget = 0;
         u8 td_nest = 0xFF;
@@ -430,9 +447,10 @@ private:
 
     bool forbidden() const;
     void maybe_preempt();
-    void switch_to_task(i32 next_id);
+    bool switch_to_task(i32 next_id);
     void reap_removed();
     void remove_sem_waiter(u32 task_id);
+    bool has_sem_waiter(u32 sem_addr, u32 task_id) const;
     SemWaitQueue* sem_queue(u32 sem_addr, bool create);
 
     m68k::Machine* m_ = nullptr;
@@ -454,7 +472,7 @@ private:
     u32 task_exit_stub_ = 0;
     SegmentLoader loader_{nullptr, nullptr};
     IdleHook idle_{nullptr, nullptr};
-    TaskHost task_host_{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    TaskHost task_host_{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
     Scheduler sched_{};
     TaskContext tasks_[Scheduler::kMaxTasks]{};
     SemWaitQueue sem_queues_[kMaxSemaphores]{};

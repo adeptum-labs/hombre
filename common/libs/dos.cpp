@@ -7823,6 +7823,8 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
     exited_ = false;
     const ExitReason why = m_->jit->call_guest((seglist << 2) + 4, max_blocks);
     running_ = false;
+    exec_->end_child_tasks();
+    exec_->reset_nest_counts();
     DosOps::cleanup_command(*this, saved_current_dir, saved_cis, saved_cos);
     bool ok = false;
     if (why == ExitReason::Returned) {

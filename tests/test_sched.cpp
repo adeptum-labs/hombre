@@ -237,6 +237,32 @@ void find_across_states() {
     CHECK_EQ(s.find(0x1111), 0);
 }
 
+void switch_to_returns_bool_and_rejects_invalid_targets() {
+    Scheduler s;
+    s.init(0x1000);
+    const i32 rdy = s.add(0x2000, 0);
+    const i32 wtg = s.add(0x3000, 0);
+    const i32 rem = s.add(0x4000, 0);
+
+    CHECK(s.switch_to(wtg));
+    s.wait(wtg);
+    s.remove(rem);
+
+    // Out-of-range, Free, Waiting, Removed and already-Running targets fail.
+    CHECK(!s.switch_to(-1));
+    CHECK(!s.switch_to(Scheduler::kMaxTasks));
+    CHECK(!s.switch_to(10));
+    CHECK(!s.switch_to(wtg));
+    CHECK(!s.switch_to(rem));
+    CHECK_EQ(s.current(), wtg);
+
+    // Ready target succeeds.
+    CHECK(s.switch_to(rdy));
+    CHECK_EQ(s.current(), rdy);
+    CHECK(!s.switch_to(rdy));
+    CHECK_EQ(s.current(), rdy);
+}
+
 }  // namespace
 
 int main() {
@@ -247,5 +273,6 @@ int main() {
     full_table_and_reuse();
     set_priority_requeues();
     find_across_states();
+    switch_to_returns_bool_and_rejects_invalid_targets();
     return check::finish("test_sched");
 }
