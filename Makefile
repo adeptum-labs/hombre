@@ -216,6 +216,11 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "t i m e r t e s t ret" \
 	    "timertest: timer ok" "timertest: abort ok" "timertest: delay ok" \
 	    "m68k: C:timertest returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "r u n spc t i m e r t e s t ret v e r s i o n ret" \
+	    "[CLI 2]" "m68k: C:version returned 0" "timertest: delay ok" \
+	    "dos: CLI 2 ended, returned 0"
+	bash tools/log_order.sh build/serial.log "shell: builtin run returned 0" \
+	    "timertest: slept" "dos: CLI 2 ended, returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t spc f a u l t ret" \
 	    --mouse-after "exec: task tasktest.fault ended with Illegal" \
 	    --mouse "sendkey ctrl-c;sendkey v;sendkey e;sendkey r;sendkey s;sendkey i;sendkey o;sendkey n;sendkey ret" \
@@ -267,13 +272,16 @@ check-workbench: image
 	    "intuition: window opened HombreShell" "m68k: running C:Version" \
 	    "Kickstart 60.0, Workbench 40.42" "m68k: C:Version returned 0" "halting"
 	tools/boot_check.sh --disk "$$DISK" \
-	    --keys "d i r ret l i s t spc c ret t y p e spc s shift-dot s t a r t u p slash s e q u e n c e ret i n f o ret a s s i g n ret d a t e ret w h i c h spc d i r ret c d spc c ret c d spc shift-7 ret a s k spc q ret y ret w h y ret" \
+	    --keys "d i r ret l i s t spc c ret t y p e spc s shift-dot s t a r t u p slash s e q u e n c e ret i n f o ret a s s i g n ret d a t e ret w h i c h spc d i r ret c d spc c ret c d spc shift-7 ret a s k spc q ret y ret w h y ret r u n spc w a i t spc 3 ret e c h o spc h i ret" \
 	    "m68k: C:dir returned 0" "m68k: C:list returned 0" "Directory \"C\" on" \
 	    "m68k: C:type returned 0" "Workbench3.1 [Mounted]" "m68k: C:info returned 0" \
 	    "LIBS           Workbench3.1:Libs" "m68k: C:assign returned 0" \
 	    "m68k: C:date returned 0" "m68k: C:which returned 0" \
 	    "shell: builtin cd returned 0" "shell: builtin ask returned 5" \
-	    "shell: builtin why returned 0"
+	    "shell: builtin why returned 0" "[CLI 2]" \
+	    "shell: builtin echo returned 0" "dos: CLI 2 ended, returned 0"
+	bash tools/log_order.sh build/serial.log "shell: builtin echo returned 0" \
+	    "dos: CLI 2 ended, returned 0"
 	tools/boot_check.sh --disk "$$DISK" \
 	    --keys "m a k e d i r spc r a m shift-dot x ret c o p y spc s shift-dot s t a r t u p slash s e q u e n c e spc r a m shift-dot x ret t y p e spc r a m shift-dot x shift-7 s t a r t u p slash s e q u e n c e ret r e n a m e spc r a m shift-dot x spc r a m shift-dot y ret p r o t e c t spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc s spc a d d ret f i l e n o t e spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc h e l l o ret l i s t spc r a m shift-dot y ret d e l e t e spc r a m shift-dot y spc a l l ret d i r spc r a m shift-dot ret s e t e n v spc f o o spc b a r ret g e t e n v spc f o o ret t y p e spc e n v shift-dot f o o ret i n f o ret w a i t spc 1 ret" \
 	    "m68k: C:makedir returned 0" "m68k: C:copy returned 0" \

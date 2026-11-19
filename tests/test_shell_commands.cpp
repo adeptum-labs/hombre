@@ -52,6 +52,22 @@ void print_sink(void* ctx, const char* text) {
     *static_cast<std::string*>(ctx) += text;
 }
 
+// HUNK_HEADER with one HUNK_CODE holding RTS.
+std::vector<u8> rts_hunk() {
+    return {
+        0x00, 0x00, 0x03, 0xF3,  // HUNK_HEADER
+        0x00, 0x00, 0x00, 0x00,  // no names
+        0x00, 0x00, 0x00, 0x01,  // one hunk
+        0x00, 0x00, 0x00, 0x00,  // first hunk 0
+        0x00, 0x00, 0x00, 0x00,  // last hunk 0
+        0x00, 0x00, 0x00, 0x01,  // hunk 0 size in longs
+        0x00, 0x00, 0x03, 0xE9,  // HUNK_CODE
+        0x00, 0x00, 0x00, 0x01,  // one long
+        0x00, 0x00, 0x4E, 0x75,  // RTS
+        0x00, 0x00, 0x03, 0xF2,  // HUNK_END
+    };
+}
+
 class Rig {
 public:
     Rig()
@@ -59,6 +75,7 @@ public:
           image_(build_adf("HombreTest", false,
                            {
                                {"C/Echo", {'x'}},
+                               {"C/RunMe", rts_hunk()},
                                {"S/Startup-Sequence", {'e', 'c', 'h', 'o', '\n'}},
                                {"Devs/Sub/Deep", {'d'}},
                            })) {
@@ -644,6 +661,31 @@ void local_variable_builtins() {
     CHECK(out == "gval\n");
 }
 
+void run_starts_a_background_cli() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("run", ""));
+    CHECK(out == "Run: no command\n");
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+
+    out.clear();
+    CHECK(cmds.run("run", "nosuch"));
+    CHECK(out == "Unknown command nosuch\n");
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+
+    out.clear();
+    CHECK(cmds.run("run", "echo hi"));
+    CHECK(out == "Unknown command echo\n");
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+
+    out.clear();
+    CHECK(cmds.run("run", "RunMe one"));
+    CHECK(out == "[CLI 2]\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+}
+
 }
 
 int main() {
@@ -662,5 +704,6 @@ int main() {
     env_variable_builtins();
     env_variable_readable_via_dos_open();
     local_variable_builtins();
+    run_starts_a_background_cli();
     return check::finish("test_shell_commands");
 }

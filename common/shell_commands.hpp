@@ -33,8 +33,8 @@ class Dos;
 using ShellPrint = void (*)(void* ctx, const char* text);
 
 // Internal AmigaDOS Shell commands (CD, ECHO, PATH, WHY, PROMPT, ASK, FAILAT,
-// SET, GET, UNSET, SETENV, GETENV, UNSETENV) backed by a Dos instance and a
-// text output callback.
+// SET, GET, UNSET, SETENV, GETENV, UNSETENV, RUN) backed by a Dos instance
+// and a text output callback.
 class ShellCommands {
 public:
     constexpr ShellCommands() = default;
@@ -61,6 +61,7 @@ private:
     void cmd_prompt(const char* args);
     void cmd_ask(const char* args);
     void cmd_failat(const char* args);
+    void cmd_run(const char* args);
     void cmd_set_var(const char* args, bool global);
     void cmd_get_var(const char* args, bool global);
     void cmd_unset_var(const char* args, bool global);

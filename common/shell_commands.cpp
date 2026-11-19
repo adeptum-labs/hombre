@@ -153,6 +153,18 @@ bool next_token(const char*& p, char* out, u32 cap) {
     return true;
 }
 
+bool is_builtin_word(const char* word) {
+    constexpr const char* kNames[] = {"CD",     "ECHO",   "PATH",   "WHY",   "PROMPT",
+                                      "ASK",    "FAILAT", "SET",    "GET",   "UNSET",
+                                      "SETENV", "GETENV", "UNSETENV", "RUN"};
+    for (const char* name : kNames) {
+        if (eq_nocase(word, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool parse_u32_decimal(const char* s, u32& out) {
     if (s == nullptr || *s == '\0') {
         return false;
@@ -192,6 +204,10 @@ bool ShellCommands::run(const char* word, const char* args) {
         return false;
     }
     const char* a = args != nullptr ? args : "";
+    if (eq_nocase(word, "RUN")) {
+        cmd_run(a);
+        return true;
+    }
     if (eq_nocase(word, "CD")) {
         cmd_cd(a);
         return true;
@@ -520,6 +536,51 @@ void ShellCommands::cmd_failat(const char* args) {
         level = 1u;
     }
     dos_->set_fail_level(level);
+    dos_->set_return_code(0);
+}
+
+void ShellCommands::cmd_run(const char* args) {
+    auto unknown = [&](const char* word) {
+        char msg[kLineBuf];
+        u32 pos = append_str(msg, sizeof msg, 0, "Unknown command ");
+        pos = append_str(msg, sizeof msg, pos, word);
+        pos = append_char(msg, sizeof msg, pos, '\n');
+        msg[pos] = '\0';
+        emit(msg);
+        dos_->set_return_code(10);
+    };
+    const char* p = args;
+    char word[Dos::kMaxPath];
+    if (!next_token(p, word, sizeof word)) {
+        emit_line("Run: no command");
+        dos_->set_return_code(10);
+        return;
+    }
+    if (is_builtin_word(word)) {
+        unknown(word);
+        return;
+    }
+    char cmd[Dos::kMaxPath];
+    if (!dos_->find_command(word, cmd, sizeof cmd)) {
+        unknown(word);
+        return;
+    }
+    while (is_blank(*p)) {
+        ++p;
+    }
+    const u32 cli = dos_->start_background(cmd, p);
+    if (cli == 0) {
+        unknown(word);
+        return;
+    }
+    char digits[16];
+    format_u64(digits, sizeof digits, cli, 10);
+    char msg[kLineBuf];
+    u32 pos = append_str(msg, sizeof msg, 0, "[CLI ");
+    pos = append_str(msg, sizeof msg, pos, digits);
+    pos = append_str(msg, sizeof msg, pos, "]\n");
+    msg[pos] = '\0';
+    emit(msg);
     dos_->set_return_code(0);
 }
 
