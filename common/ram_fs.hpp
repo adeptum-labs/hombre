@@ -348,6 +348,25 @@ public:
         return 0;
     }
 
+    // Sets any used node whose date is still all zero to the current clock.
+    void stamp_zero_dates() {
+        if (store_.now == nullptr) {
+            return;
+        }
+        u32 days = 0;
+        u32 minute = 0;
+        u32 tick = 0;
+        store_.now(store_.ctx, days, minute, tick);
+        for (u32 i = 0; i < kMaxNodes; ++i) {
+            Node& n = nodes_[i];
+            if (n.used && n.date.days == 0 && n.date.minute == 0 && n.date.tick == 0) {
+                n.date.days = days;
+                n.date.minute = minute;
+                n.date.tick = tick;
+            }
+        }
+    }
+
     void retain(u32 node) {
         if (valid(node)) {
             ++nodes_[node].open_count;

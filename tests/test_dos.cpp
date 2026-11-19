@@ -5734,6 +5734,133 @@ void global_variables() {
     CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
 }
 
+void ram_handler_port_and_zero_dates() {
+    // RAM: has its own MsgPort on DosList nodes, locks, handles, GetDeviceProc and DoPkt.
+    {
+        Rig r;
+        const u32 adf_port = r.call(dos_lvo::GetFileSysTask);
+        CHECK(adf_port != 0);
+
+        const u32 head = r.call(dos_lvo::LockDosList, LDF_ALL | LDF_READ);
+        r.str(kData, "RAM");
+        const u32 ram_dev = r.call(dos_lvo::FindDosEntry, head, kData, LDF_DEVICES);
+        CHECK(ram_dev != 0);
+        const u32 ram_port = r.get32(ram_dev + dol_Task);
+        CHECK(ram_port != 0);
+        CHECK(ram_port != adf_port);
+
+        r.str(kData, "Ram Disk");
+        const u32 ram_vol = r.call(dos_lvo::FindDosEntry, head, kData, LDF_VOLUMES);
+        CHECK(ram_vol != 0);
+        CHECK_EQ(r.get32(ram_vol + dol_Task), ram_port);
+
+        r.str(kData, "DF0");
+        const u32 df0_dev = r.call(dos_lvo::FindDosEntry, head, kData, LDF_DEVICES);
+        CHECK(df0_dev != 0);
+        CHECK_EQ(r.get32(df0_dev + dol_Task), adf_port);
+
+        r.str(kData, "HombreTest");
+        const u32 adf_vol = r.call(dos_lvo::FindDosEntry, head, kData, LDF_VOLUMES);
+        CHECK(adf_vol != 0);
+        CHECK_EQ(r.get32(adf_vol + dol_Task), adf_port);
+        r.call(dos_lvo::UnLockDosList, LDF_ALL | LDF_READ);
+
+        const u32 id = kData + 0x100;
+        CHECK_EQ(r.call(dos_lvo::DoPkt, ram_port, ACTION_DISK_INFO, id >> 2), DOSTRUE);
+        CHECK_EQ(r.get32(id + id_DiskState), ID_VALIDATED);
+        CHECK_EQ(r.get32(id + id_VolumeNode), ram_vol >> 2);
+
+        CHECK_EQ(r.call(dos_lvo::DoPkt, adf_port, ACTION_DISK_INFO, id >> 2), DOSTRUE);
+        CHECK_EQ(r.get32(id + id_DiskState), ID_WRITE_PROTECTED);
+        CHECK_EQ(r.get32(id + id_VolumeNode), adf_vol >> 2);
+
+        CHECK_EQ(r.call(dos_lvo::DoPkt, ram_port, ACTION_CURRENT_VOLUME), ram_vol >> 2);
+
+        for (const char* ram_name : {"RAM:", "Ram Disk:", "T:", "ENV:"}) {
+            r.str(kData, ram_name);
+            const u32 dp = r.call(dos_lvo::GetDeviceProc, kData, 0);
+            CHECK(dp != 0);
+            CHECK_EQ(r.get32(dp + dvp_Port), ram_port);
+            r.call(dos_lvo::FreeDeviceProc, dp);
+        }
+        for (const char* adf_name : {"SYS:", "DF0:", "HombreTest:"}) {
+            r.str(kData, adf_name);
+            const u32 dp = r.call(dos_lvo::GetDeviceProc, kData, 0);
+            CHECK(dp != 0);
+            CHECK_EQ(r.get32(dp + dvp_Port), adf_port);
+            r.call(dos_lvo::FreeDeviceProc, dp);
+        }
+
+        r.str(kData, "RAM:T");
+        const u32 ram_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(ram_lock != 0);
+        CHECK_EQ(r.get32((ram_lock << 2) + fl_Task), ram_port);
+
+        r.str(kData, "RAM:probe");
+        const u32 ram_fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+        CHECK(ram_fh != 0);
+        CHECK_EQ(r.get32((ram_fh << 2) + fh_Type), ram_port);
+        r.call(dos_lvo::Close, ram_fh);
+
+        const u32 bstr = kData + 0x200;
+        const u32 buf = kData + 0x300;
+        put_bstr_at(r, bstr, "T");
+        const u32 pkt_t =
+            r.call(dos_lvo::DoPkt, ram_port, ACTION_LOCATE_OBJECT, 0, bstr >> 2, SHARED_LOCK);
+        CHECK(pkt_t != 0);
+        CHECK_EQ(r.call(dos_lvo::SameLock, pkt_t, ram_lock), LOCK_SAME);
+        CHECK_EQ(r.call(dos_lvo::NameFromLock, pkt_t, buf, 64), DOSTRUE);
+        CHECK(r.read_str(buf) == "Ram Disk:T");
+        r.call(dos_lvo::UnLock, pkt_t);
+        r.call(dos_lvo::UnLock, ram_lock);
+    }
+
+    // Boot-time RAM nodes with zero dates receive the clock date when set_clock runs;
+    // ENVARC copies keep their non-zero source dates.
+    {
+        std::vector<AdfFile> files = standard_files();
+        files.push_back({"Prefs/Env-Archive/kept", text("v")});
+        std::vector<u8> image = build_adf("HombreTest", false, files);
+        AdfVolume vol{};
+        CHECK(adf_mount(image.data(), image.size(), vol) == FsError::Ok);
+        DirEntry kept{};
+        CHECK(adf_find(vol, "Prefs/Env-Archive/kept", kept) == FsError::Ok);
+        const auto put_be32_at = [&](u32 block, u32 long_idx, u32 value) {
+            const usize off = static_cast<usize>(block) * 512 + long_idx * 4;
+            image[off + 0] = static_cast<u8>(value >> 24);
+            image[off + 1] = static_cast<u8>(value >> 16);
+            image[off + 2] = static_cast<u8>(value >> 8);
+            image[off + 3] = static_cast<u8>(value);
+        };
+        put_be32_at(kept.header_block, 105, 42);
+        put_be32_at(kept.header_block, 106, 100);
+        put_be32_at(kept.header_block, 107, 200);
+        adf_fix_checksum(image, kept.header_block);
+
+        Rig r(std::move(image));
+        g_dos.set_clock(fake_clock_2026);
+
+        const u32 fib = kData + 0x200;
+        r.str(kData, "RAM:T");
+        const u32 t_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(t_lock != 0);
+        CHECK_EQ(r.call(dos_lvo::Examine, t_lock, fib), DOSTRUE);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 17853u);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 17u * 60u + 30u);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 45u * 50u);
+        r.call(dos_lvo::UnLock, t_lock);
+
+        r.str(kData, "ENV:kept");
+        const u32 kept_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(kept_lock != 0);
+        CHECK_EQ(r.call(dos_lvo::Examine, kept_lock, fib), DOSTRUE);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 42u);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 100u);
+        CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 200u);
+        r.call(dos_lvo::UnLock, kept_lock);
+    }
+}
+
 }
 
 int main() {
@@ -5831,5 +5958,6 @@ int main() {
     ram_enumeration_after_delete_info_and_cleanup();
     t_and_env_assigns_and_envarc_copy();
     global_variables();
+    ram_handler_port_and_zero_dates();
     return check::finish("test_dos");
 }

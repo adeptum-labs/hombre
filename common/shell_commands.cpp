@@ -80,6 +80,35 @@ u32 append_char(char* out, u32 cap, u32 pos, char c) {
     return pos;
 }
 
+// Copies p[0..end) into out, stripping '"' quotes and expanding '*' escapes
+// inside quotes just as AmigaDOS ECHO does.
+u32 append_unquoted(const char* p, u32 end, char* out, u32 cap, u32 pos = 0) {
+    bool in_quote = false;
+    for (u32 i = 0; i < end; ++i) {
+        const char c = p[i];
+        if (c == '"') {
+            in_quote = !in_quote;
+            continue;
+        }
+        if (in_quote && c == '*' && i + 1 < end) {
+            const char next = p[++i];
+            if (next == 'n' || next == 'N') {
+                pos = append_char(out, cap, pos, '\n');
+            } else if (next == 'e' || next == 'E') {
+                pos = append_char(out, cap, pos, 0x1B);
+            } else {
+                pos = append_char(out, cap, pos, next);
+            }
+            continue;
+        }
+        pos = append_char(out, cap, pos, c);
+    }
+    if (out != nullptr && cap > 0) {
+        out[pos] = '\0';
+    }
+    return pos;
+}
+
 // Reads one argument token from p (skipping leading blanks, stripping
 // quotes and AmigaDOS '*' escapes when quoted). Returns false at end.
 bool next_token(const char*& p, char* out, u32 cap) {
@@ -191,6 +220,30 @@ bool ShellCommands::run(const char* word, const char* args) {
         cmd_failat(a);
         return true;
     }
+    if (eq_nocase(word, "SETENV")) {
+        cmd_set_var(a, true);
+        return true;
+    }
+    if (eq_nocase(word, "GETENV")) {
+        cmd_get_var(a, true);
+        return true;
+    }
+    if (eq_nocase(word, "UNSETENV")) {
+        cmd_unset_var(a, true);
+        return true;
+    }
+    if (eq_nocase(word, "SET")) {
+        cmd_set_var(a, false);
+        return true;
+    }
+    if (eq_nocase(word, "GET")) {
+        cmd_get_var(a, false);
+        return true;
+    }
+    if (eq_nocase(word, "UNSET")) {
+        cmd_unset_var(a, false);
+        return true;
+    }
     return false;
 }
 
@@ -279,27 +332,7 @@ void ShellCommands::cmd_echo(const char* args) {
     }
 
     char out[kLineBuf];
-    u32 pos = 0;
-    in_quote = false;
-    for (u32 i = 0; i < end; ++i) {
-        const char c = p[i];
-        if (c == '"') {
-            in_quote = !in_quote;
-            continue;
-        }
-        if (in_quote && c == '*' && i + 1 < end) {
-            const char next = p[++i];
-            if (next == 'n' || next == 'N') {
-                pos = append_char(out, sizeof out, pos, '\n');
-            } else if (next == 'e' || next == 'E') {
-                pos = append_char(out, sizeof out, pos, 0x1B);
-            } else {
-                pos = append_char(out, sizeof out, pos, next);
-            }
-            continue;
-        }
-        pos = append_char(out, sizeof out, pos, c);
-    }
+    u32 pos = append_unquoted(p, end, out, sizeof out);
     if (!noline) {
         pos = append_char(out, sizeof out, pos, '\n');
     }
@@ -487,6 +520,96 @@ void ShellCommands::cmd_failat(const char* args) {
         level = 1u;
     }
     dos_->set_fail_level(level);
+    dos_->set_return_code(0);
+}
+
+void ShellCommands::cmd_set_var(const char* args, bool global) {
+    const char* p = args;
+    char name[Dos::kMaxPath];
+    if (!next_token(p, name, sizeof name)) {
+        if (global) {
+            const bool ok = dos_->list_env_vars(
+                [](void* ctx, const char* entry_name) {
+                    static_cast<const ShellCommands*>(ctx)->emit_line(entry_name);
+                },
+                this);
+            dos_->set_return_code(ok ? 0u : 20u);
+        } else {
+            dos_->list_local_vars(
+                ndk::LV_VAR,
+                [](void* ctx, const char* var_name, const char* value) {
+                    const ShellCommands* self = static_cast<const ShellCommands*>(ctx);
+                    char line[kLineBuf];
+                    u32 pos = append_str(line, sizeof line, 0, var_name);
+                    pos = append_char(line, sizeof line, pos, ' ');
+                    pos = append_str(line, sizeof line, pos, value);
+                    pos = append_char(line, sizeof line, pos, '\n');
+                    line[pos] = '\0';
+                    self->emit(line);
+                },
+                this);
+            dos_->set_return_code(0);
+        }
+        return;
+    }
+    while (is_blank(*p)) {
+        ++p;
+    }
+    u32 end = 0;
+    while (p[end] != '\0') {
+        ++end;
+    }
+    while (end > 0 && is_blank(p[end - 1])) {
+        --end;
+    }
+    char value[kLineBuf];
+    append_unquoted(p, end, value, sizeof value);
+    const u32 flags = ndk::LV_VAR | (global ? ndk::GVF_GLOBAL_ONLY : 0u);
+    if (dos_->set_var(name, value, flags)) {
+        dos_->set_return_code(0);
+        return;
+    }
+    dos_->set_last_error(dos_->last_error());
+    dos_->set_return_code(20);
+}
+
+void ShellCommands::cmd_get_var(const char* args, bool global) {
+    const char* p = args;
+    char name[Dos::kMaxPath];
+    if (!next_token(p, name, sizeof name)) {
+        dos_->set_last_error(ndk::ERROR_REQUIRED_ARG_MISSING);
+        dos_->set_return_code(20);
+        return;
+    }
+    char value[kLineBuf];
+    const u32 flags = ndk::LV_VAR | (global ? ndk::GVF_GLOBAL_ONLY : ndk::GVF_LOCAL_ONLY);
+    if (dos_->get_var(name, value, sizeof value, flags) < 0) {
+        dos_->set_last_error(dos_->last_error());
+        dos_->set_return_code(5);
+        return;
+    }
+    emit(value);
+    emit("\n");
+    dos_->set_return_code(0);
+}
+
+void ShellCommands::cmd_unset_var(const char* args, bool global) {
+    const char* p = args;
+    char name[Dos::kMaxPath];
+    if (!next_token(p, name, sizeof name)) {
+        dos_->set_last_error(ndk::ERROR_REQUIRED_ARG_MISSING);
+        dos_->set_return_code(20);
+        return;
+    }
+    const u32 flags = ndk::LV_VAR | (global ? ndk::GVF_GLOBAL_ONLY : ndk::GVF_LOCAL_ONLY);
+    if (!dos_->delete_var(name, flags)) {
+        const u32 err = dos_->last_error();
+        if (err != ndk::ERROR_OBJECT_NOT_FOUND) {
+            dos_->set_last_error(err);
+            dos_->set_return_code(20);
+            return;
+        }
+    }
     dos_->set_return_code(0);
 }
 

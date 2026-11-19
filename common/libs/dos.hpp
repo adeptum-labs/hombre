@@ -676,8 +676,8 @@ public:
     u32 load_seg(const char* path);
 
     // Sets the clock source returning 50 Hz AmigaDOS ticks since 1978-01-01,
-    // or null to report 0/0/0.
-    void set_clock(u64 (*now_ticks)()) { now_ticks_ = now_ticks; }
+    // or null to report 0/0/0. Stamps any RAM: nodes whose date is still zero.
+    void set_clock(u64 (*now_ticks)());
 
     // Changes the shell's current directory to path ("/" parent, ":" volume
     // root, relative, or volume/assign-qualified). Must be a directory
@@ -748,6 +748,28 @@ public:
     // newline stripped). False when no reader is set, at EOF, or invalid
     // buffer.
     bool read_console_line(char* out, u32 size);
+
+    // Sets a shell variable (local by default, or global ENV: with
+    // GVF_GLOBAL_ONLY); a null value deletes it. False with IoErr set on error.
+    bool set_var(const char* name, const char* value, u32 flags = ndk::LV_VAR);
+
+    // Copies the variable into out (up to the first newline unless
+    // GVF_BINARY_VAR). Returns bytes copied (excluding NUL), or -1 with IoErr
+    // set if missing or invalid.
+    i32 get_var(const char* name, char* out, u32 size, u32 flags = ndk::LV_VAR);
+
+    // Deletes a variable (local, global, or both per flags). False with IoErr
+    // set if missing or on error.
+    bool delete_var(const char* name, u32 flags = ndk::LV_VAR);
+
+    // Visits every local variable of type (e.g. LV_VAR) in pr_LocalVars,
+    // passing its name and first line of value.
+    void list_local_vars(u32 type,
+                         void (*visit)(void* ctx, const char* name, const char* value),
+                         void* ctx) const;
+
+    // Visits every top-level entry in ENV:, passing its name. False on error.
+    bool list_env_vars(void (*visit)(void* ctx, const char* name), void* ctx);
 
     u32 dos_base() const { return base_; }
     u32 process() const { return process_; }
@@ -841,7 +863,8 @@ private:
     u32 ram_volume_node_ = 0;
     u32 device_node_ = 0;
     u32 ram_device_node_ = 0;
-    u32 port_ = 0;  // the file system's MsgPort
+    u32 port_ = 0;      // the ADF file system's MsgPort
+    u32 ram_port_ = 0;  // the RAM: file system's MsgPort
     u32 process_ = 0;
     u32 cli_ = 0;
     u32 set_name_ = 0;

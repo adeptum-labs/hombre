@@ -89,6 +89,8 @@ public:
     Rig(const Rig&) = delete;
     Rig& operator=(const Rig&) = delete;
 
+    Machine& machine() { return m_; }
+
 private:
     static constexpr usize kRegion = 1 << 20;
     std::vector<u8> memory_;
@@ -458,6 +460,187 @@ void failat_minimum_is_one() {
     CHECK(out == "Fail limit: 1\n");
 }
 
+void env_variable_builtins() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("setenv", "Greeting \"hello world\""));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    CHECK(cmds.run("GETENV", "greeting"));
+    CHECK(out == "hello world\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    // Readable through ENV:<name> via dos Open/Read.
+    u32 node = RamFs::kNone;
+    CHECK_EQ(g_dos.ram().find_path("Env/Greeting", node), 0u);
+    std::vector<u8> buf(g_dos.ram().node(node).size);
+    u32 got = 0;
+    CHECK_EQ(g_dos.ram().read(node, 0, buf.data(), static_cast<u32>(buf.size()), got), 0u);
+    CHECK(std::string(reinterpret_cast<const char*>(buf.data()), got) == "hello world");
+
+    // Empty value when STRING is omitted; listing prints top-level ENV: names.
+    out.clear();
+    CHECK(cmds.run("setenv", "EmptyVar"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.run("getenv", "EmptyVar"));
+    CHECK(out == "\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    out.clear();
+    CHECK(cmds.run("setenv", ""));
+    CHECK(out == "Greeting\nEmptyVar\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    // Missing variable: no output, rc 5, IoErr ERROR_OBJECT_NOT_FOUND so WHY explains it.
+    out.clear();
+    CHECK(cmds.run("getenv", "NoSuchVar"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 5u);
+    CHECK_EQ(g_dos.last_error(), ERROR_OBJECT_NOT_FOUND);
+    CHECK(cmds.run("why", ""));
+    CHECK(out == "Last command failed because no such file or directory\n");
+
+    // UNSETENV removes the variable and ignores missing ones silently.
+    out.clear();
+    CHECK(cmds.run("unsetenv", "Greeting"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.run("getenv", "Greeting"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 5u);
+
+    CHECK(cmds.run("unsetenv", "Greeting"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+}
+
+void env_variable_readable_via_dos_open() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("setenv", "Editor \"C:Ed *\"fast*\"\""));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    // Call dos.library Open/Read on ENV:Editor from m68k code via Rig's Machine.
+    Machine& m = rig.machine();
+    const u32 block = g_exec.alloc(0x1000, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(block != 0);
+    const u32 name_addr = block;
+    const u32 buf_addr = block + 0x100;
+    const u32 code_addr = block + 0x200;
+    const u32 sp = block + 0xF00;
+    const char env_name[] = "ENV:Editor";
+    for (u32 i = 0; i < sizeof env_name; ++i) {
+        m.mem.write8(name_addr + i, static_cast<u8>(env_name[i]));
+    }
+
+    // Minimal 68k snippet: Open("ENV:Editor", MODE_OLDFILE), Read(fh, buf, 32), Close(fh), RTS.
+    std::vector<u16> opcodes;
+    auto emit16 = [&](u16 w) { opcodes.push_back(w); };
+    auto emit32 = [&](u32 v) {
+        emit16(static_cast<u16>(v >> 16));
+        emit16(static_cast<u16>(v));
+    };
+    // move.l g_dos.dos_base(), a6
+    emit16(0x2C7C);
+    emit32(g_dos.dos_base());
+    // move.l #name_addr, d1; move.l #MODE_OLDFILE, d2; jsr -30(a6) (Open)
+    emit16(0x223C);
+    emit32(name_addr);
+    emit16(0x243C);
+    emit32(MODE_OLDFILE);
+    emit16(0x4EAE);
+    emit16(static_cast<u16>(-static_cast<i32>(dos_lvo::Open)));
+    // move.l d0, d4 (save fh); move.l d0, d1; move.l #buf_addr, d2; moveq #32, d3; jsr -42(a6) (Read)
+    emit16(0x2800);
+    emit16(0x2200);
+    emit16(0x243C);
+    emit32(buf_addr);
+    emit16(0x7620);
+    emit16(0x4EAE);
+    emit16(static_cast<u16>(-static_cast<i32>(dos_lvo::Read)));
+    // move.l d0, d5 (save count); move.l d4, d1; jsr -36(a6) (Close)
+    emit16(0x2A00);
+    emit16(0x2204);
+    emit16(0x4EAE);
+    emit16(static_cast<u16>(-static_cast<i32>(dos_lvo::Close)));
+    // move.l d5, d0; rts
+    emit16(0x2005);
+    emit16(0x4E75);
+
+    for (usize i = 0; i < opcodes.size(); ++i) {
+        m.mem.write16(code_addr + static_cast<u32>(i * 2), opcodes[i]);
+    }
+    m.cpu.a[7] = sp;
+    g_jit.flush();
+    CHECK(g_jit.call_guest(code_addr, 10000) == ExitReason::Returned);
+    CHECK_EQ(m.cpu.d[0], 11u);
+    std::string read_back;
+    for (u32 i = 0; i < 11; ++i) {
+        u32 ch = 0;
+        CHECK(m.mem.read8(buf_addr + i, ch));
+        read_back.push_back(static_cast<char>(ch));
+    }
+    CHECK(read_back == "C:Ed \"fast\"");
+    g_exec.free(block, 0x1000);
+}
+
+void local_variable_builtins() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("setenv", "OnlyGlobal gval"));
+    CHECK(cmds.run("get", "OnlyGlobal"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 5u);
+    CHECK_EQ(g_dos.last_error(), ERROR_OBJECT_NOT_FOUND);
+
+    CHECK(cmds.run("set", "Foo \"bar baz\""));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.run("set", "Empty"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.run("set", "Multi \"first*Nsecond\""));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    CHECK(cmds.run("get", "foo"));
+    CHECK(out == "bar baz\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    out.clear();
+    CHECK(cmds.run("get", "Empty"));
+    CHECK(out == "\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    out.clear();
+    CHECK(cmds.run("SET", ""));
+    CHECK(out == "Foo bar baz\nEmpty \nMulti first\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    out.clear();
+    CHECK(cmds.run("unset", "Foo"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    CHECK(cmds.run("get", "Foo"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 5u);
+
+    CHECK(cmds.run("unset", "Foo"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    // Unsetting local does not remove global OnlyGlobal.
+    CHECK(cmds.run("unset", "OnlyGlobal"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.run("getenv", "OnlyGlobal"));
+    CHECK(out == "gval\n");
+}
+
 }
 
 int main() {
@@ -473,5 +656,8 @@ int main() {
     ask_yes_and_no();
     failat();
     failat_minimum_is_one();
+    env_variable_builtins();
+    env_variable_readable_via_dos_open();
+    local_variable_builtins();
     return check::finish("test_shell_commands");
 }

@@ -76,7 +76,8 @@ constexpr u32 kDeviceNameAt = kDeviceAt + DosList_SIZEOF;  // "DF0" BSTR
 constexpr u32 kRamDeviceAt = kDeviceNameAt + 8;
 constexpr u32 kRamDeviceNameAt = kRamDeviceAt + DosList_SIZEOF;  // "RAM" BSTR
 constexpr u32 kPortAt = kRamDeviceNameAt + 8;
-constexpr u32 kProcessAt = align4(kPortAt + MP_SIZE);
+constexpr u32 kRamPortAt = align4(kPortAt + MP_SIZE);
+constexpr u32 kProcessAt = align4(kRamPortAt + MP_SIZE);
 constexpr u32 kProcessNameAt = kProcessAt + pr_SIZEOF;
 constexpr u32 kCliAt = align4(kProcessNameAt + sizeof kProcessName);
 constexpr u32 kSetNameAt = kCliAt + cli_SIZEOF;            // up to 255 characters
@@ -737,8 +738,12 @@ struct DosOps {
         for (u32 i = 0; i < fh_SIZEOF; i += 4) {
             b.w32(at + i, 0);
         }
+        const Dos::FileSlot& f = d.files_[slot];
+        const u32 type = (f.stream == Dos::Stream::File && f.entry.volume == Dos::kVolRam)
+                             ? d.ram_port_
+                             : d.port_;
         b.w32(at + fh_Interactive, interactive ? DOSTRUE : 0);
-        b.w32(at + fh_Type, d.port_);
+        b.w32(at + fh_Type, type);
         b.w32(at + fh_Args, slot);
     }
 
@@ -863,6 +868,10 @@ struct DosOps {
 
     static u32 volume_node(const Dos& d, u8 vol) {
         return vol == Dos::kVolRam ? d.ram_volume_node_ : d.volume_node_;
+    }
+
+    static u32 port_for_volume(const Dos& d, u8 vol) {
+        return vol == Dos::kVolRam ? d.ram_port_ : d.port_;
     }
 
     // Protection bits that, when set, deny the access (FIBF_READ, FIBF_WRITE).
@@ -1348,7 +1357,14 @@ struct DosOps {
         }
         b.w32(node + dol_Next, 0);
         b.w32(node + dol_Type, e.type);
-        b.w32(node + dol_Task, d.port_);
+        u32 task = d.port_;
+        if (e.type == DLT_DIRECTORY && e.dir_count > 0) {
+            const Dos::LockSlot* slot = find_lock_slot(d, e.locks[0]);
+            if (slot != nullptr) {
+                task = port_for_volume(d, slot->entry.volume);
+            }
+        }
+        b.w32(node + dol_Task, task);
         const u32 bstr_at = node + DosList_SIZEOF;
         put_bstr(b, bstr_at, e.name, kMaxComponent);
         b.w32(node + dol_Name, bstr_at >> 2);
@@ -3038,16 +3054,16 @@ struct DosOps {
         u32 error = 0;
         if (!resolve_env(d, b, name, vol, resolved, error)) {
             if (b.ok()) {
-                fail(d, b, error, DOSFALSE);
+                set_io_err(d, b, error);
             }
             return false;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
             return false;
         }
         if (resolved[0] == '\0') {
-            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            set_io_err(d, b, ERROR_OBJECT_WRONG_TYPE);
             return false;
         }
         char parent[Dos::kMaxPath];
@@ -3056,29 +3072,26 @@ struct DosOps {
         u32 parent_node = RamFs::kNone;
         const u32 p_err = d.ram_.find_path(parent, parent_node);
         if (p_err != 0) {
-            fail(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err, DOSFALSE);
+            set_io_err(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err);
             return false;
         }
         if (!d.ram_.node(parent_node).is_dir) {
-            fail(d, b, ERROR_DIR_NOT_FOUND, DOSFALSE);
+            set_io_err(d, b, ERROR_DIR_NOT_FOUND);
             return false;
         }
         u32 node = RamFs::kNone;
         const u32 c_err = d.ram_.create_file(parent_node, leaf, node);
         if (c_err != 0) {
-            fail(d, b, c_err, DOSFALSE);
+            set_io_err(d, b, c_err);
             return false;
         }
         if (size != 0) {
             const u32 w_err = d.ram_.write(node, 0, from, size);
             if (w_err != 0) {
                 d.ram_.remove(node);
-                fail(d, b, w_err, DOSFALSE);
+                set_io_err(d, b, w_err);
                 return false;
             }
-        }
-        if (b.ok()) {
-            native::set_result(b.machine(), DOSTRUE);
         }
         return b.ok();
     }
@@ -3089,61 +3102,75 @@ struct DosOps {
         u32 error = 0;
         if (!resolve_env(d, b, name, vol, resolved, error)) {
             if (b.ok()) {
-                fail(d, b, error, DOSFALSE);
+                set_io_err(d, b, error);
             }
             return false;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
             return false;
         }
         if (resolved[0] == '\0') {
-            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            set_io_err(d, b, ERROR_OBJECT_WRONG_TYPE);
             return false;
         }
         u32 node = RamFs::kNone;
         const u32 find_err = d.ram_.find_path(resolved, node);
         if (find_err != 0) {
-            fail(d, b, find_err, DOSFALSE);
+            set_io_err(d, b, find_err);
             return false;
         }
         if (node == 0 || d.ram_.node(node).is_dir) {
-            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
+            set_io_err(d, b, ERROR_OBJECT_WRONG_TYPE);
             return false;
         }
         const u32 err = d.ram_.remove(node);
         if (err != 0) {
-            fail(d, b, err, DOSFALSE);
+            set_io_err(d, b, err);
             return false;
-        }
-        if (b.ok()) {
-            native::set_result(b.machine(), DOSTRUE);
         }
         return b.ok();
     }
 
-    static bool read_env_var(Dos& d, Bus& b, const char* name, u32 buffer, u32 size, u32 flags) {
+    struct VarOut {
+        Bus* b;
+        u32 guest;
+        u8* host;
+
+        bool valid() const { return host != nullptr || guest != 0; }
+
+        bool put(u32 idx, u8 ch) const {
+            if (host != nullptr) {
+                host[idx] = ch;
+                return true;
+            }
+            b->w8(guest + idx, ch);
+            return b->ok();
+        }
+    };
+
+    static i32 read_env_var(Dos& d, Bus& b, const char* name, VarOut out, u32 size, u32 flags) {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
         if (!resolve_env(d, b, name, vol, resolved, error)) {
-            b.w8(buffer, 0);
+            out.put(0, 0);
             if (b.ok()) {
-                fail(d, b, error, 0xFFFFFFFF);
+                set_io_err(d, b, error);
             }
-            return false;
+            return -1;
         }
         DirEntry entry{};
         const u32 f_err = fs_find(d, vol, resolved, entry);
         if (f_err != 0) {
-            b.w8(buffer, 0);
-            fail(d, b, f_err, 0xFFFFFFFF);
-            return false;
+            out.put(0, 0);
+            set_io_err(d, b, f_err);
+            return -1;
         }
         if (entry.is_dir) {
-            b.w8(buffer, 0);
-            fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0xFFFFFFFF);
-            return false;
+            out.put(0, 0);
+            set_io_err(d, b, ERROR_OBJECT_WRONG_TYPE);
+            return -1;
         }
         const u32 length = fs_size(d, entry);
         const bool terminate = (flags & GVF_DONT_NULL_TERM) == 0;
@@ -3161,10 +3188,9 @@ struct DosOps {
             u32 got = 0;
             const u32 r_err = fs_read(d, entry, n, chunk, want, got);
             if (r_err != 0) {
-                b.w8(buffer, 0);
-                fail(d, b, entry.volume == Dos::kVolRam ? r_err : ERROR_NOT_A_DOS_DISK,
-                     0xFFFFFFFF);
-                return false;
+                out.put(0, 0);
+                set_io_err(d, b, entry.volume == Dos::kVolRam ? r_err : ERROR_NOT_A_DOS_DISK);
+                return -1;
             }
             if (got == 0) {
                 break;
@@ -3174,21 +3200,135 @@ struct DosOps {
                     stop = true;
                     break;
                 }
-                b.w8(buffer + n, chunk[i]);
-                if (!b.ok()) {
-                    return false;
+                if (!out.put(n, chunk[i])) {
+                    return -1;
                 }
                 ++n;
             }
         }
-        if (terminate) {
-            b.w8(buffer + n, 0);
+        if (terminate && !out.put(n, 0)) {
+            return -1;
         }
         set_io_err(d, b, length);
-        if (b.ok()) {
-            native::set_result(b.machine(), n);
+        return b.ok() ? static_cast<i32>(n) : -1;
+    }
+
+    static bool set_var_impl(Dos& d, Bus& b, const char* name, const u8* from, u32 size,
+                             bool has_value, u32 flags) {
+        const u32 type = flags & 0xFF;
+        if ((flags & GVF_GLOBAL_ONLY) != 0) {
+            if (!has_value) {
+                return delete_env_var(d, b, name);
+            }
+            return write_env_var(d, b, name, from, size);
         }
+        u32 node = find_var(d, b, name, type);
+        if (!b.ok()) {
+            return false;
+        }
+        if (!has_value) {
+            if (node == 0) {
+                set_io_err(d, b, ERROR_OBJECT_NOT_FOUND);
+                return false;
+            }
+            delete_var(d, b, node);
+            return b.ok();
+        }
+        u32 value = 0;
+        if (size != 0) {
+            value = d.exec_->alloc(size, MEMF_PUBLIC);
+            if (value == 0) {
+                set_io_err(d, b, ERROR_NO_FREE_STORE);
+                return false;
+            }
+            // exec handed the block out, so it is guest memory.
+            for (u32 i = 0; i < size; ++i) {
+                b.machine().mem.base[value + i] = from[i];
+            }
+        }
+        if (node == 0) {
+            const u32 bytes = LocalVar_SIZEOF + length_of(name) + 1;
+            node = d.exec_->alloc(bytes, MEMF_PUBLIC | MEMF_CLEAR);
+            if (node == 0) {
+                d.exec_->free(value, size);
+                set_io_err(d, b, ERROR_NO_FREE_STORE);
+                return false;
+            }
+            put_string(b, node + LocalVar_SIZEOF, name);
+            b.w8(node + LN_TYPE, type);
+            b.w32(node + LN_NAME, node + LocalVar_SIZEOF);
+            add_tail(b, d.process_ + pr_LocalVars, node);
+        } else {
+            free_value(d, b, node);
+        }
+        b.w16(node + lv_Flags, flags & (GVF_BINARY_VAR | GVF_DONT_NULL_TERM));
+        b.w32(node + lv_Value, value);
+        b.w32(node + lv_Len, size);
         return b.ok();
+    }
+
+    static i32 get_var_impl(Dos& d, Bus& b, const char* name, VarOut out, u32 size, u32 flags) {
+        if (!out.valid() || size == 0 || (size & 0x80000000) != 0) {
+            set_io_err(d, b, ERROR_BAD_NUMBER);
+            return -1;
+        }
+        const u32 type = flags & 0xFF;
+        const bool global_only = (flags & GVF_GLOBAL_ONLY) != 0;
+        const bool local_only = (flags & GVF_LOCAL_ONLY) != 0;
+        if (!global_only) {
+            const u32 node = find_var(d, b, name, type);
+            if (!b.ok()) {
+                return -1;
+            }
+            if (node != 0) {
+                const u32 value = b.r32(node + lv_Value);
+                const u32 length = b.r32(node + lv_Len);
+                const bool terminate = (flags & GVF_DONT_NULL_TERM) == 0;
+                const u32 room = terminate ? size - 1 : size;
+                u32 n = 0;
+                for (; n < length && n < room; ++n) {
+                    const u32 c = b.r8(value + n);
+                    if (!b.ok() || ((flags & GVF_BINARY_VAR) == 0 && c == '\n')) {
+                        break;
+                    }
+                    if (!out.put(n, static_cast<u8>(c))) {
+                        return -1;
+                    }
+                }
+                if (terminate && !out.put(n, 0)) {
+                    return -1;
+                }
+                set_io_err(d, b, length);
+                return b.ok() ? static_cast<i32>(n) : -1;
+            }
+        }
+        if (!local_only && (global_only || type == LV_VAR)) {
+            return read_env_var(d, b, name, out, size, flags);
+        }
+        out.put(0, 0);
+        set_io_err(d, b, ERROR_OBJECT_NOT_FOUND);
+        return -1;
+    }
+
+    static bool delete_var_impl(Dos& d, Bus& b, const char* name, u32 flags) {
+        const u32 type = flags & 0xFF;
+        const bool global_only = (flags & GVF_GLOBAL_ONLY) != 0;
+        const bool local_only = (flags & GVF_LOCAL_ONLY) != 0;
+        if (!global_only) {
+            const u32 node = find_var(d, b, name, type);
+            if (!b.ok()) {
+                return false;
+            }
+            if (node != 0) {
+                delete_var(d, b, node);
+                return b.ok();
+            }
+        }
+        if (!local_only && (global_only || type == LV_VAR)) {
+            return delete_env_var(d, b, name);
+        }
+        set_io_err(d, b, ERROR_OBJECT_NOT_FOUND);
+        return false;
     }
 
     // SetVar(name, buffer, size, flags): sets a local variable of the type
@@ -3201,86 +3341,26 @@ struct DosOps {
         const u32 buffer = m.cpu.d[2];
         u32 size = m.cpu.d[3];
         const u32 flags = m.cpu.d[4];
-        const u32 type = flags & 0xFF;
         char name[kMaxName];
         if (!var_name(d, b, name, DOSFALSE)) {
             return;
         }
-        if ((flags & GVF_GLOBAL_ONLY) != 0) {
-            if (buffer == 0) {
-                delete_env_var(d, b, name);
-                return;
-            }
+        const u8* from = nullptr;
+        if (buffer != 0) {
             if (size == 0xFFFFFFFF) {
                 size = 0;
                 while (b.r8(buffer + size) != 0 && b.ok()) {
                     ++size;
                 }
             }
-            const u8* from = b.ok() && size != 0 ? b.bytes_at(buffer, size) : nullptr;
+            from = b.ok() && size != 0 ? b.bytes_at(buffer, size) : nullptr;
             if (!b.ok()) {
                 return;
             }
-            write_env_var(d, b, name, from, size);
-            return;
         }
-        u32 node = find_var(d, b, name, type);
-        if (!b.ok()) {
-            return;
-        }
-        if (buffer == 0) {
-            if (node == 0) {
-                fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
-                return;
-            }
-            delete_var(d, b, node);
-            if (b.ok()) {
-                native::set_result(m, DOSTRUE);
-            }
-            return;
-        }
-        if (size == 0xFFFFFFFF) {
-            size = 0;
-            while (b.r8(buffer + size) != 0 && b.ok()) {
-                ++size;
-            }
-        }
-        const u8* from = b.ok() && size != 0 ? b.bytes_at(buffer, size) : nullptr;
-        if (!b.ok()) {
-            return;
-        }
-        u32 value = 0;
-        if (size != 0) {
-            value = d.exec_->alloc(size, MEMF_PUBLIC);
-            if (value == 0) {
-                fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
-                return;
-            }
-            // exec handed the block out, so it is guest memory.
-            for (u32 i = 0; i < size; ++i) {
-                m.mem.base[value + i] = from[i];
-            }
-        }
-        if (node == 0) {
-            const u32 bytes = LocalVar_SIZEOF + length_of(name) + 1;
-            node = d.exec_->alloc(bytes, MEMF_PUBLIC | MEMF_CLEAR);
-            if (node == 0) {
-                d.exec_->free(value, size);
-                fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
-                return;
-            }
-            put_string(b, node + LocalVar_SIZEOF, name);
-            b.w8(node + LN_TYPE, type);
-            b.w32(node + LN_NAME, node + LocalVar_SIZEOF);
-            add_tail(b, d.process_ + pr_LocalVars, node);
-        } else {
-            free_value(d, b, node);
-        }
-        b.w16(node + lv_Flags, flags & (GVF_BINARY_VAR | GVF_DONT_NULL_TERM));
-        b.w32(node + lv_Value, value);
-        b.w32(node + lv_Len, size);
+        const bool ok = set_var_impl(d, b, name, from, size, buffer != 0, flags);
         if (b.ok()) {
-            native::set_result(m, DOSTRUE);
+            native::set_result(m, ok ? DOSTRUE : DOSFALSE);
         }
     }
 
@@ -3311,43 +3391,10 @@ struct DosOps {
             b.w8(buffer, 0);
             return;
         }
-        const u32 type = flags & 0xFF;
-        const bool global_only = (flags & GVF_GLOBAL_ONLY) != 0;
-        const bool local_only = (flags & GVF_LOCAL_ONLY) != 0;
-        if (!global_only) {
-            const u32 node = find_var(d, b, name, type);
-            if (!b.ok()) {
-                return;
-            }
-            if (node != 0) {
-                const u32 value = b.r32(node + lv_Value);
-                const u32 length = b.r32(node + lv_Len);
-                const bool terminate = (flags & GVF_DONT_NULL_TERM) == 0;
-                const u32 room = terminate ? size - 1 : size;
-                u32 n = 0;
-                for (; n < length && n < room; ++n) {
-                    const u32 c = b.r8(value + n);
-                    if (!b.ok() || ((flags & GVF_BINARY_VAR) == 0 && c == '\n')) {
-                        break;
-                    }
-                    b.w8(buffer + n, c);
-                }
-                if (terminate) {
-                    b.w8(buffer + n, 0);
-                }
-                set_io_err(d, b, length);
-                if (b.ok()) {
-                    native::set_result(m, n);
-                }
-                return;
-            }
+        const i32 res = get_var_impl(d, b, name, VarOut{&b, buffer, nullptr}, size, flags);
+        if (b.ok()) {
+            native::set_result(m, res < 0 ? 0xFFFFFFFFu : static_cast<u32>(res));
         }
-        if (!local_only && (global_only || type == LV_VAR)) {
-            read_env_var(d, b, name, buffer, size, flags);
-            return;
-        }
-        b.w8(buffer, 0);
-        fail(d, b, ERROR_OBJECT_NOT_FOUND, 0xFFFFFFFF);
     }
 
     static void find_var_lvo(void* ctx, Machine& m) {
@@ -3377,27 +3424,10 @@ struct DosOps {
         if (!var_name(d, b, name, DOSFALSE)) {
             return;
         }
-        const u32 type = flags & 0xFF;
-        const bool global_only = (flags & GVF_GLOBAL_ONLY) != 0;
-        const bool local_only = (flags & GVF_LOCAL_ONLY) != 0;
-        if (!global_only) {
-            const u32 node = find_var(d, b, name, type);
-            if (!b.ok()) {
-                return;
-            }
-            if (node != 0) {
-                delete_var(d, b, node);
-                if (b.ok()) {
-                    native::set_result(m, DOSTRUE);
-                }
-                return;
-            }
+        const bool ok = delete_var_impl(d, b, name, flags);
+        if (b.ok()) {
+            native::set_result(m, ok ? DOSTRUE : DOSFALSE);
         }
-        if (!local_only && (global_only || type == LV_VAR)) {
-            delete_env_var(d, b, name);
-            return;
-        }
-        fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
     }
 
     // StrToLong(string, value): the decimal number at the start of string,
@@ -3884,7 +3914,7 @@ struct DosOps {
         b.w32(at + fl_Link, 0);
         b.w32(at + fl_Key, key);
         b.w32(at + fl_Access, access == EXCLUSIVE_LOCK ? EXCLUSIVE_LOCK : SHARED_LOCK);
-        b.w32(at + fl_Task, d.port_);
+        b.w32(at + fl_Task, port_for_volume(d, vol));
         b.w32(at + fl_Volume, volume_node(d, vol) >> 2);
     }
 
@@ -4132,12 +4162,14 @@ struct DosOps {
         lock_parent_of_path(d, b, f.entry.volume, f.path);
     }
 
-    static bool same_lock_impl(Dos& d, Bus& b, u32 lock1, u32 lock2) {
+    static bool same_lock_impl(Dos& d, Bus& b, u32 lock1, u32 lock2,
+                               u8 zero_vol = Dos::kVolAdf) {
         DirEntry e1{};
         DirEntry e2{};
         const char* p1 = nullptr;
         const char* p2 = nullptr;
-        if (!lock_entry(d, b, lock1, e1, p1) || !lock_entry(d, b, lock2, e2, p2)) {
+        if (!lock_entry(d, b, lock1, e1, p1, zero_vol) ||
+            !lock_entry(d, b, lock2, e2, p2, zero_vol)) {
             native::set_result(b.machine(), LOCK_DIFFERENT);
             return false;
         }
@@ -4212,12 +4244,13 @@ struct DosOps {
 
     static void current_dir(void* ctx, Machine& m) { select(m, of(ctx), pr_CurrentDir); }
 
-    // The entry and path of a lock; 0 is the root. False with IoErr set if
-    // it is not a lock.
-    static bool lock_entry(Dos& d, Bus& b, u32 bptr, DirEntry& entry, const char*& path) {
+    // The entry and path of a lock; 0 is the root of zero_vol. False with IoErr
+    // set if it is not a lock.
+    static bool lock_entry(Dos& d, Bus& b, u32 bptr, DirEntry& entry, const char*& path,
+                           u8 zero_vol = Dos::kVolAdf) {
         if (bptr == 0) {
             path = "";
-            const u32 err = fs_find(d, Dos::kVolAdf, "", entry);
+            const u32 err = fs_find(d, zero_vol, "", entry);
             if (err != 0) {
                 set_io_err(d, b, err);
                 return false;
@@ -4566,6 +4599,10 @@ struct DosOps {
                     }
                     for (u32 k = 0; k + 1 < e.dir_count; ++k) {
                         if (e.locks[k] == lock) {
+                            const Dos::LockSlot* next_slot = find_lock_slot(d, e.locks[k + 1]);
+                            const u8 next_vol =
+                                next_slot != nullptr ? next_slot->entry.volume : Dos::kVolAdf;
+                            b.w32(last + dvp_Port, port_for_volume(d, next_vol));
                             b.w32(last + dvp_Lock, e.locks[k + 1]);
                             if (b.ok()) {
                                 native::set_result(m, last);
@@ -4597,6 +4634,7 @@ struct DosOps {
         while (name[colon] != '\0' && name[colon] != ':') {
             ++colon;
         }
+        u32 dvp_port = d.port_;
         u32 dvp_lock = 0;
         u32 dvp_flags = 0;
         u32 dvp_node = 0;
@@ -4614,6 +4652,7 @@ struct DosOps {
                 }
                 cur_vol = slot->entry.volume;
             }
+            dvp_port = port_for_volume(d, cur_vol);
             dvp_lock = current;
             dvp_node = volume_node(d, cur_vol);
         } else if (is_console(name)) {
@@ -4633,14 +4672,17 @@ struct DosOps {
                 }
                 cur_vol = slot->entry.volume;
             }
+            dvp_port = port_for_volume(d, cur_vol);
             dvp_node = volume_node(d, cur_vol);
         } else if (same_name(name, colon, d.volume_.name)) {
             dvp_node = d.volume_node_;
         } else if (same_name(name, colon, "DF0")) {
             dvp_node = d.device_node_;
         } else if (same_name(name, colon, "Ram Disk")) {
+            dvp_port = d.ram_port_;
             dvp_node = d.ram_volume_node_;
         } else if (same_name(name, colon, "RAM")) {
+            dvp_port = d.ram_port_;
             dvp_node = d.ram_device_node_;
         } else {
             const i64 idx = find_assign(d, name, colon);
@@ -4686,10 +4728,13 @@ struct DosOps {
                     fail(d, b, lock_err, 0);
                     return;
                 }
+                dvp_port = port_for_volume(d, vol);
                 dvp_flags = DVPF_ASSIGN | DVPF_UNLOCK;
                 dvp_node = e.node;
             } else {
                 dvp_lock = e.locks[0];
+                const Dos::LockSlot* slot = find_lock_slot(d, dvp_lock);
+                dvp_port = port_for_volume(d, slot != nullptr ? slot->entry.volume : Dos::kVolAdf);
                 dvp_flags = DVPF_ASSIGN;
                 dvp_node = e.node;
             }
@@ -4702,7 +4747,7 @@ struct DosOps {
             fail(d, b, ERROR_NO_FREE_STORE, 0);
             return;
         }
-        b.w32(dvp + dvp_Port, d.port_);
+        b.w32(dvp + dvp_Port, dvp_port);
         b.w32(dvp + dvp_Lock, dvp_lock);
         b.w32(dvp + dvp_Flags, dvp_flags);
         b.w32(dvp + dvp_DevNode, dvp_node);
@@ -4850,10 +4895,11 @@ struct DosOps {
         return b.ok();
     }
 
-    static bool examine_impl(Dos& d, Bus& b, u32 lock_bptr, u32 fib) {
+    static bool examine_impl(Dos& d, Bus& b, u32 lock_bptr, u32 fib,
+                             u8 zero_vol = Dos::kVolAdf) {
         DirEntry entry{};
         const char* path = nullptr;
-        if (!lock_entry(d, b, lock_bptr, entry, path)) {
+        if (!lock_entry(d, b, lock_bptr, entry, path, zero_vol)) {
             native::set_result(b.machine(), DOSFALSE);
             return false;
         }
@@ -4908,10 +4954,11 @@ struct DosOps {
         }
     };
 
-    static bool ex_next_impl(Dos& d, Bus& b, u32 lock_bptr, u32 fib) {
+    static bool ex_next_impl(Dos& d, Bus& b, u32 lock_bptr, u32 fib,
+                             u8 zero_vol = Dos::kVolAdf) {
         DirEntry dir{};
         const char* path = nullptr;
-        if (!lock_entry(d, b, lock_bptr, dir, path)) {
+        if (!lock_entry(d, b, lock_bptr, dir, path, zero_vol)) {
             native::set_result(b.machine(), DOSFALSE);
             return false;
         }
@@ -5847,10 +5894,11 @@ struct DosOps {
 
     static void ex_all_end(void*, Machine&) {}
 
-    static bool fill_info_data(Dos& d, Bus& b, u32 lock_bptr, u32 id) {
+    static bool fill_info_data(Dos& d, Bus& b, u32 lock_bptr, u32 id,
+                               u8 zero_vol = Dos::kVolAdf) {
         DirEntry entry{};
         const char* path = nullptr;
-        if (!lock_entry(d, b, lock_bptr, entry, path)) {
+        if (!lock_entry(d, b, lock_bptr, entry, path, zero_vol)) {
             native::set_result(b.machine(), DOSFALSE);
             return false;
         }
@@ -5927,10 +5975,11 @@ struct DosOps {
     }
 
     static bool resolve_from_lock(Dos& d, Bus& b, u32 base_lock, const char* name, u8& vol,
-                                  char (&resolved)[Dos::kMaxPath], u32& error) {
+                                  char (&resolved)[Dos::kMaxPath], u32& error,
+                                  u8 zero_vol = Dos::kVolAdf) {
         DirEntry base_entry{};
         const char* base_path = nullptr;
-        if (!lock_entry(d, b, base_lock, base_entry, base_path)) {
+        if (!lock_entry(d, b, base_lock, base_entry, base_path, zero_vol)) {
             error = b.ok() ? b.r32(d.process_ + pr_Result2) : 0;
             return false;
         }
@@ -6013,11 +6062,12 @@ struct DosOps {
         }
     }
 
-    static bool delete_file_impl(Dos& d, Bus& b, u32 base_lock, const char* name) {
+    static bool delete_file_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
+                                 u8 zero_vol = Dos::kVolAdf) {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, DOSFALSE);
             }
@@ -6071,11 +6121,11 @@ struct DosOps {
     }
 
     static bool rename_impl(Dos& d, Bus& b, u32 old_lock, const char* old_name, u32 new_lock,
-                            const char* new_name) {
+                            const char* new_name, u8 zero_vol = Dos::kVolAdf) {
         u8 old_vol = Dos::kVolAdf;
         char old_resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_from_lock(d, b, old_lock, old_name, old_vol, old_resolved, error)) {
+        if (!resolve_from_lock(d, b, old_lock, old_name, old_vol, old_resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, DOSFALSE);
             }
@@ -6083,7 +6133,7 @@ struct DosOps {
         }
         u8 new_vol = Dos::kVolAdf;
         char new_resolved[Dos::kMaxPath];
-        if (!resolve_from_lock(d, b, new_lock, new_name, new_vol, new_resolved, error)) {
+        if (!resolve_from_lock(d, b, new_lock, new_name, new_vol, new_resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, DOSFALSE);
             }
@@ -6164,11 +6214,12 @@ struct DosOps {
         }
     }
 
-    static bool create_dir_impl(Dos& d, Bus& b, u32 base_lock, const char* name) {
+    static bool create_dir_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
+                                u8 zero_vol = Dos::kVolAdf) {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, 0);
             }
@@ -6236,11 +6287,12 @@ struct DosOps {
         }
     }
 
-    static bool set_protection_impl(Dos& d, Bus& b, u32 base_lock, const char* name, u32 mask) {
+    static bool set_protection_impl(Dos& d, Bus& b, u32 base_lock, const char* name, u32 mask,
+                                    u8 zero_vol = Dos::kVolAdf) {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, DOSFALSE);
             }
@@ -6286,11 +6338,11 @@ struct DosOps {
     }
 
     static bool set_comment_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
-                                 const char* comment) {
+                                 const char* comment, u8 zero_vol = Dos::kVolAdf) {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, DOSFALSE);
             }
@@ -6342,7 +6394,8 @@ struct DosOps {
         }
     }
 
-    static bool set_file_date_impl(Dos& d, Bus& b, u32 base_lock, const char* name, u32 ds_addr) {
+    static bool set_file_date_impl(Dos& d, Bus& b, u32 base_lock, const char* name, u32 ds_addr,
+                                   u8 zero_vol = Dos::kVolAdf) {
         if (ds_addr == 0) {
             fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
             return false;
@@ -6356,7 +6409,7 @@ struct DosOps {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error)) {
+        if (!resolve_from_lock(d, b, base_lock, name, vol, resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, DOSFALSE);
             }
@@ -6401,7 +6454,8 @@ struct DosOps {
         }
     }
 
-    static void pkt_locate_object(Dos& d, Bus& b, u32 lock_bptr, u32 name_bstr, u32 mode) {
+    static void pkt_locate_object(Dos& d, Bus& b, u32 lock_bptr, u32 name_bstr, u32 mode,
+                                  u8 zero_vol) {
         char name[kMaxName];
         if (!read_bstr_arg(d, b, name_bstr, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME, 0,
                            false)) {
@@ -6410,7 +6464,7 @@ struct DosOps {
         u8 vol = Dos::kVolAdf;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_from_lock(d, b, lock_bptr, name, vol, resolved, error)) {
+        if (!resolve_from_lock(d, b, lock_bptr, name, vol, resolved, error, zero_vol)) {
             if (b.ok()) {
                 fail(d, b, error, 0);
             }
@@ -6438,18 +6492,20 @@ struct DosOps {
         const u32 arg2 = m.cpu.d[4];
         const u32 arg3 = m.cpu.d[5];
         const u32 arg4 = m.cpu.d[6];
-        if (port == 0 || native::guest_address(m, port) != d.port_) {
+        const u32 guest_port = port == 0 ? 0 : native::guest_address(m, port);
+        if (guest_port == 0 || (guest_port != d.port_ && guest_port != d.ram_port_)) {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, DOSFALSE);
             return;
         }
+        const u8 port_vol = guest_port == d.ram_port_ ? Dos::kVolRam : Dos::kVolAdf;
         switch (action) {
         case ACTION_DISK_INFO:
-            if (fill_info_data(d, b, 0, arg1 << 2)) {
+            if (fill_info_data(d, b, 0, arg1 << 2, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
         case ACTION_INFO:
-            if (fill_info_data(d, b, arg1, arg2 << 2)) {
+            if (fill_info_data(d, b, arg1, arg2 << 2, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -6458,15 +6514,17 @@ struct DosOps {
             native::set_result(m, DOSTRUE);
             return;
         case ACTION_CURRENT_VOLUME: {
-            const u32 current = b.r32(d.process_ + pr_CurrentDir);
-            if (!b.ok()) {
-                return;
-            }
-            u8 vol = Dos::kVolAdf;
-            if (current != 0) {
-                const Dos::LockSlot* slot = find_lock_slot(d, current);
-                if (slot != nullptr) {
-                    vol = slot->entry.volume;
+            u8 vol = port_vol;
+            if (port_vol == Dos::kVolAdf) {
+                const u32 current = b.r32(d.process_ + pr_CurrentDir);
+                if (!b.ok()) {
+                    return;
+                }
+                if (current != 0) {
+                    const Dos::LockSlot* slot = find_lock_slot(d, current);
+                    if (slot != nullptr) {
+                        vol = slot->entry.volume;
+                    }
                 }
             }
             set_io_err(d, b, 0);
@@ -6474,12 +6532,12 @@ struct DosOps {
             return;
         }
         case ACTION_SAME_LOCK:
-            if (same_lock_impl(d, b, arg1, arg2)) {
+            if (same_lock_impl(d, b, arg1, arg2, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
         case ACTION_LOCATE_OBJECT:
-            pkt_locate_object(d, b, arg1, arg2, arg3);
+            pkt_locate_object(d, b, arg1, arg2, arg3, port_vol);
             return;
         case ACTION_FREE_LOCK:
             if (free_user_lock(d, arg1)) {
@@ -6493,7 +6551,7 @@ struct DosOps {
             char name[kMaxName];
             if (read_bstr_arg(d, b, arg2, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
                               DOSFALSE, false) &&
-                delete_file_impl(d, b, arg1, name)) {
+                delete_file_impl(d, b, arg1, name, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -6505,7 +6563,7 @@ struct DosOps {
                               DOSFALSE, false) &&
                 read_bstr_arg(d, b, arg4, new_name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
                               DOSFALSE, false) &&
-                rename_impl(d, b, arg1, old_name, arg3, new_name)) {
+                rename_impl(d, b, arg1, old_name, arg3, new_name, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -6514,7 +6572,7 @@ struct DosOps {
             char name[kMaxName];
             if (read_bstr_arg(d, b, arg2, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME, 0,
                               false) &&
-                create_dir_impl(d, b, arg1, name)) {
+                create_dir_impl(d, b, arg1, name, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -6523,7 +6581,7 @@ struct DosOps {
             char name[kMaxName];
             if (read_bstr_arg(d, b, arg3, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
                               DOSFALSE, false) &&
-                set_protection_impl(d, b, arg2, name, arg4)) {
+                set_protection_impl(d, b, arg2, name, arg4, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -6535,7 +6593,7 @@ struct DosOps {
                               DOSFALSE, false) &&
                 read_bstr_arg(d, b, arg4, comment, RamFs::kMaxComment, ERROR_COMMENT_TOO_BIG,
                               DOSFALSE, true) &&
-                set_comment_impl(d, b, arg2, name, comment)) {
+                set_comment_impl(d, b, arg2, name, comment, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -6544,7 +6602,7 @@ struct DosOps {
             char name[kMaxName];
             if (read_bstr_arg(d, b, arg3, name, kMaxName - 1, ERROR_INVALID_COMPONENT_NAME,
                               DOSFALSE, false) &&
-                set_file_date_impl(d, b, arg2, name, arg4)) {
+                set_file_date_impl(d, b, arg2, name, arg4, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -6560,12 +6618,12 @@ struct DosOps {
             }
             return;
         case ACTION_EXAMINE_OBJECT:
-            if (examine_impl(d, b, arg1, arg2 << 2)) {
+            if (examine_impl(d, b, arg1, arg2 << 2, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
         case ACTION_EXAMINE_NEXT:
-            if (ex_next_impl(d, b, arg1, arg2 << 2)) {
+            if (ex_next_impl(d, b, arg1, arg2 << 2, port_vol)) {
                 set_io_err(d, b, 0);
             }
             return;
@@ -7361,6 +7419,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     device_node_ = block_ + kDeviceAt;
     ram_device_node_ = block_ + kRamDeviceAt;
     port_ = block_ + kPortAt;
+    ram_port_ = block_ + kRamPortAt;
     process_ = block_ + kProcessAt;
     cli_ = block_ + kCliAt;
     set_name_ = block_ + kSetNameAt;
@@ -7424,7 +7483,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     put_bstr(b, block_ + kVolumeNameAt, volume.name, 30);
     b.w32(volume_node_ + dol_Name, (block_ + kVolumeNameAt) >> 2);
     b.w32(ram_volume_node_ + dol_Type, DLT_VOLUME);
-    b.w32(ram_volume_node_ + dol_Task, port_);
+    b.w32(ram_volume_node_ + dol_Task, ram_port_);
     const RamFs::Date& ram_date = ram_.node(0).date;
     b.w32(ram_volume_node_ + dol_VolumeDate + ds_Days, ram_date.days);
     b.w32(ram_volume_node_ + dol_VolumeDate + ds_Minute, ram_date.minute);
@@ -7437,13 +7496,15 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     put_bstr(b, block_ + kDeviceNameAt, "DF0", 30);
     b.w32(device_node_ + dol_Name, (block_ + kDeviceNameAt) >> 2);
     b.w32(ram_device_node_ + dol_Type, DLT_DEVICE);
-    b.w32(ram_device_node_ + dol_Task, port_);
+    b.w32(ram_device_node_ + dol_Task, ram_port_);
     put_bstr(b, block_ + kRamDeviceNameAt, "RAM", 30);
     b.w32(ram_device_node_ + dol_Name, (block_ + kRamDeviceNameAt) >> 2);
 
-    // The file system's port, which nothing sends to.
+    // The file system ports, which nothing sends to.
     b.w8(port_ + LN_TYPE, NT_MSGPORT);
     new_list(b, port_ + MP_MSGLIST);
+    b.w8(ram_port_ + LN_TYPE, NT_MSGPORT);
+    new_list(b, ram_port_ + MP_MSGLIST);
 
     // The shell Process and its CLI.
     put_string(b, block_ + kProcessNameAt, kProcessName);
@@ -8145,6 +8206,149 @@ bool Dos::read_console_line(char* out, u32 size) {
     }
     out[copy] = '\0';
     return true;
+}
+
+void Dos::set_clock(u64 (*now_ticks)()) {
+    now_ticks_ = now_ticks;
+    if (now_ticks_ == nullptr || m_ == nullptr) {
+        return;
+    }
+    ram_.stamp_zero_dates();
+    if (ram_volume_node_ != 0) {
+        Bus b(*m_);
+        if (b.r32(ram_volume_node_ + dol_VolumeDate + ds_Days) == 0 &&
+            b.r32(ram_volume_node_ + dol_VolumeDate + ds_Minute) == 0 &&
+            b.r32(ram_volume_node_ + dol_VolumeDate + ds_Tick) == 0) {
+            const RamFs::Date& d = ram_.node(0).date;
+            b.w32(ram_volume_node_ + dol_VolumeDate + ds_Days, d.days);
+            b.w32(ram_volume_node_ + dol_VolumeDate + ds_Minute, d.minute);
+            b.w32(ram_volume_node_ + dol_VolumeDate + ds_Tick, d.tick);
+        }
+    }
+}
+
+bool Dos::set_var(const char* name, const char* value, u32 flags) {
+    if (m_ == nullptr) {
+        return false;
+    }
+    if (name == nullptr) {
+        set_last_error(ERROR_REQUIRED_ARG_MISSING);
+        return false;
+    }
+    if (length_of(name) >= kMaxName) {
+        set_last_error(ERROR_INVALID_COMPONENT_NAME);
+        return false;
+    }
+    Bus b(*m_);
+    const u8* data = reinterpret_cast<const u8*>(value);
+    const u32 size = value != nullptr ? length_of(value) : 0;
+    return DosOps::set_var_impl(*this, b, name, data, size, value != nullptr, flags);
+}
+
+i32 Dos::get_var(const char* name, char* out, u32 size, u32 flags) {
+    if (m_ == nullptr) {
+        return -1;
+    }
+    if (name == nullptr) {
+        set_last_error(ERROR_REQUIRED_ARG_MISSING);
+        return -1;
+    }
+    if (length_of(name) >= kMaxName) {
+        set_last_error(ERROR_INVALID_COMPONENT_NAME);
+        return -1;
+    }
+    Bus b(*m_);
+    return DosOps::get_var_impl(*this, b, name,
+                                DosOps::VarOut{nullptr, 0, reinterpret_cast<u8*>(out)}, size,
+                                flags);
+}
+
+bool Dos::delete_var(const char* name, u32 flags) {
+    if (m_ == nullptr) {
+        return false;
+    }
+    if (name == nullptr) {
+        set_last_error(ERROR_REQUIRED_ARG_MISSING);
+        return false;
+    }
+    if (length_of(name) >= kMaxName) {
+        set_last_error(ERROR_INVALID_COMPONENT_NAME);
+        return false;
+    }
+    Bus b(*m_);
+    return DosOps::delete_var_impl(*this, b, name, flags);
+}
+
+void Dos::list_local_vars(u32 type,
+                          void (*visit)(void* ctx, const char* name, const char* value),
+                          void* ctx) const {
+    if (m_ == nullptr || visit == nullptr || process_ == 0) {
+        return;
+    }
+    Bus b(*m_);
+    u32 node = b.r32(process_ + pr_LocalVars + LH_HEAD);
+    for (u32 n = 0; n < kMaxVars; ++n) {
+        const u32 succ = b.r32(node + LN_SUCC);
+        if (!b.ok() || succ == 0) {
+            return;
+        }
+        if (b.r8(node + LN_TYPE) == (type & 0xFF)) {
+            char name[kMaxName];
+            if (b.string(b.r32(node + LN_NAME), name, kMaxName)) {
+                const u32 value = b.r32(node + lv_Value);
+                const u32 length = b.r32(node + lv_Len);
+                char val[kMaxArgs + 1];
+                u32 out_len = 0;
+                for (; out_len < length && out_len < kMaxArgs; ++out_len) {
+                    const u32 c = b.r8(value + out_len);
+                    if (!b.ok() || c == '\n') {
+                        break;
+                    }
+                    val[out_len] = static_cast<char>(c);
+                }
+                if (!b.ok()) {
+                    return;
+                }
+                val[out_len] = '\0';
+                visit(ctx, name, val);
+            } else if (!b.ok()) {
+                return;
+            }
+        }
+        node = succ;
+    }
+}
+
+bool Dos::list_env_vars(void (*visit)(void* ctx, const char* name), void* ctx) {
+    if (m_ == nullptr || visit == nullptr) {
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolAdf;
+    char resolved[kMaxPath];
+    u32 error = 0;
+    if (!DosOps::resolve(*this, b, "ENV:", vol, resolved, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    struct EnvVisit {
+        void (*visit)(void* ctx, const char* name);
+        void* ctx;
+    } ev{visit, ctx};
+    const u32 err = DosOps::fs_list(
+        *this, vol, resolved,
+        [](void* p, const DirEntry& e) {
+            const EnvVisit& w = *static_cast<const EnvVisit*>(p);
+            w.visit(w.ctx, e.name);
+        },
+        &ev);
+    if (err != 0) {
+        set_last_error(err);
+        return false;
+    }
+    return b.ok();
 }
 
 }
