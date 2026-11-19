@@ -804,6 +804,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     clock_ = nullptr;
     base_ = 0;
     front_ = 0;
+    default_screen_ = 0;
     reply_port_ = 0;
     active_window_ = 0;
     pressed_gadget_window_ = 0;
@@ -825,6 +826,9 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     }
     for (u32& msg : messages_) {
         msg = 0;
+    }
+    for (u32& owner : message_owners_) {
+        owner = 0;
     }
     for (ScreenRecord& rec : screen_records_) {
         rec = ScreenRecord{};
@@ -1420,6 +1424,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     display_->palette_dirty = false;
     write_links();
     rec->addr = screen;
+    rec->owner = exec_->this_task();
     rec->screen_bytes = ndk::Screen_SIZEOF;
     rec->planes = planes;
     rec->planes_bytes = pbytes;
@@ -1503,6 +1508,9 @@ bool Intuition::close_screen(u32 screen) {
     }
     exec_->free(screen, rec->screen_bytes);
     *rec = ScreenRecord{};
+    if (default_screen_ == screen) {
+        default_screen_ = 0;
+    }
 
     if (was_front) {
         front_ = screens_[0];
@@ -1613,9 +1621,10 @@ void Intuition::free_tracked_message(u32 message) {
     if (addr == 0) {
         return;
     }
-    for (u32& slot : messages_) {
-        if (slot == addr) {
-            slot = 0;
+    for (u32 i = 0; i < kMaxMessages; ++i) {
+        if (messages_[i] == addr) {
+            messages_[i] = 0;
+            message_owners_[i] = 0;
             Bus b(*machine_);
             const u32 idcmp_class = b.r32(addr + ndk::im_Class);
             const u32 window = b.r32(addr + ndk::im_IDCMPWindow);
@@ -1690,14 +1699,14 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     if (!b.ok() || (idcmp & idcmp_class) == 0) {
         return false;
     }
-    u32* slot = nullptr;
-    for (u32& entry : messages_) {
-        if (entry == 0) {
-            slot = &entry;
+    u32 slot = kMaxMessages;
+    for (u32 i = 0; i < kMaxMessages; ++i) {
+        if (messages_[i] == 0) {
+            slot = i;
             break;
         }
     }
-    if (slot == nullptr) {
+    if (slot == kMaxMessages) {
         ++dropped_messages_;
         return false;
     }
@@ -1726,7 +1735,8 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
         exec_->free(msg, ndk::IntuiMessage_SIZEOF);
         return false;
     }
-    *slot = msg;
+    messages_[slot] = msg;
+    message_owners_[slot] = rec->owner;
     return true;
 }
 
@@ -2071,6 +2081,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w32(layer + ndk::ly_Window, window);
 
     rec->addr = window;
+    rec->owner = exec_->this_task();
     rec->window_bytes = ndk::Window_SIZEOF;
     rec->screen = screen;
     rec->next_window = 0;
@@ -2784,15 +2795,20 @@ void Intuition::end_drag() {
     post_intuimessage(window, ndk::IDCMP_CHANGEWINDOW, 0);
 }
 
-void Intuition::reclaim(u32 keep_window, u32 keep_screen) {
-    reclaim(&keep_window, keep_window != 0 ? 1u : 0u, keep_screen);
+void Intuition::reclaim_owned_by(u32 task, u32 keep_window, u32 keep_screen) {
+    reclaim_owned_by(task, &keep_window, keep_window != 0 ? 1u : 0u, keep_screen);
 }
 
-void Intuition::reclaim(const u32* keep_windows, u32 count, u32 keep_screen) {
+void Intuition::reclaim_owned_by(u32 task, const u32* keep_windows, u32 count,
+                                 u32 keep_screen) {
     u32 win_to_close[kMaxWindows]{};
     u32 win_count = 0;
     for (u32 window : windows_) {
         if (window == 0) {
+            continue;
+        }
+        const WindowRecord* rec = find_window_record(window);
+        if (rec == nullptr || rec->owner != task) {
             continue;
         }
         bool keep = false;
@@ -2810,7 +2826,11 @@ void Intuition::reclaim(const u32* keep_windows, u32 count, u32 keep_screen) {
     u32 scr_to_close[kMaxScreens]{};
     u32 scr_count = 0;
     for (u32 screen : screens_) {
-        if (screen != 0 && screen != keep_screen) {
+        if (screen == 0 || screen == keep_screen) {
+            continue;
+        }
+        const ScreenRecord* rec = find_screen_record(screen);
+        if (rec != nullptr && rec->owner == task) {
             scr_to_close[scr_count++] = screen;
         }
     }
@@ -2824,15 +2844,16 @@ void Intuition::reclaim(const u32* keep_windows, u32 count, u32 keep_screen) {
     for (u32 i = 0; i < count; ++i) {
         if (keep_windows[i] != 0) {
             if (const WindowRecord* krec = find_window_record(keep_windows[i]);
-                krec != nullptr && krec->user_port != 0) {
+                krec != nullptr && krec->owner == task && krec->user_port != 0) {
                 remove_window_messages(krec->user_port, keep_windows[i]);
             }
         }
     }
-    for (u32& slot : messages_) {
-        if (slot != 0) {
-            const u32 msg = slot;
-            slot = 0;
+    for (u32 i = 0; i < kMaxMessages; ++i) {
+        if (messages_[i] != 0 && message_owners_[i] == task) {
+            const u32 msg = messages_[i];
+            messages_[i] = 0;
+            message_owners_[i] = 0;
             if (exec_ != nullptr) {
                 exec_->free(msg, ndk::IntuiMessage_SIZEOF);
             }
@@ -2844,6 +2865,14 @@ void Intuition::reclaim(const u32* keep_windows, u32 count, u32 keep_screen) {
     }
     pressed_gadget_window_ = 0;
     pressed_gadget_ = GadgetKind::None;
+}
+
+u32 Intuition::window_owner(u32 window) const {
+    if (window == 0) {
+        return 0;
+    }
+    const WindowRecord* rec = find_window_record(window);
+    return rec != nullptr ? rec->owner : 0;
 }
 
 bool Intuition::window_open(u32 window) const {

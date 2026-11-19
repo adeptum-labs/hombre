@@ -46,6 +46,7 @@ std::string row_str(const ShellText::Row& row) {
 
 void wraps_at_columns() {
     ShellText text;
+    text.clear();
     put_str(text, "abcdefghijklmnopqrstuvwxy");
     text.new_line();
     CHECK_EQ(text.line_count(), 2u);
@@ -62,6 +63,7 @@ void wraps_at_columns() {
 
 void rewrap_wider_joins_rows() {
     ShellText text;
+    text.clear();
     put_str(text, "abcdefghijklmnopqrstuvwxy");
     text.new_line();
     ShellText::Row rows[8]{};
@@ -73,6 +75,7 @@ void rewrap_wider_joins_rows() {
 
 void current_line_cursor_row() {
     ShellText text;
+    text.clear();
     put_str(text, "0123456789");
     ShellText::Row rows[8]{};
     CHECK_EQ(text.tail(10, 8, rows), 2u);
@@ -84,6 +87,7 @@ void current_line_cursor_row() {
 
 void erase_stops_at_input_start() {
     ShellText text;
+    text.clear();
     put_str(text, "1> ");
     text.mark_input_start();
     text.put('a');
@@ -99,6 +103,7 @@ void erase_stops_at_input_start() {
 
 void drops_oldest_lines() {
     ShellText text;
+    text.clear();
     for (u32 i = 0; i < 1200; ++i) {
         const std::string line = "L" + std::to_string(i);
         put_str(text, line.c_str());
@@ -115,6 +120,7 @@ void drops_oldest_lines() {
 void long_line_breaks() {
     constexpr u32 kMax = ShellText::kMaxLineBytes;
     ShellText text;
+    text.clear();
     text.mark_input_start();
     for (u32 i = 0; i < kMax + 44; ++i) {
         text.put(static_cast<u8>('a' + i % 26));
@@ -135,6 +141,7 @@ void long_line_breaks() {
 // one logical line that erase can take back to the prompt.
 void longest_typed_line_is_one_line() {
     ShellText text;
+    text.clear();
     for (u32 i = 0; i < ShellWindow::kMaxPrompt + 16; ++i) {
         text.put('p');
     }
@@ -151,6 +158,7 @@ void longest_typed_line_is_one_line() {
 
 void rewrap_long_input_at_minimum() {
     ShellText text;
+    text.clear();
     put_str(text, "1> ");
     text.mark_input_start();
     for (u32 i = 0; i < 40; ++i) {
@@ -171,6 +179,7 @@ void rewrap_long_input_at_minimum() {
 
 void tail_with_more_rows_than_text() {
     ShellText text;
+    text.clear();
     put_str(text, "one");
     text.new_line();
     put_str(text, "two");
@@ -184,6 +193,7 @@ void tail_with_more_rows_than_text() {
 
 void total_rows_matches_tail() {
     ShellText text;
+    text.clear();
     ShellText::Row rows[48]{};
     CHECK_EQ(text.total_rows(10), 1u);
     CHECK_EQ(text.tail(10, 48, rows), 1u);
@@ -204,6 +214,7 @@ void total_rows_matches_tail() {
 
 void rows_from_top_and_middle() {
     ShellText text;
+    text.clear();
     put_str(text, "abcdefgh");
     text.new_line();
     text.new_line();
@@ -233,6 +244,7 @@ void rows_from_top_and_middle() {
 
 void rows_from_clamps_past_end() {
     ShellText text;
+    text.clear();
     put_str(text, "abcdef");
     text.new_line();
     put_str(text, "gh");
@@ -256,6 +268,7 @@ void rows_from_clamps_past_end() {
 
 void keeps_1024_lines() {
     ShellText text;
+    text.clear();
     for (u32 i = 0; i < 1100; ++i) {
         if (i > 0) {
             text.new_line();
@@ -276,12 +289,14 @@ void keeps_1024_lines() {
 // Lines keep a number across drops, and rows map to lines and back.
 void dropped_rows_before_and_locate() {
     ShellText text;
+    text.clear();
     for (u32 i = 0; i < ShellText::kMaxLines + 5; ++i) {
         text.put('a');
         text.new_line();
     }
     CHECK_EQ(text.dropped(), 6u);
     ShellText t2;
+    t2.clear();
     for (u32 i = 0; i < 25; ++i) {
         t2.put('x');
     }
@@ -305,8 +320,27 @@ void dropped_rows_before_and_locate() {
     CHECK_EQ(row, 0u);
 }
 
+// A value-initialised store is empty until clear sets up the one empty line
+// the layout starts from.
+void value_initialised_text_clears_to_an_empty_line() {
+    ShellText text{};
+    CHECK_EQ(text.line_count(), 0u);
+    text.clear();
+    CHECK_EQ(text.line_count(), 1u);
+
+    put_str(text, "abc");
+    text.new_line();
+    CHECK_EQ(text.line_count(), 2u);
+    ShellText::Row rows[4]{};
+    CHECK_EQ(text.tail(10, 4, rows), 2u);
+    CHECK(row_str(rows[0]) == "abc");
+    CHECK_EQ(rows[1].length, 0u);
+    CHECK_EQ(text.cursor_column(10), 0u);
+}
+
 void total_rows_cache_matches_full_count() {
     ShellText text;
+    text.clear();
     u32 cols = 80;
     CHECK_EQ(text.total_rows(cols), text.full_total_rows(cols));
 
@@ -357,7 +391,10 @@ void total_rows_cache_matches_full_count() {
 
 int main() {
     dropped_rows_before_and_locate();
+    CHECK_EQ(constinit_probe.line_count(), 0u);
+    constinit_probe.clear();
     CHECK_EQ(constinit_probe.line_count(), 1u);
+    value_initialised_text_clears_to_an_empty_line();
     wraps_at_columns();
     rewrap_wider_joins_rows();
     current_line_cursor_row();

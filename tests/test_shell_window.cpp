@@ -61,11 +61,13 @@ void put_new_screen(GfxRig& r, u32 at, u32 width, u32 height) {
 u32 open_screen(GfxRig& r) {
     put_new_screen(r, kNewScreen, 640, 400);
     r.cpu().a[0] = kNewScreen;
-    return r.result(Base::Intuition, intuition_lvo::OpenScreen);
+    const u32 screen = r.result(Base::Intuition, intuition_lvo::OpenScreen);
+    r.intuition.set_default_screen(screen);
+    return screen;
 }
 
 bool open_shell(GfxRig& r, ShellWindow& shell) {
-    return shell.open(r.machine, r.exec, r.graphics, r.intuition, r.display);
+    return shell.open(r.machine, r.exec, r.graphics, r.intuition);
 }
 
 u32 shell_window(GfxRig& r, u32 screen) { return r.get32(screen + sc_FirstWindow); }
@@ -205,7 +207,7 @@ void open_gives_a_window_on_the_front_screen() {
 void open_without_a_screen_returns_false() {
     GfxRig r;
     ShellWindow shell;
-    CHECK(!shell.open(r.machine, r.exec, r.graphics, r.intuition, r.display));
+    CHECK(!shell.open(r.machine, r.exec, r.graphics, r.intuition));
     CHECK(!shell.is_open());
     CHECK_EQ(r.display.front_screen, 0u);
 }
@@ -1353,12 +1355,33 @@ void cursor_back_crosses_a_wrapped_row() {
     CHECK(cell_all(r, bm, ix, iy, 1, 1, 0));
 }
 
+void shell_opens_on_the_default_screen_not_the_front_one() {
+    GfxRig r;
+    const u32 first = open_screen(r);
+    CHECK(first != 0);
+    put_new_screen(r, kNewScreen, 640, 400);
+    r.cpu().a[0] = kNewScreen;
+    const u32 second = r.result(Base::Intuition, intuition_lvo::OpenScreen);
+    CHECK(second != 0);
+    CHECK_EQ(r.display.front_screen, second);
+    CHECK_EQ(r.intuition.default_screen(), first);
+
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    CHECK(shell.is_open());
+    const u32 window = shell.window();
+    CHECK_EQ(r.get32(window + wd_WScreen), first);
+    CHECK_EQ(r.get32(first + sc_FirstWindow), window);
+    CHECK_EQ(r.get32(second + sc_FirstWindow), 0u);
+}
+
 int main() {
     cursor_back_shows_an_inverse_cell();
     echo_after_cursor_back_puts_the_block_at_the_end();
     cursor_back_crosses_a_wrapped_row();
     open_gives_a_window_on_the_front_screen();
     open_without_a_screen_returns_false();
+    shell_opens_on_the_default_screen_not_the_front_one();
     text_lands_in_cell_0_0_of_the_inner_area();
     newline_cr_and_tab_move_the_cursor();
     a_line_wider_than_the_window_wraps();

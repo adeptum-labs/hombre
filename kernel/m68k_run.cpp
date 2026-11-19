@@ -114,9 +114,10 @@ struct Console {
     u8 key_queue[key_queue_cap]{};
     u32 key_head = 0;
     u32 key_count = 0;
-    bool at_line_start = true;
+    bool mid_line = false;
     bool command_running = false;
     bool line_mode = false;
+    bool input_wait = false;
     bool open = false;
     u8 index = 0;
     u32 process = 0;
@@ -127,6 +128,9 @@ struct Console {
 };
 
 constinit Console consoles[Dos::kMaxConsoles]{};
+
+// The console the last keyboard report went to.
+constinit u8 last_active_console = 0;
 
 // Whether what reached the serial log so far ends a line.
 constinit bool serial_at_line_start = true;
@@ -159,7 +163,7 @@ void console_write(void* ctx, const u8* data, u32 bytes) {
         const u8 ch = data[i];
         serial::write_char(ch == '\n' || ch == '\t' ? static_cast<char>(ch) : printable_char(ch));
         serial_at_line_start = ch == '\n';
-        c.at_line_start = ch == '\n';
+        c.mid_line = ch != '\n';
     }
     if (c.shell.is_open()) {
         c.shell.write(data, bytes);
@@ -211,6 +215,7 @@ void open_amiga_screen(const BootInfo& info) {
         fail("could not open the screen");
         return;
     }
+    intuition.set_default_screen(amiga_screen);
     serial::write("intuition: screen opened 640x400\n");
 }
 
@@ -340,8 +345,9 @@ void poll_mouse() {
     }
 }
 
-// The console of the active window, or console 0 when no shell window is
-// active.
+// The console of the active window: its shell's console, or the console
+// whose process opened the window; the last console keys went to when there
+// is no such console.
 Console& active_console() {
     const u32 window = intuition.active_window();
     if (window != 0) {
@@ -350,8 +356,50 @@ Console& active_console() {
                 return c;
             }
         }
+        const u32 owner = intuition.window_owner(window);
+        for (Console& c : consoles) {
+            if (owner != 0 && c.open && c.process == owner) {
+                return c;
+            }
+        }
     }
-    return consoles[0];
+    Console& last = consoles[last_active_console];
+    return last.open ? last : consoles[0];
+}
+
+// True when a Ready task wants the CPU rather than a key.
+bool other_task_ready() {
+    const Scheduler& sched = exec.scheduler();
+    for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
+        const Scheduler::Slot& slot = sched.slot(i);
+        if (slot.state != TaskState::Ready) {
+            continue;
+        }
+        bool waiting_for_a_key = false;
+        for (const Console& c : consoles) {
+            if (c.open && (c.line_mode || c.input_wait) && slot.task_addr == c.process) {
+                waiting_for_a_key = true;
+                break;
+            }
+        }
+        if (!waiting_for_a_key) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Gives other tasks the CPU while one wants it. With only shells waiting at
+// their prompts left, one yield lets another shell run before this task
+// halts, so two idle shells do not switch to each other forever.
+void wait_for_work(const Console& c) {
+    if (c.key_count > 0) {
+        return;
+    }
+    if (exec.yield_in_native() && (c.key_count > 0 || other_task_ready())) {
+        return;
+    }
+    idle_wait();
 }
 
 void key_queue_clear(Console& c) {
@@ -455,6 +503,7 @@ void poll_keys() {
     u8 report[KeyDecoder::kReportBytes];
     for (u32 i = 0; i < poll_budget && usb_keyboard_poll(report); ++i) {
         Console& c = active_console();
+        last_active_console = c.index;
         const bool ctrl = (report[0] & (kModLCtrl | kModRCtrl)) != 0;
         const u8* slots = report + 2;
         u8 chars[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey];
@@ -466,7 +515,9 @@ void poll_keys() {
                     continue;
                 }
                 if (usage == usage_key_c) {
-                    exec.signal_task(c.process, sigbreakf_ctrl_c);
+                    if (c.command_running) {
+                        exec.signal_task(c.process, sigbreakf_ctrl_c);
+                    }
                 } else if (usage == usage_key_backslash_us ||
                            usage == usage_key_backslash_iso ||
                            keymap_se(usage, report[0], false) == '\\') {
@@ -543,9 +594,9 @@ u32 console_read(void* ctx, u8* buf, u32 size) {
                 return 0;
             }
             task_host_poll(nullptr);
-            if (c.key_count == 0 && !exec.yield_in_native()) {
-                idle_wait();
-            }
+            c.input_wait = true;
+            wait_for_work(c);
+            c.input_wait = false;
             continue;
         }
         if (ch == ctrl_backslash) {
@@ -600,9 +651,9 @@ bool console_ready(void* ctx, u32 timeout_us) {
         if (usb_keyboard_status() != UsbStatus::Ready) {
             return false;
         }
-        if (!exec.yield_in_native()) {
-            idle_wait();
-        }
+        c.input_wait = true;
+        wait_for_work(c);
+        c.input_wait = false;
     }
     return false;
 }
@@ -678,7 +729,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
 // messages it never replied to and the signals it allocated. Ending child
 // tasks and resetting signals belongs to the boot task; a shell's command
 // runs on the shell's own task.
-void reclaim_after_program() {
+void reclaim_after_program(u32 task) {
     if (exec.this_task() == dos.process()) {
         exec.end_child_tasks();
         exec.reset_nest_counts();
@@ -692,7 +743,15 @@ void reclaim_after_program() {
                 keep[count++] = c.shell.window();
             }
         }
-        intuition.reclaim(keep, count, amiga_screen);
+        intuition.reclaim_owned_by(task, keep, count, amiga_screen);
+    }
+}
+
+// A Ctrl+C pressed at a prompt belongs to no command.
+void clear_ctrl_c(u32 process) {
+    u32 recvd = 0;
+    if (process != 0 && machine.mem.read32(process + ndk::TC_SIGRECVD, recvd)) {
+        machine.mem.write32(process + ndk::TC_SIGRECVD, recvd & ~sigbreakf_ctrl_c);
     }
 }
 
@@ -705,11 +764,12 @@ bool execute(Console& c, const char* path, const char* args) {
 
     machine.cpu.exit = ExitReason::None;
     u32 result = 0;
+    clear_ctrl_c(c.process);
     c.command_running = true;
     const bool ok = dos.run_command_in(c.process, path, args, result, block_budget);
     c.command_running = false;
     c.filter.reset();
-    reclaim_after_program();
+    reclaim_after_program(c.process);
     intuition.flush_palette();
     if (!serial_at_line_start) {
         serial::write_char('\n');
@@ -817,7 +877,7 @@ bool typed_run(void* ctx, const char* path, const char* args) {
                    machine.cpu.exit == ExitReason::Returned)) {
         const u32 rc = dos.last_return_code(c.process);
         if (rc != 0 && rc >= dos.fail_level(c.process)) {
-            if (!c.at_line_start) {
+            if (c.mid_line) {
                 console_write(&c, reinterpret_cast<const u8*>("\n"), 1);
             }
             char digits[16];
@@ -866,12 +926,13 @@ bool open_new_shell(void* ctx) {
     c.cli = 0;
     c.command_running = false;
     c.line_mode = false;
+    c.input_wait = false;
     c.open = false;
-    c.at_line_start = true;
+    c.mid_line = false;
     c.filter.reset();
     key_queue_clear(c);
     const i32 offset = static_cast<i32>(index - 1) * 20;
-    if (!c.shell.open(machine, exec, graphics, intuition, display, 60 + offset, 60 + offset,
+    if (!c.shell.open(machine, exec, graphics, intuition, 60 + offset, 60 + offset,
                       new_shell_width, new_shell_height)) {
         return false;
     }
@@ -891,6 +952,7 @@ bool open_new_shell(void* ctx) {
         c.open = false;
         c.process = 0;
         c.cli = 0;
+        log_line("shell: cannot start new shell");
         return false;
     }
     return true;
@@ -938,8 +1000,7 @@ void shell_loop(Console& c) {
         if (c.commands.ended()) {
             break;
         }
-        exec.yield_if_ready();
-        idle_wait();
+        wait_for_work(c);
     }
     c.line_mode = false;
     if (c.index == 0) {
@@ -951,6 +1012,7 @@ void shell_loop(Console& c) {
     c.shell.close();
     c.open = false;
     c.command_running = false;
+    c.input_wait = false;
     c.process = 0;
     c.cli = 0;
     c.filter.reset();
@@ -968,7 +1030,7 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
     }
     Console& boot = consoles[0];
     if (amiga_screen != 0) {
-        if (boot.shell.open(machine, exec, graphics, intuition, display)) {
+        if (boot.shell.open(machine, exec, graphics, intuition)) {
             boot.shell.set_view_listener(&on_shell_view, nullptr);
             serial::write("intuition: window opened HombreShell\n");
             show_amiga_screen(info);

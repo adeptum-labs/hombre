@@ -2232,7 +2232,7 @@ void reclaim_closes_windows_and_screens_but_keeps_the_given_ones() {
     CHECK(extra_win2 != 0);
     r.intuition.pointer_event(40, 40, kMouseLeft, kMouseLeft, 0, false);
 
-    r.intuition.reclaim(keep_win, keep_scr);
+    r.intuition.reclaim_owned_by(r.exec.this_task(), keep_win, keep_scr);
     CHECK(r.intuition.window_open(keep_win));
     CHECK(!r.intuition.window_open(extra_win1));
     CHECK(!r.intuition.window_open(extra_win2));
@@ -2243,7 +2243,7 @@ void reclaim_closes_windows_and_screens_but_keeps_the_given_ones() {
     CHECK_EQ(r.get32(keep_scr), 0u);
     CHECK_EQ(avail_mem(r), baseline);
 
-    r.intuition.reclaim(0, 0);
+    r.intuition.reclaim_owned_by(r.exec.this_task(), 0, 0);
     CHECK(!r.intuition.window_open(keep_win));
     CHECK_EQ(r.intuition.front_screen(), 0u);
     CHECK_EQ(r.display.front_screen, 0u);
@@ -2274,7 +2274,7 @@ void reclaim_frees_delivered_unreplied_messages_and_balances_memory() {
     CHECK(get_msg(r, port) != 0);
     CHECK(get_msg(r, port) != 0);
 
-    r.intuition.reclaim(keep_win, keep_scr);
+    r.intuition.reclaim_owned_by(r.exec.this_task(), keep_win, keep_scr);
     CHECK_EQ(avail_mem(r), baseline);
 
     // All message slots are free again.
@@ -2286,7 +2286,7 @@ void reclaim_frees_delivered_unreplied_messages_and_balances_memory() {
         r.intuition.pointer_event(140, 70, kMouseLeft, kMouseLeft, 0, false);
     }
     CHECK_EQ(r.intuition.dropped_messages(), 0u);
-    r.intuition.reclaim(keep_win, keep_scr);
+    r.intuition.reclaim_owned_by(r.exec.this_task(), keep_win, keep_scr);
     CHECK_EQ(avail_mem(r), baseline);
 }
 
@@ -2308,7 +2308,7 @@ void reclaim_clears_a_closed_active_window() {
     const Rect box = Intuition::close_box_rect(150, 40);
     r.intuition.pointer_event(box.x0 + 1, box.y0 + 1, kMouseLeft, kMouseLeft, 0, false);
 
-    r.intuition.reclaim(keep_win, keep_scr);
+    r.intuition.reclaim_owned_by(r.exec.this_task(), keep_win, keep_scr);
     CHECK_EQ(r.intuition.active_window(), 0u);
     CHECK(r.intuition.window_open(keep_win));
 
@@ -2318,7 +2318,7 @@ void reclaim_clears_a_closed_active_window() {
     put_new_window(r, kNewWindow, 150, 40, 120, 80, 0, 0, 0, 0);
     const u32 inactive_win = open_win(r, kNewWindow);
     CHECK(inactive_win != 0);
-    r.intuition.reclaim(keep_win, keep_scr);
+    r.intuition.reclaim_owned_by(r.exec.this_task(), keep_win, keep_scr);
     CHECK_EQ(r.intuition.active_window(), keep_win);
 }
 
@@ -2338,10 +2338,66 @@ void reclaim_restores_the_front_screen() {
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ScreenToBack), ExitReason::Halt);
     CHECK_EQ(r.intuition.front_screen(), s3);
 
-    r.intuition.reclaim(0, keep_scr);
+    r.intuition.reclaim_owned_by(r.exec.this_task(), 0, keep_scr);
     CHECK_EQ(r.intuition.front_screen(), keep_scr);
     CHECK_EQ(r.display.front_screen, keep_scr);
     CHECK_EQ(r.get32(keep_scr), 0u);
+}
+
+void reclaim_owned_by_closes_only_that_owners_windows_screens_and_messages() {
+    GfxRig r;
+    constexpr u32 task_a = kData + 0x900;
+    constexpr u32 task_b = kData + 0x980;
+
+    r.exec.set_this_task(task_a);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 keep_scr = open_new(r, kNewScreen);
+    put_new_window(r, kNewWindow, 10, 20, 100, 60, 0, 0, 0, 0);
+    const u32 keep_win = open_win(r, kNewWindow);
+    CHECK(keep_scr != 0 && keep_win != 0);
+
+    r.exec.set_this_task(task_b);
+    put_new_screen(r, kNewScreen, 400, 300, 2, 0, 1, 0);
+    const u32 other_scr = open_new(r, kNewScreen);
+    put_new_window(r, kNewWindow, 30, 30, 90, 70, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 other_win = open_win(r, kNewWindow);
+    const u32 other_port = r.get32(other_win + wd_UserPort);
+    r.intuition.pointer_event(60, 60, kMouseLeft, kMouseLeft, 0, false);
+    CHECK(other_scr != 0 && other_win != 0 && other_port != 0);
+    const u32 baseline = avail_mem(r);
+
+    r.exec.set_this_task(task_a);
+    put_new_screen(r, kNewScreen, 320, 200, 2, 0, 1, 0);
+    const u32 gone_scr = open_new(r, kNewScreen);
+    put_new_window(r, kNewWindow, 20, 20, 80, 50, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    const u32 gone_win = open_win(r, kNewWindow);
+    r.intuition.pointer_event(40, 40, kMouseLeft, kMouseLeft, 0, false);
+    CHECK(gone_scr != 0 && gone_win != 0);
+    CHECK_EQ(r.intuition.window_owner(gone_win), task_a);
+    CHECK_EQ(r.intuition.window_owner(other_win), task_b);
+
+    r.intuition.reclaim_owned_by(task_a, keep_win, keep_scr);
+
+    CHECK(r.intuition.window_open(keep_win));
+    CHECK(!r.intuition.window_open(gone_win));
+    CHECK(r.intuition.window_open(other_win));
+    CHECK_EQ(r.intuition.front_screen(), keep_scr);
+    CHECK_EQ(r.display.front_screen, keep_scr);
+    CHECK_EQ(r.get32(keep_scr + sc_FirstWindow), keep_win);
+    CHECK_EQ(r.get32(other_scr + sc_FirstWindow), other_win);
+    CHECK_EQ(avail_mem(r), baseline);
+
+    // The other task's message is still queued.
+    const u32 other_msg = get_msg(r, other_port);
+    CHECK(other_msg != 0);
+    CHECK_EQ(r.get32(other_msg + im_Class), IDCMP_MOUSEBUTTONS);
+    reply_msg(r, other_msg);
+
+    // The closed screen is unknown, so a window cannot be opened on it.
+    put_new_window(r, kNewWindow, 0, 0, 40, 40, 0, 0, gone_scr, CUSTOMSCREEN);
+    CHECK_EQ(open_win(r, kNewWindow), 0u);
 }
 
 void window_draws_into_private_bitmap() {
@@ -4495,6 +4551,7 @@ int main() {
     reclaim_frees_delivered_unreplied_messages_and_balances_memory();
     reclaim_clears_a_closed_active_window();
     reclaim_restores_the_front_screen();
+    reclaim_owned_by_closes_only_that_owners_windows_screens_and_messages();
     window_draws_into_private_bitmap();
     rectfill_in_window_shows_on_screen();
     upper_window_covers_lower_after_draw();

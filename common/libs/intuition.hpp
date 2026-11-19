@@ -148,11 +148,19 @@ public:
     // size hook runs and IDCMP_NEWSIZE is posted when the window asked for
     // it and has no NEWSIZE waiting for a reply.
     void size_window_to(u32 window, i32 width, i32 height);
-    // Closes every window but keep_window, and every screen but keep_screen.
-    void reclaim(u32 keep_window = 0, u32 keep_screen = 0);
-    // Closes every window not in keep_windows, and every screen but
-    // keep_screen.
-    void reclaim(const u32* keep_windows, u32 count, u32 keep_screen);
+    // Closes the windows and screens task opened, except keep_window and
+    // keep_screen, and frees the IntuiMessages it posted. Windows, screens
+    // and messages of other tasks stay.
+    void reclaim_owned_by(u32 task, u32 keep_window = 0, u32 keep_screen = 0);
+    // Like the above, keeping the windows in keep_windows.
+    void reclaim_owned_by(u32 task, const u32* keep_windows, u32 count, u32 keep_screen);
+
+    // The task that opened the window, 0 when it is not open.
+    u32 window_owner(u32 window) const;
+
+    // The screen shells open their windows on.
+    void set_default_screen(u32 screen) { default_screen_ = screen; }
+    u32 default_screen() const { return default_screen_; }
     // Returns pointers to the screen's native 256-entry strong/light shade
     // tables, rebuilding them if the palette changed. False for unknown or
     // shallow (< 8 plane) screens.
@@ -168,6 +176,7 @@ private:
     // believe a guest field.
     struct ScreenRecord {
         u32 addr = 0;
+        u32 owner = 0;
         u32 screen_bytes = 0;
         u32 planes = 0;
         u32 planes_bytes = 0;
@@ -198,6 +207,7 @@ private:
     // What a window owns, with its place in the screen's window list.
     struct WindowRecord {
         u32 addr = 0;
+        u32 owner = 0;
         u32 window_bytes = 0;
         u32 screen = 0;
         u32 next_window = 0;
@@ -296,6 +306,7 @@ private:
     u64 (*clock_)() = nullptr;
     u32 base_ = 0;
     u32 front_ = 0;
+    u32 default_screen_ = 0;
     u32 reply_port_ = 0;
     u32 active_window_ = 0;
     u32 pressed_gadget_window_ = 0;
@@ -315,6 +326,7 @@ private:
     u32 screens_[kMaxScreens]{};
     u32 windows_[kMaxWindows]{};
     u32 messages_[kMaxMessages]{};
+    u32 message_owners_[kMaxMessages]{};
     ScreenRecord screen_records_[kMaxScreens]{};
     WindowRecord window_records_[kMaxWindows]{};
     GadgetHookEntry gadget_hooks_[kMaxGadgetHooks]{};

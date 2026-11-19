@@ -56,10 +56,11 @@ constexpr bool is_printable(u8 c) {
 
 }
 
-bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuition,
-                       DisplayState& display, i32 left, i32 top, u32 window_width, u32 window_height) {
+bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuition, i32 left,
+                       i32 top, u32 window_width, u32 window_height) {
     close();
-    if (display.front_screen == 0) {
+    const u32 screen = intuition.default_screen();
+    if (screen == 0) {
         return false;
     }
     const u32 nw = exec.alloc(ndk::NewWindow_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
@@ -80,7 +81,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     b.w16(nw + ndk::nw_LeftEdge, static_cast<u16>(static_cast<i16>(left)));
     // Below the screen's title bar and the line under it when no top is given.
     const i32 top_edge =
-        top >= 0 ? top : static_cast<i32>(b.r8(display.front_screen + ndk::sc_BarHeight) + 1);
+        top >= 0 ? top : static_cast<i32>(b.r8(screen + ndk::sc_BarHeight) + 1);
     b.w16(nw + ndk::nw_TopEdge, static_cast<u16>(static_cast<i16>(top_edge)));
     b.w16(nw + ndk::nw_Width, static_cast<u16>(window_width));
     b.w16(nw + ndk::nw_Height, static_cast<u16>(window_height));
@@ -91,7 +92,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
            ndk::WFLG_SIZEGADGET | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
                ndk::WFLG_DRAGBAR | ndk::WFLG_ACTIVATE);
     b.w32(nw + ndk::nw_Title, title);
-    b.w32(nw + ndk::nw_Screen, display.front_screen);
+    b.w32(nw + ndk::nw_Screen, screen);
     b.w16(nw + ndk::nw_MinWidth, kMinWidth);
     b.w16(nw + ndk::nw_MinHeight, kMinHeight);
     b.w16(nw + ndk::nw_MaxWidth, kMaxSize);

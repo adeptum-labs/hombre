@@ -262,7 +262,7 @@ private:
     u8 lines_[kMaxLines][kMaxLineBytes]{};
     u32 lengths_[kMaxLines]{};
     u32 head_ = 0;
-    u32 count_ = 1;
+    u32 count_ = 0;
     u32 input_start_ = 0;
     u32 dropped_ = 0;
     mutable u32 cached_cols_ = 0;
