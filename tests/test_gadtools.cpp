@@ -333,30 +333,37 @@ void layout_menus_places_titles_and_items() {
     CHECK_EQ(r.get16(file + mu_LeftEdge), 0u);
     CHECK_EQ(r.get16(file + mu_TopEdge), 0u);
     CHECK_EQ(r.get16(file + mu_Width), 48u);
-    CHECK_EQ(r.get16(file + mu_Height), 9u);
+    CHECK_EQ(r.get16(file + mu_Height), 10u);
     CHECK_EQ(r.get16(edit + mu_LeftEdge), 48u);
     CHECK_EQ(r.get16(edit + mu_TopEdge), 0u);
     CHECK_EQ(r.get16(edit + mu_Width), 48u);
-    CHECK_EQ(r.get16(edit + mu_Height), 9u);
+    CHECK_EQ(r.get16(edit + mu_Height), 10u);
 
+    // Open: four characters and eight columns of padding, 32 for the
+    // shortcut and 16 for the submenu arrow; Wrap's check mark gives the
+    // whole column 16 more.
     CHECK_EQ(r.get16(open + mi_LeftEdge), 0u);
-    CHECK_EQ(r.get16(open + mi_TopEdge), 11u);
-    CHECK_EQ(r.get16(open + mi_Width), 68u);
-    CHECK_EQ(r.get16(open + mi_Height), 9u);
+    CHECK_EQ(r.get16(open + mi_TopEdge), 0u);
+    CHECK_EQ(r.get16(open + mi_Width), 104u);
+    CHECK_EQ(r.get16(open + mi_Height), 10u);
     CHECK_EQ(r.get16(bar + mi_LeftEdge), 0u);
-    CHECK_EQ(r.get16(bar + mi_TopEdge), 20u);
-    CHECK_EQ(r.get16(bar + mi_Width), 68u);
-    CHECK_EQ(r.get16(bar + mi_Height), 4u);
-    CHECK_EQ(r.get16(wrap + mi_TopEdge), 24u);
-    CHECK_EQ(r.get16(wrap + mi_Width), 68u);
-    CHECK_EQ(r.get16(wrap + mi_Height), 9u);
-    CHECK_EQ(r.get16(quit + mi_TopEdge), 33u);
-    CHECK_EQ(r.get16(quit + mi_Width), 68u);
-    CHECK_EQ(r.get16(quit + mi_Height), 9u);
+    CHECK_EQ(r.get16(bar + mi_TopEdge), 10u);
+    CHECK_EQ(r.get16(bar + mi_Width), 104u);
+    CHECK_EQ(r.get16(bar + mi_Height), 6u);
+    CHECK_EQ(r.get16(wrap + mi_TopEdge), 16u);
+    CHECK_EQ(r.get16(wrap + mi_Width), 104u);
+    CHECK_EQ(r.get16(wrap + mi_Height), 10u);
+    CHECK_EQ(r.get16(quit + mi_TopEdge), 26u);
+    CHECK_EQ(r.get16(quit + mi_Width), 104u);
+    CHECK_EQ(r.get16(quit + mi_Height), 10u);
+    const u32 recent = r.get32(open + mi_SubItem);
+    CHECK_EQ(r.get16(recent + mi_TopEdge), 0u);
+    CHECK_EQ(r.get16(recent + mi_Width), 56u);
+    CHECK_EQ(r.get16(recent + mi_Height), 10u);
     CHECK_EQ(r.get16(paste + mi_LeftEdge), 0u);
-    CHECK_EQ(r.get16(paste + mi_TopEdge), 11u);
-    CHECK_EQ(r.get16(paste + mi_Width), 44u);
-    CHECK_EQ(r.get16(paste + mi_Height), 9u);
+    CHECK_EQ(r.get16(paste + mi_TopEdge), 0u);
+    CHECK_EQ(r.get16(paste + mi_Width), 48u);
+    CHECK_EQ(r.get16(paste + mi_Height), 10u);
 }
 
 void free_menus_returns_memory_and_rejects_foreign_strips() {

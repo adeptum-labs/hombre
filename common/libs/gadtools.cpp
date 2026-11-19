@@ -126,7 +126,9 @@ constexpr u32 kMenuBlockHeader = 8;
 constexpr u32 kMenuBlockMagic = 0x474D4E55;  // "GMNU"
 constexpr u32 kMaxNewMenus = 512;
 constexpr u32 kMenuText = 8;  // pixels per character of the 8x8 font
-constexpr u32 kItemHeight = 9;
+constexpr u32 kItemHeight = 10;  // a text item: the font and a row of space above and below
+constexpr u32 kBarItemHeight = 6;  // a separator bar
+constexpr u32 kItemPadding = 8;  // columns around an item's label
 
 }
 
@@ -339,20 +341,28 @@ struct GadToolsNatives {
     static u32 layout_items(Bus& b, u32 first, i32 left, i32 top) {
         u32 widest = 0;
         u32 count = 0;
+        bool checks = false;
         for (u32 it = first; it != 0 && count < kMaxNewMenus && b.ok();
              it = b.r32(it + mi_NextItem), ++count) {
             const u16 flags = static_cast<u16>(b.r16(it + mi_Flags));
             u32 w = 0;
             if ((flags & ITEMTEXT) != 0) {
-                w = label_length(b, b.r32(b.r32(it + mi_ItemFill) + it_IText)) * kMenuText + 4;
+                w = label_length(b, b.r32(b.r32(it + mi_ItemFill) + it_IText)) * kMenuText +
+                    kItemPadding;
             }
             if ((flags & COMMSEQ) != 0) {
                 w += 4 * kMenuText;
             }
-            if ((flags & CHECKIT) != 0) {
+            if (b.r32(it + mi_SubItem) != 0) {
                 w += 2 * kMenuText;
             }
+            checks = checks || (flags & CHECKIT) != 0;
             widest = w > widest ? w : widest;
+        }
+        // One CHECKIT item gives every item of the column room for a check
+        // mark, so the labels line up.
+        if (checks) {
+            widest += 2 * kMenuText;
         }
         widest = widest < 4 * kMenuText ? 4 * kMenuText : widest;
         i32 y = top;
@@ -360,7 +370,7 @@ struct GadToolsNatives {
         for (u32 it = first; it != 0 && count < kMaxNewMenus && b.ok();
              it = b.r32(it + mi_NextItem), ++count) {
             const u16 flags = static_cast<u16>(b.r16(it + mi_Flags));
-            const u32 h = (flags & ITEMTEXT) != 0 ? kItemHeight : 4;
+            const u32 h = (flags & ITEMTEXT) != 0 ? kItemHeight : kBarItemHeight;
             b.w16(it + mi_LeftEdge, static_cast<u16>(left));
             b.w16(it + mi_TopEdge, static_cast<u16>(y));
             b.w16(it + mi_Width, static_cast<u16>(widest));
@@ -390,7 +400,7 @@ struct GadToolsNatives {
             b.w16(mu + mu_TopEdge, 0);
             b.w16(mu + mu_Width, static_cast<u16>(width));
             b.w16(mu + mu_Height, static_cast<u16>(kItemHeight));
-            layout_items(b, b.r32(mu + mu_FirstItem), 0, static_cast<i32>(kItemHeight) + 2);
+            layout_items(b, b.r32(mu + mu_FirstItem), 0, 0);
             left += static_cast<i32>(width);
         }
         native::set_result(m, b.ok() ? 1 : 0);
@@ -399,7 +409,7 @@ struct GadToolsNatives {
     static void layout_menu_items(void*, Machine& m) {
         Bus b(m);
         if (m.cpu.a[0] != 0) {
-            layout_items(b, m.cpu.a[0], 0, static_cast<i32>(kItemHeight) + 2);
+            layout_items(b, m.cpu.a[0], 0, 0);
         }
         native::set_result(m, b.ok() ? 1 : 0);
     }
