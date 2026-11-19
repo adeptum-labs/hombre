@@ -35,7 +35,23 @@ constexpr char kIdString[] = "layers 60.0 (Hombre)\r\n";
 
 void nothing(void*, Machine&) {}
 
-void no_region(void*, Machine& m) { native::set_result(m, 0); }
+// InstallClipRegion: makes the region at A1, or none for 0, the clip region
+// of the layer at A0 and returns the one it replaces. Drawing through the
+// layer's RastPort stays inside the region until another call takes it out
+// again; the region stays the caller's to dispose of.
+void install_clip_region(void*, Machine& m) {
+    Bus b(m);
+    const u32 layer = m.cpu.a[0];
+    if (layer == 0) {
+        native::set_result(m, 0);
+        return;
+    }
+    const u32 old = b.r32(layer + ndk::ly_ClipRegion);
+    b.w32(layer + ndk::ly_ClipRegion, m.cpu.a[1]);
+    if (b.ok()) {
+        native::set_result(m, old);
+    }
+}
 
 struct Function {
     u32 lvo;
@@ -50,7 +66,7 @@ constexpr Function kFunctions[] = {
     {layers_lvo::UnlockLayers, nothing, "UnlockLayers"},
     {layers_lvo::LockLayerInfo, nothing, "LockLayerInfo"},
     {layers_lvo::UnlockLayerInfo, nothing, "UnlockLayerInfo"},
-    {layers_lvo::InstallClipRegion, no_region, "InstallClipRegion"},
+    {layers_lvo::InstallClipRegion, install_clip_region, "InstallClipRegion"},
 };
 
 }

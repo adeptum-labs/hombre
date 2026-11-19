@@ -26,6 +26,7 @@
 #include "../m68k_cpu.hpp"
 #include "../types.hpp"
 #include "exec.hpp"
+#include "gfx.hpp"
 #include "native.hpp"
 #include "version.hpp"
 
@@ -33,8 +34,8 @@
 //
 // Windows keep their own bitmaps and tasks switch only at safe points on
 // one CPU, so the layer locks have nothing to guard and return at once.
-// InstallClipRegion keeps no region and returns none. Every other vector
-// logs "layers: unimplemented LVO -<n>" and ends the run with
+// InstallClipRegion puts a region in the layer, which drawing through the
+// layer's RastPort then stays inside. Every other vector logs "layers: unimplemented LVO -<n>" and ends the run with
 // Unimplemented.
 
 namespace hombre {

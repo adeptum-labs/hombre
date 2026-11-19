@@ -53,10 +53,9 @@ i32 cp_x(Bus& b, u32 rp) { return static_cast<i16>(b.r16(rp + ndk::rp_cp_x)); }
 
 i32 cp_y(Bus& b, u32 rp) { return static_cast<i16>(b.r16(rp + ndk::rp_cp_y)); }
 
-bool drawable(const View& v, i32 x, i32 y) {
-    return x >= v.clip.x0 && x <= v.clip.x1 && y >= v.clip.y0 && y <= v.clip.y1 && x >= 0 &&
-           y >= 0 && (static_cast<u32>(x) >> 3) < v.bitmap.bytes_per_row &&
-           static_cast<u32>(y) < v.bitmap.rows;
+bool drawable(Bus& b, const View& v, i32 x, i32 y) {
+    return x >= 0 && y >= 0 && (static_cast<u32>(x) >> 3) < v.bitmap.bytes_per_row &&
+           static_cast<u32>(y) < v.bitmap.rows && raster::in_clip(b, v.clip, x, y);
 }
 
 Rect unite(Rect a, const Rect& b) {
@@ -227,9 +226,19 @@ void fill_span(Bus& b, const View& v, i32 y, i32 x0, i32 x1, u32 pen, Rect& dirt
     dirty = unite(dirty, r);
 }
 
-// Fills the polygon of n points (bitmap coordinates) by the even-odd rule.
+// Fills the polygon of n points (bitmap coordinates) by the even-odd rule,
+// its edges included: a shape too thin to hold a pixel between its edges,
+// or one that runs out and back along the same line, still shows whole.
 void fill_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n, u32 pen,
                   Rect& dirty) {
+    if (n < 2) {
+        return;
+    }
+    for (u32 i = 0; i < n; ++i) {
+        const u32 j = (i + 1) % n;
+        dirty = unite(dirty, raster::draw_line(b, v.bitmap, v.clip, xs[i], ys[i], xs[j], ys[j],
+                                               pen));
+    }
     if (n < 3) {
         return;
     }
@@ -332,15 +341,13 @@ namespace {
 
 // --- regions -----------------------------------------------------------------
 
-// struct Region: its bounds and its list of RegionRectangles, whose bounds
-// are relative to the region's MinX/MinY.
-constexpr u32 rg_bounds = 0;
-constexpr u32 rg_RegionRectangle = 8;
-constexpr u32 Region_SIZEOF = 12;
-constexpr u32 rr_Next = 0;
-constexpr u32 rr_Prev = 4;
-constexpr u32 rr_bounds = 8;
-constexpr u32 RegionRectangle_SIZEOF = 16;
+using ndk::Region_SIZEOF;
+using ndk::RegionRectangle_SIZEOF;
+using ndk::rg_bounds;
+using ndk::rg_RegionRectangle;
+using ndk::rr_bounds;
+using ndk::rr_Next;
+using ndk::rr_Prev;
 
 // The most rectangles one region keeps; an operation that would need more
 // fails and leaves the region as it was.
@@ -1021,7 +1028,7 @@ struct GraphicsNatives {
         }
         const i32 x = static_cast<i16>(m.cpu.d[0]) + v.origin_x;
         const i32 y = static_cast<i16>(m.cpu.d[1]) + v.origin_y;
-        if (!drawable(v, x, y)) {
+        if (!drawable(b, v, x, y)) {
             native::set_result(m, 0xFFFFFFFF);
             return;
         }
@@ -1044,7 +1051,7 @@ struct GraphicsNatives {
         }
         const i32 x = static_cast<i16>(m.cpu.d[0]) + v.origin_x;
         const i32 y = static_cast<i16>(m.cpu.d[1]) + v.origin_y;
-        if (!drawable(v, x, y)) {
+        if (!drawable(b, v, x, y)) {
             native::set_result(m, 0xFFFFFFFF);
             return;
         }

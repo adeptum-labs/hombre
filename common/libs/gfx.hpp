@@ -104,8 +104,19 @@ constexpr u32 ly_MaxX = 20;
 constexpr u32 ly_MaxY = 22;
 constexpr u32 ly_SuperBitMap = 32;
 constexpr u32 ly_Window = 40;
+constexpr u32 ly_ClipRegion = 126;
 constexpr u32 Layer_SIZEOF = 160;
 static_assert(Layer_SIZEOF == 160);
+
+// struct Region: its bounds and its list of RegionRectangles, whose bounds
+// are relative to the region's MinX and MinY.
+constexpr u32 rg_bounds = 0;
+constexpr u32 rg_RegionRectangle = 8;
+constexpr u32 Region_SIZEOF = 12;
+constexpr u32 rr_Next = 0;
+constexpr u32 rr_Prev = 4;
+constexpr u32 rr_bounds = 8;
+constexpr u32 RegionRectangle_SIZEOF = 16;
 
 // struct ViewPort
 constexpr u32 vp_ColorMap = 4;

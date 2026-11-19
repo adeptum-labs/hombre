@@ -1042,6 +1042,51 @@ void area_fills_square_and_triangle_and_empties_the_table() {
     CHECK_EQ(read_pixel(r, s.rp, 60, 71), 0u);
 }
 
+void area_fill_of_a_shape_without_width_draws_its_whole_line() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    init_area(r, s.rp, kAreaMax);
+
+    // Out along a shallow line, on to a tip and back the same way, as a
+    // clock draws a thin hand.
+    CHECK_EQ(area_move(r, s.rp, 10, 100), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 50, 108), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 60, 110), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 50, 108), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 10, 100), 0u);
+    area_end(r, s.rp);
+
+    // Every column from end to end holds a pixel of the line, and nothing
+    // lies outside the box around it.
+    for (i32 x = 10; x <= 60; ++x) {
+        u32 set = 0;
+        for (i32 y = 100; y <= 110; ++y) {
+            set += read_pixel(r, s.rp, x, y) == 1 ? 1 : 0;
+        }
+        CHECK(set >= 1);
+        CHECK_EQ(read_pixel(r, s.rp, x, 99), 0u);
+        CHECK_EQ(read_pixel(r, s.rp, x, 111), 0u);
+    }
+    CHECK_EQ(read_pixel(r, s.rp, 10, 100), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 60, 110), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 9, 100), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 61, 110), 0u);
+
+    // Filled again in pen 0 the same shape takes every pixel away.
+    r.graphics.set_pens(s.rp, 0, 0, JAM1);
+    CHECK_EQ(area_move(r, s.rp, 10, 100), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 50, 108), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 60, 110), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 50, 108), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 10, 100), 0u);
+    area_end(r, s.rp);
+    for (i32 y = 99; y <= 111; ++y) {
+        for (i32 x = 9; x <= 61; ++x) {
+            CHECK_EQ(read_pixel(r, s.rp, x, y), 0u);
+        }
+    }
+}
+
 void area_draw_past_max_count_returns_minus_one() {
     GfxRig r;
     const Surface s = make_surface(r, kBitmap, kRastPort);
@@ -1148,6 +1193,434 @@ void init_tmp_ras_records_the_buffer_and_wait_blit_is_a_no_op() {
 
 }
 
+// --- regions -----------------------------------------------------------------
+
+constexpr u32 kRectangle = kData + 0xE00;
+
+u32 new_region(GfxRig& r) {
+    const u32 region = r.result(Base::Graphics, graphics_lvo::NewRegion);
+    CHECK(region != 0);
+    return region;
+}
+
+void dispose_region(GfxRig& r, u32 region) {
+    r.cpu().a[0] = region;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::DisposeRegion), ExitReason::Halt);
+}
+
+// OrRectRegion, AndRectRegion, ClearRectRegion or XorRectRegion of the
+// rectangle with the region; D0 is what the vector gave.
+u32 rect_region(GfxRig& r, u32 lvo, u32 region, i32 x0, i32 y0, i32 x1, i32 y1) {
+    r.put16(kRectangle, static_cast<u32>(x0));
+    r.put16(kRectangle + 2, static_cast<u32>(y0));
+    r.put16(kRectangle + 4, static_cast<u32>(x1));
+    r.put16(kRectangle + 6, static_cast<u32>(y1));
+    r.cpu().a[0] = region;
+    r.cpu().a[1] = kRectangle;
+    return r.result(Base::Graphics, lvo);
+}
+
+u32 region_region(GfxRig& r, u32 lvo, u32 source, u32 dest) {
+    r.cpu().a[0] = source;
+    r.cpu().a[1] = dest;
+    return r.result(Base::Graphics, lvo);
+}
+
+i32 word_at(GfxRig& r, u32 at) { return static_cast<__INT16_TYPE__>(r.get16(at)); }
+
+// The rectangles of the region in absolute coordinates, in list order.
+std::vector<Rect> region_rects(GfxRig& r, u32 region) {
+    std::vector<Rect> rects;
+    const i32 min_x = word_at(r, region + rg_bounds);
+    const i32 min_y = word_at(r, region + rg_bounds + 2);
+    u32 prev = 0;
+    for (u32 rr = r.get32(region + rg_RegionRectangle); rr != 0 && rects.size() < 1000;
+         rr = r.get32(rr + rr_Next)) {
+        CHECK_EQ(r.get32(rr + rr_Prev), prev);
+        rects.push_back(Rect{min_x + word_at(r, rr + rr_bounds),
+                             min_y + word_at(r, rr + rr_bounds + 2),
+                             min_x + word_at(r, rr + rr_bounds + 4),
+                             min_y + word_at(r, rr + rr_bounds + 6)});
+        prev = rr;
+    }
+    return rects;
+}
+
+// How many of the region's rectangles hold the point: 1 inside a region
+// whose rectangles do not overlap, 0 outside.
+u32 region_cover(const std::vector<Rect>& rects, i32 x, i32 y) {
+    u32 count = 0;
+    for (const Rect& rect : rects) {
+        if (x >= rect.x0 && x <= rect.x1 && y >= rect.y0 && y <= rect.y1) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Checks the region against inside(x, y) over 0..59 in both directions,
+// and that its bounds are the box around what it covers.
+template <typename Inside>
+void check_region(GfxRig& r, u32 region, Inside inside) {
+    const std::vector<Rect> rects = region_rects(r, region);
+    Rect box{0, 0, -1, -1};
+    for (i32 y = 0; y < 60; ++y) {
+        for (i32 x = 0; x < 60; ++x) {
+            const u32 expected = inside(x, y) ? 1u : 0u;
+            CHECK_EQ(region_cover(rects, x, y), expected);
+            if (expected == 0) {
+                continue;
+            }
+            if (box.x1 < box.x0) {
+                box = Rect{x, y, x, y};
+            }
+            box.x0 = x < box.x0 ? x : box.x0;
+            box.x1 = x > box.x1 ? x : box.x1;
+            box.y0 = y < box.y0 ? y : box.y0;
+            box.y1 = y > box.y1 ? y : box.y1;
+        }
+    }
+    if (box.x1 < box.x0) {
+        CHECK(rects.empty());
+        return;
+    }
+    CHECK_EQ(word_at(r, region + rg_bounds), box.x0);
+    CHECK_EQ(word_at(r, region + rg_bounds + 2), box.y0);
+    CHECK_EQ(word_at(r, region + rg_bounds + 4), box.x1);
+    CHECK_EQ(word_at(r, region + rg_bounds + 6), box.y1);
+}
+
+bool in_box(i32 x, i32 y, i32 x0, i32 y0, i32 x1, i32 y1) {
+    return x >= x0 && x <= x1 && y >= y0 && y <= y1;
+}
+
+void new_region_is_empty_and_dispose_frees_every_rectangle() {
+    GfxRig r;
+    const u32 before = r.exec.free_bytes();
+    const u32 region = new_region(r);
+    CHECK_EQ(r.get32(region + rg_RegionRectangle), 0u);
+    check_region(r, region, [](i32, i32) { return false; });
+
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 10, 10, 19, 19), 1u);
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 40, 30, 49, 39), 1u);
+    CHECK(r.exec.free_bytes() < before);
+    dispose_region(r, region);
+    CHECK_EQ(r.exec.free_bytes(), before);
+
+    // Disposing no region does nothing.
+    dispose_region(r, 0);
+    CHECK_EQ(r.exec.free_bytes(), before);
+}
+
+void or_rect_region_stores_rectangles_relative_to_the_bounds() {
+    GfxRig r;
+    const u32 region = new_region(r);
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 10, 20, 19, 24), 1u);
+    CHECK_EQ(word_at(r, region + rg_bounds), 10);
+    CHECK_EQ(word_at(r, region + rg_bounds + 2), 20);
+    CHECK_EQ(word_at(r, region + rg_bounds + 4), 19);
+    CHECK_EQ(word_at(r, region + rg_bounds + 6), 24);
+    const u32 rr = r.get32(region + rg_RegionRectangle);
+    CHECK(rr != 0);
+    CHECK_EQ(r.get32(rr + rr_Next), 0u);
+    CHECK_EQ(r.get32(rr + rr_Prev), 0u);
+    CHECK_EQ(word_at(r, rr + rr_bounds), 0);
+    CHECK_EQ(word_at(r, rr + rr_bounds + 2), 0);
+    CHECK_EQ(word_at(r, rr + rr_bounds + 4), 9);
+    CHECK_EQ(word_at(r, rr + rr_bounds + 6), 4);
+    dispose_region(r, region);
+}
+
+void or_rect_region_joins_overlapping_rectangles_without_overlap() {
+    GfxRig r;
+    const u32 region = new_region(r);
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 10, 10, 29, 29), 1u);
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 20, 20, 39, 39), 1u);
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 50, 5, 55, 8), 1u);
+    check_region(r, region, [](i32 x, i32 y) {
+        return in_box(x, y, 10, 10, 29, 29) || in_box(x, y, 20, 20, 39, 39) ||
+               in_box(x, y, 50, 5, 55, 8);
+    });
+
+    // A rectangle already inside changes nothing.
+    const std::vector<Rect> rects = region_rects(r, region);
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 12, 12, 15, 15), 1u);
+    CHECK_EQ(region_rects(r, region).size(), rects.size());
+    dispose_region(r, region);
+}
+
+void and_rect_region_keeps_what_the_rectangle_covers() {
+    GfxRig r;
+    const u32 region = new_region(r);
+    rect_region(r, graphics_lvo::OrRectRegion, region, 10, 10, 29, 29);
+    rect_region(r, graphics_lvo::OrRectRegion, region, 40, 10, 49, 29);
+    rect_region(r, graphics_lvo::AndRectRegion, region, 20, 15, 44, 19);
+    check_region(r, region, [](i32 x, i32 y) {
+        return in_box(x, y, 20, 15, 29, 19) || in_box(x, y, 40, 15, 44, 19);
+    });
+
+    // A rectangle that misses the region empties it.
+    const u32 before = r.exec.free_bytes();
+    rect_region(r, graphics_lvo::AndRectRegion, region, 0, 0, 5, 5);
+    check_region(r, region, [](i32, i32) { return false; });
+    CHECK(r.exec.free_bytes() > before);
+    dispose_region(r, region);
+}
+
+void clear_rect_region_cuts_a_hole() {
+    GfxRig r;
+    const u32 region = new_region(r);
+    rect_region(r, graphics_lvo::OrRectRegion, region, 10, 10, 39, 39);
+    CHECK_EQ(rect_region(r, graphics_lvo::ClearRectRegion, region, 20, 20, 29, 29), 1u);
+    check_region(r, region, [](i32 x, i32 y) {
+        return in_box(x, y, 10, 10, 39, 39) && !in_box(x, y, 20, 20, 29, 29);
+    });
+
+    // Cutting past the edge takes the corner off.
+    CHECK_EQ(rect_region(r, graphics_lvo::ClearRectRegion, region, 35, 0, 59, 14), 1u);
+    check_region(r, region, [](i32 x, i32 y) {
+        return in_box(x, y, 10, 10, 39, 39) && !in_box(x, y, 20, 20, 29, 29) &&
+               !in_box(x, y, 35, 0, 59, 14);
+    });
+    dispose_region(r, region);
+}
+
+void xor_rect_region_keeps_what_only_one_of_them_covers() {
+    GfxRig r;
+    const u32 region = new_region(r);
+    rect_region(r, graphics_lvo::OrRectRegion, region, 10, 10, 29, 29);
+    CHECK_EQ(rect_region(r, graphics_lvo::XorRectRegion, region, 20, 20, 39, 39), 1u);
+    check_region(r, region, [](i32 x, i32 y) {
+        return in_box(x, y, 10, 10, 29, 29) != in_box(x, y, 20, 20, 39, 39);
+    });
+
+    // The same rectangle again puts the first one back.
+    CHECK_EQ(rect_region(r, graphics_lvo::XorRectRegion, region, 20, 20, 39, 39), 1u);
+    check_region(r, region, [](i32 x, i32 y) { return in_box(x, y, 10, 10, 29, 29); });
+    dispose_region(r, region);
+}
+
+void region_region_operations_change_only_the_destination() {
+    GfxRig r;
+    const u32 source = new_region(r);
+    const u32 dest = new_region(r);
+    rect_region(r, graphics_lvo::OrRectRegion, source, 5, 5, 24, 24);
+    rect_region(r, graphics_lvo::OrRectRegion, source, 40, 40, 49, 49);
+    rect_region(r, graphics_lvo::OrRectRegion, dest, 15, 15, 44, 44);
+    auto in_source = [](i32 x, i32 y) {
+        return in_box(x, y, 5, 5, 24, 24) || in_box(x, y, 40, 40, 49, 49);
+    };
+
+    CHECK_EQ(region_region(r, graphics_lvo::AndRegionRegion, source, dest), 1u);
+    check_region(r, dest, [&](i32 x, i32 y) {
+        return in_source(x, y) && in_box(x, y, 15, 15, 44, 44);
+    });
+    check_region(r, source, in_source);
+
+    CHECK_EQ(region_region(r, graphics_lvo::OrRegionRegion, source, dest), 1u);
+    check_region(r, dest, in_source);
+    check_region(r, source, in_source);
+
+    // An empty source leaves an OR as it was and empties an AND.
+    const u32 empty = new_region(r);
+    CHECK_EQ(region_region(r, graphics_lvo::OrRegionRegion, empty, dest), 1u);
+    check_region(r, dest, in_source);
+    CHECK_EQ(region_region(r, graphics_lvo::AndRegionRegion, empty, dest), 1u);
+    check_region(r, dest, [](i32, i32) { return false; });
+    dispose_region(r, empty);
+    dispose_region(r, source);
+    dispose_region(r, dest);
+}
+
+void clear_region_empties_the_region_and_frees_its_rectangles() {
+    GfxRig r;
+    const u32 region = new_region(r);
+    const u32 empty_bytes = r.exec.free_bytes();
+    rect_region(r, graphics_lvo::OrRectRegion, region, 10, 10, 39, 39);
+    rect_region(r, graphics_lvo::ClearRectRegion, region, 20, 20, 29, 29);
+    r.cpu().a[0] = region;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::ClearRegion), ExitReason::Halt);
+    CHECK_EQ(r.exec.free_bytes(), empty_bytes);
+    CHECK_EQ(r.get32(region + rg_RegionRectangle), 0u);
+    check_region(r, region, [](i32, i32) { return false; });
+
+    // The cleared region takes rectangles again.
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, region, 1, 2, 3, 4), 1u);
+    check_region(r, region, [](i32 x, i32 y) { return in_box(x, y, 1, 2, 3, 4); });
+    dispose_region(r, region);
+}
+
+void region_calls_without_a_region_or_rectangle_fail() {
+    GfxRig r;
+    const u32 region = new_region(r);
+    CHECK_EQ(rect_region(r, graphics_lvo::OrRectRegion, 0, 1, 1, 2, 2), 0u);
+    r.cpu().a[0] = region;
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OrRectRegion), 0u);
+    CHECK_EQ(region_region(r, graphics_lvo::OrRegionRegion, 0, region), 0u);
+    CHECK_EQ(region_region(r, graphics_lvo::AndRegionRegion, region, 0), 0u);
+    check_region(r, region, [](i32, i32) { return false; });
+    dispose_region(r, region);
+}
+
+// The pen at a bitmap position, read from the planes themselves.
+u32 plane_pixel(GfxRig& r, const Surface& s, u32 row_bytes, u32 x, u32 y) {
+    const u32 at = y * row_bytes + (x >> 3);
+    const u32 mask = 0x80u >> (x & 7);
+    return ((r.get8(s.plane0 + at) & mask) != 0 ? 1u : 0u) |
+           ((r.get8(s.plane1 + at) & mask) != 0 ? 2u : 0u);
+}
+
+void set_rast(GfxRig& r, u32 rp, u32 pen) {
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = pen;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRast), ExitReason::Halt);
+}
+
+// A layer at 100,50 to 179,99 of the screen bitmap whose clip region holds
+// the layer's 10,10-19,19 and 30,10-39,19.
+u32 install_two_boxes(GfxRig& r, const Surface& s) {
+    r.put16(kLayer + ly_MinX, 100);
+    r.put16(kLayer + ly_MinY, 50);
+    r.put16(kLayer + ly_MaxX, 179);
+    r.put16(kLayer + ly_MaxY, 99);
+    r.put32(s.rp + rp_Layer, kLayer);
+    const u32 region = new_region(r);
+    rect_region(r, graphics_lvo::OrRectRegion, region, 10, 10, 19, 19);
+    rect_region(r, graphics_lvo::OrRectRegion, region, 30, 10, 39, 19);
+    r.put32(kLayer + ly_ClipRegion, region);
+    return region;
+}
+
+bool in_two_boxes(i32 x, i32 y) {
+    return in_box(x, y, 10, 10, 19, 19) || in_box(x, y, 30, 10, 39, 19);
+}
+
+void clip_region_keeps_fills_inside_its_rectangles() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    const u32 region = install_two_boxes(r, s);
+
+    // SetRast clears to pen 3 only where the region is.
+    set_rast(r, s.rp, 3);
+    for (i32 y = 0; y < 50; ++y) {
+        for (i32 x = 0; x < 80; ++x) {
+            const u32 expected = in_two_boxes(x, y) ? 3u : 0u;
+            CHECK_EQ(plane_pixel(r, s, kBytesPerRow, static_cast<u32>(100 + x),
+                                 static_cast<u32>(50 + y)),
+                     expected);
+        }
+    }
+
+    // A RectFill across both rectangles and the gap between them.
+    r.graphics.set_pens(s.rp, 1, 0, JAM2);
+    rect_fill(r, s.rp, 0, 14, 79, 15);
+    for (i32 x = 0; x < 80; ++x) {
+        const u32 inside = in_two_boxes(x, 14) ? 1u : 0u;
+        CHECK_EQ(plane_pixel(r, s, kBytesPerRow, static_cast<u32>(100 + x), 64), inside);
+        CHECK_EQ(plane_pixel(r, s, kBytesPerRow, static_cast<u32>(100 + x), 66),
+                 in_two_boxes(x, 16) ? 3u : 0u);
+    }
+
+    // Without the region the whole layer is drawn again.
+    r.put32(kLayer + ly_ClipRegion, 0);
+    set_rast(r, s.rp, 2);
+    for (i32 y = 0; y < 50; ++y) {
+        for (i32 x = 0; x < 80; ++x) {
+            CHECK_EQ(plane_pixel(r, s, kBytesPerRow, static_cast<u32>(100 + x),
+                                 static_cast<u32>(50 + y)),
+                     2u);
+        }
+    }
+    CHECK_EQ(plane_pixel(r, s, kBytesPerRow, 99, 60), 0u);
+    CHECK_EQ(plane_pixel(r, s, kBytesPerRow, 180, 60), 0u);
+    dispose_region(r, region);
+}
+
+void clip_region_keeps_lines_text_and_pixels_inside() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    const u32 region = install_two_boxes(r, s);
+    r.graphics.set_pens(s.rp, 1, 0, JAM2);
+
+    // A line through both rectangles shows only inside them, and the pen
+    // position ends where the line does.
+    move(r, s.rp, 0, 12);
+    r.cpu().a[1] = s.rp;
+    r.cpu().d[0] = 79;
+    r.cpu().d[1] = 12;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Draw), ExitReason::Halt);
+    CHECK_EQ(r.get16(s.rp + rp_cp_x), 79u);
+    for (i32 x = 0; x < 80; ++x) {
+        CHECK_EQ(plane_pixel(r, s, kBytesPerRow, static_cast<u32>(100 + x), 62),
+                 in_two_boxes(x, 12) ? 1u : 0u);
+    }
+
+    // Text advances by its whole width once, however many rectangles the
+    // region has, and each glyph pixel is drawn only inside them.
+    move(r, s.rp, 8, 21);
+    r.str(kStrings, "HHHH");
+    r.cpu().a[1] = s.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 4;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Text), ExitReason::Halt);
+    CHECK_EQ(r.get16(s.rp + rp_cp_x), 40u);
+    const u8* rows = glyph('H');
+    for (i32 y = 15; y < 23; ++y) {
+        for (i32 x = 8; x < 40; ++x) {
+            const bool set = ((rows[y - 15] >> ((x - 8) & 7)) & 1) != 0;
+            const u32 expected = in_two_boxes(x, y) ? (set ? 1u : 0u) : 0u;
+            CHECK_EQ(plane_pixel(r, s, kBytesPerRow, static_cast<u32>(100 + x),
+                                 static_cast<u32>(50 + y)),
+                     expected);
+        }
+    }
+
+    // WritePixel and ReadPixel refuse a place outside the region.
+    r.graphics.set_pens(s.rp, 2, 0, JAM2);
+    CHECK_EQ(write_pixel(r, s.rp, 35, 11), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 35, 11), 2u);
+    CHECK_EQ(write_pixel(r, s.rp, 25, 11), 0xFFFFFFFFu);
+    CHECK_EQ(read_pixel(r, s.rp, 25, 11), 0xFFFFFFFFu);
+    CHECK_EQ(plane_pixel(r, s, kBytesPerRow, 125, 61), 0u);
+    dispose_region(r, region);
+}
+
+void an_empty_clip_region_lets_nothing_through() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    r.put16(kLayer + ly_MinX, 100);
+    r.put16(kLayer + ly_MinY, 50);
+    r.put16(kLayer + ly_MaxX, 179);
+    r.put16(kLayer + ly_MaxY, 99);
+    r.put32(s.rp + rp_Layer, kLayer);
+    const u32 region = new_region(r);
+    r.put32(kLayer + ly_ClipRegion, region);
+    const std::vector<u8> before = plane_snapshot(r, s);
+    set_rast(r, s.rp, 3);
+    rect_fill(r, s.rp, 0, 0, 79, 49);
+    CHECK_EQ(write_pixel(r, s.rp, 5, 5), 0xFFFFFFFFu);
+    CHECK(plane_snapshot(r, s) == before);
+    dispose_region(r, region);
+}
+
+void clip_region_of_a_superbitmap_layer_is_window_relative() {
+    GfxRig r;
+    const Surface s = make_superbitmap_layer(r);
+    const u32 region = new_region(r);
+    rect_region(r, graphics_lvo::OrRectRegion, region, 20, 5, 29, 9);
+    r.put32(kLayer + ly_ClipRegion, region);
+    set_rast(r, s.rp, 1);
+    for (i32 y = 0; y < 50; ++y) {
+        for (i32 x = 0; x < 100; ++x) {
+            CHECK_EQ(plane_pixel(r, s, 14, static_cast<u32>(x), static_cast<u32>(y)),
+                     in_box(x, y, 20, 5, 29, 9) ? 1u : 0u);
+        }
+    }
+    dispose_region(r, region);
+}
+
+
 int main() {
     init_bitmap_fills_the_fields();
     init_rastport_sets_default_pens();
@@ -1178,10 +1651,24 @@ int main() {
     load_rgb32_caps_colormap_count_at_256();
     text_extent_reports_five_characters_of_the_8x8_font();
     area_fills_square_and_triangle_and_empties_the_table();
+    area_fill_of_a_shape_without_width_draws_its_whole_line();
     area_draw_past_max_count_returns_minus_one();
     area_ellipse_fills_symmetrically_about_the_centre();
     area_outline_uses_the_outline_pen();
     draw_ellipse_outline_has_no_gaps_and_leaves_the_inside_clear();
     init_tmp_ras_records_the_buffer_and_wait_blit_is_a_no_op();
+    new_region_is_empty_and_dispose_frees_every_rectangle();
+    or_rect_region_stores_rectangles_relative_to_the_bounds();
+    or_rect_region_joins_overlapping_rectangles_without_overlap();
+    and_rect_region_keeps_what_the_rectangle_covers();
+    clear_rect_region_cuts_a_hole();
+    xor_rect_region_keeps_what_only_one_of_them_covers();
+    region_region_operations_change_only_the_destination();
+    clear_region_empties_the_region_and_frees_its_rectangles();
+    region_calls_without_a_region_or_rectangle_fail();
+    clip_region_keeps_fills_inside_its_rectangles();
+    clip_region_keeps_lines_text_and_pixels_inside();
+    an_empty_clip_region_lets_nothing_through();
+    clip_region_of_a_superbitmap_layer_is_window_relative();
     return check::finish("test_graphics");
 }

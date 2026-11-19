@@ -128,6 +128,9 @@ public:
     }
 
     u32 get8(u32 at) const { return memory_[at]; }
+    u32 get32(u32 at) const {
+        return (get8(at) << 24) | (get8(at + 1) << 16) | (get8(at + 2) << 8) | get8(at + 3);
+    }
 
     u32 str(u32 at, const std::string& s) {
         for (usize i = 0; i < s.size(); ++i) {
@@ -179,10 +182,33 @@ void layer_locks_do_nothing() {
     }
 }
 
-void install_clip_region_returns_zero() {
+void install_clip_region_keeps_the_region_and_returns_the_one_before() {
     Rig r;
-    r.m.cpu.a[0] = kData;
-    r.m.cpu.a[1] = kData + 0x100;
+    const u32 layer = kData;
+    const u32 first = kData + 0x100;
+    const u32 second = kData + 0x200;
+    CHECK_EQ(ly_ClipRegion, 126u);
+
+    // A layer without a region gives none back and takes the new one.
+    r.m.cpu.a[0] = layer;
+    r.m.cpu.a[1] = first;
+    CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallClipRegion), 0u);
+    CHECK_EQ(r.get32(layer + ly_ClipRegion), first);
+
+    r.m.cpu.a[0] = layer;
+    r.m.cpu.a[1] = second;
+    CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallClipRegion), first);
+    CHECK_EQ(r.get32(layer + ly_ClipRegion), second);
+
+    // No region takes the clip out again and hands the last one back.
+    r.m.cpu.a[0] = layer;
+    r.m.cpu.a[1] = 0;
+    CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallClipRegion), second);
+    CHECK_EQ(r.get32(layer + ly_ClipRegion), 0u);
+
+    // No layer has no region to give.
+    r.m.cpu.a[0] = 0;
+    r.m.cpu.a[1] = first;
     CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallClipRegion), 0u);
 }
 
@@ -216,7 +242,7 @@ void icon_reads_what_is_there_and_defaults_the_rest() {
 
 int main() {
     layer_locks_do_nothing();
-    install_clip_region_returns_zero();
+    install_clip_region_keeps_the_region_and_returns_the_one_before();
     icon_reads_what_is_there_and_defaults_the_rest();
     return check::finish("test_layers_icon");
 }

@@ -45,9 +45,14 @@ struct Bitmap {
     u32 addr;
 };
 
-// An inclusive rectangle the drawing stays inside.
+// An inclusive rectangle the drawing stays inside. With region not 0 the
+// drawing also stays inside the rectangles of that Region, whose
+// coordinates are relative to region_x, region_y.
 struct Clip {
     i32 x0, y0, x1, y1;
+    u32 region = 0;
+    i32 region_x = 0;
+    i32 region_y = 0;
 };
 
 // The pens and draw mode of one operation.
@@ -125,6 +130,51 @@ void plot(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i64 x, i64 y
     }
     write_pixel(bus, bitmap, static_cast<i32>(x), static_cast<i32>(y), pen);
     grow(dirty, static_cast<i32>(x), static_cast<i32>(y));
+}
+
+Rect unite_rects(const Rect& a, const Rect& b) {
+    if (b.x1 < b.x0 || b.y1 < b.y0) {
+        return a;
+    }
+    if (a.x1 < a.x0 || a.y1 < a.y0) {
+        return b;
+    }
+    return Rect{a.x0 < b.x0 ? a.x0 : b.x0, a.y0 < b.y0 ? a.y0 : b.y0, a.x1 > b.x1 ? a.x1 : b.x1,
+                a.y1 > b.y1 ? a.y1 : b.y1};
+}
+
+// The most rectangles of a clip region a draw walks.
+constexpr u32 kMaxClipRects = 256;
+
+// Calls visit(part) for the clip itself, or with a region for the part of
+// the clip inside each of the region's rectangles, until visit returns
+// false.
+template <typename Visit>
+void walk_clip(native::Bus& bus, const Clip& clip, Visit visit) {
+    if (clip.region == 0) {
+        visit(clip);
+        return;
+    }
+    using i16 = __INT16_TYPE__;
+    const i32 base_x = clip.region_x + static_cast<i16>(bus.r16(clip.region + ndk::rg_bounds));
+    const i32 base_y =
+        clip.region_y + static_cast<i16>(bus.r16(clip.region + ndk::rg_bounds + 2));
+    u32 rr = bus.r32(clip.region + ndk::rg_RegionRectangle);
+    for (u32 i = 0; rr != 0 && i < kMaxClipRects && bus.ok(); ++i) {
+        const i32 x0 = base_x + static_cast<i16>(bus.r16(rr + ndk::rr_bounds));
+        const i32 y0 = base_y + static_cast<i16>(bus.r16(rr + ndk::rr_bounds + 2));
+        const i32 x1 = base_x + static_cast<i16>(bus.r16(rr + ndk::rr_bounds + 4));
+        const i32 y1 = base_y + static_cast<i16>(bus.r16(rr + ndk::rr_bounds + 6));
+        rr = bus.r32(rr + ndk::rr_Next);
+        if (!bus.ok()) {
+            return;
+        }
+        const Clip part{x0 > clip.x0 ? x0 : clip.x0, y0 > clip.y0 ? y0 : clip.y0,
+                        x1 < clip.x1 ? x1 : clip.x1, y1 < clip.y1 ? y1 : clip.y1};
+        if (part.x0 <= part.x1 && part.y0 <= part.y1 && !visit(part)) {
+            return;
+        }
+    }
 }
 
 // The bits of a plane byte from pixel x to the byte's right end, and from
@@ -217,7 +267,8 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
 
 // Reads the RastPort's BitMap and, when it has a layer, the layer's clip: a
 // layer over the bitmap itself clips to the layer's size, any other layer
-// clips at its screen position.
+// clips at its screen position. A region installed in the layer clips
+// further, its coordinates relative to the layer's top left corner.
 inline RastPortView load_rastport(native::Bus& bus, u32 rp) {
     RastPortView view{};
     if (rp == 0) {
@@ -242,6 +293,9 @@ inline RastPortView load_rastport(native::Bus& bus, u32 rp) {
             view.origin_y = min_y;
             view.clip = Clip{min_x, min_y, max_x, max_y};
         }
+        view.clip.region = bus.r32(layer + ndk::ly_ClipRegion);
+        view.clip.region_x = view.origin_x;
+        view.clip.region_y = view.origin_y;
     } else {
         view.clip = Clip{0, 0, static_cast<i32>(view.bitmap.bytes_per_row << 3) - 1,
                          static_cast<i32>(view.bitmap.rows) - 1};
@@ -282,7 +336,19 @@ inline void write_pixel(native::Bus& bus, const Bitmap& bitmap, i32 x, i32 y, u3
     }
 }
 
-inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen) {
+// True for a pixel inside the clip and, when it has one, its region.
+inline bool in_clip(native::Bus& bus, const Clip& clip, i32 x, i32 y) {
+    bool inside = false;
+    walk_clip(bus, clip, [&](const Clip& part) {
+        inside = x >= part.x0 && x <= part.x1 && y >= part.y0 && y <= part.y1;
+        return !inside;
+    });
+    return inside;
+}
+
+namespace {
+
+Rect fill_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen) {
     const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
     const i64 height = static_cast<i64>(bitmap.rows);
     i64 left = r.x0 > clip.x0 ? r.x0 : clip.x0;
@@ -325,8 +391,8 @@ inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
                 static_cast<i32>(bottom)};
 }
 
-inline Rect draw_line(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 x0, i32 y0,
-                      i32 x1, i32 y1, u32 pen) {
+Rect draw_line_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 x0, i32 y0,
+                    i32 x1, i32 y1, u32 pen) {
     Rect dirty = empty_rect();
     i64 x = x0;
     i64 y = y0;
@@ -353,8 +419,8 @@ inline Rect draw_line(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     return dirty;
 }
 
-inline Rect draw_text(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
-                      i32 x, i32 baseline_y, const u8* chars, u32 count, u32& advance) {
+Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
+                    i32 x, i32 baseline_y, const u8* chars, u32 count, u32& advance) {
     advance = 8 * count;
     Rect dirty = empty_rect();
     const bool inverse = (pens.mode & ndk::INVERSVID) != 0;
@@ -416,8 +482,8 @@ inline Rect draw_text(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     return dirty;
 }
 
-inline Rect scroll_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 dx, i32 dy,
-                        Rect area, u32 bg_pen) {
+Rect scroll_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 dx, i32 dy,
+                      Rect area, u32 bg_pen) {
     const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
     const i64 height = static_cast<i64>(bitmap.rows);
     i64 left = area.x0 > clip.x0 ? area.x0 : clip.x0;
@@ -497,6 +563,55 @@ inline Rect scroll_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip
     }
     return Rect{static_cast<i32>(left), static_cast<i32>(top), static_cast<i32>(right),
                 static_cast<i32>(bottom)};
+}
+
+}
+
+// Each drawing call below draws inside the clip; where the clip has a
+// region, inside every rectangle of the region in turn. The rectangle it
+// returns holds every pixel it changed.
+
+inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen) {
+    Rect dirty = empty_rect();
+    walk_clip(bus, clip, [&](const Clip& part) {
+        dirty = unite_rects(dirty, fill_rect_part(bus, bitmap, part, r, pen));
+        return true;
+    });
+    return dirty;
+}
+
+inline Rect draw_line(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 x0, i32 y0,
+                      i32 x1, i32 y1, u32 pen) {
+    Rect dirty = empty_rect();
+    walk_clip(bus, clip, [&](const Clip& part) {
+        dirty = unite_rects(dirty, draw_line_part(bus, bitmap, part, x0, y0, x1, y1, pen));
+        return true;
+    });
+    return dirty;
+}
+
+inline Rect draw_text(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
+                      i32 x, i32 baseline_y, const u8* chars, u32 count, u32& advance) {
+    advance = 8 * count;
+    Rect dirty = empty_rect();
+    walk_clip(bus, clip, [&](const Clip& part) {
+        dirty = unite_rects(dirty, draw_text_part(bus, bitmap, part, pens, x, baseline_y, chars,
+                                                  count, advance));
+        return true;
+    });
+    return dirty;
+}
+
+// Each rectangle of a region scrolls on its own: what would come from
+// outside it is filled with bg_pen.
+inline Rect scroll_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 dx, i32 dy,
+                        Rect area, u32 bg_pen) {
+    Rect dirty = empty_rect();
+    walk_clip(bus, clip, [&](const Clip& part) {
+        dirty = unite_rects(dirty, scroll_rect_part(bus, bitmap, part, dx, dy, area, bg_pen));
+        return true;
+    });
+    return dirty;
 }
 
 // Clips a copy rectangle against both bitmaps; false if nothing overlaps.
