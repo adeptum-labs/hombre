@@ -3659,8 +3659,14 @@ void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool compl
         Rect area{0, 0, -1, -1};
         if (width > 0 && height > 0 && depth >= 0 && depth <= 8 &&
             clip_image_rect(view, origin_x + img_left, origin_y + img_top, width, height, area)) {
+            // A complemented image has every pen of its box inverted in the
+            // planes the bitmap has.
+            const u32 pen_mask =
+                view.bitmap.depth >= 8 ? 0xFFu : (1u << view.bitmap.depth) - 1;
             if (data == 0 || depth == 0) {
-                const Rect filled = raster::fill_rect(b, view.bitmap, view.clip, area, plane_on_off);
+                const Rect filled =
+                    raster::fill_rect(b, view.bitmap, view.clip, area,
+                                      complement ? ~plane_on_off & pen_mask : plane_on_off);
                 if (b.ok()) {
                     report_image_damage(view, filled);
                 }
@@ -3706,14 +3712,13 @@ void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool compl
                                     pen |= 1u << bit;
                                 }
                             }
+                            if (view.clip.region != 0 &&
+                                !raster::in_clip(b, view.clip, static_cast<i32>(x),
+                                                 static_cast<i32>(y))) {
+                                continue;
+                            }
                             if (complement) {
-                                // Only the image's set pixels invert what is
-                                // under them; the rest stays as it is.
-                                if (pen == 0) {
-                                    continue;
-                                }
-                                pen ^= raster::read_pixel(b, view.bitmap, static_cast<i32>(x),
-                                                          static_cast<i32>(y));
+                                pen = ~pen & pen_mask;
                             }
                             raster::write_pixel(b, view.bitmap, static_cast<i32>(x),
                                                 static_cast<i32>(y), pen);

@@ -5308,31 +5308,43 @@ void draw_image_clips_at_the_window_edge() {
     CHECK_EQ(window_pixel(r, window, 6, 5), 0u);
 }
 
-void draw_image_complemented_inverts_what_the_image_draws() {
+void draw_image_complemented_inverts_every_pen_of_the_image_box() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 100, 50, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
     const u32 rp = screen + sc_RastPort;
 
-    // A row of pen 2 under a four-pixel image whose bits are 1010.
+    // A four-pixel image whose bits are 1010 on a cleared row and on a row
+    // of pen 2: what lay under the image makes no difference, and the
+    // image's clear pixels show as much as its set ones.
     r.graphics.set_pens(rp, 2, 0, JAM1);
-    r.graphics.rect_fill(rp, 10, 10, 13, 10);
+    r.graphics.rect_fill(rp, 10, 12, 13, 12);
     const u32 data = kData + 0x1800;
     r.put8(data, 0xA0);
     const u32 image = put_image(r, kData + 0x1000, 0, 0, 4, 1, 1, data, 1, 0);
-    r.intuition.draw_image_complemented(rp, image, 10, 10);
-    CHECK_EQ(screen_pixel(r, screen, 10, 10), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 11, 10), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 12, 10), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 13, 10), 2u);
+    for (i32 y : {10, 12}) {
+        r.intuition.draw_image_complemented(rp, image, 10, y);
+        CHECK_EQ(screen_pixel(r, screen, 10, y), 2u);
+        CHECK_EQ(screen_pixel(r, screen, 11, y), 3u);
+        CHECK_EQ(screen_pixel(r, screen, 12, y), 2u);
+        CHECK_EQ(screen_pixel(r, screen, 13, y), 3u);
+        CHECK_EQ(screen_pixel(r, screen, 14, y), 0u);
+    }
 
-    // The same image drawn plainly writes its own pen instead.
+    // The same image drawn plainly writes its own pens.
     r.intuition.draw_image(rp, image, 10, 10);
     CHECK_EQ(screen_pixel(r, screen, 10, 10), 1u);
     CHECK_EQ(screen_pixel(r, screen, 11, 10), 0u);
     CHECK_EQ(screen_pixel(r, screen, 12, 10), 1u);
     CHECK_EQ(screen_pixel(r, screen, 13, 10), 0u);
+
+    // An image without data is its PlaneOnOff pen, complemented too.
+    const u32 solid = put_image(r, kData + 0x1100, 0, 0, 4, 1, 0, 0, 0, 1);
+    r.intuition.draw_image_complemented(rp, solid, 20, 10);
+    CHECK_EQ(screen_pixel(r, screen, 20, 10), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 23, 10), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 24, 10), 0u);
 }
 
 }
@@ -5488,7 +5500,7 @@ int main() {
     erase_image_clears_the_image_box();
     draw_image_takes_word_offsets_and_follows_the_chain();
     draw_image_leaves_out_what_it_cannot_draw();
-    draw_image_complemented_inverts_what_the_image_draws();
+    draw_image_complemented_inverts_every_pen_of_the_image_box();
     draw_image_clips_at_the_window_edge();
     return check::finish("test_intuition");
 }

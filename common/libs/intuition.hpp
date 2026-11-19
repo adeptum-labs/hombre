@@ -160,9 +160,9 @@ public:
     // PlanePick selects, the bits of unselected planes from PlaneOnOff.
     void draw_image(u32 rp, u32 image, i32 left, i32 top);
 
-    // The same image drawn in COMPLEMENT mode: every pixel the image draws
-    // has its pen complemented into what the RastPort held, as a selected
-    // icon without a SelectRender image looks.
+    // The same image with every pen of its box complemented, as a
+    // complement highlight over the drawn image leaves it: the look of a
+    // selected icon without a SelectRender image.
     void draw_image_complemented(u32 rp, u32 image, i32 left, i32 top);
 
     // SetMenuStrip and ClearMenuStrip for code that is not the guest's:
