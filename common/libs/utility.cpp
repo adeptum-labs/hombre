@@ -290,6 +290,49 @@ void udivmod32(void*, Machine& m) {
 void to_upper(void*, Machine& m) { native::set_result(m, upper(m.cpu.d[0])); }
 void to_lower(void*, Machine& m) { native::set_result(m, lower(m.cpu.d[0])); }
 
+// struct Hook: h_Entry, the code CallHookPkt runs.
+constexpr u32 h_Entry = 8;
+// Blocks one hook call may run.
+constexpr u64 kHookBlocks = 1ull << 24;
+
+// Calls the hook at A0 with the object in A2 and the message in A1, as its
+// h_Entry expects them, and returns its D0. Every other register is as it
+// was. A null hook or entry returns 0.
+void call_hook_pkt(void* ctx, Machine& m) {
+    Exec& exec = *static_cast<Exec*>(ctx);
+    Bus b(m);
+    const u32 hook = m.cpu.a[0];
+    const u32 entry = hook != 0 ? b.r32(hook + h_Entry) : 0;
+    if (!b.ok()) {
+        return;
+    }
+    if (entry == 0) {
+        native::set_result(m, 0);
+        return;
+    }
+    if (!exec.enter_nested_run()) {
+        native::set_result(m, 0);
+        return;
+    }
+    u32 d[8];
+    u32 a[8];
+    for (u32 i = 0; i < 8; ++i) {
+        d[i] = m.cpu.d[i];
+        a[i] = m.cpu.a[i];
+    }
+    const m68k::ExitReason why = m.jit->call_guest(entry, kHookBlocks);
+    exec.leave_nested_run();
+    if (why != m68k::ExitReason::Returned) {
+        return;  // the run ended inside the hook
+    }
+    const u32 result = m.cpu.d[0];
+    for (u32 i = 0; i < 8; ++i) {
+        m.cpu.d[i] = d[i];
+        m.cpu.a[i] = a[i];
+    }
+    m.cpu.d[0] = result;
+}
+
 struct UtilityFunction {
     u32 lvo;
     m68k::NativeFn fn;
@@ -300,6 +343,7 @@ constexpr UtilityFunction kUtilityFunctions[] = {
     {utility_lvo::FindTagItem, find_tag_item, "FindTagItem"},
     {utility_lvo::GetTagData, get_tag_data, "GetTagData"},
     {utility_lvo::NextTagItem, next_tag_item, "NextTagItem"},
+    {utility_lvo::CallHookPkt, call_hook_pkt, "CallHookPkt"},
     {utility_lvo::Amiga2Date, amiga2date, "Amiga2Date"},
     {utility_lvo::Date2Amiga, date2amiga, "Date2Amiga"},
     {utility_lvo::SMult32, smult32, "SMult32"},
@@ -329,7 +373,7 @@ bool Utility::init(Machine& m, Exec& exec) {
         return false;
     }
     const u32 base = exec.make_native_library(kUtilityName, kHombreLibVersion, vectors_, kVectors,
-                                              nullptr, UtilityBase_SIZEOF);
+                                              &exec, UtilityBase_SIZEOF);
     if (base == 0) {
         exec.free(id_string, sizeof kIdString);
         return false;

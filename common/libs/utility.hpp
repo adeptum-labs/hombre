@@ -50,6 +50,7 @@ namespace utility_lvo {
 constexpr u32 FindTagItem = 30;
 constexpr u32 GetTagData = 36;
 constexpr u32 NextTagItem = 48;
+constexpr u32 CallHookPkt = 102;
 constexpr u32 Amiga2Date = 120;
 constexpr u32 Date2Amiga = 126;
 constexpr u32 SMult32 = 138;
