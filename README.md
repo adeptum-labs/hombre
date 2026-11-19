@@ -64,7 +64,9 @@ Targets:
   clock), `Which`, `Avail`, `Status` and `Version`, and
   `Utilities/Clock` opens its analogue clock window on the Workbench
   screen, drawn by native gadtools, layers and icon libraries and the
-  graphics area fills (its menus are built but not drawn yet). The boot
+  graphics area fills. Holding the right mouse button over a window
+  with a menu strip shows its menus in the screen title bar; releasing
+  over an item picks it. The boot
   disk stays
   read-only, but `RAM:` (the volume "Ram Disk") can be written: `Copy`,
   `MakeDir`, `Rename`, `Delete`, `Protect`, `Filenote` and `SetDate` work
