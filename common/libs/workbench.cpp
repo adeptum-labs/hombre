@@ -119,6 +119,7 @@ constexpr i32 kCascadeX = 40;
 constexpr i32 kCascadeY = 44;
 constexpr i32 kCascadeStep = 20;
 constexpr u32 kMaxWindowTitle = 64;
+constexpr u32 kClipBytes = ndk::Region_SIZEOF + ndk::RegionRectangle_SIZEOF;
 
 // The menu labels, in the order the menus number them.
 constexpr u16 kDisabled = NM_ITEMDISABLED;
@@ -309,6 +310,39 @@ IconArt art_of(Bus& b, u32 object) {
     return art;
 }
 
+// The window's clip Region in its layer while the Workbench draws, and
+// the layer's own region back after: Intuition draws the frame through the
+// same layer.
+class InnerClip {
+public:
+    InnerClip(Machine& m, u32 rp, u32 region) : machine_(m) {
+        if (rp == 0 || region == 0) {
+            return;
+        }
+        Bus b(machine_);
+        layer_ = b.r32(rp + ndk::rp_Layer);
+        if (!b.ok() || layer_ == 0) {
+            layer_ = 0;
+            return;
+        }
+        old_ = b.r32(layer_ + ndk::ly_ClipRegion);
+        b.w32(layer_ + ndk::ly_ClipRegion, region);
+    }
+    ~InnerClip() {
+        if (layer_ != 0) {
+            Bus b(machine_);
+            b.w32(layer_ + ndk::ly_ClipRegion, old_);
+        }
+    }
+    InnerClip(const InnerClip&) = delete;
+    InnerClip& operator=(const InnerClip&) = delete;
+
+private:
+    Machine& machine_;
+    u32 layer_ = 0;
+    u32 old_ = 0;
+};
+
 struct Function {
     u32 lvo;
     m68k::NativeFn fn;
@@ -427,6 +461,34 @@ void Workbench::measure_window(u32 index) {
     const i32 bottom = b.r8(w.window + ndk::wd_BorderBottom);
     w.inner_width = width - w.inner_left - right;
     w.inner_height = height - w.inner_top - bottom;
+    if (w.clip == 0) {
+        return;
+    }
+    // The Region's box and its one rectangle, which is relative to the
+    // box; an empty inner area has no rectangle and clips everything.
+    const u32 rect = w.clip + ndk::Region_SIZEOF;
+    const bool empty = w.inner_width <= 0 || w.inner_height <= 0;
+    b.w16(w.clip + ndk::rg_bounds, static_cast<u32>(w.inner_left));
+    b.w16(w.clip + ndk::rg_bounds + 2, static_cast<u32>(w.inner_top));
+    b.w16(w.clip + ndk::rg_bounds + 4, static_cast<u32>(w.inner_left + w.inner_width - 1));
+    b.w16(w.clip + ndk::rg_bounds + 6, static_cast<u32>(w.inner_top + w.inner_height - 1));
+    b.w32(w.clip + ndk::rg_RegionRectangle, empty ? 0 : rect);
+    b.w32(rect + ndk::rr_Next, 0);
+    b.w32(rect + ndk::rr_Prev, 0);
+    b.w16(rect + ndk::rr_bounds, 0);
+    b.w16(rect + ndk::rr_bounds + 2, 0);
+    b.w16(rect + ndk::rr_bounds + 4, static_cast<u32>(w.inner_width - 1));
+    b.w16(rect + ndk::rr_bounds + 6, static_cast<u32>(w.inner_height - 1));
+}
+
+// Gives back the window record and its clip Region; the window itself is
+// the caller's to close.
+void Workbench::release_window(u32 index) {
+    DrawerWindow& w = windows_[index];
+    if (w.clip != 0) {
+        exec_->free(w.clip, kClipBytes);
+    }
+    w = DrawerWindow{};
 }
 
 void Workbench::attach_window(u32 index, u32 window, const char* name, const char* path) {
@@ -437,6 +499,7 @@ void Workbench::attach_window(u32 index, u32 window, const char* name, const cha
     Bus b(*machine_);
     w.user_port = b.r32(window + ndk::wd_UserPort);
     w.rp = b.r32(window + ndk::wd_RPort);
+    w.clip = exec_->alloc(kClipBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     measure_window(index);
     copy_text(w.name, sizeof w.name, name);
     copy_text(w.path, sizeof w.path, path);
@@ -576,7 +639,7 @@ void Workbench::set_backdrop(bool on) {
     const u32 old_window = windows_[0].window;
     intuition_->clear_menu_strip(old_window);
     intuition_->close_window(old_window);
-    windows_[0] = DrawerWindow{};
+    release_window(0);
     backdrop_ = on;
     open_root();
     if (!windows_[0].used) {
@@ -923,7 +986,7 @@ void Workbench::close_drawer(u32 window_index) {
     free_icons(window_index);
     clicks_[window_index].clear();
     intuition_->close_window(windows_[window_index].window);
-    windows_[window_index] = DrawerWindow{};
+    release_window(window_index);
     draw_window(0);
 }
 
@@ -956,13 +1019,7 @@ void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, boo
         label_x = left + art.left + (art.width - span) / 2;
         label_y = top + art.top + art.height + kLabelBaseline;
     }
-    const i32 inner_right = drawer.inner_left + drawer.inner_width - 1;
-    if (label_x + span > inner_right) {
-        label_x = inner_right - span;
-    }
-    if (label_x < drawer.inner_left) {
-        label_x = drawer.inner_left;
-    }
+    // A label past the inner edges is cut off there, as the image is.
     graphics_->set_pens(drawer.rp, 1, 0, ndk::JAM1);
     graphics_->move(drawer.rp, label_x, label_y);
     graphics_->text(drawer.rp, reinterpret_cast<const u8*>(icon.name), length);
@@ -979,6 +1036,7 @@ void Workbench::draw_window(u32 window_index) {
     if (right < drawer.inner_left || bottom < drawer.inner_top) {
         return;
     }
+    const InnerClip clip(*machine_, drawer.rp, drawer.clip);
     graphics_->set_pens(drawer.rp, 0, 0, ndk::JAM1);
     graphics_->rect_fill(drawer.rp, drawer.inner_left, drawer.inner_top, right, bottom);
     for (u32 i = 0; i < kMaxIcons; ++i) {

@@ -1374,6 +1374,88 @@ void a_disk_icon_inside_a_drawer_is_no_volume() {
     CHECK_EQ(r.find_window("Fake:"), Workbench::kMaxWindows);
 }
 
+void a_resized_drawer_clips_its_icons_and_keeps_their_places() {
+    std::vector<AdfFile> files = test_files();
+    files.push_back({"Labels.info", drawer_icon_info(static_cast<i32>(kNoIconPosition),
+                                                    static_cast<i32>(kNoIconPosition), 30,
+                                                    50, 300, 120)});
+    files.push_back({"Labels/LongLabelName.info", icon_info(kWBTool, 10, 10)});
+    files.push_back({"Labels/Right.info", icon_info(kWBTool, 200, 10)});
+    Rig r(files);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon_in(root, "Labels"));
+    const u32 labels = r.find_window("HombreTest:Labels");
+    CHECK(labels != Workbench::kMaxWindows);
+    const u32 window = r.workbench.window(labels).window;
+    const u32 layer = r.get32(r.workbench.window(labels).rp + rp_Layer);
+    CHECK(layer != 0);
+
+    // The pixels of the label rows under icons placed at top 10.
+    auto label_pixels = [&]() {
+        const Workbench::DrawerWindow& w = r.workbench.window(labels);
+        u32 count = 0;
+        for (i32 y = w.inner_top + 22; y <= w.inner_top + 34; ++y) {
+            for (i32 x = w.inner_left; x < w.inner_left + w.inner_width; ++x) {
+                count += r.window_pixel(window, x, y) == 1 ? 1 : 0;
+            }
+        }
+        return count;
+    };
+
+    // A label wider than the room left of its icon is cut at the inner
+    // edge, not moved inside it.
+    const u32 cut = label_pixels();
+    const u32 wide = r.find_icon_in(labels, "LongLabelName");
+    const u32 right = r.find_icon_in(labels, "Right");
+    r.drag(labels, 13, 13, r.screen_x(labels, 103), r.screen_y(labels, 13));
+    CHECK_EQ(r.workbench.icon(wide).left, 100);
+    const u32 whole = label_pixels();
+    CHECK(cut < whole);
+    CHECK(cut > 0);
+
+    // Narrower than the right icon reaches: the frame keeps its pixels and
+    // the icons keep their places.
+    g_intuition.size_window_to(window, 215, 70);
+    const u32 width = r.get16(window + wd_Width);
+    const u32 height = r.get16(window + wd_Height);
+    // The frame as Intuition drew it, before the desktop draws again.
+    const i32 left = static_cast<i32>(r.get8(window + wd_BorderLeft));
+    const i32 top = static_cast<i32>(r.get8(window + wd_BorderTop));
+    const i32 inner_right = static_cast<i32>(width) - static_cast<i32>(r.get8(window + wd_BorderRight));
+    const i32 inner_bottom =
+        static_cast<i32>(height) - static_cast<i32>(r.get8(window + wd_BorderBottom));
+    auto read_frame = [&]() {
+        std::vector<u32> pens;
+        for (i32 y = 0; y < static_cast<i32>(height); ++y) {
+            for (i32 x = 0; x < static_cast<i32>(width); ++x) {
+                if (x < left || x >= inner_right || y < top || y >= inner_bottom) {
+                    pens.push_back(r.window_pixel(window, x, y));
+                }
+            }
+        }
+        return pens;
+    };
+    const std::vector<u32> frame = read_frame();
+    r.workbench.pump();
+    CHECK(read_frame() == frame);
+    CHECK(r.workbench.window(labels).inner_width < 200 + 32);
+    CHECK_EQ(r.workbench.icon(right).left, 200);
+    CHECK_EQ(r.workbench.icon(right).top, 10);
+    CHECK_EQ(r.workbench.icon(wide).left, 100);
+    // Drawing again draws nothing on the frame.
+    r.rescan("HombreTest:Labels");
+    CHECK(read_frame() == frame);
+    CHECK_EQ(r.get32(layer + ly_ClipRegion), 0u);
+
+    // Closing the drawer gives its clip region back.
+    const u32 before = r.free_bytes();
+    r.workbench.open_icon(root, r.find_icon_in(root, "Tools"));
+    r.workbench.close_drawer(r.find_window("HombreTest:Tools"));
+    CHECK_EQ(r.free_bytes(), before);
+}
+
 void snapshot_and_unsnapshot_store_the_icon_place() {
     Rig r;
     put_ram_project("Note");
@@ -1476,6 +1558,7 @@ int main() {
     a_drag_ends_when_its_window_is_filled_again();
     a_dragged_disk_keeps_its_place_over_a_backdrop_toggle();
     a_disk_icon_inside_a_drawer_is_no_volume();
+    a_resized_drawer_clips_its_icons_and_keeps_their_places();
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();
     return check::finish("test_workbench");

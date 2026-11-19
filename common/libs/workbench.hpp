@@ -116,12 +116,15 @@ public:
     };
 
     // An open window of the desktop: the root window (index 0), a backdrop
-    // or an ordinary window, or a drawer.
+    // or an ordinary window, or a drawer. clip is a Region of its inner
+    // area that the Workbench's drawing stays inside, so icons past the
+    // edges of a sized window are cut off rather than moved.
     struct DrawerWindow {
         bool used = false;
         u32 window = 0;
         u32 user_port = 0;
         u32 rp = 0;
+        u32 clip = 0;
         i32 inner_left = 0;
         i32 inner_top = 0;
         i32 inner_width = 0;
@@ -328,6 +331,7 @@ private:
     u32 build_menu_strip();
     void attach_window(u32 index, u32 window, const char* name, const char* path);
     void measure_window(u32 index);
+    void release_window(u32 index);
     void open_drawer_window(const char* path, const char* name, u32 object);
     void release_tool(RunningTool& tool);
     void open_root();
