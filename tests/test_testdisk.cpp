@@ -30,6 +30,7 @@
 // test sets it); without it the test says so and passes.
 
 #include "libs/dos.hpp"
+#include "libs/timer_device.hpp"
 #include "check.hpp"
 #include "dms.hpp"
 #include "ofs_writer.hpp"
@@ -56,6 +57,7 @@ constexpr usize kMaxImage = 80u * 22528u;  // an HD disk
 
 Jit g_jit;
 Exec g_exec;
+TimerDevice g_timer;
 Dos g_dos;
 std::vector<std::string> g_lines;
 std::string g_console;
@@ -127,6 +129,7 @@ public:
         g_console.clear();
         g_log = capture;
         CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_timer.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         CHECK(g_dos.init(m, g_exec, volume, console, nullptr));
         m.cpu.a[7] = kStack;

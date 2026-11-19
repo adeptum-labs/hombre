@@ -3867,8 +3867,15 @@ struct DosOps {
         }
     }
 
-    // Nothing else runs, so a Delay is over at once.
-    static void delay(void*, Machine& m) { native::set_result(m, 0); }
+    // Blocks the calling task for d1 ticks (1/50 s each) and returns 0.
+    static void delay(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        const i32 ticks = static_cast<i32>(m.cpu.d[1]);
+        if (ticks > 0 && d.exec_ != nullptr) {
+            d.exec_->sleep_us(static_cast<u64>(ticks) * 20000ull);
+        }
+        native::set_result(m, 0);
+    }
 
     // Reports whether the stream has a byte ready or becomes ready within the
     // timeout (microseconds).

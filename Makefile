@@ -213,6 +213,9 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t ret t a s k t e s t spc 2 ret" \
 	    "tasktest: signalled" "tasktest: preempted" "tasktest: blocked wait ok" \
 	    "tasktest: run2" "tasktest: done" "m68k: C:tasktest returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "t i m e r t e s t ret" \
+	    "timertest: timer ok" "timertest: abort ok" "timertest: delay ok" \
+	    "m68k: C:timertest returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t spc f a u l t ret" \
 	    --mouse-after "exec: task tasktest.fault ended with Illegal" \
 	    --mouse "sendkey ctrl-c;sendkey v;sendkey e;sendkey r;sendkey s;sendkey i;sendkey o;sendkey n;sendkey ret" \
@@ -272,14 +275,14 @@ check-workbench: image
 	    "shell: builtin cd returned 0" "shell: builtin ask returned 5" \
 	    "shell: builtin why returned 0"
 	tools/boot_check.sh --disk "$$DISK" \
-	    --keys "m a k e d i r spc r a m shift-dot x ret c o p y spc s shift-dot s t a r t u p slash s e q u e n c e spc r a m shift-dot x ret t y p e spc r a m shift-dot x shift-7 s t a r t u p slash s e q u e n c e ret r e n a m e spc r a m shift-dot x spc r a m shift-dot y ret p r o t e c t spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc s spc a d d ret f i l e n o t e spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc h e l l o ret l i s t spc r a m shift-dot y ret d e l e t e spc r a m shift-dot y spc a l l ret d i r spc r a m shift-dot ret s e t e n v spc f o o spc b a r ret g e t e n v spc f o o ret t y p e spc e n v shift-dot f o o ret i n f o ret" \
+	    --keys "m a k e d i r spc r a m shift-dot x ret c o p y spc s shift-dot s t a r t u p slash s e q u e n c e spc r a m shift-dot x ret t y p e spc r a m shift-dot x shift-7 s t a r t u p slash s e q u e n c e ret r e n a m e spc r a m shift-dot x spc r a m shift-dot y ret p r o t e c t spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc s spc a d d ret f i l e n o t e spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc h e l l o ret l i s t spc r a m shift-dot y ret d e l e t e spc r a m shift-dot y spc a l l ret d i r spc r a m shift-dot ret s e t e n v spc f o o spc b a r ret g e t e n v spc f o o ret t y p e spc e n v shift-dot f o o ret i n f o ret w a i t spc 1 ret" \
 	    "m68k: C:makedir returned 0" "m68k: C:copy returned 0" \
 	    "; Startup-Sequence for low-density floppies" "m68k: C:rename returned 0" \
 	    "m68k: C:protect returned 0" "m68k: C:filenote returned 0" \
 	    "Directory \"ram:y\" on" ": hello" "m68k: C:list returned 0" \
 	    "ram:y  Deleted" "m68k: C:delete returned 0" "     T (dir)" \
 	    "shell: builtin setenv returned 0" "shell: builtin getenv returned 0" \
-	    "Read/Write Ram Disk" "m68k: C:info returned 0"
+	    "Read/Write Ram Disk" "m68k: C:info returned 0" "m68k: C:wait returned 0"
 else
 check-workbench:
 	@echo "set DISK=<path to a Workbench .dms or .adf>" >&2; exit 1
@@ -330,7 +333,7 @@ $(ELF2HUNK): tools/elf2hunk.cpp
 # turns the ELF executable into a hunk file.
 M68K_AS       := m68k-linux-gnu-as
 M68K_LD       := m68k-linux-gnu-ld
-M68K_PROGRAMS := version hombretest mousetest tasktest
+M68K_PROGRAMS := version hombretest mousetest tasktest timertest
 M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
 
 define require_tool

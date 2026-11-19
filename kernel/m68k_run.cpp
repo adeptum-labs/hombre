@@ -31,6 +31,7 @@
 #include "../common/libs/graphics.hpp"
 #include "../common/libs/intuition.hpp"
 #include "../common/libs/native.hpp"
+#include "../common/libs/timer_device.hpp"
 #include "../common/libs/utility.hpp"
 #include "../common/m68k_decode.hpp"
 #include "../common/m68k_jit.hpp"
@@ -82,6 +83,7 @@ constexpr u32 sigbreakf_ctrl_c = 1u << 12;
 constinit m68k::Machine machine{};
 constinit m68k::Jit jit{};
 constinit Exec exec{};
+constinit TimerDevice timer_device{};
 constinit TaskStacks task_stacks{};
 constinit Utility utility{};
 constinit Dos dos{};
@@ -235,11 +237,8 @@ void on_shell_view(void*, u32 view) {
 
 // The AmigaDOS time: the real-time clock read once, advanced by the TSC
 // clock. Without a readable clock DateStamp stays at the start of 1978.
-u64 boot_dos_ticks = 0;
-u64 boot_clock_us = 0;
-
 u64 dos_now_ticks() {
-    return boot_dos_ticks + (clock_us() - boot_clock_us) / 20000;
+    return timer_device.sys_time_us() / 20000;
 }
 
 void start_dos_clock() {
@@ -249,8 +248,10 @@ void start_dos_clock() {
         return;
     }
     const DosStamp stamp = dos_stamp_from_civil(now);
-    boot_dos_ticks = (static_cast<u64>(stamp.days) * 1440 + stamp.minutes) * 3000 + stamp.ticks;
-    boot_clock_us = clock_us();
+    const u64 boot_dos_ticks =
+        (static_cast<u64>(stamp.days) * 1440 + stamp.minutes) * 3000 + stamp.ticks;
+    const u64 boot_clock_us = clock_us();
+    timer_device.set_sys_time_us(boot_dos_ticks * 20000, boot_clock_us);
     dos.set_clock(&dos_now_ticks);
     serial::write("clock: ");
     serial::write_dec(now.year);
@@ -478,6 +479,10 @@ bool task_host_slice_over(void*) {
     return take_need_resched();
 }
 
+u64 task_host_now_us(void*) {
+    return clock_us();
+}
+
 constexpr bool is_console_printable(u8 c) {
     return (c >= 0x20 && c <= 0x7e) || c >= 0xa0;
 }
@@ -593,12 +598,16 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
     }
     exec.set_task_host(TaskHost{&task_host_create, &task_host_switch, &task_host_destroy,
                                 &task_host_slice_over, &task_host_poll, &hook_trampoline,
-                                nullptr});
+                                &task_host_now_us, nullptr});
     if (!exec.init(machine, free_start, m68k::kGuestBytes)) {
         fail("exec init failed");
         return false;
     }
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
+    if (!timer_device.init(machine, exec)) {
+        fail("timer init failed");
+        return false;
+    }
     if (!utility.init(machine, exec)) {
         fail("utility init failed");
         return false;

@@ -23,6 +23,7 @@
 
 #include "check.hpp"
 #include "libs/dos.hpp"
+#include "libs/timer_device.hpp"
 #include "ofs_writer.hpp"
 #include "shell_commands.hpp"
 
@@ -44,6 +45,7 @@ constexpr u32 kFreeEnd = 0x400000;
 
 Jit g_jit;
 Exec g_exec;
+TimerDevice g_timer;
 Dos g_dos;
 
 void print_sink(void* ctx, const char* text) {
@@ -74,6 +76,7 @@ public:
         m_.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m_));
         CHECK(g_exec.init(m_, kFreeStart, kFreeEnd));
+        CHECK(g_timer.init(m_, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume_) == FsError::Ok);
         CHECK(g_dos.init(m_, g_exec, volume_, nullptr, nullptr));
     }

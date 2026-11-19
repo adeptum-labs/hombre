@@ -22,6 +22,7 @@
  */
 
 #include "libs/dos.hpp"
+#include "libs/timer_device.hpp"
 #include "check.hpp"
 #include "ofs_writer.hpp"
 
@@ -58,6 +59,7 @@ constexpr u64 kBlocks = 1000000;
 // Static storage, as the kernel keeps them.
 Jit g_jit;
 Exec g_exec;
+TimerDevice g_timer;
 Dos g_dos;
 std::vector<std::string> g_lines;
 std::string g_console;
@@ -320,6 +322,7 @@ public:
         g_console.clear();
         g_log = capture;
         CHECK(g_exec.init(m, kFreeStart, free_end));
+        CHECK(g_timer.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         CHECK(g_dos.init(m, g_exec, volume, console, &g_console));
         m.cpu.a[7] = kStack;
@@ -328,6 +331,7 @@ public:
     ~Rig() {
         g_exec.set_this_task(0);
         g_exec.set_segment_loader(SegmentLoader{nullptr, nullptr});
+        g_exec.set_task_host(TaskHost{});
         g_log = nullptr;
         munmap(rw_, kRegion);
         munmap(const_cast<u8*>(rx_), kRegion);
@@ -397,6 +401,18 @@ public:
         put16(kCall + 6, 0x0400);
         g_jit.flush();
         m.cpu.a[6] = base();
+        m.cpu.a[7] = kStack;
+        m.cpu.pc = kCall;
+        return g_jit.run(kBlocks);
+    }
+
+    ExitReason exec(u32 lvo) {
+        put16(kCall, 0x4EAE);
+        put16(kCall + 2, disp(lvo));
+        put16(kCall + 4, 0x4EF8);  // JMP $400.w
+        put16(kCall + 6, 0x0400);
+        g_jit.flush();
+        m.cpu.a[6] = g_exec.exec_base();
         m.cpu.a[7] = kStack;
         m.cpu.pc = kCall;
         return g_jit.run(kBlocks);
@@ -5905,6 +5921,120 @@ void ram_handler_port_and_zero_dates() {
     }
 }
 
+struct FakeDelayHost {
+    u64 now_us = 100000;
+    u64 step_us = 20000;
+    u32 idle_calls = 0;
+    bool idle_ok = false;
+    bool send_ctrl_c_at_idle = false;
+    u32 ctrl_c_on_call = 0;
+    std::vector<std::pair<u32, u32>> switches;
+};
+
+bool fake_delay_create(void*, u32) { return true; }
+void fake_delay_switch(void* ctx, u32 from, u32 to) {
+    static_cast<FakeDelayHost*>(ctx)->switches.push_back({from, to});
+}
+void fake_delay_destroy(void*, u32) {}
+bool fake_delay_slice_over(void*) { return false; }
+void fake_delay_poll(void*) {}
+bool fake_delay_idle(void* ctx) {
+    FakeDelayHost& h = *static_cast<FakeDelayHost*>(ctx);
+    ++h.idle_calls;
+    if (h.send_ctrl_c_at_idle && h.idle_calls == h.ctrl_c_on_call) {
+        g_exec.signal_current_task(SIGBREAKF_CTRL_C);
+    }
+    h.now_us += h.step_us;
+    return h.idle_ok;
+}
+u64 fake_delay_now(void* ctx) { return static_cast<FakeDelayHost*>(ctx)->now_us; }
+
+void delay_blocks_and_wakes_with_fake_host() {
+    // Delay(0) returns immediately without idling, and Delay(ticks) idles
+    // until now_us reaches deadline even when idle returns false.
+    {
+        Rig r;
+        FakeDelayHost host{};
+        g_exec.set_task_host(TaskHost{fake_delay_create, fake_delay_switch, fake_delay_destroy,
+                                      fake_delay_slice_over, fake_delay_poll, fake_delay_idle,
+                                      fake_delay_now, &host});
+        CHECK_EQ(r.call(dos_lvo::Delay, 0), 0u);
+        CHECK_EQ(host.idle_calls, 0u);
+
+        CHECK_EQ(r.call(dos_lvo::Delay, 5), 0u);
+        CHECK_EQ(host.idle_calls, 5u);
+        CHECK_EQ(host.now_us, 200000u);
+    }
+
+    // With a child task ready, Delay marks the caller Waiting with a deadline
+    // and switches away; Signal does not wake it early, and passing the
+    // deadline wakes it back to Ready.
+    {
+        Rig r;
+        FakeDelayHost host{};
+        g_exec.set_task_host(TaskHost{fake_delay_create, fake_delay_switch, fake_delay_destroy,
+                                      fake_delay_slice_over, fake_delay_poll, fake_delay_idle,
+                                      fake_delay_now, &host});
+        const u32 boot = r.proc();
+        const u32 child = kData + 0x200;
+        for (u32 i = 0; i < TC_SIZE; ++i) {
+            r.put8(child + i, 0);
+        }
+        r.put8(child + LN_TYPE, NT_TASK);
+        r.put8(child + LN_PRI, 0);
+        r.put32(child + TC_SPLOWER, kData + 0x1000);
+        r.put32(child + TC_SPUPPER, kData + 0x2000);
+        r.put32(child + TC_SPREG, kData + 0x2000);
+        r.cpu().a[1] = child;
+        r.cpu().a[2] = 0x2000;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+        CHECK_EQ(r.call(dos_lvo::Delay, 10), 0u);
+        CHECK_EQ(g_exec.scheduler().current(), 1);
+        CHECK_EQ(r.get8(boot + TC_STATE), TS_WAIT);
+        CHECK(g_exec.scheduler().slot(0).state == TaskState::Waiting);
+        CHECK_EQ(host.switches.size(), 1u);
+        CHECK_EQ(host.switches[0].first, 0u);
+        CHECK_EQ(host.switches[0].second, 1u);
+
+        // Sending a signal (even Ctrl+C) does not wake a sleeping task early.
+        r.cpu().a[1] = boot;
+        r.cpu().d[0] = SIGBREAKF_CTRL_C;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        CHECK(g_exec.scheduler().slot(0).state == TaskState::Waiting);
+
+        // Advancing before the deadline keeps it Waiting.
+        r.cpu().exit = ExitReason::None;
+        host.now_us = 299999;
+        CHECK(!g_exec.yield_in_native());
+        CHECK(g_exec.scheduler().slot(0).state == TaskState::Waiting);
+
+        // Reaching the deadline wakes boot and switches back on yield.
+        host.now_us = 300000;
+        CHECK(g_exec.yield_in_native());
+        CHECK_EQ(g_exec.scheduler().current(), 0);
+        CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+        g_exec.end_child_tasks();
+    }
+
+    // Ctrl+C arriving on the boot task during Delay ends the run with Break
+    // once the delay finishes.
+    {
+        Rig r;
+        FakeDelayHost host{};
+        host.send_ctrl_c_at_idle = true;
+        host.ctrl_c_on_call = 2;
+        g_exec.set_task_host(TaskHost{fake_delay_create, fake_delay_switch, fake_delay_destroy,
+                                      fake_delay_slice_over, fake_delay_poll, fake_delay_idle,
+                                      fake_delay_now, &host});
+        r.cpu().d[1] = 4;
+        CHECK_EQ(r.dos(dos_lvo::Delay), ExitReason::Break);
+        CHECK_EQ(host.idle_calls, 4u);
+        CHECK_EQ(host.now_us, 180000u);
+    }
+}
+
 }
 
 int main() {
@@ -6004,5 +6134,6 @@ int main() {
     t_and_env_assigns_and_envarc_copy();
     global_variables();
     ram_handler_port_and_zero_dates();
+    delay_blocks_and_wakes_with_fake_host();
     return check::finish("test_dos");
 }

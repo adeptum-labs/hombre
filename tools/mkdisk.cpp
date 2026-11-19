@@ -23,13 +23,13 @@
 
 // Host only: writes the test disk the boot check mounts.
 //
-//   mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk> <tasktest.hunk>
+//   mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk> <tasktest.hunk> <timertest.hunk>
 //
 // The disk is an OFS volume named HombreTest, packed as a DMS archive with
-// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the four
-// hunk files, as C/Version, LIBS/hombretest.library, C/mousetest and
-// C/tasktest. The output depends on nothing but this source and the hunk
-// files, so two runs give identical files.
+// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the five
+// hunk files, as C/Version, LIBS/hombretest.library, C/mousetest,
+// C/tasktest and C/timertest. The output depends on nothing but this source
+// and the hunk files, so two runs give identical files.
 
 #include "dms.hpp"
 #include "dms_writer.hpp"
@@ -54,7 +54,8 @@ std::vector<u8> text(const std::string& s) {
 
 std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vector<u8>& library,
                                 const std::vector<u8>& mousetest,
-                                const std::vector<u8>& tasktest) {
+                                const std::vector<u8>& tasktest,
+                                const std::vector<u8>& timertest) {
     std::vector<u8> echo(kEchoBytes);
     for (usize i = 0; i < echo.size(); ++i) {
         // A repeating run A..Z that shows where a block boundary was crossed.
@@ -68,6 +69,7 @@ std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vecto
         {"LIBS/hombretest.library", library},
         {"C/mousetest", mousetest},
         {"C/tasktest", tasktest},
+        {"C/timertest", timertest},
     };
 }
 
@@ -110,23 +112,25 @@ bool write_file(const char* path, const std::vector<u8>& data) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 6) {
+    if (argc != 7) {
         std::fprintf(stderr,
                      "usage: mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk>"
-                     " <tasktest.hunk>\n");
+                     " <tasktest.hunk> <timertest.hunk>\n");
         return 2;
     }
     std::vector<u8> version;
     std::vector<u8> library;
     std::vector<u8> mousetest;
     std::vector<u8> tasktest;
+    std::vector<u8> timertest;
     if (!read_file(argv[2], version) || !read_file(argv[3], library) ||
-        !read_file(argv[4], mousetest) || !read_file(argv[5], tasktest)) {
+        !read_file(argv[4], mousetest) || !read_file(argv[5], tasktest) ||
+        !read_file(argv[6], timertest)) {
         return 1;
     }
     try {
-        const std::vector<u8> adf =
-            build_adf("HombreTest", false, test_files(version, library, mousetest, tasktest));
+        const std::vector<u8> adf = build_adf(
+            "HombreTest", false, test_files(version, library, mousetest, tasktest, timertest));
         const std::vector<u8> dms = build_dms(adf, kSimple, kDdTrackBytes);
         return write_file(argv[1], dms) ? 0 : 1;
     } catch (const std::exception& e) {
