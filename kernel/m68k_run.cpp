@@ -32,6 +32,7 @@
 #include "../common/libs/gadtools.hpp"
 #include "../common/libs/icon.hpp"
 #include "../common/libs/layers.hpp"
+#include "../common/libs/version_library.hpp"
 #include "../common/libs/intuition.hpp"
 #include "../common/libs/native.hpp"
 #include "../common/libs/timer_device.hpp"
@@ -95,6 +96,7 @@ constinit Graphics graphics{};
 constinit Intuition intuition{};
 constinit GadTools gadtools{};
 constinit Layers layers{};
+constinit VersionLibrary version_library{};
 constinit Icon icon{};
 constinit Workbench workbench{};
 constinit DisplayState display{};
@@ -738,6 +740,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
     }
     if (!layers.init(machine, exec)) {
         fail("layers init failed");
+        return false;
+    }
+    if (!version_library.init(machine, exec)) {
+        fail("version init failed");
         return false;
     }
     if (!dos.init(machine, exec, volume, &console_write, &consoles[0])) {

@@ -25,6 +25,7 @@
 #include "libs/exec.hpp"
 #include "libs/icon.hpp"
 #include "libs/layers.hpp"
+#include "libs/version_library.hpp"
 #include "check.hpp"
 #include "ofs_writer.hpp"
 
@@ -53,6 +54,7 @@ Jit g_jit;
 Exec g_exec;
 Dos g_dos;
 Layers g_layers;
+VersionLibrary g_version;
 Icon g_icon;
 std::vector<std::string> g_lines;
 
@@ -91,6 +93,7 @@ public:
         g_log = capture;
         CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
         CHECK(g_layers.init(m, g_exec));
+        CHECK(g_version.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
         CHECK(g_icon.init(m, g_exec, g_dos));
@@ -212,6 +215,27 @@ void install_clip_region_keeps_the_region_and_returns_the_one_before() {
     CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallClipRegion), 0u);
 }
 
+void version_library_carries_the_system_version() {
+    Rig r;
+    // The library in the list answers; LIBS: is never asked.
+    bool asked = false;
+    g_exec.set_segment_loader(SegmentLoader{
+        [](void* ctx, const char*, u32&) {
+            *static_cast<bool*>(ctx) = true;
+            return false;
+        },
+        &asked});
+    r.m.cpu.a[1] = r.str(kData, "version.library");
+    r.m.cpu.d[0] = 0;
+    const u32 base = r.result(g_exec.exec_base(), exec_lvo::OpenLibrary);
+    CHECK_EQ(base, g_version.base());
+    CHECK(!asked);
+    CHECK_EQ((r.get8(base + LIB_VERSION) << 8) | r.get8(base + LIB_VERSION + 1), kHombreLibVersion);
+    CHECK_EQ((r.get8(base + LIB_REVISION) << 8) | r.get8(base + LIB_REVISION + 1), kHombreLibRevision);
+    r.m.cpu.a[1] = base;
+    r.result(g_exec.exec_base(), exec_lvo::CloseLibrary);
+}
+
 void icon_reads_what_is_there_and_defaults_the_rest() {
     Rig r;
     r.str(kData, "NoIcon");
@@ -244,5 +268,6 @@ int main() {
     layer_locks_do_nothing();
     install_clip_region_keeps_the_region_and_returns_the_one_before();
     icon_reads_what_is_there_and_defaults_the_rest();
+    version_library_carries_the_system_version();
     return check::finish("test_layers_icon");
 }
