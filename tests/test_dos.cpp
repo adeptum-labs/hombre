@@ -4726,7 +4726,7 @@ void ram_volume_read_operations() {
     CHECK_EQ(ram.write(sub_file, 0, reinterpret_cast<const u8*>(payload.data()),
                        static_cast<u32>(payload.size())),
              0u);
-    CHECK_EQ(ram.set_protection(sub_file, 0x0A), 0u);
+    CHECK_EQ(ram.set_protection(sub_file, 0x03), 0u);
     CHECK_EQ(ram.set_comment(sub_file, "ram note"), 0u);
     CHECK_EQ(ram.set_date(sub_file, 123, 456, 789), 0u);
 
@@ -4768,7 +4768,7 @@ void ram_volume_read_operations() {
     CHECK_EQ(file_fib.type, static_cast<i32>(ST_FILE));
     CHECK_EQ(file_fib.size, payload.size());
     CHECK_EQ(file_fib.blocks, 1u);
-    CHECK_EQ(r.get32(fib + fib_Protection), 0x0Au);
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x03u);
     CHECK(r.read_str(fib + fib_Comment) == "ram note");
     CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 123u);
     CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 456u);
@@ -4957,6 +4957,42 @@ void ram_dos_list_match_and_exall() {
     r.call(dos_lvo::ExAllEnd, ram_lock, ex_buf, 512, ED_COMMENT, eac);
     r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
     r.call(dos_lvo::UnLock, ram_lock);
+}
+
+void ram_protection_bits_are_enforced() {
+    Rig r;
+    const u32 buf = kData + 0x200;
+    r.str(kData, "RAM:locked");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh != 0);
+    r.str(buf, "abc");
+    CHECK_EQ(r.call(dos_lvo::Write, fh, buf, 3), 3u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+
+    // Without the write bit: no new file over it, no read-write open, and
+    // an open handle can neither write nor change the size.
+    const u32 reader = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(reader != 0);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0x4), DOSTRUE);
+    CHECK_EQ(as_signed(r.call(dos_lvo::Write, reader, buf, 3)), -1);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(as_signed(r.call(dos_lvo::SetFileSize, reader, 0, OFFSET_BEGINNING)), -1);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::Close, reader), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_READWRITE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+
+    // Without the read bit an old file does not open.
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0x8), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_READ_PROTECTED);
+
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0), DOSTRUE);
+    const u32 again = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(again != 0);
+    CHECK_EQ(r.call(dos_lvo::Close, again), DOSTRUE);
 }
 
 void ram_open_write_read_and_seek() {
@@ -5510,7 +5546,7 @@ void t_and_env_assigns_and_envarc_copy() {
             image[off + 2] = static_cast<u8>(value >> 8);
             image[off + 3] = static_cast<u8>(value);
         };
-        put_be32_at(greeting.header_block, 80, 0x0A);   // protection
+        put_be32_at(greeting.header_block, 80, 0x03);   // protection
         put_be32_at(greeting.header_block, 105, 42);    // days
         put_be32_at(greeting.header_block, 106, 100);   // minute
         put_be32_at(greeting.header_block, 107, 200);   // tick
@@ -5538,7 +5574,7 @@ void t_and_env_assigns_and_envarc_copy() {
         const u32 g_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
         CHECK(g_lock != 0);
         CHECK_EQ(r.call(dos_lvo::Examine, g_lock, fib), DOSTRUE);
-        CHECK_EQ(r.get32(fib + fib_Protection), 0x0Au);
+        CHECK_EQ(r.get32(fib + fib_Protection), 0x03u);
         CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 42u);
         CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 100u);
         CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 200u);
@@ -5788,6 +5824,7 @@ int main() {
     ram_volume_read_operations();
     ram_dos_list_match_and_exall();
     ram_open_write_read_and_seek();
+    ram_protection_bits_are_enforced();
     ram_buffered_output_and_set_file_size();
     ram_delete_createdir_rename_and_metadata();
     ram_exclusive_locks_and_dopkt();

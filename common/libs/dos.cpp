@@ -784,6 +784,10 @@ struct DosOps {
         f.has_unget = false;
         f.has_last = false;
         const u32 node = f.entry.header_block - 1;
+        if (ram_denies(d, node, kFibfWrite)) {
+            set_io_err(d, b, ERROR_WRITE_PROTECTED);
+            return false;
+        }
         const u32 err = d.ram_.write(node, f.pos, data, bytes);
         if (err != 0) {
             set_io_err(d, b, err);
@@ -859,6 +863,14 @@ struct DosOps {
 
     static u32 volume_node(const Dos& d, u8 vol) {
         return vol == Dos::kVolRam ? d.ram_volume_node_ : d.volume_node_;
+    }
+
+    // Protection bits that, when set, deny the access (FIBF_READ, FIBF_WRITE).
+    static constexpr u32 kFibfWrite = 1u << 2;
+    static constexpr u32 kFibfRead = 1u << 3;
+
+    static bool ram_denies(const Dos& d, u32 node, u32 bit) {
+        return d.ram_.valid(node) && (d.ram_.node(node).protection & bit) != 0;
     }
 
     static DirEntry ram_entry(const Dos& d, u32 node) {
@@ -2091,6 +2103,12 @@ struct DosOps {
                 table_full(d, b, "file handle", Dos::kMaxFiles);
                 return false;
             }
+            u32 existing = RamFs::kNone;
+            if (d.ram_.find(parent_node, leaf, existing) == 0 &&
+                ram_denies(d, existing, kFibfWrite)) {
+                fail(d, b, ERROR_WRITE_PROTECTED, 0);
+                return false;
+            }
             const u32 c_err = d.ram_.create_file(parent_node, leaf, node);
             if (c_err != 0) {
                 fail(d, b, c_err, 0);
@@ -2109,6 +2127,12 @@ struct DosOps {
             if (err == 0) {
                 if (d.ram_.node(node).is_dir) {
                     fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
+                    return;
+                }
+                const u32 needs = mode == MODE_READWRITE ? kFibfWrite : kFibfRead;
+                if (ram_denies(d, node, needs)) {
+                    fail(d, b, needs == kFibfWrite ? ERROR_WRITE_PROTECTED : ERROR_READ_PROTECTED,
+                         0);
                     return;
                 }
                 if (ram_node_busy(d, node, false)) {
@@ -2317,6 +2341,10 @@ struct DosOps {
             return;
         }
         const u32 target = static_cast<u32>(new_size);
+        if (ram_denies(d, node, kFibfWrite)) {
+            fail(d, b, ERROR_WRITE_PROTECTED, 0xFFFFFFFF);
+            return;
+        }
         const u32 err = d.ram_.set_size(node, target);
         if (err != 0) {
             fail(d, b, err, 0xFFFFFFFF);
