@@ -279,6 +279,7 @@ private:
     void run();
     void handle_message(u32 window_index, u32 message);
     void menu_pick(u32 window_index, u32 number);
+    void show_about();
     void refresh_title();
 
     u32 build_menu_strip();

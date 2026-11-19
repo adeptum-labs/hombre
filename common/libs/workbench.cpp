@@ -127,7 +127,7 @@ struct MenuSpec {
 
 constexpr MenuItemSpec kWorkbenchItems[] = {
     {"Backdrop", false},  {"Execute Command...", false}, {"Redraw All", true},
-    {"Update All", true}, {"Last Message", false},       {"About...", false},
+    {"Update All", true}, {"Last Message", false},       {"About...", true},
     {"Quit", false},
 };
 
@@ -1003,6 +1003,55 @@ void Workbench::update_all() {
     }
 }
 
+// The requester is built in guest memory, answered by the Workbench task
+// itself, and given back once a button is picked.
+void Workbench::show_about() {
+    if (machine_ == nullptr || exec_ == nullptr || intuition_ == nullptr) {
+        return;
+    }
+    constexpr char kText[] =
+        "Workbench version %ld.%ld\nKickstart version %ld.%ld\n\nCopyright \xA9 2026\n"
+        "Adam Waldenberg and Adeptum AB";
+    constexpr char kGadgetFormat[] = "Ok";
+    constexpr char kTitle[] = "About Workbench";
+    constexpr u32 kArgs = 4;
+    const u32 bytes = ndk::EasyStruct_SIZEOF + sizeof kText + sizeof kGadgetFormat +
+                      sizeof kTitle + kArgs * 4;
+    const u32 block = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (block == 0) {
+        LogLine().text("workbench: no memory for About").send();
+        return;
+    }
+    Bus b(*machine_);
+    const u32 args = block + ndk::EasyStruct_SIZEOF;
+    u32 at = args + kArgs * 4;
+    auto put = [&](const char* text, u32 length) {
+        const u32 start = at;
+        for (u32 i = 0; i < length; ++i) {
+            b.w8(at + i, static_cast<u8>(text[i]));
+        }
+        at += length;
+        return start;
+    };
+    const u32 text_at = put(kText, sizeof kText);
+    const u32 gadget_at = put(kGadgetFormat, sizeof kGadgetFormat);
+    const u32 title_at = put(kTitle, sizeof kTitle);
+    b.w32(block + ndk::es_StructSize, ndk::EasyStruct_SIZEOF);
+    b.w32(block + ndk::es_Flags, 0);
+    b.w32(block + ndk::es_Title, title_at);
+    b.w32(block + ndk::es_TextFormat, text_at);
+    b.w32(block + ndk::es_GadgetFormat, gadget_at);
+    b.w32(args, kHombreLibVersion);
+    b.w32(args + 4, kHombreLibRevision);
+    b.w32(args + 8, kHombreLibVersion);
+    b.w32(args + 12, kHombreLibRevision);
+    const u32 window = windows_[0].used ? windows_[0].window : 0;
+    if (b.ok()) {
+        intuition_->easy_request(window, block, 0, args);
+    }
+    exec_->free(block, bytes);
+}
+
 void Workbench::menu_pick(u32 window_index, u32 number) {
     const u32 menu = number & 0x1F;
     const u32 item = (number >> 5) & 0x3F;
@@ -1014,6 +1063,8 @@ void Workbench::menu_pick(u32 window_index, u32 number) {
             redraw_all();
         } else if (item == 3) {
             update_all();
+        } else if (item == 5) {
+            show_about();
         }
     } else if (menu == kMenuWindow) {
         if (item == 1) {

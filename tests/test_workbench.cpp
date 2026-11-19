@@ -1020,7 +1020,12 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     const u32 update_all = r.get32(redraw_all + mi_NextItem);
     CHECK(r.str(r.get32(r.get32(update_all + mi_ItemFill) + it_IText)) == "Update All");
     CHECK_EQ(r.get16(update_all + mi_Flags) & ITEMENABLED, ITEMENABLED);
-    CHECK_EQ(r.get16(r.get32(update_all + mi_NextItem) + mi_Flags) & ITEMENABLED, 0u);
+    const u32 last_message = r.get32(update_all + mi_NextItem);
+    CHECK_EQ(r.get16(last_message + mi_Flags) & ITEMENABLED, 0u);
+    const u32 about = r.get32(last_message + mi_NextItem);
+    CHECK(r.str(r.get32(r.get32(about + mi_ItemFill) + it_IText)) == "About...");
+    CHECK_EQ(r.get16(about + mi_Flags) & ITEMENABLED, ITEMENABLED);
+    CHECK_EQ(r.get16(about + mi_Flags) & ITEMTEXT, ITEMTEXT);
 }
 
 }
