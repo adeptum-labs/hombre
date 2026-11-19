@@ -24,6 +24,7 @@
 #include "check.hpp"
 #include "fake_pages.hpp"
 #include "paging.hpp"
+#include "task_switch.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -463,6 +464,59 @@ void cache_flags_are_encoded() {
     CHECK(!tables.map_2m(3 * k2M, 0, k2M, Present | (1ull << 5)));
 }
 
+void dummy_task_entry(void*) {}
+
+void task_stack_window_maps_4k_with_guard_and_reuses_slots() {
+    arena.reset();
+    PageTables root_tables(arena.allocator());
+    CHECK(root_tables.ok());
+
+    static u32 flushed_count = 0;
+    static u32 freed_count = 0;
+    flushed_count = 0;
+    freed_count = 0;
+    auto free_cb = [](void*, u64) { ++freed_count; };
+    auto flush_cb = [](u64) { ++flushed_count; };
+
+    TaskStacks stacks;
+    CHECK(stacks.init(arena.allocator(), root_tables.root(), free_cb, flush_cb, nullptr));
+    CHECK(stacks.create_with_trampoline(1, dummy_task_entry, reinterpret_cast<void*>(0x42),
+                                        0xDEADBEEFull));
+    const u64 bottom1 = stacks.stack_bottom(1);
+    const u64 top1 = stacks.stack_top(1);
+    const u64 guard1 = stacks.guard_page(1);
+    CHECK(bottom1 >= kTaskStackBase);
+    CHECK_EQ(top1 - bottom1, kTaskStackBytes);
+    CHECK_EQ(bottom1 - guard1, kTaskGuardBytes);
+
+    u64 phys = 0;
+    CHECK(!stacks.translate_4k(guard1, phys));
+    CHECK(!stacks.translate_4k(top1, phys));
+    for (u64 off = 0; off < kTaskStackBytes; off += 4096) {
+        CHECK(stacks.translate_4k(bottom1 + off, phys));
+    }
+
+    // Check initial switch frame at the top of the highest stack page.
+    u64 top_page_phys = 0;
+    CHECK(stacks.translate_4k(top1 - 4096, top_page_phys));
+    const u64* top_page = arena.allocator().phys_to_ptr(arena.allocator().ctx, top_page_phys);
+    const u64* frame = top_page + (4096 / sizeof(u64) - 8);
+    CHECK_EQ(frame[2], reinterpret_cast<u64>(&dummy_task_entry));
+    CHECK_EQ(frame[3], 0x42ull);
+    CHECK_EQ(frame[6], 0x2ull);
+    CHECK_EQ(frame[7], 0xDEADBEEFull);
+    CHECK_EQ(stacks.saved_rsp(1), top1 - 64);
+
+    // Destroy frees all 16 pages with TLB flushes, and next create reuses slot.
+    stacks.destroy(1);
+    CHECK_EQ(flushed_count, kTaskStackPages);
+    CHECK_EQ(freed_count, kTaskStackPages);
+    CHECK(!stacks.translate_4k(bottom1, phys));
+
+    CHECK(stacks.create_with_trampoline(2, dummy_task_entry, nullptr, 0xCAFEBABEull));
+    CHECK_EQ(stacks.stack_bottom(2), bottom1);
+}
+
 }
 
 int main() {
@@ -489,5 +543,6 @@ int main() {
     cache_flags_are_encoded();
     protect_changes_flags_of_mapped_pages();
     protect_is_refused_without_touching_the_tables();
+    task_stack_window_maps_4k_with_guard_and_reuses_slots();
     return check::finish("test_paging");
 }
