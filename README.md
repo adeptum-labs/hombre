@@ -46,6 +46,8 @@ Targets:
   `Unknown command <word>`). Input needs the controller and keyboard; without
   them the window says why and the boot ends. The serial port logs `usb:` and
   `shell:` lines, with each submitted line as `shell: line: <text>`.
+  Up and Down at the prompt bring back the last 16 lines entered; going
+  down past the newest returns to the line being typed.
   The shell has the Workbench 3.1 builtins `Cd`, `Echo`, `Path`, `Why`,
   `Prompt`, `Ask`, `Failat`, `Set`, `Get`, `UnSet`, `SetEnv`, `GetEnv` and
   `UnSetEnv`; its prompt shows the current directory, and a

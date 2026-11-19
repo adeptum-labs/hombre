@@ -50,6 +50,80 @@ void Shell::init(const ShellHost& host) {
     host_ = host;
     length_ = 0;
     line_[0] = '\0';
+    history_head_ = 0;
+    history_count_ = 0;
+    browse_ = 0;
+    draft_length_ = 0;
+}
+
+void Shell::history_up() {
+    if (browse_ == history_count_) {
+        return;
+    }
+    if (browse_ == 0) {
+        for (u32 i = 0; i < length_; ++i) {
+            draft_[i] = line_[i];
+        }
+        draft_length_ = length_;
+    }
+    ++browse_;
+    const u32 slot = (history_head_ + kHistory - browse_) % kHistory;
+    replace_line(history_[slot], history_length_[slot]);
+}
+
+void Shell::history_down() {
+    if (browse_ == 0) {
+        return;
+    }
+    --browse_;
+    if (browse_ == 0) {
+        replace_line(draft_, draft_length_);
+        return;
+    }
+    const u32 slot = (history_head_ + kHistory - browse_) % kHistory;
+    replace_line(history_[slot], history_length_[slot]);
+}
+
+void Shell::replace_line(const char* text, u32 length) {
+    if (host_.scroll_to_bottom != nullptr) {
+        host_.scroll_to_bottom(host_.ctx);
+    }
+    for (; length_ > 0; --length_) {
+        host_.erase(host_.ctx);
+    }
+    for (u32 i = 0; i < length; ++i) {
+        line_[i] = text[i];
+        host_.echo(host_.ctx, static_cast<u8>(text[i]));
+    }
+    length_ = length;
+}
+
+void Shell::stop_browsing() {
+    browse_ = 0;
+}
+
+// Keeps line_[begin, end) as the newest history entry unless it repeats
+// the one before it.
+void Shell::remember(u32 begin, u32 end) {
+    const u32 length = end - begin;
+    if (history_count_ != 0) {
+        const u32 newest = (history_head_ + kHistory - 1) % kHistory;
+        bool same = history_length_[newest] == length;
+        for (u32 i = 0; same && i < length; ++i) {
+            same = history_[newest][i] == line_[begin + i];
+        }
+        if (same) {
+            return;
+        }
+    }
+    for (u32 i = 0; i < length; ++i) {
+        history_[history_head_][i] = line_[begin + i];
+    }
+    history_length_[history_head_] = length;
+    history_head_ = (history_head_ + 1) % kHistory;
+    if (history_count_ < kHistory) {
+        ++history_count_;
+    }
 }
 
 void Shell::key(u8 ch) {
@@ -58,6 +132,9 @@ void Shell::key(u8 ch) {
             host_.scroll_to_bottom(host_.ctx);
         }
     };
+    if (ch == '\n' || ch == '\b' || ch == '\t' || is_printable(ch)) {
+        stop_browsing();
+    }
     if (ch == '\n') {
         to_bottom();
         enter();
@@ -115,6 +192,9 @@ void Shell::enter() {
     u32 end = length_;
     while (end > begin && line_[end - 1] == ' ') {
         --end;
+    }
+    if (begin != end) {
+        remember(begin, end);
     }
     if (begin == end) {
         host_.prompt(host_.ctx);

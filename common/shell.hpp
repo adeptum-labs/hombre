@@ -47,21 +47,39 @@ struct ShellHost {
 };
 
 // One shell session: a fixed line buffer edited by the keyboard and parsed
-// into a command path and its argument text when Enter is pressed.
+// into a command path and its argument text when Enter is pressed. The
+// last kHistory lines entered can be brought back into the buffer.
 class Shell {
 public:
     static constexpr u32 kMaxLine = 512;
+    static constexpr u32 kHistory = 16;
 
     void init(const ShellHost& host);
     void key(u8 ch);
 
+    // Replace the line with the previous or next history entry; going down
+    // past the newest one brings back the line that was being typed.
+    void history_up();
+    void history_down();
+
 private:
     void enter();
     void log_line();
+    void remember(u32 begin, u32 end);
+    void replace_line(const char* text, u32 length);
+    void stop_browsing();
 
     ShellHost host_{};
     u32 length_ = 0;
     char line_[kMaxLine + 1]{};
+
+    char history_[kHistory][kMaxLine]{};
+    u32 history_length_[kHistory]{};
+    u32 history_head_ = 0;   // the slot the next line goes to
+    u32 history_count_ = 0;
+    u32 browse_ = 0;         // 0: not browsing; n: the nth newest entry
+    u32 draft_length_ = 0;
+    char draft_[kMaxLine]{};
 };
 
 }

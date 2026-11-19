@@ -37,12 +37,14 @@ enum class ConsoleKey : u8 {
     PageDown,
     Top,
     Bottom,
+    HistoryUp,
+    HistoryDown,
     Swallowed,
 };
 
 // Filters Amiga CSI sequences (0x9B followed by up to 6 bytes ending at a
 // final byte in 0x40..0x7E) out of a byte stream, turning scroll sequences into
-// ConsoleKey actions and swallowing other complete or over-long sequences.
+// ConsoleKey actions, Up and Down into history keys, and swallowing other complete or over-long sequences.
 class CsiFilter {
 public:
     static constexpr usize kMaxSeqBytes = 6;
@@ -93,6 +95,12 @@ inline ConsoleKey CsiFilter::match() const {
         }
         if (buf_[0] == 'S') {
             return ConsoleKey::RowDown;
+        }
+        if (buf_[0] == 'A') {
+            return ConsoleKey::HistoryUp;
+        }
+        if (buf_[0] == 'B') {
+            return ConsoleKey::HistoryDown;
         }
         return ConsoleKey::Swallowed;
     }

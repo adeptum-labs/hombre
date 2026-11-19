@@ -369,6 +369,16 @@ void handle_decoded_byte(u8 raw, Shell* line_editor) {
     case ConsoleKey::Bottom:
         shell.scroll_to_bottom();
         break;
+    case ConsoleKey::HistoryUp:
+        if (line_editor != nullptr) {
+            line_editor->history_up();
+        }
+        break;
+    case ConsoleKey::HistoryDown:
+        if (line_editor != nullptr) {
+            line_editor->history_down();
+        }
+        break;
     case ConsoleKey::None:
     case ConsoleKey::Swallowed:
         break;

@@ -351,7 +351,85 @@ void key_on_full_line_returns_to_bottom() {
 
 }
 
+void up_recalls_earlier_lines() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "dir\nlist c\n");
+    shell.history_up();
+    shell.history_up();
+    shell.history_up();
+    shell.key('\n');
+    CHECK_EQ(r.paths.size(), 3u);
+    CHECK(r.paths[2] == "C:dir");
+
+    r.calls.clear();
+    shell.history_up();
+    CHECK(echoed(r) == "dir");
+    shell.history_up();
+    CHECK_EQ(calls_with(r, "erase").size(), 3u);
+    CHECK(echoed(r) == "dirlist c");
+    shell.key('\n');
+    CHECK(r.paths[3] == "C:list");
+    CHECK(r.args[3] == "c");
+}
+
+void down_returns_to_the_typed_line() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "dir\nty");
+    shell.history_up();
+    shell.history_down();
+    shell.history_down();
+    type_text(shell, "pe x\n");
+    CHECK_EQ(r.paths.size(), 2u);
+    CHECK(r.paths[1] == "C:type");
+    CHECK(r.args[1] == "x");
+}
+
+void history_skips_blank_and_repeated_lines() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "dir\ndir\n  \n");
+    shell.history_up();
+    shell.history_up();
+    shell.key('\n');
+    CHECK_EQ(r.paths.size(), 3u);
+    CHECK(r.paths[2] == "C:dir");
+}
+
+void history_keeps_the_newest_lines() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    for (u32 i = 0; i < Shell::kHistory + 4; ++i) {
+        const std::string line = "c" + std::to_string(i) + "\n";
+        type_text(shell, line.c_str());
+    }
+    for (u32 i = 0; i < Shell::kHistory + 4; ++i) {
+        shell.history_up();
+    }
+    shell.key('\n');
+    CHECK(r.paths.back() == "C:c4");
+}
+
+void history_does_nothing_when_empty() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    shell.history_up();
+    shell.history_down();
+    CHECK(r.calls.empty());
+}
+
 int main() {
+up_recalls_earlier_lines();
+down_returns_to_the_typed_line();
+history_skips_blank_and_repeated_lines();
+history_keeps_the_newest_lines();
+history_does_nothing_when_empty();
     typing_echoes_each_character();
     backspace_erases_and_empty_backspace_does_nothing();
     tab_pads_to_the_next_stop_of_8();
