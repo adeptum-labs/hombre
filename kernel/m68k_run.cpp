@@ -450,6 +450,7 @@ bool poll_input_while_running() {
 }
 
 bool hook_trampoline(void*) {
+    intuition.flush_palette();
     return poll_input_while_running();
 }
 
@@ -598,6 +599,7 @@ bool execute(const char* path, const char* args) {
     command_running = false;
     console_filter.reset();
     reclaim_after_program();
+    intuition.flush_palette();
     if (!console_at_line_start) {
         serial::write_char('\n');
         console_at_line_start = true;
@@ -730,6 +732,7 @@ bool typed_run(void*, const char* path, const char* args) {
                                &typed_cursor_back});
     serial::write("shell: ready\n");
     while (usb_keyboard_status() == UsbStatus::Ready) {
+        intuition.flush_palette();
         poll_mouse();
         u8 queued = 0;
         while (key_queue_pop(queued)) {

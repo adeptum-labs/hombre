@@ -362,7 +362,8 @@ void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w
     const i32 line = static_cast<i32>(kBarHeight);
 
     if (high_color) {
-        const bool rounded = w.width >= 7;
+        const bool rounded =
+            (w.flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0 && w.width >= 7;
         if (rounded) {
             graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
             graphics.rect_fill(rp, 2, 1, 2, 1);
@@ -463,8 +464,9 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
     const i32 right = w.width - 1;
     const i32 bottom = w.height - 1;
 
-    const bool rounded =
-        high_color && (w.flags & ndk::WFLG_BORDERLESS) == 0 && w.width >= 7 && w.height >= 4;
+    const bool rounded = high_color &&
+                         (w.flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0 &&
+                         w.width >= 7 && w.height >= 4;
     graphics.set_pens(rp, 0, 0, ndk::JAM2);
     if (keep != nullptr && keep->x0 <= keep->x1 && keep->y0 <= keep->y1) {
         // Only clear areas outside the preserved interior; borders are redrawn below.

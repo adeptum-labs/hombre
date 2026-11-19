@@ -396,7 +396,7 @@ void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
     r.put32(kColorMap + cm_LowColorBits, low_table);
     r.display.front_screen = kScreen;
 
-    // SetRGB32 stores high/low nibbles and refreshes the front screen.
+    // SetRGB32 stores high/low nibbles and defers the front-screen refresh.
     r.cpu().a[0] = vp;
     r.cpu().d[0] = 42;
     r.cpu().d[1] = 0x12345678u;
@@ -405,6 +405,8 @@ void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32), ExitReason::Halt);
     CHECK_EQ(r.get16(color_table + 42 * 2), 0x01A0u);
     CHECK_EQ(r.get16(low_table + 42 * 2), 0x02BFu);
+    CHECK(r.refreshes.empty());
+    r.intuition.flush_palette();
     CHECK_EQ(r.refreshes.size(), 1u);
     CHECK_EQ(r.refreshes[0].x0, 0);
     CHECK_EQ(r.refreshes[0].y0, 0);
@@ -429,6 +431,8 @@ void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB4), ExitReason::Halt);
     CHECK_EQ(r.get16(color_table + 7 * 2), 0x0A3Eu);
     CHECK_EQ(r.get16(low_table + 7 * 2), 0x0A3Eu);
+    CHECK_EQ(r.refreshes.size(), 1u);
+    r.intuition.flush_palette();
     CHECK_EQ(r.refreshes.size(), 2u);
 
     r.cpu().a[0] = kColorMap;
@@ -463,6 +467,8 @@ void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
     r.cpu().a[0] = vp;
     r.cpu().a[1] = load_table;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::LoadRGB32), ExitReason::Halt);
+    CHECK_EQ(r.refreshes.size(), 2u);
+    r.intuition.flush_palette();
     CHECK_EQ(r.refreshes.size(), 3u);
 
     r.cpu().a[0] = kColorMap;
@@ -486,7 +492,7 @@ void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
     CHECK_EQ(r.get32(out_table + 4), 0x9B9B9B9Bu);
     CHECK_EQ(r.get32(out_table + 8), 0xE0E0E0E0u);
 
-    // SetRGB32CM updates the ColorMap without refreshing the display.
+    // SetRGB32CM on the front screen's ColorMap also defers until flush.
     r.cpu().a[0] = kColorMap;
     r.cpu().d[0] = 255;
     r.cpu().d[1] = 0x5A000000u;
@@ -494,6 +500,8 @@ void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
     r.cpu().d[3] = 0x7C000000u;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32CM), ExitReason::Halt);
     CHECK_EQ(r.refreshes.size(), 3u);
+    r.intuition.flush_palette();
+    CHECK_EQ(r.refreshes.size(), 4u);
     r.cpu().a[0] = kColorMap;
     r.cpu().d[0] = 255;
     r.cpu().d[1] = 1;
@@ -801,6 +809,141 @@ void superbitmap_bad_pointer_is_bus_error() {
     CHECK(r.refreshes.empty());
 }
 
+void palette_calls_defer_until_flush() {
+    GfxRig r;
+    const u32 color_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 low_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    CHECK(color_table != 0 && low_table != 0);
+
+    const u32 vp = kScreen + sc_ViewPort;
+    r.put16(kScreen + sc_Width, 320);
+    r.put16(kScreen + sc_Height, 200);
+    r.put32(vp + vp_ColorMap, kColorMap);
+    r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+    r.put16(kColorMap + cm_Count, 256);
+    r.put32(kColorMap + cm_ColorTable, color_table);
+    r.put32(kColorMap + cm_LowColorBits, low_table);
+    r.display.front_screen = kScreen;
+
+    for (u32 pen = 0; pen < 256; ++pen) {
+        r.cpu().a[0] = vp;
+        r.cpu().d[0] = pen;
+        r.cpu().d[1] = pen * 0x01010101u;
+        r.cpu().d[2] = pen * 0x01010101u;
+        r.cpu().d[3] = pen * 0x01010101u;
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32), ExitReason::Halt);
+    }
+    CHECK(r.refreshes.empty());
+    CHECK(r.display.palette_dirty);
+
+    r.intuition.flush_palette();
+    CHECK_EQ(r.refreshes.size(), 1u);
+    CHECK(!r.display.palette_dirty);
+
+    r.intuition.flush_palette();
+    CHECK_EQ(r.refreshes.size(), 1u);
+}
+
+void set_rgb32_cm_refreshes_front_map_only_at_flush() {
+    GfxRig r;
+    const u32 front_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 front_low = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 other_map = r.exec.alloc(ColorMap_SIZEOF, MEMF_CHIP | MEMF_CLEAR);
+    const u32 other_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 other_low = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    CHECK(front_table != 0 && front_low != 0 && other_map != 0 && other_table != 0 &&
+          other_low != 0);
+
+    const u32 vp = kScreen + sc_ViewPort;
+    r.put16(kScreen + sc_Width, 320);
+    r.put16(kScreen + sc_Height, 200);
+    r.put32(vp + vp_ColorMap, kColorMap);
+    r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+    r.put16(kColorMap + cm_Count, 256);
+    r.put32(kColorMap + cm_ColorTable, front_table);
+    r.put32(kColorMap + cm_LowColorBits, front_low);
+
+    r.put8(other_map + cm_Type, COLORMAP_TYPE_V39);
+    r.put16(other_map + cm_Count, 256);
+    r.put32(other_map + cm_ColorTable, other_table);
+    r.put32(other_map + cm_LowColorBits, other_low);
+    r.display.front_screen = kScreen;
+
+    r.cpu().a[0] = other_map;
+    r.cpu().d[0] = 5;
+    r.cpu().d[1] = 0x11000000u;
+    r.cpu().d[2] = 0x22000000u;
+    r.cpu().d[3] = 0x33000000u;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32CM), ExitReason::Halt);
+    CHECK(!r.display.palette_dirty);
+    r.intuition.flush_palette();
+    CHECK(r.refreshes.empty());
+
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = 5;
+    r.cpu().d[1] = 0x44000000u;
+    r.cpu().d[2] = 0x55000000u;
+    r.cpu().d[3] = 0x66000000u;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32CM), ExitReason::Halt);
+    CHECK(r.refreshes.empty());
+    CHECK(r.display.palette_dirty);
+    r.intuition.flush_palette();
+    CHECK_EQ(r.refreshes.size(), 1u);
+}
+
+void load_rgb32_caps_colormap_count_at_256() {
+    GfxRig r;
+    constexpr u32 kAllocEntries = 600;
+    const u32 color_table = r.exec.alloc(kAllocEntries * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 low_table = r.exec.alloc(kAllocEntries * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 load_table = r.exec.alloc(512, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(color_table != 0 && low_table != 0 && load_table != 0);
+
+    for (u32 i = 0; i < kAllocEntries; ++i) {
+        r.put16(color_table + i * 2, 0xBEEFu);
+        r.put16(low_table + i * 2, 0xBEEFu);
+    }
+
+    const u32 vp = kScreen + sc_ViewPort;
+    r.put32(vp + vp_ColorMap, kColorMap);
+    r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+    r.put16(kColorMap + cm_Count, 65535);
+    r.put32(kColorMap + cm_ColorTable, color_table);
+    r.put32(kColorMap + cm_LowColorBits, low_table);
+
+    u32 p = load_table;
+    r.put32(p, (10u << 16) | 250u);
+    p += 4;
+    for (u32 i = 0; i < 10; ++i) {
+        r.put32(p, 0x12000000u);
+        r.put32(p + 4, 0x34000000u);
+        r.put32(p + 8, 0x56000000u);
+        p += 12;
+    }
+    r.put32(p, (4u << 16) | 256u);
+    p += 4;
+    for (u32 i = 0; i < 4; ++i) {
+        r.put32(p, 0x78000000u);
+        r.put32(p + 4, 0x9A000000u);
+        r.put32(p + 8, 0xBC000000u);
+        p += 12;
+    }
+    r.put32(p, 0u);
+
+    r.cpu().a[0] = vp;
+    r.cpu().a[1] = load_table;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::LoadRGB32), ExitReason::Halt);
+
+    for (u32 i = 250; i < 256; ++i) {
+        CHECK_EQ(r.get16(color_table + i * 2), 0x0135u);
+        CHECK_EQ(r.get16(low_table + i * 2), 0x0246u);
+    }
+    for (u32 i = 256; i < kAllocEntries; ++i) {
+        CHECK_EQ(r.get16(color_table + i * 2), 0xBEEFu);
+        CHECK_EQ(r.get16(low_table + i * 2), 0xBEEFu);
+    }
+}
+
 }
 
 int main() {
@@ -828,5 +971,8 @@ int main() {
     superbitmap_layer_clips_to_size();
     damage_sink_gets_private_bitmap_rect();
     superbitmap_bad_pointer_is_bus_error();
+    palette_calls_defer_until_flush();
+    set_rgb32_cm_refreshes_front_map_only_at_flush();
+    load_rgb32_caps_colormap_count_at_256();
     return check::finish("test_graphics");
 }

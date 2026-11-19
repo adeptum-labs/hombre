@@ -2542,7 +2542,7 @@ void size_gadget_sets_right_border() {
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
     CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
-    CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 2u);
     CHECK_EQ(window_pixel(r, window, 196, 96), 1u);
     CHECK_EQ(window_pixel(r, window, 197, 97), 2u);
     CHECK_EQ(window_pixel(r, window, 188, 50), 1u);
@@ -2560,7 +2560,7 @@ void size_bbottom_sets_bottom_border() {
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
     CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
-    CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 2u);
     CHECK_EQ(window_pixel(r, window, 100, 90), 1u);
     CHECK_EQ(window_pixel(r, window, 100, 89), 0u);
 }
@@ -3608,7 +3608,26 @@ void border_sizes_with_without_size_gadget_and_borderless() {
     CHECK_EQ(r.get8(sizable + wd_BorderLeft), 2u);
     CHECK_EQ(r.get8(sizable + wd_BorderTop), 15u);
     CHECK_EQ(r.get8(sizable + wd_BorderRight), 12u);
-    CHECK_EQ(r.get8(sizable + wd_BorderBottom), 10u);
+    CHECK_EQ(r.get8(sizable + wd_BorderBottom), 2u);
+
+    put_new_window(r, kNewWindow, 20, 120, 160, 80, WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM, 0, 0, 0);
+    const u32 sbottom = open_win(r, kNewWindow);
+    CHECK(sbottom != 0);
+    CHECK_EQ(r.get8(sbottom + wd_BorderRight), 2u);
+    CHECK_EQ(r.get8(sbottom + wd_BorderBottom), 10u);
+
+    put_new_window(r, kNewWindow, 200, 120, 160, 80,
+                   WFLG_SIZEGADGET | WFLG_SIZEBRIGHT | WFLG_SIZEBBOTTOM, 0, 0, 0);
+    const u32 sboth = open_win(r, kNewWindow);
+    CHECK(sboth != 0);
+    CHECK_EQ(r.get8(sboth + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(sboth + wd_BorderBottom), 10u);
+
+    put_new_window(r, kNewWindow, 380, 120, 160, 80, WFLG_SIZEGADGET | WFLG_SIZEBRIGHT, 0, 0, 0);
+    const u32 sright = open_win(r, kNewWindow);
+    CHECK(sright != 0);
+    CHECK_EQ(r.get8(sright + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(sright + wd_BorderBottom), 2u);
 
     put_new_window(r, kNewWindow, 380, 20, 160, 80, WFLG_BORDERLESS, 0, 0, 0);
     const u32 borderless = open_win(r, kNewWindow);
@@ -4115,6 +4134,291 @@ void shade_table_darkens_default_pen0_and_updates_on_setrgb32() {
     CHECK_EQ(screen_pixel(r, screen, 153, 50), 11u);
 }
 
+std::vector<u8> screen_plane_bytes(GfxRig& r, u32 screen) {
+    const u32 bm = screen + sc_BitMap;
+    const u32 bpr = r.get16(bm + bm_BytesPerRow);
+    const u32 rows = r.get16(bm + bm_Rows);
+    const u32 depth = r.get8(bm + bm_Depth);
+    const u32 plane_bytes = bpr * rows;
+    std::vector<u8> out(plane_bytes * depth);
+    for (u32 plane = 0; plane < depth; ++plane) {
+        const u32 ptr = r.get32(bm + bm_Planes + plane * 4);
+        for (u32 i = 0; i < plane_bytes; ++i) {
+            out[plane * plane_bytes + i] = static_cast<u8>(r.get8(ptr + i));
+        }
+    }
+    return out;
+}
+
+void flush_palette_recomposes_8plane_shadows_and_end_batch_flushes() {
+    auto setup_scene = [](GfxRig& r, bool palette_before_windows) -> u32 {
+        put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        fill_backdrop_rect(r, screen, 0, 15, 639, 399, 5);
+
+        auto load_new_palette = [&]() {
+            const u32 table = r.exec.alloc(256, MEMF_PUBLIC | MEMF_CLEAR);
+            CHECK(table != 0);
+            u32 p = table;
+            // Change pen 5 (backdrop) to bright cyan and pen 2 to bright yellow,
+            // and put exact 0.70 / 0.85 shade targets in pens 200..203.
+            r.put32(p, (1u << 16) | 5u);
+            p += 4;
+            r.put32(p, 0x00000000u);
+            r.put32(p + 4, 0xFFFFFFFFu);
+            r.put32(p + 8, 0xFFFFFFFFu);
+            p += 12;
+            r.put32(p, (1u << 16) | 2u);
+            p += 4;
+            r.put32(p, 0xFFFFFFFFu);
+            r.put32(p + 4, 0xFFFFFFFFu);
+            r.put32(p + 8, 0x00000000u);
+            p += 12;
+            r.put32(p, (4u << 16) | 200u);
+            p += 4;
+            // 200: 0.70 * (0,255,255) -> (0, 179, 179)
+            r.put32(p, 0u);
+            r.put32(p + 4, 179u * 0x01010101u);
+            r.put32(p + 8, 179u * 0x01010101u);
+            p += 12;
+            // 201: 0.85 * (0,255,255) -> (0, 217, 217)
+            r.put32(p, 0u);
+            r.put32(p + 4, 217u * 0x01010101u);
+            r.put32(p + 8, 217u * 0x01010101u);
+            p += 12;
+            // 202: 0.70 * (255,255,0) -> (179, 179, 0)
+            r.put32(p, 179u * 0x01010101u);
+            r.put32(p + 4, 179u * 0x01010101u);
+            r.put32(p + 8, 0u);
+            p += 12;
+            // 203: 0.85 * (255,255,0) -> (217, 217, 0)
+            r.put32(p, 217u * 0x01010101u);
+            r.put32(p + 4, 217u * 0x01010101u);
+            r.put32(p + 8, 0u);
+            p += 12;
+            r.put32(p, 0u);
+
+            r.cpu().a[0] = screen + sc_ViewPort;
+            r.cpu().a[1] = table;
+            CHECK_EQ(r.call(Base::Graphics, graphics_lvo::LoadRGB32), ExitReason::Halt);
+        };
+
+        if (palette_before_windows) {
+            load_new_palette();
+            r.intuition.flush_palette();
+        }
+        put_new_window(r, kNewWindow, 150, 80, 140, 90, 0, 0, 0, 0);
+        const u32 back_win = open_win(r, kNewWindow);
+        CHECK(back_win != 0);
+        fill_window_rect(r, back_win, 4, 16, 135, 85, 2);
+
+        put_new_window(r, kNewWindow, 60, 50, 120, 80, WFLG_ACTIVATE, 0, 0, 0);
+        const u32 front_win = open_win(r, kNewWindow);
+        CHECK(front_win != 0);
+
+        if (!palette_before_windows) {
+            r.refreshes.clear();
+            load_new_palette();
+            CHECK(r.refreshes.empty());
+        }
+        return screen;
+    };
+
+    GfxRig ref;
+    const u32 ref_screen = setup_scene(ref, true);
+    GfxRig r;
+    const u32 screen = setup_scene(r, false);
+
+    // Shadow pixels are still stale until flush_palette() runs.
+    CHECK(screen_pixel(r, screen, 180, 60) != 200u);
+    r.intuition.flush_palette();
+    CHECK_EQ(r.refreshes.size(), 1u);
+    CHECK_EQ(r.refreshes[0].x0, 0);
+    CHECK_EQ(r.refreshes[0].y0, 0);
+    CHECK_EQ(r.refreshes[0].x1, 639);
+    CHECK_EQ(r.refreshes[0].y1, 399);
+
+    const u8* strong = nullptr;
+    const u8* light = nullptr;
+    CHECK(r.intuition.shade_tables(screen, strong, light));
+    CHECK_EQ(strong[5], 200u);
+    CHECK_EQ(light[5], 201u);
+    CHECK_EQ(strong[2], 202u);
+    CHECK_EQ(light[2], 203u);
+
+    for (i32 y = 54; y <= 133; ++y) {
+        for (i32 x = 64; x <= 183; ++x) {
+            if (x <= 179 && y <= 129) {
+                continue;
+            }
+            if ((x <= 181 && y <= 131) && (x >= 180 || y >= 130)) {
+                const u32 under = (x >= 154 && x <= 285 && y >= 96 && y <= 165) ? 2u : 5u;
+                if (x >= 150 && y >= 80 && !(x >= 154 && y >= 96)) {
+                    continue;
+                }
+                CHECK_EQ(screen_pixel(r, screen, x, y), static_cast<u32>(strong[under]));
+            } else if (x >= 180 || y >= 130) {
+                const u32 under = (x >= 154 && x <= 285 && y >= 96 && y <= 165) ? 2u : 5u;
+                if (x >= 150 && y >= 80 && !(x >= 154 && y >= 96)) {
+                    continue;
+                }
+                CHECK_EQ(screen_pixel(r, screen, x, y), static_cast<u32>(light[under]));
+            }
+        }
+    }
+    CHECK(screen_plane_bytes(r, screen) == screen_plane_bytes(ref, ref_screen));
+
+    // Nested batches defer palette flush until the outermost end_batch().
+    r.refreshes.clear();
+    r.intuition.begin_batch();
+    r.intuition.begin_batch();
+    for (u32 i = 0; i < 10; ++i) {
+        r.cpu().a[0] = screen + sc_ViewPort;
+        r.cpu().d[0] = 20 + i;
+        r.cpu().d[1] = 0x11111111u * (i + 1);
+        r.cpu().d[2] = 0x11111111u * (i + 1);
+        r.cpu().d[3] = 0x11111111u * (i + 1);
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32), ExitReason::Halt);
+    }
+    r.intuition.end_batch();
+    CHECK(r.refreshes.empty());
+    CHECK(r.display.palette_dirty);
+    r.intuition.end_batch();
+    CHECK_EQ(r.refreshes.size(), 1u);
+    CHECK(!r.display.palette_dirty);
+}
+
+void backdrop_window_has_square_corners_no_shadow_and_stays_behind() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    fill_backdrop_rect(r, screen, 0, 15, 639, 399, 5);
+
+    put_new_window(r, kNewWindow, 100, 50, 140, 90, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 n1 = open_win(r, kNewWindow);
+    CHECK(n1 != 0);
+    fill_window_rect(r, n1, 4, 16, 135, 85, 2);
+
+    put_new_window(r, kNewWindow, 60, 40, 120, 80,
+                   WFLG_BACKDROP | WFLG_DRAGBAR | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET,
+                   0, 0, 0);
+    const u32 b1 = open_win(r, kNewWindow);
+    CHECK(b1 != 0);
+
+    // b1 opened behind n1.
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), n1);
+    CHECK_EQ(r.get32(n1 + wd_NextWindow), b1);
+    CHECK_EQ(screen_pixel(r, screen, 120, 70), 2u);
+
+    // Square corners (no cut corners) and no drop shadow on b1.
+    CHECK_EQ(screen_pixel(r, screen, 60, 40), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 61, 41), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 62, 41), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 80, 121), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 80, 123), 5u);
+
+    put_new_window(r, kNewWindow, 70, 45, 120, 80, WFLG_BACKDROP, 0, 0, 0);
+    const u32 b2 = open_win(r, kNewWindow);
+    CHECK(b2 != 0);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), n1);
+    CHECK_EQ(r.get32(n1 + wd_NextWindow), b2);
+    CHECK_EQ(r.get32(b2 + wd_NextWindow), b1);
+    CHECK_EQ(screen_pixel(r, screen, 189, 45), static_cast<u32>(chrome::kFrameDark));
+
+    // WindowToFront on b1 brings it ahead of b2, never above normal window n1.
+    r.cpu().a[0] = b1;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::WindowToFront), ExitReason::Halt);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), n1);
+    CHECK_EQ(r.get32(n1 + wd_NextWindow), b1);
+    CHECK_EQ(r.get32(b1 + wd_NextWindow), b2);
+    CHECK_EQ(screen_pixel(r, screen, 120, 70), 2u);
+
+    // New normal window opens in front of both n1 and backdrop windows.
+    put_new_window(r, kNewWindow, 260, 50, 100, 60, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 n2 = open_win(r, kNewWindow);
+    CHECK(n2 != 0);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), n2);
+    CHECK_EQ(r.get32(n2 + wd_NextWindow), n1);
+
+    // WindowToBack on n2 puts it behind n1, still ahead of backdrop windows.
+    r.cpu().a[0] = n2;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::WindowToBack), ExitReason::Halt);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), n1);
+    CHECK_EQ(r.get32(n1 + wd_NextWindow), n2);
+    CHECK_EQ(r.get32(n2 + wd_NextWindow), b1);
+}
+
+void size_box_hit_test_matches_border_placement() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    // Right-border default: x width-11..width-2, y height-11..height-2.
+    const Rect rb = Intuition::size_box_rect(40, 40, 200, 100, WFLG_SIZEGADGET);
+    CHECK_EQ(rb.x0, 229);
+    CHECK_EQ(rb.y0, 129);
+    CHECK_EQ(rb.x1, 238);
+    CHECK_EQ(rb.y1, 138);
+
+    put_new_window(r, kNewWindow, 40, 40, 200, 100, WFLG_SIZEGADGET | WFLG_ACTIVATE, 0, 0, 0);
+    r.put16(kNewWindow + nw_MaxWidth, 0xFFFF);
+    r.put16(kNewWindow + nw_MaxHeight, 0xFFFF);
+    const u32 w_right = open_win(r, kNewWindow);
+    CHECK(w_right != 0);
+
+    // 1 px above size box and 1 px outer frames do not trigger resize.
+    press(r, 229, 128);
+    move_to(r, 239, 138);
+    release(r, 239, 138);
+    CHECK_EQ(r.get16(w_right + wd_Width), 200u);
+    CHECK_EQ(r.get16(w_right + wd_Height), 100u);
+
+    press(r, 239, 135);
+    move_to(r, 249, 145);
+    release(r, 249, 145);
+    CHECK_EQ(r.get16(w_right + wd_Width), 200u);
+
+    press(r, 235, 139);
+    move_to(r, 245, 149);
+    release(r, 245, 149);
+    CHECK_EQ(r.get16(w_right + wd_Height), 100u);
+
+    // Top-left pixel of the 10x10 size box resizes.
+    press(r, 229, 129);
+    move_to(r, 239, 139);
+    release(r, 239, 139);
+    CHECK_EQ(r.get16(w_right + wd_Width), 210u);
+    CHECK_EQ(r.get16(w_right + wd_Height), 110u);
+
+    // Bottom-border placement: y height-9..height-2.
+    const Rect bb =
+        Intuition::size_box_rect(300, 40, 200, 100, WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM);
+    CHECK_EQ(bb.x0, 489);
+    CHECK_EQ(bb.y0, 131);
+    CHECK_EQ(bb.x1, 498);
+    CHECK_EQ(bb.y1, 138);
+
+    put_new_window(r, kNewWindow, 300, 40, 200, 100,
+                   WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM | WFLG_ACTIVATE, 0, 0, 0);
+    r.put16(kNewWindow + nw_MaxWidth, 0xFFFF);
+    r.put16(kNewWindow + nw_MaxHeight, 0xFFFF);
+    const u32 w_bottom = open_win(r, kNewWindow);
+    CHECK(w_bottom != 0);
+
+    press(r, 489, 130);
+    move_to(r, 499, 140);
+    release(r, 499, 140);
+    CHECK_EQ(r.get16(w_bottom + wd_Width), 200u);
+
+    press(r, 489, 131);
+    move_to(r, 499, 141);
+    release(r, 499, 141);
+    CHECK_EQ(r.get16(w_bottom + wd_Width), 210u);
+    CHECK_EQ(r.get16(w_bottom + wd_Height), 110u);
+}
+
 }
 
 int main() {
@@ -4243,5 +4547,8 @@ int main() {
     moving_and_closing_window_removes_old_shadow();
     depth2_screen_has_no_corners_and_no_shadow();
     shade_table_darkens_default_pen0_and_updates_on_setrgb32();
+    flush_palette_recomposes_8plane_shadows_and_end_batch_flushes();
+    backdrop_window_has_square_corners_no_shadow_and_stays_behind();
+    size_box_hit_test_matches_border_placement();
     return check::finish("test_intuition");
 }

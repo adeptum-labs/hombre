@@ -682,7 +682,8 @@ void shell_has_size_gadget() {
     const u32 window = shell_window(r, screen);
     CHECK(window != 0);
     CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
-    CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 2u);
+    CHECK_EQ(rows(r, window), 46u);
     CHECK_EQ(r.get16(window + wd_MinWidth), 160u);
     CHECK((r.get32(window + wd_Flags) & WFLG_SIZEGADGET) != 0);
 }
@@ -833,7 +834,7 @@ void shell_has_scroll_gadget() {
     CHECK_EQ(r.get16(gad + gg_TopEdge),
              static_cast<u32>(r.get8(window + wd_BorderTop)) + 1u);
     CHECK_EQ(r.get16(gad + gg_Width), 8u);
-    const i32 expected_h = -(static_cast<i32>(r.get8(window + wd_BorderTop)) + 11);
+    const i32 expected_h = -(static_cast<i32>(r.get8(window + wd_BorderTop)) + 13);
     CHECK_EQ(static_cast<i16>(r.get16(gad + gg_Height)), static_cast<i16>(expected_h));
 
     const raster::Bitmap bm = screen_bitmap(r, screen);
@@ -846,15 +847,21 @@ void shell_has_scroll_gadget() {
     const i32 box_y0 = static_cast<i16>(r.get16(gad + gg_TopEdge));
     const i32 box_x1 = box_x0 + static_cast<i16>(r.get16(gad + gg_Width)) - 1;
     const i32 box_y1 = box_y0 + (wh + static_cast<i16>(r.get16(gad + gg_Height))) - 1;
-    const Rect size_box = Intuition::size_box_rect(0, 0, ww, wh);
+    const Rect size_box = Intuition::size_box_rect(0, 0, ww, wh, r.get32(window + wd_Flags));
     CHECK(box_x0 >= ww - border_right);
     CHECK(box_x1 <= ww - 2);
     CHECK(box_y0 > 14);
     CHECK(box_y1 < size_box.y0);
+    CHECK_EQ(box_y1, size_box.y0 - 2);
 
-    // The size gadget shows its engraved diagonal grip on screen.
+    // The size gadget shows its engraved diagonal grip on screen, and dragging it resizes.
     CHECK_EQ(pixel(r, bm, wl + ww - 4, wt + wh - 4), 1u);
     CHECK_EQ(pixel(r, bm, wl + ww - 3, wt + wh - 3), 2u);
+    press(r, wl + ww - 5, wt + wh - 5);
+    move_to(r, wl + ww - 45, wt + wh - 25);
+    release(r, wl + ww - 45, wt + wh - 25);
+    CHECK_EQ(r.get16(window + wd_Width), static_cast<u32>(ww - 40));
+    CHECK_EQ(r.get16(window + wd_Height), static_cast<u32>(wh - 20));
     CHECK_EQ(r.get16(gad + gg_Flags), GFLG_RELRIGHT | GFLG_RELHEIGHT);
     CHECK_EQ(r.get16(gad + gg_Activation),
              GACT_RIGHTBORDER | GACT_IMMEDIATE | GACT_FOLLOWMOUSE | GACT_RELVERIFY);

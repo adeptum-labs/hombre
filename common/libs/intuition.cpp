@@ -396,7 +396,8 @@ constexpr u8 kTopCornerInsets[3] = {3, 2, 1};
 constexpr i32 kShadowSize = 4;
 
 constexpr bool has_rounded_corners(u32 screen_depth, u32 window_flags) {
-    return screen_depth >= 8 && (window_flags & ndk::WFLG_BORDERLESS) == 0;
+    return screen_depth >= 8 &&
+           (window_flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0;
 }
 
 constexpr bool has_shadow(u32 screen_depth, u32 window_flags) {
@@ -788,10 +789,11 @@ Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width) {
     return Rect{cx - 5, top + 2, cx + 5, top + 12};
 }
 
-Rect Intuition::size_box_rect(i32 left, i32 top, i32 width, i32 height) {
+Rect Intuition::size_box_rect(i32 left, i32 top, i32 width, i32 height, u32 flags) {
     const i32 right = left + width - 1;
     const i32 bottom = top + height - 1;
-    return Rect{right - 10, bottom - 8, right - 1, bottom - 1};
+    const i32 y0 = (flags & ndk::WFLG_SIZEBBOTTOM) != 0 ? bottom - 8 : bottom - 10;
+    return Rect{right - 10, y0, right - 1, bottom - 1};
 }
 
 bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& display) {
@@ -814,6 +816,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     dropped_messages_ = 0;
     batch_depth_ = 0;
     display.front_screen = 0;
+    display.palette_dirty = false;
     for (u32& screen : screens_) {
         screen = 0;
     }
@@ -860,6 +863,34 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
 
 void Intuition::begin_batch() { ++batch_depth_; }
 
+void Intuition::flush_palette() {
+    if (display_ == nullptr || !display_->palette_dirty || machine_ == nullptr ||
+        batch_depth_ > 0) {
+        return;
+    }
+    display_->palette_dirty = false;
+    const u32 screen = display_->front_screen;
+    if (screen == 0) {
+        return;
+    }
+    const ScreenRecord* srec = find_screen_record(screen);
+    if (srec != nullptr) {
+        if (srec->depth >= 8) {
+            compose(screen, Rect{0, 0, static_cast<i32>(srec->width) - 1,
+                                 static_cast<i32>(srec->height) - 1});
+        } else {
+            refresh_screen(screen);
+        }
+        return;
+    }
+    Bus b(*machine_);
+    const u32 width = b.r16(screen + ndk::sc_Width);
+    const u32 height = b.r16(screen + ndk::sc_Height);
+    if (b.ok() && width > 0 && height > 0) {
+        refresh_full(*display_, *machine_, screen, width, height);
+    }
+}
+
 void Intuition::end_batch() {
     if (batch_depth_ == 0) {
         return;
@@ -867,6 +898,16 @@ void Intuition::end_batch() {
     --batch_depth_;
     if (batch_depth_ != 0) {
         return;
+    }
+    if (display_ != nullptr && display_->palette_dirty) {
+        ScreenRecord* front = find_screen_record(display_->front_screen);
+        if (front != nullptr && (front->depth >= 8 ||
+                                 (front->pending.x0 <= front->pending.x1 &&
+                                  front->pending.y0 <= front->pending.y1))) {
+            display_->palette_dirty = false;
+            front->pending = Rect{0, 0, static_cast<i32>(front->width) - 1,
+                                  static_cast<i32>(front->height) - 1};
+        }
     }
     for (ScreenRecord& srec : screen_records_) {
         if (srec.addr != 0 && srec.pending.x0 <= srec.pending.x1 &&
@@ -876,6 +917,7 @@ void Intuition::end_batch() {
             compose(srec.addr, r);
         }
     }
+    flush_palette();
 }
 
 void Intuition::compose(u32 screen, Rect r) {
@@ -1375,6 +1417,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     screens_[0] = screen;
     front_ = screen;
     display_->front_screen = screen;
+    display_->palette_dirty = false;
     write_links();
     rec->addr = screen;
     rec->screen_bytes = ndk::Screen_SIZEOF;
@@ -1464,6 +1507,7 @@ bool Intuition::close_screen(u32 screen) {
     if (was_front) {
         front_ = screens_[0];
         display_->front_screen = front_;
+        display_->palette_dirty = false;
         if (front_ != 0) {
             refresh_screen(front_);
         } else {
@@ -1484,6 +1528,7 @@ void Intuition::screen_to_front(u32 screen) {
     screens_[0] = screen;
     front_ = screen;
     display_->front_screen = screen;
+    display_->palette_dirty = false;
     write_links();
     refresh_screen(screen);
 }
@@ -1505,6 +1550,7 @@ void Intuition::screen_to_back(u32 screen) {
     screens_[open - 1] = screen;
     front_ = screens_[0];
     display_->front_screen = front_;
+    display_->palette_dirty = false;
     write_links();
     refresh_screen(front_);
 }
@@ -1831,12 +1877,11 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     const i32 height =
         a.height == 0 || a.height > room_y ? static_cast<i32>(room_y) : static_cast<i32>(a.height);
     const bool borderless = (a.flags & ndk::WFLG_BORDERLESS) != 0;
+    const bool has_size = !borderless && (a.flags & ndk::WFLG_SIZEGADGET) != 0;
+    const bool size_bottom = has_size && (a.flags & ndk::WFLG_SIZEBBOTTOM) != 0;
+    const bool size_right = has_size && (!size_bottom || (a.flags & ndk::WFLG_SIZEBRIGHT) != 0);
     const u32 border_left = borderless ? 1 : chrome::kBorderLeft;
     const u32 border_top = borderless ? 1 : chrome::kBorderTop;
-    const bool size_right =
-        !borderless && ((a.flags & (ndk::WFLG_SIZEGADGET | ndk::WFLG_SIZEBRIGHT)) != 0);
-    const bool size_bottom =
-        !borderless && ((a.flags & (ndk::WFLG_SIZEGADGET | ndk::WFLG_SIZEBBOTTOM)) != 0);
     const u32 border_right =
         borderless ? 1 : (size_right ? chrome::kSizeBorderRight : chrome::kBorderRight);
     const u32 border_bottom =
@@ -2028,7 +2073,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->addr = window;
     rec->window_bytes = ndk::Window_SIZEOF;
     rec->screen = screen;
-    rec->next_window = srec->first_window;
+    rec->next_window = 0;
     rec->left = left;
     rec->top = top;
     rec->width = width;
@@ -2057,7 +2102,9 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->newsize_pending = false;
     rec->newsize_w = width;
     rec->newsize_h = height;
-    srec->first_window = window;
+    const u32 insert_after =
+        (a.flags & ndk::WFLG_BACKDROP) != 0 ? last_normal_window(*srec) : 0;
+    insert_window_after(*srec, *rec, insert_after);
     write_window_links(screen);
     for (u32& slot : windows_) {
         if (slot == 0) {
@@ -2291,6 +2338,89 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
     }
 }
 
+u32 Intuition::last_normal_window(const ScreenRecord& srec, u32 skip_window) const {
+    u32 last_normal = 0;
+    u32 cur = srec.first_window;
+    for (u32 step = 0; step < kMaxWindows && cur != 0; ++step) {
+        const WindowRecord* wrec = find_window_record(cur);
+        if (wrec == nullptr) {
+            break;
+        }
+        if (cur != skip_window && (wrec->flags & ndk::WFLG_BACKDROP) == 0) {
+            last_normal = cur;
+        }
+        cur = wrec->next_window;
+    }
+    return last_normal;
+}
+
+u32 Intuition::last_window(const ScreenRecord& srec, u32 skip_window) const {
+    u32 last = 0;
+    u32 cur = srec.first_window;
+    for (u32 step = 0; step < kMaxWindows && cur != 0; ++step) {
+        const WindowRecord* wrec = find_window_record(cur);
+        if (wrec == nullptr) {
+            break;
+        }
+        if (cur != skip_window) {
+            last = cur;
+        }
+        cur = wrec->next_window;
+    }
+    return last;
+}
+
+void Intuition::insert_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after) {
+    if (after == 0) {
+        rec.next_window = srec.first_window;
+        srec.first_window = rec.addr;
+        return;
+    }
+    WindowRecord* arec = find_window_record(after);
+    if (arec == nullptr) {
+        rec.next_window = srec.first_window;
+        srec.first_window = rec.addr;
+        return;
+    }
+    rec.next_window = arec->next_window;
+    arec->next_window = rec.addr;
+}
+
+bool Intuition::move_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after) {
+    u32 cur_prev = 0;
+    if (srec.first_window != rec.addr) {
+        u32 p = srec.first_window;
+        for (u32 step = 0; step < kMaxWindows && p != 0; ++step) {
+            const WindowRecord* prec = find_window_record(p);
+            if (prec == nullptr) {
+                return false;
+            }
+            if (prec->next_window == rec.addr) {
+                cur_prev = p;
+                break;
+            }
+            p = prec->next_window;
+        }
+        if (cur_prev == 0) {
+            return false;
+        }
+    }
+    if (cur_prev == after) {
+        return false;
+    }
+    if (cur_prev == 0) {
+        srec.first_window = rec.next_window;
+    } else {
+        WindowRecord* prec = find_window_record(cur_prev);
+        if (prec == nullptr) {
+            return false;
+        }
+        prec->next_window = rec.next_window;
+    }
+    insert_window_after(srec, rec, after);
+    return true;
+}
+
 void Intuition::window_to_front(u32 window) {
     const u32 index = find_window(window);
     if (index >= kMaxWindows) {
@@ -2301,26 +2431,17 @@ void Intuition::window_to_front(u32 window) {
         return;
     }
     ScreenRecord* srec = find_screen_record(rec->screen);
-    if (srec == nullptr || srec->first_window == window) {
+    if (srec == nullptr) {
         return;
     }
-    u32 prev = srec->first_window;
-    for (u32 step = 0; step < kMaxWindows && prev != 0; ++step) {
-        WindowRecord* prec = find_window_record(prev);
-        if (prec == nullptr) {
-            return;
-        }
-        if (prec->next_window == window) {
-            prec->next_window = rec->next_window;
-            rec->next_window = srec->first_window;
-            srec->first_window = window;
-            write_window_links(rec->screen);
-            compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
-                                                    rec->height, rec->flags));
-            return;
-        }
-        prev = prec->next_window;
+    const bool backdrop = (rec->flags & ndk::WFLG_BACKDROP) != 0;
+    const u32 after = backdrop ? last_normal_window(*srec, window) : 0;
+    if (!move_window_after(*srec, *rec, after)) {
+        return;
     }
+    write_window_links(rec->screen);
+    compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
+                                            rec->height, rec->flags));
 }
 
 void Intuition::window_to_back(u32 window) {
@@ -2329,50 +2450,22 @@ void Intuition::window_to_back(u32 window) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
-    if (rec == nullptr || rec->next_window == 0) {
+    if (rec == nullptr) {
         return;
     }
     ScreenRecord* srec = find_screen_record(rec->screen);
     if (srec == nullptr || srec->first_window == 0) {
         return;
     }
-    if (srec->first_window == window) {
-        srec->first_window = rec->next_window;
-    } else {
-        u32 prev = srec->first_window;
-        bool unlinked = false;
-        for (u32 step = 0; step < kMaxWindows && prev != 0; ++step) {
-            WindowRecord* prec = find_window_record(prev);
-            if (prec == nullptr) {
-                return;
-            }
-            if (prec->next_window == window) {
-                prec->next_window = rec->next_window;
-                unlinked = true;
-                break;
-            }
-            prev = prec->next_window;
-        }
-        if (!unlinked) {
-            return;
-        }
+    const bool backdrop = (rec->flags & ndk::WFLG_BACKDROP) != 0;
+    const u32 after =
+        backdrop ? last_window(*srec, window) : last_normal_window(*srec, window);
+    if (!move_window_after(*srec, *rec, after)) {
+        return;
     }
-    u32 tail = srec->first_window;
-    for (u32 step = 0; step < kMaxWindows && tail != 0; ++step) {
-        WindowRecord* trec = find_window_record(tail);
-        if (trec == nullptr) {
-            return;
-        }
-        if (trec->next_window == 0) {
-            trec->next_window = window;
-            rec->next_window = 0;
-            write_window_links(rec->screen);
-            compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
-                                                    rec->height, rec->flags));
-            return;
-        }
-        tail = trec->next_window;
-    }
+    write_window_links(rec->screen);
+    compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
+                                            rec->height, rec->flags));
 }
 
 void Intuition::set_size_hook(u32 window, WindowHook hook, void* ctx) {
@@ -2633,7 +2726,7 @@ bool Intuition::start_drag(u32 window, i32 x, i32 y) {
     const i32 right = rec->left + rec->width - 1;
     const i32 bottom = rec->top + rec->height - 1;
     if ((flags & ndk::WFLG_SIZEGADGET) != 0 &&
-        in_rect(size_box_rect(rec->left, rec->top, rec->width, rec->height), x, y)) {
+        in_rect(size_box_rect(rec->left, rec->top, rec->width, rec->height, flags), x, y)) {
         drag_ = Drag::Size;
         grab_x_ = right - x;
         grab_y_ = bottom - y;

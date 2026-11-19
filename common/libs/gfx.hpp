@@ -59,6 +59,7 @@ struct DisplayState {
     DamageSink damage{nullptr, nullptr};
     // Incremented whenever a ColorMap is modified through graphics.library.
     u32 palette_gen = 0;
+    bool palette_dirty = false;
 };
 
 // Offsets and values of the graphics and Intuition structures, named as the

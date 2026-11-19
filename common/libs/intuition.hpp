@@ -92,7 +92,7 @@ public:
 
     static Rect close_box_rect(i32 left, i32 top);
     static Rect depth_box_rect(i32 left, i32 top, i32 width);
-    static Rect size_box_rect(i32 left, i32 top, i32 width, i32 height);
+    static Rect size_box_rect(i32 left, i32 top, i32 width, i32 height, u32 flags = 0);
 
     // Makes intuition.library over graphics, which must be initialised.
     // False if exec runs out of memory or native ids.
@@ -134,6 +134,7 @@ public:
     u32 window_under(i32 x, i32 y) const { return window_at(x, y); }
     void begin_batch();
     void end_batch();
+    void flush_palette();
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
     void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
@@ -256,6 +257,10 @@ private:
     const WindowRecord* find_window_record(u32 window) const;
     WindowRecord* free_window_record();
     void remove_window_at(u32 index);
+    u32 last_normal_window(const ScreenRecord& srec, u32 skip_window = 0) const;
+    u32 last_window(const ScreenRecord& srec, u32 skip_window = 0) const;
+    void insert_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after);
+    bool move_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after);
     void activate_window(u32 window);
     void redraw_window_bar(u32 window);
     bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);

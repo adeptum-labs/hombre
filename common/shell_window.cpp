@@ -144,7 +144,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     b.w16(gadget + ndk::gg_TopEdge, static_cast<u16>(border_top + 1));
     b.w16(gadget + ndk::gg_Width, static_cast<u16>(kScrollWidth));
     // Inside the right border with 1-px margins below the bar and above the size gadget.
-    b.w16(gadget + ndk::gg_Height, static_cast<u16>(static_cast<i16>(-(border_top + 11))));
+    b.w16(gadget + ndk::gg_Height, static_cast<u16>(static_cast<i16>(-(border_top + 13))));
     b.w16(gadget + ndk::gg_Flags, kGadgetFlags);
     b.w16(gadget + ndk::gg_Activation, kGadgetActivation);
     b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_PROPGADGET);

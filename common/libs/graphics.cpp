@@ -144,19 +144,25 @@ void bump_palette(DisplayState* display) {
     }
 }
 
-void refresh_viewport(const DisplayState* display, Machine& m, Bus& b, u32 vp) {
-    if (display == nullptr || display->front_screen == 0 || display->sink.refresh == nullptr) {
+void mark_viewport_dirty(DisplayState* display, Machine& m, u32 vp) {
+    if (display == nullptr || display->front_screen == 0 || vp == 0) {
         return;
     }
-    if (native::guest_address(m, vp) !=
+    if (native::guest_address(m, vp) ==
         native::guest_address(m, display->front_screen + ndk::sc_ViewPort)) {
+        display->palette_dirty = true;
+    }
+}
+
+void mark_colormap_dirty(DisplayState* display, Machine& m, u32 map) {
+    if (display == nullptr || display->front_screen == 0 || map == 0) {
         return;
     }
-    const i32 width = static_cast<i32>(b.r16(display->front_screen + ndk::sc_Width));
-    const i32 height = static_cast<i32>(b.r16(display->front_screen + ndk::sc_Height));
-    if (b.ok() && width > 0 && height > 0) {
-        display->sink.refresh(display->sink.ctx, m, display->front_screen,
-                              Rect{0, 0, width - 1, height - 1});
+    Bus fb(m);
+    const u32 front_map = fb.r32(display->front_screen + ndk::sc_ViewPort + ndk::vp_ColorMap);
+    if (fb.ok() && front_map != 0 &&
+        native::guest_address(m, map) == native::guest_address(m, front_map)) {
+        display->palette_dirty = true;
     }
 }
 
@@ -173,6 +179,9 @@ ColorMapTables colormap_tables(Bus& b, u32 map) {
         return t;
     }
     t.limit = b.r16(map + ndk::cm_Count);
+    if (t.limit > 256) {
+        t.limit = 256;
+    }
     t.table = b.r32(map + ndk::cm_ColorTable);
     if (b.r8(map + ndk::cm_Type) >= ndk::COLORMAP_TYPE_V39) {
         t.low_table = b.r32(map + ndk::cm_LowColorBits);
@@ -327,7 +336,7 @@ struct GraphicsNatives {
         }
         if (n != 0 && b.ok()) {
             bump_palette(g.display_);
-            refresh_viewport(g.display_, m, b, vp);
+            mark_viewport_dirty(g.display_, m, vp);
         }
     }
 
@@ -381,7 +390,7 @@ struct GraphicsNatives {
         }
         if (b.ok()) {
             bump_palette(g.display_);
-            refresh_viewport(g.display_, m, b, vp);
+            mark_viewport_dirty(g.display_, m, vp);
         }
     }
 
@@ -546,7 +555,7 @@ struct GraphicsNatives {
         const ColorMapTables t = colormap_tables(b, b.r32(vp + ndk::vp_ColorMap));
         if (write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
             bump_palette(g.display_);
-            refresh_viewport(g.display_, m, b, vp);
+            mark_viewport_dirty(g.display_, m, vp);
         }
     }
 
@@ -596,7 +605,7 @@ struct GraphicsNatives {
         }
         if (changed && b.ok()) {
             bump_palette(g.display_);
-            refresh_viewport(g.display_, m, b, vp);
+            mark_viewport_dirty(g.display_, m, vp);
         }
     }
 
@@ -634,6 +643,7 @@ struct GraphicsNatives {
         const ColorMapTables t = colormap_tables(b, m.cpu.a[0]);
         if (write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
             bump_palette(g.display_);
+            mark_colormap_dirty(g.display_, m, m.cpu.a[0]);
         }
     }
 };
