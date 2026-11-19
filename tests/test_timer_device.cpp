@@ -62,6 +62,15 @@ bool logged(const std::string& text) {
     return false;
 }
 
+bool logged_containing(const std::string& text) {
+    for (const std::string& line : g_lines) {
+        if (line.find(text) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct FakeTimerHost {
     u64 now_us = 0;
     u64 idle_step_us = 0;
@@ -181,6 +190,33 @@ private:
     u8* rw_ = nullptr;
     const u8* rx_ = nullptr;
 };
+
+// A port, a request and an open timer.device unit for UNIT_MICROHZ.
+u32 make_timer_request(Rig& r, u32& port) {
+    CHECK_EQ(r.call_exec(exec_lvo::CreateMsgPort), ExitReason::Returned);
+    port = r.m.cpu.d[0];
+    CHECK(port != 0);
+    r.m.cpu.a[0] = port;
+    r.m.cpu.d[0] = TR_SIZE;
+    CHECK_EQ(r.call_exec(exec_lvo::CreateIORequest), ExitReason::Returned);
+    const u32 req = r.m.cpu.d[0];
+    CHECK(req != 0);
+    r.m.cpu.a[0] = r.str(kNames, "timer.device");
+    r.m.cpu.d[0] = UNIT_MICROHZ;
+    r.m.cpu.a[1] = req;
+    r.m.cpu.d[1] = 0;
+    CHECK_EQ(r.call_exec(exec_lvo::OpenDevice), ExitReason::Returned);
+    CHECK_EQ(r.m.cpu.d[0], 0u);
+    return req;
+}
+
+void send_timer_request(Rig& r, u32 req, u32 micro) {
+    r.put16(req + io_Command, TR_ADDREQUEST);
+    r.put32(req + tv_secs, 0);
+    r.put32(req + tv_micro, micro);
+    r.m.cpu.a[1] = req;
+    CHECK_EQ(r.call_exec(exec_lvo::SendIO), ExitReason::Returned);
+}
 
 void timer_queue_ordering_exact_deadline_abort_capacity() {
     TimerQueue q;
@@ -543,6 +579,123 @@ void waituntil_and_eclock_units() {
     CHECK_EQ(r.call_exec(exec_lvo::DeleteMsgPort), ExitReason::Returned);
 }
 
+void timer_queue_remove_task_keeps_other_tasks() {
+    TimerQueue q;
+    CHECK(q.insert(100, 0x10, 1));
+    CHECK(q.insert(200, 0x20, 2));
+    CHECK(q.insert(300, 0x30, 1));
+    q.remove_task(1);
+    CHECK_EQ(q.count(), 1u);
+    CHECK_EQ(q.entry(0).request, 0x20u);
+    CHECK_EQ(q.entry(0).task, 2u);
+    q.remove_task(1);
+    CHECK_EQ(q.count(), 1u);
+    q.remove_task(2);
+    CHECK(q.empty());
+}
+
+void drop_requests_of_removes_only_that_tasks_requests() {
+    Rig r;
+    r.host.now_us = 0;
+    u32 port = 0;
+    const u32 req1 = make_timer_request(r, port);
+    send_timer_request(r, req1, 1000);
+
+    const u32 other_task = kData + 0x300;
+    g_exec.set_this_task(other_task);
+    r.m.cpu.a[0] = port;
+    r.m.cpu.d[0] = TR_SIZE;
+    CHECK_EQ(r.call_exec(exec_lvo::CreateIORequest), ExitReason::Returned);
+    const u32 req2 = r.m.cpu.d[0];
+    r.put32(req2 + io_Device, r.get32(req1 + io_Device));
+    r.put32(req2 + io_Unit, r.get32(req1 + io_Unit));
+    send_timer_request(r, req2, 2000);
+    CHECK_EQ(g_timer.queue().count(), 2u);
+
+    g_timer.drop_requests_of(kData);
+    CHECK_EQ(g_timer.queue().count(), 1u);
+    CHECK_EQ(g_timer.queue().entry(0).request, req2);
+    CHECK_EQ(r.get8(req1 + LN_TYPE), NT_MESSAGE);
+
+    g_timer.drop_requests_of(other_task);
+    CHECK(!g_timer.has_pending());
+    CHECK_EQ(r.get8(req2 + LN_TYPE), NT_MESSAGE);
+    CHECK_EQ(g_exec.get_message(port), 0u);
+}
+
+void expire_timers_replies_while_the_run_has_ended() {
+    Rig r;
+    r.host.now_us = 0;
+    u32 port = 0;
+    const u32 req = make_timer_request(r, port);
+    send_timer_request(r, req, 1000);
+    CHECK(g_timer.has_pending());
+
+    const ExitReason ended = r.m.cpu.exit;
+    CHECK(ended != ExitReason::None);
+    r.host.now_us = 5000;
+    g_exec.expire_timers();
+    CHECK_EQ(r.m.cpu.exit, ended);
+    CHECK(!g_timer.has_pending());
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_REPLYMSG);
+    CHECK_EQ(g_exec.get_message(port), req);
+}
+
+void a_reply_to_a_freed_port_does_not_change_the_run_state() {
+    Rig r;
+    r.host.now_us = 0;
+    u32 port = 0;
+    const u32 req = make_timer_request(r, port);
+    send_timer_request(r, req, 1000);
+
+    g_exec.delete_port(port);
+    // The first fit hands the freed block back, cleared, as a reused port.
+    CHECK_EQ(g_exec.alloc(MP_SIZE, MEMF_PUBLIC | MEMF_CLEAR), port);
+    const ExitReason ended = r.m.cpu.exit;
+    r.host.now_us = 5000;
+    g_exec.expire_timers();
+    CHECK_EQ(r.m.cpu.exit, ended);
+    CHECK(!g_timer.has_pending());
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_MESSAGE);
+}
+
+void an_unreadable_reply_port_is_logged_and_dropped() {
+    Rig r;
+    r.host.now_us = 0;
+    u32 port = 0;
+    const u32 req = make_timer_request(r, port);
+    send_timer_request(r, req, 1000);
+    r.put32(req + mn_ReplyPort, kGuestBytes + 0x100);
+
+    const ExitReason ended = r.m.cpu.exit;
+    g_lines.clear();
+    r.host.now_us = 5000;
+    g_exec.expire_timers();
+    CHECK_EQ(r.m.cpu.exit, ended);
+    CHECK(!g_timer.has_pending());
+    CHECK(logged_containing("exec: timer reply faulted at "));
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_MESSAGE);
+}
+
+void a_timer_request_of_a_removed_task_is_not_replied() {
+    Rig r;
+    r.host.now_us = 0;
+    u32 port = 0;
+    const u32 req = make_timer_request(r, port);
+    send_timer_request(r, req, 1000);
+
+    // The boot task's address leaves the scheduler; the request it issued
+    // must not be answered any more.
+    g_exec.set_this_task(kData + 0x300);
+    const ExitReason ended = r.m.cpu.exit;
+    r.host.now_us = 5000;
+    g_exec.expire_timers();
+    CHECK_EQ(r.m.cpu.exit, ended);
+    CHECK(!g_timer.has_pending());
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_MESSAGE);
+    CHECK_EQ(g_exec.get_message(port), 0u);
+}
+
 }  // namespace
 
 int main() {
@@ -551,5 +704,11 @@ int main() {
     sys_time_setsystime_and_readeclock();
     requests_idle_until_deadline_abort_and_queue_full();
     waituntil_and_eclock_units();
+    timer_queue_remove_task_keeps_other_tasks();
+    drop_requests_of_removes_only_that_tasks_requests();
+    expire_timers_replies_while_the_run_has_ended();
+    a_reply_to_a_freed_port_does_not_change_the_run_state();
+    an_unreadable_reply_port_is_logged_and_dropped();
+    a_timer_request_of_a_removed_task_is_not_replied();
     return check::finish("test_timer_device");
 }

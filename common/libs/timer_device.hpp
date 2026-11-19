@@ -81,6 +81,7 @@ public:
     struct Entry {
         u64 deadline_us = 0;
         u32 request = 0;
+        u32 task = 0;
     };
 
     void clear() { count_ = 0; }
@@ -90,9 +91,9 @@ public:
     u64 next_deadline() const { return count_ > 0 ? entries_[0].deadline_us : 0; }
     const Entry& entry(u32 i) const { return entries_[i]; }
 
-    // Inserts (deadline_us, request) in ascending deadline order (FIFO for
-    // equal deadlines). False when the queue is full.
-    bool insert(u64 deadline_us, u32 request) {
+    // Inserts (deadline_us, request, task) in ascending deadline order (FIFO
+    // for equal deadlines). False when the queue is full.
+    bool insert(u64 deadline_us, u32 request, u32 task = 0) {
         if (count_ >= kCapacity) {
             return false;
         }
@@ -101,9 +102,23 @@ public:
             entries_[pos] = entries_[pos - 1];
             --pos;
         }
-        entries_[pos] = Entry{deadline_us, request};
+        entries_[pos] = Entry{deadline_us, request, task};
         ++count_;
         return true;
+    }
+
+    // Removes every entry of task.
+    void remove_task(u32 task) {
+        for (u32 i = 0; i < count_;) {
+            if (entries_[i].task != task) {
+                ++i;
+                continue;
+            }
+            for (u32 j = i + 1; j < count_; ++j) {
+                entries_[j - 1] = entries_[j];
+            }
+            --count_;
+        }
     }
 
     // Removes the entry matching request. False if not present.
@@ -143,7 +158,7 @@ public:
     static constexpr u16 kVersion = 40;
 
     // Creates "timer.device" version 40 on ExecBase->DeviceList and registers
-    // its expiry hook with exec. exec must be initialised.
+    // its expiry and task-drop hooks with exec. exec must be initialised.
     bool init(m68k::Machine& m, Exec& exec);
 
     u32 device_base() const { return base_; }
@@ -160,6 +175,9 @@ public:
     // Overrides the monotonic microsecond clock source (defaults to exec's
     // TaskHost::now_us).
     void set_clock(u64 (*now_us)(void* ctx), void* ctx = nullptr);
+
+    // Removes the pending requests the task issued, without replying.
+    void drop_requests_of(u32 task) { queue_.remove_task(task); }
 
     // Replies to every queued request whose deadline_us <= now_us.
     void expire(u64 now_us);

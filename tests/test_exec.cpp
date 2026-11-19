@@ -22,6 +22,7 @@
  */
 
 #include "libs/exec.hpp"
+#include "libs/timer_device.hpp"
 #include "check.hpp"
 
 #include <cstdio>
@@ -2573,13 +2574,15 @@ void signal_wakes_waiting_task_and_switches_only_for_higher_priority() {
         r.cpu().a[3] = 0;
         CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
 
-        // Unknown task: sets tc_SigRecvd only, no switch.
+        // Unknown task: nothing is written and the signal is logged.
         const u32 unknown = kData + 0x400;
         r.put32(unknown + TC_SIGRECVD, 0);
+        g_lines.clear();
         r.cpu().a[1] = unknown;
         r.cpu().d[0] = 0x0010;
         CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
-        CHECK_EQ(r.get32(unknown + TC_SIGRECVD), 0x0010u);
+        CHECK_EQ(r.get32(unknown + TC_SIGRECVD), 0u);
+        CHECK(logged_containing("exec: Signal to unknown task "));
         CHECK(host.switches.empty());
 
         // Boot calls Wait(0x0020): marks boot Waiting on TaskWait and switches to child1 (id 1).
@@ -3279,6 +3282,17 @@ struct ExecTest {
 
     static u32& load_depth(Exec& e) { return e.load_depth_; }
     static u32 task_load_depth(const Exec& e, u32 id) { return e.tasks_[id].load_depth; }
+    static u32 task_parent(const Exec& e, u32 id) { return e.tasks_[id].parent; }
+    static void set_task_parent(Exec& e, u32 id, u32 parent) { e.tasks_[id].parent = parent; }
+    static void set_task_detached(Exec& e, u32 id, bool detached) {
+        e.tasks_[id].detached = detached;
+    }
+    static u32 task_td_nest(const Exec& e, u32 id) { return e.tasks_[id].td_nest; }
+    static u32 task_id_nest(const Exec& e, u32 id) { return e.tasks_[id].id_nest; }
+    static void set_task_nests(Exec& e, u32 id, u8 td, u8 id_nest) {
+        e.tasks_[id].td_nest = td;
+        e.tasks_[id].id_nest = id_nest;
+    }
 };
 }  // namespace hombre
 
@@ -3458,6 +3472,172 @@ void reset_nest_counts_clears_forbid_and_disable() {
     CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
     CHECK_EQ(host.switches.size(), 1u);
     CHECK_EQ(host.switches[0].to, 1u);
+}
+
+void end_tasks_of_ends_only_the_parents_tree_and_keeps_detached_tasks() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    const u32 a = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "a", kNames);
+    const u32 b = setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "b", kNames + 0x20);
+    const u32 g = setup_child_task(r, kData + 0x300, kData + 0x4000, 0, "g", kNames + 0x40);
+    const u32 d = setup_child_task(r, kData + 0x800, kData + 0x5000, 0, "d", kNames + 0x60);
+    const u32 o = setup_child_task(r, kData + 0x900, kData + 0x6000, 0, "o", kNames + 0x80);
+    const u32 children[] = {a, b, g, d, o};
+    const u32 stacks[] = {kData + 0x2000, kData + 0x3000, kData + 0x4000, kData + 0x5000,
+                          kData + 0x6000};
+    for (u32 i = 0; i < 5; ++i) {
+        r.cpu().a[1] = children[i];
+        r.cpu().a[2] = stacks[i];
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+        CHECK_EQ(ExecTest::task_parent(g_exec, static_cast<u32>(g_exec.scheduler().find(
+                                                   children[i]))),
+                 boot);
+    }
+
+    // b and g are a's and b's children; o belongs to the detached d.
+    ExecTest::set_task_parent(g_exec, 2, a);
+    ExecTest::set_task_parent(g_exec, 3, b);
+    ExecTest::set_task_detached(g_exec, 4, true);
+    ExecTest::set_task_parent(g_exec, 5, d);
+
+    g_lines.clear();
+    g_exec.end_tasks_of(boot);
+
+    CHECK(logged("exec: ended task a"));
+    CHECK(logged("exec: ended task b"));
+    CHECK(logged("exec: ended task g"));
+    CHECK(!logged("exec: ended task d"));
+    CHECK(!logged("exec: ended task o"));
+    CHECK(g_exec.scheduler().find(a) < 0);
+    CHECK(g_exec.scheduler().find(b) < 0);
+    CHECK(g_exec.scheduler().find(g) < 0);
+    CHECK(g_exec.scheduler().find(d) >= 0);
+    CHECK(g_exec.scheduler().find(o) >= 0);
+    CHECK_EQ(r.get8(a + TC_STATE), TS_REMOVED);
+    CHECK_EQ(r.get8(b + TC_STATE), TS_REMOVED);
+    CHECK_EQ(r.get8(g + TC_STATE), TS_REMOVED);
+    CHECK_EQ(r.get8(d + TC_STATE), TS_READY);
+    CHECK_EQ(r.get8(o + TC_STATE), TS_READY);
+    CHECK_EQ(host.destroyed.size(), 3u);
+}
+
+void reset_task_state_restores_a_non_running_task_only() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    const i32 id = g_exec.scheduler().find(child);
+    CHECK(id > 0);
+
+    r.put8(child + TC_TDNESTCNT, 0x10);
+    r.put8(child + TC_IDNESTCNT, 0x11);
+    r.put32(child + TC_SIGRECVD, 0xFFFF);
+    r.put32(child + TC_SIGALLOC, 0);
+    ExecTest::set_task_nests(g_exec, static_cast<u32>(id), 0x10, 0x11);
+    r.put32(boot + TC_SIGRECVD, 0x1234);
+    r.put32(boot + TC_SIGALLOC, 0x00010000);
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK_EQ(r.exec(exec_lvo::Disable), ExitReason::Halt);
+    const u32 td = r.get8(r.base() + TDNestCnt);
+    const u32 id_nest = r.get8(r.base() + IDNestCnt);
+
+    g_exec.reset_task_state(child);
+    CHECK_EQ(r.get8(child + TC_TDNESTCNT), 0xFFu);
+    CHECK_EQ(r.get8(child + TC_IDNESTCNT), 0xFFu);
+    CHECK_EQ(r.get32(child + TC_SIGRECVD), 0u);
+    CHECK_EQ(r.get32(child + TC_SIGALLOC), 0x0000FFFFu);
+    CHECK_EQ(ExecTest::task_td_nest(g_exec, static_cast<u32>(id)), 0xFFu);
+    CHECK_EQ(ExecTest::task_id_nest(g_exec, static_cast<u32>(id)), 0xFFu);
+    CHECK_EQ(r.get8(r.base() + TDNestCnt), td);
+    CHECK_EQ(r.get8(r.base() + IDNestCnt), id_nest);
+    CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0x1234u);
+    CHECK_EQ(r.get32(boot + TC_SIGALLOC), 0x00010000u);
+
+    g_exec.reset_task_state(boot);
+    CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
+    CHECK_EQ(r.get8(r.base() + IDNestCnt), 0xFFu);
+    CHECK_EQ(r.get8(boot + TC_TDNESTCNT), 0xFFu);
+    CHECK_EQ(r.get8(boot + TC_IDNESTCNT), 0xFFu);
+    CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0u);
+    CHECK_EQ(r.get32(boot + TC_SIGALLOC), 0x0000FFFFu);
+}
+
+// Nested runs stop two levels short of the call depth limit, leaving room
+// for the innermost program's own calls into 68000 code.
+void enter_nested_run_stops_at_the_call_depth_limit() {
+    Rig r;
+    for (u32 i = 0; i < 6; ++i) {
+        CHECK(g_exec.enter_nested_run());
+    }
+    g_lines.clear();
+    CHECK(!g_exec.enter_nested_run());
+    CHECK(logged("exec: calls into 68000 code nested too deep"));
+    g_exec.leave_nested_run();
+    CHECK(g_exec.enter_nested_run());
+    for (u32 i = 0; i < 6; ++i) {
+        g_exec.leave_nested_run();
+    }
+    CHECK(g_exec.enter_nested_run());
+    g_exec.leave_nested_run();
+}
+
+void timer_requests_of_a_removed_task_are_dropped() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+    TimerDevice timer;
+    CHECK(timer.init(r.m, g_exec));
+
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = TR_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    const u32 req = r.cpu().d[0];
+    r.cpu().a[0] = r.str(kNames + 0x100, "timer.device");
+    r.cpu().d[0] = UNIT_MICROHZ;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Halt);
+
+    // The child issues the request: BeginIO stores the task exec reports.
+    g_exec.set_this_task(child);
+    r.put16(req + io_Command, TR_ADDREQUEST);
+    r.put32(req + TR_TIME, 0);
+    r.put32(req + TR_TIME + 4, 1000);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::SendIO), ExitReason::Halt);
+    CHECK(timer.has_pending());
+    CHECK_EQ(timer.queue().entry(0).task, child);
+    g_exec.set_this_task(boot);
+
+    r.cpu().a[1] = child;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+
+    CHECK(!timer.has_pending());
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_MESSAGE);
+    host.now_us = 5000;
+    g_exec.expire_timers();
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_MESSAGE);
+    CHECK_EQ(g_exec.get_message(port), 0u);
 }
 
 void yield_in_native_and_per_task_state() {
@@ -3950,6 +4130,10 @@ int main() {
     slice_end_calls_task_host_poll();
     end_child_tasks_removes_reaps_and_clears_sem_waiters();
     reset_nest_counts_clears_forbid_and_disable();
+    end_tasks_of_ends_only_the_parents_tree_and_keeps_detached_tasks();
+    reset_task_state_restores_a_non_running_task_only();
+    enter_nested_run_stops_at_the_call_depth_limit();
+    timer_requests_of_a_removed_task_are_dropped();
     yield_in_native_and_per_task_state();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();

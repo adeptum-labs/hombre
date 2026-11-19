@@ -235,7 +235,7 @@ struct TimerOps {
         if (!b.ok()) {
             return;
         }
-        t.queue_.insert(deadline_us, native::guest_address(m, io_raw));
+        t.queue_.insert(deadline_us, native::guest_address(m, io_raw), t.exec_->this_task());
     }
 
     static void abort_io(void* ctx, Machine& m) {
@@ -371,6 +371,10 @@ struct TimerOps {
     static bool has_pending_hook(void* ctx) {
         return of(ctx).has_pending();
     }
+
+    static void drop_hook(void* ctx, u32 task) {
+        of(ctx).drop_requests_of(task);
+    }
 };
 
 namespace {
@@ -423,6 +427,7 @@ bool TimerDevice::init(Machine& m, Exec& exec) {
         return false;
     }
     exec.set_timer_hook(TimerHook{TimerOps::expire_hook, TimerOps::has_pending_hook, this});
+    exec.set_timer_drop_hook(TimerOps::drop_hook, this);
     return true;
 }
 
@@ -448,19 +453,26 @@ u64 TimerDevice::current_now_us() const {
 }
 
 void TimerDevice::expire(u64 now_us) {
-    if (m_ == nullptr || exec_ == nullptr || m_->cpu.exit != m68k::ExitReason::None) {
+    if (m_ == nullptr || exec_ == nullptr) {
         return;
     }
     TimerQueue::Entry entry{};
     while (queue_.pop_due(now_us, entry)) {
+        if (exec_->scheduler().find(entry.task) < 0) {
+            continue;  // the task that issued the request is gone
+        }
+        const m68k::CpuState saved = m_->cpu;
+        m_->cpu.exit = m68k::ExitReason::None;
         Bus b(*m_);
         b.w8(entry.request + io_Error, 0);
-        if (b.ok()) {
-            exec_->reply_message(entry.request);
+        const bool faulted = !b.ok();
+        const u32 fault = m_->cpu.fault_addr;
+        m_->cpu = saved;
+        if (faulted) {
+            LogLine().text("exec: timer reply faulted at ").hex(fault).send();
+            continue;
         }
-        if (m_->cpu.exit != m68k::ExitReason::None) {
-            break;
-        }
+        exec_->reply_timer_message(entry.request);
     }
 }
 

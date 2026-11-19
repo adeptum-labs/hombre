@@ -543,12 +543,23 @@ struct ExecOps {
         store_signals_of(e, b, e.task_, value);
     }
 
-    // Signals `task_addr` (any guest Task, known or unknown). Wakes a waiting
-    // task whose awaited mask matches and flags an immediate switch if a higher
-    // priority task became ready.
+    // True for a task the scheduler holds or the boot task.
+    static bool known_task(const Exec& e, u32 addr) {
+        return addr != 0 && (e.sched_.find(addr) >= 0 || addr == e.tasks_[0].task_addr);
+    }
+
+    // Signals a task exec knows. An address that is not a scheduled task and
+    // not the boot task may be freed memory and is only logged.
     static void signal_task(Exec& e, Bus& b, u32 task_addr, u32 mask) {
         const u32 addr = native::guest_address(*e.m_, task_addr);
         if (addr == 0) {
+            return;
+        }
+        if (!known_task(e, addr)) {
+            if (e.unknown_signal_addr_ != addr) {
+                e.unknown_signal_addr_ = addr;
+                LogLine().text("exec: Signal to unknown task ").hex(addr).send();
+            }
             return;
         }
         const u32 old = b.r32(addr + TC_SIGRECVD);
@@ -771,6 +782,9 @@ struct ExecOps {
         }
         const Scheduler::Slot slot = e.sched_.slot(static_cast<u32>(target_id));
         const u32 target_addr = slot.task_addr;
+        if (target_addr != 0 && e.timer_drop_hook_ != nullptr) {
+            e.timer_drop_hook_(e.timer_drop_ctx_, target_addr);
+        }
         if ((slot.state == TaskState::Ready || slot.state == TaskState::Waiting) &&
             target_addr != 0) {
             remove(b, target_addr);
@@ -2676,6 +2690,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     }
     pending_switch_ = false;
     softint_logged_ = false;
+    unknown_signal_addr_ = 0;
     every_task_waits_logged_ = false;
     abort_to_boot_task_ = false;
     reply_port_ = 0;
@@ -2684,6 +2699,8 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     task_end_hook_ = nullptr;
     task_end_ctx_ = nullptr;
     timer_hook_ = TimerHook{};
+    timer_drop_hook_ = nullptr;
+    timer_drop_ctx_ = nullptr;
     for (LibraryInfo& info : libraries_) {
         info = LibraryInfo{};
     }
@@ -3064,6 +3081,7 @@ u32 Exec::spawn(u32 task, u32 init_pc, u32 final_pc, bool detached) {
     tc.run_state = m68k::Jit::RunState{~0ull, 0};
     tc.call_depth = 0;
     tc.task_addr = task;
+    tc.parent = task_;
     tc.budget = ~0ull;
     tc.td_nest = 0xFF;
     tc.id_nest = 0xFF;
@@ -3137,6 +3155,7 @@ u32 Exec::spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, boo
     tc.cpu.a[7] = child_sp;
     tc.run_state = m68k::Jit::RunState{~0ull, 0};
     tc.task_addr = task;
+    tc.parent = task_;
     tc.budget = ~0ull;
     tc.detached = detached;
     tc.native_body = body;
@@ -3150,6 +3169,11 @@ u32 Exec::spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, boo
 void Exec::set_task_end_hook(void (*hook)(void* ctx, u32 task, bool self), void* ctx) {
     task_end_hook_ = hook;
     task_end_ctx_ = ctx;
+}
+
+void Exec::set_timer_drop_hook(void (*hook)(void* ctx, u32 task), void* ctx) {
+    timer_drop_hook_ = hook;
+    timer_drop_ctx_ = ctx;
 }
 
 void Exec::set_this_task(u32 task_addr) {
@@ -3236,6 +3260,30 @@ bool Exec::reply_message(u32 message) {
     return ExecOps::reply_msg(*this, b, message);
 }
 
+bool Exec::reply_timer_message(u32 message) {
+    if (m_ == nullptr) {
+        return false;
+    }
+    const ExitReason saved_exit = m_->cpu.exit;
+    const u32 saved_fault = m_->cpu.fault_addr;
+    const u32 saved_trap = m_->cpu.trap_number;
+    m_->cpu.exit = ExitReason::None;
+    Bus b(*m_);
+    const u32 port = b.r32(message + mn_ReplyPort);
+    bool replyable = port == 0;
+    if (b.ok() && port != 0) {
+        replyable = ExecOps::known_task(*this, b.r32(port + mp_SigTask));
+    }
+    const bool replied = b.ok() && replyable && ExecOps::reply_msg(*this, b, message);
+    if (!b.ok()) {
+        LogLine().text("exec: timer reply faulted at ").hex(m_->cpu.fault_addr).send();
+    }
+    m_->cpu.exit = saved_exit;
+    m_->cpu.fault_addr = saved_fault;
+    m_->cpu.trap_number = saved_trap;
+    return replied;
+}
+
 u64 Exec::now_us() const {
     return task_host_.now_us != nullptr ? task_host_.now_us(task_host_.ctx) : 0;
 }
@@ -3250,11 +3298,16 @@ bool Exec::has_pending_timers() const {
 }
 
 void Exec::expire_timers() {
-    if (m_ == nullptr || base_ == 0 || task_host_.now_us == nullptr ||
-        m_->cpu.exit != ExitReason::None) {
+    if (m_ == nullptr || base_ == 0 || task_host_.now_us == nullptr) {
         return;
     }
     const u64 now = task_host_.now_us(task_host_.ctx);
+    // Timers belong to every task, not to the one that happens to be running:
+    // a fault while completing one is dropped instead of ending that run.
+    const ExitReason saved_exit = m_->cpu.exit;
+    const u32 saved_fault = m_->cpu.fault_addr;
+    const u32 saved_trap = m_->cpu.trap_number;
+    m_->cpu.exit = ExitReason::None;
     Bus b(*m_);
     for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
         if (!tasks_[i].sleeping || now < tasks_[i].sleep_deadline_us) {
@@ -3276,9 +3329,17 @@ void Exec::expire_timers() {
             }
         }
     }
-    if (timer_hook_.expire != nullptr && m_->cpu.exit == ExitReason::None) {
+    bool faulted = !b.ok();
+    if (timer_hook_.expire != nullptr) {
         timer_hook_.expire(timer_hook_.ctx, now);
+        faulted = faulted || m_->cpu.exit != ExitReason::None;
     }
+    if (faulted) {
+        LogLine().text("exec: timer reply faulted at ").hex(m_->cpu.fault_addr).send();
+    }
+    m_->cpu.exit = saved_exit;
+    m_->cpu.fault_addr = saved_fault;
+    m_->cpu.trap_number = saved_trap;
 }
 
 void Exec::sleep_us(u64 us) {
@@ -3448,12 +3509,7 @@ void Exec::reset_task_signals() {
     abort_to_boot_task_ = false;
     tasks_[0].sleeping = false;
     tasks_[0].sleep_deadline_us = 0;
-    const u32 boot_addr = tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_;
-    if (m_ != nullptr && boot_addr != 0) {
-        Bus b(*m_);
-        b.w32(boot_addr + TC_SIGALLOC, 0x0000FFFF);
-        b.w32(boot_addr + TC_SIGRECVD, 0);
-    }
+    reset_task_state(tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_);
 }
 
 void Exec::set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx) {
@@ -3732,49 +3788,102 @@ void Exec::end_child_tasks() {
         task_ = tasks_[0].task_addr;
         m_->mem.write32(base_ + ThisTask, task_);
     }
-    for (u32 i = 1; i < Scheduler::kMaxTasks; ++i) {
-        const Scheduler::Slot s = sched_.slot(i);
-        if (s.state != TaskState::Free && s.state != TaskState::Removed &&
-            tasks_[i].detached) {
-            continue;
-        }
-        tasks_[i].sleeping = false;
-        tasks_[i].sleep_deadline_us = 0;
-        if (s.state == TaskState::Free || s.state == TaskState::Removed) {
-            continue;
-        }
-        char name[kMaxName];
-        read_task_name(*m_, s.task_addr, name);
-        LogLine().text("exec: ended task ").text(name).send();
-        if (s.task_addr != 0) {
-            Bus b(*m_);
-            if (s.state == TaskState::Ready || s.state == TaskState::Waiting) {
-                remove(b, s.task_addr);
+    end_tasks_of(tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_);
+}
+
+void Exec::end_tasks_of(u32 parent) {
+    if (m_ == nullptr) {
+        return;
+    }
+    u32 ended[Scheduler::kMaxTasks];
+    u32 ended_count = 0;
+    ended[ended_count++] = parent;
+    auto is_ended = [&](u32 addr) {
+        for (u32 i = 0; i < ended_count; ++i) {
+            if (ended[i] == addr) {
+                return true;
             }
-            b.w8(s.task_addr + TC_STATE, TS_REMOVED);
         }
-        remove_sem_waiter(i);
-        sched_.remove(static_cast<i32>(i));
-        if (task_end_hook_ != nullptr) {
-            task_end_hook_(task_end_ctx_, s.task_addr, false);
+        return false;
+    };
+    for (bool found = true; found;) {
+        found = false;
+        for (u32 i = 1; i < Scheduler::kMaxTasks; ++i) {
+            const Scheduler::Slot s = sched_.slot(i);
+            if (s.state == TaskState::Free || s.state == TaskState::Removed ||
+                tasks_[i].detached || !is_ended(tasks_[i].parent)) {
+                continue;
+            }
+            tasks_[i].sleeping = false;
+            tasks_[i].sleep_deadline_us = 0;
+            char name[kMaxName];
+            read_task_name(*m_, s.task_addr, name);
+            LogLine().text("exec: ended task ").text(name).send();
+            if (s.task_addr != 0) {
+                Bus b(*m_);
+                if (s.state == TaskState::Ready || s.state == TaskState::Waiting) {
+                    remove(b, s.task_addr);
+                }
+                b.w8(s.task_addr + TC_STATE, TS_REMOVED);
+            }
+            remove_sem_waiter(i);
+            if (s.task_addr != 0 && timer_drop_hook_ != nullptr) {
+                timer_drop_hook_(timer_drop_ctx_, s.task_addr);
+            }
+            sched_.remove(static_cast<i32>(i));
+            if (task_end_hook_ != nullptr) {
+                task_end_hook_(task_end_ctx_, s.task_addr, false);
+            }
+            if (s.task_addr != 0 && ended_count < Scheduler::kMaxTasks) {
+                ended[ended_count++] = s.task_addr;
+            }
+            found = true;
         }
     }
     reap_removed();
 }
 
-void Exec::reset_nest_counts() {
-    tasks_[0].td_nest = 0xFF;
-    tasks_[0].id_nest = 0xFF;
-    if (m_ == nullptr || base_ == 0) {
+void Exec::reset_task_state(u32 task) {
+    i32 id = sched_.find(task);
+    if (id < 0 && task == tasks_[0].task_addr) {
+        id = 0;
+    }
+    if (id >= 0) {
+        tasks_[id].td_nest = 0xFF;
+        tasks_[id].id_nest = 0xFF;
+    }
+    if (m_ == nullptr || base_ == 0 || task == 0) {
         return;
     }
     Bus b(*m_);
-    b.w8(base_ + TDNestCnt, 0xFF);
-    b.w8(base_ + IDNestCnt, 0xFF);
-    const u32 boot_addr = tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_;
-    if (boot_addr != 0) {
-        b.w8(boot_addr + TC_TDNESTCNT, 0xFF);
-        b.w8(boot_addr + TC_IDNESTCNT, 0xFF);
+    b.w8(task + TC_TDNESTCNT, 0xFF);
+    b.w8(task + TC_IDNESTCNT, 0xFF);
+    b.w32(task + TC_SIGRECVD, 0);
+    b.w32(task + TC_SIGALLOC, 0x0000FFFF);
+    if (id >= 0 && id == sched_.current()) {
+        b.w8(base_ + TDNestCnt, 0xFF);
+        b.w8(base_ + IDNestCnt, 0xFF);
+    }
+}
+
+void Exec::reset_nest_counts() {
+    reset_task_state(tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_);
+}
+
+bool Exec::enter_nested_run() {
+    // Two levels stay free, so the innermost program can still make calls
+    // that go into 68000 code, such as opening a library.
+    if (call_depth_ + 2 >= kMaxCallDepth) {
+        LogLine().text("exec: calls into 68000 code nested too deep").send();
+        return false;
+    }
+    ++call_depth_;
+    return true;
+}
+
+void Exec::leave_nested_run() {
+    if (call_depth_ > 0) {
+        --call_depth_;
     }
 }
 

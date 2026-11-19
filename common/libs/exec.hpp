@@ -429,6 +429,10 @@ public:
     // before idling. Reset on init.
     void set_timer_hook(const TimerHook& hook) { timer_hook_ = hook; }
 
+    // Registers the hook called with each task exec removes, so that a timer
+    // can drop the requests that task issued. Reset on init.
+    void set_timer_drop_hook(void (*hook)(void* ctx, u32 task), void* ctx);
+
     // Entry point for newly created host task contexts.
     void task_main(u32 id);
 
@@ -441,13 +445,30 @@ public:
     // when no switch took place.
     bool yield_in_native();
 
-    // Removes and reaps every non-boot task and clears their semaphore wait
-    // queue entries.
+    // Removes and reaps every non-detached task the boot task created, and
+    // their non-detached descendants, and clears their semaphore wait queue
+    // entries.
     void end_child_tasks();
+
+    // Removes and reaps every non-detached task whose parent is the task at
+    // parent, and their non-detached descendants, logging each as ended.
+    void end_tasks_of(u32 parent);
+
+    // Puts the task's nest counts back to -1 (0xFF), clears its received
+    // signals and gives it all signals back. ExecBase gets the nest counts
+    // when the task is the running one.
+    void reset_task_state(u32 task);
 
     // Resets TDNestCnt and IDNestCnt to -1 (0xFF) in ExecBase, the host
     // context, and the boot task's Task structure.
     void reset_nest_counts();
+
+    // Counts one nested call into 68000 code against the same limit as the
+    // translator's own calls. False, logged, when the limit is reached.
+    bool enter_nested_run();
+
+    // Gives back a count enter_nested_run took.
+    void leave_nested_run();
 
     const Scheduler& scheduler() const { return sched_; }
 
@@ -472,7 +493,8 @@ public:
     u32 spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, bool detached);
 
     // Sets the bits of mask in the task's tc_SigRecvd and wakes it when it
-    // waits for them; Ctrl+C also cuts a non-boot task's Delay short.
+    // waits for them; Ctrl+C also cuts a non-boot task's Delay short. An
+    // address that is not a scheduled task is logged and left alone.
     void signal_task(u32 task, u32 mask);
 
     // Called for every task exec removes, before the task's slot is
@@ -497,6 +519,11 @@ public:
     // Replies message to its mn_ReplyPort (or marks it NT_FREEMSG when null).
     bool reply_message(u32 message);
 
+    // Replies a timer's request. A fault on the request or on its reply port
+    // is logged and dropped, and the current task's run state is left alone.
+    // False when the reply was not delivered.
+    bool reply_timer_message(u32 message);
+
     // Expires any due sleeping tasks and invokes the registered timer hook.
     void expire_timers();
 
@@ -514,8 +541,8 @@ public:
     // Sets the bits of mask in the current task's tc_SigRecvd.
     void signal_current_task(u32 mask);
 
-    // Restores the current task's tc_SigAlloc to 0x0000FFFF and tc_SigRecvd
-    // to 0, and clears the tracked raisable-port mask.
+    // Restores the boot task's tc_SigAlloc to 0x0000FFFF, clears its
+    // tc_SigRecvd and nest counts, and clears the tracked raisable-port mask.
     void reset_task_signals();
 
     // Registers a reply port whose replies go to handler instead of being
@@ -543,6 +570,7 @@ private:
         u32 call_depth = 0;
         u32 load_depth = 0;
         u32 task_addr = 0;
+        u32 parent = 0;
         u64 budget = 0;
         u8 td_nest = 0xFF;
         u8 id_nest = 0xFF;
@@ -594,11 +622,14 @@ private:
     IdleHook idle_{nullptr, nullptr};
     TaskHost task_host_{};
     TimerHook timer_hook_{};
+    void (*timer_drop_hook_)(void* ctx, u32 task) = nullptr;
+    void* timer_drop_ctx_ = nullptr;
     Scheduler sched_{};
     TaskContext tasks_[Scheduler::kMaxTasks]{};
     SemWaitQueue sem_queues_[kMaxSemaphores]{};
     bool pending_switch_ = false;
     bool softint_logged_ = false;
+    u32 unknown_signal_addr_ = 0;  // the last logged unknown Signal target
     bool every_task_waits_logged_ = false;
     bool abort_to_boot_task_ = false;
     u32 reply_port_ = 0;
