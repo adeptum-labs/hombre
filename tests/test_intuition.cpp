@@ -201,11 +201,11 @@ void open_screen_builds_struct_bitmap_and_colormap() {
     CHECK(screen != 0);
     CHECK_EQ(r.get16(screen + sc_Width), 640u);
     CHECK_EQ(r.get16(screen + sc_Height), 400u);
-    CHECK_EQ(r.get8(screen + sc_BarHeight), 10u);
-    CHECK_EQ(r.get8(screen + sc_WBorTop), 11u);
-    CHECK_EQ(r.get8(screen + sc_WBorLeft), 1u);
-    CHECK_EQ(r.get8(screen + sc_WBorRight), 1u);
-    CHECK_EQ(r.get8(screen + sc_WBorBottom), 1u);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 14u);
+    CHECK_EQ(r.get8(screen + sc_WBorTop), 15u);
+    CHECK_EQ(r.get8(screen + sc_WBorLeft), 2u);
+    CHECK_EQ(r.get8(screen + sc_WBorRight), 2u);
+    CHECK_EQ(r.get8(screen + sc_WBorBottom), 2u);
     CHECK_EQ(r.get8(screen + sc_DetailPen), 0u);
     CHECK_EQ(r.get8(screen + sc_BlockPen), 1u);
     CHECK_EQ(r.get32(screen + sc_Title), 0u);
@@ -250,13 +250,13 @@ void open_screen_clears_and_draws_title_bar() {
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
-    CHECK_EQ(screen_pixel(r, screen, 5, 5), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 0, 0), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 639, 9), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 0, 10), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 5, 10), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 639, 10), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 5, 11), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 5), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 0, 0), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 639, 13), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 0, 14), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 14), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 639, 14), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 15), 0u);
     CHECK_EQ(screen_pixel(r, screen, 10, 300), 0u);
     CHECK_EQ(screen_pixel(r, screen, 639, 399), 0u);
 }
@@ -295,10 +295,10 @@ void open_screen_taglist_reads_sa_tags() {
     CHECK(r.read_str(title) == "H");
     CHECK_EQ(r.get32(screen + sc_DefaultTitle), title);
 
-    // The title is drawn at pen 1 over the bar, which stays pen 2.
-    CHECK_EQ(screen_pixel(r, screen, 1, 1), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 2, 1), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 3, 1), 2u);
+    // The title is drawn at pen 1 over the bar, which stays pen 0 on 2-plane.
+    CHECK_EQ(screen_pixel(r, screen, 1, 3), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 2, 3), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 3, 3), 0u);
     CHECK(refreshed(r, screen, 0, 0, 319, 199));
 
     // A null NewScreen takes the tags and the defaults.
@@ -613,10 +613,10 @@ void open_window_builds_struct_rastport_and_layer() {
     CHECK_EQ(r.get16(window + wd_Width), 200u);
     CHECK_EQ(r.get16(window + wd_Height), 100u);
     CHECK_EQ(r.get32(window + wd_WScreen), screen);
-    CHECK_EQ(r.get8(window + wd_BorderLeft), 1u);
-    CHECK_EQ(r.get8(window + wd_BorderTop), 11u);
-    CHECK_EQ(r.get8(window + wd_BorderRight), 1u);
-    CHECK_EQ(r.get8(window + wd_BorderBottom), 1u);
+    CHECK_EQ(r.get8(window + wd_BorderLeft), 2u);
+    CHECK_EQ(r.get8(window + wd_BorderTop), 15u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 2u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 2u);
     CHECK_EQ(r.get32(screen + sc_FirstWindow), window);
     CHECK_EQ(r.get32(window + wd_NextWindow), 0u);
 
@@ -660,21 +660,21 @@ void open_window_draws_chrome() {
     CHECK_EQ(screen_pixel(r, screen, 249, 60), 1u);
     CHECK_EQ(screen_pixel(r, screen, 50, 159), 1u);
     CHECK_EQ(screen_pixel(r, screen, 50, 80), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 100, 65), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 100, 70), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 100, 71), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 51, 61), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 54, 64), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 61), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 244, 64), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 61, 61), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 65), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 74), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 75), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 58, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 58, 67), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 67), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 67, 63), 1u);
 
-    // Without the close gadget the bar has no box in that corner.
+    // Without the close gadget the bar has no button in that corner.
     put_new_window(r, kNewWindow, 300, 60, 200, 100, 0, 0, 0, 0);
     const u32 plain = open_win(r, kNewWindow);
     CHECK(plain != 0);
-    CHECK_EQ(screen_pixel(r, screen, 301, 61), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 301, 65), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 308, 62), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 301, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 300, 60), 1u);
 }
 
@@ -842,11 +842,11 @@ void window_text_goes_into_the_window_only() {
     const u8 text[] = {'H', 'H'};
     CHECK_EQ(r.graphics.text(rp, text, 2), 16u);
     const std::vector<u8> after = screen_planes(r, screen);
-    CHECK(changed_only_inside(before, after, 80, 400, 51, 71, 248, 158));
-    CHECK_EQ(screen_pixel(r, screen, 53, 72), 3u);
+    CHECK(changed_only_inside(before, after, 80, 400, 52, 75, 247, 157));
+    CHECK_EQ(screen_pixel(r, screen, 54, 76), 3u);
     CHECK_EQ(screen_pixel(r, screen, 50, 78), 1u);
     CHECK_EQ(screen_pixel(r, screen, 249, 78), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 100, 70), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 74), 1u);
 }
 
 void text_longer_than_window_is_clipped() {
@@ -870,8 +870,8 @@ void text_longer_than_window_is_clipped() {
     CHECK_EQ(r.graphics.text(rp, text, 40), 320u);
     const std::vector<u8> after = screen_planes(r, screen);
     CHECK(changed_only_inside(before, after, 80, 400, 50, 60, 109, 159));
-    CHECK_EQ(r.get16(rp + rp_cp_x), 321u);
-    CHECK_EQ(screen_pixel(r, screen, 110, 72), 0u);
+    CHECK_EQ(r.get16(rp + rp_cp_x), 322u);
+    CHECK_EQ(screen_pixel(r, screen, 110, 76), 0u);
 }
 
 void close_window_repaints_and_unlinks() {
@@ -893,7 +893,8 @@ void close_window_repaints_and_unlinks() {
     CHECK_EQ(screen_pixel(r, screen, 50, 60), 0u);
     CHECK_EQ(screen_pixel(r, screen, 100, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 249, 159), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 5, 5), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 5), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 14), 1u);
     CHECK(refreshed(r, screen, 50, 60, 249, 159));
 }
 
@@ -926,7 +927,7 @@ void set_window_titles_redraws_title() {
     put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET, kWinTitle, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
-    CHECK_EQ(screen_pixel(r, screen, 61, 61), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 67, 63), 0u);
 
     r.str(kWinTitle, "B");
     r.cpu().a[0] = window;
@@ -937,14 +938,14 @@ void set_window_titles_redraws_title() {
     CHECK(title != 0);
     CHECK(title != kWinTitle);
     CHECK(r.read_str(title) == "B");
-    CHECK_EQ(screen_pixel(r, screen, 61, 61), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 67, 63), 1u);
 
     r.cpu().a[0] = window;
     r.cpu().a[1] = 0;
     r.cpu().a[2] = 0xFFFFFFFF;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
     CHECK_EQ(r.get32(window + wd_Title), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 61, 61), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 67, 63), 0u);
 
     r.cpu().a[0] = window;
     r.cpu().a[1] = 0xFFFFFFFF;
@@ -996,8 +997,9 @@ void open_window_reads_32_bit_flags() {
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
     CHECK_EQ(r.get32(window + wd_Flags), flags);
-    CHECK_EQ(screen_pixel(r, screen, 51, 61), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 61), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 58, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 58, 67), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 62), 2u);
 
     put_new_window(r, kNewWindow, 300, 60, 100, 50, WFLG_BORDERLESS, 0, 0, 0);
     const u32 borderless = open_win(r, kNewWindow);
@@ -1010,7 +1012,8 @@ void open_window_reads_32_bit_flags() {
     const u32 tagged = open_win_tags(r, 0, tags);
     CHECK(tagged != 0);
     CHECK_EQ(r.get32(tagged + wd_Flags), flags);
-    CHECK_EQ(screen_pixel(r, screen, 11, 21), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 18, 22), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 11, 21), 3u);
 }
 
 void window_open_is_true_until_closed() {
@@ -1688,20 +1691,28 @@ void hit_rectangles_match_the_drawn_boxes() {
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
 
-    const Rect boxes[2] = {Intuition::close_box_rect(50, 60),
-                           Intuition::depth_box_rect(50, 60, 200)};
-    for (const Rect& box : boxes) {
-        for (i32 y = box.y0; y <= box.y1; ++y) {
-            for (i32 x = box.x0; x <= box.x1; ++x) {
-                const bool border =
-                    x == box.x0 || x == box.x1 || y == box.y0 || y == box.y1;
-                CHECK_EQ(screen_pixel(r, screen, x, y), border ? 1u : 2u);
-            }
-        }
-        CHECK_EQ(screen_pixel(r, screen, box.x0, box.y1 + 1), 2u);
-    }
-    CHECK_EQ(screen_pixel(r, screen, boxes[0].x1 + 1, boxes[0].y0), 2u);
-    CHECK_EQ(screen_pixel(r, screen, boxes[1].x0 - 1, boxes[1].y0), 2u);
+    const Rect close_box = Intuition::close_box_rect(50, 60);
+    const Rect depth_box = Intuition::depth_box_rect(50, 60, 200);
+    const i32 close_cx = (close_box.x0 + close_box.x1) / 2;
+    const i32 close_cy = (close_box.y0 + close_box.y1) / 2;
+    const i32 depth_cx = (depth_box.x0 + depth_box.x1) / 2;
+    const i32 depth_cy = (depth_box.y0 + depth_box.y1) / 2;
+
+    CHECK_EQ(screen_pixel(r, screen, close_cx, close_cy), 0u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y1), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x1, close_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_box.y0), 0u);
+
+    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y0), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y1), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, depth_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_box.y0), 0u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x1 + 1, close_box.y0), 0u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 - 1, depth_box.y0), 0u);
 }
 
 void messages_carry_the_clock_time() {
@@ -2382,7 +2393,7 @@ void rectfill_in_window_shows_on_screen() {
     }
     CHECK_EQ(screen_pixel(r, screen, 104, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 110, 65), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 105, 64), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 105, 64), 1u);
     CHECK_EQ(screen_pixel(r, screen, 105, 70), 0u);
 }
 
@@ -2530,14 +2541,14 @@ void size_gadget_sets_right_border() {
     put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_SIZEGADGET, 0, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
-    CHECK_EQ(r.get8(window + wd_BorderRight), 10u);
-    CHECK_EQ(r.get8(window + wd_BorderBottom), 1u);
-    CHECK_EQ(window_pixel(r, window, 195, 95), 2u);
-    CHECK_EQ(window_pixel(r, window, 191, 91), 1u);
-    CHECK_EQ(window_pixel(r, window, 190, 50), 1u);
-    CHECK_EQ(window_pixel(r, window, 189, 50), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 245, 155), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 151), 1u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
+    CHECK_EQ(window_pixel(r, window, 196, 96), 1u);
+    CHECK_EQ(window_pixel(r, window, 197, 97), 2u);
+    CHECK_EQ(window_pixel(r, window, 188, 50), 1u);
+    CHECK_EQ(window_pixel(r, window, 187, 50), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 246, 156), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 247, 157), 2u);
 }
 
 void size_bbottom_sets_bottom_border() {
@@ -2549,7 +2560,7 @@ void size_bbottom_sets_bottom_border() {
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
     CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
-    CHECK_EQ(r.get8(window + wd_BorderRight), 1u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
     CHECK_EQ(window_pixel(r, window, 100, 90), 1u);
     CHECK_EQ(window_pixel(r, window, 100, 89), 0u);
 }
@@ -2674,8 +2685,8 @@ void drag_moves_window() {
     const u32 layer = r.get32(window + wd_WLayer);
     CHECK_EQ(r.get16(layer + ly_MinX), 250u);
     CHECK_EQ(r.get16(layer + ly_MaxY), 279u);
-    // The title bar (pen 2 inside the frame) is now at y 121..129.
-    CHECK_EQ(screen_pixel(r, screen, 300, 125), 2u);
+    // The active title bar (pen 3 inside the frame) is now at y 121..133.
+    CHECK_EQ(screen_pixel(r, screen, 300, 125), 3u);
     CHECK_EQ(screen_pixel(r, screen, 300, 120), 1u);
     for (i32 y = 100; y < 120; ++y) {
         for (i32 x = 200; x < 250; ++x) {
@@ -2754,8 +2765,9 @@ void resize_grows_and_clears() {
     CHECK_EQ(window_pixel(r, window, 250, 170), 0u);
     CHECK_EQ(window_pixel(r, window, 100, 155), 0u);
     // The size gadget at the new corner, in the window and on screen.
-    CHECK_EQ(window_pixel(r, window, 275, 185), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 475, 285), 2u);
+    CHECK_EQ(window_pixel(r, window, 276, 186), 1u);
+    CHECK_EQ(window_pixel(r, window, 277, 187), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 476, 286), 1u);
     // The old gadget position is interior now.
     CHECK_EQ(screen_pixel(r, screen, 435, 255), 0u);
 }
@@ -2956,11 +2968,12 @@ void open_window_links_and_draws_prop_gadget() {
     CHECK_EQ(window_pixel(r, window, 20, 79), 1u);
     CHECK_EQ(window_pixel(r, window, 35, 79), 1u);
     // Knob at top (inner 21..34 x 21..78, height = 58 * 0x4000 / 0xFFFF = 14 -> y 21..34).
-    CHECK_EQ(window_pixel(r, window, 21, 21), 1u);
-    CHECK_EQ(window_pixel(r, window, 34, 34), 1u);
-    CHECK_EQ(window_pixel(r, window, 22, 22), 2u);
-    CHECK_EQ(window_pixel(r, window, 33, 33), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 72, 72), 2u);
+    CHECK_EQ(window_pixel(r, window, 21, 21), 0u);
+    CHECK_EQ(window_pixel(r, window, 23, 21), 1u);
+    CHECK_EQ(window_pixel(r, window, 22, 22), 1u);
+    CHECK_EQ(window_pixel(r, window, 23, 23), 2u);
+    CHECK_EQ(window_pixel(r, window, 32, 32), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 73, 73), 2u);
     // Container interior below knob is pen 0.
     CHECK_EQ(window_pixel(r, window, 25, 40), 0u);
     CHECK_EQ(window_pixel(r, window, 25, 78), 0u);
@@ -2993,8 +3006,8 @@ void wa_gadgets_tag_links_list() {
     CHECK_EQ(r.get32(window + wd_FirstGadget), kGad1);
     CHECK_EQ(r.get32(kGad1 + gg_NextGadget), kGad2);
     CHECK_EQ(r.get32(kGad2 + gg_NextGadget), 0u);
-    CHECK_EQ(window_pixel(r, window, 12, 17), 2u);
-    CHECK_EQ(window_pixel(r, window, 42, 17), 2u);
+    CHECK_EQ(window_pixel(r, window, 13, 18), 2u);
+    CHECK_EQ(window_pixel(r, window, 43, 18), 2u);
 }
 
 void add_and_remove_glist_positions() {
@@ -3074,7 +3087,7 @@ void relative_geometry_follows_resize() {
     CHECK(open_new(r, kNewScreen) != 0);
 
     put_prop_info(r, kProp1, AUTOKNOB | FREEVERT | PROPBORDERLESS, 0, 0, MAXBODY, MAXBODY / 4);
-    put_gadget(r, kGad1, 0, -8, 11, 8, -21, GFLG_RELRIGHT | GFLG_RELHEIGHT, 0, GTYP_PROPGADGET,
+    put_gadget(r, kGad1, 0, -9, 16, 8, -26, GFLG_RELRIGHT | GFLG_RELHEIGHT, 0, GTYP_PROPGADGET,
                kProp1);
     put_new_window(r, kNewWindow, 40, 40, 200, 100, WFLG_SIZEGADGET, 0, 0, 0);
     r.put16(kNewWindow + nw_MaxWidth, 0xFFFF);
@@ -3084,15 +3097,15 @@ void relative_geometry_follows_resize() {
     r.put32(kNewWindow + nw_FirstGadget, 0);
     CHECK(window != 0);
 
-    // At 200x100: box x = 191..198, y = 11..89; knob at x 192..197, y 12..30.
-    CHECK_EQ(window_pixel(r, window, 195, 20), 2u);
-    CHECK_EQ(window_pixel(r, window, 195, 80), 0u);
+    // At 200x100: box x = 190..197, y = 16..89; knob at x 191..196, y 17..34.
+    CHECK_EQ(window_pixel(r, window, 194, 24), 2u);
+    CHECK_EQ(window_pixel(r, window, 194, 80), 0u);
 
     r.intuition.size_window_to(window, 300, 160);
-    // At 300x160: box x = 291..298, y = 11..149; knob at x 292..297, y 12..45.
-    CHECK_EQ(window_pixel(r, window, 195, 20), 0u);
-    CHECK_EQ(window_pixel(r, window, 295, 20), 2u);
-    CHECK_EQ(window_pixel(r, window, 295, 140), 0u);
+    // At 300x160: box x = 290..297, y = 16..149; knob at x 291..296, y 17..49.
+    CHECK_EQ(window_pixel(r, window, 194, 24), 0u);
+    CHECK_EQ(window_pixel(r, window, 294, 24), 2u);
+    CHECK_EQ(window_pixel(r, window, 294, 140), 0u);
 }
 
 std::vector<u32> g_prop_pots;
@@ -3576,6 +3589,271 @@ void remove_glist_clears_hook() {
     CHECK_EQ(g_prop_pots.size(), 1u);
 }
 
+void border_sizes_with_without_size_gadget_and_borderless() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    put_new_window(r, kNewWindow, 20, 20, 160, 80, 0, 0, 0, 0);
+    const u32 plain = open_win(r, kNewWindow);
+    CHECK(plain != 0);
+    CHECK_EQ(r.get8(plain + wd_BorderLeft), 2u);
+    CHECK_EQ(r.get8(plain + wd_BorderTop), 15u);
+    CHECK_EQ(r.get8(plain + wd_BorderRight), 2u);
+    CHECK_EQ(r.get8(plain + wd_BorderBottom), 2u);
+
+    put_new_window(r, kNewWindow, 200, 20, 160, 80, WFLG_SIZEGADGET, 0, 0, 0);
+    const u32 sizable = open_win(r, kNewWindow);
+    CHECK(sizable != 0);
+    CHECK_EQ(r.get8(sizable + wd_BorderLeft), 2u);
+    CHECK_EQ(r.get8(sizable + wd_BorderTop), 15u);
+    CHECK_EQ(r.get8(sizable + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(sizable + wd_BorderBottom), 10u);
+
+    put_new_window(r, kNewWindow, 380, 20, 160, 80, WFLG_BORDERLESS, 0, 0, 0);
+    const u32 borderless = open_win(r, kNewWindow);
+    CHECK(borderless != 0);
+    CHECK_EQ(r.get8(borderless + wd_BorderLeft), 1u);
+    CHECK_EQ(r.get8(borderless + wd_BorderTop), 1u);
+    CHECK_EQ(r.get8(borderless + wd_BorderRight), 1u);
+    CHECK_EQ(r.get8(borderless + wd_BorderBottom), 1u);
+}
+
+void close_depth_size_hit_at_new_positions() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_new_window(r, kNewWindow, 40, 40, 200, 100,
+                   WFLG_CLOSEGADGET | WFLG_DEPTHGADGET | WFLG_SIZEGADGET, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_CLOSEWINDOW);
+    r.put16(kNewWindow + nw_MaxWidth, 0xFFFF);
+    r.put16(kNewWindow + nw_MaxHeight, 0xFFFF);
+    const u32 w1 = open_win(r, kNewWindow);
+    CHECK(w1 != 0);
+
+    put_new_window(r, kNewWindow, 100, 70, 160, 80, WFLG_DEPTHGADGET, 0, 0, 0);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w2 != 0);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), w2);
+
+    const Rect d2 = Intuition::depth_box_rect(100, 70, 160);
+    const i32 d2_cx = (d2.x0 + d2.x1) / 2;
+    const i32 d2_cy = (d2.y0 + d2.y1) / 2;
+    press(r, d2_cx, d2_cy);
+    release(r, d2_cx, d2_cy);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), w1);
+
+    const Rect c1 = Intuition::close_box_rect(40, 40);
+    const i32 c1_cx = (c1.x0 + c1.x1) / 2;
+    const i32 c1_cy = (c1.y0 + c1.y1) / 2;
+    press(r, c1_cx, c1_cy);
+    release(r, c1_cx, c1_cy);
+    const u32 close_msg = get_msg(r, r.get32(w1 + wd_UserPort));
+    CHECK(close_msg != 0);
+    CHECK_EQ(r.get32(close_msg + im_Class), IDCMP_CLOSEWINDOW);
+    reply_msg(r, close_msg);
+
+    const Rect s1 = Intuition::size_box_rect(40, 40, 200, 100);
+    const i32 s1_cx = (s1.x0 + s1.x1) / 2;
+    const i32 s1_cy = (s1.y0 + s1.y1) / 2;
+    press(r, s1_cx, s1_cy);
+    move_to(r, s1_cx + 20, s1_cy + 15);
+    release(r, s1_cx + 20, s1_cy + 15);
+    CHECK_EQ(r.get16(w1 + wd_Width), 220u);
+    CHECK_EQ(r.get16(w1 + wd_Height), 115u);
+}
+
+void depth8_chrome_pixel_spot_checks() {
+    GfxRig r;
+    r.str(kTitle, "Screen");
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, kTitle);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    u32 prev_sbar = screen_pixel(r, screen, 100, 0);
+    CHECK_EQ(prev_sbar, static_cast<u32>(chrome::kInactiveBar0));
+    for (i32 y = 1; y <= 13; ++y) {
+        const u32 p = screen_pixel(r, screen, 100, y);
+        CHECK(p >= chrome::kInactiveBar0 && p <= chrome::kInactiveBar5);
+        CHECK(p >= prev_sbar);
+        prev_sbar = p;
+    }
+    CHECK_EQ(prev_sbar, static_cast<u32>(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 100, 14), static_cast<u32>(chrome::kFrameDark));
+
+    r.str(kWinTitle, "H");
+    put_new_window(r, kNewWindow, 40, 30, 220, 120,
+                   WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET | WFLG_SIZEGADGET,
+                   kWinTitle, 0, 0);
+    const u32 w1 = open_win(r, kNewWindow);
+    CHECK(w1 != 0);
+
+    CHECK_EQ(screen_pixel(r, screen, 40, 30), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 259, 30), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 40, 149), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 259, 149), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 41, 60), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 258, 60), static_cast<u32>(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 100, 148), static_cast<u32>(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 42, 45), 0u);
+
+    CHECK_EQ(screen_pixel(r, screen, 120, 31), static_cast<u32>(chrome::kFrameLight));
+    u32 prev_bar = screen_pixel(r, screen, 120, 32);
+    CHECK_EQ(prev_bar, static_cast<u32>(chrome::kActiveBar0));
+    for (i32 row = 2; row <= 13; ++row) {
+        const u32 p = screen_pixel(r, screen, 120, 30 + row);
+        CHECK(p >= chrome::kActiveBar0 && p <= chrome::kActiveBar7);
+        CHECK(p >= prev_bar);
+        prev_bar = p;
+    }
+    CHECK_EQ(prev_bar, static_cast<u32>(chrome::kActiveBar7));
+    CHECK_EQ(screen_pixel(r, screen, 120, 44), static_cast<u32>(chrome::kFrameDark));
+
+    CHECK_EQ(screen_pixel(r, screen, 48, 37), static_cast<u32>(chrome::kCloseFill));
+    CHECK_EQ(screen_pixel(r, screen, 48, 32), static_cast<u32>(chrome::kCloseRing));
+    CHECK_EQ(screen_pixel(r, screen, 251, 32), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 251, 37), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 57, 33), static_cast<u32>(chrome::kTitleActive));
+    CHECK_EQ(screen_pixel(r, screen, 256, 146), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 257, 147), static_cast<u32>(chrome::kFrameLight));
+
+    put_new_window(r, kNewWindow, 300, 30, 200, 100,
+                   WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET, kWinTitle, 0, 0);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w2 != 0);
+
+    u32 prev_inact = screen_pixel(r, screen, 120, 32);
+    CHECK_EQ(prev_inact, static_cast<u32>(chrome::kInactiveBar0));
+    for (i32 row = 2; row <= 13; ++row) {
+        const u32 p = screen_pixel(r, screen, 120, 30 + row);
+        CHECK(p >= chrome::kInactiveBar0 && p <= chrome::kInactiveBar5);
+        CHECK(p >= prev_inact);
+        prev_inact = p;
+    }
+    CHECK_EQ(prev_inact, static_cast<u32>(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 48, 37), static_cast<u32>(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 48, 32), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 251, 32), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 57, 33), static_cast<u32>(chrome::kTitleInactive));
+    CHECK_EQ(screen_pixel(r, screen, 400, 32), static_cast<u32>(chrome::kActiveBar0));
+    CHECK_EQ(screen_pixel(r, screen, 400, 43), static_cast<u32>(chrome::kActiveBar7));
+}
+
+void depth8_prop_gadget_chrome_pixels() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_prop_info(r, kProp2, AUTOKNOB | FREEVERT | PROPBORDERLESS, 0, 0, MAXBODY, MAXBODY / 4);
+    put_prop_info(r, kProp3, AUTOKNOB | FREEHORIZ, 0, 0, MAXBODY / 4, MAXBODY);
+    put_gadget(r, kGad1, kGad2, 20, 20, 12, 40, 0, 0, GTYP_PROPGADGET, kProp1);
+    put_gadget(r, kGad2, kGad3, 50, 20, 12, 82, 0, 0, GTYP_PROPGADGET, kProp2);
+    put_gadget(r, kGad3, 0, 80, 20, 82, 12, 0, 0, GTYP_PROPGADGET, kProp3);
+
+    put_new_window(r, kNewWindow, 50, 50, 220, 140, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    // kGad1: knob y=21..29 (height 9, no grip), track y=30..58.
+    CHECK_EQ(window_pixel(r, window, 20, 20), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(window_pixel(r, window, 20, 50), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(window_pixel(r, window, 25, 50), static_cast<u32>(chrome::kTrack));
+    CHECK_EQ(window_pixel(r, window, 21, 21), static_cast<u32>(chrome::kTrack));
+    CHECK_EQ(window_pixel(r, window, 23, 21), static_cast<u32>(chrome::kFrameDark));
+    const u32 k1_centre = window_pixel(r, window, 25, 25);
+    CHECK(k1_centre >= chrome::kKnob0 && k1_centre <= chrome::kKnob2);
+    CHECK_EQ(window_pixel(r, window, 25, 22), static_cast<u32>(chrome::kKnob0));
+    CHECK_EQ(window_pixel(r, window, 25, 28), static_cast<u32>(chrome::kKnob2));
+
+    // Selecting/dragging kGad1 switches knob to kActiveBar2..kActiveBar5.
+    press(r, 75, 75);
+    const u32 k1_drag = window_pixel(r, window, 25, 25);
+    CHECK(k1_drag >= chrome::kActiveBar2 && k1_drag <= chrome::kActiveBar5);
+    release(r, 75, 75);
+    const u32 k1_rel = window_pixel(r, window, 25, 25);
+    CHECK(k1_rel >= chrome::kKnob0 && k1_rel <= chrome::kKnob2);
+
+    // kGad2: PROPBORDERLESS, knob y=21..40 (height 20 >= 12, 3 grip lines at y=28,30,32).
+    CHECK_EQ(window_pixel(r, window, 50, 20), static_cast<u32>(chrome::kTrack));
+    CHECK_EQ(window_pixel(r, window, 55, 28), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(window_pixel(r, window, 55, 30), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(window_pixel(r, window, 55, 32), static_cast<u32>(chrome::kFrameDark));
+    const u32 k2_fill = window_pixel(r, window, 55, 29);
+    CHECK(k2_fill >= chrome::kKnob0 && k2_fill <= chrome::kKnob2);
+
+    // kGad3: FREEHORIZ-only, knob x=81..99, y=21..30 (width 19 >= 12, 3 grip lines at x=88,90,92).
+    CHECK_EQ(window_pixel(r, window, 82, 25), static_cast<u32>(chrome::kKnob0));
+    CHECK_EQ(window_pixel(r, window, 98, 25), static_cast<u32>(chrome::kKnob2));
+    CHECK_EQ(window_pixel(r, window, 88, 25), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(window_pixel(r, window, 90, 25), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(window_pixel(r, window, 92, 25), static_cast<u32>(chrome::kFrameDark));
+}
+
+void depth2_fallback_chrome_pens() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, kGad1, 0, 20, 20, 12, 40, 0, 0, GTYP_PROPGADGET, kProp1);
+    r.str(kWinTitle, "H");
+    put_new_window(r, kNewWindow, 20, 20, 200, 100,
+                   WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET, kWinTitle, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 active = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(active != 0);
+
+    CHECK_EQ(screen_pixel(r, screen, 20, 20), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 25), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 37, 23), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 28, 27), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 28, 22), 1u);
+    CHECK_EQ(window_pixel(r, active, 25, 25), 2u);
+    CHECK_EQ(window_pixel(r, active, 23, 21), 1u);
+    CHECK_EQ(window_pixel(r, active, 25, 50), 0u);
+
+    put_new_window(r, kNewWindow, 260, 20, 160, 80, WFLG_CLOSEGADGET, kWinTitle, 0, 0);
+    const u32 inactive = open_win(r, kNewWindow);
+    CHECK(inactive != 0);
+    CHECK_EQ(screen_pixel(r, screen, 320, 25), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 260, 20), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 277, 23), 1u);
+}
+
+void activation_switch_redraws_both_bars() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    put_new_window(r, kNewWindow, 30, 30, 180, 100, WFLG_ACTIVATE | WFLG_CLOSEGADGET, 0, 0, 0);
+    const u32 w1 = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 250, 30, 180, 100, WFLG_CLOSEGADGET, 0, 0, 0);
+    const u32 w2 = open_win(r, kNewWindow);
+    CHECK(w1 != 0 && w2 != 0);
+    CHECK_EQ(r.intuition.active_window(), w1);
+    CHECK_EQ(screen_pixel(r, screen, 120, 32), static_cast<u32>(chrome::kActiveBar0));
+    CHECK_EQ(screen_pixel(r, screen, 340, 32), static_cast<u32>(chrome::kInactiveBar0));
+
+    r.refreshes.clear();
+    press(r, 300, 80);
+    release(r, 300, 80);
+    CHECK_EQ(r.intuition.active_window(), w2);
+    CHECK_EQ(r.refreshes.size(), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 120, 32), static_cast<u32>(chrome::kInactiveBar0));
+    CHECK_EQ(screen_pixel(r, screen, 120, 43), static_cast<u32>(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 340, 32), static_cast<u32>(chrome::kActiveBar0));
+    CHECK_EQ(screen_pixel(r, screen, 340, 43), static_cast<u32>(chrome::kActiveBar7));
+}
+
 }
 
 int main() {
@@ -3693,5 +3971,11 @@ int main() {
     modify_prop_ignores_non_prop_gadget();
     modify_prop_keeps_knobhit_during_drag();
     remove_glist_clears_hook();
+    border_sizes_with_without_size_gadget_and_borderless();
+    close_depth_size_hit_at_new_positions();
+    depth8_chrome_pixel_spot_checks();
+    depth8_prop_gadget_chrome_pixels();
+    depth2_fallback_chrome_pens();
+    activation_switch_redraws_both_bars();
     return check::finish("test_intuition");
 }

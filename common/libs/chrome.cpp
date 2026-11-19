@@ -1,0 +1,570 @@
+/*
+ * The Hombre Operating System.
+ * Copyright © 2026 Adam Waldenberg and Adeptum AB.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.adeptum.se
+ * Contact: info@adeptum.se
+ */
+
+#include "chrome.hpp"
+
+#include "chrome_palette.hpp"
+#include "graphics.hpp"
+#include "intuition.hpp"
+
+namespace hombre::chrome {
+
+using native::Bus;
+
+namespace {
+
+constexpr u32 kTitleChunk = 64;
+constexpr u32 kMaxTitleChars = 255;
+constexpr i32 kTitleBaseline = 9;
+constexpr i32 kCloseCenterX = 8;
+constexpr i32 kCloseCenterY = 7;
+constexpr i32 kDepthRightOffset = 9;
+constexpr i32 kDepthCenterY = 7;
+constexpr i32 kButtonRadius = 5;
+
+struct RpState {
+    u8 fg = 0;
+    u8 bg = 0;
+    u8 mode = 0;
+    u16 cx = 0;
+    u16 cy = 0;
+};
+
+RpState save_rp(Bus& b, u32 rp) {
+    return RpState{
+        static_cast<u8>(b.r8(rp + ndk::rp_FgPen)),
+        static_cast<u8>(b.r8(rp + ndk::rp_BgPen)),
+        static_cast<u8>(b.r8(rp + ndk::rp_DrawMode)),
+        static_cast<u16>(b.r16(rp + ndk::rp_cp_x)),
+        static_cast<u16>(b.r16(rp + ndk::rp_cp_y)),
+    };
+}
+
+void restore_rp(Bus& b, u32 rp, const RpState& s) {
+    b.w8(rp + ndk::rp_FgPen, s.fg);
+    b.w8(rp + ndk::rp_BgPen, s.bg);
+    b.w8(rp + ndk::rp_DrawMode, s.mode);
+    b.w16(rp + ndk::rp_cp_x, s.cx);
+    b.w16(rp + ndk::rp_cp_y, s.cy);
+}
+
+u32 rastport_depth(Bus& b, u32 rp) {
+    const u32 bitmap = b.r32(rp + ndk::rp_BitMap);
+    if (bitmap == 0 || !b.ok()) {
+        return 0;
+    }
+    const u32 depth = b.r8(bitmap + ndk::bm_Depth);
+    return b.ok() ? depth : 0;
+}
+
+constexpr i32 min_i32(i32 a, i32 b) { return a < b ? a : b; }
+
+constexpr i32 max_i32(i32 a, i32 b) { return a > b ? a : b; }
+
+void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title, i32 x, i32 baseline, i32 x1) {
+    if (title == 0 || x1 < x) {
+        return;
+    }
+    u32 chars = static_cast<u32>((x1 - x + 1) / 8);
+    if (chars > kMaxTitleChars) {
+        chars = kMaxTitleChars;
+    }
+    graphics.move(rp, x, baseline);
+    u8 buffer[kTitleChunk];
+    for (u32 at = 0; at < chars; at += kTitleChunk) {
+        u32 n = chars - at;
+        if (n > kTitleChunk) {
+            n = kTitleChunk;
+        }
+        for (u32 i = 0; i < n; ++i) {
+            buffer[i] = static_cast<u8>(b.r8(title + at + i));
+        }
+        if (!b.ok()) {
+            return;
+        }
+        u32 length = 0;
+        while (length < n && buffer[length] != 0) {
+            ++length;
+        }
+        if (length != 0) {
+            graphics.text(rp, buffer, length);
+        }
+        if (length < n) {
+            return;
+        }
+    }
+}
+
+void draw_outline_box(Graphics& graphics, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1, u8 pen) {
+    graphics.set_pens(rp, pen, 0, ndk::JAM2);
+    graphics.rect_fill(rp, x0, y0, x1, y0);
+    graphics.rect_fill(rp, x0, y1, x1, y1);
+    graphics.rect_fill(rp, x0, y0, x0, y1);
+    graphics.rect_fill(rp, x1, y0, x1, y1);
+}
+
+void draw_frame_box(Graphics& graphics, u32 rp, const Rect& box, u8 fill_pen, u8 border_pen) {
+    graphics.set_pens(rp, fill_pen, 0, ndk::JAM2);
+    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+    draw_outline_box(graphics, rp, box.x0, box.y0, box.x1, box.y1, border_pen);
+}
+
+// Integer midpoint circle rasterisation: optional filled disc plus 1-px ring.
+void draw_circle(Graphics& graphics, u32 rp, i32 cx, i32 cy, i32 radius, u8 fill_pen, u8 ring_pen,
+                 bool filled) {
+    if (filled) {
+        graphics.set_pens(rp, fill_pen, 0, ndk::JAM2);
+        i32 x = radius;
+        i32 y = 0;
+        i32 d = 1 - radius;
+        while (x >= y) {
+            graphics.rect_fill(rp, cx - x, cy + y, cx + x, cy + y);
+            if (y != 0) {
+                graphics.rect_fill(rp, cx - x, cy - y, cx + x, cy - y);
+            }
+            if (x != y) {
+                graphics.rect_fill(rp, cx - y, cy + x, cx + y, cy + x);
+                graphics.rect_fill(rp, cx - y, cy - x, cx + y, cy - x);
+            }
+            ++y;
+            if (d < 0) {
+                d += 2 * y + 1;
+            } else {
+                --x;
+                d += 2 * (y - x) + 1;
+            }
+        }
+    }
+
+    graphics.set_pens(rp, ring_pen, 0, ndk::JAM2);
+    i32 x = radius;
+    i32 y = 0;
+    i32 d = 1 - radius;
+    auto plot = [&](i32 px, i32 py) { graphics.rect_fill(rp, px, py, px, py); };
+    while (x >= y) {
+        plot(cx + x, cy + y);
+        plot(cx - x, cy + y);
+        plot(cx + x, cy - y);
+        plot(cx - x, cy - y);
+        plot(cx + y, cy + x);
+        plot(cx - y, cy + x);
+        plot(cx + y, cy - x);
+        plot(cx - y, cy - x);
+        ++y;
+        if (d < 0) {
+            d += 2 * y + 1;
+        } else {
+            --x;
+            d += 2 * (y - x) + 1;
+        }
+    }
+}
+
+void draw_close_button(Graphics& graphics, u32 rp, bool active, bool high_color) {
+    const u8 fill = high_color ? (active ? kCloseFill : kInactiveBar5) : (active ? 2 : 0);
+    const u8 ring = high_color ? (active ? kCloseRing : kFrameDark) : 1;
+    draw_circle(graphics, rp, kCloseCenterX, kCloseCenterY, kButtonRadius, fill, ring, true);
+}
+
+void draw_depth_button(Graphics& graphics, u32 rp, i32 width, bool active, bool high_color) {
+    const i32 cx = width - kDepthRightOffset;
+    const i32 cy = kDepthCenterY;
+    const u8 pen = high_color ? (active ? kFrameLight : kFrameDark) : (active ? 2 : 1);
+    draw_circle(graphics, rp, cx, cy, kButtonRadius, 0, pen, false);
+    draw_outline_box(graphics, rp, cx - 3, cy - 3, cx, cy, pen);
+    graphics.set_pens(rp, pen, 0, ndk::JAM2);
+    graphics.rect_fill(rp, cx - 1, cy - 1, cx + 2, cy + 2);
+}
+
+void draw_size_gadget(Graphics& graphics, u32 rp, i32 width, i32 height, bool high_color) {
+    if (width < static_cast<i32>(kSizeBorderRight) ||
+        height < static_cast<i32>(kSizeBorderBottom)) {
+        return;
+    }
+    const u8 dark = high_color ? kFrameDark : 1;
+    const u8 light = high_color ? kFrameLight : 2;
+    struct Offset {
+        i32 dx;
+        i32 dy;
+    };
+    static constexpr Offset kDots[6] = {
+        {-8, -4}, {-6, -6}, {-4, -8},
+        {-6, -4}, {-4, -6},
+        {-4, -4},
+    };
+    for (const Offset& o : kDots) {
+        const i32 px = width + o.dx;
+        const i32 py = height + o.dy;
+        graphics.set_pens(rp, dark, 0, ndk::JAM2);
+        graphics.rect_fill(rp, px, py, px, py);
+        graphics.set_pens(rp, light, 0, ndk::JAM2);
+        graphics.rect_fill(rp, px + 1, py + 1, px + 1, py + 1);
+    }
+}
+
+i32 rounded_inset(i32 d, i32 radius) {
+    if (radius >= 2) {
+        if (d == 0) {
+            return 2;
+        }
+        if (d == 1) {
+            return 1;
+        }
+        return 0;
+    }
+    if (radius == 1 && d == 0) {
+        return 1;
+    }
+    return 0;
+}
+
+void draw_rounded_outline(Graphics& graphics, u32 rp, const Rect& box, i32 radius, u8 pen) {
+    graphics.set_pens(rp, pen, 0, ndk::JAM2);
+    for (i32 y = box.y0; y <= box.y1; ++y) {
+        const i32 dy = min_i32(y - box.y0, box.y1 - y);
+        const i32 ins = rounded_inset(dy, radius);
+        const i32 lx = box.x0 + ins;
+        const i32 rx = box.x1 - ins;
+        if (dy == 0) {
+            if (lx <= rx) {
+                graphics.rect_fill(rp, lx, y, rx, y);
+            }
+        } else {
+            const i32 prev_ins = rounded_inset(dy - 1, radius);
+            const i32 inner_lx = box.x0 + prev_ins - 1;
+            const i32 inner_rx = box.x1 - prev_ins + 1;
+            const i32 left_end = max_i32(lx, inner_lx);
+            const i32 right_start = min_i32(rx, inner_rx);
+            graphics.rect_fill(rp, lx, y, left_end, y);
+            graphics.rect_fill(rp, right_start, y, rx, y);
+        }
+    }
+}
+
+void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gflags,
+               bool high_color) {
+    const i32 kw = knob.x1 - knob.x0 + 1;
+    const i32 kh = knob.y1 - knob.y0 + 1;
+    if (kw <= 0 || kh <= 0) {
+        return;
+    }
+    const i32 max_rx = (kw - 1) / 2;
+    const i32 max_ry = (kh - 1) / 2;
+    const i32 radius = min_i32(2, min_i32(max_rx, max_ry));
+
+    const bool horiz_only = (pflags & ndk::FREEHORIZ) != 0 && (pflags & ndk::FREEVERT) == 0;
+    const bool selected = (gflags & ndk::GFLG_SELECTED) != 0;
+
+    if (!high_color) {
+        graphics.set_pens(rp, 2, 0, ndk::JAM2);
+        for (i32 y = knob.y0 + 1; y <= knob.y1 - 1; ++y) {
+            const i32 dy = min_i32(y - knob.y0, knob.y1 - y);
+            const i32 ins = max_i32(1, rounded_inset(dy, radius));
+            if (knob.x0 + ins <= knob.x1 - ins) {
+                graphics.rect_fill(rp, knob.x0 + ins, y, knob.x1 - ins, y);
+            }
+        }
+        draw_rounded_outline(graphics, rp, knob, radius, 1);
+        return;
+    }
+
+    const u8 grad_base = selected ? kActiveBar2 : kKnob0;
+    const i32 grad_steps = selected ? 4 : 3;
+
+    if (horiz_only) {
+        const i32 inner_w = kw - 2;
+        if (inner_w > 0) {
+            for (i32 x = knob.x0 + 1; x <= knob.x1 - 1; ++x) {
+                const i32 dx = min_i32(x - knob.x0, knob.x1 - x);
+                const i32 ins = max_i32(1, rounded_inset(dx, radius));
+                const i32 y0 = knob.y0 + ins;
+                const i32 y1 = knob.y1 - ins;
+                if (y0 <= y1) {
+                    const i32 step = ((x - (knob.x0 + 1)) * grad_steps) / inner_w;
+                    graphics.set_pens(rp, grad_base + static_cast<u8>(step), 0, ndk::JAM2);
+                    graphics.rect_fill(rp, x, y0, x, y1);
+                }
+            }
+        }
+    } else {
+        const i32 inner_h = kh - 2;
+        if (inner_h > 0) {
+            for (i32 y = knob.y0 + 1; y <= knob.y1 - 1; ++y) {
+                const i32 dy = min_i32(y - knob.y0, knob.y1 - y);
+                const i32 ins = max_i32(1, rounded_inset(dy, radius));
+                const i32 x0 = knob.x0 + ins;
+                const i32 x1 = knob.x1 - ins;
+                if (x0 <= x1) {
+                    const i32 step = ((y - (knob.y0 + 1)) * grad_steps) / inner_h;
+                    graphics.set_pens(rp, grad_base + static_cast<u8>(step), 0, ndk::JAM2);
+                    graphics.rect_fill(rp, x0, y, x1, y);
+                }
+            }
+        }
+    }
+
+    draw_rounded_outline(graphics, rp, knob, radius, kFrameDark);
+
+    const i32 cx = (knob.x0 + knob.x1) / 2;
+    const i32 cy = (knob.y0 + knob.y1) / 2;
+    if (!horiz_only && kh >= 12) {
+        i32 gx0 = knob.x0 + 2 <= knob.x1 - 2 ? knob.x0 + 2 : knob.x0 + 1;
+        i32 gx1 = knob.x0 + 2 <= knob.x1 - 2 ? knob.x1 - 2 : knob.x1 - 1;
+        if (gx1 - gx0 + 1 > 5) {
+            gx0 = cx - 2;
+            gx1 = cx + 2;
+        }
+        if (gx0 <= gx1) {
+            graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+            graphics.rect_fill(rp, gx0, cy - 2, gx1, cy - 2);
+            graphics.rect_fill(rp, gx0, cy, gx1, cy);
+            graphics.rect_fill(rp, gx0, cy + 2, gx1, cy + 2);
+        }
+    } else if (horiz_only && kw >= 12) {
+        i32 gy0 = knob.y0 + 2 <= knob.y1 - 2 ? knob.y0 + 2 : knob.y0 + 1;
+        i32 gy1 = knob.y0 + 2 <= knob.y1 - 2 ? knob.y1 - 2 : knob.y1 - 1;
+        if (gy1 - gy0 + 1 > 5) {
+            gy0 = cy - 2;
+            gy1 = cy + 2;
+        }
+        if (gy0 <= gy1) {
+            graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+            graphics.rect_fill(rp, cx - 2, gy0, cx - 2, gy1);
+            graphics.rect_fill(rp, cx, gy0, cx, gy1);
+            graphics.rect_fill(rp, cx + 2, gy0, cx + 2, gy1);
+        }
+    }
+}
+
+void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, bool high_color) {
+    const i32 left = 1;
+    const i32 right = w.width - 2;
+    const i32 line = static_cast<i32>(kBarHeight);
+
+    if (high_color) {
+        graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
+        graphics.rect_fill(rp, left, 1, right, 1);
+
+        const u8 base = w.active ? kActiveBar0 : kInactiveBar0;
+        const i32 steps = w.active ? 8 : 6;
+        const i32 rows = line - 2;
+        for (i32 y = 2; y < line; ++y) {
+            const i32 step = ((y - 2) * steps) / rows;
+            graphics.set_pens(rp, base + static_cast<u8>(step), 0, ndk::JAM2);
+            graphics.rect_fill(rp, left, y, right, y);
+        }
+        graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+        graphics.rect_fill(rp, left, line, right, line);
+    } else {
+        graphics.set_pens(rp, w.active ? 3 : 0, 0, ndk::JAM2);
+        graphics.rect_fill(rp, left, 1, right, line - 1);
+        graphics.set_pens(rp, 1, 0, ndk::JAM2);
+        graphics.rect_fill(rp, left, line, right, line);
+    }
+
+    if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
+        draw_close_button(graphics, rp, w.active, high_color);
+    }
+    if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
+        draw_depth_button(graphics, rp, w.width, w.active, high_color);
+    }
+
+    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0 ? 17 : 4;
+    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0 ? w.width - 17 : w.width - 4;
+    const u8 text_pen = high_color ? (w.active ? kTitleActive : kTitleInactive) : (w.active ? 2 : 1);
+    graphics.set_pens(rp, text_pen, 0, ndk::JAM1);
+    draw_title(graphics, b, rp, w.title, text_x, kTitleBaseline, text_x1);
+}
+
+}
+
+void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
+    if (rp == 0 || width == 0) {
+        return;
+    }
+    const RpState saved = save_rp(b, rp);
+    const bool high_color = rastport_depth(b, rp) >= 8;
+    const i32 right = static_cast<i32>(width) - 1;
+    const i32 line = static_cast<i32>(kBarHeight);
+
+    if (high_color) {
+        for (i32 y = 0; y < line; ++y) {
+            const i32 step = (y * 6) / line;
+            graphics.set_pens(rp, kInactiveBar0 + static_cast<u8>(step), 0, ndk::JAM2);
+            graphics.rect_fill(rp, 0, y, right, y);
+        }
+        graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+        graphics.rect_fill(rp, 0, line, right, line);
+    } else {
+        graphics.set_pens(rp, 0, 0, ndk::JAM2);
+        graphics.rect_fill(rp, 0, 0, right, line - 1);
+        graphics.set_pens(rp, 1, 0, ndk::JAM2);
+        graphics.rect_fill(rp, 0, line, right, line);
+    }
+
+    if (title != 0) {
+        graphics.set_pens(rp, 1, 0, ndk::JAM1);
+        draw_title(graphics, b, rp, title, 1, kTitleBaseline, right);
+    }
+    restore_rp(b, rp, saved);
+}
+
+void draw_window_bar(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) {
+    if (rp == 0 || w.width < 2 || w.height <= static_cast<i32>(kBarHeight)) {
+        return;
+    }
+    const RpState saved = save_rp(b, rp);
+    const bool high_color = rastport_depth(b, rp) >= 8;
+    draw_bar_contents(graphics, b, rp, w, high_color);
+    restore_rp(b, rp, saved);
+}
+
+void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w,
+                        const Rect* keep) {
+    if (rp == 0 || w.width <= 0 || w.height <= 0) {
+        return;
+    }
+    const RpState saved = save_rp(b, rp);
+    const bool high_color = rastport_depth(b, rp) >= 8;
+    const i32 right = w.width - 1;
+    const i32 bottom = w.height - 1;
+
+    graphics.set_pens(rp, 0, 0, ndk::JAM2);
+    if (keep != nullptr && keep->x0 <= keep->x1 && keep->y0 <= keep->y1) {
+        // Only clear areas outside the preserved interior; borders are redrawn below.
+        if (keep->x1 < right) {
+            graphics.rect_fill(rp, keep->x1 + 1, 0, right, bottom);
+        }
+        if (keep->y1 < bottom) {
+            graphics.rect_fill(rp, 0, keep->y1 + 1, right, bottom);
+        }
+    } else {
+        graphics.rect_fill(rp, 0, 0, right, bottom);
+    }
+
+    const u8 frame_pen = high_color ? kFrameDark : 1;
+    draw_outline_box(graphics, rp, 0, 0, right, bottom, frame_pen);
+
+    if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
+        draw_bar_contents(graphics, b, rp, w, high_color);
+
+        const i32 body_top = static_cast<i32>(w.border_top);
+        const i32 body_bottom = bottom - 1;
+        if (body_top <= body_bottom && w.width >= 3) {
+            if (high_color) {
+                graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
+                graphics.rect_fill(rp, 1, body_top, 1, body_bottom);
+
+                graphics.set_pens(rp, kInactiveBar5, 0, ndk::JAM2);
+                if (w.border_left > 2) {
+                    const i32 lx1 = min_i32(static_cast<i32>(w.border_left) - 1, right - 1);
+                    if (2 <= lx1) {
+                        graphics.rect_fill(rp, 2, body_top, lx1, body_bottom);
+                    }
+                }
+                if (w.border_right >= 2) {
+                    const i32 rx0 = max_i32(w.width - static_cast<i32>(w.border_right), 2);
+                    if (rx0 <= right - 1) {
+                        graphics.rect_fill(rp, rx0, body_top, right - 1, body_bottom);
+                    }
+                }
+                if (w.border_bottom >= 2) {
+                    const i32 by0 = max_i32(w.height - static_cast<i32>(w.border_bottom), body_top);
+                    if (by0 <= body_bottom && 2 <= right - 1) {
+                        graphics.rect_fill(rp, 2, by0, right - 1, body_bottom);
+                    }
+                }
+            } else {
+                graphics.set_pens(rp, 0, 0, ndk::JAM2);
+                if (w.border_right >= 2) {
+                    const i32 rx0 = max_i32(w.width - static_cast<i32>(w.border_right), 1);
+                    if (rx0 <= right - 1) {
+                        graphics.rect_fill(rp, rx0, body_top, right - 1, body_bottom);
+                    }
+                }
+                if (w.border_bottom >= 2) {
+                    const i32 by0 = max_i32(w.height - static_cast<i32>(w.border_bottom), body_top);
+                    if (by0 <= body_bottom && 1 <= right - 1) {
+                        graphics.rect_fill(rp, 1, by0, right - 1, body_bottom);
+                    }
+                }
+                graphics.set_pens(rp, 1, 0, ndk::JAM2);
+                if (w.border_right > 2 && w.width >= static_cast<i32>(w.border_right)) {
+                    const i32 x = w.width - static_cast<i32>(w.border_right);
+                    graphics.rect_fill(rp, x, body_top, x, bottom);
+                }
+                if (w.border_bottom > 2 && w.height >= static_cast<i32>(w.border_bottom)) {
+                    const i32 y = w.height - static_cast<i32>(w.border_bottom);
+                    graphics.rect_fill(rp, 0, y, right, y);
+                }
+            }
+        }
+
+        if ((w.flags & ndk::WFLG_SIZEGADGET) != 0) {
+            draw_size_gadget(graphics, rp, w.width, w.height, high_color);
+        }
+    }
+
+    const i32 ix0 = static_cast<i32>(w.border_left);
+    const i32 iy0 = static_cast<i32>(w.border_top);
+    const i32 ix1 = w.width - static_cast<i32>(w.border_right) - 1;
+    const i32 iy1 = w.height - static_cast<i32>(w.border_bottom) - 1;
+    if (keep == nullptr && ix0 <= ix1 && iy0 <= iy1) {
+        graphics.set_pens(rp, 0, 0, ndk::JAM2);
+        graphics.rect_fill(rp, ix0, iy0, ix1, iy1);
+    }
+
+    restore_rp(b, rp, saved);
+}
+
+void draw_prop_gadget(Graphics& graphics, Bus& b, u32 rp, const PropChrome& g) {
+    if (rp == 0 || g.box.x1 < g.box.x0 || g.box.y1 < g.box.y0) {
+        return;
+    }
+    const RpState saved = save_rp(b, rp);
+    const bool high_color = rastport_depth(b, rp) >= 8;
+
+    if (high_color) {
+        graphics.set_pens(rp, kTrack, 0, ndk::JAM2);
+        graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
+        if ((g.pflags & ndk::PROPBORDERLESS) == 0) {
+            graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+            graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y0);
+            graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x0, g.box.y1);
+        }
+    } else {
+        if ((g.pflags & ndk::PROPBORDERLESS) != 0) {
+            graphics.set_pens(rp, 0, 0, ndk::JAM2);
+            graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
+        } else {
+            draw_frame_box(graphics, rp, g.box, 0, 1);
+        }
+    }
+
+    if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1) {
+        draw_knob(graphics, rp, g.knob, g.pflags, g.gflags, high_color);
+    }
+    restore_rp(b, rp, saved);
+}
+
+}

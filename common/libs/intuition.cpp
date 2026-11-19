@@ -24,6 +24,7 @@
 #include "intuition.hpp"
 
 #include "../hid_mouse.hpp"
+#include "chrome.hpp"
 #include "chrome_palette.hpp"
 #include "exec.hpp"
 #include "graphics.hpp"
@@ -44,8 +45,6 @@ constexpr char kIntuitionName[] = "intuition.library";
 // struct Screen's sc_NextScreen, the pointer before sc_FirstWindow.
 constexpr u32 kScNextScreen = 0;
 constexpr u32 kWBENCHSCREEN = 1;
-constexpr u32 kBarHeight = 10;
-constexpr u32 kTitleChunk = 64;
 constexpr u32 kMaxTitleChars = 255;
 
 constexpr u32 kBasePalette[8] = {
@@ -193,41 +192,6 @@ void refresh_full(DisplayState& display, Machine& m, u32 screen, u32 width, u32 
     }
     const Rect full{0, 0, static_cast<i32>(width) - 1, static_cast<i32>(height) - 1};
     display.sink.refresh(display.sink.ctx, m, screen, full);
-}
-
-// Draws the pen 1 title from x with the given baseline, inside x1.
-void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title, i32 x, i32 baseline, i32 x1) {
-    if (title == 0 || x1 < x) {
-        return;
-    }
-    u32 chars = static_cast<u32>((x1 - x + 1) / 8);
-    if (chars > kMaxTitleChars) {
-        chars = kMaxTitleChars;
-    }
-    graphics.move(rp, x, baseline);
-    u8 buffer[kTitleChunk];
-    for (u32 at = 0; at < chars; at += kTitleChunk) {
-        u32 n = chars - at;
-        if (n > kTitleChunk) {
-            n = kTitleChunk;
-        }
-        for (u32 i = 0; i < n; ++i) {
-            buffer[i] = static_cast<u8>(b.r8(title + at + i));
-        }
-        if (!b.ok()) {
-            return;
-        }
-        u32 length = 0;
-        while (length < n && buffer[length] != 0) {
-            ++length;
-        }
-        if (length != 0) {
-            graphics.text(rp, buffer, length);
-        }
-        if (length < n) {
-            return;
-        }
-    }
 }
 
 // The fields of a NewWindow as the WA_ tags can override them.
@@ -422,22 +386,6 @@ Rect unite_rect(Rect a, const Rect& b) {
     return a;
 }
 
-void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
-    if (rp == 0 || width == 0) {
-        return;
-    }
-    const i32 right = static_cast<i32>(width) - 1;
-    graphics.set_pens(rp, 2, 1, ndk::JAM2);
-    graphics.rect_fill(rp, 0, 0, right, static_cast<i32>(kBarHeight) - 1);
-    graphics.set_pens(rp, 1, 1, ndk::JAM2);
-    graphics.rect_fill(rp, 0, static_cast<i32>(kBarHeight), right,
-                       static_cast<i32>(kBarHeight));
-    if (title != 0) {
-        graphics.set_pens(rp, 1, 2, ndk::JAM1);
-        draw_title(graphics, b, rp, title, 1, 7, right);
-    }
-}
-
 // The Window fields a draw or a free needs.
 struct WindowView {
     u32 window = 0;
@@ -598,18 +546,18 @@ PropGeometry load_prop_geometry(Bus& b, const WindowView& w, u32 gadget) {
     return g;
 }
 
-void draw_frame_box(Graphics& graphics, u32 rp, const Rect& box, u32 fill_pen) {
-    graphics.set_pens(rp, fill_pen, 0, ndk::JAM2);
-    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
-    graphics.set_pens(rp, 1, 0, ndk::JAM2);
-    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y0);
-    graphics.rect_fill(rp, box.x0, box.y1, box.x1, box.y1);
-    graphics.rect_fill(rp, box.x0, box.y0, box.x0, box.y1);
-    graphics.rect_fill(rp, box.x1, box.y0, box.x1, box.y1);
-}
-
-void draw_gadget(Graphics& graphics, u32 rp, const Rect& box) {
-    draw_frame_box(graphics, rp, box, 2);
+chrome::WindowChrome to_chrome(const WindowView& w, bool active) {
+    return chrome::WindowChrome{
+        w.width,
+        w.height,
+        w.flags,
+        w.title,
+        w.border_left,
+        w.border_top,
+        w.border_right,
+        w.border_bottom,
+        active,
+    };
 }
 
 void draw_prop_gadget(Graphics& graphics, Bus& b, const WindowView& w, u32 gadget) {
@@ -621,127 +569,11 @@ void draw_prop_gadget(Graphics& graphics, Bus& b, const WindowView& w, u32 gadge
     if (!g.ok) {
         return;
     }
-    const u8 fg = static_cast<u8>(b.r8(rp + ndk::rp_FgPen));
-    const u8 bg = static_cast<u8>(b.r8(rp + ndk::rp_BgPen));
-    const u8 mode = static_cast<u8>(b.r8(rp + ndk::rp_DrawMode));
-    const u16 cx = static_cast<u16>(b.r16(rp + ndk::rp_cp_x));
-    const u16 cy = static_cast<u16>(b.r16(rp + ndk::rp_cp_y));
-    if ((g.pflags & ndk::PROPBORDERLESS) != 0) {
-        graphics.set_pens(rp, 0, 0, ndk::JAM2);
-        graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
-    } else {
-        draw_frame_box(graphics, rp, g.box, 0);
-    }
-    if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1) {
-        draw_frame_box(graphics, rp, g.knob, 2);
-    }
-    b.w8(rp + ndk::rp_FgPen, fg);
-    b.w8(rp + ndk::rp_BgPen, bg);
-    b.w8(rp + ndk::rp_DrawMode, mode);
-    b.w16(rp + ndk::rp_cp_x, cx);
-    b.w16(rp + ndk::rp_cp_y, cy);
-}
-
-// The 10-row title bar of a window with its gadgets, line and title, drawn in
-// window-relative coordinates through the window's RastPort.
-void draw_window_bar(Graphics& graphics, Bus& b, const WindowView& w) {
-    const u32 rp = w.rp;
-    if (rp == 0 || w.width < 2 || w.height <= static_cast<i32>(kBarHeight)) {
+    const u16 gflags = static_cast<u16>(b.r16(gadget + ndk::gg_Flags));
+    if (!b.ok()) {
         return;
     }
-    const u8 fg = static_cast<u8>(b.r8(rp + ndk::rp_FgPen));
-    const u8 bg = static_cast<u8>(b.r8(rp + ndk::rp_BgPen));
-    const u8 mode = static_cast<u8>(b.r8(rp + ndk::rp_DrawMode));
-    const u16 cx = static_cast<u16>(b.r16(rp + ndk::rp_cp_x));
-    const u16 cy = static_cast<u16>(b.r16(rp + ndk::rp_cp_y));
-    const i32 left = 1;
-    const i32 right = w.width - 2;
-    const i32 top = 1;
-    const i32 line = static_cast<i32>(kBarHeight);
-    graphics.set_pens(rp, 2, 1, ndk::JAM2);
-    graphics.rect_fill(rp, left, top, right, line);
-    if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        draw_gadget(graphics, rp, Intuition::close_box_rect(0, 0));
-    }
-    if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
-        draw_gadget(graphics, rp, Intuition::depth_box_rect(0, 0, w.width));
-    }
-    graphics.set_pens(rp, 1, 0, ndk::JAM2);
-    graphics.rect_fill(rp, left, line, right, line);
-    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0 ? 11 : 2;
-    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0 ? right - 8 : right;
-    graphics.set_pens(rp, 1, 2, ndk::JAM1);
-    draw_title(graphics, b, rp, w.title, text_x, 7, text_x1);
-    b.w8(rp + ndk::rp_FgPen, fg);
-    b.w8(rp + ndk::rp_BgPen, bg);
-    b.w8(rp + ndk::rp_DrawMode, mode);
-    b.w16(rp + ndk::rp_cp_x, cx);
-    b.w16(rp + ndk::rp_cp_y, cy);
-}
-
-// Draws the frame of a window in its own bitmap. Without keep the whole
-// window is cleared first; with keep, the interior rectangle keep (window
-// coordinates) keeps its pixels and only what lies right of or below it is
-// cleared.
-void draw_window_chrome(Graphics& graphics, Bus& b, const WindowView& w,
-                        const Rect* keep = nullptr) {
-    const u32 rp = w.rp;
-    if (rp == 0 || w.width <= 0 || w.height <= 0) {
-        return;
-    }
-    const u8 fg = static_cast<u8>(b.r8(rp + ndk::rp_FgPen));
-    const u8 bg = static_cast<u8>(b.r8(rp + ndk::rp_BgPen));
-    const u8 mode = static_cast<u8>(b.r8(rp + ndk::rp_DrawMode));
-    const u16 cx = static_cast<u16>(b.r16(rp + ndk::rp_cp_x));
-    const u16 cy = static_cast<u16>(b.r16(rp + ndk::rp_cp_y));
-    const i32 right = w.width - 1;
-    const i32 bottom = w.height - 1;
-    graphics.set_pens(rp, 0, 0, ndk::JAM2);
-    if (keep != nullptr) {
-        // Clears what lies right of and below the kept interior; the frame
-        // drawn next covers the rest.
-        if (keep->x1 < right) {
-            graphics.rect_fill(rp, keep->x1 + 1, 0, right, bottom);
-        }
-        if (keep->y1 < bottom) {
-            graphics.rect_fill(rp, 0, keep->y1 + 1, right, bottom);
-        }
-    } else {
-        graphics.rect_fill(rp, 0, 0, right, bottom);
-    }
-    graphics.set_pens(rp, 1, 0, ndk::JAM2);
-    graphics.rect_fill(rp, 0, 0, right, 0);
-    graphics.rect_fill(rp, 0, bottom, right, bottom);
-    graphics.rect_fill(rp, 0, 0, 0, bottom);
-    graphics.rect_fill(rp, right, 0, right, bottom);
-    if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
-        draw_window_bar(graphics, b, w);
-        graphics.set_pens(rp, 1, 0, ndk::JAM2);
-        if (w.border_right == 10 && w.width >= 10) {
-            const i32 x = w.width - 10;
-            graphics.rect_fill(rp, x, static_cast<i32>(w.border_top), x, bottom);
-        }
-        if (w.border_bottom == 10 && w.height >= 10) {
-            const i32 y = w.height - 10;
-            graphics.rect_fill(rp, 0, y, right, y);
-        }
-        if ((w.flags & ndk::WFLG_SIZEGADGET) != 0) {
-            draw_gadget(graphics, rp, Intuition::size_box_rect(0, 0, w.width, w.height));
-        }
-    }
-    const i32 ix0 = static_cast<i32>(w.border_left);
-    const i32 iy0 = static_cast<i32>(w.border_top);
-    const i32 ix1 = w.width - static_cast<i32>(w.border_right) - 1;
-    const i32 iy1 = w.height - static_cast<i32>(w.border_bottom) - 1;
-    if (keep == nullptr && ix0 <= ix1 && iy0 <= iy1) {
-        graphics.set_pens(rp, 0, 0, ndk::JAM2);
-        graphics.rect_fill(rp, ix0, iy0, ix1, iy1);
-    }
-    b.w8(rp + ndk::rp_FgPen, fg);
-    b.w8(rp + ndk::rp_BgPen, bg);
-    b.w8(rp + ndk::rp_DrawMode, mode);
-    b.w16(rp + ndk::rp_cp_x, cx);
-    b.w16(rp + ndk::rp_cp_y, cy);
+    chrome::draw_prop_gadget(graphics, b, rp, chrome::PropChrome{g.box, g.knob, g.pflags, gflags});
 }
 
 }
@@ -911,18 +743,18 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
 }
 
 Rect Intuition::close_box_rect(i32 left, i32 top) {
-    return Rect{left + 1, top + 1, left + 8, top + 8};
+    return Rect{left + 3, top + 2, left + 13, top + 12};
 }
 
 Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width) {
-    const i32 right = left + width - 2;
-    return Rect{right - 7, top + 1, right, top + 8};
+    const i32 cx = left + width - 9;
+    return Rect{cx - 5, top + 2, cx + 5, top + 12};
 }
 
 Rect Intuition::size_box_rect(i32 left, i32 top, i32 width, i32 height) {
     const i32 right = left + width - 1;
     const i32 bottom = top + height - 1;
-    return Rect{right - 8, bottom - 8, right - 1, bottom - 1};
+    return Rect{right - 10, bottom - 8, right - 1, bottom - 1};
 }
 
 bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& display) {
@@ -1323,11 +1155,11 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w16(screen + ndk::sc_TopEdge, a.top);
     b.w16(screen + ndk::sc_Width, a.width);
     b.w16(screen + ndk::sc_Height, a.height);
-    b.w8(screen + ndk::sc_BarHeight, kBarHeight);
-    b.w8(screen + ndk::sc_WBorTop, 11);
-    b.w8(screen + ndk::sc_WBorLeft, 1);
-    b.w8(screen + ndk::sc_WBorRight, 1);
-    b.w8(screen + ndk::sc_WBorBottom, 1);
+    b.w8(screen + ndk::sc_BarHeight, chrome::kBarHeight);
+    b.w8(screen + ndk::sc_WBorTop, chrome::kBorderTop);
+    b.w8(screen + ndk::sc_WBorLeft, chrome::kBorderLeft);
+    b.w8(screen + ndk::sc_WBorRight, chrome::kBorderRight);
+    b.w8(screen + ndk::sc_WBorBottom, chrome::kBorderBottom);
     b.w8(screen + ndk::sc_DetailPen, a.detail);
     b.w8(screen + ndk::sc_BlockPen, a.block);
     b.w32(screen + ndk::sc_Title, title);
@@ -1398,7 +1230,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     begin_batch();
     graphics_->set_pens(backdrop_rp, 0, 0, ndk::JAM2);
     graphics_->rect_fill(backdrop_rp, 0, 0, right, bottom);
-    draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title);
+    chrome::draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title);
     compose(screen, Rect{0, 0, right, bottom});
     end_batch();
     return screen;
@@ -1674,18 +1506,46 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     return true;
 }
 
+void Intuition::redraw_window_bar(u32 window) {
+    if (window == 0 || machine_ == nullptr || graphics_ == nullptr ||
+        find_window(window) >= kMaxWindows) {
+        return;
+    }
+    const WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    WindowView w = load_window(b, window);
+    if (!w.ok || (w.flags & ndk::WFLG_BORDERLESS) != 0) {
+        return;
+    }
+    w.rp = rec->rp;
+    chrome::draw_window_bar(*graphics_, b, rec->rp, to_chrome(w, active_window_ == window));
+    const i32 bar_bottom = static_cast<i32>(chrome::kBarHeight);
+    const i32 y1 = rec->height - 1 < bar_bottom ? rec->height - 1 : bar_bottom;
+    if (rec->width > 0 && y1 >= 0) {
+        compose(rec->screen,
+                Rect{rec->left, rec->top, rec->left + rec->width - 1, rec->top + y1});
+    }
+}
+
 void Intuition::activate_window(u32 window) {
     if (window == active_window_) {
         return;
     }
     const u32 prev = active_window_;
     active_window_ = window;
+    begin_batch();
     if (prev != 0) {
         post_intuimessage(prev, ndk::IDCMP_INACTIVEWINDOW, 0);
+        redraw_window_bar(prev);
     }
     if (window != 0) {
         post_intuimessage(window, ndk::IDCMP_ACTIVEWINDOW, 0);
+        redraw_window_bar(window);
     }
+    end_batch();
 }
 
 u32 Intuition::window_at(i32 x, i32 y) const {
@@ -1793,14 +1653,16 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     const i32 height =
         a.height == 0 || a.height > room_y ? static_cast<i32>(room_y) : static_cast<i32>(a.height);
     const bool borderless = (a.flags & ndk::WFLG_BORDERLESS) != 0;
-    const u32 border_top = borderless ? 1 : 11;
-    const bool size_right = !borderless &&
-                            ((a.flags & ndk::WFLG_SIZEBRIGHT) != 0 ||
-                             ((a.flags & ndk::WFLG_SIZEGADGET) != 0 &&
-                              (a.flags & ndk::WFLG_SIZEBBOTTOM) == 0));
-    const bool size_bottom = !borderless && (a.flags & ndk::WFLG_SIZEBBOTTOM) != 0;
-    const u32 border_right = size_right ? 10 : 1;
-    const u32 border_bottom = size_bottom ? 10 : 1;
+    const u32 border_left = borderless ? 1 : chrome::kBorderLeft;
+    const u32 border_top = borderless ? 1 : chrome::kBorderTop;
+    const bool size_right =
+        !borderless && ((a.flags & (ndk::WFLG_SIZEGADGET | ndk::WFLG_SIZEBRIGHT)) != 0);
+    const bool size_bottom =
+        !borderless && ((a.flags & (ndk::WFLG_SIZEGADGET | ndk::WFLG_SIZEBBOTTOM)) != 0);
+    const u32 border_right =
+        borderless ? 1 : (size_right ? chrome::kSizeBorderRight : chrome::kBorderRight);
+    const u32 border_bottom =
+        borderless ? 1 : (size_bottom ? chrome::kSizeBorderBottom : chrome::kBorderBottom);
 
     const i32 floor_w = 40;
     const i32 floor_h = static_cast<i32>(border_top) + 10;
@@ -1953,7 +1815,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w32(window + ndk::wd_Title, title);
     b.w32(window + ndk::wd_WScreen, screen);
     b.w32(window + ndk::wd_RPort, rp);
-    b.w8(window + ndk::wd_BorderLeft, 1);
+    b.w8(window + ndk::wd_BorderLeft, border_left);
     b.w8(window + ndk::wd_BorderTop, border_top);
     b.w8(window + ndk::wd_BorderRight, border_right);
     b.w8(window + ndk::wd_BorderBottom, border_bottom);
@@ -2026,17 +1888,23 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     }
 
     begin_batch();
+    if ((a.flags & ndk::WFLG_ACTIVATE) != 0) {
+        const u32 prev = active_window_;
+        active_window_ = window;
+        if (prev != 0) {
+            post_intuimessage(prev, ndk::IDCMP_INACTIVEWINDOW, 0);
+            redraw_window_bar(prev);
+        }
+        post_intuimessage(window, ndk::IDCMP_ACTIVEWINDOW, 0);
+    }
     WindowView w = load_window(b, window);
     w.rp = rp;
-    draw_window_chrome(*graphics_, b, w);
+    chrome::draw_window_chrome(*graphics_, b, rp, to_chrome(w, active_window_ == window));
     if (a.gadgets != 0) {
         draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
     }
     compose(screen, Rect{left, top, right, bottom});
     end_batch();
-    if ((a.flags & ndk::WFLG_ACTIVATE) != 0) {
-        activate_window(window);
-    }
     return window;
 }
 
@@ -2227,7 +2095,7 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
             b.w32(rec->screen + ndk::sc_Title, copy);
             b.w32(rec->screen + ndk::sc_DefaultTitle, copy);
             begin_batch();
-            draw_screen_bar(*graphics_, b, srec->backdrop_rp, srec->width, srec->title);
+            chrome::draw_screen_bar(*graphics_, b, srec->backdrop_rp, srec->width, srec->title);
             end_batch();
         }
     }
@@ -2236,7 +2104,8 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
         w.rp = rec->rp;
         if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
             begin_batch();
-            draw_window_bar(*graphics_, b, w);
+            chrome::draw_window_bar(*graphics_, b, rec->rp,
+                                    to_chrome(w, active_window_ == window));
             end_batch();
         }
     }
@@ -2537,7 +2406,7 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     w.width = width;
     w.height = height;
     w.rp = rec->rp;
-    draw_window_chrome(*graphics_, b, w, &keep);
+    chrome::draw_window_chrome(*graphics_, b, rec->rp, to_chrome(w, active_window_ == window), &keep);
     if (w.first_gadget != 0) {
         draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
     }
@@ -2588,7 +2457,7 @@ bool Intuition::start_drag(u32 window, i32 x, i32 y) {
         grab_x_ = right - x;
         grab_y_ = bottom - y;
     } else if ((flags & ndk::WFLG_DRAGBAR) != 0 && x >= rec->left && x <= right &&
-               y >= rec->top && y <= rec->top + static_cast<i32>(kBarHeight)) {
+               y >= rec->top && y <= rec->top + static_cast<i32>(chrome::kBarHeight)) {
         drag_ = Drag::Move;
         grab_x_ = x - rec->left;
         grab_y_ = y - rec->top;
@@ -3085,6 +2954,9 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
             drag_gadget_ = gadget;
             grab_x_ = wx - g.knob.x0;
             grab_y_ = wy - g.knob.y0;
+            WindowView draw_w = w;
+            draw_w.rp = rec->rp;
+            draw_prop_gadget(*graphics_, b, draw_w, gadget);
             if ((activation & ndk::GACT_IMMEDIATE) != 0) {
                 post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
             }
@@ -3206,6 +3078,14 @@ void Intuition::end_prop_drag() {
         const u32 pflags = b.r16(pi + ndk::pi_Flags);
         if (b.ok()) {
             b.w16(pi + ndk::pi_Flags, pflags & ~ndk::KNOBHIT);
+        }
+        const WindowRecord* rec = find_window_record(window);
+        if (rec != nullptr) {
+            WindowView w = load_window(b, window);
+            if (w.ok) {
+                w.rp = rec->rp;
+                draw_prop_gadget(*graphics_, b, w, gadget);
+            }
         }
     }
     if ((gflags & ndk::GFLG_DISABLED) == 0 && (activation & ndk::GACT_RELVERIFY) != 0) {

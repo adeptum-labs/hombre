@@ -87,7 +87,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     b.w16(nw + ndk::nw_IDCMPFlags, 0);
     b.w32(nw + ndk::nw_Flags,
            ndk::WFLG_SIZEGADGET | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
-               ndk::WFLG_DRAGBAR);
+               ndk::WFLG_DRAGBAR | ndk::WFLG_ACTIVATE);
     b.w32(nw + ndk::nw_Title, title);
     b.w32(nw + ndk::nw_Screen, display.front_screen);
     b.w16(nw + ndk::nw_MinWidth, kMinWidth);
@@ -140,11 +140,11 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     b.w16(prop + ndk::pi_Flags, kPropFlags);
     b.w16(prop + ndk::pi_HorizBody, ndk::MAXBODY);
     b.w16(prop + ndk::pi_VertBody, ndk::MAXBODY);
-    b.w16(gadget + ndk::gg_LeftEdge, static_cast<u16>(static_cast<i16>(-kScrollWidth)));
-    b.w16(gadget + ndk::gg_TopEdge, static_cast<u16>(border_top));
+    b.w16(gadget + ndk::gg_LeftEdge, static_cast<u16>(static_cast<i16>(-(kScrollWidth + 1))));
+    b.w16(gadget + ndk::gg_TopEdge, static_cast<u16>(border_top + 1));
     b.w16(gadget + ndk::gg_Width, static_cast<u16>(kScrollWidth));
-    // From below the title bar to above the size gadget's 10 rows.
-    b.w16(gadget + ndk::gg_Height, static_cast<u16>(static_cast<i16>(-(border_top + 10))));
+    // Inside the right border with 1-px margins below the bar and above the size gadget.
+    b.w16(gadget + ndk::gg_Height, static_cast<u16>(static_cast<i16>(-(border_top + 11))));
     b.w16(gadget + ndk::gg_Flags, kGadgetFlags);
     b.w16(gadget + ndk::gg_Activation, kGadgetActivation);
     b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_PROPGADGET);

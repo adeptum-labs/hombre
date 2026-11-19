@@ -196,9 +196,10 @@ void open_gives_a_window_on_the_front_screen() {
     CHECK_EQ(flags, static_cast<u32>(WFLG_DEPTHGADGET | WFLG_CLOSEGADGET | WFLG_DRAGBAR));
     CHECK(r.read_str(r.get32(window + wd_Title)) == "HombreShell");
     CHECK_EQ(r.get32(layer_of(r, window) + ly_Window), window);
-    CHECK_EQ(inner_x(r, window), 1);
-    // Below the screen title bar (10 rows and its line), as a real shell window.
-    CHECK_EQ(inner_y(r, window), 22);
+    CHECK_EQ(inner_x(r, window), 2);
+    // Below the screen title bar (14 rows and its line) and the window's 15-px top border.
+    CHECK_EQ(inner_y(r, window), 30);    // The shell takes the keyboard, so its window opens active.
+    CHECK_EQ(r.intuition.active_window(), window);
 }
 
 void open_without_a_screen_returns_false() {
@@ -680,7 +681,8 @@ void shell_has_size_gadget() {
     CHECK(open_shell(r, shell));
     const u32 window = shell_window(r, screen);
     CHECK(window != 0);
-    CHECK_EQ(r.get8(window + wd_BorderRight), 10u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
     CHECK_EQ(r.get16(window + wd_MinWidth), 160u);
     CHECK((r.get32(window + wd_Flags) & WFLG_SIZEGADGET) != 0);
 }
@@ -707,7 +709,7 @@ void shell_rewraps_on_resize() {
     const i32 ix = inner_x(r, window);
     const i32 iy = inner_y(r, window);
     const raster::Bitmap bm = screen_bitmap(r, screen);
-    const u32 c = (400 - 1 - 10) / 8;
+    const u32 c = (400 - 2 - 12) / 8;
     CHECK_EQ(columns(r, window), c);
     CHECK(!cell_all(r, bm, ix, iy, 0, 1, 0));
     CHECK(cell_is(r, bm, ix, iy, 0, 1, static_cast<char>(line[c])));
@@ -827,19 +829,32 @@ void shell_has_scroll_gadget() {
 
     const u32 gad = r.get32(window + wd_FirstGadget);
     CHECK(gad != 0);
-    CHECK_EQ(static_cast<i16>(r.get16(gad + gg_LeftEdge)), static_cast<i16>(-8));
-    CHECK_EQ(r.get16(gad + gg_TopEdge), static_cast<u32>(r.get8(window + wd_BorderTop)));
+    CHECK_EQ(static_cast<i16>(r.get16(gad + gg_LeftEdge)), static_cast<i16>(-9));
+    CHECK_EQ(r.get16(gad + gg_TopEdge),
+             static_cast<u32>(r.get8(window + wd_BorderTop)) + 1u);
     CHECK_EQ(r.get16(gad + gg_Width), 8u);
-    // The bar ends above the size gadget, which takes the last 10 rows.
-    const i32 expected_h = -(static_cast<i32>(r.get8(window + wd_BorderTop)) + 10);
+    const i32 expected_h = -(static_cast<i32>(r.get8(window + wd_BorderTop)) + 11);
     CHECK_EQ(static_cast<i16>(r.get16(gad + gg_Height)), static_cast<i16>(expected_h));
-    // The size gadget keeps its look: pen 2 inside, on screen.
+
     const raster::Bitmap bm = screen_bitmap(r, screen);
     const i32 wl = static_cast<i16>(r.get16(window + wd_LeftEdge));
     const i32 wt = static_cast<i16>(r.get16(window + wd_TopEdge));
     const i32 ww = r.get16(window + wd_Width);
     const i32 wh = r.get16(window + wd_Height);
-    CHECK_EQ(pixel(r, bm, wl + ww - 5, wt + wh - 5), 2u);
+    const i32 border_right = static_cast<i32>(r.get8(window + wd_BorderRight));
+    const i32 box_x0 = ww - 1 + static_cast<i16>(r.get16(gad + gg_LeftEdge));
+    const i32 box_y0 = static_cast<i16>(r.get16(gad + gg_TopEdge));
+    const i32 box_x1 = box_x0 + static_cast<i16>(r.get16(gad + gg_Width)) - 1;
+    const i32 box_y1 = box_y0 + (wh + static_cast<i16>(r.get16(gad + gg_Height))) - 1;
+    const Rect size_box = Intuition::size_box_rect(0, 0, ww, wh);
+    CHECK(box_x0 >= ww - border_right);
+    CHECK(box_x1 <= ww - 2);
+    CHECK(box_y0 > 14);
+    CHECK(box_y1 < size_box.y0);
+
+    // The size gadget shows its engraved diagonal grip on screen.
+    CHECK_EQ(pixel(r, bm, wl + ww - 4, wt + wh - 4), 1u);
+    CHECK_EQ(pixel(r, bm, wl + ww - 3, wt + wh - 3), 2u);
     CHECK_EQ(r.get16(gad + gg_Flags), GFLG_RELRIGHT | GFLG_RELHEIGHT);
     CHECK_EQ(r.get16(gad + gg_Activation),
              GACT_RIGHTBORDER | GACT_IMMEDIATE | GACT_FOLLOWMOUSE | GACT_RELVERIFY);
@@ -956,7 +971,7 @@ void knob_drag_scrolls() {
     const i32 win_h = static_cast<i16>(r.get16(window + wd_Height));
     const i32 knob_x = win_left + win_w - 5;
     const i32 knob_bottom_y = win_top + win_h - 15;
-    const i32 track_top_y = win_top + 15;
+    const i32 track_top_y = win_top + 18;
 
     press(r, knob_x, knob_bottom_y);
     move_to(r, knob_x, (knob_bottom_y + track_top_y) / 2);
