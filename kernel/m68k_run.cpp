@@ -29,6 +29,9 @@
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
 #include "../common/libs/graphics.hpp"
+#include "../common/libs/gadtools.hpp"
+#include "../common/libs/icon.hpp"
+#include "../common/libs/layers.hpp"
 #include "../common/libs/intuition.hpp"
 #include "../common/libs/native.hpp"
 #include "../common/libs/timer_device.hpp"
@@ -89,6 +92,9 @@ constinit Utility utility{};
 constinit Dos dos{};
 constinit Graphics graphics{};
 constinit Intuition intuition{};
+constinit GadTools gadtools{};
+constinit Layers layers{};
+constinit Icon icon{};
 constinit DisplayState display{};
 constinit AmigaDisplay amiga_display{};
 constinit PointerState pointer{};
@@ -187,7 +193,8 @@ void open_amiga_screen(const BootInfo& info) {
         return;
     }
     if (!graphics.init(machine, exec, display) ||
-        !intuition.init(machine, exec, graphics, display)) {
+        !intuition.init(machine, exec, graphics, display) ||
+        !gadtools.init(machine, exec, graphics)) {
         fail("graphics init failed");
         return;
     }
@@ -707,6 +714,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
     }
     if (!utility.init(machine, exec)) {
         fail("utility init failed");
+        return false;
+    }
+    if (!layers.init(machine, exec) || !icon.init(machine, exec)) {
+        fail("layers or icon init failed");
         return false;
     }
     if (!dos.init(machine, exec, volume, &console_write, &consoles[0])) {

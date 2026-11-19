@@ -293,6 +293,9 @@ check-workbench: image
 	bash tools/log_order.sh build/serial.log "m68k: C:break returned 0" \
 	    "dos: CLI 3 ended"
 	tools/boot_check.sh --disk "$$DISK" \
+	    --keys "r u n spc u t i l i t i e s shift-7 c l o c k ret e c h o spc h i ret" \
+	    "[CLI 2]" "intuition: window Clock opened" "shell: builtin echo returned 0"
+	tools/boot_check.sh --disk "$$DISK" \
 	    --keys "m a k e d i r spc r a m shift-dot x ret c o p y spc s shift-dot s t a r t u p slash s e q u e n c e spc r a m shift-dot x ret t y p e spc r a m shift-dot x shift-7 s t a r t u p slash s e q u e n c e ret r e n a m e spc r a m shift-dot x spc r a m shift-dot y ret p r o t e c t spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc s spc a d d ret f i l e n o t e spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc h e l l o ret l i s t spc r a m shift-dot y ret d e l e t e spc r a m shift-dot y spc a l l ret d i r spc r a m shift-dot ret s e t e n v spc f o o spc b a r ret g e t e n v spc f o o ret t y p e spc e n v shift-dot f o o ret i n f o ret w a i t spc 1 ret" \
 	    "m68k: C:makedir returned 0" "m68k: C:copy returned 0" \
 	    "; Startup-Sequence for low-density floppies" "m68k: C:rename returned 0" \

@@ -61,7 +61,11 @@ Targets:
   refuses it. Commands are searched in `C:` and the
   `Path` directories. On a Workbench 3.1 disk the read-only commands work:
   `Dir`, `List`, `Type`, `Info`, `Assign`, `Date` (from the PC's real-time
-  clock), `Which`, `Avail`, `Status` and `Version`. The boot disk stays
+  clock), `Which`, `Avail`, `Status` and `Version`, and
+  `Utilities/Clock` opens its analogue clock window on the Workbench
+  screen, drawn by native gadtools, layers and icon libraries and the
+  graphics area fills (its menus are built but not drawn yet). The boot
+  disk stays
   read-only, but `RAM:` (the volume "Ram Disk") can be written: `Copy`,
   `MakeDir`, `Rename`, `Delete`, `Protect`, `Filenote` and `SetDate` work
   there. Its contents live in memory and are lost when the machine
@@ -101,8 +105,9 @@ Targets:
   startup sequence, and that the disk's own `C:Version` runs and returns 0.
   Two more boots type commands at the shell: the read-only commands and
   builtins, then a session that makes, copies, renames, protects, lists
-  and deletes files on `RAM:` and sets an environment variable.
-  `DISK=` is required and the markers fit the 3.1 Workbench disk only.
+  and deletes files on `RAM:` and sets an environment variable, and
+  further boots open a second shell and start `Utilities/Clock` in the
+  background. `DISK=` is required and the markers fit the 3.1 Workbench disk only.
 - `make test` builds and runs the host unit tests under the address and
   undefined behaviour sanitizers. It builds the test disk as well, so it
   needs `binutils-m68k-linux-gnu` too.
