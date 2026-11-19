@@ -195,6 +195,16 @@ public:
     // EraseRect on a RastPort without a backfill hook.
     void erase_image(u32 rp, u32 image, i32 left, i32 top);
 
+    // ReportMouse: whether the window gets IDCMP_MOUSEMOVE as the pointer
+    // moves.
+    void report_mouse(u32 window, bool on);
+
+    // An Image drawn above every window of the screen with its top-left
+    // corner at x, y, as the Workbench shows an icon being dragged. A new
+    // call moves it; clear_drag_image takes it away.
+    void set_drag_image(u32 screen, u32 image, i32 x, i32 y);
+    void clear_drag_image();
+
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
     void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
@@ -415,6 +425,9 @@ private:
     void call_gadget_hook(u32 gadget, u32 vert_pot);
     void report_image_damage(const raster::RastPortView& view, const Rect& rect);
     void draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool complement);
+    void draw_image_view(native::Bus& b, const raster::RastPortView& view, u32 image, i32 left,
+                         i32 top, bool complement, bool damage);
+    Rect icon_drag_rect(native::Bus& b) const;
     void clear_gadget_hook(u32 gadget);
     void clear_window_gadget_hooks(u32 window);
     void log_unhandled_gadget_type(u32 gtype);
@@ -444,6 +457,15 @@ private:
     u32 drag_window_ = 0;
     u32 drag_gadget_ = 0;
     MenuMode menu_;
+    // The image an application drags over its screen, drawn above every
+    // window: the screen, the Image and its top-left corner.
+    struct IconDrag {
+        u32 screen = 0;
+        u32 image = 0;
+        i32 x = 0;
+        i32 y = 0;
+    };
+    IconDrag icon_drag_;
     i32 grab_x_ = 0;
     i32 grab_y_ = 0;
     i32 mouse_x_ = 0;

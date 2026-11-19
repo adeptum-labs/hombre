@@ -1730,6 +1730,61 @@ void move_goes_to_the_active_window_only_with_reportmouse() {
     reply_msg(r, msg);
 }
 
+void report_mouse_turns_move_reports_on_and_off() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 60, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEMOVE);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    r.intuition.report_mouse(window, true);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, WFLG_REPORTMOUSE);
+    r.intuition.pointer_event(70, 80, 0, 0, 0, true);
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_MOUSEMOVE);
+    reply_msg(r, msg);
+
+    r.intuition.report_mouse(window, false);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, 0u);
+    r.intuition.pointer_event(72, 82, 0, 0, 0, true);
+    CHECK_EQ(get_msg(r, port), 0u);
+}
+
+void a_drag_image_is_drawn_above_the_windows_until_cleared() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 inside = screen_pixel(r, screen, 80, 100);
+    const u32 own = window_pixel(r, window, 71 - 50, 92 - 60);
+    const u32 outside = screen_pixel(r, screen, 300, 300);
+    const u32 solid = put_image(r, kData + 0x1080, 1, 2, 6, 4, 0, 0, 0, 3);
+
+    // Over the window, its corner at x, y plus the image's own offsets.
+    r.intuition.set_drag_image(screen, solid, 70, 90);
+    CHECK_EQ(screen_pixel(r, screen, 71, 92), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 76, 95), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 77, 95), inside);
+    CHECK_EQ(screen_pixel(r, screen, 70, 92), inside);
+    // The window's own bitmap is not drawn into.
+    CHECK_EQ(window_pixel(r, window, 71 - 50, 92 - 60), own);
+
+    // Moving it puts back what was under the old place.
+    r.intuition.set_drag_image(screen, solid, 299, 298);
+    CHECK_EQ(screen_pixel(r, screen, 71, 92), inside);
+    CHECK_EQ(screen_pixel(r, screen, 300, 300), 3u);
+
+    r.intuition.clear_drag_image();
+    CHECK_EQ(screen_pixel(r, screen, 300, 300), outside);
+}
+
 void close_gadget_posts_closewindow_on_release_over_the_box() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -5799,6 +5854,8 @@ int main() {
     mouse_button_ignored_without_idcmp_flag();
     left_press_activates_the_window_and_posts_active_and_inactive();
     move_goes_to_the_active_window_only_with_reportmouse();
+    report_mouse_turns_move_reports_on_and_off();
+    a_drag_image_is_drawn_above_the_windows_until_cleared();
     close_gadget_posts_closewindow_on_release_over_the_box();
     close_gadget_release_elsewhere_does_nothing();
     close_gadget_without_idcmp_does_nothing();

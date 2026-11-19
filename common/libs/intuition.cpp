@@ -1268,6 +1268,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     drag_ = Drag::None;
     drag_window_ = 0;
     drag_gadget_ = 0;
+    icon_drag_ = IconDrag{};
     menu_.active = false;
     menu_.screen = 0;
     menu_.window = 0;
@@ -1490,6 +1491,13 @@ void Intuition::compose(u32 screen, Rect r) {
                 }
             }
         }
+    }
+    if (b.ok() && icon_drag_.image != 0 && icon_drag_.screen == screen) {
+        raster::RastPortView view{};
+        view.bitmap = dst;
+        view.clip = raster::Clip{r.x0, r.y0, r.x1, r.y1};
+        view.ok = true;
+        draw_image_view(b, view, icon_drag_.image, icon_drag_.x, icon_drag_.y, false, false);
     }
     if (b.ok() && menu_.active && menu_.screen == screen) {
         draw_menu_overlay(b, dst, r);
@@ -4167,6 +4175,62 @@ void Intuition::draw_image_complemented(u32 rp, u32 image, i32 left, i32 top) {
     draw_image_mode(rp, image, left, top, true);
 }
 
+void Intuition::report_mouse(u32 window, bool on) {
+    if (machine_ == nullptr || find_window(window) >= kMaxWindows) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 flags = b.r32(window + ndk::wd_Flags);
+    b.w32(window + ndk::wd_Flags,
+          on ? flags | ndk::WFLG_REPORTMOUSE : flags & ~ndk::WFLG_REPORTMOUSE);
+}
+
+// The box of the dragged image on its screen; empty when nothing is
+// dragged.
+Rect Intuition::icon_drag_rect(Bus& b) const {
+    if (icon_drag_.image == 0) {
+        return Rect{0, 0, -1, -1};
+    }
+    const u32 image = icon_drag_.image;
+    const i32 left = icon_drag_.x + static_cast<i16>(b.r16(image + image::LeftEdge));
+    const i32 top = icon_drag_.y + static_cast<i16>(b.r16(image + image::TopEdge));
+    const i32 width = static_cast<i16>(b.r16(image + image::Width));
+    const i32 height = static_cast<i16>(b.r16(image + image::Height));
+    if (!b.ok() || width <= 0 || height <= 0) {
+        return Rect{0, 0, -1, -1};
+    }
+    return Rect{left, top, left + width - 1, top + height - 1};
+}
+
+void Intuition::set_drag_image(u32 screen, u32 image, i32 x, i32 y) {
+    if (machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 old_screen = icon_drag_.screen;
+    const Rect old_rect = icon_drag_rect(b);
+    icon_drag_ = IconDrag{screen, image, x, y};
+    const Rect new_rect = icon_drag_rect(b);
+    if (old_screen != 0 && old_screen != screen) {
+        compose(old_screen, old_rect);
+        compose(screen, new_rect);
+    } else {
+        compose(screen, unite_rect(old_rect, new_rect));
+    }
+}
+
+void Intuition::clear_drag_image() {
+    if (machine_ == nullptr || icon_drag_.image == 0) {
+        icon_drag_ = IconDrag{};
+        return;
+    }
+    Bus b(*machine_);
+    const u32 screen = icon_drag_.screen;
+    const Rect rect = icon_drag_rect(b);
+    icon_drag_ = IconDrag{};
+    compose(screen, rect);
+}
+
 void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool complement) {
     if (machine_ == nullptr || rp == 0 || image == 0) {
         return;
@@ -4176,6 +4240,11 @@ void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool compl
     if (!view.ok) {
         return;
     }
+    draw_image_view(b, view, image, left, top, complement, true);
+}
+
+void Intuition::draw_image_view(Bus& b, const raster::RastPortView& view, u32 image, i32 left,
+                                i32 top, bool complement, bool damage) {
     const i64 origin_x = static_cast<i64>(left) + view.origin_x;
     const i64 origin_y = static_cast<i64>(top) + view.origin_y;
     u32 current = image;
@@ -4203,7 +4272,7 @@ void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool compl
                 const Rect filled =
                     raster::fill_rect(b, view.bitmap, view.clip, area,
                                       complement ? ~plane_on_off & pen_mask : plane_on_off);
-                if (b.ok()) {
+                if (b.ok() && damage) {
                     report_image_damage(view, filled);
                 }
             } else {
@@ -4260,7 +4329,7 @@ void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool compl
                                                 static_cast<i32>(y), pen);
                         }
                     }
-                    if (b.ok()) {
+                    if (b.ok() && damage) {
                         report_image_damage(view, area);
                     }
                 }
