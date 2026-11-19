@@ -35,15 +35,17 @@
 // serves and builds a DiskObject in guest memory with the AmigaOS layout:
 // the gadget, DrawerData, both Images and their plane data, the strings and
 // the tool type array all live in one exec block, which FreeDiskObject
-// returns. GetDiskObjectNew falls back to GetDefDiskObject, whose built-in
-// shapes cover the standard types. PutDiskObject writes the same format to
-// RAM:, and DeleteDiskObject removes an icon. FindToolType, MatchToolValue
-// and BumpRevision work on names and tool types as their autodocs describe.
+// returns. A null name gives a DiskObject with no parts to fill in.
+// GetDiskObjectNew falls back to GetDefDiskObject whenever the icon does not
+// load; its built-in shapes cover the standard types. PutDiskObject writes
+// the same format to RAM:, and DeleteDiskObject removes an icon.
+// FindToolType, MatchToolValue and BumpRevision work on names and tool types
+// as their autodocs describe.
 //
-// A missing or malformed icon leaves D0 0 with IoErr ERROR_OBJECT_NOT_FOUND
-// or ERROR_OBJECT_WRONG_TYPE. The obsolete GetIcon vector logs
-// "icon: unimplemented LVO -42" and ends the run; the obsolete free-list
-// calls accept their arguments and free nothing.
+// A missing or malformed icon leaves GetDiskObject's D0 0 with IoErr
+// ERROR_OBJECT_NOT_FOUND or ERROR_OBJECT_WRONG_TYPE. The obsolete GetIcon
+// vector logs "icon: unimplemented LVO -42" and ends the run; the obsolete
+// free-list calls accept their arguments and free nothing.
 
 namespace hombre {
 
@@ -83,7 +85,6 @@ public:
     bool init(m68k::Machine& m, Exec& exec, Dos& dos);
 
     static constexpr u32 kMaxInfoBytes = 64 * 1024;
-    static constexpr u32 kMaxToolTypes = 64;
 
     u32 base() const { return base_; }
 
@@ -117,9 +118,6 @@ private:
     Exec* exec_ = nullptr;
     Dos* dos_ = nullptr;
     u32 base_ = 0;
-    // What the last GetDiskObject failed with, for GetDiskObjectNew's
-    // fallback, whichever process is running.
-    u32 last_error_ = 0;
     Block blocks_[kMaxObjects]{};
     // The raw bytes of the .info file a call is working on.
     u8 file_[kMaxInfoBytes]{};

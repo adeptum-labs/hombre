@@ -40,6 +40,11 @@ constexpr char kIdString[] = "icon 60.0 (Hombre)\r\n";
 constexpr u16 kMagic = 0xE310;
 constexpr u16 kVersion = 1;
 constexpr u16 kGflgGadghImage = 2;
+constexpr u16 kGflgGadgImage = 4;
+// The low byte of the gadget's UserData is the icon's revision; revision 1
+// icons carry dd_Flags and dd_ViewModes after every other part.
+constexpr u32 kDiskRevision = 1;
+constexpr u32 kDiskRevisionMask = 255;
 constexpr u32 kNoIconPosition = 0x80000000;
 constexpr u32 kDefaultStack = 4096;
 
@@ -49,6 +54,7 @@ constexpr u8 kWBDrawer = 2;
 constexpr u8 kWBTool = 3;
 constexpr u8 kWBProject = 4;
 constexpr u8 kWBGarbage = 5;
+constexpr u8 kWBKick = 7;
 
 // struct DiskObject (workbench/workbench.h).
 namespace disk_object {
@@ -99,8 +105,12 @@ constexpr u32 nw_bit_map = 34;
 constexpr u32 kMaxNameChars = 255;
 constexpr u32 kNameBytes = kMaxNameChars + 6;  // ".info" and the NUL
 constexpr u32 kMaxInfoBytes = Icon::kMaxInfoBytes;
-constexpr u32 kMaxToolTypes = Icon::kMaxToolTypes;
-constexpr u32 kMaxToolTypeEntries = 256;
+// A tool type takes five bytes of an .info file at least, so no array a
+// file can hold is longer than this.
+constexpr u32 kMaxToolTypeEntries = kMaxInfoBytes / 5;
+// The longest tool type name and value FindToolType and MatchToolValue take.
+constexpr u32 kMaxToolNameChars = 255;
+constexpr u32 kMaxToolValueChars = 1023;
 constexpr u32 kBumpMax = 30;
 constexpr u32 kArtBytes = 512;
 
@@ -126,6 +136,10 @@ bool same_ci(const char* a, const char* b, u32 length) {
         }
     }
     return true;
+}
+
+u32 read_be32(const u8* at) {
+    return (u32{at[0]} << 24) | (u32{at[1]} << 16) | (u32{at[2]} << 8) | at[3];
 }
 
 void write_be16(u8* at, u32 value) {
@@ -185,8 +199,11 @@ struct IconFile {
     u32 default_tool_bytes = 0;
     bool has_tool_types = false;
     u32 tool_type_count = 0;
-    const char* tool_type[kMaxToolTypes]{};
-    u32 tool_type_bytes[kMaxToolTypes]{};
+    // The first tool type as the file holds it, a LONG length and the
+    // bytes; the others follow it. tool_type_bytes counts the bytes of
+    // every string.
+    const u8* tool_types = nullptr;
+    u32 tool_type_bytes = 0;
     bool has_tool_window = false;
     const char* tool_window = nullptr;
     u32 tool_window_bytes = 0;
@@ -362,17 +379,20 @@ bool parse_info(const u8* data, u32 size, IconFile& out) {
         if (r.bad || table < 4 || (table % 4) != 0) {
             return false;
         }
+        // Every string takes file bytes, so the file's size bounds the
+        // walk whatever count the table claims.
         const u32 count = table / 4 - 1;
-        if (count > kMaxToolTypes) {
-            return false;
-        }
         out.has_tool_types = true;
-        out.tool_type_count = count;
+        out.tool_types = r.data + r.pos;
         for (u32 i = 0; i < count; ++i) {
-            if (!parse_string(r, out.tool_type[i], out.tool_type_bytes[i])) {
+            const char* text = nullptr;
+            u32 bytes = 0;
+            if (!parse_string(r, text, bytes)) {
                 return false;
             }
+            out.tool_type_bytes += bytes;
         }
+        out.tool_type_count = count;
     }
     if (tool_window != 0) {
         if (!parse_string(r, out.tool_window, out.tool_window_bytes)) {
@@ -381,7 +401,7 @@ bool parse_info(const u8* data, u32 size, IconFile& out) {
         out.has_tool_window = true;
     }
     // The OS 2 disk revision follows every other part.
-    if (out.has_drawer && out.user_data == 1) {
+    if (out.has_drawer && (out.user_data & kDiskRevisionMask) == kDiskRevision) {
         out.drawer_flags = r.u32v();
         out.drawer_view_modes = r.u16v();
     }
@@ -461,6 +481,8 @@ const Art* default_art(u32 type) {
         return &kProject;
     case kWBGarbage:
         return &kGarbage;
+    case kWBKick:
+        return &kDisk;
     default:
         return nullptr;
     }
@@ -497,7 +519,7 @@ struct Layout {
     u32 render_data = 0;
     u32 select_data = 0;
     u32 default_tool = 0;
-    u32 tool_type[kMaxToolTypes]{};
+    u32 tool_strings = 0;
     u32 tool_types = 0;
     u32 tool_window = 0;
 };
@@ -529,13 +551,11 @@ bool layout_info(const IconFile& info, Layout& out) {
         at += info.default_tool_bytes;
     }
     if (info.has_tool_types) {
-        for (u32 i = 0; i < info.tool_type_count; ++i) {
-            out.tool_type[i] = static_cast<u32>(at);
-            at += info.tool_type_bytes[i];
-        }
+        out.tool_strings = static_cast<u32>(at);
+        at += info.tool_type_bytes;
         at = (at + 3) & ~static_cast<u64>(3);
         out.tool_types = static_cast<u32>(at);
-        at += (info.tool_type_count + 1) * 4;
+        at += (static_cast<u64>(info.tool_type_count) + 1) * 4;
     }
     if (info.has_tool_window) {
         out.tool_window = static_cast<u32>(at);
@@ -667,22 +687,22 @@ bool write_guest_image(Writer& w, Bus& b, u32 at) {
     return true;
 }
 
+// False when the array holds more entries than a file has room for, or a
+// string does not fit.
 bool write_guest_tool_types(Writer& w, Bus& b, u32 array) {
-    u32 entries[kMaxToolTypeEntries]{};
     u32 count = 0;
-    for (; count < kMaxToolTypeEntries; ++count) {
+    for (;; ++count) {
         const u32 entry = b.r32(array + count * 4);
-        if (!b.ok()) {
+        if (!b.ok() || count > kMaxToolTypeEntries) {
             return false;
         }
         if (entry == 0) {
             break;
         }
-        entries[count] = entry;
     }
     w.u32v((count + 1) * 4);
     for (u32 i = 0; i < count; ++i) {
-        if (!write_guest_string(w, b, entries[i])) {
+        if (!write_guest_string(w, b, b.r32(array + i * 4))) {
             return false;
         }
     }
@@ -807,7 +827,6 @@ bool Icon::init(Machine& m, Exec& exec, Dos& dos) {
     exec_ = &exec;
     dos_ = &dos;
     base_ = 0;
-    last_error_ = 0;
     for (Block& block : blocks_) {
         block = Block{};
     }
@@ -876,13 +895,11 @@ u32 Icon::build_object(const icon_detail::IconFile& info) {
     Layout layout;
     if (!layout_info(info, layout)) {
         set_io_error(ndk::ERROR_NO_FREE_STORE);
-        last_error_ = ndk::ERROR_NO_FREE_STORE;
         return 0;
     }
     const u32 base = exec_->alloc(layout.total, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (base == 0) {
         set_io_error(ndk::ERROR_NO_FREE_STORE);
-        last_error_ = ndk::ERROR_NO_FREE_STORE;
         return 0;
     }
     Bus b(*machine_);
@@ -943,10 +960,14 @@ u32 Icon::build_object(const icon_detail::IconFile& info) {
         copy_string(b, base + layout.default_tool, info.default_tool, info.default_tool_bytes);
     }
     if (info.has_tool_types) {
+        const u8* from = info.tool_types;
+        u32 to = base + layout.tool_strings;
         for (u32 i = 0; i < info.tool_type_count; ++i) {
-            b.w32(base + layout.tool_types + i * 4, base + layout.tool_type[i]);
-            copy_string(b, base + layout.tool_type[i], info.tool_type[i],
-                        info.tool_type_bytes[i]);
+            const u32 bytes = read_be32(from);
+            copy_string(b, to, reinterpret_cast<const char*>(from + 4), bytes);
+            b.w32(base + layout.tool_types + i * 4, to);
+            from += 4 + bytes;
+            to += bytes;
         }
         b.w32(base + layout.tool_types + info.tool_type_count * 4, 0);
     }
@@ -960,38 +981,36 @@ u32 Icon::build_object(const icon_detail::IconFile& info) {
     if (!record(base, layout.total)) {
         exec_->free(base, layout.total);
         set_io_error(ndk::ERROR_NO_FREE_STORE);
-        last_error_ = ndk::ERROR_NO_FREE_STORE;
         return 0;
     }
     return base;
 }
 
 u32 Icon::get_disk_object(Bus& b, u32 name) {
-    last_error_ = 0;
+    if (name == 0) {
+        // No name asks for a DiskObject to fill in: one with no parts.
+        return build_object(icon_detail::IconFile{});
+    }
     char text[kMaxNameChars + 1];
-    if (name == 0 || !b.string(name, text, sizeof text)) {
+    if (!b.string(name, text, sizeof text)) {
         if (b.ok()) {
             set_io_error(ndk::ERROR_INVALID_COMPONENT_NAME);
-            last_error_ = ndk::ERROR_INVALID_COMPONENT_NAME;
         }
         return 0;
     }
     char path[kNameBytes];
     if (!info_path(text, path)) {
         set_io_error(ndk::ERROR_INVALID_COMPONENT_NAME);
-        last_error_ = ndk::ERROR_INVALID_COMPONENT_NAME;
         return 0;
     }
     u32 got = 0;
     u32 error = 0;
     if (!dos_->read_file(path, file_, sizeof file_, got, error)) {
-        last_error_ = error;
         return 0;
     }
     icon_detail::IconFile info;
     if (!parse_info(file_, got, info)) {
         set_io_error(ndk::ERROR_OBJECT_WRONG_TYPE);
-        last_error_ = ndk::ERROR_OBJECT_WRONG_TYPE;
         return 0;
     }
     return build_object(info);
@@ -999,17 +1018,14 @@ u32 Icon::get_disk_object(Bus& b, u32 name) {
 
 u32 Icon::get_disk_object_new(Bus& b, u32 name) {
     const u32 object = get_disk_object(b, name);
-    if (object != 0) {
+    if (object != 0 || name == 0 || !b.ok()) {
         return object;
     }
-    if (last_error_ != ndk::ERROR_OBJECT_NOT_FOUND) {
-        return 0;
-    }
+    // Whatever kept the icon from loading, the object gets the default
+    // icon of its type. A name too long to look up keeps the IoErr
+    // GetDiskObject left.
     char text[kMaxNameChars + 1];
-    if (name == 0 || !b.string(name, text, sizeof text)) {
-        if (b.ok()) {
-            set_io_error(ndk::ERROR_INVALID_COMPONENT_NAME);
-        }
+    if (!b.string(name, text, sizeof text)) {
         return 0;
     }
     const Dos::Target target = dos_->examine(text);
@@ -1033,10 +1049,11 @@ u32 Icon::get_default_disk_object(u32 type) {
     info.top = 0;
     info.width = static_cast<i32>(art->width);
     info.height = static_cast<i32>(art->height);
-    info.flags = 0;
+    // An icon's gadget renders an Image and highlights by complement.
+    info.flags = kGflgGadgImage;
     info.activation = ndk::GACT_RELVERIFY;
     info.gadget_type = 1;  // GTYP_BOOLGADGET
-    info.user_data = 0;
+    info.user_data = kDiskRevision;
     info.type = static_cast<u8>(type);
     info.current_x = static_cast<i32>(kNoIconPosition);
     info.current_y = static_cast<i32>(kNoIconPosition);
@@ -1141,7 +1158,7 @@ u32 Icon::put_disk_object(Bus& b, u32 name, u32 disk_object) {
             set_io_error(ndk::ERROR_OBJECT_TOO_LARGE);
             return 0;
         }
-        if (drawer != 0 && user_data == 1) {
+        if (drawer != 0 && (user_data & kDiskRevisionMask) == kDiskRevision) {
             w.u32v(b.r32(drawer + drawer::Flags));
             w.u16v(b.r16(drawer + drawer::ViewModes));
         }
@@ -1178,42 +1195,39 @@ u32 Icon::find_tool_type(Bus& b, u32 array, u32 name) {
     if (array == 0 || name == 0) {
         return 0;
     }
-    char wanted[kMaxToolTypeEntries + 1]{};
+    char wanted[kMaxToolNameChars + 1]{};
     if (!b.string(name, wanted, sizeof wanted)) {
         return 0;
     }
-    for (u32 i = 0; i < kMaxToolTypeEntries; ++i) {
+    for (u32 i = 0; i <= kMaxToolTypeEntries; ++i) {
         const u32 entry = b.r32(array + i * 4);
         if (!b.ok() || entry == 0) {
             return 0;
         }
+        // The entry's name is what stands before its '=' or its end, and
+        // only as much of the entry is read as the wanted name is long.
         u32 length = 0;
-        while (length < kMaxToolTypeEntries) {
+        bool match = true;
+        for (; match && wanted[length] != '\0'; ++length) {
             const u32 c = b.r8(entry + length);
             if (!b.ok()) {
                 return 0;
             }
-            if (c == 0 || c == '=') {
-                break;
-            }
-            ++length;
+            match = c != '=' &&
+                    lower_ascii(static_cast<char>(c)) == lower_ascii(wanted[length]);
         }
-        if (length >= kMaxToolTypeEntries) {
-            return 0;
+        if (!match) {
+            continue;
         }
         const u32 terminator = b.r8(entry + length);
-        bool match = wanted[length] == '\0';
-        for (u32 k = 0; match && k < length; ++k) {
-            const u32 c = b.r8(entry + k);
-            if (!b.ok()) {
-                return 0;
-            }
-            if (lower_ascii(static_cast<char>(c)) != lower_ascii(wanted[k])) {
-                match = false;
-            }
+        if (!b.ok()) {
+            return 0;
         }
-        if (match) {
-            return terminator == '=' ? entry + length + 1 : entry + length;
+        if (terminator == '=') {
+            return entry + length + 1;
+        }
+        if (terminator == 0) {
+            return entry + length;
         }
     }
     return 0;
@@ -1223,14 +1237,14 @@ u32 Icon::match_tool_value(Bus& b, u32 types, u32 value) {
     if (types == 0 || value == 0) {
         return 0;
     }
-    char alternatives[kMaxToolTypeEntries * 4]{};
-    char wanted[kMaxToolTypeEntries * 4]{};
+    char alternatives[kMaxToolValueChars + 1]{};
+    char wanted[kMaxToolValueChars + 1]{};
     if (!b.string(types, alternatives, sizeof alternatives) ||
         !b.string(value, wanted, sizeof wanted)) {
         return 0;
     }
     const char* at = alternatives;
-    for (u32 i = 0; i < kMaxToolTypeEntries; ++i) {
+    for (;;) {
         const char* end = at;
         while (*end != '\0' && *end != '|') {
             ++end;
@@ -1248,7 +1262,6 @@ u32 Icon::match_tool_value(Bus& b, u32 types, u32 value) {
         }
         at = end + 1;
     }
-    return 0;
 }
 
 u32 Icon::bump_revision(Bus& b, u32 new_name, u32 old_name) {
@@ -1262,12 +1275,16 @@ u32 Icon::bump_revision(Bus& b, u32 new_name, u32 old_name) {
         }
         old_text[kMaxNameChars] = '\0';
     }
+    // "copy_of_X" is copy 1 of X and "copy_N_of_X" copy N; any other name,
+    // "copy X" included, is an original.
     const char* base = old_text;
+    bool is_copy = false;
     u64 number = 0;
-    if (starts_with_ci(old_text, "copy ")) {
+    if (starts_with_ci(old_text, "copy_")) {
         const char* rest = old_text + 5;
-        if (starts_with_ci(rest, "of ")) {
+        if (starts_with_ci(rest, "of_")) {
             base = rest + 3;
+            is_copy = true;
             number = 1;
         } else {
             u64 digits = 0;
@@ -1276,8 +1293,9 @@ u32 Icon::bump_revision(Bus& b, u32 new_name, u32 old_name) {
                 digits = digits * 10 + static_cast<u32>(rest[count] - '0');
                 ++count;
             }
-            if (count > 0 && starts_with_ci(rest + count, " of ")) {
+            if (count > 0 && starts_with_ci(rest + count, "_of_")) {
                 base = rest + count + 4;
+                is_copy = true;
                 number = digits;
             }
         }
@@ -1289,15 +1307,15 @@ u32 Icon::bump_revision(Bus& b, u32 new_name, u32 old_name) {
             result[pos++] = *text++;
         }
     };
-    if (number == 0) {
-        put("copy of ");
+    if (!is_copy) {
+        put("copy_of_");
     } else {
-        put("copy ");
+        put("copy_");
         char digits[24];
         if (format_u64(digits, sizeof digits, number + 1, 10) != 0) {
             put(digits);
         }
-        put(" of ");
+        put("_of_");
     }
     put(base);
     result[pos] = '\0';
