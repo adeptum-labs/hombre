@@ -154,9 +154,10 @@ bool next_token(const char*& p, char* out, u32 cap) {
 }
 
 bool is_builtin_word(const char* word) {
-    constexpr const char* kNames[] = {"CD",     "ECHO",   "PATH",   "WHY",   "PROMPT",
-                                      "ASK",    "FAILAT", "SET",    "GET",   "UNSET",
-                                      "SETENV", "GETENV", "UNSETENV", "RUN"};
+    constexpr const char* kNames[] = {"CD",       "ECHO",   "PATH",   "WHY",   "PROMPT",
+                                      "ASK",      "FAILAT", "SET",    "GET",   "UNSET",
+                                      "SETENV",   "GETENV", "UNSETENV", "RUN", "NEWSHELL",
+                                      "ENDCLI"};
     for (const char* name : kNames) {
         if (eq_nocase(word, name)) {
             return true;
@@ -206,6 +207,14 @@ bool ShellCommands::run(const char* word, const char* args) {
     const char* a = args != nullptr ? args : "";
     if (eq_nocase(word, "RUN")) {
         cmd_run(a);
+        return true;
+    }
+    if (eq_nocase(word, "NEWSHELL")) {
+        cmd_newshell();
+        return true;
+    }
+    if (eq_nocase(word, "ENDCLI")) {
+        cmd_endcli();
         return true;
     }
     if (eq_nocase(word, "CD")) {
@@ -268,7 +277,7 @@ void ShellCommands::cmd_cd(const char* args) {
     char dir[Dos::kMaxPath];
     if (!next_token(p, dir, sizeof dir)) {
         char cur[Dos::kMaxPath];
-        if (!dos_->current_dir_name(cur, sizeof cur)) {
+        if (!dos_->current_dir_name(cur, sizeof cur, process_)) {
             cur[0] = '\0';
         }
         emit_line(cur);
@@ -276,7 +285,7 @@ void ShellCommands::cmd_cd(const char* args) {
         return;
     }
     u32 err = 0;
-    if (dos_->change_dir(dir, err)) {
+    if (dos_->change_dir(dir, err, process_)) {
         dos_->set_return_code(0);
         return;
     }
@@ -427,11 +436,11 @@ void ShellCommands::cmd_path(const char* args) {
 }
 
 void ShellCommands::cmd_why() {
-    const u32 rc = dos_->last_return_code();
+    const u32 rc = dos_->last_return_code(process_);
     if (rc == 0) {
         emit_line("The last command did not set a return code");
     } else {
-        const u32 err = dos_->last_error();
+        const u32 err = dos_->last_error(process_);
         if (err == 0) {
             emit_line("The last command did not set a reason for failure");
         } else {
@@ -461,7 +470,7 @@ void ShellCommands::cmd_prompt(const char* args) {
         --end;
     }
     if (end == 0) {
-        dos_->set_prompt(kDefaultPrompt);
+        dos_->set_prompt(kDefaultPrompt, process_);
         dos_->set_return_code(0);
         return;
     }
@@ -475,7 +484,7 @@ void ShellCommands::cmd_prompt(const char* args) {
         }
         buf[copy] = '\0';
     }
-    dos_->set_prompt(buf);
+    dos_->set_prompt(buf, process_);
     dos_->set_return_code(0);
 }
 
@@ -515,7 +524,7 @@ void ShellCommands::cmd_failat(const char* args) {
     char tok[64];
     if (!next_token(p, tok, sizeof tok)) {
         char digits[16];
-        format_u64(digits, sizeof digits, dos_->fail_level(), 10);
+        format_u64(digits, sizeof digits, dos_->fail_level(process_), 10);
         char msg[64];
         u32 pos = append_str(msg, sizeof msg, 0, "Fail limit: ");
         pos = append_str(msg, sizeof msg, pos, digits);
@@ -561,7 +570,7 @@ void ShellCommands::cmd_run(const char* args) {
         return;
     }
     char cmd[Dos::kMaxPath];
-    if (!dos_->find_command(word, cmd, sizeof cmd)) {
+    if (!dos_->find_command(word, cmd, sizeof cmd, process_)) {
         unknown(word);
         return;
     }
@@ -581,6 +590,25 @@ void ShellCommands::cmd_run(const char* args) {
     pos = append_str(msg, sizeof msg, pos, "]\n");
     msg[pos] = '\0';
     emit(msg);
+    dos_->set_return_code(0);
+}
+
+void ShellCommands::cmd_newshell() {
+    if (new_shell_ != nullptr && new_shell_(new_shell_ctx_)) {
+        dos_->set_return_code(0);
+        return;
+    }
+    emit_line("NewShell: cannot open a new shell");
+    dos_->set_return_code(20);
+}
+
+void ShellCommands::cmd_endcli() {
+    if (process_ == 0 || process_ == dos_->process()) {
+        emit_line("EndCLI: the boot shell cannot end");
+        dos_->set_return_code(10);
+        return;
+    }
+    ended_ = true;
     dos_->set_return_code(0);
 }
 
@@ -608,7 +636,7 @@ void ShellCommands::cmd_set_var(const char* args, bool global) {
                     line[pos] = '\0';
                     self->emit(line);
                 },
-                this);
+                this, process_);
             dos_->set_return_code(0);
         }
         return;
@@ -630,7 +658,7 @@ void ShellCommands::cmd_set_var(const char* args, bool global) {
         dos_->set_return_code(0);
         return;
     }
-    dos_->set_last_error(dos_->last_error());
+    dos_->set_last_error(dos_->last_error(process_));
     dos_->set_return_code(20);
 }
 
@@ -645,7 +673,7 @@ void ShellCommands::cmd_get_var(const char* args, bool global) {
     char value[kLineBuf];
     const u32 flags = ndk::LV_VAR | (global ? ndk::GVF_GLOBAL_ONLY : ndk::GVF_LOCAL_ONLY);
     if (dos_->get_var(name, value, sizeof value, flags) < 0) {
-        dos_->set_last_error(dos_->last_error());
+        dos_->set_last_error(dos_->last_error(process_));
         dos_->set_return_code(5);
         return;
     }
@@ -664,7 +692,7 @@ void ShellCommands::cmd_unset_var(const char* args, bool global) {
     }
     const u32 flags = ndk::LV_VAR | (global ? ndk::GVF_GLOBAL_ONLY : ndk::GVF_LOCAL_ONLY);
     if (!dos_->delete_var(name, flags)) {
-        const u32 err = dos_->last_error();
+        const u32 err = dos_->last_error(process_);
         if (err != ndk::ERROR_OBJECT_NOT_FOUND) {
             dos_->set_last_error(err);
             dos_->set_return_code(20);
@@ -674,16 +702,16 @@ void ShellCommands::cmd_unset_var(const char* args, bool global) {
     dos_->set_return_code(0);
 }
 
-u32 format_prompt(const Dos& dos, u32 cli_number, char* out, u32 size) {
+u32 format_prompt(const Dos& dos, u32 cli_number, char* out, u32 size, u32 process) {
     if (out == nullptr || size == 0) {
         return 0;
     }
     char fmt[260];
-    if (!dos.prompt(fmt, sizeof fmt) || fmt[0] == '\0') {
+    if (!dos.prompt(fmt, sizeof fmt, process) || fmt[0] == '\0') {
         append_str(fmt, sizeof fmt, 0, kDefaultPrompt);
     }
     char dir[260];
-    if (!dos.current_dir_name(dir, sizeof dir)) {
+    if (!dos.current_dir_name(dir, sizeof dir, process)) {
         dir[0] = '\0';
     }
     char num[16];

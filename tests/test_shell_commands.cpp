@@ -686,6 +686,113 @@ void run_starts_a_background_cli() {
     CHECK_EQ(g_dos.last_return_code(), 0u);
 }
 
+struct NewShellHook {
+    u32 calls = 0;
+    bool result = true;
+};
+
+bool open_test_shell(void* ctx) {
+    NewShellHook& hook = *static_cast<NewShellHook*>(ctx);
+    ++hook.calls;
+    return hook.result;
+}
+
+void newshell_calls_the_hook() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+    NewShellHook hook;
+    cmds.set_new_shell(open_test_shell, &hook);
+
+    CHECK(cmds.run("newshell", ""));
+    CHECK_EQ(hook.calls, 1u);
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    out.clear();
+    hook.result = false;
+    CHECK(cmds.run("NewShell", ""));
+    CHECK_EQ(hook.calls, 2u);
+    CHECK(out == "NewShell: cannot open a new shell\n");
+    CHECK_EQ(g_dos.last_return_code(), 20u);
+}
+
+void newshell_without_a_hook_fails() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("newshell", ""));
+    CHECK(out == "NewShell: cannot open a new shell\n");
+    CHECK_EQ(g_dos.last_return_code(), 20u);
+}
+
+void endcli_refuses_in_the_boot_shell() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+
+    CHECK(cmds.run("endcli", ""));
+    CHECK(out == "EndCLI: the boot shell cannot end\n");
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+    CHECK(!cmds.ended());
+
+    out.clear();
+    cmds.set_process(g_dos.process());
+    CHECK(cmds.run("ENDCLI", ""));
+    CHECK(out == "EndCLI: the boot shell cannot end\n");
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+    CHECK(!cmds.ended());
+}
+
+void set_process_uses_that_cli() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+    u32 process = 0;
+    u32 cli = 0;
+    CHECK(g_dos.create_shell_process(1, process, cli));
+    CHECK(process != 0);
+    CHECK(process != g_dos.process());
+    g_exec.set_this_task(process);
+    cmds.set_process(process);
+
+    CHECK(cmds.run("cd", "c"));
+    CHECK_EQ(g_dos.last_return_code(process), 0u);
+    char buf[128];
+    CHECK(g_dos.current_dir_name(buf, sizeof buf, process));
+    CHECK(std::string(buf) == "HombreTest:C");
+    CHECK(g_dos.current_dir_name(buf, sizeof buf));
+    CHECK(std::string(buf) == "HombreTest:");
+
+    out.clear();
+    CHECK(cmds.run("cd", ""));
+    CHECK(out == "HombreTest:C\n");
+
+    out.clear();
+    CHECK(cmds.run("prompt", "\"[%N] \""));
+    CHECK_EQ(g_dos.last_return_code(process), 0u);
+    format_prompt(g_dos, cli, buf, sizeof buf, process);
+    CHECK(std::string(buf) == "[2] ");
+    format_prompt(g_dos, 1, buf, sizeof buf);
+    CHECK(std::string(buf) == "1.HombreTest:> ");
+
+    g_dos.set_return_code(20);
+    g_dos.set_last_error(ERROR_OBJECT_NOT_FOUND);
+    out.clear();
+    CHECK(cmds.run("why", ""));
+    CHECK(out == "Last command failed because no such file or directory\n");
+    CHECK_EQ(g_dos.last_return_code(process), 0u);
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+
+    out.clear();
+    CHECK(cmds.run("endcli", ""));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(process), 0u);
+    CHECK(cmds.ended());
+    g_exec.set_this_task(g_dos.process());
+}
+
 }
 
 int main() {
@@ -705,5 +812,9 @@ int main() {
     env_variable_readable_via_dos_open();
     local_variable_builtins();
     run_starts_a_background_cli();
+    newshell_calls_the_hook();
+    newshell_without_a_hook_fails();
+    endcli_refuses_in_the_boot_shell();
+    set_process_uses_that_cli();
     return check::finish("test_shell_commands");
 }

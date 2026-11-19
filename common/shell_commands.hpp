@@ -33,8 +33,8 @@ class Dos;
 using ShellPrint = void (*)(void* ctx, const char* text);
 
 // Internal AmigaDOS Shell commands (CD, ECHO, PATH, WHY, PROMPT, ASK, FAILAT,
-// SET, GET, UNSET, SETENV, GETENV, UNSETENV, RUN) backed by a Dos instance
-// and a text output callback.
+// SET, GET, UNSET, SETENV, GETENV, UNSETENV, RUN, NEWSHELL, ENDCLI) backed by
+// a Dos instance and a text output callback.
 class ShellCommands {
 public:
     constexpr ShellCommands() = default;
@@ -45,7 +45,22 @@ public:
         dos_ = &dos;
         print_ = print;
         ctx_ = ctx;
+        ended_ = false;
     }
+
+    // The process whose CLI the builtins act on. 0 is the boot shell's
+    // process.
+    void set_process(u32 process) { process_ = process; }
+
+    // Sets the NewShell hook: it opens a new shell and returns false when
+    // none can be opened.
+    void set_new_shell(bool (*open)(void* ctx), void* ctx) {
+        new_shell_ = open;
+        new_shell_ctx_ = ctx;
+    }
+
+    // True once EndCLI has ended a non-boot shell.
+    bool ended() const { return ended_; }
 
     // Runs word with args if word matches an internal command (case-insensitive).
     // Returns false for non-builtin commands.
@@ -62,6 +77,8 @@ private:
     void cmd_ask(const char* args);
     void cmd_failat(const char* args);
     void cmd_run(const char* args);
+    void cmd_newshell();
+    void cmd_endcli();
     void cmd_set_var(const char* args, bool global);
     void cmd_get_var(const char* args, bool global);
     void cmd_unset_var(const char* args, bool global);
@@ -69,10 +86,15 @@ private:
     Dos* dos_ = nullptr;
     ShellPrint print_ = nullptr;
     void* ctx_ = nullptr;
+    u32 process_ = 0;
+    bool (*new_shell_)(void* ctx) = nullptr;
+    void* new_shell_ctx_ = nullptr;
+    bool ended_ = false;
 };
 
 // Formats the CLI prompt into out using cli_Prompt (%N, %S, %%; unknown %
-// sequences copied as is). Returns the length written, excluding NUL.
-u32 format_prompt(const Dos& dos, u32 cli_number, char* out, u32 size);
+// sequences copied as is). Returns the length written, excluding NUL. process
+// 0 is the boot shell's process.
+u32 format_prompt(const Dos& dos, u32 cli_number, char* out, u32 size, u32 process = 0);
 
 }
