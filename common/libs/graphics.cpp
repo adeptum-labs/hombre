@@ -554,7 +554,9 @@ struct GraphicsNatives {
             return;
         }
         bool changed = false;
-        constexpr u32 kMaxLoadRecords = 65536;
+        // Guest addresses wrap, so a table without its terminator would never
+        // fault: the records and the entries read from each are both capped.
+        constexpr u32 kMaxLoadRecords = 256;
         for (u32 rec = 0; rec < kMaxLoadRecords; ++rec) {
             const u32 header = b.r32(p);
             p += 4;
@@ -566,7 +568,10 @@ struct GraphicsNatives {
                 break;
             }
             const u32 first = header & 0xFFFF;
-            for (u32 i = 0; i < count; ++i) {
+            const u32 room = first < t.limit ? t.limit - first : 0;
+            const u32 used = count < room ? count : room;
+            const u32 next = p + count * 12;
+            for (u32 i = 0; i < used; ++i) {
                 const u32 r = b.r32(p);
                 const u32 gr = b.r32(p + 4);
                 const u32 bl = b.r32(p + 8);
@@ -578,6 +583,7 @@ struct GraphicsNatives {
                     changed = true;
                 }
             }
+            p = next;
         }
         if (changed && b.ok()) {
             refresh_viewport(g.display_, m, b, vp);
