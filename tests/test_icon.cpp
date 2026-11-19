@@ -748,6 +748,28 @@ void disk_revision_is_the_low_byte_of_user_data() {
     CHECK_EQ(free_disk_object(r, old), 0u);
 }
 
+void save_object_writes_a_host_path_and_refuses_the_disk() {
+    Rig r;
+    const u32 object = g_icon.load_object("Tools/HighRev");
+    CHECK(object != 0);
+    r.put32(object + do_CurrentX, 123);
+    r.put32(object + do_CurrentY, 45);
+    u32 error = 0;
+    CHECK(g_icon.save_object("RAM:Saved", object, error));
+    CHECK_EQ(error, 0u);
+    const u32 saved = g_icon.load_object("RAM:Saved");
+    CHECK(saved != 0);
+    CHECK_EQ(r.get32(saved + do_CurrentX), 123u);
+    CHECK_EQ(r.get32(saved + do_CurrentY), 45u);
+    g_icon.free_object(saved);
+
+    CHECK(!g_icon.save_object("TestDisk:Tools/HighRev", object, error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+    CHECK(!g_icon.save_object("RAM:Nothing", 0, error));
+    CHECK_EQ(error, ERROR_REQUIRED_ARG_MISSING);
+    g_icon.free_object(object);
+}
+
 void many_tool_types_load_and_are_found() {
     Rig r;
     const u32 obj = get_disk_object(r, "Tools/Many");
@@ -1240,6 +1262,7 @@ int main() {
     null_name_gives_an_empty_disk_object();
     disk_object_table_fills_without_leaking();
     disk_revision_is_the_low_byte_of_user_data();
+    save_object_writes_a_host_path_and_refuses_the_disk();
     many_tool_types_load_and_are_found();
     find_tool_type_skips_entries_it_does_not_match();
     optional_parts_follow_the_gadget_flags();

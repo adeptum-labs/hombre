@@ -95,6 +95,11 @@ public:
     u32 default_object(u32 type);
     void free_object(u32 object) { free_disk_object(object); }
 
+    // PutDiskObject for code that is not the guest's: writes the object as
+    // path's .info. False with the dos error code in error when it cannot,
+    // ERROR_DISK_WRITE_PROTECTED on a volume dos cannot write.
+    bool save_object(const char* path, u32 object, u32& error);
+
 private:
     friend struct IconNatives;
 
@@ -114,6 +119,7 @@ private:
     u32 get_disk_object(native::Bus& bus, u32 name);
     u32 get_disk_object_new(native::Bus& bus, u32 name);
     u32 put_disk_object(native::Bus& bus, u32 name, u32 disk_object);
+    u32 write_object(native::Bus& bus, const char* name, u32 disk_object, u32& error);
     u32 delete_disk_object(native::Bus& bus, u32 name);
     u32 get_default_disk_object(u32 type);
     u32 find_tool_type(native::Bus& bus, u32 array, u32 name);

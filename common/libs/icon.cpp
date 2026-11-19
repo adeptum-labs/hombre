@@ -1093,13 +1093,35 @@ u32 Icon::put_disk_object(Bus& b, u32 name, u32 disk_object) {
         }
         return 0;
     }
+    u32 error = 0;
+    return write_object(b, text, disk_object, error);
+}
+
+bool Icon::save_object(const char* path, u32 object, u32& error) {
+    error = 0;
+    if (machine_ == nullptr || path == nullptr) {
+        error = ndk::ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*machine_);
+    const bool saved = write_object(b, path, object, error) != 0;
+    if (!saved && error == 0) {
+        error = b.ok() ? ndk::ERROR_OBJECT_WRONG_TYPE : ndk::ERROR_REQUIRED_ARG_MISSING;
+    }
+    return saved;
+}
+
+u32 Icon::write_object(Bus& b, const char* text, u32 disk_object, u32& error) {
+    error = 0;
     char path[kNameBytes];
     if (!info_path(text, path)) {
         set_io_error(ndk::ERROR_INVALID_COMPONENT_NAME);
+        error = ndk::ERROR_INVALID_COMPONENT_NAME;
         return 0;
     }
     if (disk_object == 0) {
         set_io_error(ndk::ERROR_REQUIRED_ARG_MISSING);
+        error = ndk::ERROR_REQUIRED_ARG_MISSING;
         return 0;
     }
     const u32 gadget = disk_object + disk_object::Gadget;
@@ -1145,23 +1167,28 @@ u32 Icon::put_disk_object(Bus& b, u32 name, u32 disk_object) {
         }
         if (render != 0 && !write_guest_image(w, b, render)) {
             set_io_error(ndk::ERROR_OBJECT_WRONG_TYPE);
+            error = ndk::ERROR_OBJECT_WRONG_TYPE;
             return 0;
         }
         if ((flags & kGflgGadghImage) != 0 && select != 0 &&
             !write_guest_image(w, b, select)) {
             set_io_error(ndk::ERROR_OBJECT_WRONG_TYPE);
+            error = ndk::ERROR_OBJECT_WRONG_TYPE;
             return 0;
         }
         if (default_tool != 0 && !write_guest_string(w, b, default_tool)) {
             set_io_error(ndk::ERROR_OBJECT_TOO_LARGE);
+            error = ndk::ERROR_OBJECT_TOO_LARGE;
             return 0;
         }
         if (tool_types != 0 && !write_guest_tool_types(w, b, tool_types)) {
             set_io_error(ndk::ERROR_OBJECT_TOO_LARGE);
+            error = ndk::ERROR_OBJECT_TOO_LARGE;
             return 0;
         }
         if (tool_window != 0 && !write_guest_string(w, b, tool_window)) {
             set_io_error(ndk::ERROR_OBJECT_TOO_LARGE);
+            error = ndk::ERROR_OBJECT_TOO_LARGE;
             return 0;
         }
         if (drawer != 0 && (user_data & kDiskRevisionMask) == kDiskRevision) {
@@ -1174,9 +1201,9 @@ u32 Icon::put_disk_object(Bus& b, u32 name, u32 disk_object) {
     }
     if (w.full) {
         set_io_error(ndk::ERROR_OBJECT_TOO_LARGE);
+        error = ndk::ERROR_OBJECT_TOO_LARGE;
         return 0;
     }
-    u32 error = 0;
     return dos_->write_file(path, file_, w.pos, error) ? 1 : 0;
 }
 
