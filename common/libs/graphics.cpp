@@ -40,48 +40,8 @@ constexpr char kTopazName[] = "topaz.font";
 constexpr u32 kMaxTextChars = 65536;
 constexpr u32 kTextChunk = 64;
 
-// A RastPort's BitMap and the rectangle drawing stays inside, both in
-// bitmap coordinates. The layer origin is what RastPort coordinates are
-// relative to.
-struct View {
-    raster::Bitmap bitmap;
-    raster::Clip clip;
-    i32 origin_x = 0;
-    i32 origin_y = 0;
-    u32 bitmap_addr = 0;
-    bool ok = false;
-};
-
-View view(Bus& b, u32 rp) {
-    View v{};
-    if (rp == 0) {
-        return v;
-    }
-    const u32 layer = b.r32(rp + ndk::rp_Layer);
-    const u32 bitmap = b.r32(rp + ndk::rp_BitMap);
-    if (bitmap == 0 || !raster::load_bitmap(b, bitmap, v.bitmap)) {
-        return v;
-    }
-    v.bitmap_addr = bitmap;
-    if (layer != 0) {
-        const i32 min_x = static_cast<i16>(b.r16(layer + ndk::ly_MinX));
-        const i32 min_y = static_cast<i16>(b.r16(layer + ndk::ly_MinY));
-        const i32 max_x = static_cast<i16>(b.r16(layer + ndk::ly_MaxX));
-        const i32 max_y = static_cast<i16>(b.r16(layer + ndk::ly_MaxY));
-        if (b.r32(layer + ndk::ly_SuperBitMap) == bitmap) {
-            v.clip = raster::Clip{0, 0, max_x - min_x, max_y - min_y};
-        } else {
-            v.origin_x = min_x;
-            v.origin_y = min_y;
-            v.clip = raster::Clip{min_x, min_y, max_x, max_y};
-        }
-    } else {
-        v.clip = raster::Clip{0, 0, static_cast<i32>(v.bitmap.bytes_per_row << 3) - 1,
-                              static_cast<i32>(v.bitmap.rows) - 1};
-    }
-    v.ok = b.ok();
-    return v;
-}
+// The BitMap, the clip and the origin of a RastPort's drawing.
+using View = raster::RastPortView;
 
 raster::Pens pens(Bus& b, u32 rp) {
     return raster::Pens{static_cast<u8>(b.r8(rp + ndk::rp_FgPen)),
@@ -378,7 +338,7 @@ struct GraphicsNatives {
             return;
         }
         Bus b(m);
-        const View v = view(b, rp);
+        const View v = raster::load_rastport(b, rp);
         if (!v.ok) {
             return;
         }
@@ -502,7 +462,7 @@ struct GraphicsNatives {
             return;
         }
         Bus b(m);
-        const View v = view(b, rp);
+        const View v = raster::load_rastport(b, rp);
         if (!v.ok) {
             return;
         }
@@ -636,7 +596,7 @@ struct GraphicsNatives {
             native::set_result(m, 0xFFFFFFFF);
             return;
         }
-        const View v = view(b, rp);
+        const View v = raster::load_rastport(b, rp);
         u32 count = b.r16(ai + ai_Count);
         count = count > kMaxAreaVectors ? kMaxAreaVectors : count;
         const u32 table = b.r32(ai + ai_VctrTbl);
@@ -703,7 +663,7 @@ struct GraphicsNatives {
         Graphics& g = of(ctx);
         Bus b(m);
         const u32 rp = m.cpu.a[1];
-        const View v = view(b, rp);
+        const View v = raster::load_rastport(b, rp);
         if (!v.ok) {
             return;
         }
@@ -764,7 +724,7 @@ struct GraphicsNatives {
             return;
         }
         Bus b(m);
-        const View v = view(b, rp);
+        const View v = raster::load_rastport(b, rp);
         if (!v.ok) {
             native::set_result(m, 0xFFFFFFFF);
             return;
@@ -787,7 +747,7 @@ struct GraphicsNatives {
             return;
         }
         Bus b(m);
-        const View v = view(b, rp);
+        const View v = raster::load_rastport(b, rp);
         if (!v.ok) {
             native::set_result(m, 0xFFFFFFFF);
             return;
@@ -1162,7 +1122,7 @@ void Graphics::rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
         return;
     }
     Bus b(*machine_);
-    const View v = view(b, rp);
+    const View v = raster::load_rastport(b, rp);
     if (!v.ok) {
         return;
     }
@@ -1178,7 +1138,7 @@ void Graphics::draw_line(u32 rp, i32 x1, i32 y1) {
         return;
     }
     Bus b(*machine_);
-    const View v = view(b, rp);
+    const View v = raster::load_rastport(b, rp);
     if (!v.ok) {
         return;
     }
@@ -1198,7 +1158,7 @@ u32 Graphics::text(u32 rp, const u8* chars, u32 count) {
         return 0;
     }
     Bus b(*machine_);
-    const View v = view(b, rp);
+    const View v = raster::load_rastport(b, rp);
     if (!v.ok) {
         return 0;
     }
@@ -1220,7 +1180,7 @@ void Graphics::scroll(u32 rp, i32 dx, i32 dy, i32 x0, i32 y0, i32 x1, i32 y1) {
         return;
     }
     Bus b(*machine_);
-    const View v = view(b, rp);
+    const View v = raster::load_rastport(b, rp);
     if (!v.ok) {
         return;
     }

@@ -55,6 +55,17 @@ struct Pens {
     u8 fg, bg, mode;
 };
 
+// A RastPort's BitMap and the rectangle drawing through it stays inside,
+// with the origin its coordinates are relative to.
+struct RastPortView {
+    Bitmap bitmap;
+    Clip clip{0, 0, -1, -1};
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    u32 bitmap_addr = 0;
+    bool ok = false;
+};
+
 inline void write_pixel(native::Bus& bus, const Bitmap& bitmap, i32 x, i32 y, u32 pen);
 
 namespace {
@@ -202,6 +213,41 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
         }
     }
     return true;
+}
+
+// Reads the RastPort's BitMap and, when it has a layer, the layer's clip: a
+// layer over the bitmap itself clips to the layer's size, any other layer
+// clips at its screen position.
+inline RastPortView load_rastport(native::Bus& bus, u32 rp) {
+    RastPortView view{};
+    if (rp == 0) {
+        return view;
+    }
+    using i16 = __INT16_TYPE__;
+    const u32 layer = bus.r32(rp + ndk::rp_Layer);
+    const u32 bitmap = bus.r32(rp + ndk::rp_BitMap);
+    if (bitmap == 0 || !load_bitmap(bus, bitmap, view.bitmap)) {
+        return view;
+    }
+    view.bitmap_addr = bitmap;
+    if (layer != 0) {
+        const i32 min_x = static_cast<i16>(bus.r16(layer + ndk::ly_MinX));
+        const i32 min_y = static_cast<i16>(bus.r16(layer + ndk::ly_MinY));
+        const i32 max_x = static_cast<i16>(bus.r16(layer + ndk::ly_MaxX));
+        const i32 max_y = static_cast<i16>(bus.r16(layer + ndk::ly_MaxY));
+        if (bus.r32(layer + ndk::ly_SuperBitMap) == bitmap) {
+            view.clip = Clip{0, 0, max_x - min_x, max_y - min_y};
+        } else {
+            view.origin_x = min_x;
+            view.origin_y = min_y;
+            view.clip = Clip{min_x, min_y, max_x, max_y};
+        }
+    } else {
+        view.clip = Clip{0, 0, static_cast<i32>(view.bitmap.bytes_per_row << 3) - 1,
+                         static_cast<i32>(view.bitmap.rows) - 1};
+    }
+    view.ok = bus.ok();
+    return view;
 }
 
 inline u32 read_pixel(native::Bus& bus, const Bitmap& bitmap, i32 x, i32 y) {
