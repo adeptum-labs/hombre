@@ -379,6 +379,16 @@ void handle_decoded_byte(u8 raw, Shell* line_editor) {
             line_editor->history_down();
         }
         break;
+    case ConsoleKey::CursorLeft:
+        if (line_editor != nullptr) {
+            line_editor->cursor_left();
+        }
+        break;
+    case ConsoleKey::CursorRight:
+        if (line_editor != nullptr) {
+            line_editor->cursor_right();
+        }
+        break;
     case ConsoleKey::None:
     case ConsoleKey::Swallowed:
         break;
@@ -648,6 +658,7 @@ void write_shell_prompt() {
 
 void typed_echo(void*, u8 ch) { shell.echo(ch); }
 void typed_erase(void*) { shell.erase_last(); }
+void typed_cursor_back(void*, u32 back) { shell.set_cursor_back(back); }
 void typed_end_line(void*) { shell.end_line(); }
 void typed_message(void*, const char* text) { shell.print_line(text); }
 void typed_prompt(void*) { write_shell_prompt(); }
@@ -715,7 +726,8 @@ bool typed_run(void*, const char* path, const char* args) {
     static constinit Shell line_editor;
     line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
                                &typed_message, &typed_prompt, &typed_log, &typed,
-                               &typed_builtin, &typed_scroll_to_bottom});
+                               &typed_builtin, &typed_scroll_to_bottom,
+                               &typed_cursor_back});
     serial::write("shell: ready\n");
     while (usb_keyboard_status() == UsbStatus::Ready) {
         poll_mouse();

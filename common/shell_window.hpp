@@ -65,6 +65,12 @@ public:
     // enters. Does nothing once the cursor is back at the prompt's end.
     void erase_last();
 
+    // Shows the cursor back cells before the end of the typed input, as an
+    // inverted cell over the byte there; 0 is the block after the input.
+    // Clamped to the start of the input. echo, erase_last and end_line put
+    // it back at the end first.
+    void set_cursor_back(u32 back);
+
     // Clears the block cursor and moves to column 0 of the next row.
     void end_line();
 
@@ -104,6 +110,10 @@ private:
     void advance_row();
     void draw_cell(u8 c);
     void draw_cursor();
+    void hide_cursor();
+    void cursor_to_end();
+    bool cursor_cell(u32& row, u32& column) const;
+    void draw_cell_at(u32 row, u32 column, u8 c);
     void mark_line_start();
 
     m68k::Machine* machine_ = nullptr;
@@ -124,6 +134,7 @@ private:
     u32 row_ = 0;
     u32 view_ = 0;
     bool cursor_visible_ = false;
+    u32 cursor_back_ = 0;
     void (*view_listener_)(void* ctx, u32 view) = nullptr;
     void* view_ctx_ = nullptr;
     ShellText text_{};

@@ -82,14 +82,16 @@ void up_and_down_recall_history() {
     CHECK_EQ(feed_seq(filter, up, sizeof(up), out), ConsoleKey::HistoryUp);
     const u8 down[] = {0x9B, 'B'};
     CHECK_EQ(feed_seq(filter, down, sizeof(down), out), ConsoleKey::HistoryDown);
+    const u8 right[] = {0x9B, 'C'};
+    CHECK_EQ(feed_seq(filter, right, sizeof(right), out), ConsoleKey::CursorRight);
+    const u8 left[] = {0x9B, 'D'};
+    CHECK_EQ(feed_seq(filter, left, sizeof(left), out), ConsoleKey::CursorLeft);
 }
 
 void other_sequences_are_swallowed() {
     CsiFilter filter;
     u8 out = 0;
 
-    const u8 right[] = {0x9B, 'C'};
-    CHECK_EQ(feed_seq(filter, right, sizeof(right), out), ConsoleKey::Swallowed);
 
     const u8 home[] = {0x9B, '4', '4', '~'};
     CHECK_EQ(feed_seq(filter, home, sizeof(home), out), ConsoleKey::Swallowed);

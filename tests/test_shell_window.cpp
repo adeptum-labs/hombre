@@ -144,6 +144,22 @@ bool cell_is(GfxRig& r, const raster::Bitmap& bm, i32 ix, i32 iy, u32 column, u3
     return true;
 }
 
+bool cell_is_inverse(GfxRig& r, const raster::Bitmap& bm, i32 ix, i32 iy, u32 column, u32 row,
+                     char ch) {
+    const u8* glyph_rows = glyph(ch);
+    for (u32 y = 0; y < 8; ++y) {
+        for (u32 x = 0; x < 8; ++x) {
+            const u32 want = ((glyph_rows[y] >> x) & 1) != 0 ? 0u : 1u;
+            const i32 px = ix + static_cast<i32>(column) * 8 + static_cast<i32>(x);
+            const i32 py = iy + static_cast<i32>(row) * 8 + static_cast<i32>(y);
+            if (pixel(r, bm, px, py) != want) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool cell_all(GfxRig& r, const raster::Bitmap& bm, i32 ix, i32 iy, u32 column, u32 row, u32 pen) {
     for (u32 y = 0; y < 8; ++y) {
         for (u32 x = 0; x < 8; ++x) {
@@ -1236,7 +1252,89 @@ void knob_moves_when_store_is_full() {
 
 }
 
+void cursor_back_shows_an_inverse_cell() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+
+    shell.echo('A');
+    shell.echo('B');
+    shell.echo('C');
+    shell.set_cursor_back(1);
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, 'B'));
+    CHECK(cell_is_inverse(r, bm, ix, iy, 2, 0, 'C'));
+    CHECK(cell_all(r, bm, ix, iy, 3, 0, 0));
+
+    shell.set_cursor_back(3);
+    CHECK(cell_is_inverse(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_is(r, bm, ix, iy, 2, 0, 'C'));
+
+    // Past the start of the input it stops at the first typed byte.
+    shell.set_cursor_back(9);
+    CHECK(cell_is_inverse(r, bm, ix, iy, 0, 0, 'A'));
+
+    shell.set_cursor_back(0);
+    CHECK(cell_is(r, bm, ix, iy, 0, 0, 'A'));
+    CHECK(cell_all(r, bm, ix, iy, 3, 0, 1));
+}
+
+void echo_after_cursor_back_puts_the_block_at_the_end() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+
+    shell.echo('A');
+    shell.echo('B');
+    shell.set_cursor_back(1);
+    shell.echo('C');
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, 'B'));
+    CHECK(cell_is(r, bm, ix, iy, 2, 0, 'C'));
+    CHECK(cell_all(r, bm, ix, iy, 3, 0, 1));
+
+    shell.set_cursor_back(2);
+    shell.erase_last();
+    CHECK(cell_is(r, bm, ix, iy, 1, 0, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 2, 0, 1));
+}
+
+void cursor_back_crosses_a_wrapped_row() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 cells = columns(r, window);
+
+    for (u32 i = 0; i < cells; ++i) {
+        shell.echo('A');
+    }
+    shell.echo('B');
+    shell.set_cursor_back(2);
+    CHECK(cell_is_inverse(r, bm, ix, iy, cells - 1, 0, 'A'));
+    CHECK(cell_is(r, bm, ix, iy, 0, 1, 'B'));
+    CHECK(cell_all(r, bm, ix, iy, 1, 1, 0));
+}
+
 int main() {
+    cursor_back_shows_an_inverse_cell();
+    echo_after_cursor_back_puts_the_block_at_the_end();
+    cursor_back_crosses_a_wrapped_row();
     open_gives_a_window_on_the_front_screen();
     open_without_a_screen_returns_false();
     text_lands_in_cell_0_0_of_the_inner_area();

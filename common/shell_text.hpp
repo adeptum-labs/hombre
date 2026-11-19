@@ -209,6 +209,21 @@ public:
         row_in_line = 0;
     }
 
+    // Bytes typed since mark_input_start on the current line.
+    u32 input_length() const {
+        const u32 len = lengths_[current_slot()];
+        return len > input_start_ ? len - input_start_ : 0;
+    }
+
+    // Byte index of the current line, which must be below its length.
+    u8 current_byte(u32 index) const {
+        return lines_[current_slot()][index];
+    }
+
+    u32 current_length() const {
+        return lengths_[current_slot()];
+    }
+
     u32 cursor_column(u32 columns) const {
         const u32 cols = columns == 0 ? 1 : columns;
         return lengths_[current_slot()] % cols;

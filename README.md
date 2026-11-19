@@ -47,7 +47,8 @@ Targets:
   them the window says why and the boot ends. The serial port logs `usb:` and
   `shell:` lines, with each submitted line as `shell: line: <text>`.
   Up and Down at the prompt bring back the last 16 lines entered; going
-  down past the newest returns to the line being typed.
+  down past the newest returns to the line being typed. Left and Right move
+  the cursor within the line, and typing and Backspace work at the cursor.
   The shell has the Workbench 3.1 builtins `Cd`, `Echo`, `Path`, `Why`,
   `Prompt`, `Ask`, `Failat`, `Set`, `Get`, `UnSet`, `SetEnv`, `GetEnv` and
   `UnSetEnv`; its prompt shows the current directory, and a

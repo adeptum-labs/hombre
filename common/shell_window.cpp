@@ -174,6 +174,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     row_ = 0;
     view_ = 0;
     cursor_visible_ = false;
+    cursor_back_ = 0;
     text_.clear();
     mark_line_start();
     intuition.set_size_hook(window, &ShellWindow::on_size, this);
@@ -195,6 +196,7 @@ void ShellWindow::write(const u8* data, u32 bytes) {
         bytes = kMaxWrite;
     }
     cursor_visible_ = false;
+    cursor_back_ = 0;
     const u32 old_total = text_.total_rows(columns_);
     intuition_->begin_batch();
     if (view_ > 0) {
@@ -320,6 +322,7 @@ void ShellWindow::echo(u8 ch) {
     if (view_ > 0) {
         scroll_to_bottom();
     }
+    cursor_to_end();
     const u32 old_total = text_.total_rows(columns_);
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     put_byte(ch, true);
@@ -338,6 +341,7 @@ void ShellWindow::erase_last() {
     if (view_ > 0) {
         scroll_to_bottom();
     }
+    cursor_to_end();
     const u32 old_total = text_.total_rows(columns_);
     if (!text_.erase_last()) {
         intuition_->end_batch();
@@ -375,6 +379,7 @@ void ShellWindow::end_line() {
     if (view_ > 0) {
         scroll_to_bottom();
     }
+    cursor_to_end();
     const u32 old_total = text_.total_rows(columns_);
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     draw_cell(' ');
@@ -742,9 +747,82 @@ void ShellWindow::mark_line_start() {
     text_.mark_input_start();
 }
 
+void ShellWindow::set_cursor_back(u32 back) {
+    if (!is_open() || columns_ == 0 || rows_ == 0) {
+        return;
+    }
+    const u32 typed = text_.input_length();
+    if (back > typed) {
+        back = typed;
+    }
+    intuition_->begin_batch();
+    if (view_ > 0) {
+        scroll_to_bottom();
+    }
+    hide_cursor();
+    cursor_back_ = back;
+    draw_cursor();
+    intuition_->end_batch();
+}
+
+void ShellWindow::cursor_to_end() {
+    if (cursor_back_ == 0) {
+        return;
+    }
+    hide_cursor();
+    cursor_back_ = 0;
+    draw_cursor();
+}
+
+// The cell the cursor is on when it sits cursor_back_ bytes before the end
+// of the input; false when that cell is above the window.
+bool ShellWindow::cursor_cell(u32& row, u32& column) const {
+    const u64 at = static_cast<u64>(row_) * columns_ + col_;
+    if (cursor_back_ > at) {
+        return false;
+    }
+    row = static_cast<u32>((at - cursor_back_) / columns_);
+    column = static_cast<u32>((at - cursor_back_) % columns_);
+    return true;
+}
+
+void ShellWindow::draw_cell_at(u32 row, u32 column, u8 c) {
+    graphics_->move(rp_, origin_x_ + static_cast<i32>(column * kCell),
+                    origin_y_ + static_cast<i32>(row * kCell) + static_cast<i32>(kBaseline));
+    graphics_->text(rp_, &c, 1);
+}
+
+// Draws the cell under the cursor as plain text again.
+void ShellWindow::hide_cursor() {
+    if (columns_ == 0 || rows_ == 0 || view_ > 0) {
+        return;
+    }
+    graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
+    if (cursor_back_ == 0) {
+        draw_cell(' ');
+        return;
+    }
+    u32 row = 0;
+    u32 column = 0;
+    if (cursor_cell(row, column)) {
+        draw_cell_at(row, column, text_.current_byte(text_.current_length() - cursor_back_));
+    }
+}
+
 void ShellWindow::draw_cursor() {
     cursor_visible_ = true;
     if (columns_ == 0 || rows_ == 0) {
+        return;
+    }
+    if (cursor_back_ != 0) {
+        u32 row = 0;
+        u32 column = 0;
+        if (cursor_cell(row, column)) {
+            graphics_->set_pens(rp_, 0, 1, ndk::JAM2);
+            draw_cell_at(row, column,
+                         text_.current_byte(text_.current_length() - cursor_back_));
+            graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
+        }
         return;
     }
     graphics_->set_pens(rp_, 1, 1, ndk::JAM2);

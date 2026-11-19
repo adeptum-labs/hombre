@@ -189,11 +189,12 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "m68k: C:version returned 0" "shell: line: zzz" "shell: unknown command zzz" \
 	    "shell: line: \\xe5\\xe4\\xf6"
 	tools/boot_check.sh --disk $(TEST_DISK) \
-	    --keys "c d spc c ret c d ret c d spc shift-7 ret e c h o spc h e j ret p a t h ret w h y ret up up up spc a ret up down down spc y ret" \
+	    --keys "c d spc c ret c d ret c d spc shift-7 ret e c h o spc h e j ret p a t h ret w h y ret up up up spc a ret up down down spc y ret e c x o spc h i left left left left backspace h ret" \
 	    "shell: builtin cd returned 0" "HombreTest:C" "hej" \
 	    "shell: builtin echo returned 0" "Current_directory" \
 	    "shell: builtin path returned 0" "The last command did not set a return code" \
-	    "shell: builtin why returned 0" "shell: line: echo hej a" "shell: line:  y"
+	    "shell: builtin why returned 0" "shell: line: echo hej a" "shell: line:  y" \
+	    "shell: line: echo hi"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "m o u s e t e s t ret" \
 	    --mouse-after "mousetest: ready" \
 	    --mouse "mouse_move 10 10;mouse_button 1;mouse_button 0;sendkey ctrl-c" \

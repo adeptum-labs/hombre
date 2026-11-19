@@ -44,6 +44,9 @@ struct ShellHost {
     void* ctx;
     bool (*builtin)(void* ctx, const char* word, const char* args) = nullptr;
     void (*scroll_to_bottom)(void* ctx) = nullptr;
+    // Shows the cursor back bytes before the end of the line; without it
+    // the cursor stays at the end and Left and Right do nothing.
+    void (*cursor_back)(void* ctx, u32 back) = nullptr;
 };
 
 // One shell session: a fixed line buffer edited by the keyboard and parsed
@@ -62,16 +65,24 @@ public:
     void history_up();
     void history_down();
 
+    // Move the cursor within the line; typing and Backspace then work at
+    // the cursor.
+    void cursor_left();
+    void cursor_right();
+
 private:
     void enter();
     void log_line();
     void remember(u32 begin, u32 end);
     void replace_line(const char* text, u32 length);
     void stop_browsing();
+    void insert(const char* text, u32 count);
+    void show_cursor();
 
     ShellHost host_{};
     u32 length_ = 0;
     char line_[kMaxLine + 1]{};
+    u32 cursor_ = 0;  // index in line_ where typing goes
 
     char history_[kHistory][kMaxLine]{};
     u32 history_length_[kHistory]{};

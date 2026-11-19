@@ -75,6 +75,10 @@ bool host_builtin(void* ctx, const char* word, const char* args) {
     return !r.accept_builtin.empty() && word == r.accept_builtin;
 }
 
+void host_cursor_back(void* ctx, u32 back) {
+    static_cast<Recorder*>(ctx)->calls.push_back("back:" + std::to_string(back));
+}
+
 void host_scroll_to_bottom(void* ctx) {
     static_cast<Recorder*>(ctx)->calls.push_back("scroll_to_bottom");
 }
@@ -89,6 +93,7 @@ ShellHost make_host(Recorder& recorder) {
     host.prompt = host_prompt;
     host.log_line = host_log_line;
     host.ctx = &recorder;
+    host.cursor_back = host_cursor_back;
     return host;
 }
 
@@ -424,7 +429,91 @@ void history_does_nothing_when_empty() {
     CHECK(r.calls.empty());
 }
 
+void left_then_typing_inserts() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "dr");
+    shell.cursor_left();
+    CHECK(r.calls.back() == "back:1");
+    shell.key('i');
+    shell.key('\n');
+    CHECK(r.paths.back() == "C:dir");
+}
+
+void backspace_in_the_middle_removes_the_byte_before_the_cursor() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "dirx");
+    shell.cursor_left();
+    shell.key('\b');
+    type_text(shell, "r");
+    shell.key('\n');
+    CHECK(r.paths.back() == "C:dirx");
+}
+
+void cursor_stops_at_both_ends() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "ab");
+    for (u32 i = 0; i < 5; ++i) {
+        shell.cursor_left();
+    }
+    shell.key('x');
+    for (u32 i = 0; i < 5; ++i) {
+        shell.cursor_right();
+    }
+    shell.key('y');
+    shell.key('\n');
+    CHECK(r.paths.back() == "C:xaby");
+    r.calls.clear();
+    shell.key('\b');
+    shell.cursor_left();
+    CHECK(r.calls.empty() || r.calls.back() != "erase");
+}
+
+void recalled_line_is_edited_at_its_end() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "dir\n");
+    shell.history_up();
+    shell.cursor_left();
+    shell.key('x');
+    shell.key('\n');
+    CHECK(r.paths.back() == "C:dixr");
+}
+
+void enter_in_the_middle_moves_the_cursor_to_the_end_first() {
+    Recorder r;
+    Shell shell;
+    shell.init(make_host(r));
+    type_text(shell, "ab");
+    shell.cursor_left();
+    r.calls.clear();
+    shell.key('\n');
+    CHECK(r.calls.size() >= 2u);
+    CHECK(r.calls[0] == "scroll_to_bottom" || r.calls[0] == "back:0");
+    bool back_before_end = false;
+    for (const std::string& call : r.calls) {
+        if (call == "back:0") {
+            back_before_end = true;
+        }
+        if (call == "end_line") {
+            break;
+        }
+    }
+    CHECK(back_before_end);
+}
+
 int main() {
+left_then_typing_inserts();
+backspace_in_the_middle_removes_the_byte_before_the_cursor();
+cursor_stops_at_both_ends();
+recalled_line_is_edited_at_its_end();
+enter_in_the_middle_moves_the_cursor_to_the_end_first();
 up_recalls_earlier_lines();
 down_returns_to_the_typed_line();
 history_skips_blank_and_repeated_lines();

@@ -50,6 +50,7 @@ void Shell::init(const ShellHost& host) {
     host_ = host;
     length_ = 0;
     line_[0] = '\0';
+    cursor_ = 0;
     history_head_ = 0;
     history_count_ = 0;
     browse_ = 0;
@@ -96,6 +97,7 @@ void Shell::replace_line(const char* text, u32 length) {
         host_.echo(host_.ctx, static_cast<u8>(text[i]));
     }
     length_ = length;
+    cursor_ = length;
 }
 
 void Shell::stop_browsing() {
@@ -137,26 +139,91 @@ void Shell::key(u8 ch) {
     }
     if (ch == '\n') {
         to_bottom();
+        if (cursor_ != length_) {
+            cursor_ = length_;
+            show_cursor();
+        }
         enter();
+        cursor_ = 0;
     } else if (ch == '\b') {
         to_bottom();
-        if (length_ > 0) {
-            --length_;
+        if (cursor_ == 0) {
+            return;
+        }
+        const u32 tail = length_ - cursor_;
+        for (u32 i = 0; i <= tail; ++i) {
             host_.erase(host_.ctx);
+        }
+        for (u32 i = cursor_; i < length_; ++i) {
+            line_[i - 1] = line_[i];
+        }
+        --length_;
+        --cursor_;
+        for (u32 i = cursor_; i < length_; ++i) {
+            host_.echo(host_.ctx, static_cast<u8>(line_[i]));
+        }
+        if (tail != 0) {
+            show_cursor();
         }
     } else if (ch == '\t') {
         to_bottom();
-        const u32 spaces = kTabColumns - length_ % kTabColumns;
-        for (u32 i = 0; i < spaces && length_ < kMaxLine; ++i) {
-            line_[length_++] = ' ';
-            host_.echo(host_.ctx, ' ');
-        }
+        constexpr char kSpaces[kTabColumns] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
+        insert(kSpaces, kTabColumns - cursor_ % kTabColumns);
     } else if (is_printable(ch)) {
         to_bottom();
-        if (length_ < kMaxLine) {
-            line_[length_++] = static_cast<char>(ch);
-            host_.echo(host_.ctx, ch);
-        }
+        const char c = static_cast<char>(ch);
+        insert(&c, 1);
+    }
+}
+
+void Shell::cursor_left() {
+    if (host_.cursor_back == nullptr || cursor_ == 0) {
+        return;
+    }
+    --cursor_;
+    show_cursor();
+}
+
+void Shell::cursor_right() {
+    if (host_.cursor_back == nullptr || cursor_ == length_) {
+        return;
+    }
+    ++cursor_;
+    show_cursor();
+}
+
+// Inserts count bytes at the cursor, as many as fit, and redraws the rest
+// of the line after them.
+void Shell::insert(const char* text, u32 count) {
+    if (count > kMaxLine - length_) {
+        count = kMaxLine - length_;
+    }
+    if (count == 0) {
+        return;
+    }
+    const u32 tail = length_ - cursor_;
+    for (u32 i = 0; i < tail; ++i) {
+        host_.erase(host_.ctx);
+    }
+    for (u32 i = length_; i-- > cursor_;) {
+        line_[i + count] = line_[i];
+    }
+    for (u32 i = 0; i < count; ++i) {
+        line_[cursor_ + i] = text[i];
+    }
+    length_ += count;
+    for (u32 i = cursor_; i < length_; ++i) {
+        host_.echo(host_.ctx, static_cast<u8>(line_[i]));
+    }
+    cursor_ += count;
+    if (tail != 0) {
+        show_cursor();
+    }
+}
+
+void Shell::show_cursor() {
+    if (host_.cursor_back != nullptr) {
+        host_.cursor_back(host_.ctx, length_ - cursor_);
     }
 }
 
