@@ -23,8 +23,10 @@
 
 #include "../common/boot_info.hpp"
 #include "../common/serial.hpp"
+#include "apic.hpp"
 #include "boot_disk.hpp"
 #include "boot_framebuffer.hpp"
+#include "clock.hpp"
 #include "framebuffer.hpp"
 #include "gdt.hpp"
 #include "idt.hpp"
@@ -186,6 +188,11 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write("no framebuffer\n");
     }
     if (mem_init(*info, phys_pages, mmio)) {
+        pic_mask_all();
+        clock_init();
+        if (apic_init(mmio)) {
+            irq_enable();
+        }
         boot_disk_run(*info, phys_pages, mmio);
     }
     serial::write("halting\n");

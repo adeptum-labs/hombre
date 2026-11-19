@@ -24,6 +24,7 @@
 #include "clock.hpp"
 
 #include "../common/port_io.hpp"
+#include "apic.hpp"
 
 namespace hombre {
 
@@ -97,21 +98,28 @@ bool calibrate_once(u64& khz) {
 }
 
 bool clock_init() {
+    if (tsc_khz != 0) {
+        return true;
+    }
+    const u64 flags = irq_save();
+    bool ok = false;
     u64 khz = 0;
     // Each reading overshoots by up to one poll, so the lower one is closer.
     for (u32 attempt = 0; attempt < 2; ++attempt) {
         u64 reading = 0;
         if (!calibrate_once(reading)) {
+            irq_restore(flags);
             return false;
         }
         khz = (attempt == 0 || reading < khz) ? reading : khz;
     }
-    if (khz < kMinKhz || khz > kMaxKhz) {
-        return false;
+    if (khz >= kMinKhz && khz <= kMaxKhz) {
+        tsc_khz = khz;
+        tsc_start = rdtsc();
+        ok = true;
     }
-    tsc_khz = khz;
-    tsc_start = rdtsc();
-    return true;
+    irq_restore(flags);
+    return ok;
 }
 
 u64 clock_us() {

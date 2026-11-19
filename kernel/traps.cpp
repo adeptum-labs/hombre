@@ -24,6 +24,7 @@
 #include "idt.hpp"
 
 #include "../common/serial.hpp"
+#include "apic.hpp"
 #include "descriptors.hpp"
 #include "gdt.hpp"
 #include "trap_frame.hpp"
@@ -240,6 +241,13 @@ void write_heading(u64 vector) {
 }
 
 extern "C" void trap_dispatch(TrapFrame* frame) {
+    if (frame->vector == kApicTimerVector) {
+        apic_handle_timer_irq();
+        return;
+    }
+    if (frame->vector == kApicSpuriousVector) {
+        return;
+    }
     if (frame->vector != vector_breakpoint) {
         dump_and_halt(*frame);
     }

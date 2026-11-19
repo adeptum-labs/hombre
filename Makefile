@@ -177,6 +177,7 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	tools/boot_check.sh --disk $(TEST_DISK) "Hombre loader" \
 	    "kernel loaded: entry=0xffffffff8010" "Hombre kernel booted" "usable memory:" \
 	    "gdt loaded" "idt loaded" "breakpoint ok" "lower half unmapped" "cpu0 percpu ok" \
+	    "apic: timer 1000 Hz" \
 	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" \
 	    "disk: DMS SIMPLE, 80 tracks" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
 	    "S:Startup-Sequence:" "  Hombre test startup" "usb: no controller" \

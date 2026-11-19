@@ -42,6 +42,7 @@
 #include "../common/shell_commands.hpp"
 #include "../common/shell_window.hpp"
 #include "amiga_display.hpp"
+#include "apic.hpp"
 #include "boot_framebuffer.hpp"
 #include "clock.hpp"
 #include "code_region.hpp"
@@ -444,7 +445,7 @@ void poll_keys_while_running() {
 bool poll_input_while_running() {
     poll_mouse();
     poll_keys_while_running();
-    asm volatile("pause");
+    idle_wait();
     // Without a keyboard nothing could stop a blocked program: let the run end.
     return usb_keyboard_status() == UsbStatus::Ready;
 }
@@ -510,7 +511,8 @@ bool console_ready(void*, u32 timeout_us) {
     if (usb_keyboard_status() != UsbStatus::Ready) {
         return false;
     }
-    poll_input_while_running();
+    poll_mouse();
+    poll_keys_while_running();
     if (key_queue_count > 0) {
         return true;
     }
@@ -751,7 +753,7 @@ bool typed_run(void*, const char* path, const char* args) {
                 handle_decoded_byte(chars[i], &line_editor);
             }
         }
-        asm volatile("pause");
+        idle_wait();
     }
     shell.print_line(usb_keyboard_result().message);
     for (;;) {
