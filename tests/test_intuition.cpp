@@ -37,6 +37,44 @@ using gfx_test::GfxRig;
 using gfx_test::kData;
 using gfx_test::logged;
 
+namespace hombre {
+
+// The requester state EasyRequestArgs keeps is not part of its public API;
+// the tests read it to aim the pointer and to count the buttons.
+struct IntuitionTest {
+    static u32 button_count(const Intuition& g, u32 window) {
+        const Intuition::Requester* req = g.find_requester(window);
+        return req != nullptr ? req->button_count : 0;
+    }
+
+    static Rect button(const Intuition& g, u32 window, u32 index) {
+        const Intuition::Requester* req = g.find_requester(window);
+        if (req == nullptr || index >= req->button_count) {
+            return Rect{0, 0, -1, -1};
+        }
+        return req->buttons[index];
+    }
+
+    static std::string label(const Intuition& g, u32 window, u32 index) {
+        const Intuition::Requester* req = g.find_requester(window);
+        if (req == nullptr || index >= req->button_count) {
+            return std::string();
+        }
+        return std::string(req->labels[index], req->label_length[index]);
+    }
+
+    static u32 requester_window(const Intuition& g) {
+        for (const Intuition::Requester& req : g.requesters_) {
+            if (req.window != 0) {
+                return req.window;
+            }
+        }
+        return 0;
+    }
+};
+
+}
+
 namespace {
 
 constexpr u32 kNewScreen = kData;
@@ -77,6 +115,17 @@ constexpr u32 kTextSub0 = kData + 0xFC0;
 constexpr u32 kTextSub1 = kData + 0xFE0;
 constexpr u32 kMenuFile = kData + 0x1080;
 constexpr u32 kMenuEdit = kData + 0x10A0;
+constexpr u32 kEasy = kData + 0x2000;
+constexpr u32 kEasyTitle = kData + 0x2040;
+constexpr u32 kEasyText = kData + 0x2080;
+constexpr u32 kEasyGadgets = kData + 0x20C0;
+constexpr u32 kEasyArgs = kData + 0x2100;
+constexpr u32 kEasyArg0 = kData + 0x2140;
+constexpr u32 kEasyArg1 = kData + 0x2180;
+constexpr u32 kEasyArg2 = kData + 0x21C0;
+constexpr u32 kIdcmpOut = kData + 0x2200;
+constexpr u32 kEasyMessage = kData + 0x2240;
+constexpr u32 kEasyTask = kData + 0x2280;
 
 // struct Menu, struct MenuItem and struct IntuiText
 constexpr u32 mu_NextMenu = 0;
@@ -5349,6 +5398,355 @@ void draw_image_complemented_inverts_every_pen_of_the_image_box() {
 
 }
 
+namespace {
+
+void put_easy(GfxRig& r, u32 at, u32 flags, u32 title, u32 text, u32 gadgets) {
+    r.put32(at + es_StructSize, EasyStruct_SIZEOF);
+    r.put32(at + es_Flags, flags);
+    r.put32(at + es_Title, title);
+    r.put32(at + es_TextFormat, text);
+    r.put32(at + es_GadgetFormat, gadgets);
+}
+
+u32 build_requester(GfxRig& r, u32 window, u32 easy, u32 idcmp, u32 args) {
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = easy;
+    r.cpu().d[0] = idcmp;
+    r.cpu().a[3] = args;
+    return r.result(Base::Intuition, intuition_lvo::BuildEasyRequestArgs);
+}
+
+i32 handle_requester(GfxRig& r, u32 window, u32 idcmp_ptr, bool wait) {
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = idcmp_ptr;
+    r.cpu().d[0] = wait ? 1 : 0;
+    return static_cast<i32>(r.result(Base::Intuition, intuition_lvo::SysReqHandler));
+}
+
+void free_requester(GfxRig& r, u32 window) {
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::FreeSysRequest), ExitReason::Halt);
+}
+
+i32 easy_request(GfxRig& r, u32 window, u32 easy, u32 idcmp_ptr, u32 args) {
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = easy;
+    r.cpu().a[2] = idcmp_ptr;
+    r.cpu().a[3] = args;
+    return static_cast<i32>(r.result(Base::Intuition, intuition_lvo::EasyRequestArgs));
+}
+
+void click_requester_button(GfxRig& r, u32 window, u32 index) {
+    const Rect box = IntuitionTest::button(r.intuition, window, index);
+    CHECK(box.x1 >= box.x0 && box.y1 >= box.y0);
+    const i32 left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 top = static_cast<i16>(r.get16(window + wd_TopEdge));
+    const i32 x = left + (box.x0 + box.x1) / 2;
+    const i32 y = top + (box.y0 + box.y1) / 2;
+    press(r, x, y);
+    release(r, x, y);
+}
+
+std::vector<u32> requester_button_pixels(GfxRig& r, u32 window, u32 index) {
+    const Rect box = IntuitionTest::button(r.intuition, window, index);
+    std::vector<u32> pixels;
+    for (i32 y = box.y0; y <= box.y1; ++y) {
+        for (i32 x = box.x0; x <= box.x1; ++x) {
+            pixels.push_back(window_pixel(r, window, x, y));
+        }
+    }
+    return pixels;
+}
+
+u32 open_requester_screen(GfxRig& r) {
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    return screen;
+}
+
+void requester_builds_on_the_default_screen_with_its_title_and_buttons() {
+    GfxRig r;
+    const u32 screen = open_requester_screen(r);
+    r.str(kEasyTitle, "Q");
+    r.str(kEasyText, "first line\nsecond line");
+    r.str(kEasyGadgets, "Yes|Maybe|No");
+    put_easy(r, kEasy, 0, kEasyTitle, kEasyText, kEasyGadgets);
+    const u32 window = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_WScreen), screen);
+    CHECK(r.read_str(r.get32(window + wd_Title)) == "Q");
+    CHECK(r.get32(window + wd_Title) != kEasyTitle);
+    CHECK_EQ(IntuitionTest::button_count(r.intuition, window), 3u);
+    CHECK(IntuitionTest::label(r.intuition, window, 0) == "Yes");
+    CHECK(IntuitionTest::label(r.intuition, window, 1) == "Maybe");
+    CHECK(IntuitionTest::label(r.intuition, window, 2) == "No");
+    CHECK_EQ(r.get32(window + wd_Flags),
+             static_cast<u32>(WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_ACTIVATE | WFLG_RMBTRAP));
+    CHECK_EQ(r.get32(window + wd_IDCMPFlags), static_cast<u32>(IDCMP_MOUSEBUTTONS));
+    const i32 left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 top = static_cast<i16>(r.get16(window + wd_TopEdge));
+    const i32 width = static_cast<i32>(r.get16(window + wd_Width));
+    const i32 height = static_cast<i32>(r.get16(window + wd_Height));
+    CHECK_EQ(left, (640 - width) / 2);
+    CHECK_EQ(top, (400 - height) / 2);
+    CHECK(logged("intuition: requester Q opened"));
+
+    free_requester(r, window);
+    CHECK(!r.intuition.window_open(window));
+    CHECK_EQ(IntuitionTest::button_count(r.intuition, window), 0u);
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
+}
+
+void requester_handler_without_input_returns_minus_two() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyText, "body");
+    r.str(kEasyGadgets, "Ok");
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+    const u32 window = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(window != 0);
+    CHECK_EQ(handle_requester(r, window, 0, false), -2);
+    free_requester(r, window);
+}
+
+void requester_buttons_answer_with_their_numbers() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyText, "one line");
+    r.str(kEasyGadgets, "Yes|Maybe|No");
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+    const u32 window = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(window != 0);
+
+    const i32 expected[3] = {1, 2, 0};
+    for (u32 i = 0; i < 3; ++i) {
+        click_requester_button(r, window, i);
+        CHECK_EQ(handle_requester(r, window, 0, false), expected[i]);
+    }
+    free_requester(r, window);
+
+    // One button is the rightmost and answers 0.
+    r.str(kEasyGadgets, "Ok");
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+    const u32 single = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(single != 0);
+    click_requester_button(r, single, 0);
+    CHECK_EQ(handle_requester(r, single, 0, false), 0);
+    free_requester(r, single);
+}
+
+void requester_release_outside_raises_the_button_again() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyText, "body");
+    r.str(kEasyGadgets, "Ok");
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+    const u32 window = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(window != 0);
+    const std::vector<u32> raised = requester_button_pixels(r, window, 0);
+    const Rect box = IntuitionTest::button(r.intuition, window, 0);
+    const i32 left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 top = static_cast<i16>(r.get16(window + wd_TopEdge));
+    press(r, left + (box.x0 + box.x1) / 2, top + (box.y0 + box.y1) / 2);
+    CHECK_EQ(handle_requester(r, window, 0, false), -2);
+    CHECK(requester_button_pixels(r, window, 0) != raised);
+
+    release(r, 1, 1);
+    CHECK_EQ(handle_requester(r, window, 0, false), -2);
+    CHECK(requester_button_pixels(r, window, 0) == raised);
+    free_requester(r, window);
+}
+
+void requester_caller_idcmp_class_returns_minus_one() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyTitle, "Keys");
+    r.str(kEasyText, "press a key");
+    r.str(kEasyGadgets, "Cancel");
+    put_easy(r, kEasy, 0, kEasyTitle, kEasyText, kEasyGadgets);
+    const u32 window = build_requester(r, 0, kEasy, IDCMP_RAWKEY, 0);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    CHECK(port != 0);
+    r.put32(kEasyMessage + mn_ReplyPort, 0);
+    r.put32(kEasyMessage + im_Class, IDCMP_RAWKEY);
+    r.put16(kEasyMessage + im_Code, 0x20);
+    r.put16(kEasyMessage + im_MouseX, 0);
+    r.put16(kEasyMessage + im_MouseY, 0);
+    CHECK(r.exec.post_message(port, kEasyMessage));
+
+    CHECK_EQ(handle_requester(r, window, kIdcmpOut, false), -1);
+    CHECK_EQ(r.get32(kIdcmpOut), static_cast<u32>(IDCMP_RAWKEY));
+    CHECK_EQ(r.exec.get_message(port), 0u);
+    CHECK_EQ(r.get8(kEasyMessage + LN_TYPE), static_cast<u32>(NT_FREEMSG));
+    free_requester(r, window);
+}
+
+void requester_title_falls_back_to_the_window_then_the_system() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.str(kWinTitle, "Ref");
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, kWinTitle, 0, 0);
+    const u32 reference = open_win(r, kNewWindow);
+    CHECK(reference != 0);
+    r.str(kEasyText, "body");
+    r.str(kEasyGadgets, "Ok");
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+
+    u32 window = build_requester(r, reference, kEasy, 0, 0);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_WScreen), screen);
+    CHECK(r.read_str(r.get32(window + wd_Title)) == "Ref");
+    free_requester(r, window);
+
+    r.intuition.set_default_screen(screen);
+    window = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(window != 0);
+    CHECK(r.read_str(r.get32(window + wd_Title)) == "System Request");
+    free_requester(r, window);
+}
+
+void requester_formats_text_then_gadgets_from_one_stream() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyText, "%s has %ld");
+    r.str(kEasyGadgets, "%s|Cancel");
+    r.str(kEasyArg0, "Adam");
+    r.str(kEasyArg2, "Save");
+    r.put32(kEasyArgs, kEasyArg0);
+    r.put32(kEasyArgs + 4, 42);
+    r.put32(kEasyArgs + 8, kEasyArg2);
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+    const u32 window = build_requester(r, 0, kEasy, 0, kEasyArgs);
+    CHECK(window != 0);
+    CHECK_EQ(IntuitionTest::button_count(r.intuition, window), 2u);
+    CHECK(IntuitionTest::label(r.intuition, window, 0) == "Save");
+    CHECK(IntuitionTest::label(r.intuition, window, 1) == "Cancel");
+    free_requester(r, window);
+}
+
+void free_sys_request_ignores_zero_and_one() {
+    GfxRig r;
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::FreeSysRequest), ExitReason::Halt);
+    r.cpu().a[0] = 1;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::FreeSysRequest), ExitReason::Halt);
+}
+
+u64 requester_clock(void*) { return 0; }
+
+struct RequesterClick {
+    GfxRig* rig;
+    bool clicked = false;
+};
+
+bool click_the_requester(void* ctx) {
+    RequesterClick& click = *static_cast<RequesterClick*>(ctx);
+    if (click.clicked) {
+        return true;
+    }
+    const u32 window = IntuitionTest::requester_window(click.rig->intuition);
+    if (window == 0) {
+        return true;
+    }
+    const Rect box = IntuitionTest::button(click.rig->intuition, window, 0);
+    if (box.x1 < box.x0) {
+        return false;
+    }
+    const i32 left = static_cast<i16>(click.rig->get16(window + wd_LeftEdge));
+    const i32 top = static_cast<i16>(click.rig->get16(window + wd_TopEdge));
+    const i32 x = left + (box.x0 + box.x1) / 2;
+    const i32 y = top + (box.y0 + box.y1) / 2;
+    click.rig->intuition.pointer_event(x, y, kMouseLeft, kMouseLeft, 0, false);
+    click.rig->intuition.pointer_event(x, y, 0, 0, kMouseLeft, false);
+    click.clicked = true;
+    return true;
+}
+
+void requester_memory_comes_back_after_easy_request() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyTitle, "Easy");
+    r.str(kEasyText, "Hi");
+    r.str(kEasyGadgets, "Ok");
+    put_easy(r, kEasy, 0, kEasyTitle, kEasyText, kEasyGadgets);
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        r.put8(kEasyTask + i, 0);
+    }
+    r.put8(kEasyTask + LN_TYPE, NT_TASK);
+    r.put32(kEasyTask + TC_SIGALLOC, 0x0000FFFF);
+    r.exec.set_this_task(kEasyTask);
+    TaskHost host{};
+    host.now_us = requester_clock;
+    r.exec.set_task_host(host);
+    RequesterClick click{&r};
+    r.exec.set_idle_hook(IdleHook{click_the_requester, &click});
+
+    r.cpu().d[0] = 0;
+    const u32 before = avail_mem(r);
+    CHECK_EQ(easy_request(r, 0, kEasy, 0, 0), 0);
+    r.cpu().d[0] = 0;
+    CHECK_EQ(avail_mem(r), before);
+    CHECK(click.clicked);
+    CHECK_EQ(IntuitionTest::requester_window(r.intuition), 0u);
+}
+
+struct RequesterKey {
+    GfxRig* rig;
+    bool posted = false;
+};
+
+bool press_a_key_at_the_requester(void* ctx) {
+    RequesterKey& key = *static_cast<RequesterKey*>(ctx);
+    if (key.posted) {
+        return true;
+    }
+    const u32 window = IntuitionTest::requester_window(key.rig->intuition);
+    if (window == 0) {
+        return true;
+    }
+    const u32 port = key.rig->get32(window + wd_UserPort);
+    key.rig->put32(kEasyMessage + mn_ReplyPort, 0);
+    key.rig->put32(kEasyMessage + im_Class, IDCMP_RAWKEY);
+    key.rig->put16(kEasyMessage + im_Code, 0x20);
+    key.posted = key.rig->exec.post_message(port, kEasyMessage);
+    return true;
+}
+
+// EasyRequestArgs ends on the IDCMP classes *IDCMP_ptr holds on entry and
+// writes the class that ended it back there; es_Flags plays no part.
+void easy_request_ends_on_the_classes_its_idcmp_pointer_holds() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyTitle, "Keys");
+    r.str(kEasyText, "press a key");
+    r.str(kEasyGadgets, "Cancel");
+    put_easy(r, kEasy, 0, kEasyTitle, kEasyText, kEasyGadgets);
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        r.put8(kEasyTask + i, 0);
+    }
+    r.put8(kEasyTask + LN_TYPE, NT_TASK);
+    r.put32(kEasyTask + TC_SIGALLOC, 0x0000FFFF);
+    r.exec.set_this_task(kEasyTask);
+    TaskHost host{};
+    host.now_us = requester_clock;
+    r.exec.set_task_host(host);
+    RequesterKey key{&r};
+    r.exec.set_idle_hook(IdleHook{press_a_key_at_the_requester, &key});
+
+    r.put32(kIdcmpOut, IDCMP_RAWKEY);
+    CHECK_EQ(easy_request(r, 0, kEasy, kIdcmpOut, 0), -1);
+    CHECK(key.posted);
+    CHECK_EQ(r.get32(kIdcmpOut), static_cast<u32>(IDCMP_RAWKEY));
+    CHECK_EQ(IntuitionTest::requester_window(r.intuition), 0u);
+}
+
+}
+
 int main() {
     screen_font_is_a_textattr_naming_topaz();
     open_screen_builds_struct_bitmap_and_colormap();
@@ -5502,5 +5900,15 @@ int main() {
     draw_image_leaves_out_what_it_cannot_draw();
     draw_image_complemented_inverts_every_pen_of_the_image_box();
     draw_image_clips_at_the_window_edge();
+    requester_builds_on_the_default_screen_with_its_title_and_buttons();
+    requester_handler_without_input_returns_minus_two();
+    requester_buttons_answer_with_their_numbers();
+    requester_release_outside_raises_the_button_again();
+    requester_caller_idcmp_class_returns_minus_one();
+    requester_title_falls_back_to_the_window_then_the_system();
+    requester_formats_text_then_gadgets_from_one_stream();
+    free_sys_request_ignores_zero_and_one();
+    requester_memory_comes_back_after_easy_request();
+    easy_request_ends_on_the_classes_its_idcmp_pointer_holds();
     return check::finish("test_intuition");
 }

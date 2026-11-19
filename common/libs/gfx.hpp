@@ -211,6 +211,15 @@ constexpr u32 wd_MoreFlags = 132;
 constexpr u32 Window_SIZEOF = 136;
 static_assert(Window_SIZEOF == 136);
 
+// struct EasyStruct
+constexpr u32 es_StructSize = 0;
+constexpr u32 es_Flags = 4;
+constexpr u32 es_Title = 8;
+constexpr u32 es_TextFormat = 12;
+constexpr u32 es_GadgetFormat = 16;
+constexpr u32 EasyStruct_SIZEOF = 20;
+static_assert(EasyStruct_SIZEOF == 20);
+
 // struct NewWindow
 constexpr u32 nw_LeftEdge = 0;
 constexpr u32 nw_TopEdge = 2;
@@ -315,6 +324,7 @@ constexpr u32 WFLG_BACKDROP = 0x100;
 constexpr u32 WFLG_REPORTMOUSE = 0x200;
 constexpr u32 WFLG_BORDERLESS = 0x800;
 constexpr u32 WFLG_ACTIVATE = 0x1000;
+constexpr u32 WFLG_RMBTRAP = 0x10000;
 
 // Gadget flags, activation, types and PropInfo constants
 constexpr u32 GFLG_RELBOTTOM = 0x8;

@@ -202,6 +202,136 @@ u32 copy_title(Bus& b, Exec& exec, u32 src, u32& bytes) {
     return at;
 }
 
+constexpr char kSystemRequestTitle[] = "System Request";
+
+// Formats the guest format string at format, taking the arguments from the
+// stream at data, into out: at most capacity - 1 characters, NUL included.
+// A null format gives an empty string.
+bool format_requester_text(Bus& b, u32 format, u32& data, char* out, u32 capacity) {
+    out[0] = '\0';
+    if (format == 0) {
+        return true;
+    }
+    struct Sink {
+        char* out;
+        u32 capacity;
+        u32 length = 0;
+
+        bool put(u32 c) {
+            if (length + 1 >= capacity) {
+                return false;
+            }
+            out[length++] = static_cast<char>(c);
+            return true;
+        }
+    } sink{out, capacity};
+    native::raw_format(b, format, data, sink);
+    out[sink.length] = '\0';
+    return b.ok();
+}
+
+struct RequesterLine {
+    const char* text;
+    u32 length;
+};
+
+u32 split_requester_lines(const char* text, RequesterLine* lines, u32 max) {
+    u32 count = 0;
+    const char* at = text;
+    for (;;) {
+        const char* end = at;
+        while (*end != '\0' && *end != '\n') {
+            ++end;
+        }
+        if (count < max) {
+            lines[count++] = RequesterLine{at, static_cast<u32>(end - at)};
+        }
+        if (*end == '\0') {
+            return count;
+        }
+        at = end + 1;
+    }
+}
+
+constexpr i32 smaller(i32 a, i32 b) { return a < b ? a : b; }
+
+constexpr i32 larger(i32 a, i32 b) { return a > b ? a : b; }
+
+// The pens of a requester on screens of eight planes, and the classic
+// white, black and grey of the shallower ones.
+struct RequesterPens {
+    u8 light;
+    u8 dark;
+    u8 paper;
+    u8 text;
+};
+
+RequesterPens requester_pens(u32 depth) {
+    if (depth >= 8) {
+        return RequesterPens{chrome::kFrameLight, chrome::kFrameDark, chrome::kInactiveBar0,
+                             chrome::kFrameDark};
+    }
+    return RequesterPens{2, 1, 2, 1};
+}
+
+// A bevel of two pixels around the paper: the top and left edges in the
+// light pen and the bottom and right in the dark, or the other way round
+// for a recessed box.
+void draw_requester_box(Graphics& graphics, u32 rp, const Rect& box, const RequesterPens& pens,
+                        bool recessed) {
+    if (box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
+    graphics.set_pens(rp, pens.paper, 0, ndk::JAM2);
+    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+    const u8 top = recessed ? pens.dark : pens.light;
+    const u8 bottom = recessed ? pens.light : pens.dark;
+    for (i32 inset = 0; inset < 2; ++inset) {
+        const i32 x0 = box.x0 + inset;
+        const i32 y0 = box.y0 + inset;
+        const i32 x1 = box.x1 - inset;
+        const i32 y1 = box.y1 - inset;
+        if (x0 > x1 || y0 > y1) {
+            break;
+        }
+        graphics.set_pens(rp, top, 0, ndk::JAM2);
+        graphics.rect_fill(rp, x0, y0, x1, y0);
+        graphics.rect_fill(rp, x0, y0, x0, y1);
+        graphics.set_pens(rp, bottom, 0, ndk::JAM2);
+        graphics.rect_fill(rp, x0, y1, x1, y1);
+        graphics.rect_fill(rp, x1, y0, x1, y1);
+    }
+}
+
+void draw_requester_text(Graphics& graphics, u32 rp, i32 x, i32 baseline, const char* text,
+                         u32 length, u32 room, u8 pen) {
+    if (length > room) {
+        length = room;
+    }
+    if (length == 0) {
+        return;
+    }
+    graphics.set_pens(rp, pen, 0, ndk::JAM1);
+    graphics.move(rp, x, baseline);
+    graphics.text(rp, reinterpret_cast<const u8*>(text), length);
+}
+
+void draw_requester_label(Graphics& graphics, u32 rp, const Rect& box, const char* text,
+                          u32 length, u8 pen) {
+    const i32 width = box.x1 - box.x0 + 1;
+    const i32 height = box.y1 - box.y0 + 1;
+    const i32 room = (width - 4) / 8;
+    if (room <= 0 || height < 8) {
+        return;
+    }
+    if (length > static_cast<u32>(room)) {
+        length = static_cast<u32>(room);
+    }
+    const i32 x = box.x0 + (width - static_cast<i32>(length) * 8) / 2;
+    const i32 baseline = box.y0 + (height - 8) / 2 + 6;
+    draw_requester_text(graphics, rp, x, baseline, text, length, static_cast<u32>(room), pen);
+}
+
 void refresh_full(DisplayState& display, Machine& m, u32 screen, u32 width, u32 height) {
     if (display.sink.refresh == nullptr) {
         return;
@@ -702,7 +832,6 @@ constexpr u32 kMiNextSelect = 32;
 constexpr u32 kItText = 12;
 constexpr u16 kMenuNull = 0xFFFF;
 constexpr u32 kIdcmpMenuPick = 0x00000100;
-constexpr u32 kWflgRmbTrap = 0x00010000;
 constexpr u32 kDriNewLook = 1;
 constexpr u32 kDriPenCount = 12;
 constexpr u16 kDefaultDriPens[kDriPenCount] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
@@ -943,6 +1072,26 @@ struct IntuitionNatives {
 
     static void close_window(void* ctx, Machine& m) { of(ctx).close_window(m.cpu.a[0]); }
 
+    static void free_sys_request(void* ctx, Machine& m) {
+        of(ctx).free_sys_request(m.cpu.a[0]);
+    }
+
+    static void easy_request_args(void* ctx, Machine& m) {
+        native::set_result(m, static_cast<u32>(of(ctx).easy_request(
+                                  m.cpu.a[0], m.cpu.a[1], m.cpu.a[2], m.cpu.a[3])));
+    }
+
+    static void build_easy_request_args(void* ctx, Machine& m) {
+        native::set_result(
+            m, of(ctx).build_easy_request(m.cpu.a[0], m.cpu.a[1], m.cpu.d[0], m.cpu.a[3]));
+    }
+
+    static void sys_req_handler(void* ctx, Machine& m) {
+        native::set_result(
+            m, static_cast<u32>(of(ctx).sys_req_handler(m.cpu.a[0], m.cpu.a[1],
+                                                        (m.cpu.d[0] & 0xFFFF) != 0)));
+    }
+
     static void modify_idcmp(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).modify_idcmp(m.cpu.a[0], m.cpu.d[0]) ? 1 : 0);
     }
@@ -1067,6 +1216,11 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::ItemAddress, IntuitionNatives::item_address, "ItemAddress"},
     {intuition_lvo::BeginRefresh, IntuitionNatives::begin_refresh, "BeginRefresh"},
     {intuition_lvo::EndRefresh, IntuitionNatives::end_refresh, "EndRefresh"},
+    {intuition_lvo::FreeSysRequest, IntuitionNatives::free_sys_request, "FreeSysRequest"},
+    {intuition_lvo::EasyRequestArgs, IntuitionNatives::easy_request_args, "EasyRequestArgs"},
+    {intuition_lvo::BuildEasyRequestArgs, IntuitionNatives::build_easy_request_args,
+     "BuildEasyRequestArgs"},
+    {intuition_lvo::SysReqHandler, IntuitionNatives::sys_req_handler, "SysReqHandler"},
     {intuition_lvo::GetScreenDrawInfo, IntuitionNatives::get_screen_draw_info,
      "GetScreenDrawInfo"},
     {intuition_lvo::FreeScreenDrawInfo, IntuitionNatives::free_screen_draw_info,
@@ -1149,6 +1303,9 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     }
     for (WindowRecord& rec : window_records_) {
         rec = WindowRecord{};
+    }
+    for (Requester& req : requesters_) {
+        req = Requester{};
     }
     for (GadgetHookEntry& entry : gadget_hooks_) {
         entry = GadgetHookEntry{};
@@ -2483,6 +2640,7 @@ void Intuition::close_window(u32 window) {
     if (index >= kMaxWindows) {
         return;
     }
+    drop_requester(window);
     if (menu_.active && menu_.window == window) {
         leave_menu_mode();
     }
@@ -2564,6 +2722,384 @@ void Intuition::close_window(u32 window) {
     if (srec != nullptr) {
         compose(screen, window_damage_rect(srec->depth, left, top, width, height, flags));
     }
+}
+
+Intuition::Requester* Intuition::find_requester(u32 window) {
+    if (window == 0) {
+        return nullptr;
+    }
+    for (Requester& req : requesters_) {
+        if (req.window == window) {
+            return &req;
+        }
+    }
+    return nullptr;
+}
+
+const Intuition::Requester* Intuition::find_requester(u32 window) const {
+    if (window == 0) {
+        return nullptr;
+    }
+    for (const Requester& req : requesters_) {
+        if (req.window == window) {
+            return &req;
+        }
+    }
+    return nullptr;
+}
+
+Intuition::Requester* Intuition::free_requester() {
+    for (Requester& req : requesters_) {
+        if (req.window == 0) {
+            return &req;
+        }
+    }
+    return nullptr;
+}
+
+void Intuition::drop_requester(u32 window) {
+    Requester* req = find_requester(window);
+    if (req != nullptr) {
+        *req = Requester{};
+    }
+}
+
+u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 args) {
+    if (machine_ == nullptr || exec_ == nullptr || graphics_ == nullptr) {
+        return 0;
+    }
+    Requester* slot = free_requester();
+    if (slot == nullptr) {
+        LogLine().text("intuition: requester limit reached").send();
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 easy_title = b.r32(easy_struct + ndk::es_Title);
+    const u32 text_format = b.r32(easy_struct + ndk::es_TextFormat);
+    const u32 gadget_format = b.r32(easy_struct + ndk::es_GadgetFormat);
+    if (!b.ok()) {
+        return 0;
+    }
+    u32 screen = 0;
+    if (window != 0 && window_open(window)) {
+        screen = b.r32(window + ndk::wd_WScreen);
+    }
+    if (screen == 0) {
+        screen = default_screen_ != 0 ? default_screen_ : front_;
+    }
+    if (screen == 0 || find_screen(screen) >= kMaxScreens) {
+        LogLine().text("intuition: requester without a screen").send();
+        return 0;
+    }
+    const i32 screen_w = static_cast<i32>(b.r16(screen + ndk::sc_Width));
+    const i32 screen_h = static_cast<i32>(b.r16(screen + ndk::sc_Height));
+    if (!b.ok() || screen_w <= 0 || screen_h <= 0) {
+        return 0;
+    }
+    if (gadget_format == 0) {
+        LogLine().text("intuition: requester without gadgets").send();
+        return 0;
+    }
+
+    char text[kMaxRequesterText];
+    char gadgets[kMaxRequesterGadgetText];
+    u32 stream = args;
+    if (!format_requester_text(b, text_format, stream, text, sizeof text) ||
+        !format_requester_text(b, gadget_format, stream, gadgets, sizeof gadgets)) {
+        return 0;
+    }
+
+    Requester req;
+    req.idcmp = idcmp;
+    bool too_many_buttons = false;
+    char* at = gadgets;
+    for (;;) {
+        char* end = at;
+        while (*end != '\0' && *end != '|') {
+            ++end;
+        }
+        if (req.button_count < kMaxRequesterButtons) {
+            u32 length = static_cast<u32>(end - at);
+            if (length >= kMaxRequesterLabel) {
+                length = kMaxRequesterLabel - 1;
+            }
+            for (u32 i = 0; i < length; ++i) {
+                req.labels[req.button_count][i] = at[i];
+            }
+            req.labels[req.button_count][length] = '\0';
+            req.label_length[req.button_count] = static_cast<u8>(length);
+            ++req.button_count;
+        } else {
+            too_many_buttons = true;
+        }
+        if (*end == '\0') {
+            break;
+        }
+        at = end + 1;
+    }
+    if (too_many_buttons) {
+        LogLine().text("intuition: requester has more than ").dec(kMaxRequesterButtons)
+            .text(" buttons").send();
+    }
+
+    RequesterLine lines[kMaxRequesterLines];
+    const u32 line_count = split_requester_lines(text, lines, kMaxRequesterLines);
+    u32 max_chars = 0;
+    for (u32 i = 0; i < line_count; ++i) {
+        max_chars = lines[i].length > max_chars ? lines[i].length : max_chars;
+    }
+    u32 widest = 0;
+    for (u32 i = 0; i < req.button_count; ++i) {
+        widest = req.label_length[i] > widest ? req.label_length[i] : widest;
+    }
+
+    const i32 button_w = static_cast<i32>(widest) * 8 + kRequesterButtonPad;
+    const i32 button_row_w =
+        req.button_count <= 1
+            ? button_w
+            : static_cast<i32>(req.button_count) * button_w +
+                  static_cast<i32>(req.button_count - 1) * kRequesterButtonGap;
+    const i32 text_box_w = static_cast<i32>(max_chars) * 8 + 2 * kRequesterTextPad;
+    const i32 text_box_h = static_cast<i32>(line_count) * 8 + 2 * kRequesterTextPad;
+    const i32 content_w = larger(text_box_w, button_row_w);
+    const i32 content_h = text_box_h + kRequesterGap + kRequesterButtonHeight;
+    i32 width = content_w + 2 * kRequesterMargin + static_cast<i32>(chrome::kBorderLeft) +
+                static_cast<i32>(chrome::kBorderRight);
+    i32 height = content_h + 2 * kRequesterMargin + static_cast<i32>(chrome::kBorderTop) +
+                 static_cast<i32>(chrome::kBorderBottom);
+    width = smaller(width, screen_w);
+    height = smaller(height, screen_h);
+    const i32 left = (screen_w - width) / 2;
+    const i32 top = (screen_h - height) / 2;
+
+    u32 title = easy_title;
+    if (title == 0 && window != 0 && window_open(window)) {
+        title = b.r32(window + ndk::wd_Title);
+    }
+    const bool literal_title = title == 0;
+    const u32 title_bytes = literal_title ? sizeof kSystemRequestTitle : 0;
+    const u32 new_window_bytes = ndk::NewWindow_SIZEOF + title_bytes;
+    const u32 new_window = exec_->alloc(new_window_bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (new_window == 0) {
+        LogLine().text("intuition: no memory for a requester").send();
+        return 0;
+    }
+    if (literal_title) {
+        title = new_window + ndk::NewWindow_SIZEOF;
+        for (u32 i = 0; i < sizeof kSystemRequestTitle; ++i) {
+            b.w8(title + i, static_cast<u8>(kSystemRequestTitle[i]));
+        }
+    }
+    b.w16(new_window + ndk::nw_LeftEdge, static_cast<u32>(left));
+    b.w16(new_window + ndk::nw_TopEdge, static_cast<u32>(top));
+    b.w16(new_window + ndk::nw_Width, static_cast<u32>(width));
+    b.w16(new_window + ndk::nw_Height, static_cast<u32>(height));
+    b.w8(new_window + ndk::nw_DetailPen, 0);
+    b.w8(new_window + ndk::nw_BlockPen, 1);
+    b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_MOUSEBUTTONS | idcmp);
+    b.w32(new_window + ndk::nw_Flags, ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET |
+                                          ndk::WFLG_ACTIVATE | ndk::WFLG_RMBTRAP);
+    b.w32(new_window + ndk::nw_Title, title);
+    b.w32(new_window + ndk::nw_Screen, screen);
+    b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
+    const u32 requester = b.ok() ? open_window(new_window, 0) : 0;
+    exec_->free(new_window, new_window_bytes);
+    if (!b.ok()) {
+        return 0;
+    }
+    if (requester == 0) {
+        LogLine().text("intuition: could not open the requester").send();
+        return 0;
+    }
+
+    const i32 req_w = static_cast<i32>(b.r16(requester + ndk::wd_Width));
+    const i32 req_h = static_cast<i32>(b.r16(requester + ndk::wd_Height));
+    const i32 inner_x0 = static_cast<i32>(chrome::kBorderLeft) + kRequesterMargin;
+    const i32 inner_x1 =
+        req_w - static_cast<i32>(chrome::kBorderRight) - 1 - kRequesterMargin;
+    const i32 inner_y0 = static_cast<i32>(chrome::kBorderTop) + kRequesterMargin;
+    const i32 inner_y1 =
+        req_h - static_cast<i32>(chrome::kBorderBottom) - 1 - kRequesterMargin;
+    const i32 button_y1 = inner_y1;
+    const i32 button_y0 = button_y1 - kRequesterButtonHeight + 1;
+    const i32 span = larger(0, inner_x1 - inner_x0 + 1);
+    const i32 last_x = larger(inner_x0, inner_x1 - button_w + 1);
+    for (u32 i = 0; i < req.button_count; ++i) {
+        i32 x = inner_x0;
+        if (req.button_count == 1) {
+            x = span > button_w ? inner_x0 + (span - button_w) / 2 : inner_x0;
+        } else {
+            x = inner_x0 + (last_x - inner_x0) * static_cast<i32>(i) /
+                               static_cast<i32>(req.button_count - 1);
+        }
+        req.buttons[i] = Rect{x, button_y0, x + button_w - 1, button_y1};
+    }
+    req.window = requester;
+    const Rect text_box{inner_x0, inner_y0,
+                        smaller(inner_x0 + text_box_w - 1, inner_x1),
+                        smaller(inner_y0 + text_box_h - 1, button_y0 - kRequesterGap - 1)};
+    *slot = req;
+
+    const u32 rp = b.r32(requester + ndk::wd_RPort);
+    if (b.ok() && rp != 0) {
+        const u32 depth = b.r8(b.r32(rp + ndk::rp_BitMap) + ndk::bm_Depth);
+        const RequesterPens pens = requester_pens(depth);
+        begin_batch();
+        if (text_box.x1 >= text_box.x0 && text_box.y1 >= text_box.y0) {
+            draw_requester_box(*graphics_, rp, text_box, pens, true);
+            const u32 room = static_cast<u32>(
+                larger(0, (text_box.x1 - text_box.x0 + 1 - 2 * kRequesterTextPad) / 8));
+            i32 baseline = text_box.y0 + kRequesterTextPad + 6;
+            for (u32 i = 0; i < line_count; ++i) {
+                if (baseline + 1 > text_box.y1) {
+                    break;
+                }
+                draw_requester_text(*graphics_, rp, text_box.x0 + kRequesterTextPad, baseline,
+                                    lines[i].text, lines[i].length, room, pens.text);
+                baseline += 8;
+            }
+        }
+        for (u32 i = 0; i < req.button_count; ++i) {
+            draw_requester_box(*graphics_, rp, req.buttons[i], pens, false);
+            draw_requester_label(*graphics_, rp, req.buttons[i], req.labels[i],
+                                 req.label_length[i], pens.text);
+        }
+        end_batch();
+    }
+
+    char name[41];
+    name[0] = '\0';
+    const u32 title_at = b.r32(requester + ndk::wd_Title);
+    for (u32 i = 0; title_at != 0 && i + 1 < sizeof name; ++i) {
+        const u32 c = b.r8(title_at + i);
+        name[i] = c >= 0x20 && c < 0x7F ? static_cast<char>(c) : '\0';
+        name[i + 1] = '\0';
+        if (c == 0 || !b.ok()) {
+            name[i] = '\0';
+            break;
+        }
+    }
+    LogLine().text("intuition: requester ").text(name).text(" opened").send();
+    return requester;
+}
+
+i32 Intuition::sys_req_handler(u32 window, u32 idcmp_ptr, bool wait) {
+    Requester* req = find_requester(window);
+    if (req == nullptr || machine_ == nullptr || exec_ == nullptr || graphics_ == nullptr) {
+        return -2;
+    }
+    Bus b(*machine_);
+    const u32 port = b.r32(window + ndk::wd_UserPort);
+    if (!b.ok() || port == 0) {
+        return -2;
+    }
+    for (;;) {
+        const u32 message = exec_->get_message(port);
+        if (message == 0) {
+            if (!wait) {
+                return -2;
+            }
+            const u32 bit = b.r8(port + ndk::mp_SigBit);
+            if (!b.ok() || bit >= 32) {
+                return -2;
+            }
+            if (exec_->wait_for(1u << bit, ~u64(0)) == 0) {
+                return -2;
+            }
+            continue;
+        }
+        const u32 idcmp_class = b.r32(message + ndk::im_Class);
+        const u32 code = b.r16(message + ndk::im_Code);
+        const i32 mouse_x = static_cast<i16>(b.r16(message + ndk::im_MouseX));
+        const i32 mouse_y = static_cast<i16>(b.r16(message + ndk::im_MouseY));
+        exec_->reply_message(message);
+        if (!b.ok()) {
+            return -2;
+        }
+        if (idcmp_class != ndk::IDCMP_MOUSEBUTTONS && (idcmp_class & req->idcmp) != 0) {
+            if (idcmp_ptr != 0) {
+                Bus out(*machine_);
+                out.w32(idcmp_ptr, idcmp_class);
+            }
+            return -1;
+        }
+        if (idcmp_class != ndk::IDCMP_MOUSEBUTTONS) {
+            continue;
+        }
+        i32 hit = -1;
+        for (u32 i = 0; i < req->button_count; ++i) {
+            const Rect& box = req->buttons[i];
+            if (mouse_x >= box.x0 && mouse_x <= box.x1 && mouse_y >= box.y0 &&
+                mouse_y <= box.y1) {
+                hit = static_cast<i32>(i);
+                break;
+            }
+        }
+        if (code == ndk::SELECTDOWN) {
+            if (req->pressed >= 0 && req->pressed != hit) {
+                draw_requester_button(window, *req, static_cast<u32>(req->pressed), false);
+            }
+            req->pressed = hit;
+            if (hit >= 0) {
+                draw_requester_button(window, *req, static_cast<u32>(hit), true);
+            }
+        } else if (code == ndk::SELECTUP && req->pressed >= 0) {
+            const u32 pressed = static_cast<u32>(req->pressed);
+            req->pressed = -1;
+            if (hit == static_cast<i32>(pressed)) {
+                return pressed + 1 == req->button_count ? 0 : static_cast<i32>(pressed + 1);
+            }
+            draw_requester_button(window, *req, pressed, false);
+        }
+    }
+}
+
+void Intuition::draw_requester_button(u32 window, const Requester& req, u32 index, bool pressed) {
+    if (index >= req.button_count || machine_ == nullptr || graphics_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 rp = b.r32(window + ndk::wd_RPort);
+    if (!b.ok() || rp == 0) {
+        return;
+    }
+    const u32 depth = b.r8(b.r32(rp + ndk::rp_BitMap) + ndk::bm_Depth);
+    if (!b.ok()) {
+        return;
+    }
+    const RequesterPens pens = requester_pens(depth);
+    begin_batch();
+    draw_requester_box(*graphics_, rp, req.buttons[index], pens, pressed);
+    draw_requester_label(*graphics_, rp, req.buttons[index], req.labels[index],
+                         req.label_length[index], pens.text);
+    end_batch();
+}
+
+void Intuition::free_sys_request(u32 window) {
+    if (window == 0 || window == 1 || find_requester(window) == nullptr) {
+        return;
+    }
+    close_window(window);
+}
+
+i32 Intuition::easy_request(u32 window, u32 easy_struct, u32 idcmp_ptr, u32 args) {
+    if (machine_ == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    // The classes that end the requester early come in through *idcmp_ptr,
+    // which also takes the class that ended it.
+    const u32 idcmp = idcmp_ptr != 0 ? b.r32(idcmp_ptr) : 0;
+    const u32 requester = b.ok() ? build_easy_request(window, easy_struct, idcmp, args) : 0;
+    if (requester == 0) {
+        return 0;
+    }
+    i32 result = -2;
+    while (result == -2 && machine_->cpu.exit == m68k::ExitReason::None) {
+        result = sys_req_handler(requester, idcmp_ptr, true);
+    }
+    free_sys_request(requester);
+    return result;
 }
 
 void Intuition::set_menu_strip(u32 window, u32 menu) {
@@ -2857,7 +3393,7 @@ bool Intuition::menu_strip_ready(Bus& b) const {
     if (rec == nullptr || rec->screen != front_) {
         return false;
     }
-    if ((b.r32(active_window_ + ndk::wd_Flags) & kWflgRmbTrap) != 0) {
+    if ((b.r32(active_window_ + ndk::wd_Flags) & ndk::WFLG_RMBTRAP) != 0) {
         return false;
     }
     return b.r32(active_window_ + kWdMenuStrip) != 0 && b.ok();

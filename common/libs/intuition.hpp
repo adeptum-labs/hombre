@@ -76,6 +76,7 @@ constexpr u32 WindowToBack = 306;
 constexpr u32 WindowToFront = 312;
 constexpr u32 BeginRefresh = 354;
 constexpr u32 EndRefresh = 366;
+constexpr u32 FreeSysRequest = 372;
 constexpr u32 LockIBase = 414;
 constexpr u32 UnlockIBase = 420;
 constexpr u32 GetScreenData = 426;
@@ -86,6 +87,9 @@ constexpr u32 NewModifyProp = 468;
 constexpr u32 LockPubScreen = 510;
 constexpr u32 UnlockPubScreen = 516;
 constexpr u32 GetDefaultPubScreen = 582;
+constexpr u32 EasyRequestArgs = 588;
+constexpr u32 BuildEasyRequestArgs = 594;
+constexpr u32 SysReqHandler = 600;
 constexpr u32 GetScreenDrawInfo = 690;
 constexpr u32 FreeScreenDrawInfo = 696;
 constexpr u32 ResetMenuStrip = 702;
@@ -135,6 +139,23 @@ public:
     // with a log.
     u32 open_window(u32 new_window, u32 tags);
     void close_window(u32 window);
+
+    // EasyRequestArgs, BuildEasyRequestArgs, SysReqHandler and
+    // FreeSysRequest for code that is not the guest's. The EasyStruct is at
+    // easy_struct, the argument stream the formats consume at args, and
+    // idcmp the caller's own IDCMP classes.
+    u32 build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 args);
+    // Answers the requester's input: a button's number, -1 for a message of
+    // one of the caller's classes, left in the ULONG at idcmp_ptr, or -2
+    // when there is no input and wait is false.
+    i32 sys_req_handler(u32 window, u32 idcmp_ptr, bool wait);
+    // Closes a window BuildEasyRequestArgs opened and drops its buttons;
+    // any other window is left alone.
+    void free_sys_request(u32 window);
+    // Builds the requester, answers it until a button or the caller's event
+    // ends it, and frees it.
+    i32 easy_request(u32 window, u32 easy_struct, u32 idcmp_ptr, u32 args);
+
     bool modify_idcmp(u32 window, u32 flags);
     void set_window_titles(u32 window, u32 title, u32 screen_title);
     void window_to_front(u32 window);
@@ -208,8 +229,22 @@ public:
 
 private:
     friend struct IntuitionNatives;
+    friend struct IntuitionTest;
 
     static constexpr u32 kVectors = intuition_lvo::Last / 6;
+
+    static constexpr u32 kMaxRequesters = 8;
+    static constexpr u32 kMaxRequesterButtons = 8;
+    static constexpr u32 kMaxRequesterLabel = 40;
+    static constexpr u32 kMaxRequesterText = 1024;
+    static constexpr u32 kMaxRequesterGadgetText = 256;
+    static constexpr u32 kMaxRequesterLines = 32;
+    static constexpr i32 kRequesterMargin = 8;
+    static constexpr i32 kRequesterTextPad = 8;
+    static constexpr i32 kRequesterGap = 8;
+    static constexpr i32 kRequesterButtonHeight = 14;
+    static constexpr i32 kRequesterButtonPad = 12;
+    static constexpr i32 kRequesterButtonGap = 8;
 
     // What a screen owns in guest memory, so that closing it never has to
     // believe a guest field.
@@ -281,6 +316,19 @@ private:
         bool newsize_pending = false;
         i32 newsize_w = 0;
         i32 newsize_h = 0;
+    };
+
+    // A requester window EasyRequestArgs built: the IDCMP classes that are
+    // the caller's rather than the requester's, where each button lies, its
+    // label kept for redrawing, and the button the pointer holds down.
+    struct Requester {
+        u32 window = 0;
+        u32 idcmp = 0;
+        u32 button_count = 0;
+        i32 pressed = -1;
+        Rect buttons[kMaxRequesterButtons]{};
+        char labels[kMaxRequesterButtons][kMaxRequesterLabel]{};
+        u8 label_length[kMaxRequesterButtons]{};
     };
 
     struct GadgetHookEntry {
@@ -371,6 +419,11 @@ private:
     void clear_window_gadget_hooks(u32 window);
     void log_unhandled_gadget_type(u32 gtype);
     u32 find_gadget_window(u32 gadget) const;
+    Requester* find_requester(u32 window);
+    const Requester* find_requester(u32 window) const;
+    Requester* free_requester();
+    void drop_requester(u32 window);
+    void draw_requester_button(u32 window, const Requester& req, u32 index, bool pressed);
 
     m68k::Machine* machine_ = nullptr;
     Exec* exec_ = nullptr;
@@ -403,6 +456,7 @@ private:
     u32 message_owners_[kMaxMessages]{};
     ScreenRecord screen_records_[kMaxScreens]{};
     WindowRecord window_records_[kMaxWindows]{};
+    Requester requesters_[kMaxRequesters]{};
     GadgetHookEntry gadget_hooks_[kMaxGadgetHooks]{};
     bool unhandled_gadget_types_[8]{};
     NativeVector vectors_[kVectors]{};
