@@ -75,8 +75,15 @@ public:
         u8 protocol = 0;
         u16 report_bytes = 0;
         xhci::ProducerRing ring{};
+        // kTransfers buffers of kBufferStride bytes, one per queued transfer,
+        // so reports keep arriving while the kernel is busy elsewhere.
+        static constexpr u32 kTransfers = 8;
+        static constexpr u32 kBufferStride = 64;
         u64 report_phys = 0;
         u8* report = nullptr;
+        // The buffer of the oldest queued transfer: one endpoint completes
+        // its transfers in order.
+        u32 next_buffer = 0;
         xhci::ReportQueue queue{};
         State state = State::Absent;
     };

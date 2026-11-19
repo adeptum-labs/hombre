@@ -501,9 +501,15 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
     hid->report = pages.to_ptr(report_phys);
     hid->report_phys = report_phys;
     hid->queue.clear();
-    if (!hid->ring.push(xhci::make_normal(report_phys, report_bytes))) {
-        error = kErrorDeviceMemory;
-        return Xhci::Scan::Failed;
+    hid->next_buffer = 0;
+    static_assert(Xhci::HidDevice::kTransfers * Xhci::HidDevice::kBufferStride <= kPageBytes);
+    static_assert(xhci::kMaxInterruptTransferBytes <= Xhci::HidDevice::kBufferStride);
+    for (u32 i = 0; i < Xhci::HidDevice::kTransfers; ++i) {
+        const u64 buffer = report_phys + i * Xhci::HidDevice::kBufferStride;
+        if (!hid->ring.push(xhci::make_normal(buffer, report_bytes))) {
+            error = kErrorDeviceMemory;
+            return Xhci::Scan::Failed;
+        }
     }
     hid->state = Xhci::HidDevice::State::Ready;
     return protocol == xhci::kKeyboardProtocol ? Xhci::Scan::Keyboard
@@ -943,9 +949,13 @@ void Xhci::pump_events() {
         if (length > xhci::ReportQueue::kMaxReport) {
             length = xhci::ReportQueue::kMaxReport;
         }
-        device->queue.push(device->report, length);
-        __builtin_memset(device->report, 0, device->report_bytes);
-        if (!device->ring.push(xhci::make_normal(device->report_phys, device->report_bytes))) {
+        const u32 offset = device->next_buffer * HidDevice::kBufferStride;
+        device->next_buffer = (device->next_buffer + 1) % HidDevice::kTransfers;
+        u8* const buffer = device->report + offset;
+        device->queue.push(buffer, length);
+        __builtin_memset(buffer, 0, device->report_bytes);
+        if (!device->ring.push(xhci::make_normal(device->report_phys + offset,
+                                                 device->report_bytes))) {
             device->state = HidDevice::State::Lost;
             continue;
         }
