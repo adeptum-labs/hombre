@@ -328,6 +328,119 @@ void outline_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n,
 
 }
 
+namespace {
+
+// --- regions -----------------------------------------------------------------
+
+// struct Region: its bounds and its list of RegionRectangles, whose bounds
+// are relative to the region's MinX/MinY.
+constexpr u32 rg_bounds = 0;
+constexpr u32 rg_RegionRectangle = 8;
+constexpr u32 Region_SIZEOF = 12;
+constexpr u32 rr_Next = 0;
+constexpr u32 rr_Prev = 4;
+constexpr u32 rr_bounds = 8;
+constexpr u32 RegionRectangle_SIZEOF = 16;
+
+// The most rectangles one region keeps; an operation that would need more
+// fails and leaves the region as it was.
+constexpr u32 kMaxRegionRects = 256;
+
+// A region's area as disjoint rectangles in absolute coordinates.
+struct RectSet {
+    Rect rects[kMaxRegionRects]{};
+    u32 count = 0;
+    bool overflow = false;
+
+    void add(const Rect& r) {
+        if (r.x1 < r.x0 || r.y1 < r.y0) {
+            return;
+        }
+        if (count == kMaxRegionRects) {
+            overflow = true;
+            return;
+        }
+        rects[count++] = r;
+    }
+};
+
+Rect read_rect(Bus& b, u32 at) {
+    return Rect{static_cast<i16>(b.r16(at)), static_cast<i16>(b.r16(at + 2)),
+                static_cast<i16>(b.r16(at + 4)), static_cast<i16>(b.r16(at + 6))};
+}
+
+void write_rect(Bus& b, u32 at, const Rect& r) {
+    b.w16(at, static_cast<u32>(r.x0));
+    b.w16(at + 2, static_cast<u32>(r.y0));
+    b.w16(at + 4, static_cast<u32>(r.x1));
+    b.w16(at + 6, static_cast<u32>(r.y1));
+}
+
+bool load_region(Bus& b, u32 region, RectSet& out) {
+    out.count = 0;
+    const Rect bounds = read_rect(b, region + rg_bounds);
+    u32 rr = b.r32(region + rg_RegionRectangle);
+    for (u32 i = 0; rr != 0 && i < kMaxRegionRects && b.ok(); ++i) {
+        const Rect r = read_rect(b, rr + rr_bounds);
+        out.add(Rect{r.x0 + bounds.x0, r.y0 + bounds.y0, r.x1 + bounds.x0, r.y1 + bounds.y0});
+        rr = b.r32(rr + rr_Next);
+    }
+    return b.ok();
+}
+
+Rect intersect(const Rect& a, const Rect& c) {
+    return Rect{a.x0 > c.x0 ? a.x0 : c.x0, a.y0 > c.y0 ? a.y0 : c.y0,
+                a.x1 < c.x1 ? a.x1 : c.x1, a.y1 < c.y1 ? a.y1 : c.y1};
+}
+
+// The parts of a outside cut, added to out.
+void subtract(const Rect& a, const Rect& cut, RectSet& out) {
+    const Rect c = intersect(a, cut);
+    if (c.x1 < c.x0 || c.y1 < c.y0) {
+        out.add(a);
+        return;
+    }
+    out.add(Rect{a.x0, a.y0, a.x1, c.y0 - 1});
+    out.add(Rect{a.x0, c.y1 + 1, a.x1, a.y1});
+    out.add(Rect{a.x0, c.y0, c.x0 - 1, c.y1});
+    out.add(Rect{c.x1 + 1, c.y0, a.x1, c.y1});
+}
+
+// The set minus r.
+void subtract_rect(RectSet& set, const Rect& r) {
+    static constinit RectSet scratch{};
+    scratch.count = 0;
+    scratch.overflow = false;
+    for (u32 i = 0; i < set.count; ++i) {
+        subtract(set.rects[i], r, scratch);
+    }
+    set.overflow |= scratch.overflow;
+    set.count = 0;
+    for (u32 i = 0; i < scratch.count; ++i) {
+        set.add(scratch.rects[i]);
+    }
+}
+
+// The set with r added, the rectangles kept disjoint.
+void add_rect(RectSet& set, const Rect& r) {
+    static constinit RectSet pieces{};
+    pieces.count = 0;
+    pieces.overflow = false;
+    pieces.add(r);
+    for (u32 i = 0; i < set.count; ++i) {
+        subtract_rect(pieces, set.rects[i]);
+    }
+    set.overflow |= pieces.overflow;
+    for (u32 i = 0; i < pieces.count; ++i) {
+        set.add(pieces.rects[i]);
+    }
+}
+
+}  // namespace
+
+namespace {
+}
+
 struct GraphicsNatives {
     static Graphics& of(void* ctx) { return *static_cast<Graphics*>(ctx); }
 
@@ -507,6 +620,183 @@ struct GraphicsNatives {
         }
     }
 
+
+
+    // --- regions -------------------------------------------------------------
+
+    // Frees the RegionRectangles of region and writes set as its new list
+    // and bounds. False, with the region unchanged, if memory runs out.
+    static bool store_region(Graphics& g, Bus& b, u32 region, const RectSet& set) {
+        if (set.overflow) {
+            return false;
+        }
+        Rect bounds{0, 0, -1, -1};
+        for (u32 i = 0; i < set.count; ++i) {
+            bounds = unite(bounds, set.rects[i]);
+        }
+        if (set.count == 0) {
+            bounds = Rect{0, 0, 0, 0};
+        }
+        u32 first = 0;
+        u32 prev = 0;
+        for (u32 i = 0; i < set.count; ++i) {
+            const u32 rr = g.exec_->alloc(RegionRectangle_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+            if (rr == 0) {
+                for (u32 at = first; at != 0;) {
+                    const u32 next = b.r32(at + rr_Next);
+                    g.exec_->free(at, RegionRectangle_SIZEOF);
+                    at = next;
+                }
+                return false;
+            }
+            const Rect& r = set.rects[i];
+            write_rect(b, rr + rr_bounds,
+                       Rect{r.x0 - bounds.x0, r.y0 - bounds.y0, r.x1 - bounds.x0, r.y1 - bounds.y0});
+            b.w32(rr + rr_Prev, prev);
+            if (prev != 0) {
+                b.w32(prev + rr_Next, rr);
+            } else {
+                first = rr;
+            }
+            prev = rr;
+        }
+        clear_rects(g, b, region);
+        write_rect(b, region + rg_bounds, bounds);
+        b.w32(region + rg_RegionRectangle, first);
+        return b.ok();
+    }
+
+    static void clear_rects(Graphics& g, Bus& b, u32 region) {
+        u32 rr = b.r32(region + rg_RegionRectangle);
+        for (u32 i = 0; rr != 0 && i < kMaxRegionRects && b.ok(); ++i) {
+            const u32 next = b.r32(rr + rr_Next);
+            g.exec_->free(rr, RegionRectangle_SIZEOF);
+            rr = next;
+        }
+        b.w32(region + rg_RegionRectangle, 0);
+    }
+
+    static Rect rect_arg(Bus& b, u32 at) { return read_rect(b, at); }
+
+    static void new_region(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).exec_->alloc(Region_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR));
+    }
+
+    static void dispose_region(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 region = m.cpu.a[0];
+        if (region == 0) {
+            return;
+        }
+        clear_rects(g, b, region);
+        g.exec_->free(region, Region_SIZEOF);
+    }
+
+    static void clear_region(void* ctx, Machine& m) {
+        Bus b(m);
+        const u32 region = m.cpu.a[0];
+        if (region == 0) {
+            return;
+        }
+        clear_rects(of(ctx), b, region);
+        write_rect(b, region + rg_bounds, Rect{0, 0, 0, 0});
+    }
+
+    // OrRectRegion, AndRectRegion, ClearRectRegion and XorRectRegion: a0
+    // region, a1 rectangle; TRUE unless memory runs out.
+    static void rect_op(void* ctx, Machine& m, int op) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 region = m.cpu.a[0];
+        if (region == 0 || m.cpu.a[1] == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const Rect r = rect_arg(b, m.cpu.a[1]);
+        static constinit RectSet set{};
+        set.overflow = false;
+        if (!load_region(b, region, set)) {
+            return;
+        }
+        switch (op) {
+        case 0:  // or
+            add_rect(set, r);
+            break;
+        case 1: {  // and
+            static constinit RectSet kept{};
+            kept.count = 0;
+            kept.overflow = false;
+            for (u32 i = 0; i < set.count; ++i) {
+                kept.add(intersect(set.rects[i], r));
+            }
+            set = kept;
+            break;
+        }
+        case 2:  // clear
+            subtract_rect(set, r);
+            break;
+        default: {  // xor: what one of them covers and not the other
+            static constinit RectSet outside{};
+            outside.count = 0;
+            outside.overflow = false;
+            outside.add(r);
+            for (u32 i = 0; i < set.count; ++i) {
+                subtract_rect(outside, set.rects[i]);
+            }
+            subtract_rect(set, r);
+            for (u32 i = 0; i < outside.count; ++i) {
+                set.add(outside.rects[i]);
+            }
+            set.overflow |= outside.overflow;
+            break;
+        }
+        }
+        native::set_result(m, store_region(g, b, region, set) ? 1 : 0);
+    }
+
+    static void or_rect_region(void* ctx, Machine& m) { rect_op(ctx, m, 0); }
+    static void and_rect_region(void* ctx, Machine& m) { rect_op(ctx, m, 1); }
+    static void clear_rect_region(void* ctx, Machine& m) { rect_op(ctx, m, 2); }
+    static void xor_rect_region(void* ctx, Machine& m) { rect_op(ctx, m, 3); }
+
+    // OrRegionRegion and AndRegionRegion: a0 source, a1 destination.
+    static void region_op(void* ctx, Machine& m, bool both) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 source = m.cpu.a[0];
+        const u32 dest = m.cpu.a[1];
+        if (source == 0 || dest == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        static constinit RectSet a{};
+        static constinit RectSet d{};
+        a.overflow = false;
+        d.overflow = false;
+        if (!load_region(b, source, a) || !load_region(b, dest, d)) {
+            return;
+        }
+        if (both) {
+            static constinit RectSet kept{};
+            kept.count = 0;
+            kept.overflow = false;
+            for (u32 i = 0; i < d.count; ++i) {
+                for (u32 j = 0; j < a.count; ++j) {
+                    kept.add(intersect(d.rects[i], a.rects[j]));
+                }
+            }
+            d = kept;
+        } else {
+            for (u32 j = 0; j < a.count; ++j) {
+                add_rect(d, a.rects[j]);
+            }
+        }
+        native::set_result(m, store_region(g, b, dest, d) ? 1 : 0);
+    }
+
+    static void or_region_region(void* ctx, Machine& m) { region_op(ctx, m, false); }
+    static void and_region_region(void* ctx, Machine& m) { region_op(ctx, m, true); }
 
     // --- area fill -----------------------------------------------------------
 
@@ -989,6 +1279,15 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::InitArea, GraphicsNatives::init_area, "InitArea"},
     {graphics_lvo::InitTmpRas, GraphicsNatives::init_tmp_ras, "InitTmpRas"},
     {graphics_lvo::WaitBlit, GraphicsNatives::wait_blit, "WaitBlit"},
+    {graphics_lvo::NewRegion, GraphicsNatives::new_region, "NewRegion"},
+    {graphics_lvo::DisposeRegion, GraphicsNatives::dispose_region, "DisposeRegion"},
+    {graphics_lvo::ClearRegion, GraphicsNatives::clear_region, "ClearRegion"},
+    {graphics_lvo::OrRectRegion, GraphicsNatives::or_rect_region, "OrRectRegion"},
+    {graphics_lvo::AndRectRegion, GraphicsNatives::and_rect_region, "AndRectRegion"},
+    {graphics_lvo::ClearRectRegion, GraphicsNatives::clear_rect_region, "ClearRectRegion"},
+    {graphics_lvo::XorRectRegion, GraphicsNatives::xor_rect_region, "XorRectRegion"},
+    {graphics_lvo::OrRegionRegion, GraphicsNatives::or_region_region, "OrRegionRegion"},
+    {graphics_lvo::AndRegionRegion, GraphicsNatives::and_region_region, "AndRegionRegion"},
     {graphics_lvo::CloseFont, GraphicsNatives::close_font, "CloseFont"},
     {graphics_lvo::LoadRGB4, GraphicsNatives::load_rgb4, "LoadRGB4"},
     {graphics_lvo::InitRastPort, GraphicsNatives::init_rastport, "InitRastPort"},
