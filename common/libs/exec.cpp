@@ -561,7 +561,8 @@ struct ExecOps {
         if (id < 0) {
             return;
         }
-        if (e.sched_.slot(static_cast<u32>(id)).state == TaskState::Waiting) {
+        if (e.sched_.slot(static_cast<u32>(id)).state == TaskState::Waiting &&
+            !e.tasks_[id].sleeping) {
             const u32 wanted = b.r32(addr + TC_SIGWAIT);
             if (!b.ok()) {
                 return;
@@ -712,6 +713,19 @@ struct ExecOps {
         for (;;) {
             i32 next = e.sched_.pick_next();
             while (next < 0) {
+                e.expire_timers();
+                if (!is_remove && m.cpu.exit != ExitReason::None) {
+                    restore_task_from_wait(e, b, cur, cur_addr);
+                    b.stop();
+                    return;
+                }
+                if (is_remove && m.cpu.exit != ExitReason::None) {
+                    m.cpu.exit = ExitReason::None;
+                }
+                next = e.sched_.pick_next();
+                if (next >= 0) {
+                    break;
+                }
                 const bool can_wake = poll_idle(e);
                 if (!is_remove && m.cpu.exit != ExitReason::None) {
                     restore_task_from_wait(e, b, cur, cur_addr);
@@ -721,8 +735,17 @@ struct ExecOps {
                 if (is_remove && m.cpu.exit != ExitReason::None) {
                     m.cpu.exit = ExitReason::None;
                 }
+                e.expire_timers();
+                if (!is_remove && m.cpu.exit != ExitReason::None) {
+                    restore_task_from_wait(e, b, cur, cur_addr);
+                    b.stop();
+                    return;
+                }
+                if (is_remove && m.cpu.exit != ExitReason::None) {
+                    m.cpu.exit = ExitReason::None;
+                }
                 if (!is_remove && cur == 0 && (signals(e, b) & SIGBREAKF_CTRL_C) != 0 &&
-                    e.sched_.slot(0).state == TaskState::Waiting) {
+                    e.sched_.slot(0).state == TaskState::Waiting && !e.tasks_[0].sleeping) {
                     if (cur_addr != 0) {
                         remove(b, cur_addr);
                         b.w8(cur_addr + TC_STATE, TS_READY);
@@ -733,7 +756,8 @@ struct ExecOps {
                     }
                 }
                 next = e.sched_.pick_next();
-                if (next < 0 && !can_wake) {
+                const bool timer_pending = e.task_host_.now_us != nullptr && e.has_pending_timers();
+                if (next < 0 && !can_wake && !timer_pending) {
                     if (!is_remove && cur == 0 && e.sched_.active_count() == 1) {
                         if (restore_task_from_wait(e, b, 0, cur_addr)) {
                             LogLine().text("exec: Wait with no signals pending").send();
@@ -973,6 +997,11 @@ struct ExecOps {
     static u32 wait_signals(Exec& e, Bus& b, u32 wanted) {
         Machine& m = b.machine();
         for (;;) {
+            e.expire_timers();
+            if (m.cpu.exit != ExitReason::None) {
+                b.stop();
+                return 0;
+            }
             const u32 pending = signals(e, b);
             const u32 got = pending & wanted;
             if (!b.ok()) {
@@ -985,21 +1014,21 @@ struct ExecOps {
             const i32 cur = e.sched_.current();
             const u32 cur_addr = e.task_;
             const u32 raisable = e.port_signals_ | SIGBREAKF_CTRL_C;
-            if (cur == 0 && e.sched_.active_count() == 1 && (wanted & raisable) == 0) {
+            const bool timer_can_wake = e.task_host_.now_us != nullptr && e.has_pending_timers();
+            if (cur == 0 && e.sched_.active_count() == 1 && (wanted & raisable) == 0 &&
+                !(wanted != 0 && timer_can_wake)) {
                 LogLine().text("exec: Wait with no signals pending").send();
                 end_run(m, ExitReason::Unimplemented);
                 b.stop();
                 return 0;
             }
             if (cur == 0 && e.sched_.active_count() == 1 && e.task_host_.switch_to == nullptr) {
-                if (!poll_idle(e)) {
-                    if (m.cpu.exit == ExitReason::None) {
-                        LogLine().text("exec: Wait with no signals pending").send();
-                        end_run(m, ExitReason::Unimplemented);
-                    }
+                const bool can_wake = poll_idle(e);
+                if (m.cpu.exit != ExitReason::None) {
                     b.stop();
                     return 0;
                 }
+                e.expire_timers();
                 if (m.cpu.exit != ExitReason::None) {
                     b.stop();
                     return 0;
@@ -1017,6 +1046,15 @@ struct ExecOps {
                         return 0;
                     }
                 }
+                const bool still_timer = e.task_host_.now_us != nullptr && e.has_pending_timers();
+                if (!can_wake && !still_timer && (signals(e, b) & wanted) == 0) {
+                    if (m.cpu.exit == ExitReason::None) {
+                        LogLine().text("exec: Wait with no signals pending").send();
+                        end_run(m, ExitReason::Unimplemented);
+                    }
+                    b.stop();
+                    return 0;
+                }
                 continue;
             }
 
@@ -1032,7 +1070,23 @@ struct ExecOps {
 
             i32 next = e.sched_.pick_next();
             while (next < 0) {
+                e.expire_timers();
+                if (m.cpu.exit != ExitReason::None) {
+                    restore_task_from_wait(e, b, cur, cur_addr);
+                    b.stop();
+                    return 0;
+                }
+                next = e.sched_.pick_next();
+                if (next >= 0) {
+                    break;
+                }
                 const bool can_wake = poll_idle(e);
+                if (m.cpu.exit != ExitReason::None) {
+                    restore_task_from_wait(e, b, cur, cur_addr);
+                    b.stop();
+                    return 0;
+                }
+                e.expire_timers();
                 if (m.cpu.exit != ExitReason::None) {
                     restore_task_from_wait(e, b, cur, cur_addr);
                     b.stop();
@@ -1050,7 +1104,8 @@ struct ExecOps {
                     }
                 }
                 next = e.sched_.pick_next();
-                if (next < 0 && !can_wake) {
+                const bool still_timer = e.task_host_.now_us != nullptr && e.has_pending_timers();
+                if (next < 0 && !can_wake && !still_timer) {
                     if (cur == 0 && e.sched_.active_count() == 1) {
                         if (restore_task_from_wait(e, b, 0, cur_addr)) {
                             LogLine().text("exec: Wait with no signals pending").send();
@@ -1281,28 +1336,31 @@ struct ExecOps {
         }
     }
 
-    static void reply_msg_lvo(void* ctx, Machine& m) {
-        Exec& e = of(ctx);
-        Bus b(m);
-        const u32 message = m.cpu.a[1];
+    static bool reply_msg(Exec& e, Bus& b, u32 message) {
+        Machine& m = b.machine();
         if (native::guest_address(m, message) == 0) {
             fault_null(b);
-            return;
+            return false;
         }
         const u32 reply_port = b.r32(message + mn_ReplyPort);
         if (!b.ok()) {
-            return;
+            return false;
         }
         if (native::guest_address(m, reply_port) == 0) {
             b.w8(message + LN_TYPE, NT_FREEMSG);
-            return;
+            return b.ok();
         }
         if (e.reply_handler_ != nullptr && e.reply_port_ != 0 &&
             native::guest_address(m, reply_port) == native::guest_address(m, e.reply_port_)) {
             e.reply_handler_(e.reply_ctx_, message);
-            return;
+            return true;
         }
-        queue_message(e, b, reply_port, message, NT_REPLYMSG);
+        return queue_message(e, b, reply_port, message, NT_REPLYMSG);
+    }
+
+    static void reply_msg_lvo(void* ctx, Machine& m) {
+        Bus b(m);
+        (void)reply_msg(of(ctx), b, m.cpu.a[1]);
     }
 
     static void wait_port_lvo(void* ctx, Machine& m) {
@@ -1782,6 +1840,357 @@ struct ExecOps {
         native::set_result(m, init_resident(of(ctx), b, m.cpu.a[1], m.cpu.d[1]));
     }
 
+    // --- devices ---------------------------------------------------------
+
+    static constexpr u32 sign_extend_byte(u32 v) {
+        return static_cast<u32>(static_cast<i32>(static_cast<i8>(v & 0xFF)));
+    }
+
+    static bool call_device_vector(Exec& e, Bus& b, u32 dev, u32 lvo, u32 d0, u32 d1, u32 a1,
+                                   u32& d0_out) {
+        const u32 vec = dev - lvo;
+        const u32 w0 = b.r16(vec);
+        const u32 w1 = b.r16(vec + 2);
+        if (!b.ok()) {
+            return false;
+        }
+        CpuState& cpu = e.m_->cpu;
+        u32 saved_d[8];
+        u32 saved_a[8];
+        for (u32 i = 0; i < 8; ++i) {
+            saved_d[i] = cpu.d[i];
+            saved_a[i] = cpu.a[i];
+        }
+        if ((w0 & 0xF000u) == native::kALine && w1 == native::kRts) {
+            const u16 id = static_cast<u16>(w0 & 0x0FFFu);
+            cpu.d[0] = d0;
+            cpu.d[1] = d1;
+            cpu.a[1] = a1;
+            cpu.a[6] = dev;
+            if (e.m_->jit->call_native(id)) {
+                if (cpu.exit != ExitReason::None) {
+                    b.stop();
+                    return false;
+                }
+                d0_out = cpu.d[0];
+                for (u32 i = 0; i < 8; ++i) {
+                    cpu.d[i] = saved_d[i];
+                    cpu.a[i] = saved_a[i];
+                }
+                return true;
+            }
+            for (u32 i = 0; i < 8; ++i) {
+                cpu.d[i] = saved_d[i];
+                cpu.a[i] = saved_a[i];
+            }
+        }
+        GuestCall call(e.call_depth_, b);
+        cpu.d[0] = d0;
+        cpu.d[1] = d1;
+        cpu.a[1] = a1;
+        cpu.a[6] = dev;
+        if (!call.run(vec)) {
+            return false;
+        }
+        d0_out = call.d0();
+        return true;
+    }
+
+    static bool is_queued_on_port(Bus& b, u32 port, u32 target) {
+        Machine& m = b.machine();
+        const u32 target_addr = native::guest_address(m, target);
+        const u32 list = port + mp_MsgList;
+        u32 n = b.r32(list + LH_HEAD);
+        for (u32 count = 0; count < kMaxQueued; ++count) {
+            const u32 succ = b.r32(n + LN_SUCC);
+            if (!b.ok() || succ == 0) {
+                return false;
+            }
+            if (native::guest_address(m, n) == target_addr) {
+                return true;
+            }
+            n = succ;
+        }
+        return false;
+    }
+
+    static u32 wait_io(Exec& e, Bus& b, u32 io_raw) {
+        Machine& m = b.machine();
+        if (native::guest_address(m, io_raw) == 0) {
+            fault_null(b);
+            return 0;
+        }
+        const u32 flags = b.r8(io_raw + io_Flags);
+        if (!b.ok()) {
+            return 0;
+        }
+        if ((flags & IOF_QUICK) != 0) {
+            return sign_extend_byte(b.r8(io_raw + io_Error));
+        }
+        const u32 port = b.r32(io_raw + mn_ReplyPort);
+        if (!b.ok()) {
+            return 0;
+        }
+        for (;;) {
+            e.expire_timers();
+            if (m.cpu.exit != ExitReason::None) {
+                b.stop();
+                return 0;
+            }
+            const u32 type = b.r8(io_raw + LN_TYPE);
+            if (!b.ok()) {
+                return 0;
+            }
+            if (type == NT_REPLYMSG) {
+                break;
+            }
+            if (native::guest_address(m, port) == 0) {
+                fault_null(b);
+                return 0;
+            }
+            const u32 sig_bit = b.r8(port + mp_SigBit);
+            if (!b.ok()) {
+                return 0;
+            }
+            const u32 mask = sig_bit < 32 ? (1u << sig_bit) : 0;
+            if (wait_signals(e, b, mask) == 0 || !b.ok()) {
+                return 0;
+            }
+        }
+        if (native::guest_address(m, port) != 0 && is_queued_on_port(b, port, io_raw)) {
+            remove(b, io_raw);
+        }
+        return sign_extend_byte(b.r8(io_raw + io_Error));
+    }
+
+    static void open_device_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 name_raw = m.cpu.a[0];
+        const u32 unit = m.cpu.d[0];
+        const u32 io_raw = m.cpu.a[1];
+        const u32 flags = m.cpu.d[1];
+        if (native::guest_address(m, name_raw) == 0 || native::guest_address(m, io_raw) == 0) {
+            fault_null(b);
+            return;
+        }
+        char name[kMaxName];
+        if (!b.string(name_raw, name, sizeof name)) {
+            if (b.ok()) {
+                LogLine().text("exec: device name too long").send();
+                b.w32(io_raw + io_Device, 0);
+                b.w8(io_raw + io_Error, static_cast<u8>(IOERR_OPENFAIL));
+                if (b.ok()) {
+                    native::set_result(m, static_cast<u32>(-1));
+                }
+            }
+            return;
+        }
+        const u32 dev = find_name(b, e.base_ + DeviceList, name);
+        if (!b.ok()) {
+            return;
+        }
+        if (dev == 0) {
+            LogLine().text("exec: no device ").text(name).send();
+            b.w32(io_raw + io_Device, 0);
+            b.w8(io_raw + io_Error, static_cast<u8>(IOERR_OPENFAIL));
+            if (b.ok()) {
+                native::set_result(m, static_cast<u32>(-1));
+            }
+            return;
+        }
+        b.w32(io_raw + io_Device, dev);
+        b.w8(io_raw + io_Error, 0);
+        if (!b.ok()) {
+            return;
+        }
+        u32 d0_out = 0;
+        if (!call_device_vector(e, b, dev, dev_lvo::Open, unit, flags, io_raw, d0_out)) {
+            return;
+        }
+        const u32 err = sign_extend_byte(b.r8(io_raw + io_Error));
+        if (b.ok()) {
+            native::set_result(m, err);
+        }
+    }
+
+    static void close_device_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 io_raw = m.cpu.a[1];
+        if (native::guest_address(m, io_raw) == 0) {
+            return;
+        }
+        const u32 dev = b.r32(io_raw + io_Device);
+        if (!b.ok()) {
+            return;
+        }
+        if (native::guest_address(m, dev) != 0) {
+            u32 d0_out = 0;
+            if (!call_device_vector(e, b, dev, dev_lvo::Close, 0, 0, io_raw, d0_out)) {
+                return;
+            }
+        }
+        b.w32(io_raw + io_Device, 0);
+    }
+
+    static void do_io_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 io_raw = m.cpu.a[1];
+        if (native::guest_address(m, io_raw) == 0) {
+            fault_null(b);
+            return;
+        }
+        const u32 dev = b.r32(io_raw + io_Device);
+        if (!b.ok()) {
+            return;
+        }
+        if (native::guest_address(m, dev) == 0) {
+            fault_null(b);
+            return;
+        }
+        b.w8(io_raw + io_Flags, IOF_QUICK);
+        b.w8(io_raw + LN_TYPE, NT_MESSAGE);
+        if (!b.ok()) {
+            return;
+        }
+        u32 d0_out = 0;
+        if (!call_device_vector(e, b, dev, dev_lvo::BeginIO, 0, 0, io_raw, d0_out)) {
+            return;
+        }
+        const u32 flags = b.r8(io_raw + io_Flags);
+        if (!b.ok()) {
+            return;
+        }
+        if ((flags & IOF_QUICK) != 0) {
+            const u32 err = sign_extend_byte(b.r8(io_raw + io_Error));
+            if (b.ok()) {
+                native::set_result(m, err);
+            }
+            return;
+        }
+        const u32 err = wait_io(e, b, io_raw);
+        if (b.ok()) {
+            native::set_result(m, err);
+        }
+    }
+
+    static void send_io_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 io_raw = m.cpu.a[1];
+        if (native::guest_address(m, io_raw) == 0) {
+            fault_null(b);
+            return;
+        }
+        const u32 dev = b.r32(io_raw + io_Device);
+        if (!b.ok()) {
+            return;
+        }
+        if (native::guest_address(m, dev) == 0) {
+            fault_null(b);
+            return;
+        }
+        b.w8(io_raw + io_Flags, 0);
+        b.w8(io_raw + LN_TYPE, NT_MESSAGE);
+        if (!b.ok()) {
+            return;
+        }
+        u32 d0_out = 0;
+        (void)call_device_vector(e, b, dev, dev_lvo::BeginIO, 0, 0, io_raw, d0_out);
+    }
+
+    static void check_io_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 io_raw = m.cpu.a[1];
+        if (native::guest_address(m, io_raw) == 0) {
+            fault_null(b);
+            return;
+        }
+        e.expire_timers();
+        if (m.cpu.exit != ExitReason::None) {
+            return;
+        }
+        const u32 flags = b.r8(io_raw + io_Flags);
+        const u32 type = b.r8(io_raw + LN_TYPE);
+        if (!b.ok()) {
+            return;
+        }
+        const bool done = (flags & IOF_QUICK) != 0 || type == NT_REPLYMSG;
+        native::set_result(m, done ? io_raw : 0);
+    }
+
+    static void wait_io_lvo(void* ctx, Machine& m) {
+        Bus b(m);
+        const u32 err = wait_io(of(ctx), b, m.cpu.a[1]);
+        if (b.ok()) {
+            native::set_result(m, err);
+        }
+    }
+
+    static void abort_io_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 io_raw = m.cpu.a[1];
+        if (native::guest_address(m, io_raw) == 0) {
+            fault_null(b);
+            return;
+        }
+        const u32 dev = b.r32(io_raw + io_Device);
+        if (!b.ok()) {
+            return;
+        }
+        if (native::guest_address(m, dev) == 0) {
+            fault_null(b);
+            return;
+        }
+        u32 d0_out = 0;
+        if (!call_device_vector(e, b, dev, dev_lvo::AbortIO, 0, 0, io_raw, d0_out)) {
+            return;
+        }
+        native::set_result(m, d0_out);
+    }
+
+    static void create_io_request_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 port = m.cpu.a[0];
+        const u32 size = m.cpu.d[0];
+        if (native::guest_address(m, port) == 0 || size < MN_SIZE || size > 0xFFFF) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 req = e.alloc(size, MEMF_PUBLIC | MEMF_CLEAR);
+        if (req == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        b.w8(req + LN_TYPE, NT_REPLYMSG);
+        b.w32(req + mn_ReplyPort, port);
+        b.w16(req + mn_Length, size);
+        if (!b.ok()) {
+            e.free(req, size);
+            return;
+        }
+        native::set_result(m, req);
+    }
+
+    static void delete_io_request_lvo(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 io_raw = m.cpu.a[0];
+        if (native::guest_address(m, io_raw) == 0) {
+            return;
+        }
+        const u32 len = b.r16(io_raw + mn_Length);
+        if (!b.ok() || len == 0) {
+            return;
+        }
+        e.free(io_raw, len);
+    }
+
     // --- semaphores ------------------------------------------------------
 
     static void new_min_list(Bus& b, u32 list) {
@@ -2244,6 +2653,13 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::OldOpenLibrary, ExecOps::old_open_library, "OldOpenLibrary"},
     {exec_lvo::CloseLibrary, ExecOps::close_library, "CloseLibrary"},
     {exec_lvo::SumLibrary, ExecOps::sum_library_lvo, "SumLibrary"},
+    {exec_lvo::OpenDevice, ExecOps::open_device_lvo, "OpenDevice"},
+    {exec_lvo::CloseDevice, ExecOps::close_device_lvo, "CloseDevice"},
+    {exec_lvo::DoIO, ExecOps::do_io_lvo, "DoIO"},
+    {exec_lvo::SendIO, ExecOps::send_io_lvo, "SendIO"},
+    {exec_lvo::CheckIO, ExecOps::check_io_lvo, "CheckIO"},
+    {exec_lvo::WaitIO, ExecOps::wait_io_lvo, "WaitIO"},
+    {exec_lvo::AbortIO, ExecOps::abort_io_lvo, "AbortIO"},
     {exec_lvo::RawDoFmt, ExecOps::raw_do_fmt, "RawDoFmt"},
     {exec_lvo::OpenLibrary, ExecOps::open_library_lvo, "OpenLibrary"},
     {exec_lvo::InitSemaphore, ExecOps::init_semaphore_lvo, "InitSemaphore"},
@@ -2259,6 +2675,8 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::CopyMemQuick, ExecOps::copy_mem, "CopyMemQuick"},
     {exec_lvo::CacheClearU, ExecOps::cache_clear, "CacheClearU"},
     {exec_lvo::CacheClearE, ExecOps::cache_clear, "CacheClearE"},
+    {exec_lvo::CreateIORequest, ExecOps::create_io_request_lvo, "CreateIORequest"},
+    {exec_lvo::DeleteIORequest, ExecOps::delete_io_request_lvo, "DeleteIORequest"},
     {exec_lvo::CreateMsgPort, ExecOps::create_msg_port_lvo, "CreateMsgPort"},
     {exec_lvo::DeleteMsgPort, ExecOps::delete_msg_port_lvo, "DeleteMsgPort"},
     {exec_lvo::ObtainSemaphoreShared, ExecOps::obtain_semaphore_shared_lvo,
@@ -2309,6 +2727,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     reply_port_ = 0;
     reply_handler_ = nullptr;
     reply_ctx_ = nullptr;
+    timer_hook_ = TimerHook{};
     for (LibraryInfo& info : libraries_) {
         info = LibraryInfo{};
     }
@@ -2546,8 +2965,8 @@ void Exec::free(u32 addr, u32 bytes) {
     mem.write32(header_ + MH_FREE, free_bytes_);
 }
 
-u32 Exec::make_native_library(const char* name, u16 version, const NativeVector* fns, u32 count,
-                              void* ctx, u32 pos_size) {
+u32 Exec::make_native_node(const char* name, u16 version, u8 node_type, u32 list_offset,
+                           const NativeVector* fns, u32 count, void* ctx, u32 pos_size) {
     if (m_ == nullptr || name == nullptr || (count != 0 && fns == nullptr) || pos_size > 0xFFFF) {
         return 0;
     }
@@ -2605,17 +3024,29 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
     }
     put_string(b, lib + pos, name);
     b.w32(lib + LN_NAME, lib + pos);
-    b.w8(lib + LIB_FLAGS, LIBF_SUMUSED);
+    b.w8(lib + LN_TYPE, node_type);
+    b.w8(lib + LIB_FLAGS, LIBF_SUMUSED | LIBF_CHANGED);
     b.w16(lib + LIB_NEGSIZE, neg);
     b.w16(lib + LIB_POSSIZE, pos);
     b.w16(lib + LIB_VERSION, version);
-    ExecOps::add_library(*this, b, lib);
+    ExecOps::sum_library(b, lib);
+    enqueue(b, base_ + list_offset, lib);
     jit.flush();
     if (!b.ok()) {
         return 0;
     }
     ++library_count_;
     return lib;
+}
+
+u32 Exec::make_native_library(const char* name, u16 version, const NativeVector* fns, u32 count,
+                              void* ctx, u32 pos_size) {
+    return make_native_node(name, version, NT_LIBRARY, LibList, fns, count, ctx, pos_size);
+}
+
+u32 Exec::make_native_device(const char* name, u16 version, const NativeVector* fns, u32 count,
+                             void* ctx, u32 pos_size) {
+    return make_native_node(name, version, NT_DEVICE, DeviceList, fns, count, ctx, pos_size);
 }
 
 void Exec::set_this_task(u32 task_addr) {
@@ -2694,6 +3125,164 @@ u32 Exec::get_message(u32 port) {
     return ExecOps::get_msg(b, port);
 }
 
+bool Exec::reply_message(u32 message) {
+    if (m_ == nullptr) {
+        return false;
+    }
+    Bus b(*m_);
+    return ExecOps::reply_msg(*this, b, message);
+}
+
+u64 Exec::now_us() const {
+    return task_host_.now_us != nullptr ? task_host_.now_us(task_host_.ctx) : 0;
+}
+
+bool Exec::has_pending_timers() const {
+    for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
+        if (tasks_[i].sleeping) {
+            return true;
+        }
+    }
+    return timer_hook_.has_pending != nullptr && timer_hook_.has_pending(timer_hook_.ctx);
+}
+
+void Exec::expire_timers() {
+    if (m_ == nullptr || base_ == 0 || task_host_.now_us == nullptr ||
+        m_->cpu.exit != ExitReason::None) {
+        return;
+    }
+    const u64 now = task_host_.now_us(task_host_.ctx);
+    Bus b(*m_);
+    for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
+        if (!tasks_[i].sleeping || now < tasks_[i].sleep_deadline_us) {
+            continue;
+        }
+        tasks_[i].sleeping = false;
+        if (sched_.slot(i).state == TaskState::Waiting) {
+            const u32 addr = tasks_[i].task_addr;
+            if (addr != 0) {
+                remove(b, addr);
+                b.w8(addr + TC_STATE, TS_READY);
+            }
+            sched_.wake(static_cast<i32>(i));
+            if (addr != 0) {
+                enqueue(b, base_ + TaskReady, addr);
+            }
+            if (sched_.should_switch_now()) {
+                pending_switch_ = true;
+            }
+        }
+    }
+    if (timer_hook_.expire != nullptr && m_->cpu.exit == ExitReason::None) {
+        timer_hook_.expire(timer_hook_.ctx, now);
+    }
+}
+
+void Exec::sleep_us(u64 us) {
+    if (m_ == nullptr || us == 0 || task_host_.now_us == nullptr) {
+        return;
+    }
+    const i32 cur = sched_.current();
+    if (cur < 0 || static_cast<u32>(cur) >= Scheduler::kMaxTasks) {
+        return;
+    }
+    const u64 now = task_host_.now_us(task_host_.ctx);
+    const u64 deadline = (~u64(0) - now < us) ? ~u64(0) : now + us;
+    tasks_[cur].sleeping = true;
+    tasks_[cur].sleep_deadline_us = deadline;
+
+    const u32 cur_addr = tasks_[cur].task_addr;
+    Bus b(*m_);
+    if (cur_addr != 0) {
+        b.w32(cur_addr + TC_SIGWAIT, 0);
+        b.w8(cur_addr + TC_STATE, TS_WAIT);
+        enqueue(b, base_ + TaskWait, cur_addr);
+        if (!b.ok()) {
+            tasks_[cur].sleeping = false;
+            return;
+        }
+    }
+    sched_.wait(cur);
+
+    while (tasks_[cur].sleeping && m_->cpu.exit == ExitReason::None) {
+        expire_timers();
+        if (!tasks_[cur].sleeping) {
+            if (sched_.slot(static_cast<u32>(cur)).state != TaskState::Running) {
+                ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+            }
+            break;
+        }
+        i32 next = sched_.pick_next();
+        while (next < 0) {
+            expire_timers();
+            if (m_->cpu.exit != ExitReason::None) {
+                tasks_[cur].sleeping = false;
+                ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+                return;
+            }
+            next = sched_.pick_next();
+            if (next >= 0) {
+                break;
+            }
+            const bool can_wake = ExecOps::poll_idle(*this);
+            if (m_->cpu.exit != ExitReason::None) {
+                tasks_[cur].sleeping = false;
+                ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+                return;
+            }
+            expire_timers();
+            if (m_->cpu.exit != ExitReason::None) {
+                tasks_[cur].sleeping = false;
+                ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+                return;
+            }
+            next = sched_.pick_next();
+            const bool still_timer = task_host_.now_us != nullptr && has_pending_timers();
+            if (next < 0 && !can_wake && !still_timer) {
+                tasks_[cur].sleeping = false;
+                ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+                return;
+            }
+        }
+        if (!tasks_[cur].sleeping) {
+            if (sched_.slot(static_cast<u32>(cur)).state != TaskState::Running) {
+                ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+            }
+            break;
+        }
+        if (next == cur) {
+            ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+            continue;
+        }
+        if (task_host_.switch_to == nullptr || !switch_to_task(next)) {
+            tasks_[cur].sleeping = false;
+            ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+            return;
+        }
+        if (sched_.current() != cur) {
+            return;
+        }
+        if (abort_to_boot_task_ && cur == 0) {
+            tasks_[cur].sleeping = false;
+            end_run(*m_, ExitReason::Unimplemented);
+            return;
+        }
+        if (m_->cpu.exit != ExitReason::None) {
+            tasks_[cur].sleeping = false;
+            return;
+        }
+    }
+
+    if (cur == 0 && m_->cpu.exit == ExitReason::None) {
+        const u32 after = ExecOps::signals(*this, b);
+        if (b.ok() && (after & SIGBREAKF_CTRL_C) != 0) {
+            ExecOps::store_signals(*this, b, after & ~SIGBREAKF_CTRL_C);
+            LogLine().text("exec: Delay interrupted by Ctrl+C").send();
+            end_run(*m_, ExitReason::Break);
+        }
+    }
+}
+
 void Exec::signal_current_task(u32 mask) {
     if (m_ == nullptr) {
         return;
@@ -2715,6 +3304,8 @@ void Exec::reset_task_signals() {
     port_signals_ = 0;
     every_task_waits_logged_ = false;
     abort_to_boot_task_ = false;
+    tasks_[0].sleeping = false;
+    tasks_[0].sleep_deadline_us = 0;
     const u32 boot_addr = tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_;
     if (m_ != nullptr && boot_addr != 0) {
         Bus b(*m_);
@@ -2742,13 +3333,24 @@ bool Exec::forbidden() const {
 }
 
 void Exec::maybe_preempt() {
-    if (task_host_.switch_to == nullptr || sched_.active_count() <= 1 || forbidden()) {
+    if (forbidden()) {
+        return;
+    }
+    const bool has_timers = has_pending_timers();
+    if (sched_.active_count() <= 1 && !has_timers && !pending_switch_) {
         return;
     }
     const bool slice_ended =
         task_host_.slice_over != nullptr && task_host_.slice_over(task_host_.ctx);
-    if (slice_ended && task_host_.poll != nullptr) {
-        task_host_.poll(task_host_.ctx);
+    if (slice_ended) {
+        if (task_host_.poll != nullptr) {
+            task_host_.poll(task_host_.ctx);
+        }
+        expire_timers();
+    }
+    if (task_host_.switch_to == nullptr || sched_.active_count() <= 1) {
+        pending_switch_ = false;
+        return;
     }
     bool do_switch = false;
     if (pending_switch_) {
@@ -2930,7 +3532,11 @@ void Exec::task_main(u32 id) {
 }
 
 bool Exec::yield_in_native() {
-    if (m_ == nullptr || task_host_.switch_to == nullptr || forbidden()) {
+    if (m_ == nullptr || forbidden()) {
+        return false;
+    }
+    expire_timers();
+    if (task_host_.switch_to == nullptr) {
         return false;
     }
     const i32 next = sched_.pick_next();
@@ -2949,6 +3555,8 @@ void Exec::end_child_tasks() {
         return;
     }
     pending_switch_ = false;
+    tasks_[0].sleeping = false;
+    tasks_[0].sleep_deadline_us = 0;
     if (sched_.current() != 0) {
         if (sched_.slot(0).state == TaskState::Waiting) {
             if (tasks_[0].task_addr != 0) {
@@ -2973,6 +3581,8 @@ void Exec::end_child_tasks() {
         m_->mem.write32(base_ + ThisTask, task_);
     }
     for (u32 i = 1; i < Scheduler::kMaxTasks; ++i) {
+        tasks_[i].sleeping = false;
+        tasks_[i].sleep_deadline_us = 0;
         const Scheduler::Slot s = sched_.slot(i);
         if (s.state == TaskState::Free || s.state == TaskState::Removed) {
             continue;

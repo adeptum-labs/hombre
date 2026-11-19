@@ -2430,6 +2430,7 @@ struct FakeHostState {
     bool slice_over = false;
     bool idle_ok = false;
     u32 poll_calls = 0;
+    u64 now_us = 0;
     void (*on_poll)(void* ctx) = nullptr;
     void* on_poll_ctx = nullptr;
     bool (*on_idle)(void* ctx) = nullptr;
@@ -2476,9 +2477,13 @@ bool fake_idle(void* ctx) {
     return s.idle_ok;
 }
 
+u64 fake_now_us(void* ctx) {
+    return static_cast<FakeHostState*>(ctx)->now_us;
+}
+
 TaskHost make_fake_host(FakeHostState& state) {
     return TaskHost{fake_create, fake_switch, fake_destroy, fake_slice_over,
-                    fake_poll,   fake_idle,   &state};
+                    fake_poll,   fake_idle,   fake_now_us,  &state};
 }
 
 u32 setup_child_task(Rig& r, u32 task_addr, u32 stack_top, i8 pri, const char* name,
@@ -3423,6 +3428,341 @@ void yield_in_native_and_per_task_state() {
     CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
 }
 
+// --- devices and IORequests ---------------------------------------------
+
+struct FakeDevState {
+    u32 open_calls = 0;
+    u32 close_calls = 0;
+    u32 begin_calls = 0;
+    u32 abort_calls = 0;
+    u32 last_unit = 0;
+    u32 last_flags = 0;
+    u32 held_req = 0;
+    bool complete_quick = true;
+    i8 reply_err = 0;
+};
+
+void fake_dev_open(void* ctx, Machine& m) {
+    FakeDevState& s = *static_cast<FakeDevState*>(ctx);
+    ++s.open_calls;
+    s.last_unit = m.cpu.d[0];
+    s.last_flags = m.cpu.d[1];
+    const u32 dev = m.cpu.a[6];
+    const u32 req = m.cpu.a[1];
+    native::Bus b(m);
+    if (s.last_unit == 99) {
+        b.w8(req + io_Error, static_cast<u8>(IOERR_OPENFAIL));
+        return;
+    }
+    b.w16(dev + LIB_OPENCNT, b.r16(dev + LIB_OPENCNT) + 1);
+    b.w32(req + io_Unit, 0x1234);
+    b.w8(req + io_Error, 0);
+}
+
+void fake_dev_close(void* ctx, Machine& m) {
+    FakeDevState& s = *static_cast<FakeDevState*>(ctx);
+    ++s.close_calls;
+    const u32 dev = m.cpu.a[6];
+    native::Bus b(m);
+    const u32 cnt = b.r16(dev + LIB_OPENCNT);
+    if (cnt != 0) {
+        b.w16(dev + LIB_OPENCNT, cnt - 1);
+    }
+    native::set_result(m, 0);
+}
+
+void fake_dev_begin_io(void* ctx, Machine& m) {
+    FakeDevState& s = *static_cast<FakeDevState*>(ctx);
+    ++s.begin_calls;
+    const u32 req = m.cpu.a[1];
+    native::Bus b(m);
+    const u16 cmd = static_cast<u16>(b.r16(req + io_Command));
+    const u8 flags = static_cast<u8>(b.r8(req + io_Flags));
+    if (s.complete_quick && (flags & IOF_QUICK) != 0) {
+        b.w8(req + io_Error, cmd == CMD_READ ? 0 : static_cast<u8>(IOERR_NOCMD));
+        b.w32(req + io_Actual, 42);
+        return;
+    }
+    b.w8(req + io_Error, 0);
+    b.w8(req + io_Flags, flags & ~IOF_QUICK);
+    b.w8(req + LN_TYPE, NT_MESSAGE);
+    s.held_req = req;
+}
+
+void fake_dev_abort_io(void* ctx, Machine& m) {
+    FakeDevState& s = *static_cast<FakeDevState*>(ctx);
+    ++s.abort_calls;
+    const u32 req = m.cpu.a[1];
+    if (s.held_req == req) {
+        s.held_req = 0;
+        native::Bus b(m);
+        b.w8(req + io_Error, static_cast<u8>(IOERR_ABORTED));
+        g_exec.reply_message(req);
+        native::set_result(m, 0);
+        return;
+    }
+    native::set_result(m, static_cast<u32>(-1));
+}
+
+void device_create_open_do_send_check_wait_abort() {
+    CHECK_EQ(exec_lvo::OpenDevice, 444u);
+    CHECK_EQ(exec_lvo::CloseDevice, 450u);
+    CHECK_EQ(exec_lvo::DoIO, 456u);
+    CHECK_EQ(exec_lvo::SendIO, 462u);
+    CHECK_EQ(exec_lvo::CheckIO, 468u);
+    CHECK_EQ(exec_lvo::WaitIO, 474u);
+    CHECK_EQ(exec_lvo::AbortIO, 480u);
+    CHECK_EQ(exec_lvo::CreateIORequest, 654u);
+    CHECK_EQ(exec_lvo::DeleteIORequest, 660u);
+    CHECK_EQ(IO_SIZE, 32u);
+    CHECK_EQ(IOSTD_SIZE, 48u);
+
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    FakeDevState dev_state{};
+    const NativeVector fns[] = {
+        {fake_dev_open, "Open"},
+        {fake_dev_close, "Close"},
+        {nullptr, "Expunge"},
+        {nullptr, "Reserved"},
+        {fake_dev_begin_io, "BeginIO"},
+        {fake_dev_abort_io, "AbortIO"},
+    };
+    const u32 dev = g_exec.make_native_device("fake.device", 40, fns, 6, &dev_state);
+    CHECK(dev != 0);
+    CHECK_EQ(r.get8(dev + LN_TYPE), NT_DEVICE);
+    CHECK(r.walk(r.base() + DeviceList) == std::vector<u32>{dev});
+    CHECK(r.walk(r.base() + LibList) == std::vector<u32>{r.base()});
+
+    // CreateMsgPort & CreateIORequest.
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+
+    // Bad CreateIORequest arguments return 0.
+    r.cpu().a[0] = 0;
+    r.cpu().d[0] = IOSTD_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = MN_SIZE - 1;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = IOSTD_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    const u32 req = r.cpu().d[0];
+    CHECK(req != 0);
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_REPLYMSG);
+    CHECK_EQ(r.get32(req + mn_ReplyPort), port);
+    CHECK_EQ(r.get16(req + mn_Length), IOSTD_SIZE);
+
+    // OpenDevice of an unknown device logs and returns -1 with IOERR_OPENFAIL.
+    g_lines.clear();
+    r.cpu().a[0] = r.str(kNames, "missing.device");
+    r.cpu().d[0] = 0;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0xFFFFFFFFu);
+    CHECK_EQ(static_cast<i8>(r.get8(req + io_Error)), IOERR_OPENFAIL);
+    CHECK(logged("exec: no device missing.device"));
+
+    // OpenDevice of unit rejected by device's Open returns sign-extended error.
+    r.cpu().a[0] = r.str(kNames, "fake.device");
+    r.cpu().d[0] = 99;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 7;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0xFFFFFFFFu);
+    CHECK_EQ(static_cast<i8>(r.get8(req + io_Error)), IOERR_OPENFAIL);
+
+    // Successful OpenDevice sets io_Device and calls Open with d0/a1/d1.
+    r.cpu().a[0] = r.str(kNames, "fake.device");
+    r.cpu().d[0] = 2;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 5;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(r.get32(req + io_Device), dev);
+    CHECK_EQ(r.get32(req + io_Unit), 0x1234u);
+    CHECK_EQ(r.get16(dev + LIB_OPENCNT), 1u);
+    CHECK_EQ(dev_state.last_unit, 2u);
+    CHECK_EQ(dev_state.last_flags, 5u);
+
+    // DoIO quick completion.
+    dev_state.complete_quick = true;
+    r.put16(req + io_Command, CMD_READ);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::DoIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(r.get8(req + io_Flags) & IOF_QUICK, IOF_QUICK);
+    CHECK_EQ(r.get32(req + io_Actual), 42u);
+
+    // DoIO quick with error sign-extends io_Error.
+    r.put16(req + io_Command, CMD_WRITE);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::DoIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], static_cast<u32>(static_cast<i32>(IOERR_NOCMD)));
+
+    // DoIO non-quick blocks in WaitIO until device ReplyMsgs, then removes from port.
+    dev_state.complete_quick = false;
+    struct IdleCtx {
+        FakeDevState* dev;
+        u32 calls;
+    } idle_ctx{&dev_state, 0};
+    host.on_idle = [](void* p) {
+        IdleCtx& c = *static_cast<IdleCtx*>(p);
+        ++c.calls;
+        if (c.calls == 2 && c.dev->held_req != 0) {
+            const u32 h = c.dev->held_req;
+            c.dev->held_req = 0;
+            g_exec.reply_message(h);
+        }
+        return true;
+    };
+    host.on_idle_ctx = &idle_ctx;
+    r.put16(req + io_Command, CMD_READ);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::DoIO), ExitReason::Halt);
+    CHECK_EQ(idle_ctx.calls, 2u);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_REPLYMSG);
+    CHECK_EQ(g_exec.get_message(port), 0u);  // WaitIO removed it from the reply port
+
+    // SendIO + CheckIO before and after completion + WaitIO removes from port.
+    host.on_idle = nullptr;
+    r.put16(req + io_Command, CMD_READ);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::SendIO), ExitReason::Halt);
+    CHECK_EQ(dev_state.held_req, req);
+    CHECK_EQ(r.get8(req + io_Flags), 0u);
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_MESSAGE);
+
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::CheckIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    // Device replies with an error; CheckIO now returns req, WaitIO removes it & returns error.
+    r.put8(req + io_Error, static_cast<u8>(IOERR_BADLENGTH));
+    dev_state.held_req = 0;
+    CHECK(g_exec.reply_message(req));
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::CheckIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], req);
+
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::WaitIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], static_cast<u32>(static_cast<i32>(IOERR_BADLENGTH)));
+    CHECK_EQ(g_exec.get_message(port), 0u);
+
+    // SendIO + AbortIO + WaitIO returns IOERR_ABORTED.
+    r.put16(req + io_Command, CMD_READ);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::SendIO), ExitReason::Halt);
+    CHECK_EQ(dev_state.held_req, req);
+
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::AbortIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(dev_state.abort_calls, 1u);
+
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::WaitIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], static_cast<u32>(static_cast<i32>(IOERR_ABORTED)));
+    CHECK_EQ(g_exec.get_message(port), 0u);
+
+    // CloseDevice calls Close and clears io_Device.
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::CloseDevice), ExitReason::Halt);
+    CHECK_EQ(dev_state.close_calls, 1u);
+    CHECK_EQ(r.get32(req + io_Device), 0u);
+    CHECK_EQ(r.get16(dev + LIB_OPENCNT), 0u);
+
+    // DeleteIORequest frees the block cleanly (null is ignored).
+    r.cpu().d[1] = MEMF_PUBLIC;
+    CHECK_EQ(r.exec(exec_lvo::AvailMem), ExitReason::Halt);
+    const u32 avail_before = r.cpu().d[0];
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::DeleteIORequest), ExitReason::Halt);
+    r.cpu().a[0] = req;
+    CHECK_EQ(r.exec(exec_lvo::DeleteIORequest), ExitReason::Halt);
+    r.cpu().d[1] = MEMF_PUBLIC;
+    CHECK_EQ(r.exec(exec_lvo::AvailMem), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], avail_before + IOSTD_SIZE);
+    g_exec.delete_port(port);
+}
+
+void guest_68k_device_vectors_use_call_guest() {
+    Rig r;
+    make_test_task(r, kData);
+
+    // 68000 device routines at kCode:
+    // Open:   MOVE.B #0,31(A1) ; MOVEQ #0,D0 ; RTS
+    // Close:  MOVEQ #0,D0 ; RTS
+    // BeginIO: MOVE.L #77,32(A1) ; MOVE.B #0,31(A1) ; RTS
+    const u32 open_fn = kCode;
+    const u32 close_fn = r.code(open_fn, {0x137C, 0x0000, 0x001F, 0x7000, 0x4E75});
+    const u32 begin_fn = r.code(close_fn, {0x7000, 0x4E75});
+    r.code(begin_fn, {0x237C, 0x0000, 0x004D, 0x0020, 0x137C, 0x0000, 0x001F, 0x4E75});
+
+    // Build a 68k device node via MakeLibrary with 6 vectors and enqueue on DeviceList.
+    const u32 vecs = kData + 0x200;
+    r.put32(vecs + 0, open_fn);
+    r.put32(vecs + 4, close_fn);
+    r.put32(vecs + 8, close_fn);   // Expunge
+    r.put32(vecs + 12, close_fn);  // Reserved
+    r.put32(vecs + 16, begin_fn);
+    r.put32(vecs + 20, close_fn);  // AbortIO
+    r.put32(vecs + 24, 0xFFFFFFFF);
+    r.cpu().a[0] = vecs;
+    r.cpu().a[1] = 0;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = LIB_SIZE;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::MakeLibrary), ExitReason::Halt);
+    const u32 dev = r.cpu().d[0];
+    CHECK(dev != 0);
+    r.put8(dev + LN_TYPE, NT_DEVICE);
+    r.put32(dev + LN_NAME, r.str(kNames, "guest.device"));
+    r.cpu().a[0] = r.base() + DeviceList;
+    r.cpu().a[1] = dev;
+    CHECK_EQ(r.exec(exec_lvo::AddTail), ExitReason::Halt);
+    g_jit.flush();
+
+    const u32 port = g_exec.create_port();
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = IOSTD_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    const u32 req = r.cpu().d[0];
+
+    r.cpu().a[0] = r.str(kNames + 0x20, "guest.device");
+    r.cpu().d[0] = 0;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(r.get32(req + io_Device), dev);
+
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::DoIO), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(r.get32(req + io_Actual), 77u);
+
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::CloseDevice), ExitReason::Halt);
+    CHECK_EQ(r.get32(req + io_Device), 0u);
+
+    r.cpu().a[0] = req;
+    CHECK_EQ(r.exec(exec_lvo::DeleteIORequest), ExitReason::Halt);
+    g_exec.delete_port(port);
+}
+
 }
 
 int main() {
@@ -3499,5 +3839,7 @@ int main() {
     end_child_tasks_removes_reaps_and_clears_sem_waiters();
     reset_nest_counts_clears_forbid_and_disable();
     yield_in_native_and_per_task_state();
+    device_create_open_do_send_check_wait_abort();
+    guest_68k_device_vectors_use_call_guest();
     return check::finish("test_exec");
 }

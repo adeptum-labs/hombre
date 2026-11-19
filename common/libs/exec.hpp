@@ -90,6 +90,13 @@ constexpr u32 AddLibrary = 396;
 constexpr u32 OldOpenLibrary = 408;
 constexpr u32 CloseLibrary = 414;
 constexpr u32 SumLibrary = 426;
+constexpr u32 OpenDevice = 444;
+constexpr u32 CloseDevice = 450;
+constexpr u32 DoIO = 456;
+constexpr u32 SendIO = 462;
+constexpr u32 CheckIO = 468;
+constexpr u32 WaitIO = 474;
+constexpr u32 AbortIO = 480;
 constexpr u32 RawDoFmt = 522;
 constexpr u32 OpenLibrary = 552;
 constexpr u32 InitSemaphore = 558;
@@ -105,6 +112,8 @@ constexpr u32 CopyMem = 624;
 constexpr u32 CopyMemQuick = 630;
 constexpr u32 CacheClearU = 636;
 constexpr u32 CacheClearE = 642;
+constexpr u32 CreateIORequest = 654;
+constexpr u32 DeleteIORequest = 660;
 constexpr u32 CreateMsgPort = 666;
 constexpr u32 DeleteMsgPort = 672;
 constexpr u32 ObtainSemaphoreShared = 678;
@@ -121,6 +130,18 @@ constexpr u32 Open = 6;
 constexpr u32 Close = 12;
 constexpr u32 Expunge = 18;
 constexpr u32 Reserved = 24;
+
+}
+
+// The standard vectors every device starts with.
+namespace dev_lvo {
+
+constexpr u32 Open = 6;
+constexpr u32 Close = 12;
+constexpr u32 Expunge = 18;
+constexpr u32 Reserved = 24;
+constexpr u32 BeginIO = 30;
+constexpr u32 AbortIO = 36;
 
 }
 
@@ -264,6 +285,38 @@ constexpr u32 mn_ReplyPort = 14;
 constexpr u32 mn_Length = 18;
 constexpr u32 MN_SIZE = 20;
 
+// struct IORequest and struct IOStdReq
+constexpr u32 io_Device = 20;
+constexpr u32 io_Unit = 24;
+constexpr u32 io_Command = 28;
+constexpr u32 io_Flags = 30;
+constexpr u32 io_Error = 31;
+constexpr u32 IO_SIZE = 32;
+
+constexpr u32 io_Actual = 32;
+constexpr u32 io_Length = 36;
+constexpr u32 io_Data = 40;
+constexpr u32 io_Offset = 44;
+constexpr u32 IOSTD_SIZE = 48;
+
+constexpr u8 IOF_QUICK = 1;
+
+constexpr u16 CMD_INVALID = 0;
+constexpr u16 CMD_RESET = 1;
+constexpr u16 CMD_READ = 2;
+constexpr u16 CMD_WRITE = 3;
+constexpr u16 CMD_UPDATE = 4;
+constexpr u16 CMD_CLEAR = 5;
+constexpr u16 CMD_STOP = 6;
+constexpr u16 CMD_START = 7;
+constexpr u16 CMD_FLUSH = 8;
+constexpr u16 CMD_NONSTD = 9;
+
+constexpr i8 IOERR_OPENFAIL = -1;
+constexpr i8 IOERR_ABORTED = -2;
+constexpr i8 IOERR_NOCMD = -3;
+constexpr i8 IOERR_BADLENGTH = -4;
+
 // Node types
 constexpr u8 NT_TASK = 1;
 constexpr u8 NT_DEVICE = 3;
@@ -283,20 +336,30 @@ constexpr u8 NT_SIGNALSEM = 15;
 struct TaskHost {
     // Creates a host context that will call Exec::task_main(id) when first
     // switched to. False when no stack can be had.
-    bool (*create)(void* ctx, u32 id);
+    bool (*create)(void* ctx, u32 id) = nullptr;
     // Saves the running host context of `from` and resumes `to`.
-    void (*switch_to)(void* ctx, u32 from, u32 to);
+    void (*switch_to)(void* ctx, u32 from, u32 to) = nullptr;
     // Frees the context of a removed task that is not running.
-    void (*destroy)(void* ctx, u32 id);
+    void (*destroy)(void* ctx, u32 id) = nullptr;
     // True once per time slice (take_need_resched).
-    bool (*slice_over)(void* ctx);
+    bool (*slice_over)(void* ctx) = nullptr;
     // Polls input and flushes the display without halting; called at slice end.
-    void (*poll)(void* ctx);
+    void (*poll)(void* ctx) = nullptr;
     // Polls input and halts until the next interrupt; called while no
     // task can run. False when nothing can ever wake a waiter (no
     // keyboard).
-    bool (*idle)(void* ctx);
-    void* ctx;
+    bool (*idle)(void* ctx) = nullptr;
+    // Monotonic microseconds since boot, or null when no clock is wired.
+    u64 (*now_us)(void* ctx) = nullptr;
+    void* ctx = nullptr;
+};
+
+// Called at slice end, yield points, and before idling in Wait/Delay to
+// complete due timer requests.
+struct TimerHook {
+    void (*expire)(void* ctx, u64 now_us) = nullptr;
+    bool (*has_pending)(void* ctx) = nullptr;
+    void* ctx = nullptr;
 };
 
 // Loads a file the way dos LoadSeg does and hands back its seglist BPTR.
@@ -346,6 +409,11 @@ public:
     u32 make_native_library(const char* name, u16 version, const NativeVector* fns, u32 count,
                             void* ctx = nullptr, u32 pos_size = ndk::LIB_SIZE);
 
+    // Like make_native_library, but sets LN_TYPE = NT_DEVICE and enqueues on
+    // ExecBase->DeviceList.
+    u32 make_native_device(const char* name, u16 version, const NativeVector* fns, u32 count,
+                           void* ctx = nullptr, u32 pos_size = ndk::LIB_SIZE);
+
     // OpenLibrary of a library not in the list asks this for LIBS:<name>.
     // It may be set before init and is kept across it.
     void set_segment_loader(const SegmentLoader& loader) { loader_ = loader; }
@@ -356,6 +424,10 @@ public:
 
     // Supplies the host context-switch and timer callbacks. Kept across init.
     void set_task_host(const TaskHost& host) { task_host_ = host; }
+
+    // Registers the timer expiry hook called at slice end, yield points, and
+    // before idling. Reset on init.
+    void set_timer_hook(const TimerHook& hook) { timer_hook_ = hook; }
 
     // Entry point for newly created host task contexts.
     void task_main(u32 id);
@@ -398,6 +470,23 @@ public:
     // Removes and returns the head message of port, or 0 if it is empty.
     u32 get_message(u32 port);
 
+    // Replies message to its mn_ReplyPort (or marks it NT_FREEMSG when null).
+    bool reply_message(u32 message);
+
+    // Expires any due sleeping tasks and invokes the registered timer hook.
+    void expire_timers();
+
+    // True when a task is sleeping in sleep_us or the timer hook reports
+    // pending requests.
+    bool has_pending_timers() const;
+
+    // Blocks the current task in the scheduler for at least us microseconds
+    // (returns at once when us == 0 or no clock is wired).
+    void sleep_us(u64 us);
+
+    // Current monotonic microseconds from TaskHost::now_us, or 0 if unset.
+    u64 now_us() const;
+
     // Sets the bits of mask in the current task's tc_SigRecvd.
     void signal_current_task(u32 mask);
 
@@ -433,6 +522,8 @@ private:
         u64 budget = 0;
         u8 td_nest = 0xFF;
         u8 id_nest = 0xFF;
+        bool sleeping = false;
+        u64 sleep_deadline_us = 0;
     };
 
     struct SemWaitQueue {
@@ -445,6 +536,8 @@ private:
         u32 count = 0;
     };
 
+    u32 make_native_node(const char* name, u16 version, u8 node_type, u32 list_offset,
+                         const NativeVector* fns, u32 count, void* ctx, u32 pos_size);
     bool forbidden() const;
     void maybe_preempt();
     bool switch_to_task(i32 next_id);
@@ -472,7 +565,8 @@ private:
     u32 task_exit_stub_ = 0;
     SegmentLoader loader_{nullptr, nullptr};
     IdleHook idle_{nullptr, nullptr};
-    TaskHost task_host_{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    TaskHost task_host_{};
+    TimerHook timer_hook_{};
     Scheduler sched_{};
     TaskContext tasks_[Scheduler::kMaxTasks]{};
     SemWaitQueue sem_queues_[kMaxSemaphores]{};

@@ -134,6 +134,10 @@ public:
     // most 4094 of them. Returns the A-line id, 0 if full.
     u16 add_native(NativeFn fn, void* ctx, const char* name);
 
+    // Calls registered native id directly. False if id is out of range or
+    // not registered.
+    bool call_native(u16 id);
+
     // Drops every translated block.
     void flush();
 
