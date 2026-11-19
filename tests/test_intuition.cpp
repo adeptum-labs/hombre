@@ -116,6 +116,47 @@ constexpr u32 dri_NumPens = 2;
 constexpr u32 dri_Pens = 4;
 constexpr u32 dri_Font = 8;
 
+// struct Image
+constexpr u32 img_LeftEdge = 0;
+constexpr u32 img_TopEdge = 2;
+constexpr u32 img_Width = 4;
+constexpr u32 img_Height = 6;
+constexpr u32 img_Depth = 8;
+constexpr u32 img_ImageData = 10;
+constexpr u32 img_PlanePick = 14;
+constexpr u32 img_PlaneOnOff = 15;
+constexpr u32 img_NextImage = 16;
+
+u32 put_image(GfxRig& r, u32 at, i32 left, i32 top, u32 width, u32 height, u32 depth, u32 data,
+              u32 plane_pick, u32 plane_on_off, u32 next = 0) {
+    r.put16(at + img_LeftEdge, static_cast<u32>(left));
+    r.put16(at + img_TopEdge, static_cast<u32>(top));
+    r.put16(at + img_Width, width);
+    r.put16(at + img_Height, height);
+    r.put16(at + img_Depth, depth);
+    r.put32(at + img_ImageData, data);
+    r.put8(at + img_PlanePick, plane_pick);
+    r.put8(at + img_PlaneOnOff, plane_on_off);
+    r.put32(at + img_NextImage, next);
+    return at;
+}
+
+void draw_image_at(GfxRig& r, u32 rp, u32 image, i32 left, i32 top) {
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = image;
+    r.cpu().d[0] = static_cast<u32>(left);
+    r.cpu().d[1] = static_cast<u32>(top);
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DrawImage), ExitReason::Halt);
+}
+
+void erase_image_at(GfxRig& r, u32 rp, u32 image, i32 left, i32 top) {
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = image;
+    r.cpu().d[0] = static_cast<u32>(left);
+    r.cpu().d[1] = static_cast<u32>(top);
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::EraseImage), ExitReason::Halt);
+}
+
 void put_new_screen(GfxRig& r, u32 at, u32 width, u32 height, u32 depth, u32 detail,
                     u32 block, u32 title) {
     r.put16(at + ns_LeftEdge, 0);
@@ -5083,6 +5124,94 @@ void open_window_logs_the_title() {
     CHECK(logged("intuition: window Clock opened"));
 }
 
+void draw_image_reads_plane_pick_and_plane_on_off() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 100, 50, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 rp = screen + sc_RastPort;
+
+    const u32 data = kData + 0x1800;
+    r.put8(data, 0xA0);
+    r.put8(data + 2, 0xC0);  // plane 1: rows are whole words
+    const u32 two_planes = put_image(r, kData + 0x1000, 0, 0, 4, 1, 2, data, 3, 0);
+    draw_image_at(r, rp, two_planes, 10, 10);
+    CHECK_EQ(screen_pixel(r, screen, 10, 10), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 11, 10), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 12, 10), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 13, 10), 0u);
+
+    r.put8(data, 0xA0);
+    const u32 one_plane = put_image(r, kData + 0x1040, 0, 0, 4, 1, 1, data, 1, 2);
+    draw_image_at(r, rp, one_plane, 10, 20);
+    CHECK_EQ(screen_pixel(r, screen, 10, 20), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 11, 20), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 12, 20), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 13, 20), 2u);
+
+    const u32 solid = put_image(r, kData + 0x1080, 0, 0, 3, 2, 0, 0, 0, 2);
+    draw_image_at(r, rp, solid, 20, 10);
+    for (i32 y = 10; y < 12; ++y) {
+        for (i32 x = 20; x < 23; ++x) {
+            CHECK_EQ(screen_pixel(r, screen, x, y), 2u);
+        }
+    }
+}
+
+void erase_image_fills_the_background_pen() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 100, 50, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 rp = screen + sc_RastPort;
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetBPen), ExitReason::Halt);
+
+    const u32 data = kData + 0x1800;
+    r.put8(data, 0xFF);
+    const u32 image = put_image(r, kData + 0x1000, 0, 0, 4, 2, 1, data, 1, 0);
+    erase_image_at(r, rp, image, 5, 5);
+    for (i32 y = 5; y < 7; ++y) {
+        for (i32 x = 5; x < 9; ++x) {
+            CHECK_EQ(screen_pixel(r, screen, x, y), 3u);
+        }
+    }
+    CHECK_EQ(screen_pixel(r, screen, 9, 5), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 4, 5), 0u);
+}
+
+void draw_image_clips_at_the_window_edge() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 200, 100, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 20, 20, 40, 30, WFLG_BORDERLESS | WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+
+    const u32 data = kData + 0x1800;
+    for (u32 i = 0; i < 3; ++i) {
+        r.put8(data + i, 0xFF);
+    }
+    const u32 image = put_image(r, kData + 0x1000, 0, 0, 8, 2, 1, data, 1, 0);
+    draw_image_at(r, rp, image, 36, 10);
+    for (i32 x = 36; x < 40; ++x) {
+        CHECK_EQ(window_pixel(r, window, x, 10), 1u);
+    }
+    CHECK_EQ(window_pixel(r, window, 35, 10), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 60, 30), 0u);
+
+    // Two columns left of the window: the image's second row lands on
+    // row 5, its last six columns inside, and nothing beyond its width.
+    CHECK_EQ(window_pixel(r, window, 6, 5), 0u);
+    draw_image_at(r, rp, image, -2, 4);
+    CHECK_EQ(window_pixel(r, window, 2, 5), 1u);
+    CHECK_EQ(window_pixel(r, window, 5, 5), 1u);
+    CHECK_EQ(window_pixel(r, window, 6, 5), 0u);
+}
+
 }
 
 int main() {
@@ -5232,5 +5361,8 @@ int main() {
     menu_rmbtrap_window_still_gets_menudown_and_menuup();
     menu_mode_ends_without_a_pick_when_the_strip_or_window_goes();
     open_window_logs_the_title();
+    draw_image_reads_plane_pick_and_plane_on_off();
+    erase_image_fills_the_background_pen();
+    draw_image_clips_at_the_window_edge();
     return check::finish("test_intuition");
 }

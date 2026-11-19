@@ -47,6 +47,7 @@ class Graphics;
 
 namespace raster {
 struct Bitmap;
+struct RastPortView;
 }
 
 // Library vector offsets of intuition.library, n of LVO -n, as the 3.1
@@ -54,6 +55,7 @@ struct Bitmap;
 namespace intuition_lvo {
 
 constexpr u32 AddGadget = 42;
+constexpr u32 DrawImage = 114;
 constexpr u32 CloseScreen = 66;
 constexpr u32 ClearMenuStrip = 54;
 constexpr u32 CloseWindow = 72;
@@ -89,6 +91,7 @@ constexpr u32 FreeScreenDrawInfo = 696;
 constexpr u32 ResetMenuStrip = 702;
 constexpr u32 OpenWindowTagList = 606;
 constexpr u32 OpenScreenTagList = 612;
+constexpr u32 EraseImage = 630;
 // The last vector of the 3.9 library; the table reaches down to it.
 constexpr u32 Last = 828;
 
@@ -151,6 +154,14 @@ public:
     void begin_batch();
     void end_batch();
     void flush_palette();
+
+    // Draws the Image chain at image at left, top on the RastPort, as
+    // DrawImage does: every pixel's pen comes from the data planes
+    // PlanePick selects, the bits of unselected planes from PlaneOnOff.
+    void draw_image(u32 rp, u32 image, i32 left, i32 top);
+
+    // Fills each image's rectangle with the RastPort's background pen.
+    void erase_image(u32 rp, u32 image, i32 left, i32 top);
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
     void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
@@ -342,6 +353,7 @@ private:
     void drag_prop(i32 x, i32 y);
     void end_prop_drag();
     void call_gadget_hook(u32 gadget, u32 vert_pot);
+    void report_image_damage(const raster::RastPortView& view, const Rect& rect);
     void clear_gadget_hook(u32 gadget);
     void clear_window_gadget_hooks(u32 window);
     void log_unhandled_gadget_type(u32 gtype);

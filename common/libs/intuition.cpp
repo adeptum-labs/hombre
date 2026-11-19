@@ -47,6 +47,22 @@ constexpr u32 kScNextScreen = 0;
 constexpr u32 kWBENCHSCREEN = 1;
 constexpr u32 kMaxTitleChars = 255;
 
+// struct Image (intuition/intuition.h), as .info files and DrawImage lay it
+// out.
+namespace image {
+constexpr u32 LeftEdge = 0;
+constexpr u32 TopEdge = 2;
+constexpr u32 Width = 4;
+constexpr u32 Height = 6;
+constexpr u32 Depth = 8;
+constexpr u32 ImageData = 10;
+constexpr u32 PlanePick = 14;
+constexpr u32 PlaneOnOff = 15;
+constexpr u32 NextImage = 16;
+}
+
+constexpr u32 kMaxImageChain = 64;
+
 constexpr u32 kBasePalette[8] = {
     0xA0A6B0, 0x1C1E22, 0xFFFFFF, 0x3D6FB6, 0x7A7E86, 0xC9CDD4, 0xD9A441, 0x9E3B3B,
 };
@@ -422,6 +438,42 @@ Rect intersect_rect(const Rect& a, const Rect& b) {
         a.x1 < b.x1 ? a.x1 : b.x1,
         a.y1 < b.y1 ? a.y1 : b.y1,
     };
+}
+
+// The part of the rectangle with its top-left corner at x0, y0 that lies
+// inside the view's clip and bitmap, as bitmap coordinates.
+bool clip_image_rect(const raster::RastPortView& view, i64 x0, i64 y0, i32 width, i32 height,
+                     Rect& out) {
+    i64 left = x0 > view.clip.x0 ? x0 : view.clip.x0;
+    i64 top = y0 > view.clip.y0 ? y0 : view.clip.y0;
+    i64 right = x0 + width - 1;
+    i64 bottom = y0 + height - 1;
+    if (right > view.clip.x1) {
+        right = view.clip.x1;
+    }
+    if (bottom > view.clip.y1) {
+        bottom = view.clip.y1;
+    }
+    const i64 bitmap_width = static_cast<i64>(view.bitmap.bytes_per_row) << 3;
+    const i64 bitmap_height = static_cast<i64>(view.bitmap.rows);
+    if (left < 0) {
+        left = 0;
+    }
+    if (top < 0) {
+        top = 0;
+    }
+    if (right >= bitmap_width) {
+        right = bitmap_width - 1;
+    }
+    if (bottom >= bitmap_height) {
+        bottom = bitmap_height - 1;
+    }
+    if (left > right || top > bottom) {
+        return false;
+    }
+    out = Rect{static_cast<i32>(left), static_cast<i32>(top), static_cast<i32>(right),
+               static_cast<i32>(bottom)};
+    return true;
 }
 
 // The Window fields a draw or a free needs.
@@ -954,6 +1006,16 @@ struct IntuitionNatives {
         native::set_result(m, of(ctx).remove_glist(m.cpu.a[0], m.cpu.a[1], 1));
     }
 
+    static void draw_image(void* ctx, Machine& m) {
+        of(ctx).draw_image(m.cpu.a[0], m.cpu.a[1], static_cast<i32>(m.cpu.d[0]),
+                           static_cast<i32>(m.cpu.d[1]));
+    }
+
+    static void erase_image(void* ctx, Machine& m) {
+        of(ctx).erase_image(m.cpu.a[0], m.cpu.a[1], static_cast<i32>(m.cpu.d[0]),
+                            static_cast<i32>(m.cpu.d[1]));
+    }
+
     static void refresh_glist(void* ctx, Machine& m) {
         of(ctx).refresh_glist(m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF));
     }
@@ -988,6 +1050,8 @@ struct IntuitionFunction {
 
 constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::AddGadget, IntuitionNatives::add_gadget, "AddGadget"},
+    {intuition_lvo::DrawImage, IntuitionNatives::draw_image, "DrawImage"},
+    {intuition_lvo::EraseImage, IntuitionNatives::erase_image, "EraseImage"},
     {intuition_lvo::CloseScreen, IntuitionNatives::close_screen, "CloseScreen"},
     {intuition_lvo::CloseWindow, IntuitionNatives::close_window, "CloseWindow"},
     {intuition_lvo::ModifyIDCMP, IntuitionNatives::modify_idcmp, "ModifyIDCMP"},
@@ -3533,6 +3597,145 @@ void Intuition::set_gadget_hook(u32 gadget, GadgetHook hook, void* ctx) {
     slot->window = find_gadget_window(gadget);
     slot->hook = hook;
     slot->ctx = ctx;
+}
+
+void Intuition::report_image_damage(const raster::RastPortView& view, const Rect& rect) {
+    if (display_ == nullptr || rect.x1 < rect.x0 || rect.y1 < rect.y0) {
+        return;
+    }
+    if (display_->front_screen != 0 &&
+        view.bitmap_addr == display_->front_screen + ndk::sc_BitMap) {
+        if (display_->sink.refresh != nullptr) {
+            display_->sink.refresh(display_->sink.ctx, *machine_, display_->front_screen, rect);
+        }
+        return;
+    }
+    if (display_->damage.damaged != nullptr) {
+        display_->damage.damaged(display_->damage.ctx, *machine_, view.bitmap_addr, rect);
+    }
+}
+
+void Intuition::draw_image(u32 rp, u32 image, i32 left, i32 top) {
+    if (machine_ == nullptr || rp == 0 || image == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const raster::RastPortView view = raster::load_rastport(b, rp);
+    if (!view.ok) {
+        return;
+    }
+    const i64 origin_x = static_cast<i64>(left) + view.origin_x;
+    const i64 origin_y = static_cast<i64>(top) + view.origin_y;
+    u32 current = image;
+    for (u32 step = 0; current != 0 && step < kMaxImageChain; ++step) {
+        const i32 img_left = static_cast<i16>(b.r16(current + image::LeftEdge));
+        const i32 img_top = static_cast<i16>(b.r16(current + image::TopEdge));
+        const i32 width = static_cast<i16>(b.r16(current + image::Width));
+        const i32 height = static_cast<i16>(b.r16(current + image::Height));
+        const i32 depth = static_cast<i16>(b.r16(current + image::Depth));
+        const u32 data = b.r32(current + image::ImageData);
+        const u32 plane_pick = b.r8(current + image::PlanePick);
+        const u32 plane_on_off = b.r8(current + image::PlaneOnOff);
+        const u32 next = b.r32(current + image::NextImage);
+        if (!b.ok()) {
+            return;
+        }
+        Rect area{0, 0, -1, -1};
+        if (width > 0 && height > 0 && depth >= 0 && depth <= 8 &&
+            clip_image_rect(view, origin_x + img_left, origin_y + img_top, width, height, area)) {
+            if (data == 0 || depth == 0) {
+                const Rect filled = raster::fill_rect(b, view.bitmap, view.clip, area, plane_on_off);
+                if (b.ok()) {
+                    report_image_damage(view, filled);
+                }
+            } else {
+                const u32 row_bytes = ((static_cast<u32>(width) + 15) / 16) * 2;
+                const u32 plane_bytes = row_bytes * static_cast<u32>(height);
+                const u64 all_bytes = static_cast<u64>(plane_bytes) * static_cast<u32>(depth);
+                if (all_bytes <= 0xFFFFFFFFu &&
+                    b.bytes_at(data, static_cast<u32>(all_bytes)) != nullptr) {
+                    i32 plane_of_bit[8]{};
+                    u32 fixed = 0;
+                    u32 used = 0;
+                    for (u32 bit = 0; bit < 8; ++bit) {
+                        if ((plane_pick & (1u << bit)) != 0) {
+                            plane_of_bit[bit] = static_cast<i32>(used++);
+                        } else {
+                            plane_of_bit[bit] = -1;
+                            if ((plane_on_off & (1u << bit)) != 0) {
+                                fixed |= 1u << bit;
+                            }
+                        }
+                    }
+                    const i64 image_x = origin_x + img_left;
+                    const i64 image_y = origin_y + img_top;
+                    for (i64 y = area.y0; y <= area.y1; ++y) {
+                        const u32 row = static_cast<u32>(y - image_y);
+                        const u8* planes[8]{};
+                        for (u32 plane = 0; plane < static_cast<u32>(depth); ++plane) {
+                            planes[plane] = b.bytes_at(
+                                data + plane * plane_bytes + row * row_bytes, row_bytes);
+                        }
+                        if (!b.ok()) {
+                            return;
+                        }
+                        for (i64 x = area.x0; x <= area.x1; ++x) {
+                            const u32 column = static_cast<u32>(x - image_x);
+                            const u8 mask = static_cast<u8>(0x80u >> (column & 7));
+                            u32 pen = fixed;
+                            for (u32 bit = 0; bit < 8; ++bit) {
+                                const i32 plane = plane_of_bit[bit];
+                                if (plane >= 0 && static_cast<u32>(plane) < static_cast<u32>(depth) &&
+                                    (planes[plane][column >> 3] & mask) != 0) {
+                                    pen |= 1u << bit;
+                                }
+                            }
+                            raster::write_pixel(b, view.bitmap, static_cast<i32>(x),
+                                                static_cast<i32>(y), pen);
+                        }
+                    }
+                    if (b.ok()) {
+                        report_image_damage(view, area);
+                    }
+                }
+            }
+        }
+        current = next;
+    }
+}
+
+void Intuition::erase_image(u32 rp, u32 image, i32 left, i32 top) {
+    if (machine_ == nullptr || rp == 0 || image == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const raster::RastPortView view = raster::load_rastport(b, rp);
+    if (!view.ok) {
+        return;
+    }
+    const u32 pen = b.r8(rp + ndk::rp_BgPen);
+    const i64 origin_x = static_cast<i64>(left) + view.origin_x;
+    const i64 origin_y = static_cast<i64>(top) + view.origin_y;
+    u32 current = image;
+    for (u32 step = 0; current != 0 && step < kMaxImageChain; ++step) {
+        const i32 img_left = static_cast<i16>(b.r16(current + image::LeftEdge));
+        const i32 img_top = static_cast<i16>(b.r16(current + image::TopEdge));
+        const i32 width = static_cast<i16>(b.r16(current + image::Width));
+        const i32 height = static_cast<i16>(b.r16(current + image::Height));
+        const u32 next = b.r32(current + image::NextImage);
+        if (!b.ok()) {
+            return;
+        }
+        Rect area{0, 0, -1, -1};
+        if (width > 0 && height > 0 &&
+            clip_image_rect(view, origin_x + img_left, origin_y + img_top, width, height, area)) {
+            const Rect filled = raster::fill_rect(b, view.bitmap, view.clip, area, pen);
+            if (b.ok()) {
+                report_image_damage(view, filled);
+            }
+        }
+        current = next;
+    }
 }
 
 void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
