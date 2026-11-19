@@ -8984,6 +8984,107 @@ Dos::Target Dos::examine(const char* name) {
     return target;
 }
 
+bool Dos::list_dir(const char* name, void (*visit)(void* ctx, const char* name, bool is_dir),
+                   void* ctx, u32& error) {
+    error = 0;
+    if (m_ == nullptr || name == nullptr) {
+        error = ERROR_INVALID_COMPONENT_NAME;
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolAdf;
+    char resolved[kMaxPath];
+    if (!DosOps::resolve(*this, b, name, vol, resolved, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    struct Visit {
+        void (*fn)(void* ctx, const char* name, bool is_dir);
+        void* ctx;
+    } v{visit, ctx};
+    auto collect = [](void* at, const DirEntry& entry) {
+        const Visit* visitor = static_cast<const Visit*>(at);
+        if (visitor->fn != nullptr) {
+            visitor->fn(visitor->ctx, entry.name, entry.is_dir);
+        }
+    };
+    const u32 err = DosOps::fs_list(*this, vol, resolved, collect, &v);
+    if (err != 0) {
+        error = err;
+        set_last_error(err);
+        return false;
+    }
+    set_last_error(0);
+    return true;
+}
+
+u32 Dos::lock_path(const char* name) {
+    if (m_ == nullptr || name == nullptr) {
+        return 0;
+    }
+    Bus b(*m_);
+    u8 vol = kVolAdf;
+    char resolved[kMaxPath];
+    DirEntry entry{};
+    u32 error = 0;
+    if (!DosOps::locate(*this, b, name, vol, resolved, entry, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return 0;
+    }
+    u32 lock = 0;
+    if (!DosOps::alloc_user_lock(*this, b, resolved, entry, SHARED_LOCK, lock)) {
+        return 0;
+    }
+    return lock;
+}
+
+bool Dos::unlock_path(u32 lock) {
+    if (m_ == nullptr) {
+        return false;
+    }
+    return DosOps::free_user_lock(*this, lock);
+}
+
+void Dos::unload_seg(u32 seglist) {
+    if (m_ != nullptr && seglist != 0) {
+        DosOps::unload(*this, seglist);
+    }
+}
+
+bool Dos::create_native_process(const char* name, u32 stack_bytes, u32& process) {
+    u32 cli = 0;
+    NewProcess spec{};
+    spec.name = name;
+    spec.stack_bytes = stack_bytes;
+    spec.args = "";
+    spec.start = false;
+    return build_process(spec, process, cli);
+}
+
+bool Dos::create_program_process(const char* name, u32 seglist, u32 stack_bytes,
+                                 u32 current_dir, u32& process) {
+    u32 cli = 0;
+    NewProcess spec{};
+    spec.name = name;
+    spec.seglist = seglist;
+    spec.free_seglist = false;
+    spec.stack_bytes = stack_bytes;
+    spec.current_dir = current_dir;
+    spec.args = "";
+    spec.start = false;
+    return build_process(spec, process, cli);
+}
+
+void Dos::end_process(u32 process) {
+    if (m_ != nullptr && process != 0) {
+        process_ended(process, false);
+    }
+}
+
 bool Dos::read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error) {
     got = 0;
     error = 0;

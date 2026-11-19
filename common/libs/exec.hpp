@@ -387,6 +387,10 @@ public:
 
     u32 exec_base() const { return base_; }
 
+    // The bytes no allocation holds, for the free memory a title bar
+    // reports.
+    u32 free_bytes() const { return free_bytes_; }
+
     // Allocates from the free list, first fit, 8-byte aligned. Every MEMF_
     // attribute is accepted; MEMF_CLEAR zeroes the block. 0 on failure.
     u32 alloc(u32 bytes, u32 flags);

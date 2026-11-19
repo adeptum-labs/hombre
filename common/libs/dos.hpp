@@ -749,6 +749,40 @@ public:
     // a file on RAM: protected from reading is not.
     bool read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error);
 
+    // The name of the volume dos serves as DF0:.
+    const char* volume_name() const { return volume_.name; }
+
+    // Visits every entry of the directory name, in the order ExNext gives
+    // them: the entry's own name and whether it is a directory. False with
+    // error and IoErr set when the name is not a directory.
+    bool list_dir(const char* name, void (*visit)(void* ctx, const char* name, bool is_dir),
+                  void* ctx, u32& error);
+
+    // Lock(name, SHARED_LOCK) and UnLock for code that is not the guest's:
+    // the lock's BPTR, or 0 with IoErr set when the name is not there, and
+    // false from unlock_path for a BPTR that is no lock of this library's.
+    u32 lock_path(const char* name);
+    bool unlock_path(u32 lock);
+
+    // UnLoadSeg for code that is not the guest's.
+    void unload_seg(u32 seglist);
+
+    // Builds, but does not start, a Process for a native task: no CLI, no
+    // seglist, its own message port and stack, and NIL: as its input.
+    // False when no process context is free or memory runs out.
+    bool create_native_process(const char* name, u32 stack_bytes, u32& process);
+
+    // Builds, but does not start, a Process for the program in seglist, as
+    // a Workbench icon starts one: no CLI, no seglist to free, NIL: as its
+    // input, its own stack, and current_dir as its directory. False when
+    // no process context is free or memory runs out.
+    bool create_program_process(const char* name, u32 seglist, u32 stack_bytes,
+                                u32 current_dir, u32& process);
+
+    // Ends a process whose task never ran, giving back what it holds as the
+    // end of its task would.
+    void end_process(u32 process);
+
     // Replaces the file name with the bytes; RAM: is the only writable
     // volume, and a file there protected from writing or open elsewhere
     // stays as it is. False with error and IoErr set otherwise.
