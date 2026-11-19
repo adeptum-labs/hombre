@@ -771,21 +771,22 @@ public:
     // size - 1 bytes plus NUL) and returns the length written (0 for code 0).
     u32 fault(u32 code, char* out, u32 size) const;
 
-    // Appends dir to the CLI command search path (up to kMaxPathDirs), kept
-    // as locks and mirrored in cli_CommandDir. On failure sets error and
-    // IoErr.
+    // Appends dir to the running process's command search path (up to
+    // kMaxPathDirs), kept as locks and mirrored in its cli_CommandDir. On
+    // failure sets error and IoErr.
     bool path_add(const char* dir, u32& error);
 
-    // Clears the CLI command search path, unlocking all path locks and
-    // freeing the cli_CommandDir list.
+    // Clears the running process's command search path, unlocking all path
+    // locks and freeing its cli_CommandDir list.
     void path_reset();
 
-    // Removes dir from the command search path. False with error set when
-    // it cannot be found or is not in the path.
+    // Removes dir from the running process's command search path. False with
+    // error set when it cannot be found or is not in the path.
     bool path_remove(const char* dir, u32& error);
 
-    // Number of directories currently in the command search path.
-    u32 path_count() const { return path_count_; }
+    // Number of directories currently in the running process's command
+    // search path.
+    u32 path_count() const { return procs_[cur_index()].path_count; }
 
     // Copies the NameFromLock text of path entry i into out. False if i is
     // out of range or the name does not fit.
@@ -794,8 +795,8 @@ public:
     // Resolves command word: if it contains ':' or '/', returns it as is
     // when it exists as a file; otherwise checks the process's current
     // directory (the bare name relative to it), then each directory of its
-    // CLI path in order, then "C:<word>". Returns false if none exists as a
-    // file or out is too small. process 0 is the boot shell's process.
+    // command path in order, then "C:<word>". Returns false if none exists
+    // as a file or out is too small. process 0 is the boot shell's process.
     bool find_command(const char* word, char* out, u32 size, u32 process = 0);
 
     // Registers console 0's interactive input callbacks, used after the
@@ -883,6 +884,11 @@ private:
         u32 out_handle;     // pr_COS
         bool close_input;
         bool close_output;
+        bool shell_console;  // owns the console handle pair create_shell_process opened
+        u8 console;          // the console its streams read from and write to
+        u32 path_locks[kMaxPathDirs];
+        u32 path_nodes[kMaxPathDirs];
+        u32 path_count;
     };
     ProcContext procs_[kMaxProcs]{};
     // The context of the running task: the one whose process is exec's
@@ -893,8 +899,7 @@ private:
     // or not a known process.
     ProcContext& context_for(u32 process);
     const ProcContext& context_for(u32 process) const;
-    // The console of the process's pr_CIS handle, or console 0 when it is
-    // not a console handle.
+    // The console the process's streams read from and write to.
     u8 console_for_process(u32 process) const;
     // The owner value of the current context, 0 when it has no command running.
     u8 cur_owner() const;
@@ -909,7 +914,7 @@ private:
         u32 entry;
         u32 stack_bytes;
         u32 input;   // 0 = NIL:
-        u32 output;  // 0 = the parent's
+        u32 output;  // 0 = the parent's, shared and left open
         bool close_input;
         bool close_output;
         u32 current_dir;  // 0 = the parent's
@@ -946,7 +951,8 @@ private:
         u8 last_char;
         u8 owner;
         bool exclusive;
-        u8 console;  // the console of a Console stream
+        u8 console;       // the console of a Console stream
+        u8 generation;    // changes each time the slot is opened
         char path[kMaxPath];
     };
 
@@ -1032,12 +1038,8 @@ private:
     NativeVector vectors_[kVectors]{};
     u64 (*now_ticks_)() = nullptr;
     // The index of the path directory whose lock holds (vol, canonical), or
-    // path_count_ when none does.
-    u32 path_index_of(u8 vol, const char* canonical) const;
-
-    u32 path_locks_[kMaxPathDirs]{};
-    u32 path_nodes_[kMaxPathDirs]{};
-    u32 path_count_ = 0;
+    // the path's count when none does.
+    static u32 path_index_of(const Dos& d, const ProcContext& p, u8 vol, const char* canonical);
 
     // Memory of processes that ended themselves, freed once nothing runs on
     // it any more.

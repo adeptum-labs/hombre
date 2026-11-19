@@ -149,6 +149,12 @@ public:
         return op({0x23C0, static_cast<u16>(addr >> 16), static_cast<u16>(addr)});
     }
 
+    // MOVE.L #value,addr.L
+    Asm& store_imm(u32 value, u32 addr) {
+        return op({0x23FC, static_cast<u16>(value >> 16), static_cast<u16>(value),
+                   static_cast<u16>(addr >> 16), static_cast<u16>(addr)});
+    }
+
     // A6 = OpenLibrary("dos.library", 0).
     Asm& open_dos() {
         string("dosname", "dos.library");
@@ -276,6 +282,63 @@ std::vector<u8> entry_command() {
     a.op({0x23CF, 0x0000, 0xC80C});          // MOVE.L A7,kOut+12
     a.op({0x23EF, 0x0000, 0x0000, 0xC810});  // MOVE.L 0(A7),kOut+16
     a.moveq(0, 0).rts();
+    return hunk_file(a.build());
+}
+
+// Lowers its stack pointer over a 64-byte live frame of pattern, then runs
+// C:Hello through RunCommand; the frame address goes to kOut + 8 and the
+// result to kOut + 4.
+std::vector<u8> run_stack_command() {
+    Asm a;
+    a.open_dos();
+    a.op({0x4FEF, 0xFFC0});  // LEA -64(A7),A7
+    a.op({0x23CF, static_cast<u16>((kOut + 8) >> 16), static_cast<u16>(kOut + 8)});  // A7
+    a.op({0x41EF, 0x0000});  // LEA (A7),A0
+    for (u32 i = 0; i < 16; ++i) {
+        const u32 v = 0xC0DE0000u | i;
+        a.op({0x20FC, static_cast<u16>(v >> 16), static_cast<u16>(v)});  // MOVE.L #v,(A0)+
+    }
+    a.address(1, "hello").dos(dos_lvo::LoadSeg).from_d0(1);
+    a.address(2, "args").moveq(0, 3).dos(dos_lvo::RunCommand);
+    a.store_d0(kOut + 4);
+    a.op({0x4FEF, 0x0040});  // LEA 64(A7),A7
+    a.moveq(0, 0).rts().string("hello", "C:Hello").string("args", "");
+    return hunk_file(a.build());
+}
+
+// Runs itself through RunCommand until exec refuses to nest any deeper.
+std::vector<u8> nest_command() {
+    Asm a;
+    a.open_dos();
+    a.address(1, "nest").dos(dos_lvo::LoadSeg).from_d0(1);
+    a.address(2, "args").moveq(0, 3).dos(dos_lvo::RunCommand);
+    a.rts().string("nest", "C:Nest").string("args", "");
+    return hunk_file(a.build());
+}
+
+// Opens a console handle and starts a child on it with the close flag set,
+// so the handle belongs to the child from then on.
+std::vector<u8> spawn_with_own_handle_command() {
+    const u32 tags = kData + 0x700;
+    Asm a;
+    a.open_dos();
+    a.address(1, "star").move_l(MODE_OLDFILE, 2).dos(dos_lvo::Open);  // D0 = handle
+    a.store_d0(kOut);
+    a.store_d0(tags + 20);  // NP_Output's data
+    a.address(1, "hello").dos(dos_lvo::LoadSeg);  // D0 = seglist
+    a.store_d0(kOut + 4);
+    a.store_d0(tags + 4);  // NP_Seglist's data
+    a.store_imm(NP_Seglist, tags);
+    a.store_imm(NP_FreeSeglist, tags + 8);
+    a.store_imm(DOSTRUE, tags + 12);
+    a.store_imm(NP_Output, tags + 16);
+    a.store_imm(NP_CloseOutput, tags + 24);
+    a.store_imm(DOSTRUE, tags + 28);
+    a.store_imm(TAG_DONE, tags + 32);
+    a.store_imm(0, tags + 36);
+    a.move_l(tags, 1).dos(dos_lvo::CreateNewProc);
+    a.store_d0(kOut + 8);
+    a.moveq(0, 0).rts().string("star", "*").string("hello", "C:Hello");
     return hunk_file(a.build());
 }
 
@@ -458,6 +521,9 @@ private:
 i32 as_signed(u32 v) {
     return static_cast<i32>(v);
 }
+
+// Where the FileHandle a BPTR names sits; the generation is above bit 22.
+u32 handle_at(u32 bptr) { return (bptr & 0x003FFFFFu) << 2; }
 
 // --- layout -------------------------------------------------------------
 
@@ -1504,7 +1570,7 @@ void open_read_seek_close() {
     r.str(kData, "C:Echo");
     const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
     CHECK(fh != 0);
-    const u32 at = fh << 2;
+    const u32 at = handle_at(fh);
     CHECK_EQ(r.get32(at + fh_Interactive), 0u);
     CHECK_EQ(r.call(dos_lvo::Read, fh, kData + 0x100, 600), 600u);
     CHECK(r.bytes(kData + 0x100, 600) == std::vector<u8>(echo.begin(), echo.begin() + 600));
@@ -1702,7 +1768,8 @@ void file_table_is_bounded() {
     CHECK_EQ(r.get8(kData + 0x100), echo_bytes()[0]);
     CHECK_EQ(r.call(dos_lvo::Close, handles[3]), DOSTRUE);
     const u32 again = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
-    CHECK_EQ(again, handles[3]);
+    CHECK_EQ(handle_at(again), handle_at(handles[3]));
+    CHECK(again != handles[3]);  // a new generation
 
     // Closing what is not open is logged and ignored.
     g_lines.clear();
@@ -1723,7 +1790,7 @@ void file_table_is_bounded() {
     CHECK(g_console == "still");
     // The guest scribbling over a FileHandle changes nothing dos relies on.
     for (u32 i = 0; i < fh_SIZEOF; i += 4) {
-        r.put32((handles[0] << 2) + i, 0xDEADBEEF);
+        r.put32(handle_at(handles[0]) + i, 0xDEADBEEF);
     }
     CHECK_EQ(r.call(dos_lvo::Read, handles[0], kData + 0x100, 2), 2u);
     CHECK_EQ(r.get8(kData + 0x100), echo_bytes()[10]);
@@ -5864,7 +5931,7 @@ void ram_handler_port_and_zero_dates() {
         r.str(kData, "RAM:probe");
         const u32 ram_fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
         CHECK(ram_fh != 0);
-        CHECK_EQ(r.get32((ram_fh << 2) + fh_Type), ram_port);
+        CHECK_EQ(r.get32(handle_at(ram_fh) + fh_Type), ram_port);
         r.call(dos_lvo::Close, ram_fh);
 
         const u32 bstr = kData + 0x200;
@@ -6048,6 +6115,8 @@ void use_noop_task_host() {
     g_exec.set_task_host(TaskHost{noop_create, noop_switch, noop_destroy, nullptr, nullptr,
                                   nullptr, nullptr, nullptr});
 }
+
+void idle_task(void*) {}
 
 u32 load_echo_seg(Rig& r) {
     r.str(kData, "C:Hello");
@@ -6390,6 +6459,288 @@ void run_command_in_runs_commands_in_the_process() {
     g_exec.set_this_task(r.proc());
 }
 
+void run_command_keeps_the_callers_stack() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/RunStack", run_stack_command()});
+    Rig r(files);
+    u32 result = 1;
+    CHECK(g_dos.run_command("C:RunStack", "", result, kBlocks));
+    CHECK_EQ(result, 0u);
+    const u32 frame = r.get32(kOut + 8);
+    for (u32 i = 0; i < 16; ++i) {
+        CHECK_EQ(r.get32(frame + i * 4), 0xC0DE0000u | i);
+    }
+    CHECK_EQ(r.get32(kOut + 4), 3u);  // C:Hello's return code
+    CHECK(g_console == "hi\n");
+}
+
+void nested_runs_stop_at_the_limit() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/Nest", nest_command()});
+    Rig r(files);
+    u32 result = 0;
+    CHECK(g_dos.run_command("C:Nest", "", result, kBlocks));
+    CHECK_EQ(result, 0xFFFFFFFFu);
+    CHECK_EQ(g_dos.last_error(), ERROR_NO_FREE_STORE);
+    CHECK(logged_containing("nested too deep"));
+}
+
+// CreateProc, CreateNewProc and an asynchronous System with no output of
+// their own share the starter's output and leave it open when they end.
+void processes_leave_the_parents_output_open() {
+    Rig r;
+    use_noop_task_host();
+    const u32 original = r.call(dos_lvo::Output);
+    r.str(kData + 0x800, "*");
+    const u32 shared = r.call(dos_lvo::Open, kData + 0x800, MODE_OLDFILE);
+    CHECK(shared != 0);
+    CHECK_EQ(r.call(dos_lvo::SelectOutput, shared), original);
+
+    auto end_process = [&](u32 process) {
+        CHECK(process != 0);
+        r.cpu().a[1] = process;
+        CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    };
+    auto write_still_open = [&](const char* s) {
+        r.str(kData + 0x900, s);
+        const u32 n = static_cast<u32>(std::strlen(s));
+        CHECK_EQ(r.call(dos_lvo::Write, shared, kData + 0x900, n), n);
+    };
+
+    const u32 seglist = load_echo_seg(r);
+    r.str(kData + 0x400, "createproc");
+    const u32 port = r.call(dos_lvo::CreateProc, kData + 0x400, 0, seglist, 4096);
+    CHECK(port != 0);
+    end_process(port - pr_MsgPort);
+    write_still_open("one");
+
+    const u32 child = create_cli(r, seglist, "newproc", "", 0);
+    CHECK(child != 0);
+    CHECK_EQ(r.get32(child + pr_COS), shared);
+    end_process(child);
+    write_still_open("two");
+
+    const u32 tags = kData + 0x400;
+    r.put32(tags, SYS_Asynch);
+    r.put32(tags + 4, DOSTRUE);
+    r.put32(tags + 8, TAG_DONE);
+    r.put32(tags + 12, 0);
+    r.str(kData, "C:Hello");
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, kData, tags), 0u);
+    const u32 async = r.call(dos_lvo::FindCliProc, 2);
+    CHECK(async != 0);
+    CHECK_EQ(r.get32(async + pr_COS), shared);
+    end_process(async);
+    write_still_open("three");
+
+    CHECK(g_console == "onetwothree");
+    CHECK_EQ(r.call(dos_lvo::SelectOutput, original), shared);
+    r.call(dos_lvo::Close, shared);
+    r.call(dos_lvo::UnLoadSeg, seglist);
+}
+
+void a_passed_handle_belongs_to_the_child() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/SpawnOwn", spawn_with_own_handle_command()});
+    Rig r(files);
+    use_noop_task_host();
+    u32 result = 1;
+    CHECK(g_dos.run_command("C:SpawnOwn", "", result, kBlocks));
+    CHECK_EQ(result, 0u);
+    const u32 handle = r.get32(kOut);
+    const u32 child = r.get32(kOut + 8);
+    CHECK(handle != 0);
+    CHECK(child != 0);
+    CHECK_EQ(r.get32(child + pr_COS), handle);
+
+    // The command's cleanup left the handle to the child.
+    r.str(kData + 0x100, "live");
+    CHECK_EQ(r.call(dos_lvo::Write, handle, kData + 0x100, 4), 4u);
+
+    // The child closes it when it ends.
+    r.cpu().a[1] = child;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK_EQ(as_signed(r.call(dos_lvo::Write, handle, kData + 0x100, 4)), -1);
+}
+
+void stale_handle_bptrs_are_rejected() {
+    Rig r;
+    r.str(kData, "C:Echo");
+    const u32 first = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(first != 0);
+    CHECK_EQ(r.call(dos_lvo::Close, first), DOSTRUE);
+    const u32 second = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(second != 0);
+    CHECK_EQ(handle_at(second), handle_at(first));
+    CHECK(second != first);
+
+    g_lines.clear();
+    CHECK_EQ(r.call(dos_lvo::Close, first), DOSFALSE);
+    CHECK(logged_containing("dos: Close of a bad file handle"));
+    CHECK_EQ(as_signed(r.call(dos_lvo::Read, first, kData + 0x100, 1)), -1);
+    CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
+    CHECK_EQ(r.call(dos_lvo::Read, second, kData + 0x100, 1), 1u);
+    r.call(dos_lvo::Close, second);
+}
+
+// A shell's console pair closes only when the last process using it ends.
+void a_shell_console_pair_serves_its_children() {
+    Rig r;
+    use_noop_task_host();
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+    u32 shell = 0;
+    u32 shell_cli = 0;
+    CHECK(g_dos.create_shell_process(1, shell, shell_cli));
+    CHECK(g_exec.spawn_native(shell, idle_task, nullptr, 0, false) != 0);
+    const u32 cos = r.get32(shell + pr_COS);
+
+    g_exec.set_this_task(shell);
+    const u32 child_cli = g_dos.start_background("C:Hello", "");
+    CHECK(child_cli != 0);
+    const u32 child = r.call(dos_lvo::FindCliProc, child_cli);
+    CHECK(child != 0);
+    CHECK_EQ(r.get32(child + pr_COS), cos);
+
+    // The shell ends while the child still writes to its output.
+    g_exec.set_this_task(r.proc());
+    g_exec.end_tasks_of(r.proc());
+    CHECK(logged_containing("ended task HombreShell"));
+    r.str(kData, "live");
+    CHECK_EQ(r.call(dos_lvo::Write, cos, kData, 4), 4u);
+    CHECK(one.written == "live");
+
+    // The child's end closes the pair.
+    r.cpu().a[1] = child;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK_EQ(as_signed(r.call(dos_lvo::Write, cos, kData, 4)), -1);
+}
+
+// A command run in a shell ends the shell's non-detached child tasks and
+// resets its Forbid count.
+void run_command_in_ends_the_shells_children() {
+    Rig r;
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+    u32 shell = 0;
+    u32 shell_cli = 0;
+    CHECK(g_dos.create_shell_process(1, shell, shell_cli));
+    g_exec.set_this_task(shell);
+
+    const u32 child = kData + 0x1000;
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        r.put8(child + i, 0);
+    }
+    r.put8(child + LN_TYPE, NT_TASK);
+    r.put8(child + LN_PRI, 0xFF);
+    r.put32(child + TC_SPLOWER, kData + 0x2000);
+    r.put32(child + TC_SPUPPER, kData + 0x3000);
+    r.put32(child + TC_SPREG, kData + 0x3000);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x400;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], child);
+
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK_EQ(r.get8(g_exec.exec_base() + TDNestCnt), 0x01u);
+
+    u32 result = 0;
+    CHECK(g_dos.run_command_in(shell, "C:Hello", "", result, kBlocks));
+    CHECK_EQ(result, 3u);
+    CHECK_EQ(r.get8(child + TC_STATE), TS_REMOVED);
+    CHECK_EQ(r.get8(g_exec.exec_base() + TDNestCnt), 0xFFu);
+    CHECK_EQ(r.get8(shell + TC_TDNESTCNT), 0xFFu);
+    g_exec.set_this_task(r.proc());
+}
+
+void system_uses_the_shell_process_directory() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"S/CmdS", hello_command()});
+    Rig r(files);
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+    u32 shell = 0;
+    u32 shell_cli = 0;
+    CHECK(g_dos.create_shell_process(1, shell, shell_cli));
+    u32 err = 0;
+    CHECK(g_dos.change_dir("S", err, shell));
+    g_exec.set_this_task(shell);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "CmdS"), 0), 3u);
+    CHECK(one.written == "hi\n");
+    CHECK(g_console.empty());
+    g_exec.set_this_task(r.proc());
+}
+
+void console_star_follows_the_process_console() {
+    Rig r;
+    use_noop_task_host();
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+    u32 shell = 0;
+    u32 shell_cli = 0;
+    CHECK(g_dos.create_shell_process(1, shell, shell_cli));
+    g_exec.set_this_task(shell);
+    const u32 seglist = load_echo_seg(r);
+    const u32 child = create_cli(r, seglist, "child", "", 0);
+    CHECK(child != 0);
+
+    g_exec.set_this_task(child);
+    r.str(kData, "*");
+    const u32 out = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(out != 0);
+    r.str(kData + 0x100, "kid");
+    CHECK_EQ(r.call(dos_lvo::Write, out, kData + 0x100, 3), 3u);
+    CHECK(one.written == "kid");
+    CHECK(g_console.empty());
+    g_exec.set_this_task(r.proc());
+}
+
+void paths_belong_to_each_process() {
+    Rig r;
+    u32 err = 0;
+    CHECK(g_dos.path_add("S:", err));
+    u32 shell = 0;
+    u32 shell_cli = 0;
+    CHECK(g_dos.create_shell_process(1, shell, shell_cli));
+
+    // The shell copies the boot shell's path and adds to its own.
+    g_exec.set_this_task(shell);
+    CHECK_EQ(g_dos.path_count(), 1u);
+    char name[128];
+    CHECK(g_dos.path_name(0, name, sizeof name));
+    CHECK(std::string(name) == "HombreTest:S");
+    CHECK(g_dos.path_add("Devs", err));
+    CHECK_EQ(g_dos.path_count(), 2u);
+    const u32 shell_cli_at = r.get32(shell + pr_CLI) << 2;
+    const u32 shell_nodes = r.get32(shell_cli_at + cli_CommandDir);
+    const u32 shell_node1 = r.get32(shell_nodes << 2) << 2;
+    CHECK(shell_node1 != 0);
+    CHECK_EQ(r.get32(shell_node1), 0u);
+
+    g_exec.set_this_task(r.proc());
+    CHECK_EQ(g_dos.path_count(), 1u);
+    CHECK(g_dos.path_name(0, name, sizeof name));
+    CHECK(std::string(name) == "HombreTest:S");
+    const u32 boot_nodes = r.get32(r.call(dos_lvo::Cli) + cli_CommandDir);
+    CHECK(boot_nodes != 0);
+    CHECK(shell_nodes != 0);
+    CHECK(boot_nodes != shell_nodes);
+
+    // Resetting one shell leaves the other's path alone.
+    g_exec.set_this_task(shell);
+    g_dos.path_reset();
+    CHECK_EQ(g_dos.path_count(), 0u);
+    CHECK_EQ(r.get32(shell_cli_at + cli_CommandDir), 0u);
+    g_exec.set_this_task(r.proc());
+    CHECK_EQ(g_dos.path_count(), 1u);
+    CHECK(g_dos.path_name(0, name, sizeof name));
+    CHECK(std::string(name) == "HombreTest:S");
+    CHECK_EQ(r.get32(r.call(dos_lvo::Cli) + cli_CommandDir), boot_nodes);
+    g_dos.path_reset();
+}
+
 }
 
 int main() {
@@ -6498,5 +6849,15 @@ int main() {
     a_process_reads_and_writes_its_console();
     create_shell_process_builds_a_cli();
     run_command_in_runs_commands_in_the_process();
+    run_command_keeps_the_callers_stack();
+    nested_runs_stop_at_the_limit();
+    processes_leave_the_parents_output_open();
+    a_passed_handle_belongs_to_the_child();
+    stale_handle_bptrs_are_rejected();
+    a_shell_console_pair_serves_its_children();
+    run_command_in_ends_the_shells_children();
+    system_uses_the_shell_process_directory();
+    console_star_follows_the_process_console();
+    paths_belong_to_each_process();
     return check::finish("test_dos");
 }

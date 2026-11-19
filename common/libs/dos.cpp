@@ -40,6 +40,10 @@ namespace {
 constexpr u32 kHandles = 2 + Dos::kMaxFiles;
 constexpr u32 kConsoleIn = 0;  // the handle slots of pr_CIS and pr_COS
 constexpr u32 kConsoleOut = 1;
+// A handle BPTR carries the slot generation in its top byte, above the
+// handle's address >> 2.
+constexpr u32 kHandleBptrMask = 0x003FFFFF;
+constexpr u32 kHandleGenerationShift = 24;
 constexpr u32 kMaxName = 256;                // bytes of a guest name dos reads, NUL included
 constexpr u32 kMaxLine = Dos::kMaxArgs + 1;  // a ReadArgs line, its newline included
 constexpr u32 kMaxTemplate = 512;
@@ -682,14 +686,16 @@ struct DosOps {
 
     // --- handles and locks -------------------------------------------------
 
-    // The slot of an open handle, by its BPTR alone; -1 if it is not one.
+    // The slot of an open handle, by its BPTR alone; -1 if it is not one or
+    // its generation is not the slot's current one.
     static i64 handle_slot(const Dos& d, u32 bptr) {
-        const u64 at = static_cast<u64>(bptr) << 2;
+        const u64 at = static_cast<u64>(bptr & kHandleBptrMask) << 2;
         if (at < d.handles_ || (at - d.handles_) % fh_SIZEOF != 0) {
             return -1;
         }
         const u64 slot = (at - d.handles_) / fh_SIZEOF;
-        if (slot >= kHandles || d.files_[slot].stream == Dos::Stream::Closed) {
+        if (slot >= kHandles || d.files_[slot].stream == Dos::Stream::Closed ||
+            (bptr >> kHandleGenerationShift) != d.files_[slot].generation) {
             return -1;
         }
         return static_cast<i64>(slot);
@@ -731,7 +737,10 @@ struct DosOps {
         return nullptr;
     }
 
-    static u32 handle_bptr(const Dos& d, u32 slot) { return (d.handles_ + slot * fh_SIZEOF) >> 2; }
+    static u32 handle_bptr(const Dos& d, u32 slot) {
+        return ((d.handles_ + slot * fh_SIZEOF) >> 2) |
+               (static_cast<u32>(d.files_[slot].generation) << kHandleGenerationShift);
+    }
     static u32 lock_bptr(const Dos& d, u32 slot) { return (d.locks_ + slot * fl_SIZEOF) >> 2; }
     static u32 assign_lock_bptr(const Dos& d, u32 slot) {
         return (d.assign_locks_ + slot * fl_SIZEOF) >> 2;
@@ -1975,6 +1984,20 @@ struct DosOps {
         return s;
     }
 
+    // Gives the slot a new generation, so the BPTRs of its previous contents
+    // no longer resolve.
+    static void open_slot(Dos& d, u32 slot, const Dos::FileSlot& f) {
+        const u8 generation = static_cast<u8>(d.files_[slot].generation + 1);
+        d.files_[slot] = f;
+        d.files_[slot].generation = generation;
+    }
+
+    static void close_slot(Dos& d, u32 slot) {
+        const u8 generation = d.files_[slot].generation;
+        d.files_[slot] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
+        d.files_[slot].generation = generation;
+    }
+
     // The console input of the current process: its argument line, then its
     // pr_CIS console's reader.
     static bool refill_console(Dos& d) {
@@ -2080,8 +2103,9 @@ struct DosOps {
                 table_full(d, b, "file handle", Dos::kMaxFiles);
                 return;
             }
-            d.files_[slot] = make_file_slot(Dos::Stream::Console, DirEntry{}, "", d.cur_owner(),
-                                            false, d.console_for_process(d.cur().process));
+            open_slot(d, static_cast<u32>(slot),
+                      make_file_slot(Dos::Stream::Console, DirEntry{}, "", d.cur_owner(), false,
+                                     d.console_for_process(d.cur().process)));
             init_handle(d, b, static_cast<u32>(slot), true);
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
@@ -2091,7 +2115,8 @@ struct DosOps {
                 table_full(d, b, "file handle", Dos::kMaxFiles);
                 return;
             }
-            d.files_[slot] = make_file_slot(Dos::Stream::Nil, DirEntry{}, "", d.cur_owner());
+            open_slot(d, static_cast<u32>(slot),
+                      make_file_slot(Dos::Stream::Nil, DirEntry{}, "", d.cur_owner()));
             init_handle(d, b, static_cast<u32>(slot), false);
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
@@ -2130,7 +2155,8 @@ struct DosOps {
             }
             char canonical[Dos::kMaxPath];
             fs_canonical(d, vol, resolved, canonical);
-            d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner());
+            open_slot(d, static_cast<u32>(slot),
+                      make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner()));
             init_handle(d, b, static_cast<u32>(slot), false);
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
@@ -2212,8 +2238,8 @@ struct DosOps {
         const DirEntry entry = ram_entry(d, node);
         char canonical[Dos::kMaxPath];
         ram_node_path(d.ram_, node, canonical);
-        d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner(),
-                                        exclusive);
+        open_slot(d, static_cast<u32>(slot),
+                  make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner(), exclusive));
         retain_entry(d, entry);
         init_handle(d, b, static_cast<u32>(slot), false);
         native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
@@ -2224,7 +2250,7 @@ struct DosOps {
         const i64 slot = handle_slot(d, bptr);
         if (slot > static_cast<i64>(kConsoleOut)) {
             release_entry(d, d.files_[slot].entry);
-            d.files_[slot] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
+            close_slot(d, static_cast<u32>(slot));
         }
     }
 
@@ -4163,8 +4189,9 @@ struct DosOps {
             table_full(d, b, "file handle", Dos::kMaxFiles);
             return;
         }
-        d.files_[fslot] = make_file_slot(Dos::Stream::File, l.entry, l.path, d.cur_owner(),
-                                         l.exclusive);
+        open_slot(d, static_cast<u32>(fslot),
+                  make_file_slot(Dos::Stream::File, l.entry, l.path, d.cur_owner(),
+                                 l.exclusive));
         init_handle(d, b, static_cast<u32>(fslot), false);
         l.used = false;
         l.owner = 0;
@@ -6111,7 +6138,6 @@ struct DosOps {
     }
 
     static void update_renamed_paths(Dos& d, Bus& b, u32 renamed_node) {
-        Dos::ProcContext& p = d.cur();
         auto update_lock_slot = [&](Dos::LockSlot& l) {
             if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block > 0) {
                 const u32 node = l.entry.header_block - 1;
@@ -6160,18 +6186,25 @@ struct DosOps {
                 }
             }
         }
-        const u32 cur = b.r32(p.process + pr_CurrentDir);
-        if (b.ok() && cur != 0 && p.cli != 0) {
-            const Dos::LockSlot* cur_slot = find_lock_slot(d, cur);
-            if (cur_slot != nullptr && cur_slot->entry.volume == Dos::kVolRam &&
-                cur_slot->entry.header_block > 0 &&
-                ram_is_at_or_below(d.ram_, cur_slot->entry.header_block - 1, renamed_node)) {
-                char full_name[kMaxName];
-                format_volume_path(volume_name(d, Dos::kVolRam), cur_slot->path, full_name,
-                                   sizeof full_name);
-                put_bstr(b, p.set_name, full_name, 255);
-                b.w32(p.cli + cli_SetName, p.set_name >> 2);
+        for (Dos::ProcContext& p : d.procs_) {
+            if (!p.used || p.cli == 0) {
+                continue;
             }
+            const u32 cur = b.r32(p.process + pr_CurrentDir);
+            if (!b.ok() || cur == 0) {
+                continue;
+            }
+            const Dos::LockSlot* cur_slot = find_lock_slot(d, cur);
+            if (cur_slot == nullptr || cur_slot->entry.volume != Dos::kVolRam ||
+                cur_slot->entry.header_block == 0 ||
+                !ram_is_at_or_below(d.ram_, cur_slot->entry.header_block - 1, renamed_node)) {
+                continue;
+            }
+            char full_name[kMaxName];
+            format_volume_path(volume_name(d, Dos::kVolRam), cur_slot->path, full_name,
+                               sizeof full_name);
+            put_bstr(b, p.set_name, full_name, 255);
+            b.w32(p.cli + cli_SetName, p.set_name >> 2);
         }
     }
 
@@ -7442,9 +7475,22 @@ struct DosOps {
     // restoring the process's argument state. Returns D0, or Exit's code, or
     // -1 when the run ended another way.
     static u32 run_seg(Dos& d, Bus& b, u32 seglist, const char* args, u32 length, u32 input,
-                       u32 output) {
+                       u32 output, u32 stack_bytes = Dos::kStackBytes) {
         Dos::ProcContext& p = d.cur();
         if (p.args == 0) {
+            return 0xFFFFFFFF;
+        }
+        if (!d.exec_->enter_nested_run()) {
+            d.set_context_error(p, ERROR_NO_FREE_STORE);
+            return 0xFFFFFFFF;
+        }
+        if (stack_bytes < 1024) {
+            stack_bytes = 1024;
+        }
+        const u32 stack = d.exec_->alloc(stack_bytes, MEMF_PUBLIC | MEMF_CLEAR);
+        if (stack == 0) {
+            d.set_context_error(p, ERROR_NO_FREE_STORE);
+            d.exec_->leave_nested_run();
             return 0xFFFFFFFF;
         }
         char saved_input[Dos::kMaxArgs + 2];
@@ -7458,6 +7504,11 @@ struct DosOps {
         const u32 saved_pr_args = b.r32(p.process + pr_Arguments);
         const u32 saved_cis = b.r32(p.process + pr_CIS);
         const u32 saved_cos = b.r32(p.process + pr_COS);
+        const u32 saved_lower = b.r32(p.process + TC_SPLOWER);
+        const u32 saved_upper = b.r32(p.process + TC_SPUPPER);
+        const u32 saved_spreg = b.r32(p.process + TC_SPREG);
+        const u32 saved_return_addr = b.r32(p.process + pr_ReturnAddr);
+        const u32 saved_stack_size = b.r32(p.process + pr_StackSize);
         const bool saved_running = p.running;
         const bool saved_exited = p.exited;
         const u32 saved_exit_code = p.exit_code;
@@ -7485,11 +7536,13 @@ struct DosOps {
         p.running = true;
         p.exited = false;
         p.exit_code = 0;
-        const u32 stack_bytes = d.stack_size_of(p);
-        const u32 top = p.stack + stack_bytes;
-        const u32 saved_top4 = b.r32(top - 4);
-        const u32 saved_top8 = b.r32(top - 8);
+        const u32 top = stack + stack_bytes;
         b.w32(top - 4, stack_bytes);
+        b.w32(p.process + TC_SPLOWER, stack);
+        b.w32(p.process + TC_SPUPPER, top);
+        b.w32(p.process + TC_SPREG, top - 8);
+        b.w32(p.process + pr_ReturnAddr, top - 4);
+        b.w32(p.process + pr_StackSize, stack_bytes);
         CpuState saved_cpu = d.m_->cpu;
         CpuState& cpu = d.m_->cpu;
         cpu.exit = ExitReason::None;
@@ -7520,14 +7573,19 @@ struct DosOps {
             p.input[i] = saved_input[i];
             b.w8(p.args + i, static_cast<u8>(saved_args[i]));
         }
-        b.w32(top - 4, saved_top4);
-        b.w32(top - 8, saved_top8);
         b.w32(p.process + pr_Arguments, saved_pr_args);
         b.w32(p.process + pr_CIS, saved_cis);
         b.w32(p.process + pr_COS, saved_cos);
+        b.w32(p.process + TC_SPLOWER, saved_lower);
+        b.w32(p.process + TC_SPUPPER, saved_upper);
+        b.w32(p.process + TC_SPREG, saved_spreg);
+        b.w32(p.process + pr_ReturnAddr, saved_return_addr);
+        b.w32(p.process + pr_StackSize, saved_stack_size);
         p.running = saved_running;
         p.exited = saved_exited;
         p.exit_code = saved_exit_code;
+        d.exec_->free(stack, stack_bytes);
+        d.exec_->leave_nested_run();
         return rc;
     }
 
@@ -7628,7 +7686,8 @@ struct DosOps {
             native::set_result(m, 0xFFFFFFFF);
             return;
         }
-        native::set_result(m, run_seg(d, b, seglist, args, length, 0, 0));
+        native::set_result(
+            m, run_seg(d, b, seglist, args, length, 0, 0, d.stack_size_of(d.cur())));
     }
 
     // Runs a command line in the current process, or as a background CLI
@@ -7658,7 +7717,7 @@ struct DosOps {
             return false;
         }
         char path[Dos::kMaxPath];
-        if (!d.find_command(word, path, sizeof path)) {
+        if (!d.find_command(word, path, sizeof path, d.cur().process)) {
             return false;
         }
         const u32 seglist = d.load_seg(path);
@@ -7687,7 +7746,8 @@ struct DosOps {
             rc = 0;
             return true;
         }
-        rc = run_seg(d, b, seglist, s, length_of(s), input, output);
+        rc = run_seg(d, b, seglist, s, length_of(s), input, output,
+                     d.stack_size_of(d.cur()));
         unload(d, seglist);
         return true;
     }
@@ -7738,7 +7798,7 @@ struct DosOps {
         for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
             if (d.files_[i].stream != Dos::Stream::Closed && d.files_[i].owner == owner) {
                 release_entry(d, d.files_[i].entry);
-                d.files_[i] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
+                close_slot(d, i);
             }
         }
         for (u32 i = 0; i < Dos::kMaxLocks; ++i) {
@@ -7750,6 +7810,17 @@ struct DosOps {
                 d.lock_slots_[i].exclusive = false;
             }
         }
+    }
+
+    static void free_paths(Dos& d, Dos::ProcContext& p) {
+        constexpr u32 kPathNodeBytes = 8;
+        for (u32 i = 0; i < p.path_count && i < Dos::kMaxPathDirs; ++i) {
+            free_user_lock(d, p.path_locks[i]);
+            if (p.path_nodes[i] != 0) {
+                d.exec_->free(p.path_nodes[i], kPathNodeBytes);
+            }
+        }
+        p.path_count = 0;
     }
 };
 
@@ -7924,17 +7995,7 @@ const Dos::ProcContext& Dos::context_for(u32 process) const {
     return procs_[0];
 }
 
-u8 Dos::console_for_process(u32 process) const {
-    if (m_ == nullptr) {
-        return 0;
-    }
-    u32 cis = 0;
-    if (!m_->mem.read32(process + pr_CIS, cis)) {
-        return 0;
-    }
-    const i64 slot = DosOps::handle_slot(*this, cis);
-    return slot >= 0 ? files_[slot].console : 0;
-}
+u8 Dos::console_for_process(u32 process) const { return context_for(process).console; }
 
 void Dos::set_context_error(const ProcContext& p, u32 code) {
     if (m_ == nullptr) {
@@ -7986,10 +8047,11 @@ u32 Dos::open_nil(u8 owner) {
         return 0;
     }
     Bus b(*m_);
-    files_[slot] = DosOps::make_file_slot(Stream::Nil, DirEntry{}, "", owner);
+    DosOps::open_slot(*this, static_cast<u32>(slot),
+                      DosOps::make_file_slot(Stream::Nil, DirEntry{}, "", owner));
     DosOps::init_handle(*this, b, static_cast<u32>(slot), false);
     if (!b.ok()) {
-        files_[slot] = DosOps::make_file_slot(Stream::Closed, DirEntry{}, "");
+        DosOps::close_slot(*this, static_cast<u32>(slot));
         return 0;
     }
     return DosOps::handle_bptr(*this, static_cast<u32>(slot));
@@ -8015,7 +8077,9 @@ bool Dos::open_console_handles(u8 console, u32& in_fh, u32& out_fh) {
     }
     Bus b(*m_);
     for (u32 slot : slots) {
-        files_[slot] = DosOps::make_file_slot(Stream::Console, DirEntry{}, "", 0, false, console);
+        DosOps::open_slot(*this, slot,
+                          DosOps::make_file_slot(Stream::Console, DirEntry{}, "", 0, false,
+                                                 console));
         DosOps::init_handle(*this, b, slot, true);
     }
     if (!b.ok()) {
@@ -8077,6 +8141,9 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
     const u32 parent_cli = b.r32(parent.process + pr_CLI);
     const u32 parent_dir = b.r32(parent.process + pr_CurrentDir);
     const u32 parent_cos = b.r32(parent.process + pr_COS);
+    ProcContext& p = procs_[index];
+    p = ProcContext{};
+    p.console = spec.console != kNoConsole ? spec.console : parent.console;
     u32 process = exec_->alloc(process_bytes, MEMF_PUBLIC | MEMF_CLEAR);
     u32 cli_at = spec.cli ? exec_->alloc(kCliBlockBytes, MEMF_PUBLIC | MEMF_CLEAR) : 0;
     u32 stack = exec_->alloc(stack_bytes, MEMF_PUBLIC | MEMF_CLEAR);
@@ -8098,6 +8165,7 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
         if (created_console_out != 0) {
             DosOps::close_handle(*this, created_console_out);
         }
+        DosOps::free_paths(*this, p);
         if (spec.current_dir == 0 && current_dir != 0) {
             DosOps::free_user_lock(*this, current_dir);
         }
@@ -8110,6 +8178,7 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
         if (process != 0) {
             exec_->free(process, process_bytes);
         }
+        p = ProcContext{};
         return false;
     };
     if (process == 0 || (spec.cli && cli_at == 0) || stack == 0) {
@@ -8121,8 +8190,6 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
     if (length > kMaxArgs) {
         return rollback();
     }
-    Dos::ProcContext& p = procs_[index];
-    p = ProcContext{};
     for (u32 i = 0; i < length; ++i) {
         p.input[i] = args[i];
         b.w8(args_at + i, static_cast<u8>(args[i]));
@@ -8159,6 +8226,32 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
     }
     if (output == 0) {
         output = parent_cos;
+        close_output = false;
+    }
+    constexpr u32 kPathNodeBytes = 8;
+    for (u32 i = 0; i < parent.path_count && i < kMaxPathDirs; ++i) {
+        const i64 slot = DosOps::lock_slot(*this, parent.path_locks[i]);
+        if (slot < 0) {
+            continue;
+        }
+        const Dos::LockSlot& l = lock_slots_[slot];
+        u32 lock_bptr = 0;
+        if (!DosOps::alloc_user_lock(*this, b, l.path, l.entry, SHARED_LOCK, lock_bptr, 0)) {
+            return rollback();
+        }
+        const u32 node = exec_->alloc(kPathNodeBytes, MEMF_PUBLIC | MEMF_CLEAR);
+        if (node == 0) {
+            DosOps::free_user_lock(*this, lock_bptr);
+            return rollback();
+        }
+        b.w32(node, 0);
+        b.w32(node + 4, lock_bptr);
+        p.path_locks[p.path_count] = lock_bptr;
+        p.path_nodes[p.path_count] = node;
+        ++p.path_count;
+    }
+    for (u32 i = 0; i + 1 < p.path_count; ++i) {
+        b.w32(p.path_nodes[i], p.path_nodes[i + 1] >> 2);
     }
     if (current_dir == 0 && parent_dir != 0) {
         const Dos::LockSlot* slot = DosOps::find_lock_slot(*this, parent_dir);
@@ -8224,8 +8317,7 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
         put_bstr(b, command_file_at, "", 0);
         b.w32(cli_at + cli_Result2, 0);
         b.w32(cli_at + cli_SetName, set_name_at >> 2);
-        b.w32(cli_at + cli_CommandDir, parent_cli != 0 ? b.r32((parent_cli << 2) + cli_CommandDir)
-                                                       : 0);
+        b.w32(cli_at + cli_CommandDir, p.path_count != 0 ? p.path_nodes[0] >> 2 : 0);
         b.w32(cli_at + cli_ReturnCode, 0);
         b.w32(cli_at + cli_CommandName, command_name_at >> 2);
         b.w32(cli_at + cli_FailLevel, kFailLevel);
@@ -8270,13 +8362,31 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
     p.out_handle = output;
     p.close_input = close_input;
     p.close_output = close_output;
+    p.shell_console = spec.console != kNoConsole;
     m_->cpu.d[0] = length;
     m_->cpu.a[0] = args_at;
-    if (spec.start && exec_->spawn(process, entry, 0, true) == 0) {
-        p = ProcContext{};
+    // A process that does not own its seglist shares its starter's code, so
+    // it ends with the command that started it.
+    const bool detached = spec.seglist != 0 && spec.free_seglist;
+    if (spec.start && exec_->spawn(process, entry, 0, detached) == 0) {
         return rollback();
     }
 
+    // A handle handed over with its close flag becomes the new process's, so
+    // the parent's command cleanup leaves it open.
+    auto take_handle = [&](u32 handle, bool close) {
+        if (handle == 0 || !close) {
+            return;
+        }
+        const i64 slot = DosOps::handle_slot(*this, handle);
+        if (slot > static_cast<i64>(kConsoleOut)) {
+            files_[slot].owner = static_cast<u8>(index + 1);
+        }
+    };
+    if (spec.console == kNoConsole) {
+        take_handle(spec.input, close_input);
+        take_handle(spec.output, close_output);
+    }
     if (spec.current_dir != 0) {
         const i64 lock = DosOps::lock_slot(*this, spec.current_dir);
         if (lock >= 0) {
@@ -8368,12 +8478,49 @@ void Dos::process_ended(u32 task, bool self) {
     if (dir_slot >= 0 && lock_slots_[dir_slot].owner == static_cast<u8>(index + 1)) {
         DosOps::free_user_lock(*this, current_dir);
     }
-    if (p.close_input && p.in_handle != 0) {
+    // A shell's console handles live as long as a process still uses them as
+    // its pr_CIS or pr_COS; the close passes to that process.
+    auto other_user = [&](u32 handle, bool& as_input) -> ProcContext* {
+        as_input = false;
+        for (u32 i = 0; i < kMaxProcs; ++i) {
+            ProcContext& q = procs_[i];
+            if (i == index || !q.used) {
+                continue;
+            }
+            u32 q_in = 0;
+            u32 q_out = 0;
+            m_->mem.read32(q.process + pr_CIS, q_in);
+            m_->mem.read32(q.process + pr_COS, q_out);
+            if (q_in == handle) {
+                as_input = true;
+                return &q;
+            }
+            if (q_out == handle) {
+                return &q;
+            }
+        }
+        return nullptr;
+    };
+    auto pass_on = [&](u32 handle) {
+        bool as_input = false;
+        ProcContext* user = p.shell_console ? other_user(handle, as_input) : nullptr;
+        if (user == nullptr) {
+            return false;
+        }
+        if (as_input) {
+            user->close_input = true;
+        } else {
+            user->close_output = true;
+        }
+        return true;
+    };
+    if (p.close_input && p.in_handle != 0 && !pass_on(p.in_handle)) {
         DosOps::close_handle(*this, p.in_handle);
     }
-    if (p.close_output && p.out_handle != 0) {
+    if (p.close_output && p.out_handle != 0 && !pass_on(p.out_handle)) {
         DosOps::close_handle(*this, p.out_handle);
     }
+    DosOps::free_paths(*this, p);
     if (p.free_seglist && p.seglist != 0) {
         DosOps::unload(*this, p.seglist);
     }
@@ -8480,11 +8627,6 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     }
     unknown_pkt_count_ = 0;
     now_ticks_ = nullptr;
-    for (u32 i = 0; i < kMaxPathDirs; ++i) {
-        path_locks_[i] = 0;
-        path_nodes_[i] = 0;
-    }
-    path_count_ = 0;
     deferred_count_ = 0;
     if (m.jit == nullptr || m.mem.base == nullptr || volume.image == nullptr) {
         return false;
@@ -8916,6 +9058,8 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
         exec_->end_child_tasks();
         exec_->reset_nest_counts();
     }
+    exec_->end_tasks_of(p.process);
+    exec_->reset_task_state(p.process);
     DosOps::cleanup_command(*this, p.process, saved_current_dir, saved_cis, saved_cos,
                             static_cast<u8>(index + 1));
     drain_deferred();
@@ -9097,12 +9241,12 @@ bool Dos::path_add(const char* dir, u32& error) {
         set_last_error(error);
         return false;
     }
-    if (path_count_ >= kMaxPathDirs) {
+    ProcContext& p = cur();
+    if (p.path_count >= kMaxPathDirs) {
         error = ERROR_NO_FREE_STORE;
         set_last_error(error);
         return false;
     }
-    ProcContext& p = cur();
     Bus b(*m_);
     u8 vol = kVolAdf;
     char resolved[kMaxPath];
@@ -9120,7 +9264,7 @@ bool Dos::path_add(const char* dir, u32& error) {
     }
     char canonical[kMaxPath];
     DosOps::fs_canonical(*this, vol, resolved, canonical);
-    if (path_index_of(vol, canonical) < path_count_) {
+    if (path_index_of(*this, p, vol, canonical) < p.path_count) {
         error = 0;
         return true;  // already in the path
     }
@@ -9139,10 +9283,12 @@ bool Dos::path_add(const char* dir, u32& error) {
     }
     b.w32(node, 0);
     b.w32(node + 4, lock_bptr);
-    if (path_count_ == 0) {
-        b.w32(p.cli + cli_CommandDir, node >> 2);
-    } else {
-        b.w32(path_nodes_[path_count_ - 1], node >> 2);
+    if (p.cli != 0) {
+        if (p.path_count == 0) {
+            b.w32(p.cli + cli_CommandDir, node >> 2);
+        } else {
+            b.w32(p.path_nodes[p.path_count - 1], node >> 2);
+        }
     }
     if (!b.ok()) {
         exec_->free(node, kPathNodeBytes);
@@ -9150,25 +9296,25 @@ bool Dos::path_add(const char* dir, u32& error) {
         error = ERROR_INVALID_LOCK;
         return false;
     }
-    path_locks_[path_count_] = lock_bptr;
-    path_nodes_[path_count_] = node;
-    ++path_count_;
+    p.path_locks[p.path_count] = lock_bptr;
+    p.path_nodes[p.path_count] = node;
+    ++p.path_count;
     error = 0;
     return true;
 }
 
-u32 Dos::path_index_of(u8 vol, const char* canonical) const {
-    for (u32 i = 0; i < path_count_ && i < kMaxPathDirs; ++i) {
-        const i64 slot = DosOps::lock_slot(*this, path_locks_[i]);
-        if (slot < 0 || lock_slots_[slot].entry.volume != vol) {
+u32 Dos::path_index_of(const Dos& d, const ProcContext& p, u8 vol, const char* canonical) {
+    for (u32 i = 0; i < p.path_count && i < kMaxPathDirs; ++i) {
+        const i64 slot = DosOps::lock_slot(d, p.path_locks[i]);
+        if (slot < 0 || d.lock_slots_[slot].entry.volume != vol) {
             continue;
         }
-        const char* held = lock_slots_[slot].path;
+        const char* held = d.lock_slots_[slot].path;
         if (same_name(held, length_of(held), canonical)) {
             return i;
         }
     }
-    return path_count_;
+    return p.path_count;
 }
 
 bool Dos::path_remove(const char* dir, u32& error) {
@@ -9189,26 +9335,28 @@ bool Dos::path_remove(const char* dir, u32& error) {
     }
     char canonical[kMaxPath];
     DosOps::fs_canonical(*this, vol, resolved, canonical);
-    const u32 index = path_index_of(vol, canonical);
-    if (index >= path_count_) {
+    const u32 index = path_index_of(*this, p, vol, canonical);
+    if (index >= p.path_count) {
         error = ERROR_OBJECT_NOT_FOUND;
         set_last_error(error);
         return false;
     }
     constexpr u32 kPathNodeBytes = 8;
-    DosOps::free_user_lock(*this, path_locks_[index]);
-    exec_->free(path_nodes_[index], kPathNodeBytes);
-    for (u32 i = index; i + 1 < path_count_; ++i) {
-        path_locks_[i] = path_locks_[i + 1];
-        path_nodes_[i] = path_nodes_[i + 1];
+    DosOps::free_user_lock(*this, p.path_locks[index]);
+    exec_->free(p.path_nodes[index], kPathNodeBytes);
+    for (u32 i = index; i + 1 < p.path_count; ++i) {
+        p.path_locks[i] = p.path_locks[i + 1];
+        p.path_nodes[i] = p.path_nodes[i + 1];
     }
-    --path_count_;
-    path_locks_[path_count_] = 0;
-    path_nodes_[path_count_] = 0;
+    --p.path_count;
+    p.path_locks[p.path_count] = 0;
+    p.path_nodes[p.path_count] = 0;
     // Relink the guest list in order.
-    b.w32(p.cli + cli_CommandDir, path_count_ == 0 ? 0 : path_nodes_[0] >> 2);
-    for (u32 i = 0; i < path_count_; ++i) {
-        b.w32(path_nodes_[i], i + 1 < path_count_ ? path_nodes_[i + 1] >> 2 : 0);
+    if (p.cli != 0) {
+        b.w32(p.cli + cli_CommandDir, p.path_count == 0 ? 0 : p.path_nodes[0] >> 2);
+    }
+    for (u32 i = 0; i < p.path_count; ++i) {
+        b.w32(p.path_nodes[i], i + 1 < p.path_count ? p.path_nodes[i + 1] >> 2 : 0);
     }
     error = 0;
     return true;
@@ -9219,18 +9367,7 @@ void Dos::path_reset() {
         return;
     }
     ProcContext& p = cur();
-    constexpr u32 kPathNodeBytes = 8;
-    for (u32 i = 0; i < path_count_ && i < kMaxPathDirs; ++i) {
-        if (path_locks_[i] != 0) {
-            DosOps::free_user_lock(*this, path_locks_[i]);
-            path_locks_[i] = 0;
-        }
-        if (path_nodes_[i] != 0) {
-            exec_->free(path_nodes_[i], kPathNodeBytes);
-            path_nodes_[i] = 0;
-        }
-    }
-    path_count_ = 0;
+    DosOps::free_paths(*this, p);
     if (p.cli != 0) {
         Bus b(*m_);
         b.w32(p.cli + cli_CommandDir, 0);
@@ -9238,10 +9375,11 @@ void Dos::path_reset() {
 }
 
 bool Dos::path_name(u32 i, char* out, u32 size) const {
-    if (m_ == nullptr || out == nullptr || size == 0 || i >= path_count_) {
+    const ProcContext& p = procs_[cur_index()];
+    if (m_ == nullptr || out == nullptr || size == 0 || i >= p.path_count) {
         return false;
     }
-    const i64 slot = DosOps::lock_slot(*this, path_locks_[i]);
+    const i64 slot = DosOps::lock_slot(*this, p.path_locks[i]);
     if (slot < 0) {
         out[0] = '\0';
         return false;
@@ -9293,11 +9431,8 @@ bool Dos::find_command(const char* word, char* out, u32 size, u32 process) {
     }
 
     char cand[kMaxName + 32];
-    u32 node_bptr = p.cli != 0 ? b.r32(p.cli + cli_CommandDir) : 0;
-    for (u32 i = 0; i < kMaxPathDirs && node_bptr != 0 && b.ok(); ++i) {
-        const u32 node = node_bptr << 2;
-        node_bptr = b.r32(node);
-        const i64 lock = DosOps::lock_slot(*this, b.r32(node + 4));
+    for (u32 i = 0; i < p.path_count && i < kMaxPathDirs; ++i) {
+        const i64 lock = DosOps::lock_slot(*this, p.path_locks[i]);
         if (lock < 0) {
             continue;
         }
