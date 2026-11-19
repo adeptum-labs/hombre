@@ -848,28 +848,13 @@ struct IntuitionNatives {
     static void free_screen_draw_info(void*, Machine&) {}
 
     static void set_menu_strip(void* ctx, Machine& m) {
-        Intuition& g = of(ctx);
-        Bus b(m);
         const u32 window = m.cpu.a[0];
-        if (window != 0) {
-            b.w32(window + kWdMenuStrip, m.cpu.a[1]);
-            if (g.menu_.active && g.menu_.window == window) {
-                g.leave_menu_mode();
-            }
-        }
-        native::set_result(m, b.ok() && window != 0 ? 1 : 0);
+        of(ctx).set_menu_strip(window, m.cpu.a[1]);
+        native::set_result(m, window != 0 ? 1 : 0);
     }
 
     static void clear_menu_strip(void* ctx, Machine& m) {
-        Intuition& g = of(ctx);
-        Bus b(m);
-        const u32 window = m.cpu.a[0];
-        if (window != 0) {
-            b.w32(window + kWdMenuStrip, 0);
-            if (g.menu_.active && g.menu_.window == window) {
-                g.leave_menu_mode();
-            }
-        }
+        of(ctx).clear_menu_strip(m.cpu.a[0]);
     }
 
     // The MenuItem a menu number names: menu in bits 0-4, item in bits
@@ -2581,6 +2566,28 @@ void Intuition::close_window(u32 window) {
     }
 }
 
+void Intuition::set_menu_strip(u32 window, u32 menu) {
+    if (window == 0 || machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    b.w32(window + kWdMenuStrip, menu);
+    if (b.ok() && menu_.active && menu_.window == window) {
+        leave_menu_mode();
+    }
+}
+
+void Intuition::clear_menu_strip(u32 window) {
+    if (window == 0 || machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    b.w32(window + kWdMenuStrip, 0);
+    if (b.ok() && menu_.active && menu_.window == window) {
+        leave_menu_mode();
+    }
+}
+
 bool Intuition::modify_idcmp(u32 window, u32 flags) {
     if (find_window(window) >= kMaxWindows) {
         return false;
@@ -3617,6 +3624,14 @@ void Intuition::report_image_damage(const raster::RastPortView& view, const Rect
 }
 
 void Intuition::draw_image(u32 rp, u32 image, i32 left, i32 top) {
+    draw_image_mode(rp, image, left, top, false);
+}
+
+void Intuition::draw_image_complemented(u32 rp, u32 image, i32 left, i32 top) {
+    draw_image_mode(rp, image, left, top, true);
+}
+
+void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool complement) {
     if (machine_ == nullptr || rp == 0 || image == 0) {
         return;
     }
@@ -3690,6 +3705,15 @@ void Intuition::draw_image(u32 rp, u32 image, i32 left, i32 top) {
                                     (planes[plane][column >> 3] & mask) != 0) {
                                     pen |= 1u << bit;
                                 }
+                            }
+                            if (complement) {
+                                // Only the image's set pixels invert what is
+                                // under them; the rest stays as it is.
+                                if (pen == 0) {
+                                    continue;
+                                }
+                                pen ^= raster::read_pixel(b, view.bitmap, static_cast<i32>(x),
+                                                          static_cast<i32>(y));
                             }
                             raster::write_pixel(b, view.bitmap, static_cast<i32>(x),
                                                 static_cast<i32>(y), pen);

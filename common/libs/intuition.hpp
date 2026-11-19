@@ -160,9 +160,20 @@ public:
     // PlanePick selects, the bits of unselected planes from PlaneOnOff.
     void draw_image(u32 rp, u32 image, i32 left, i32 top);
 
+    // The same image drawn in COMPLEMENT mode: every pixel the image draws
+    // has its pen complemented into what the RastPort held, as a selected
+    // icon without a SelectRender image looks.
+    void draw_image_complemented(u32 rp, u32 image, i32 left, i32 top);
+
+    // SetMenuStrip and ClearMenuStrip for code that is not the guest's:
+    // the strip the window's right button opens.
+    void set_menu_strip(u32 window, u32 menu);
+    void clear_menu_strip(u32 window);
+
     // Clears each image's rectangle to pen 0, as EraseImage does through
     // EraseRect on a RastPort without a backfill hook.
     void erase_image(u32 rp, u32 image, i32 left, i32 top);
+
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
     void pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
@@ -355,6 +366,7 @@ private:
     void end_prop_drag();
     void call_gadget_hook(u32 gadget, u32 vert_pot);
     void report_image_damage(const raster::RastPortView& view, const Rect& rect);
+    void draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool complement);
     void clear_gadget_hook(u32 gadget);
     void clear_window_gadget_hooks(u32 window);
     void log_unhandled_gadget_type(u32 gtype);
