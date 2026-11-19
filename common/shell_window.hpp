@@ -44,10 +44,13 @@ class ShellWindow {
 public:
     static constexpr u32 kMaxPrompt = 64;
 
-    // Opens the "HombreShell" window on display.front_screen. False if
+    // Opens the "HombreShell" window on display.front_screen, at left, top
+    // and the given size; a top of -1 places it below the screen's title
+    // bar and a zero width or height fills the room there is. False if
     // there is no front screen or the window cannot be opened.
     bool open(m68k::Machine& m, Exec& exec, Graphics& gfx, Intuition& intuition,
-              DisplayState& display);
+              DisplayState& display, i32 left = 0, i32 top = -1, u32 width = 0,
+              u32 height = 0);
 
     void write(const u8* data, u32 bytes);
     void write_prompt(u32 cli_number, const char* volume);

@@ -2785,10 +2785,21 @@ void Intuition::end_drag() {
 }
 
 void Intuition::reclaim(u32 keep_window, u32 keep_screen) {
+    reclaim(&keep_window, keep_window != 0 ? 1u : 0u, keep_screen);
+}
+
+void Intuition::reclaim(const u32* keep_windows, u32 count, u32 keep_screen) {
     u32 win_to_close[kMaxWindows]{};
     u32 win_count = 0;
     for (u32 window : windows_) {
-        if (window != 0 && window != keep_window) {
+        if (window == 0) {
+            continue;
+        }
+        bool keep = false;
+        for (u32 i = 0; i < count && !keep; ++i) {
+            keep = keep_windows[i] == window;
+        }
+        if (!keep) {
             win_to_close[win_count++] = window;
         }
     }
@@ -2810,10 +2821,12 @@ void Intuition::reclaim(u32 keep_window, u32 keep_screen) {
         screen_to_front(keep_screen);
     }
 
-    if (keep_window != 0) {
-        if (const WindowRecord* krec = find_window_record(keep_window);
-            krec != nullptr && krec->user_port != 0) {
-            remove_window_messages(krec->user_port, keep_window);
+    for (u32 i = 0; i < count; ++i) {
+        if (keep_windows[i] != 0) {
+            if (const WindowRecord* krec = find_window_record(keep_windows[i]);
+                krec != nullptr && krec->user_port != 0) {
+                remove_window_messages(krec->user_port, keep_windows[i]);
+            }
         }
     }
     for (u32& slot : messages_) {

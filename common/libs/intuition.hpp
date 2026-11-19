@@ -148,7 +148,11 @@ public:
     // size hook runs and IDCMP_NEWSIZE is posted when the window asked for
     // it and has no NEWSIZE waiting for a reply.
     void size_window_to(u32 window, i32 width, i32 height);
+    // Closes every window but keep_window, and every screen but keep_screen.
     void reclaim(u32 keep_window = 0, u32 keep_screen = 0);
+    // Closes every window not in keep_windows, and every screen but
+    // keep_screen.
+    void reclaim(const u32* keep_windows, u32 count, u32 keep_screen);
     // Returns pointers to the screen's native 256-entry strong/light shade
     // tables, rebuilding them if the palette changed. False for unknown or
     // shallow (< 8 plane) screens.

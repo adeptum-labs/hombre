@@ -57,7 +57,7 @@ constexpr bool is_printable(u8 c) {
 }
 
 bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuition,
-                       DisplayState& display) {
+                       DisplayState& display, i32 left, i32 top, u32 window_width, u32 window_height) {
     close();
     if (display.front_screen == 0) {
         return false;
@@ -77,11 +77,13 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     for (u32 i = 0; i < sizeof kTitle; ++i) {
         b.w8(title + i, static_cast<u8>(kTitle[i]));
     }
-    b.w16(nw + ndk::nw_LeftEdge, 0);
-    // Below the screen's title bar and the line under it.
-    b.w16(nw + ndk::nw_TopEdge, b.r8(display.front_screen + ndk::sc_BarHeight) + 1);
-    b.w16(nw + ndk::nw_Width, 0);
-    b.w16(nw + ndk::nw_Height, 0);
+    b.w16(nw + ndk::nw_LeftEdge, static_cast<u16>(static_cast<i16>(left)));
+    // Below the screen's title bar and the line under it when no top is given.
+    const i32 top_edge =
+        top >= 0 ? top : static_cast<i32>(b.r8(display.front_screen + ndk::sc_BarHeight) + 1);
+    b.w16(nw + ndk::nw_TopEdge, static_cast<u16>(static_cast<i16>(top_edge)));
+    b.w16(nw + ndk::nw_Width, static_cast<u16>(window_width));
+    b.w16(nw + ndk::nw_Height, static_cast<u16>(window_height));
     b.w8(nw + ndk::nw_DetailPen, 0);
     b.w8(nw + ndk::nw_BlockPen, 1);
     b.w16(nw + ndk::nw_IDCMPFlags, 0);
