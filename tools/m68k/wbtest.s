@@ -21,8 +21,8 @@
 
 | wbtest: a program started from its icon. Without a CLI it waits for its
 | WBStartup message on pr_MsgPort, writes "wbtest: <NumArgs> <arg0 name>"
-| to RAM:wbtest.txt, replies the message and returns 0. A command line
-| start has no message to wait for and returns 20.
+| to RAM:wbtest.txt, replies the message under Forbid and returns 0. A
+| command line start has no message to wait for and returns 20.
 
         .set    OpenLibrary, -552
         .set    CloseLibrary, -414
@@ -30,6 +30,7 @@
         .set    WaitPort, -384
         .set    GetMsg, -372
         .set    ReplyMsg, -378
+        .set    Forbid, -132
         .set    Open, -30
         .set    Close, -36
         .set    VFWritef, -348
@@ -63,9 +64,10 @@ _start:
         tst.l   pr_CLI(%a4)
         bne     failed
 
-        movea.l pr_MsgPort(%a4),%a0
+        | pr_MsgPort is the port itself, inside the Process.
+        lea     pr_MsgPort(%a4),%a0
         jsr     WaitPort(%a6)
-        movea.l pr_MsgPort(%a4),%a0
+        lea     pr_MsgPort(%a4),%a0
         jsr     GetMsg(%a6)
         movea.l %d0,%a3
         tst.l   %d0
@@ -91,8 +93,11 @@ _start:
         move.l  %d3,%d1
         jsr     Close(%a6)
 
+        | The reply lets the Workbench unload this code, so task switches
+        | stay off from here until the task has ended.
 reply:
         movea.l 4.w,%a6
+        jsr     Forbid(%a6)
         movea.l %a3,%a1
         jsr     ReplyMsg(%a6)
         moveq   #0,%d0

@@ -223,7 +223,11 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "timertest: slept" "dos: CLI 2 ended, returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "l o a d w b ret" \
 	    "m68k: running C:loadwb" "m68k: C:loadwb returned 0" \
-	    "workbench: started" "workbench: volume HombreTest"
+	    "workbench: started" "workbench: volume HombreTest" \
+	    "workbench: started wbtest" "dos: process wbtest ended, returned 0" \
+	    "workbench: wbtest ended"
+	bash tools/log_order.sh build/serial.log "workbench: started wbtest" \
+	    "dos: process wbtest ended, returned 0" "workbench: wbtest ended"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "n e w s h e l l ret v e r s i o n ret" \
 	    "shell: new shell 2" "shell: builtin newshell returned 0" \
@@ -302,6 +306,11 @@ check-workbench: image
 	    "m68k: running C:loadwb" "workbench: started" \
 	    "workbench: volume Workbench3.1" "workbench: volume Ram Disk" \
 	    "intuition: window Workbench opened"
+	tools/boot_check.sh --disk "$$DISK" --keys "l o a d w b ret" \
+	    --mouse-after "workbench: volume Ram Disk" \
+	    --mouse "mouse_move 95 -80;mouse_move 95 -80;mouse_move 95 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move -100 12;mouse_move -100 0;mouse_move -100 0;mouse_move -100 0;mouse_move -55 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move 125 40;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0" \
+	    "workbench: opened Workbench3.1" "workbench: opened Utilities" \
+	    "workbench: started Clock" "intuition: window Clock opened"
 	tools/boot_check.sh --disk "$$DISK" \
 	    --keys "m a k e d i r spc r a m shift-dot x ret c o p y spc s shift-dot s t a r t u p slash s e q u e n c e spc r a m shift-dot x ret t y p e spc r a m shift-dot x shift-7 s t a r t u p slash s e q u e n c e ret r e n a m e spc r a m shift-dot x spc r a m shift-dot y ret p r o t e c t spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc s spc a d d ret f i l e n o t e spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc h e l l o ret l i s t spc r a m shift-dot y ret d e l e t e spc r a m shift-dot y spc a l l ret d i r spc r a m shift-dot ret s e t e n v spc f o o spc b a r ret g e t e n v spc f o o ret t y p e spc e n v shift-dot f o o ret i n f o ret w a i t spc 1 ret" \
 	    "m68k: C:makedir returned 0" "m68k: C:copy returned 0" \
