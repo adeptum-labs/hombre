@@ -90,7 +90,8 @@ Targets:
   drive filled with zero bytes, a test disk with a corrupt track and a
   machine without a disk, a boot with the kernel missing and a boot without
   a framebuffer. It also boots kernels that trigger a page
-  fault, a double fault and an unexpected interrupt on purpose.
+  fault, a double fault, an unexpected interrupt and a task stack
+  overflow onto its guard page on purpose.
 - `make check-workbench DISK="path/to/Workbench.dms"` boots a real
   Workbench 3.1 boot disk and verifies its volume, root directory and
   startup sequence, and that the disk's own `C:Version` runs and returns 0.

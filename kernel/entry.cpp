@@ -34,6 +34,7 @@
 #include "mmio.hpp"
 #include "page_alloc.hpp"
 #include "percpu.hpp"
+#include "task_switch.hpp"
 #include "text_console.hpp"
 
 using namespace hombre;
@@ -89,7 +90,7 @@ void console_put(char c) {
     console.put(c);
 }
 
-#if defined(HOMBRE_FAULT_TEST)
+#if defined(HOMBRE_FAULT_TEST) && HOMBRE_FAULT_TEST != 4
 // Provokes one deliberate CPU fault so the boot check can look for its dump.
 // The exception handler halts, so this never returns.
 [[noreturn]] void fault_test() {
@@ -107,8 +108,35 @@ void console_put(char c) {
     // Vector 128 is not an exception, so it gets the unexpected-interrupt dump.
     asm volatile("int $0x80");
 #else
-#error "HOMBRE_FAULT_TEST must be 1, 2 or 3"
+#error "HOMBRE_FAULT_TEST must be 1, 2, 3 or 4"
 #endif
+    halt();
+}
+#endif
+
+#if defined(HOMBRE_FAULT_TEST) && HOMBRE_FAULT_TEST == 4
+constinit TaskStacks guard_test_stacks{};
+
+// Pushes at the lowest address of its task stack, so the write lands on
+// the unmapped guard page below it. The page fault cannot be delivered on
+// the same stack either, which escalates to a double fault on its IST
+// stack.
+void overflow_task(void*) {
+    const u64 bottom = guard_test_stacks.stack_bottom(1);
+    serial::write("fault test: guard page 0x");
+    serial::write_hex(guard_test_stacks.guard_page(1));
+    serial::write("\n");
+    asm volatile("mov %0, %%rsp; pushq $0" : : "r"(bottom) : "memory");
+}
+
+[[noreturn]] void guard_fault_test(PhysAllocator& pages) {
+    serial::write("fault test: 4\n");
+    if (!guard_test_stacks.init_kernel(pages) ||
+        !guard_test_stacks.create(1, &overflow_task, nullptr)) {
+        serial::write("fault test: no task stack\n");
+        halt();
+    }
+    guard_test_stacks.switch_to(0, 1);
     halt();
 }
 #endif
@@ -163,7 +191,7 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write("cpu0 percpu ok\n");
     }
 
-#if defined(HOMBRE_FAULT_TEST)
+#if defined(HOMBRE_FAULT_TEST) && HOMBRE_FAULT_TEST != 4
     fault_test();
 #endif
 
@@ -188,6 +216,9 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write("no framebuffer\n");
     }
     if (mem_init(*info, phys_pages, mmio)) {
+#if defined(HOMBRE_FAULT_TEST) && HOMBRE_FAULT_TEST == 4
+        guard_fault_test(phys_pages);
+#endif
         pic_mask_all();
         clock_init();
         if (apic_init(mmio)) {

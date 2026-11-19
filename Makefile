@@ -86,7 +86,7 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 
 # Kernels that provoke a CPU fault on purpose, one per value of
 # HOMBRE_FAULT_TEST. Each is built into its own directory.
-FAULT_TESTS := 1 2 3
+FAULT_TESTS := 1 2 3 4
 
 .PHONY: all image image-nokernel disk-image run check check-workbench test test-dms \
         test-m68k clean
@@ -245,6 +245,11 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "halting"
 	tools/boot_check.sh --no-disk --fault-test 3 "fault test: 3" \
 	    "*** unexpected interrupt 128" "cs: 0x8 rflags: 0x" "halting"
+	tools/boot_check.sh --no-disk --fault-test 4 "fault test: 4" \
+	    "fault test: guard page 0xffffc10000000000" \
+	    "*** exception 8 #DF (double fault)" "rsp: 0xffffc10000001000 ss: 0x10" \
+	    "cr2: 0xffffc10000000ff8" \
+	    "halting"
 
 # Boots a real Workbench 3.1 disk, given as DISK=<path to a .dms or .adf> on
 # the command line or in the environment. The default test disk does not
