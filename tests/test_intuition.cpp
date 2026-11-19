@@ -52,12 +52,64 @@ constexpr u32 kItem1 = kData + 0x7E0;
 constexpr u32 kItem2 = kData + 0x820;
 constexpr u32 kSub0 = kData + 0x860;
 constexpr u32 kSub1 = kData + 0x8A0;
+constexpr u32 kMenuA = kData + 0xB00;
+constexpr u32 kMenuB = kData + 0xB80;
+constexpr u32 kItemA0 = kData + 0xC00;
+constexpr u32 kItemA1 = kData + 0xC40;
+constexpr u32 kItemA2 = kData + 0xC80;
+constexpr u32 kItemB0 = kData + 0xD00;
+constexpr u32 kItemB1 = kData + 0xD40;
+constexpr u32 kSubItem0 = kData + 0xD80;
+constexpr u32 kSubItem1 = kData + 0xDC0;
+constexpr u32 kFillA0 = kData + 0xE00;
+constexpr u32 kFillA1 = kData + 0xE20;
+constexpr u32 kFillA2 = kData + 0xE40;
+constexpr u32 kFillB0 = kData + 0xE80;
+constexpr u32 kFillB1 = kData + 0xEA0;
+constexpr u32 kFillSub0 = kData + 0xEC0;
+constexpr u32 kFillSub1 = kData + 0xEE0;
+constexpr u32 kTextA0 = kData + 0xF00;
+constexpr u32 kTextA1 = kData + 0xF20;
+constexpr u32 kTextA2 = kData + 0xF40;
+constexpr u32 kTextB0 = kData + 0xF80;
+constexpr u32 kTextB1 = kData + 0xFA0;
+constexpr u32 kTextSub0 = kData + 0xFC0;
+constexpr u32 kTextSub1 = kData + 0xFE0;
+constexpr u32 kMenuFile = kData + 0x1080;
+constexpr u32 kMenuEdit = kData + 0x10A0;
 
-// struct Menu and struct MenuItem
+// struct Menu, struct MenuItem and struct IntuiText
 constexpr u32 mu_NextMenu = 0;
+constexpr u32 mu_LeftEdge = 4;
+constexpr u32 mu_TopEdge = 6;
+constexpr u32 mu_Width = 8;
+constexpr u32 mu_Height = 10;
+constexpr u32 mu_Flags = 12;
+constexpr u32 mu_MenuName = 14;
 constexpr u32 mu_FirstItem = 18;
 constexpr u32 mi_NextItem = 0;
+constexpr u32 mi_LeftEdge = 4;
+constexpr u32 mi_TopEdge = 6;
+constexpr u32 mi_Width = 8;
+constexpr u32 mi_Height = 10;
+constexpr u32 mi_Flags = 12;
+constexpr u32 mi_MutualExclude = 14;
+constexpr u32 mi_ItemFill = 18;
+constexpr u32 mi_Command = 26;
 constexpr u32 mi_SubItem = 28;
+constexpr u32 mi_NextSelect = 32;
+constexpr u32 it_IText = 12;
+constexpr u16 MENUENABLED = 0x0001;
+constexpr u16 CHECKIT = 0x0001;
+constexpr u16 ITEMTEXT = 0x0002;
+constexpr u16 MENUTOGGLE = 0x0008;
+constexpr u16 ITEMENABLED = 0x0010;
+constexpr u16 HIGHCOMP = 0x0040;
+constexpr u16 CHECKED = 0x0100;
+constexpr u16 MENUNULL = 0xFFFF;
+constexpr u32 IDCMP_MENUPICK = 0x00000100;
+constexpr u32 kMenuIdcmp = IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS;
+constexpr u32 WFLG_RMBTRAP = 0x00010000;
 
 // struct DrawInfo
 constexpr u32 dri_NumPens = 2;
@@ -4627,6 +4679,398 @@ void item_address_follows_the_menu_numbers() {
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), 0u);
 }
 
+void put_menu(GfxRig& r, u32 at, u32 name, i32 left, u32 width, u16 flags, u32 first,
+              u32 next) {
+    r.put32(at + mu_NextMenu, next);
+    r.put16(at + mu_LeftEdge, static_cast<u32>(left));
+    r.put16(at + mu_TopEdge, 0);
+    r.put16(at + mu_Width, width);
+    r.put16(at + mu_Height, 9);
+    r.put16(at + mu_Flags, flags);
+    r.put32(at + mu_MenuName, name);
+    r.put32(at + mu_FirstItem, first);
+}
+
+void put_item(GfxRig& r, u32 at, u32 fill, u32 text, i32 left, i32 top, i32 width, i32 height,
+              u16 flags, u32 next, u32 sub, u32 mutual, u8 command) {
+    if (fill != 0) {
+        r.put16(fill + 4, 2);
+        r.put16(fill + 6, 1);
+        r.put32(fill + it_IText, text);
+    }
+    r.put32(at + mi_NextItem, next);
+    r.put16(at + mi_LeftEdge, static_cast<u32>(left));
+    r.put16(at + mi_TopEdge, static_cast<u32>(top));
+    r.put16(at + mi_Width, static_cast<u32>(width));
+    r.put16(at + mi_Height, static_cast<u32>(height));
+    r.put16(at + mi_Flags, flags);
+    r.put32(at + mi_MutualExclude, mutual);
+    r.put32(at + mi_ItemFill, fill);
+    r.put8(at + mi_Command, command);
+    r.put32(at + mi_SubItem, sub);
+    r.put16(at + mi_NextSelect, 0);
+}
+
+void put_two_title_strip(GfxRig& r) {
+    r.str(kMenuFile, "File");
+    r.str(kMenuEdit, "Edit");
+    r.str(kTextA0, "Open");
+    r.str(kTextA1, "Save");
+    r.str(kTextA2, "Quit");
+    r.str(kTextB0, "Paste");
+    r.str(kTextB1, "Copy");
+    r.str(kTextSub0, "One");
+    r.str(kTextSub1, "Two");
+    put_menu(r, kMenuA, kMenuFile, 0, 48, MENUENABLED, kItemA0, kMenuB);
+    put_menu(r, kMenuB, kMenuEdit, 48, 48, MENUENABLED, kItemB0, 0);
+    const u16 flags = ITEMTEXT | ITEMENABLED | HIGHCOMP;
+    put_item(r, kItemA0, kFillA0, kTextA0, 0, 0, 68, 9, flags, kItemA1, 0, 0, 0);
+    put_item(r, kItemA1, kFillA1, kTextA1, 0, 9, 68, 9, flags, kItemA2, 0, 0, 0);
+    put_item(r, kItemA2, kFillA2, kTextA2, 0, 18, 68, 9, flags, 0, 0, 0, 0);
+    put_item(r, kItemB0, kFillB0, kTextB0, 0, 0, 60, 9, flags, kItemB1, 0, 0, 0);
+    put_item(r, kItemB1, kFillB1, kTextB1, 0, 9, 60, 9, flags, 0, 0, 0, 0);
+}
+
+u32 open_menu_window(GfxRig& r, u32 flags, u32 idcmp) {
+    put_new_window(r, kNewWindow, 20, 30, 120, 80, flags, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, idcmp);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    return window;
+}
+
+void set_strip(GfxRig& r, u32 window, u32 strip) {
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = strip;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetMenuStrip), 1u);
+}
+
+void menu_press(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, kMouseRight, kMouseRight, 0, false);
+}
+
+void menu_move(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, 0, 0, 0, true);
+}
+
+void menu_release(GfxRig& r, i32 x, i32 y) {
+    r.intuition.pointer_event(x, y, 0, 0, kMouseRight, false);
+}
+
+u32 window_message(GfxRig& r, u32 window) {
+    return get_msg(r, r.get32(window + wd_UserPort));
+}
+
+void menu_right_press_opens_the_bar_and_the_second_item_picks() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, kMenuIdcmp);
+    set_strip(r, window, kMenuA);
+
+    const std::vector<u8> before = screen_planes(r, screen);
+    const u32 under = screen_pixel(r, screen, 60, 40);
+    menu_press(r, 30, 50);
+    CHECK_EQ(window_message(r, window), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 5), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 14), 1u);
+    CHECK(screen_planes(r, screen) != before);
+    // No title opens until the pointer reaches one.
+    CHECK_EQ(screen_pixel(r, screen, 60, 40), under);
+
+    menu_move(r, 60, 5);
+    CHECK_EQ(screen_pixel(r, screen, 54, 5), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 30), 2u);
+    menu_move(r, 60, 30);
+    CHECK_EQ(screen_pixel(r, screen, 100, 30), 3u);
+    menu_release(r, 60, 30);
+
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_MENUPICK);
+    CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(1 | (1 << 5) | (31 << 11)));
+    CHECK_EQ(r.get32(msg + im_IDCMPWindow), window);
+    reply_msg(r, msg);
+    CHECK_EQ(window_message(r, window), 0u);
+    CHECK(screen_planes(r, screen) == before);
+}
+
+void menu_release_over_nothing_posts_menunull() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, kMenuIdcmp);
+    set_strip(r, window, kMenuA);
+
+    const std::vector<u8> before = screen_planes(r, screen);
+    menu_press(r, 30, 50);
+    CHECK_EQ(window_message(r, window), 0u);
+    menu_release(r, 30, 50);
+
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_MENUPICK);
+    CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(MENUNULL));
+    reply_msg(r, msg);
+    CHECK_EQ(window_message(r, window), 0u);
+    CHECK(screen_planes(r, screen) == before);
+}
+
+void menu_disabled_item_posts_menunull() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    r.put16(kItemA1 + mi_Flags, ITEMTEXT | HIGHCOMP);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+
+    menu_press(r, 30, 50);
+    menu_move(r, 10, 5);
+    menu_move(r, 10, 30);
+    CHECK_EQ(screen_pixel(r, screen, 60, 30), 2u);
+    menu_release(r, 10, 30);
+
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_MENUPICK);
+    CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(MENUNULL));
+    reply_msg(r, msg);
+}
+
+void menu_checkit_with_menutoggle_toggles_checked() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u16 flags = ITEMTEXT | ITEMENABLED | HIGHCOMP | CHECKIT | MENUTOGGLE;
+    r.put16(kItemA0 + mi_Flags, flags);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+
+    for (u32 pick = 0; pick < 2; ++pick) {
+        menu_press(r, 10, 5);
+        menu_move(r, 10, 21);
+        menu_release(r, 10, 21);
+        const u32 msg = window_message(r, window);
+        CHECK(msg != 0);
+        CHECK_EQ(r.get32(msg + im_Class), IDCMP_MENUPICK);
+        CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(0xF800));
+        reply_msg(r, msg);
+        CHECK_EQ(r.get16(kItemA0 + mi_Flags),
+                 static_cast<u32>(pick == 0 ? (flags | CHECKED) : flags));
+        CHECK_EQ(r.get16(kItemA0 + mi_NextSelect), static_cast<u32>(MENUNULL));
+    }
+    CHECK_EQ(r.get16(kItemA0 + mi_Flags), static_cast<u32>(flags));
+}
+
+void menu_mutual_exclude_clears_the_other_item() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u16 base = ITEMTEXT | ITEMENABLED | HIGHCOMP | CHECKIT;
+    r.put16(kItemA0 + mi_Flags, base);
+    r.put32(kItemA0 + mi_MutualExclude, 2);
+    r.put16(kItemA1 + mi_Flags, base | CHECKED);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+
+    menu_press(r, 30, 50);
+    menu_move(r, 10, 5);
+    menu_move(r, 10, 21);
+    menu_release(r, 10, 21);
+
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    reply_msg(r, msg);
+    CHECK_EQ(r.get16(kItemA0 + mi_Flags), static_cast<u32>(base | CHECKED));
+    CHECK_EQ(r.get16(kItemA1 + mi_Flags), static_cast<u32>(base));
+}
+
+void menu_subitem_pick_carries_the_subitem_number() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    put_item(r, kItemA0, kFillA0, kTextA0, 0, 0, 68, 9, ITEMTEXT | ITEMENABLED | HIGHCOMP,
+             kItemA1, kSubItem0, 0, 0);
+    put_item(r, kSubItem0, kFillSub0, kTextSub0, 0, 0, 40, 9, ITEMTEXT | ITEMENABLED, kSubItem1,
+             0, 0, 0);
+    put_item(r, kSubItem1, kFillSub1, kTextSub1, 0, 9, 40, 9, ITEMTEXT | ITEMENABLED, 0, 0, 0,
+             0);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+
+    menu_press(r, 30, 50);
+    menu_move(r, 10, 5);
+    menu_move(r, 10, 21);
+    // Sideways through the paper and the shared border into the submenu.
+    menu_move(r, 72, 21);
+    menu_move(r, 90, 30);
+    menu_release(r, 90, 30);
+
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_MENUPICK);
+    CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(1 << 11));
+    reply_msg(r, msg);
+    CHECK_EQ(r.get16(kSubItem1 + mi_NextSelect), static_cast<u32>(MENUNULL));
+}
+
+void menu_moving_off_the_box_clears_the_item_but_keeps_the_title() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+
+    menu_press(r, 10, 5);
+    menu_move(r, 10, 21);
+    CHECK_EQ(screen_pixel(r, screen, 60, 21), 3u);
+    menu_move(r, 300, 200);
+    CHECK_EQ(screen_pixel(r, screen, 60, 21), 2u);
+    // Past the last title on the bar the open title stays open too.
+    menu_move(r, 300, 5);
+    CHECK_EQ(screen_pixel(r, screen, 60, 21), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 6, 5), 3u);
+    menu_release(r, 300, 5);
+
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(MENUNULL));
+    reply_msg(r, msg);
+}
+
+void menu_disabled_title_never_opens() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    r.put16(kMenuB + mu_Flags, 0);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+
+    menu_press(r, 60, 5);
+    CHECK_EQ(screen_pixel(r, screen, 54, 5), 2u);
+    menu_move(r, 60, 21);
+    menu_release(r, 60, 21);
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(MENUNULL));
+    reply_msg(r, msg);
+}
+
+void menu_on_a_chrome_screen_highlights_ghosts_and_restores() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    r.put16(kItemA1 + mi_Flags, ITEMTEXT | HIGHCOMP);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+    const std::vector<u8> before = screen_planes(r, screen);
+    const u32 shadowed = screen_pixel(r, screen, 79, 40);
+
+    menu_press(r, 10, 5);
+    menu_move(r, 10, 21);
+    // The bar keeps the screen title bar's gradient and the open title and
+    // the highlighted item get the active title bar's.
+    CHECK_EQ(screen_pixel(r, screen, 300, 0), static_cast<u32>(chrome::kInactiveBar0));
+    CHECK_EQ(screen_pixel(r, screen, 300, 14), static_cast<u32>(chrome::kFrameDark));
+    const u32 title = screen_pixel(r, screen, 6, 7);
+    CHECK(title >= chrome::kActiveBar0 && title <= chrome::kActiveBar7);
+    const u32 lit = screen_pixel(r, screen, 9, 21);
+    CHECK(lit >= chrome::kActiveBar0 && lit <= chrome::kActiveBar7);
+    CHECK_EQ(screen_pixel(r, screen, 5, 30), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 4, 30), static_cast<u32>(chrome::kFrameDark));
+    // The disabled item's label is grey, never the label pen.
+    u32 grey = 0;
+    u32 dark = 0;
+    for (i32 y = 26; y <= 34; ++y) {
+        for (i32 x = 8; x <= 72; ++x) {
+            const u32 pen = screen_pixel(r, screen, x, y);
+            grey += pen == chrome::kTrack ? 1 : 0;
+            dark += pen == chrome::kFrameDark ? 1 : 0;
+        }
+    }
+    CHECK(grey > 0);
+    CHECK_EQ(dark, 0u);
+    // The box casts the window shadow.
+    CHECK(screen_pixel(r, screen, 79, 40) != shadowed);
+
+    menu_release(r, 300, 200);
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    reply_msg(r, msg);
+    CHECK(screen_planes(r, screen) == before);
+}
+
+void menu_rmbtrap_window_still_gets_menudown_and_menuup() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u32 window =
+        open_menu_window(r, WFLG_ACTIVATE | WFLG_RMBTRAP, IDCMP_MOUSEBUTTONS);
+    set_strip(r, window, kMenuA);
+
+    menu_press(r, 30, 50);
+    menu_release(r, 30, 50);
+
+    const u32 down = window_message(r, window);
+    CHECK(down != 0);
+    CHECK_EQ(r.get32(down + im_Class), IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(r.get16(down + im_Code), static_cast<u32>(MENUDOWN));
+    reply_msg(r, down);
+    const u32 up = window_message(r, window);
+    CHECK(up != 0);
+    CHECK_EQ(r.get16(up + im_Code), static_cast<u32>(MENUUP));
+    reply_msg(r, up);
+    CHECK_EQ(window_message(r, window), 0u);
+}
+
+void menu_mode_ends_without_a_pick_when_the_strip_or_window_goes() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, kMenuIdcmp);
+    set_strip(r, window, kMenuA);
+    const std::vector<u8> before = screen_planes(r, screen);
+
+    menu_press(r, 30, 50);
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ClearMenuStrip), ExitReason::Halt);
+    menu_release(r, 30, 50);
+    const u32 up = window_message(r, window);
+    CHECK(up != 0);
+    CHECK_EQ(r.get16(up + im_Code), static_cast<u32>(MENUUP));
+    reply_msg(r, up);
+    CHECK_EQ(window_message(r, window), 0u);
+    CHECK(screen_planes(r, screen) == before);
+
+    set_strip(r, window, kMenuA);
+    menu_press(r, 30, 50);
+    CHECK_EQ(window_message(r, window), 0u);
+    r.intuition.close_window(window);
+    CHECK(!r.intuition.window_open(window));
+}
+
 void open_window_logs_the_title() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -4776,6 +5220,17 @@ int main() {
     get_screen_draw_info_has_the_default_pens_and_topaz();
     menu_strip_vectors_write_the_window_field();
     item_address_follows_the_menu_numbers();
+    menu_right_press_opens_the_bar_and_the_second_item_picks();
+    menu_release_over_nothing_posts_menunull();
+    menu_disabled_item_posts_menunull();
+    menu_checkit_with_menutoggle_toggles_checked();
+    menu_mutual_exclude_clears_the_other_item();
+    menu_subitem_pick_carries_the_subitem_number();
+    menu_moving_off_the_box_clears_the_item_but_keeps_the_title();
+    menu_disabled_title_never_opens();
+    menu_on_a_chrome_screen_highlights_ghosts_and_restores();
+    menu_rmbtrap_window_still_gets_menudown_and_menuup();
+    menu_mode_ends_without_a_pick_when_the_strip_or_window_goes();
     open_window_logs_the_title();
     return check::finish("test_intuition");
 }

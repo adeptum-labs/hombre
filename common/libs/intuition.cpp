@@ -627,15 +627,74 @@ constexpr u32 kDriDepth = 12;
 constexpr u32 kDriResolutionX = 14;
 constexpr u32 kDriResolutionY = 16;
 constexpr u32 kDriFlags = 18;
-// Window.MenuStrip, Menu.FirstItem and MenuItem.SubItem.
+// Window.MenuStrip and the fields of Menu, MenuItem and IntuiText menu
+// strips carry.
 constexpr u32 kWdMenuStrip = 28;
+constexpr u32 kMuNextMenu = 0;
+constexpr u32 kMuLeftEdge = 4;
+constexpr u32 kMuWidth = 8;
+constexpr u32 kMuFlags = 12;
+constexpr u32 kMuMenuName = 14;
 constexpr u32 kMuFirstItem = 18;
+constexpr u32 kMiNextItem = 0;
+constexpr u32 kMiLeftEdge = 4;
+constexpr u32 kMiTopEdge = 6;
+constexpr u32 kMiWidth = 8;
+constexpr u32 kMiHeight = 10;
+constexpr u32 kMiFlags = 12;
+constexpr u32 kMiMutualExclude = 14;
+constexpr u32 kMiItemFill = 18;
+constexpr u32 kMiCommand = 26;
 constexpr u32 kMiSubItem = 28;
+constexpr u32 kMiNextSelect = 32;
+constexpr u32 kItText = 12;
+constexpr u16 kMenuNull = 0xFFFF;
+constexpr u32 kIdcmpMenuPick = 0x00000100;
+constexpr u32 kWflgRmbTrap = 0x00010000;
 constexpr u32 kDriNewLook = 1;
 constexpr u32 kDriPenCount = 12;
 constexpr u16 kDefaultDriPens[kDriPenCount] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
 constexpr u32 kDrawInfoPensAt = 52;
 constexpr u32 kDrawInfoBytes = kDrawInfoPensAt + (kDriPenCount + 1) * 2;
+
+namespace {
+
+u32 read_menu_titles(Bus& b, u32 strip, menu_layout::Title* titles, u32 max) {
+    u32 count = 0;
+    for (u32 at = strip; at != 0 && count < max && b.ok();) {
+        menu_layout::Title& title = titles[count];
+        title.left = static_cast<i16>(b.r16(at + kMuLeftEdge));
+        title.width = static_cast<i16>(b.r16(at + kMuWidth));
+        title.first = b.r32(at + kMuFirstItem);
+        title.name = b.r32(at + kMuMenuName);
+        title.flags = static_cast<u16>(b.r16(at + kMuFlags));
+        at = b.r32(at + kMuNextMenu);
+        ++count;
+    }
+    return b.ok() ? count : 0;
+}
+
+u32 read_menu_items(Bus& b, u32 first, menu_layout::Item* items, u32 max) {
+    u32 count = 0;
+    for (u32 at = first; at != 0 && count < max && b.ok();) {
+        menu_layout::Item& item = items[count];
+        item.left = static_cast<i16>(b.r16(at + kMiLeftEdge));
+        item.top = static_cast<i16>(b.r16(at + kMiTopEdge));
+        item.width = static_cast<i16>(b.r16(at + kMiWidth));
+        item.height = static_cast<i16>(b.r16(at + kMiHeight));
+        item.flags = static_cast<u16>(b.r16(at + kMiFlags));
+        item.command = static_cast<u8>(b.r8(at + kMiCommand));
+        item.sub = b.r32(at + kMiSubItem);
+        item.addr = at;
+        const u32 fill = b.r32(at + kMiItemFill);
+        item.label = fill != 0 ? b.r32(fill + kItText) : 0;
+        at = b.r32(at + kMiNextItem);
+        ++count;
+    }
+    return b.ok() ? count : 0;
+}
+
+}
 
 struct IntuitionNatives {
     static Intuition& of(void* ctx) { return *static_cast<Intuition*>(ctx); }
@@ -736,20 +795,28 @@ struct IntuitionNatives {
 
     static void free_screen_draw_info(void*, Machine&) {}
 
-    // The menu strip is kept in the Window; menus are not drawn yet.
-    static void set_menu_strip(void*, Machine& m) {
+    static void set_menu_strip(void* ctx, Machine& m) {
+        Intuition& g = of(ctx);
         Bus b(m);
         const u32 window = m.cpu.a[0];
         if (window != 0) {
             b.w32(window + kWdMenuStrip, m.cpu.a[1]);
+            if (g.menu_.active && g.menu_.window == window) {
+                g.leave_menu_mode();
+            }
         }
         native::set_result(m, b.ok() && window != 0 ? 1 : 0);
     }
 
-    static void clear_menu_strip(void*, Machine& m) {
+    static void clear_menu_strip(void* ctx, Machine& m) {
+        Intuition& g = of(ctx);
         Bus b(m);
-        if (m.cpu.a[0] != 0) {
-            b.w32(m.cpu.a[0] + kWdMenuStrip, 0);
+        const u32 window = m.cpu.a[0];
+        if (window != 0) {
+            b.w32(window + kWdMenuStrip, 0);
+            if (g.menu_.active && g.menu_.window == window) {
+                g.leave_menu_mode();
+            }
         }
     }
 
@@ -997,6 +1064,18 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     drag_ = Drag::None;
     drag_window_ = 0;
     drag_gadget_ = 0;
+    menu_.active = false;
+    menu_.screen = 0;
+    menu_.window = 0;
+    menu_.strip = 0;
+    menu_.title = menu_layout::kNoTitle;
+    menu_.item = -1;
+    menu_.sub = -1;
+    menu_.sub_hover = false;
+    menu_.title_count = 0;
+    menu_.item_count = 0;
+    menu_.sub_count = 0;
+    menu_.overlay = Rect{0, 0, -1, -1};
     mouse_x_ = 0;
     mouse_y_ = 0;
     dropped_messages_ = 0;
@@ -1204,6 +1283,9 @@ void Intuition::compose(u32 screen, Rect r) {
                 }
             }
         }
+    }
+    if (b.ok() && menu_.active && menu_.screen == screen) {
+        draw_menu_overlay(b, dst, r);
     }
     if (b.ok() && display_ != nullptr && display_->front_screen == screen &&
         display_->sink.refresh != nullptr) {
@@ -2351,6 +2433,9 @@ void Intuition::close_window(u32 window) {
     if (index >= kMaxWindows) {
         return;
     }
+    if (menu_.active && menu_.window == window) {
+        leave_menu_mode();
+    }
     if (active_window_ == window) {
         active_window_ = 0;
     }
@@ -2692,6 +2777,250 @@ void Intuition::set_size_hook(u32 window, WindowHook hook, void* ctx) {
     rec->size_ctx = ctx;
 }
 
+bool Intuition::menu_strip_ready(Bus& b) const {
+    if (active_window_ == 0) {
+        return false;
+    }
+    const WindowRecord* rec = find_window_record(active_window_);
+    if (rec == nullptr || rec->screen != front_) {
+        return false;
+    }
+    if ((b.r32(active_window_ + ndk::wd_Flags) & kWflgRmbTrap) != 0) {
+        return false;
+    }
+    return b.r32(active_window_ + kWdMenuStrip) != 0 && b.ok();
+}
+
+void Intuition::reload_menu(Bus& b) {
+    MenuMode& m = menu_;
+    m.title_count = read_menu_titles(b, m.strip, m.titles, menu_layout::kMaxTitles);
+    m.item_count = 0;
+    m.sub_count = 0;
+    if (m.title < m.title_count) {
+        m.item_count =
+            read_menu_items(b, m.titles[m.title].first, m.items, menu_layout::kMaxItems);
+        if (m.item >= 0 && static_cast<u32>(m.item) < m.item_count &&
+            m.items[m.item].sub != 0) {
+            m.sub_count =
+                read_menu_items(b, m.items[m.item].sub, m.subs, menu_layout::kMaxSubItems);
+        }
+    }
+    if (m.item >= static_cast<i32>(m.item_count)) {
+        m.item = -1;
+    }
+    if (m.sub >= static_cast<i32>(m.sub_count)) {
+        m.sub = -1;
+    }
+    const ScreenRecord* srec = find_screen_record(m.screen);
+    const i32 screen_width = srec != nullptr ? static_cast<i32>(srec->width) : 0;
+    m.geometry = menu_layout::compute(
+        m.titles, m.title_count, m.items, m.item_count, m.subs, m.sub_count,
+        static_cast<i32>(chrome::kBarHeight) + 1, m.title, m.item, screen_width);
+}
+
+Rect Intuition::menu_overlay(const ScreenRecord& srec) const {
+    Rect r{0, 0, static_cast<i32>(srec.width) - 1, static_cast<i32>(chrome::kBarHeight)};
+    Rect box = menu_.item_count != 0 ? menu_.geometry.box : menu_layout::empty_rect();
+    Rect sub = menu_.sub_count != 0 ? menu_.geometry.sub_box : menu_layout::empty_rect();
+    if (srec.depth >= 8) {
+        if (menu_layout::valid(box)) {
+            box.x1 += kShadowSize;
+            box.y1 += kShadowSize;
+        }
+        if (menu_layout::valid(sub)) {
+            sub.x1 += kShadowSize;
+            sub.y1 += kShadowSize;
+        }
+    }
+    if (menu_layout::valid(box)) {
+        r = unite_rect(r, box);
+    }
+    if (menu_layout::valid(sub)) {
+        r = unite_rect(r, sub);
+    }
+    return r;
+}
+
+bool Intuition::enter_menu_mode(Bus& b, i32 x, i32 y) {
+    if (!menu_strip_ready(b)) {
+        return false;
+    }
+    const WindowRecord* rec = find_window_record(active_window_);
+    if (rec == nullptr) {
+        return false;
+    }
+    MenuMode& m = menu_;
+    m.active = true;
+    m.screen = rec->screen;
+    m.window = active_window_;
+    m.strip = b.r32(active_window_ + kWdMenuStrip);
+    m.title = menu_layout::kNoTitle;
+    m.item = -1;
+    m.sub = -1;
+    m.sub_hover = false;
+    m.overlay = Rect{0, 0, -1, -1};
+    reload_menu(b);
+    hover_menu(b, x, y);
+    return true;
+}
+
+void Intuition::leave_menu_mode() {
+    if (!menu_.active) {
+        return;
+    }
+    const Rect old = menu_.overlay;
+    menu_.active = false;
+    menu_.overlay = Rect{0, 0, -1, -1};
+    if (old.x1 >= old.x0 && old.y1 >= old.y0) {
+        compose(menu_.screen, old);
+    }
+}
+
+void Intuition::hover_menu(Bus& b, i32 x, i32 y) {
+    MenuMode& m = menu_;
+    if (!m.active) {
+        return;
+    }
+    const ScreenRecord* srec = find_screen_record(m.screen);
+    if (srec == nullptr) {
+        leave_menu_mode();
+        return;
+    }
+    const Rect old_overlay = m.overlay;
+    const u32 old_title = m.title;
+    const i32 old_item = m.item;
+    const i32 old_sub = m.sub;
+
+    const i32 title_hit = menu_layout::hit(m.geometry.title, m.title_count, x, y);
+    const bool title_on = title_hit >= 0 && m.titles[title_hit].enabled();
+    if (title_on && static_cast<u32>(title_hit) != m.title) {
+        m.title = static_cast<u32>(title_hit);
+        m.item = -1;
+        m.sub = -1;
+        reload_menu(b);
+    }
+
+    m.sub_hover = false;
+    if (m.title < m.title_count) {
+        if (m.sub_count != 0 && in_rect(m.geometry.sub_box, x, y)) {
+            m.sub_hover = true;
+            const i32 hit = menu_layout::hit(m.geometry.sub_item, m.sub_count, x, y);
+            m.sub = hit >= 0 && m.subs[hit].enabled() ? hit : -1;
+        } else if (in_rect(m.geometry.box, x, y)) {
+            const i32 hit = menu_layout::hit(m.geometry.item, m.item_count, x, y);
+            const i32 item = hit >= 0 && m.items[hit].enabled() ? hit : -1;
+            if (item != m.item) {
+                m.item = item;
+                m.sub = -1;
+                reload_menu(b);
+            }
+            m.sub = -1;
+        } else {
+            if (m.item != -1 || m.sub != -1) {
+                m.item = -1;
+                m.sub = -1;
+                reload_menu(b);
+            }
+        }
+    } else {
+        m.item = -1;
+        m.sub = -1;
+    }
+
+    const Rect new_overlay = menu_overlay(*srec);
+    if (m.title != old_title || m.item != old_item ||
+        m.sub != old_sub || new_overlay.x0 != old_overlay.x0 ||
+        new_overlay.y0 != old_overlay.y0 || new_overlay.x1 != old_overlay.x1 ||
+        new_overlay.y1 != old_overlay.y1) {
+        compose(m.screen, unite_rect(old_overlay, new_overlay));
+        m.overlay = new_overlay;
+    }
+}
+
+void Intuition::clear_menu_checked(Bus& b, const menu_layout::Item* items, u32 count, u32 mask) {
+    for (u32 i = 0; i < count && i < 32; ++i) {
+        if ((mask & (1u << i)) == 0 || items[i].addr == 0 ||
+            (items[i].flags & menu_layout::kItemCheckIt) == 0) {
+            continue;
+        }
+        const u16 flags = static_cast<u16>(b.r16(items[i].addr + kMiFlags));
+        if ((flags & menu_layout::kItemChecked) != 0) {
+            b.w16(items[i].addr + kMiFlags,
+                  static_cast<u16>(flags & ~menu_layout::kItemChecked));
+        }
+    }
+}
+
+void Intuition::release_menu(Bus& b, i32 x, i32 y) {
+    MenuMode& m = menu_;
+    if (!m.active) {
+        return;
+    }
+    hover_menu(b, x, y);
+    u32 item_addr = 0;
+    u16 code = kMenuNull;
+    const menu_layout::Item* level = m.items;
+    u32 level_count = m.item_count;
+    if (m.sub_hover && m.sub >= 0 && static_cast<u32>(m.sub) < m.sub_count) {
+        item_addr = m.subs[m.sub].addr;
+        code = static_cast<u16>(m.title | (static_cast<u32>(m.item) << 5) |
+                                (static_cast<u32>(m.sub) << 11));
+        level = m.subs;
+        level_count = m.sub_count;
+    } else if (!m.sub_hover && m.item >= 0 && static_cast<u32>(m.item) < m.item_count) {
+        item_addr = m.items[m.item].addr;
+        code = static_cast<u16>(m.title | (static_cast<u32>(m.item) << 5) | (31u << 11));
+    }
+    const bool picked =
+        item_addr != 0 && m.title < m.title_count && m.titles[m.title].enabled();
+    if (picked) {
+        u16 flags = static_cast<u16>(b.r16(item_addr + kMiFlags));
+        if ((flags & menu_layout::kItemCheckIt) != 0) {
+            if ((flags & menu_layout::kItemMenuToggle) != 0) {
+                flags ^= menu_layout::kItemChecked;
+            } else {
+                flags |= menu_layout::kItemChecked;
+            }
+            b.w16(item_addr + kMiFlags, flags);
+        }
+        clear_menu_checked(b, level, level_count, b.r32(item_addr + kMiMutualExclude));
+        b.w16(item_addr + kMiNextSelect, kMenuNull);
+        post_intuimessage(m.window, kIdcmpMenuPick, code);
+    } else {
+        post_intuimessage(m.window, kIdcmpMenuPick, kMenuNull);
+    }
+    leave_menu_mode();
+}
+
+void Intuition::draw_menu_overlay(Bus& b, raster::Bitmap& bitmap, const Rect& clip) {
+    const ScreenRecord* srec = find_screen_record(menu_.screen);
+    if (srec == nullptr) {
+        return;
+    }
+    chrome::MenuChrome m{};
+    m.width = static_cast<i32>(srec->width);
+    m.titles = menu_.titles;
+    m.title_rects = menu_.geometry.title;
+    m.title_count = menu_.title_count;
+    m.selected_title = menu_.title < menu_.title_count ? static_cast<i32>(menu_.title) : -1;
+    m.box = menu_.item_count != 0 ? menu_.geometry.box : menu_layout::empty_rect();
+    m.items = menu_.items;
+    m.item_rects = menu_.geometry.item;
+    m.item_count = menu_.item_count;
+    m.selected_item = menu_.item;
+    m.sub_box = menu_.sub_count != 0 ? menu_.geometry.sub_box : menu_layout::empty_rect();
+    m.sub_items = menu_.subs;
+    m.sub_item_rects = menu_.geometry.sub_item;
+    m.sub_item_count = menu_.sub_count;
+    m.selected_sub = menu_.sub;
+    m.depth = srec->depth;
+    if (srec->depth >= 8) {
+        m.strong_shade = srec->strong_shade;
+        m.light_shade = srec->light_shade;
+    }
+    chrome::draw_menu(b, bitmap, clip, m);
+}
+
 void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
     begin_batch();
     route_pointer(x, y, buttons, pressed, released, moved);
@@ -2775,6 +3104,19 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         }
     }
 
+    bool menu_right = false;
+    if ((pressed & kMouseRight) != 0 && !menu_.active && menu_strip_ready(b)) {
+        menu_right = enter_menu_mode(b, x, y);
+    }
+    if (menu_.active) {
+        menu_right = true;
+        if ((released & kMouseRight) != 0) {
+            release_menu(b, x, y);
+        } else if (moved) {
+            hover_menu(b, x, y);
+        }
+    }
+
     if (active_window_ != 0) {
         if ((pressed & kMouseLeft) != 0 && !left_press_consumed) {
             post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTDOWN);
@@ -2782,10 +3124,10 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         if ((released & kMouseLeft) != 0 && !left_release_consumed) {
             post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTUP);
         }
-        if ((pressed & kMouseRight) != 0) {
+        if ((pressed & kMouseRight) != 0 && !menu_right) {
             post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUDOWN);
         }
-        if ((released & kMouseRight) != 0) {
+        if ((released & kMouseRight) != 0 && !menu_right) {
             post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUUP);
         }
         if ((pressed & kMouseMiddle) != 0) {
@@ -2796,7 +3138,7 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         }
     }
 
-    if (moved && !dragging && active_window_ != 0) {
+    if (moved && !dragging && !menu_right && active_window_ != 0) {
         const WindowView w = load_window(b, active_window_);
         if (w.ok && (w.flags & ndk::WFLG_REPORTMOUSE) != 0) {
             post_intuimessage(active_window_, ndk::IDCMP_MOUSEMOVE, 0);

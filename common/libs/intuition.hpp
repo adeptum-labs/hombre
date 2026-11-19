@@ -25,6 +25,7 @@
 
 #include "../types.hpp"
 #include "gfx.hpp"
+#include "menu_layout.hpp"
 #include "native.hpp"
 
 // intuition.library written in C++ for code run by the 68000 translator.
@@ -43,6 +44,10 @@ namespace hombre {
 
 class Exec;
 class Graphics;
+
+namespace raster {
+struct Bitmap;
+}
 
 // Library vector offsets of intuition.library, n of LVO -n, as the 3.1
 // function description numbers them.
@@ -262,6 +267,28 @@ private:
         void* ctx = nullptr;
     };
 
+    // The strip shown while the right button is held: which title is open,
+    // which items are highlighted, and the layout read from the guest
+    // structures.
+    struct MenuMode {
+        bool active = false;
+        u32 screen = 0;
+        u32 window = 0;
+        u32 strip = 0;
+        u32 title = menu_layout::kNoTitle;
+        i32 item = -1;
+        i32 sub = -1;
+        bool sub_hover = false;
+        u32 title_count = 0;
+        u32 item_count = 0;
+        u32 sub_count = 0;
+        Rect overlay{0, 0, -1, -1};
+        menu_layout::Title titles[menu_layout::kMaxTitles]{};
+        menu_layout::Item items[menu_layout::kMaxItems]{};
+        menu_layout::Item subs[menu_layout::kMaxItems]{};
+        menu_layout::Geometry geometry{};
+    };
+
     enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2, Prop = 3 };
     enum class Drag : u8 { None = 0, Move = 1, Size = 2, Prop = 3 };
 
@@ -292,6 +319,15 @@ private:
     bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
     void post_newsize(WindowRecord& rec);
     void route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
+    bool menu_strip_ready(native::Bus& b) const;
+    bool enter_menu_mode(native::Bus& b, i32 x, i32 y);
+    void leave_menu_mode();
+    void reload_menu(native::Bus& b);
+    void hover_menu(native::Bus& b, i32 x, i32 y);
+    void release_menu(native::Bus& b, i32 x, i32 y);
+    void clear_menu_checked(native::Bus& b, const menu_layout::Item* items, u32 count, u32 mask);
+    void draw_menu_overlay(native::Bus& b, raster::Bitmap& bitmap, const Rect& clip);
+    Rect menu_overlay(const ScreenRecord& srec) const;
     bool start_drag(u32 window, i32 x, i32 y);
     void drag_to(i32 x, i32 y);
     void end_drag();
@@ -329,6 +365,7 @@ private:
     Drag drag_ = Drag::None;
     u32 drag_window_ = 0;
     u32 drag_gadget_ = 0;
+    MenuMode menu_;
     i32 grab_x_ = 0;
     i32 grab_y_ = 0;
     i32 mouse_x_ = 0;
