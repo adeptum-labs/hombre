@@ -745,11 +745,13 @@ public:
     Target examine(const char* name);
 
     // Reads the whole of the file name into data, at most capacity bytes,
-    // setting got, error and IoErr. False unless the whole file was read.
+    // setting got, error and IoErr. False unless the whole file was read;
+    // a file on RAM: protected from reading is not.
     bool read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error);
 
     // Replaces the file name with the bytes; RAM: is the only writable
-    // volume. False with error and IoErr set otherwise.
+    // volume, and a file there protected from writing or open elsewhere
+    // stays as it is. False with error and IoErr set otherwise.
     bool write_file(const char* name, const u8* data, u32 bytes, u32& error);
 
     // Deletes the file name, on RAM: only.

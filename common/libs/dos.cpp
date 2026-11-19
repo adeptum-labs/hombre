@@ -9005,6 +9005,12 @@ bool Dos::read_file(const char* name, u8* data, u32 capacity, u32& got, u32& err
         set_last_error(error);
         return false;
     }
+    if (entry.volume == kVolRam && entry.header_block > 0 &&
+        DosOps::ram_denies(*this, entry.header_block - 1, DosOps::kFibfRead)) {
+        error = ERROR_READ_PROTECTED;
+        set_last_error(error);
+        return false;
+    }
     const u32 size = DosOps::fs_size(*this, entry);
     if (size > capacity) {
         error = ERROR_OBJECT_TOO_LARGE;
@@ -9059,6 +9065,13 @@ bool Dos::write_file(const char* name, const u8* data, u32 bytes, u32& error) {
     }
     if (!ram_.node(parent_node).is_dir) {
         error = ERROR_DIR_NOT_FOUND;
+        set_last_error(error);
+        return false;
+    }
+    u32 existing = RamFs::kNone;
+    if (ram_.find(parent_node, leaf, existing) == 0 &&
+        DosOps::ram_denies(*this, existing, DosOps::kFibfWrite)) {
+        error = ERROR_WRITE_PROTECTED;
         set_last_error(error);
         return false;
     }

@@ -6697,6 +6697,115 @@ void console_star_follows_the_process_console() {
     g_exec.set_this_task(r.proc());
 }
 
+void file_helpers_follow_the_volume_rules() {
+    Rig r;
+    u8 buf[64] = {};
+    u32 got = 99;
+    u32 error = 99;
+
+    // examine: what a name is.
+    const Dos::Target file = g_dos.examine("Devs/Sub/Deep");
+    CHECK(file.kind == Dos::TargetKind::File);
+    CHECK_EQ(file.size, 4u);
+    CHECK(g_dos.examine("Devs/Sub").kind == Dos::TargetKind::Dir);
+    CHECK(g_dos.examine("HombreTest:").kind == Dos::TargetKind::VolumeRoot);
+    CHECK(g_dos.examine(":").kind == Dos::TargetKind::VolumeRoot);
+    CHECK(g_dos.examine("RAM:").kind == Dos::TargetKind::VolumeRoot);
+    CHECK(g_dos.examine("Devs/Nope").kind == Dos::TargetKind::Missing);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK(g_dos.examine("Nowhere:x").kind == Dos::TargetKind::Missing);
+    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+    CHECK(g_dos.examine(nullptr).kind == Dos::TargetKind::Missing);
+
+    // read_file: the whole file or nothing.
+    CHECK(g_dos.read_file("Devs/Sub/Deep", buf, sizeof buf, got, error));
+    CHECK_EQ(got, 4u);
+    CHECK_EQ(error, 0u);
+    CHECK(std::string(buf, buf + 4) == "deep");
+    CHECK(g_dos.read_file("C/Empty", buf, sizeof buf, got, error));
+    CHECK_EQ(got, 0u);
+    CHECK(!g_dos.read_file("Devs/Sub/Deep", buf, 3, got, error));
+    CHECK_EQ(got, 0u);
+    CHECK_EQ(error, ERROR_OBJECT_TOO_LARGE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_TOO_LARGE);
+    CHECK(!g_dos.read_file("Devs/Sub", buf, sizeof buf, got, error));
+    CHECK_EQ(error, ERROR_OBJECT_WRONG_TYPE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_WRONG_TYPE);
+    CHECK(!g_dos.read_file("Devs/Nope", buf, sizeof buf, got, error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+
+    // write_file: RAM: only, into a directory that is there.
+    const u8 first[] = {'o', 'n', 'e', ' ', 'l', 'o', 'n', 'g'};
+    const u8 second[] = {'t', 'w', 'o'};
+    CHECK(g_dos.write_file("RAM:Note", first, sizeof first, error));
+    CHECK_EQ(error, 0u);
+    CHECK_EQ(g_dos.examine("RAM:Note").size, 8u);
+    CHECK(g_dos.write_file("RAM:Note", second, sizeof second, error));
+    CHECK(g_dos.read_file("RAM:Note", buf, sizeof buf, got, error));
+    CHECK_EQ(got, 3u);
+    CHECK(std::string(buf, buf + 3) == "two");
+    CHECK(!g_dos.write_file("S/New", second, sizeof second, error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    CHECK(!g_dos.write_file("RAM:NoDir/New", second, sizeof second, error));
+    CHECK_EQ(error, ERROR_DIR_NOT_FOUND);
+    CHECK_EQ(r.io_err(), ERROR_DIR_NOT_FOUND);
+    CHECK(!g_dos.write_file("RAM:Note/New", second, sizeof second, error));
+    CHECK_EQ(error, ERROR_DIR_NOT_FOUND);
+    CHECK(!g_dos.write_file("RAM:", second, sizeof second, error));
+    CHECK_EQ(error, ERROR_OBJECT_WRONG_TYPE);
+    CHECK(!g_dos.write_file("Nowhere:x", second, sizeof second, error));
+    CHECK_EQ(error, ERROR_DEVICE_NOT_MOUNTED);
+
+    // A file open elsewhere is neither replaced nor deleted.
+    r.str(kData, "RAM:Note");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK(!g_dos.write_file("RAM:Note", first, sizeof first, error));
+    CHECK_EQ(error, ERROR_OBJECT_IN_USE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    CHECK(!g_dos.delete_file("RAM:Note", error));
+    CHECK_EQ(error, ERROR_OBJECT_IN_USE);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+    CHECK_EQ(g_dos.examine("RAM:Note").size, 3u);
+
+    // The protection bits count as they do for Open and DeleteFile.
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0x4), DOSTRUE);
+    CHECK(!g_dos.write_file("RAM:Note", first, sizeof first, error));
+    CHECK_EQ(error, ERROR_WRITE_PROTECTED);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(g_dos.examine("RAM:Note").size, 3u);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0x8), DOSTRUE);
+    CHECK(!g_dos.read_file("RAM:Note", buf, sizeof buf, got, error));
+    CHECK_EQ(error, ERROR_READ_PROTECTED);
+    CHECK_EQ(r.io_err(), ERROR_READ_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0x1), DOSTRUE);
+    CHECK(!g_dos.delete_file("RAM:Note", error));
+    CHECK_EQ(error, ERROR_DELETE_PROTECTED);
+    CHECK_EQ(r.io_err(), ERROR_DELETE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0), DOSTRUE);
+
+    // delete_file: files on RAM: only.
+    CHECK(!g_dos.delete_file("S/Startup-Sequence", error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+    CHECK(!g_dos.delete_file("RAM:Nope", error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK(!g_dos.delete_file("RAM:", error));
+    CHECK_EQ(error, ERROR_OBJECT_WRONG_TYPE);
+    r.str(kData + 0x40, "RAM:Dir");
+    const u32 dir_lock = r.call(dos_lvo::CreateDir, kData + 0x40);
+    CHECK(dir_lock != 0);
+    r.call(dos_lvo::UnLock, dir_lock);
+    CHECK(!g_dos.delete_file("RAM:Dir", error));
+    CHECK_EQ(error, ERROR_OBJECT_WRONG_TYPE);
+    CHECK(g_dos.examine("RAM:Dir").kind == Dos::TargetKind::Dir);
+    CHECK(g_dos.delete_file("RAM:Note", error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.examine("RAM:Note").kind == Dos::TargetKind::Missing);
+}
+
 void paths_belong_to_each_process() {
     Rig r;
     u32 err = 0;
@@ -6859,5 +6968,6 @@ int main() {
     system_uses_the_shell_process_directory();
     console_star_follows_the_process_console();
     paths_belong_to_each_process();
+    file_helpers_follow_the_volume_rules();
     return check::finish("test_dos");
 }
