@@ -47,13 +47,20 @@ Targets:
   them the window says why and the boot ends. The serial port logs `usb:` and
   `shell:` lines, with each submitted line as `shell: line: <text>`.
   The shell has the Workbench 3.1 builtins `Cd`, `Echo`, `Path`, `Why`,
-  `Prompt`, `Ask` and `Failat`; its prompt shows the current directory, and a
+  `Prompt`, `Ask`, `Failat`, `Set`, `Get`, `UnSet`, `SetEnv`, `GetEnv` and
+  `UnSetEnv`; its prompt shows the current directory, and a
   command whose return code reaches the fail level prints
   `<word> failed returncode <n>`. Commands are searched in `C:` and the
   `Path` directories. On a Workbench 3.1 disk the read-only commands work:
   `Dir`, `List`, `Type`, `Info`, `Assign`, `Date` (from the PC's real-time
-  clock), `Which`, `Avail`, `Status` and `Version`. The disk stays read-only:
-  there is no RAM: disk and no `Run` yet. `tools/probe_commands.sh <disk>
+  clock), `Which`, `Avail`, `Status` and `Version`. The boot disk stays
+  read-only, but `RAM:` (the volume "Ram Disk") can be written: `Copy`,
+  `MakeDir`, `Rename`, `Delete`, `Protect`, `Filenote` and `SetDate` work
+  there. Its contents live in memory and are lost when the machine
+  restarts. At start `T:` and `ENV:` are assigned to `RAM:T` and `RAM:Env`,
+  and `ENVARC:` is copied into `ENV:`, as the Workbench Startup-Sequence
+  does; global variables are files in `ENV:`. There is no `Run` yet.
+  `tools/probe_commands.sh <disk>
   "<line>"...` boots once per line and shows how each command ends, and
   `make KCXXEXTRA=-DHOMBRE_TRACE_NATIVES` logs every library call.
   A USB mouse on the same controller moves an Amiga pointer on the screen,
@@ -80,6 +87,9 @@ Targets:
 - `make check-workbench DISK="path/to/Workbench.dms"` boots a real
   Workbench 3.1 boot disk and verifies its volume, root directory and
   startup sequence, and that the disk's own `C:Version` runs and returns 0.
+  Two more boots type commands at the shell: the read-only commands and
+  builtins, then a session that makes, copies, renames, protects, lists
+  and deletes files on `RAM:` and sets an environment variable.
   `DISK=` is required and the markers fit the 3.1 Workbench disk only.
 - `make test` builds and runs the host unit tests under the address and
   undefined behaviour sanitizers. It builds the test disk as well, so it

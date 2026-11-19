@@ -254,6 +254,15 @@ check-workbench: image
 	    "m68k: C:date returned 0" "m68k: C:which returned 0" \
 	    "shell: builtin cd returned 0" "shell: builtin ask returned 5" \
 	    "shell: builtin why returned 0"
+	tools/boot_check.sh --disk "$$DISK" \
+	    --keys "m a k e d i r spc r a m shift-dot x ret c o p y spc s shift-dot s t a r t u p slash s e q u e n c e spc r a m shift-dot x ret t y p e spc r a m shift-dot x shift-7 s t a r t u p slash s e q u e n c e ret r e n a m e spc r a m shift-dot x spc r a m shift-dot y ret p r o t e c t spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc s spc a d d ret f i l e n o t e spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc h e l l o ret l i s t spc r a m shift-dot y ret d e l e t e spc r a m shift-dot y spc a l l ret d i r spc r a m shift-dot ret s e t e n v spc f o o spc b a r ret g e t e n v spc f o o ret t y p e spc e n v shift-dot f o o ret i n f o ret" \
+	    "m68k: C:makedir returned 0" "m68k: C:copy returned 0" \
+	    "; Startup-Sequence for low-density floppies" "m68k: C:rename returned 0" \
+	    "m68k: C:protect returned 0" "m68k: C:filenote returned 0" \
+	    "Directory \"ram:y\" on" ": hello" "m68k: C:list returned 0" \
+	    "ram:y  Deleted" "m68k: C:delete returned 0" "     T (dir)" \
+	    "shell: builtin setenv returned 0" "shell: builtin getenv returned 0" \
+	    "Read/Write Ram Disk" "m68k: C:info returned 0"
 else
 check-workbench:
 	@echo "set DISK=<path to a Workbench .dms or .adf>" >&2; exit 1
