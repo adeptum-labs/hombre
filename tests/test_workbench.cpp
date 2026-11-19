@@ -43,6 +43,7 @@ using namespace hombre::ndk;
 
 namespace {
 
+constexpr u32 kCall = 0x1800;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures and strings up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
@@ -53,6 +54,8 @@ constexpr u8 kWBDrawer = 2;
 constexpr u8 kWBTool = 3;
 constexpr u8 kWBProject = 4;
 constexpr u32 kNoIconPosition = 0x80000000;
+constexpr i32 kDefaultDrawerWidth = 320;
+constexpr i32 kDefaultDrawerHeight = 160;
 
 // struct Menu and struct MenuItem
 constexpr u32 mu_NextMenu = 0;
@@ -263,6 +266,8 @@ std::vector<AdfFile> test_files() {
         {"Tools/Tiny", hunk_rts()},
         {"Tools/Proj.info", project_info("Tiny", 60, 80)},
         {"Tools/Proj", text("a project")},
+        {"Tools/Sub.info", drawer_icon_info(200, 20, 60, 70, 200, 90)},
+        {"Tools/Sub/Deep.info", icon_info(kWBTool, 10, 10)},
     };
 }
 
@@ -386,6 +391,51 @@ public:
 
     std::string window_title(u32 window) const { return str(get32(window + wd_Title)); }
 
+    // JSR -lvo(A6) with A6 = base, from hand-written 68000 code.
+    ExitReason call(u32 base, u32 lvo) {
+        put16(kCall, 0x4EAE);
+        put16(kCall + 2, static_cast<u32>(0x10000 - lvo));
+        put16(kCall + 4, 0x4EF8);  // JMP $400.w
+        put16(kCall + 6, 0x0400);
+        g_jit.flush();
+        m.cpu.a[6] = base;
+        m.cpu.a[7] = kStack;
+        m.cpu.pc = kCall;
+        return g_jit.run(1000000);
+    }
+
+    // Calls the vector, which must return; D0 is what it gave.
+    u32 result(u32 base, u32 lvo) {
+        CHECK_EQ(call(base, lvo), ExitReason::Halt);
+        return m.cpu.d[0];
+    }
+
+    // The pen at x, y of the window's own bitmap.
+    u32 window_pixel(u32 window, i32 x, i32 y) const {
+        const u32 bitmap = get32(get32(window + wd_RPort) + rp_BitMap);
+        const u32 at = static_cast<u32>(y) * get16(bitmap + bm_BytesPerRow) +
+                       (static_cast<u32>(x) >> 3);
+        const u32 mask = 0x80u >> (static_cast<u32>(x) & 7);
+        u32 pen = 0;
+        for (u32 plane = 0; plane < get8(bitmap + bm_Depth); ++plane) {
+            if ((get8(get32(bitmap + bm_Planes + plane * 4) + at) & mask) != 0) {
+                pen |= 1u << plane;
+            }
+        }
+        return pen;
+    }
+
+    // One press and release of the left button at x, y of the window's
+    // inner area, and the desktop's answer to it.
+    void click(u32 window_index, i32 x, i32 y) {
+        const Workbench::DrawerWindow& w = workbench.window(window_index);
+        const i32 sx = static_cast<i32>(get16(w.window + wd_LeftEdge)) + w.inner_left + x;
+        const i32 sy = static_cast<i32>(get16(w.window + wd_TopEdge)) + w.inner_top + y;
+        g_intuition.pointer_event(sx, sy, 1, 1, 0, true);
+        g_intuition.pointer_event(sx, sy, 0, 0, 1, false);
+        workbench.pump();
+    }
+
 private:
     static constexpr usize kRegion = 1 << 20;
     std::vector<u8> memory_;
@@ -508,7 +558,10 @@ void clicks_select_and_double_click_opens() {
     CHECK_EQ(clicks.click(7, 2000000), Workbench::ClickAction::Select);
     CHECK_EQ(clicks.selected(), 7u);
     CHECK_EQ(clicks.click(7, 2100000), Workbench::ClickAction::Open);
-    const u64 late = 2100000 + Workbench::kDoubleClickUs + 1;
+    // A third quick click does not open the icon a second time.
+    CHECK_EQ(clicks.click(7, 2150000), Workbench::ClickAction::None);
+    CHECK_EQ(clicks.click(7, 2200000), Workbench::ClickAction::Open);
+    const u64 late = 2200000 + Workbench::kDoubleClickUs + 1;
     CHECK_EQ(clicks.click(7, late), Workbench::ClickAction::None);
     CHECK_EQ(clicks.click(7, late + 200000), Workbench::ClickAction::Open);
     CHECK_EQ(clicks.click(Workbench::kNoIcon, late + 2000000), Workbench::ClickAction::Clear);
@@ -637,14 +690,14 @@ void a_project_starts_its_default_tool() {
 void app_registrations_add_and_remove() {
     Rig r;
     r.workbench.open_desktop();
-    const u32 window = r.workbench.add_app_window(7, 0x11, 0, 0);
+    const u32 window = r.workbench.add_app_window(7, 0x11, 0, 0, 0);
     CHECK(window != 0);
     CHECK_EQ(r.get32(window), 0u);
     CHECK_EQ(r.workbench.app(0).id, 7u);
     CHECK_EQ(r.workbench.app(0).user, 0x11u);
-    r.workbench.remove_app_window(window);
+    CHECK(r.workbench.remove_app_window(window));
     CHECK(!r.workbench.app(0).used);
-    r.workbench.remove_app_window(window);
+    CHECK(!r.workbench.remove_app_window(window));
 
     const u32 object = g_icon.default_object(kWBDisk);
     CHECK(object != 0);
@@ -666,6 +719,266 @@ void app_registrations_add_and_remove() {
     r.workbench.remove_app_menu_item(item);
     CHECK(!r.workbench.app(0).used);
     CHECK(!r.workbench.app(1).used);
+}
+
+void app_vectors_take_their_arguments_from_the_documented_registers() {
+    Rig r;
+    r.workbench.open_desktop();
+    const u32 object = g_icon.default_object(kWBDisk);
+    CHECK(object != 0);
+    const u32 name = kData + 0x400;
+    for (u32 i = 0; i < 6; ++i) {
+        r.put8(name + i, static_cast<u32>("Hatch"[i]));
+    }
+
+    // AddAppIconA: the lock, which is always 0, is in A2 and the
+    // DiskObject in A3.
+    r.m.cpu.d[0] = 9;
+    r.m.cpu.d[1] = 0x22;
+    r.m.cpu.d[2] = 0x7777;
+    r.m.cpu.a[0] = name;
+    r.m.cpu.a[1] = kData + 0x500;
+    r.m.cpu.a[2] = 0;
+    r.m.cpu.a[3] = object;
+    r.m.cpu.a[4] = 0;
+    const u32 app_icon = r.result(r.workbench.base(), workbench_lvo::AddAppIconA);
+    CHECK(app_icon != 0);
+    const u32 icon = r.find_icon("Hatch");
+    CHECK(icon != Workbench::kNoIcon);
+    CHECK_EQ(r.workbench.icon(icon).object, object);
+    CHECK_EQ(r.workbench.app(0).id, 9u);
+    CHECK_EQ(r.workbench.app(0).user, 0x22u);
+
+    // RemoveAppIcon is TRUE for the handle and FALSE once it is gone.
+    r.m.cpu.a[0] = app_icon;
+    CHECK_EQ(r.result(r.workbench.base(), workbench_lvo::RemoveAppIcon), 1u);
+    CHECK_EQ(r.find_icon("Hatch"), Workbench::kNoIcon);
+    r.m.cpu.a[0] = app_icon;
+    CHECK_EQ(r.result(r.workbench.base(), workbench_lvo::RemoveAppIcon), 0u);
+
+    // Without a DiskObject there is no AppIcon.
+    r.m.cpu.a[0] = name;
+    r.m.cpu.a[2] = object;
+    r.m.cpu.a[3] = 0;
+    CHECK_EQ(r.result(r.workbench.base(), workbench_lvo::AddAppIconA), 0u);
+
+    r.m.cpu.d[0] = 3;
+    r.m.cpu.d[1] = 4;
+    r.m.cpu.a[0] = 0;
+    r.m.cpu.a[1] = 0;
+    r.m.cpu.a[2] = 0;
+    const u32 app_window = r.result(r.workbench.base(), workbench_lvo::AddAppWindowA);
+    CHECK(app_window != 0);
+    r.m.cpu.a[0] = app_window;
+    CHECK_EQ(r.result(r.workbench.base(), workbench_lvo::RemoveAppMenuItem), 0u);
+    r.m.cpu.a[0] = app_window;
+    CHECK_EQ(r.result(r.workbench.base(), workbench_lvo::RemoveAppWindow), 1u);
+    g_icon.free_object(object);
+}
+
+void a_drawer_window_keeps_its_title_when_the_memory_it_came_from_is_reused() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    CHECK(root != Workbench::kMaxWindows);
+    const u32 window = r.workbench.window(root).window;
+    // Blocks of the size the title was built in, filled with other bytes.
+    for (u32 i = 0; i < 16; ++i) {
+        const u32 block = g_exec.alloc(11, MEMF_PUBLIC);
+        CHECK(block != 0);
+        for (u32 k = 0; k < 11; ++k) {
+            r.put8(block + k, '#');
+        }
+    }
+    CHECK(r.window_title(window) == "HombreTest");
+    CHECK(r.window_title(r.workbench.window(0).window) == "Workbench");
+}
+
+void open_parent_opens_the_drawer_above() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon("Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kMaxWindows);
+    r.workbench.open_icon(tools, r.find_icon("Sub"));
+    const u32 sub = r.find_window("HombreTest:Tools/Sub");
+    CHECK(sub != Workbench::kMaxWindows);
+    CHECK(r.find_icon("Deep") != Workbench::kNoIcon);
+
+    // With the drawers above closed, Open Parent opens each again at the
+    // place its icon gives it.
+    r.workbench.close_drawer(tools);
+    r.workbench.close_drawer(root);
+    CHECK_EQ(r.find_window("HombreTest:Tools"), Workbench::kMaxWindows);
+    r.workbench.open_parent(sub);
+    const u32 tools_again = r.find_window("HombreTest:Tools");
+    CHECK(tools_again != Workbench::kMaxWindows);
+    const u32 tools_window = r.workbench.window(tools_again).window;
+    CHECK(r.window_title(tools_window) == "Tools");
+    CHECK_EQ(r.get16(tools_window + wd_LeftEdge), 30u);
+    CHECK_EQ(r.get16(tools_window + wd_TopEdge), 50u);
+    CHECK_EQ(r.get16(tools_window + wd_Width), 300u);
+    CHECK(r.find_icon("Proj") != Workbench::kNoIcon);
+
+    r.workbench.open_parent(tools_again);
+    const u32 root_again = r.find_window("HombreTest:");
+    CHECK(root_again != Workbench::kMaxWindows);
+    CHECK(r.window_title(r.workbench.window(root_again).window) == "HombreTest");
+
+    // An open parent only comes forward, and a disk has none.
+    u32 open_before = 0;
+    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
+        open_before += r.workbench.window(i).used ? 1 : 0;
+    }
+    r.workbench.open_parent(sub);
+    r.workbench.open_parent(root_again);
+    r.workbench.open_parent(0);
+    u32 open_after = 0;
+    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
+        open_after += r.workbench.window(i).used ? 1 : 0;
+    }
+    CHECK_EQ(open_after, open_before);
+}
+
+void a_click_shows_the_icon_selected_and_a_rescan_drops_the_selection() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon("Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kMaxWindows);
+    const Workbench::DrawerWindow drawer = r.workbench.window(tools);
+    const Workbench::IconEntry tool = r.workbench.icon(r.find_icon("Tool"));
+
+    auto image = [&]() {
+        std::vector<u32> pens;
+        for (i32 y = 0; y < 12; ++y) {
+            for (i32 x = 0; x < 32; ++x) {
+                pens.push_back(r.window_pixel(drawer.window, drawer.inner_left + tool.left + x,
+                                              drawer.inner_top + tool.top + y));
+            }
+        }
+        return pens;
+    };
+    const std::vector<u32> plain = image();
+
+    // The icon has no second image: selected, every pen of it is inverted.
+    r.click(tools, tool.left + 3, tool.top + 3);
+    const std::vector<u32> selected = image();
+    CHECK(selected != plain);
+    for (usize i = 0; i < plain.size(); ++i) {
+        CHECK_EQ(selected[i], plain[i] ^ 3u);
+    }
+
+    // Rescanning the drawer draws it unselected again.
+    r.put8(kData + 0x400, 0);
+    const char path[] = "HombreTest:Tools";
+    for (u32 i = 0; i < sizeof path; ++i) {
+        r.put8(kData + 0x400 + i, static_cast<u32>(path[i]));
+    }
+    CHECK(r.workbench.update_workbench(kData + 0x400));
+    CHECK(image() == plain);
+
+    // A click on the icon and one beside it: selected, then cleared.
+    r.click(tools, tool.left + 3, tool.top + 3);
+    CHECK(image() == selected);
+    r.click(tools, 250, 5);
+    CHECK(image() == plain);
+}
+
+void the_desktop_waits_on_the_signals_of_its_ports() {
+    Rig r;
+    r.workbench.open_desktop();
+    const u32 reply_bit = r.get8(r.workbench.reply_port() + mp_SigBit);
+    const u32 backdrop_bit = r.get8(r.workbench.window(0).user_port + mp_SigBit);
+    CHECK(reply_bit != backdrop_bit);
+    CHECK_EQ(r.workbench.wait_mask(), (1u << reply_bit) | (1u << backdrop_bit));
+
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    const u32 root_bit = r.get8(r.workbench.window(root).user_port + mp_SigBit);
+    CHECK_EQ(r.workbench.wait_mask(),
+             (1u << reply_bit) | (1u << backdrop_bit) | (1u << root_bit));
+
+    // Nothing waits at the ports once they are read; a click in the
+    // window raises its signal again.
+    r.workbench.pump();
+    g_exec.wait_for(r.workbench.wait_mask(), 0);
+    CHECK_EQ(g_exec.wait_for(r.workbench.wait_mask(), 0), 0u);
+    const Workbench::DrawerWindow& w = r.workbench.window(root);
+    const i32 x = static_cast<i32>(r.get16(w.window + wd_LeftEdge)) + w.inner_left + 250;
+    const i32 y = static_cast<i32>(r.get16(w.window + wd_TopEdge)) + w.inner_top + 100;
+    g_intuition.pointer_event(x, y, 1, 1, 0, true);
+    CHECK_EQ(g_exec.wait_for(r.workbench.wait_mask(), 0), 1u << root_bit);
+    CHECK(!r.workbench.pump());
+
+    r.workbench.close_drawer(root);
+    CHECK_EQ(r.workbench.wait_mask(), (1u << reply_bit) | (1u << backdrop_bit));
+}
+
+void a_resized_drawer_is_measured_again() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    const Workbench::DrawerWindow before = r.workbench.window(root);
+    g_intuition.size_window_to(before.window, 400, 200);
+    r.workbench.pump();
+    const Workbench::DrawerWindow& after = r.workbench.window(root);
+    CHECK_EQ(after.inner_width, before.inner_width + 400 - kDefaultDrawerWidth);
+    CHECK_EQ(after.inner_height, before.inner_height + 200 - kDefaultDrawerHeight);
+}
+
+void the_startup_message_signals_the_started_process() {
+    Rig r;
+    r.workbench.open_desktop();
+    Workbench::IconEntry icon;
+    std::strcpy(icon.file, "Tiny");
+    std::strcpy(icon.name, "Tiny");
+    icon.stack_size = 4096;
+    CHECK(r.workbench.start_tool(icon, "HombreTest:Tools"));
+    const Workbench::RunningTool tool = r.workbench.tool(r.find_tool("Tiny"));
+
+    // The message is the one on the process's port, and the port's signal
+    // is set in the task for a program that waits for it.
+    const u32 port = tool.process + pr_MsgPort;
+    CHECK_EQ(r.get32(port + mp_MsgList), tool.message);
+    CHECK_EQ(r.get32(tool.process + TC_SIGRECVD) & (1u << r.get8(port + mp_SigBit)),
+             1u << r.get8(port + mp_SigBit));
+    for (const std::string& line : g_lines) {
+        CHECK(line.find("Signal to unknown task") == std::string::npos);
+    }
+    CHECK(r.workbench.tool_reply(tool.message));
+}
+
+void a_program_that_ends_without_replying_gives_back_what_it_held() {
+    Rig r;
+    r.workbench.open_desktop();
+    Workbench::IconEntry icon;
+    std::strcpy(icon.file, "Tiny");
+    std::strcpy(icon.name, "Tiny");
+    icon.stack_size = 4096;
+    const u32 before = r.free_bytes();
+    CHECK(r.workbench.start_tool(icon, "HombreTest:Tools"));
+    const u32 slot = r.find_tool("Tiny");
+    const Workbench::RunningTool tool = r.workbench.tool(slot);
+
+    // While its process lives the program keeps its record.
+    r.workbench.reap_tools();
+    CHECK(r.workbench.tool(slot).used);
+
+    // The process is removed as a faulted one is, its message unanswered.
+    r.m.cpu.a[1] = tool.process;
+    CHECK_EQ(r.call(g_exec.exec_base(), exec_lvo::RemTask), ExitReason::Halt);
+    r.workbench.pump();
+    CHECK(!r.workbench.tool(slot).used);
+    CHECK(logged("workbench: Tiny ended without a reply"));
+    CHECK(!g_dos.unlock_path(tool.locks[0]));
+    CHECK_EQ(r.free_bytes(), before);
 }
 
 void menu_strip_lists_the_titles_and_disabled_items() {
@@ -724,5 +1037,13 @@ int main() {
     a_project_starts_its_default_tool();
     app_registrations_add_and_remove();
     menu_strip_lists_the_titles_and_disabled_items();
+    app_vectors_take_their_arguments_from_the_documented_registers();
+    a_drawer_window_keeps_its_title_when_the_memory_it_came_from_is_reused();
+    open_parent_opens_the_drawer_above();
+    a_click_shows_the_icon_selected_and_a_rescan_drops_the_selection();
+    the_desktop_waits_on_the_signals_of_its_ports();
+    a_resized_drawer_is_measured_again();
+    the_startup_message_signals_the_started_process();
+    a_program_that_ends_without_replying_gives_back_what_it_held();
     return check::finish("test_workbench");
 }

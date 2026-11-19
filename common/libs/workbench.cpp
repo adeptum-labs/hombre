@@ -104,6 +104,8 @@ constexpr i32 kGridMarginX = 8;
 constexpr i32 kGridMarginY = 8;
 constexpr i32 kDefaultDrawerWidth = 320;
 constexpr i32 kDefaultDrawerHeight = 160;
+constexpr u32 kMinDrawerWidth = 90;
+constexpr u32 kMinDrawerHeight = 40;
 constexpr i32 kCascadeX = 40;
 constexpr i32 kCascadeY = 44;
 constexpr i32 kCascadeStep = 20;
@@ -304,6 +306,8 @@ Workbench::ClickAction Workbench::Clicks::click(u32 icon, u64 now_us) {
     const bool changed = selected_ != icon;
     selected_ = icon;
     if (again) {
+        // The click that opened the icon is not the first of another pair.
+        last_icon_ = kNoIcon;
         return ClickAction::Open;
     }
     return changed ? ClickAction::Select : ClickAction::None;
@@ -371,24 +375,28 @@ u32 Workbench::build_menu_strip() {
     return strip;
 }
 
-void Workbench::attach_window(u32 index, u32 window, u32 parent, const char* name,
-                              const char* path) {
+void Workbench::measure_window(u32 index) {
+    DrawerWindow& w = windows_[index];
+    Bus b(*machine_);
+    w.inner_left = b.r8(w.window + ndk::wd_BorderLeft);
+    w.inner_top = b.r8(w.window + ndk::wd_BorderTop);
+    const i32 width = static_cast<i16>(b.r16(w.window + ndk::wd_Width));
+    const i32 height = static_cast<i16>(b.r16(w.window + ndk::wd_Height));
+    const i32 right = b.r8(w.window + ndk::wd_BorderRight);
+    const i32 bottom = b.r8(w.window + ndk::wd_BorderBottom);
+    w.inner_width = width - w.inner_left - right;
+    w.inner_height = height - w.inner_top - bottom;
+}
+
+void Workbench::attach_window(u32 index, u32 window, const char* name, const char* path) {
     DrawerWindow& w = windows_[index];
     w = DrawerWindow{};
     w.used = true;
     w.window = window;
-    w.parent = parent;
     Bus b(*machine_);
     w.user_port = b.r32(window + ndk::wd_UserPort);
     w.rp = b.r32(window + ndk::wd_RPort);
-    w.inner_left = b.r8(window + ndk::wd_BorderLeft);
-    w.inner_top = b.r8(window + ndk::wd_BorderTop);
-    const i32 width = static_cast<i16>(b.r16(window + ndk::wd_Width));
-    const i32 height = static_cast<i16>(b.r16(window + ndk::wd_Height));
-    const i32 right = b.r8(window + ndk::wd_BorderRight);
-    const i32 bottom = b.r8(window + ndk::wd_BorderBottom);
-    w.inner_width = width - w.inner_left - right;
-    w.inner_height = height - w.inner_top - bottom;
+    measure_window(index);
     copy_text(w.name, sizeof w.name, name);
     copy_text(w.path, sizeof w.path, path);
     if (menu_ != 0) {
@@ -432,7 +440,7 @@ void Workbench::open_backdrop() {
         LogLine().text("workbench: could not open the backdrop").send();
         return;
     }
-    attach_window(0, window, 0, kBackdropName, "");
+    attach_window(0, window, kBackdropName, "");
 }
 
 void Workbench::measure(IconEntry& icon) {
@@ -574,6 +582,8 @@ void Workbench::add_dir_icon(u32 window_index, const char* entry, bool is_dir) {
 
 void Workbench::fill_drawer(u32 window_index) {
     free_icons(window_index);
+    // The icon the selection named is gone with the others.
+    clicks_[window_index].clear();
     struct Collect {
         Workbench* self;
         u32 window_index;
@@ -639,6 +649,10 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     } else if (!join_path(windows_[window_index].path, icon.file, path)) {
         return;
     }
+    open_drawer_window(path, icon.name, icon.object);
+}
+
+void Workbench::open_drawer_window(const char* path, const char* name, u32 object) {
     for (u32 i = 1; i < kMaxWindows; ++i) {
         if (windows_[i].used && same_ci(windows_[i].path, path)) {
             intuition_->window_to_front(windows_[i].window);
@@ -647,7 +661,7 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     }
     const u32 slot = free_window_slot();
     if (slot == kMaxWindows) {
-        LogLine().text("workbench: no window left for ").text(icon.name).send();
+        LogLine().text("workbench: no window left for ").text(name).send();
         return;
     }
     Bus b(*machine_);
@@ -655,7 +669,7 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     i32 top = -1;
     i32 width = 0;
     i32 height = 0;
-    const u32 drawer_data = icon.object != 0 ? b.r32(icon.object + do_DrawerData) : 0;
+    const u32 drawer_data = object != 0 ? b.r32(object + do_DrawerData) : 0;
     if (drawer_data != 0) {
         left = static_cast<i16>(b.r16(drawer_data + ndk::nw_LeftEdge));
         top = static_cast<i16>(b.r16(drawer_data + ndk::nw_TopEdge));
@@ -676,7 +690,7 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     }
     const u32 new_window =
         exec_->alloc(ndk::NewWindow_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-    const u32 title_bytes = text_length(icon.name) + 1;
+    const u32 title_bytes = text_length(name) + 1;
     const u32 title = exec_->alloc(title_bytes, ndk::MEMF_PUBLIC);
     if (new_window == 0 || title == 0) {
         if (new_window != 0) {
@@ -685,11 +699,11 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
         if (title != 0) {
             exec_->free(title, title_bytes);
         }
-        LogLine().text("workbench: no memory for ").text(icon.name).send();
+        LogLine().text("workbench: no memory for ").text(name).send();
         return;
     }
     for (u32 i = 0; i < title_bytes; ++i) {
-        b.w8(title + i, static_cast<u8>(icon.name[i]));
+        b.w8(title + i, static_cast<u8>(name[i]));
     }
     b.w16(new_window + ndk::nw_LeftEdge, static_cast<u32>(left));
     b.w16(new_window + ndk::nw_TopEdge, static_cast<u32>(top));
@@ -698,7 +712,7 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     b.w8(new_window + ndk::nw_DetailPen, 0);
     b.w8(new_window + ndk::nw_BlockPen, 1);
     b.w32(new_window + ndk::nw_IDCMPFlags,
-          ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | kIdcmpMenuPick |
+          ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_NEWSIZE | kIdcmpMenuPick |
               kIdcmpRefreshWindow);
     b.w32(new_window + ndk::nw_Flags,
           ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
@@ -707,18 +721,25 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     b.w32(new_window + ndk::nw_Title, title);
     b.w32(new_window + ndk::nw_Screen, screen_);
     b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
+    // The size gadget takes the drawer from a few icons' room up to the
+    // whole screen.
+    b.w16(new_window + ndk::nw_MinWidth, kMinDrawerWidth);
+    b.w16(new_window + ndk::nw_MinHeight, kMinDrawerHeight);
+    b.w16(new_window + ndk::nw_MaxWidth, 0xFFFF);
+    b.w16(new_window + ndk::nw_MaxHeight, 0xFFFF);
+    // The window keeps a copy of its title, so the one built here goes
+    // back with the NewWindow.
     const u32 window = b.ok() ? intuition_->open_window(new_window, 0) : 0;
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, title_bytes);
     if (window == 0) {
-        LogLine().text("workbench: could not open ").text(icon.name).send();
+        LogLine().text("workbench: could not open ").text(name).send();
         return;
     }
-    attach_window(slot, window, window_index == 0 ? 0 : windows_[window_index].window,
-                  icon.name, path);
+    attach_window(slot, window, name, path);
     fill_drawer(slot);
     draw_window(slot);
-    LogLine().text("workbench: opened ").text(icon.name).send();
+    LogLine().text("workbench: opened ").text(name).send();
 }
 
 void Workbench::close_drawer(u32 window_index) {
@@ -746,6 +767,8 @@ void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, boo
         if (selected && art.select != 0) {
             intuition_->draw_image(drawer.rp, art.select, left, top);
         } else if (selected) {
+            // Without a second image the icon shows selected by its own
+            // image with every pen complemented.
             intuition_->draw_image_complemented(drawer.rp, art.render, left, top);
         } else {
             intuition_->draw_image(drawer.rp, art.render, left, top);
@@ -889,12 +912,57 @@ void Workbench::mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us) {
 }
 
 void Workbench::open_parent(u32 window_index) {
-    if (!windows_[window_index].used) {
+    if (window_index == 0 || !windows_[window_index].used) {
         return;
     }
-    const u32 parent = windows_[window_index].parent;
-    if (parent != 0) {
-        intuition_->window_to_front(parent);
+    const char* path = windows_[window_index].path;
+    if (is_volume_root(path)) {
+        return;  // a disk's window has no drawer above it
+    }
+    // The drawer above: the path up to its last '/', or the volume itself.
+    i32 cut = -1;
+    i32 colon = -1;
+    for (i32 i = 0; path[i] != '\0'; ++i) {
+        if (path[i] == '/') {
+            cut = i;
+        } else if (path[i] == ':') {
+            colon = i;
+        }
+    }
+    if (cut < 0 && colon < 0) {
+        return;
+    }
+    char parent[Dos::kMaxPath];
+    copy_text(parent, sizeof parent, path);
+    const bool is_volume = cut < 0;
+    parent[static_cast<u32>(is_volume ? colon + 1 : cut)] = '\0';
+    // Its title and icon: the volume's name and Disk.info, or the drawer's
+    // own name and icon.
+    char name[32];
+    char icon_path[Dos::kMaxPath];
+    if (is_volume) {
+        copy_text(name, sizeof name, parent);
+        const u32 length = text_length(name);
+        if (length != 0 && name[length - 1] == ':') {
+            name[length - 1] = '\0';
+        }
+        if (!join_path(parent, "Disk", icon_path)) {
+            icon_path[0] = '\0';
+        }
+    } else {
+        i32 start = 0;
+        for (i32 i = 0; parent[i] != '\0'; ++i) {
+            if (parent[i] == '/' || parent[i] == ':') {
+                start = i + 1;
+            }
+        }
+        copy_text(name, sizeof name, parent + start);
+        copy_text(icon_path, sizeof icon_path, parent);
+    }
+    const u32 object = icon_path[0] != '\0' ? icon_->load_object(icon_path) : 0;
+    open_drawer_window(parent, name, object);
+    if (object != 0) {
+        icon_->free_object(object);
     }
 }
 
@@ -974,11 +1042,17 @@ void Workbench::handle_message(u32 window_index, u32 message) {
     const i32 my = static_cast<i16>(b.r16(message + ndk::im_MouseY));
     const u64 when = static_cast<u64>(b.r32(message + ndk::im_Seconds)) * 1000000 +
                      b.r32(message + ndk::im_Micros);
+    // The message goes back before it is acted on: closing the window it
+    // came from takes the port and everything still tied to it away.
+    exec_->reply_message(message);
     if (!b.ok()) {
         return;
     }
     if (idcmp_class == ndk::IDCMP_CLOSEWINDOW) {
         close_drawer(window_index);
+    } else if (idcmp_class == ndk::IDCMP_NEWSIZE) {
+        measure_window(window_index);
+        draw_window(window_index);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTDOWN) {
         mouse_click(window_index, mx, my, when);
     } else if (idcmp_class == kIdcmpMenuPick) {
@@ -986,7 +1060,8 @@ void Workbench::handle_message(u32 window_index, u32 message) {
     }
 }
 
-void Workbench::pump() {
+bool Workbench::pump() {
+    bool more = false;
     if (reply_port_ != 0) {
         for (u32 i = 0; i < kMaxTools; ++i) {
             const u32 message = exec_->get_message(reply_port_);
@@ -996,12 +1071,17 @@ void Workbench::pump() {
             tool_reply(message);
         }
     }
+    reap_tools();
     for (u32 i = 0; i < kMaxWindows; ++i) {
-        for (u32 n = 0; n < 64; ++n) {
+        for (u32 n = 0;; ++n) {
             // A close gadget closes the window and its port, so both are
             // read again for every message.
             const u32 port = windows_[i].user_port;
             if (!windows_[i].used || port == 0) {
+                break;
+            }
+            if (n == kMaxMessagesPerPump) {
+                more = true;
                 break;
             }
             const u32 message = exec_->get_message(port);
@@ -1009,21 +1089,49 @@ void Workbench::pump() {
                 break;
             }
             handle_message(i, message);
-            exec_->reply_message(message);
         }
     }
+    return more;
+}
+
+u32 Workbench::wait_mask() const {
+    if (machine_ == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    u32 mask = 0;
+    auto add = [&](u32 port) {
+        if (port == 0) {
+            return;
+        }
+        const u32 bit = b.r8(port + ndk::mp_SigBit);
+        if (b.ok() && bit < 32) {
+            mask |= 1u << bit;
+        }
+    };
+    add(reply_port_);
+    for (const DrawerWindow& w : windows_) {
+        if (w.used) {
+            add(w.user_port);
+        }
+    }
+    return mask;
 }
 
 void Workbench::run() {
     open_desktop();
     for (;;) {
-        pump();
+        const bool more = pump();
         const u64 now = exec_->now_us();
         if (now >= next_refresh_us_) {
             refresh_title();
             next_refresh_us_ = now + kRefreshUs;
         }
-        exec_->sleep_us(20000);
+        // Until a message arrives at one of the ports, or the title is due
+        // again. Messages a full pump left behind are taken at once.
+        if (!more) {
+            exec_->wait_for(wait_mask(), next_refresh_us_ - now);
+        }
     }
 }
 
@@ -1132,8 +1240,13 @@ bool Workbench::start_program(const char* name, u32 seglist, const char* current
     u32 message_bytes = 0;
     const u32 message =
         build_startup(process, seglist, args, nargs, tool_window, locks, lock_count, message_bytes);
+    // The process is scheduled first, so the message's signal reaches a
+    // task exec knows; it cannot run before this call is over, and by then
+    // the message is on its port.
+    machine_->cpu.d[0] = 0;
+    machine_->cpu.a[0] = 0;
     const u32 port = process + ndk::pr_MsgPort;
-    if (message == 0 || !exec_->post_message(port, message)) {
+    if (message == 0 || exec_->spawn(process, (seglist << 2) + 4, 0, true) == 0) {
         for (u32 i = 0; i < lock_count; ++i) {
             dos_->unlock_path(locks[i]);
         }
@@ -1145,17 +1258,8 @@ bool Workbench::start_program(const char* name, u32 seglist, const char* current
         LogLine().text("workbench: cannot start ").text(name).send();
         return false;
     }
-    machine_->cpu.d[0] = 0;
-    machine_->cpu.a[0] = 0;
-    if (exec_->spawn(process, (seglist << 2) + 4, 0, true) == 0) {
-        for (u32 i = 0; i < lock_count; ++i) {
-            dos_->unlock_path(locks[i]);
-        }
-        exec_->free(message, message_bytes);
-        dos_->end_process(process);
-        dos_->unload_seg(seglist);
-        LogLine().text("workbench: cannot start ").text(name).send();
-        return false;
+    if (!exec_->post_message(port, message)) {
+        LogLine().text("workbench: no startup message for ").text(name).send();
     }
     record->used = true;
     record->message = message;
@@ -1270,22 +1374,36 @@ bool Workbench::launch(const IconEntry& icon, const char* drawer) {
     return start_tool(icon, drawer);
 }
 
+void Workbench::release_tool(RunningTool& tool) {
+    dos_->unload_seg(tool.seglist);
+    for (u32 i = 0; i < tool.lock_count; ++i) {
+        dos_->unlock_path(tool.locks[i]);
+    }
+    exec_->free(tool.message, tool.message_bytes);
+    tool = RunningTool{};
+}
+
 bool Workbench::tool_reply(u32 message) {
     for (RunningTool& tool : tools_) {
         if (!tool.used || tool.message != message) {
             continue;
         }
         LogLine().text("workbench: ").text(tool.name).text(" ended").send();
-        dos_->unload_seg(tool.seglist);
-        for (u32 i = 0; i < tool.lock_count; ++i) {
-            dos_->unlock_path(tool.locks[i]);
-        }
-        exec_->free(tool.message, tool.message_bytes);
-        tool = RunningTool{};
+        release_tool(tool);
         return true;
     }
     LogLine().text("workbench: reply to no running program").send();
     return false;
+}
+
+void Workbench::reap_tools() {
+    for (RunningTool& tool : tools_) {
+        if (!tool.used || exec_->scheduler().find(tool.process) >= 0) {
+            continue;
+        }
+        LogLine().text("workbench: ").text(tool.name).text(" ended without a reply").send();
+        release_tool(tool);
+    }
 }
 
 void Workbench::start_wbstartup() {
@@ -1458,23 +1576,28 @@ void Workbench::drop_app_icon(const App& app) {
     IconEntry& icon = icons_[app.icon];
     if (icon.used && icon.owner == 0) {
         icon = IconEntry{};
+        if (clicks_[0].selected() == app.icon) {
+            clicks_[0].clear();
+        }
         draw_window(0);
     }
 }
 
-u32 Workbench::add_app_window(u32 id, u32 user, u32 window, u32 tags) {
+u32 Workbench::add_app_window(u32 id, u32 user, u32 window, u32 msg_port, u32 tags) {
     (void)window;
+    (void)msg_port;
     (void)tags;
     return record_app(AppKind::Window, id, user);
 }
 
-void Workbench::remove_app_window(u32 handle) {
+bool Workbench::remove_app_window(u32 handle) {
     App* app = find_app(handle, AppKind::Window);
     if (app == nullptr) {
-        return;
+        return false;
     }
     exec_->free(app->handle, kAppBytes);
     *app = App{};
+    return true;
 }
 
 u32 Workbench::add_app_icon(u32 id, u32 user, u32 name, u32 msg_port, u32 lock, u32 object,
@@ -1526,14 +1649,15 @@ u32 Workbench::add_app_icon(u32 id, u32 user, u32 name, u32 msg_port, u32 lock, 
     return handle;
 }
 
-void Workbench::remove_app_icon(u32 handle) {
+bool Workbench::remove_app_icon(u32 handle) {
     App* app = find_app(handle, AppKind::Icon);
     if (app == nullptr) {
-        return;
+        return false;
     }
     drop_app_icon(*app);
     exec_->free(app->handle, kAppBytes);
     *app = App{};
+    return true;
 }
 
 u32 Workbench::add_app_menu_item(u32 id, u32 user, u32 text, u32 msg_port, u32 tags) {
@@ -1543,13 +1667,14 @@ u32 Workbench::add_app_menu_item(u32 id, u32 user, u32 text, u32 msg_port, u32 t
     return record_app(AppKind::MenuItem, id, user);
 }
 
-void Workbench::remove_app_menu_item(u32 handle) {
+bool Workbench::remove_app_menu_item(u32 handle) {
     App* app = find_app(handle, AppKind::MenuItem);
     if (app == nullptr) {
-        return;
+        return false;
     }
     exec_->free(app->handle, kAppBytes);
     *app = App{};
+    return true;
 }
 
 // --- the vectors ---------------------------------------------------------
@@ -1568,22 +1693,28 @@ struct WorkbenchNatives {
         native::set_result(m, of(ctx).start(m.cpu.d[0], m.cpu.d[1]));
     }
 
+    // AddAppWindowA: d0 id, d1 userdata, a0 window, a1 msgport, a2 tags.
     static void add_app_window(void* ctx, Machine& m) {
-        native::set_result(
-            m, of(ctx).add_app_window(m.cpu.d[0], m.cpu.d[1], m.cpu.a[0], m.cpu.a[1]));
+        native::set_result(m, of(ctx).add_app_window(m.cpu.d[0], m.cpu.d[1], m.cpu.a[0],
+                                                     m.cpu.a[1], m.cpu.a[2]));
     }
 
+    // Each Remove call gives TRUE for a handle its Add call handed out.
     static void remove_app_window(void* ctx, Machine& m) {
-        of(ctx).remove_app_window(m.cpu.a[0]);
+        native::set_result(m, of(ctx).remove_app_window(m.cpu.a[0]) ? 1 : 0);
     }
 
+    // AddAppIconA: d0 id, d1 userdata, a0 text, a1 msgport, a2 lock, a3
+    // diskobj, a4 tags.
     static void add_app_icon(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).add_app_icon(m.cpu.d[0], m.cpu.d[1], m.cpu.a[0],
-                                                   m.cpu.a[1], m.cpu.d[2], m.cpu.a[2],
-                                                   m.cpu.a[3]));
+                                                   m.cpu.a[1], m.cpu.a[2], m.cpu.a[3],
+                                                   m.cpu.a[4]));
     }
 
-    static void remove_app_icon(void* ctx, Machine& m) { of(ctx).remove_app_icon(m.cpu.a[0]); }
+    static void remove_app_icon(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).remove_app_icon(m.cpu.a[0]) ? 1 : 0);
+    }
 
     static void add_app_menu_item(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).add_app_menu_item(m.cpu.d[0], m.cpu.d[1], m.cpu.a[0],
@@ -1591,7 +1722,7 @@ struct WorkbenchNatives {
     }
 
     static void remove_app_menu_item(void* ctx, Machine& m) {
-        of(ctx).remove_app_menu_item(m.cpu.a[0]);
+        native::set_result(m, of(ctx).remove_app_menu_item(m.cpu.a[0]) ? 1 : 0);
     }
 
     static void wb_info(void*, Machine& m) { native::set_result(m, 0); }

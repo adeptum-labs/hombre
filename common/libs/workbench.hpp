@@ -73,6 +73,8 @@ public:
     static constexpr u32 kMaxTools = 8;
     static constexpr u32 kMaxApps = 32;
     static constexpr u32 kMaxDirEntries = 64;
+    // The most messages of one window a pass over the ports handles.
+    static constexpr u32 kMaxMessagesPerPump = 64;
     static constexpr u32 kNoIcon = 0xFFFFFFFF;
     static constexpr u32 kAppBytes = 16;
     // Two clicks on the same icon within this many microseconds open it:
@@ -112,7 +114,6 @@ public:
     struct DrawerWindow {
         bool used = false;
         u32 window = 0;
-        u32 parent = 0;  // the window the drawer was opened from
         u32 user_port = 0;
         u32 rp = 0;
         i32 inner_left = 0;
@@ -210,13 +211,14 @@ public:
     bool update_workbench(u32 name);
 
     // The application registration vectors. Every Add hands out a handle
-    // the matching Remove takes back.
-    u32 add_app_window(u32 id, u32 user, u32 window, u32 tags);
-    void remove_app_window(u32 handle);
+    // the matching Remove takes back; a Remove is false for a handle no
+    // Add of its kind handed out.
+    u32 add_app_window(u32 id, u32 user, u32 window, u32 msg_port, u32 tags);
+    bool remove_app_window(u32 handle);
     u32 add_app_icon(u32 id, u32 user, u32 name, u32 msg_port, u32 lock, u32 object, u32 tags);
-    void remove_app_icon(u32 handle);
+    bool remove_app_icon(u32 handle);
     u32 add_app_menu_item(u32 id, u32 user, u32 text, u32 msg_port, u32 tags);
-    void remove_app_menu_item(u32 handle);
+    bool remove_app_menu_item(u32 handle);
 
     // Builds the WBStartup message posted to a started process: its
     // ReplyPort is the Workbench's port, and each argument gets the lock of
@@ -229,6 +231,10 @@ public:
     // Opens the window the icon of window window_index stands for, or
     // brings the window already open for it to the front.
     void open_drawer(u32 window_index, const IconEntry& icon);
+
+    // Closes a drawer's window and gives its icons back; the backdrop
+    // stays.
+    void close_drawer(u32 window_index);
 
     // Starts the tool or project the icon describes from drawer, with a
     // message it finds on its port. False, logged, when the program cannot
@@ -246,6 +252,23 @@ public:
     // running tool sent.
     bool tool_reply(u32 message);
 
+    // Does the same for every program whose process has ended without
+    // replying its message, as one that faulted has.
+    void reap_tools();
+
+    // The Window menu's Open Parent: opens the drawer the window's drawer
+    // lies in, or brings its window to the front. A disk's window has none.
+    void open_parent(u32 window_index);
+
+    // Handles the replies of ended programs and the messages waiting at
+    // the windows' ports. True when a window had more messages than one
+    // pass takes.
+    bool pump();
+
+    // The signals of the ports the desktop gets its messages at: the reply
+    // port and every open window's.
+    u32 wait_mask() const;
+
 private:
     friend struct WorkbenchNatives;
 
@@ -254,25 +277,25 @@ private:
 
     static void task_entry(void* ctx);
     void run();
-    void pump();
     void handle_message(u32 window_index, u32 message);
     void menu_pick(u32 window_index, u32 number);
     void refresh_title();
 
     u32 build_menu_strip();
-    void attach_window(u32 index, u32 window, u32 parent, const char* name, const char* path);
+    void attach_window(u32 index, u32 window, const char* name, const char* path);
+    void measure_window(u32 index);
+    void open_drawer_window(const char* path, const char* name, u32 object);
+    void release_tool(RunningTool& tool);
     void open_backdrop();
     void add_volume_icons();
     void add_dir_icon(u32 window_index, const char* entry, bool is_dir);
     void add_volume(const char* label, const char* icon_path);
-    void close_drawer(u32 window_index);
     void fill_drawer(u32 window_index);
     void place_icons(u32 window_index);
     void draw_window(u32 window_index);
     void draw_icon(const DrawerWindow& drawer, const IconEntry& icon, bool selected);
     void redraw_all();
     void update_all();
-    void open_parent(u32 window_index);
     void select_contents(u32 window_index);
     void clean_up(u32 window_index);
     void open_selected(u32 window_index);
