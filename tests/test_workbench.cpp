@@ -277,6 +277,8 @@ std::vector<AdfFile> test_files() {
         {"Tools/Proj", text("a project")},
         {"Tools/Sub.info", drawer_icon_info(200, 20, 60, 70, 200, 90)},
         {"Tools/Sub/Deep.info", icon_info(kWBTool, 10, 10)},
+        {"Tools/Fake.info", icon_info(kWBDisk, 250, 10)},
+        {"Tools/Fake/Inside.info", icon_info(kWBTool, 10, 10)},
     };
 }
 
@@ -1362,6 +1364,16 @@ void a_dragged_disk_keeps_its_place_over_a_backdrop_toggle() {
     CHECK_EQ(r.workbench.icon(disk).top, 120);
 }
 
+void a_disk_icon_inside_a_drawer_is_no_volume() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 fake = r.find_icon_in(w.tools, "Fake");
+    CHECK(fake != Workbench::kNoIcon);
+    r.workbench.open_icon(w.tools, fake);
+    CHECK(r.find_window("HombreTest:Tools/Fake") != Workbench::kMaxWindows);
+    CHECK_EQ(r.find_window("Fake:"), Workbench::kMaxWindows);
+}
+
 void snapshot_and_unsnapshot_store_the_icon_place() {
     Rig r;
     put_ram_project("Note");
@@ -1463,6 +1475,7 @@ int main() {
     a_dragged_file_is_copied_moved_or_refused();
     a_drag_ends_when_its_window_is_filled_again();
     a_dragged_disk_keeps_its_place_over_a_backdrop_toggle();
+    a_disk_icon_inside_a_drawer_is_no_volume();
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();
     return check::finish("test_workbench");

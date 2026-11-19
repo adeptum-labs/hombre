@@ -797,11 +797,12 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     }
 }
 
-// The drawer a disk or drawer icon stands for: "Name:" for a disk, the
-// drawer's path for a drawer.
+// The drawer a disk or drawer icon stands for: "Name:" for a volume on
+// the root window, the drawer's path for anything else, a disk-typed icon
+// inside a drawer included.
 bool Workbench::icon_target_path(u32 window_index, const IconEntry& icon,
                                  char (&out)[Dos::kMaxPath]) const {
-    if (icon.type == kDisk) {
+    if (window_index == 0 && icon.type == kDisk) {
         const u32 length = text_length(icon.name);
         if (length + 2 > sizeof out) {
             return false;
@@ -817,7 +818,7 @@ bool Workbench::icon_target_path(u32 window_index, const IconEntry& icon,
 // The path of the icon's .info without the suffix: "Name:Disk" for a disk.
 bool Workbench::icon_path(u32 window_index, const IconEntry& icon,
                           char (&out)[Dos::kMaxPath]) const {
-    if (icon.type == kDisk) {
+    if (window_index == 0 && icon.type == kDisk) {
         char volume[Dos::kMaxPath];
         return icon_target_path(window_index, icon, volume) && join_path(volume, "Disk", out);
     }
