@@ -616,6 +616,27 @@ void draw_prop_gadget(Graphics& graphics, Bus& b, const WindowView& w, u32 gadge
 
 }
 
+// struct DrawInfo (intuition/screens.h) and the 3.1 default pens:
+// DETAILPEN, BLOCKPEN, TEXTPEN, SHINEPEN, SHADOWPEN, FILLPEN, FILLTEXTPEN,
+// BACKGROUNDPEN, HIGHLIGHTTEXTPEN, BARDETAILPEN, BARBLOCKPEN, BARTRIMPEN.
+constexpr u32 kDriVersion = 0;
+constexpr u32 kDriNumPens = 2;
+constexpr u32 kDriPens = 4;
+constexpr u32 kDriFont = 8;
+constexpr u32 kDriDepth = 12;
+constexpr u32 kDriResolutionX = 14;
+constexpr u32 kDriResolutionY = 16;
+constexpr u32 kDriFlags = 18;
+// Window.MenuStrip, Menu.FirstItem and MenuItem.SubItem.
+constexpr u32 kWdMenuStrip = 28;
+constexpr u32 kMuFirstItem = 18;
+constexpr u32 kMiSubItem = 28;
+constexpr u32 kDriNewLook = 1;
+constexpr u32 kDriPenCount = 12;
+constexpr u16 kDefaultDriPens[kDriPenCount] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
+constexpr u32 kDrawInfoPensAt = 52;
+constexpr u32 kDrawInfoBytes = kDrawInfoPensAt + (kDriPenCount + 1) * 2;
+
 struct IntuitionNatives {
     static Intuition& of(void* ctx) { return *static_cast<Intuition*>(ctx); }
 
@@ -634,6 +655,156 @@ struct IntuitionNatives {
     static void lock_i_base(void*, Machine& m) { native::set_result(m, 0); }
 
     static void unlock_i_base(void*, Machine&) {}
+
+    // The one public screen is the default screen, under the name
+    // "Workbench"; a null name asks for the default public screen.
+    static bool is_default_pub_name(Bus& b, u32 name) {
+        if (name == 0) {
+            return true;
+        }
+        const char* want = "Workbench";
+        for (u32 i = 0;; ++i) {
+            const u32 c = b.r8(name + i);
+            if (!b.ok()) {
+                return false;
+            }
+            const char w = want[i];
+            const u32 lc = (c >= 'A' && c <= 'Z') ? c + 32 : c;
+            const u32 lw = (w >= 'A' && w <= 'Z') ? static_cast<u32>(w) + 32 : static_cast<u32>(w);
+            if (lc != lw) {
+                return false;
+            }
+            if (c == 0) {
+                return true;
+            }
+        }
+    }
+
+    static void lock_pub_screen(void* ctx, Machine& m) {
+        Intuition& g = of(ctx);
+        Bus b(m);
+        const u32 screen = g.default_screen_ != 0 ? g.default_screen_ : g.front_;
+        if (!is_default_pub_name(b, m.cpu.a[0]) || screen == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        native::set_result(m, screen);
+    }
+
+    static void unlock_pub_screen(void*, Machine&) {}
+
+    // A DrawInfo per screen, made on first use and freed with the screen:
+    // the 3.1 default pens, the screen's font, its depth and a 1:1
+    // resolution. FreeScreenDrawInfo leaves it in place.
+    static void get_screen_draw_info(void* ctx, Machine& m) {
+        Intuition& g = of(ctx);
+        const u32 screen = m.cpu.a[0];
+        const u32 index = g.find_screen(screen);
+        if (screen == 0 || index >= Intuition::kMaxScreens) {
+            native::set_result(m, 0);
+            return;
+        }
+        Intuition::ScreenRecord& rec = g.screen_records_[index];
+        if (rec.draw_info == 0) {
+            const u32 di = g.exec_->alloc(kDrawInfoBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+            if (di == 0) {
+                native::set_result(m, 0);
+                return;
+            }
+            Bus b(m);
+            const u32 pens = di + kDrawInfoPensAt;
+            for (u32 i = 0; i < kDriPenCount; ++i) {
+                b.w16(pens + i * 2, kDefaultDriPens[i]);
+            }
+            b.w16(pens + kDriPenCount * 2, 0xFFFF);
+            b.w16(di + kDriVersion, 2);
+            b.w16(di + kDriNumPens, kDriPenCount);
+            b.w32(di + kDriPens, pens);
+            b.w32(di + kDriFont, g.graphics_ != nullptr ? g.graphics_->topaz_font() : 0);
+            b.w16(di + kDriDepth, static_cast<u16>(rec.depth));
+            b.w16(di + kDriResolutionX, 44);
+            b.w16(di + kDriResolutionY, 44);
+            b.w32(di + kDriFlags, kDriNewLook);
+            if (!b.ok()) {
+                g.exec_->free(di, kDrawInfoBytes);
+                return;
+            }
+            rec.draw_info = di;
+        }
+        native::set_result(m, rec.draw_info);
+    }
+
+    static void free_screen_draw_info(void*, Machine&) {}
+
+    // The menu strip is kept in the Window; menus are not drawn yet.
+    static void set_menu_strip(void*, Machine& m) {
+        Bus b(m);
+        const u32 window = m.cpu.a[0];
+        if (window != 0) {
+            b.w32(window + kWdMenuStrip, m.cpu.a[1]);
+        }
+        native::set_result(m, b.ok() && window != 0 ? 1 : 0);
+    }
+
+    static void clear_menu_strip(void*, Machine& m) {
+        Bus b(m);
+        if (m.cpu.a[0] != 0) {
+            b.w32(m.cpu.a[0] + kWdMenuStrip, 0);
+        }
+    }
+
+    // The MenuItem a menu number names: menu in bits 0-4, item in bits
+    // 5-10 and subitem in bits 11-15, 31 for none; 0 for MENUNULL or a
+    // number past the strip.
+    static void item_address(void*, Machine& m) {
+        Bus b(m);
+        const u32 number = m.cpu.d[0] & 0xFFFF;
+        if (number == 0xFFFF || m.cpu.a[0] == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        auto nth = [&](u32 first, u32 next_at, u32 index) {
+            u32 at = first;
+            for (u32 i = 0; at != 0 && i < index && b.ok(); ++i) {
+                at = b.r32(at + next_at);
+            }
+            return at;
+        };
+        const u32 menu = nth(m.cpu.a[0], 0, number & 0x1F);
+        const u32 item_number = (number >> 5) & 0x3F;
+        if (menu == 0 || item_number == 0x3F) {
+            native::set_result(m, 0);
+            return;
+        }
+        u32 item = nth(b.r32(menu + kMuFirstItem), 0, item_number);
+        const u32 sub_number = (number >> 11) & 0x1F;
+        if (item != 0 && sub_number != 0x1F) {
+            item = nth(b.r32(item + kMiSubItem), 0, sub_number);
+        }
+        native::set_result(m, b.ok() ? item : 0);
+    }
+
+    // Windows keep their own bitmaps, so there is no damage to repair.
+    static void begin_refresh(void*, Machine&) {}
+
+    static void end_refresh(void*, Machine&) {}
+
+    // Copies "Workbench" into the buffer at a0, which must hold
+    // MAXPUBSCREENNAME + 1 bytes.
+    static void get_default_pub_screen(void*, Machine& m) {
+        Bus b(m);
+        const u32 buffer = m.cpu.a[0];
+        if (buffer == 0) {
+            return;
+        }
+        const char* name = "Workbench";
+        for (u32 i = 0;; ++i) {
+            b.w8(buffer + i, static_cast<u8>(name[i]));
+            if (name[i] == '\0' || !b.ok()) {
+                break;
+            }
+        }
+    }
 
     static void get_screen_data(void* ctx, Machine& m) {
         Intuition& g = of(ctx);
@@ -772,6 +943,20 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::AddGList, IntuitionNatives::add_glist, "AddGList"},
     {intuition_lvo::RemoveGList, IntuitionNatives::remove_glist, "RemoveGList"},
     {intuition_lvo::NewModifyProp, IntuitionNatives::new_modify_prop, "NewModifyProp"},
+    {intuition_lvo::LockPubScreen, IntuitionNatives::lock_pub_screen, "LockPubScreen"},
+    {intuition_lvo::SetMenuStrip, IntuitionNatives::set_menu_strip, "SetMenuStrip"},
+    {intuition_lvo::ResetMenuStrip, IntuitionNatives::set_menu_strip, "ResetMenuStrip"},
+    {intuition_lvo::ClearMenuStrip, IntuitionNatives::clear_menu_strip, "ClearMenuStrip"},
+    {intuition_lvo::ItemAddress, IntuitionNatives::item_address, "ItemAddress"},
+    {intuition_lvo::BeginRefresh, IntuitionNatives::begin_refresh, "BeginRefresh"},
+    {intuition_lvo::EndRefresh, IntuitionNatives::end_refresh, "EndRefresh"},
+    {intuition_lvo::GetScreenDrawInfo, IntuitionNatives::get_screen_draw_info,
+     "GetScreenDrawInfo"},
+    {intuition_lvo::FreeScreenDrawInfo, IntuitionNatives::free_screen_draw_info,
+     "FreeScreenDrawInfo"},
+    {intuition_lvo::UnlockPubScreen, IntuitionNatives::unlock_pub_screen, "UnlockPubScreen"},
+    {intuition_lvo::GetDefaultPubScreen, IntuitionNatives::get_default_pub_screen,
+     "GetDefaultPubScreen"},
     {intuition_lvo::OpenWindowTagList, IntuitionNatives::open_window_tag_list,
      "OpenWindowTagList"},
     {intuition_lvo::OpenScreenTagList, IntuitionNatives::open_screen_tag_list,
@@ -1506,6 +1691,9 @@ bool Intuition::close_screen(u32 screen) {
     if (rec->title != 0) {
         exec_->free(rec->title, rec->title_bytes);
     }
+    if (rec->draw_info != 0) {
+        exec_->free(rec->draw_info, kDrawInfoBytes);
+    }
     exec_->free(screen, rec->screen_bytes);
     *rec = ScreenRecord{};
     if (default_screen_ == screen) {
@@ -2142,6 +2330,19 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     }
     compose(screen, window_damage_rect(srec->depth, left, top, width, height, a.flags));
     end_batch();
+    char name[41];
+    name[0] = '\0';
+    const u32 title_at = b.r32(window + ndk::wd_Title);
+    for (u32 i = 0; title_at != 0 && i + 1 < sizeof name; ++i) {
+        const u32 c = b.r8(title_at + i);
+        name[i] = c >= 0x20 && c < 0x7F ? static_cast<char>(c) : '\0';
+        name[i + 1] = '\0';
+        if (c == 0 || !b.ok()) {
+            name[i] = '\0';
+            break;
+        }
+    }
+    LogLine().text("intuition: window ").text(name).text(" opened").send();
     return window;
 }
 

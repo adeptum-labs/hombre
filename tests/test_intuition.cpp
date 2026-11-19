@@ -45,6 +45,24 @@ constexpr u32 kTitle = kData + 0x200;
 constexpr u32 kBuffer = kData + 0x300;
 constexpr u32 kNewWindow = kData + 0x500;
 constexpr u32 kWinTitle = kData + 0x600;
+constexpr u32 kMenu = kData + 0x700;
+constexpr u32 kMenu2 = kData + 0x750;
+constexpr u32 kItem0 = kData + 0x7A0;
+constexpr u32 kItem1 = kData + 0x7E0;
+constexpr u32 kItem2 = kData + 0x820;
+constexpr u32 kSub0 = kData + 0x860;
+constexpr u32 kSub1 = kData + 0x8A0;
+
+// struct Menu and struct MenuItem
+constexpr u32 mu_NextMenu = 0;
+constexpr u32 mu_FirstItem = 18;
+constexpr u32 mi_NextItem = 0;
+constexpr u32 mi_SubItem = 28;
+
+// struct DrawInfo
+constexpr u32 dri_NumPens = 2;
+constexpr u32 dri_Pens = 4;
+constexpr u32 dri_Font = 8;
 
 void put_new_screen(GfxRig& r, u32 at, u32 width, u32 height, u32 depth, u32 detail,
                     u32 block, u32 title) {
@@ -4475,6 +4493,152 @@ void size_box_hit_test_matches_border_placement() {
     CHECK_EQ(r.get16(w_bottom + wd_Height), 110u);
 }
 
+void lock_pub_screen_returns_the_default_screen() {
+    GfxRig r;
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockPubScreen), 0u);
+    r.cpu().a[0] = r.str(kBuffer, "Workbench");
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockPubScreen), 0u);
+
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockPubScreen), screen);
+    r.cpu().a[0] = r.str(kBuffer, "Workbench");
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockPubScreen), screen);
+    r.cpu().a[0] = r.str(kBuffer, "WORKBENCH");
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockPubScreen), screen);
+    r.cpu().a[0] = r.str(kBuffer, "workbench");
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockPubScreen), screen);
+    r.cpu().a[0] = r.str(kBuffer, "Other");
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockPubScreen), 0u);
+
+    r.cpu().a[0] = screen;
+    r.cpu().d[0] = 0x12345678;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::UnlockPubScreen), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x12345678u);
+}
+
+void get_default_pub_screen_writes_workbench() {
+    GfxRig r;
+    r.str(kBuffer, "overwritten");
+    r.cpu().a[0] = kBuffer;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::GetDefaultPubScreen), ExitReason::Halt);
+    CHECK(r.read_str(kBuffer) == "Workbench");
+    CHECK_EQ(r.get8(kBuffer + 9), 0u);
+}
+
+void get_screen_draw_info_has_the_default_pens_and_topaz() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    r.cpu().a[0] = screen;
+    const u32 info = r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo);
+    CHECK(info != 0);
+    CHECK_EQ(r.get16(info + dri_NumPens), 12u);
+    const u32 pens = r.get32(info + dri_Pens);
+    CHECK(pens != 0);
+    const u32 expected[12] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
+    for (u32 i = 0; i < 12; ++i) {
+        CHECK_EQ(r.get16(pens + i * 2), expected[i]);
+    }
+    CHECK_EQ(r.get16(pens + 12 * 2), 0xFFFFu);
+    CHECK_EQ(r.get32(info + dri_Font), r.graphics.topaz_font());
+
+    r.cpu().a[0] = screen;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo), info);
+    r.cpu().a[0] = kBuffer;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo), 0u);
+    r.cpu().a[0] = screen;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::FreeScreenDrawInfo), ExitReason::Halt);
+}
+
+void menu_strip_vectors_write_the_window_field() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kMenu;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetMenuStrip), 1u);
+    CHECK_EQ(r.get32(window + 28), kMenu);
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kMenu2;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ResetMenuStrip), 1u);
+    CHECK_EQ(r.get32(window + 28), kMenu2);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ClearMenuStrip), ExitReason::Halt);
+    CHECK_EQ(r.get32(window + 28), 0u);
+
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kMenu;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetMenuStrip), 0u);
+}
+
+void item_address_follows_the_menu_numbers() {
+    GfxRig r;
+    r.put32(kMenu + mu_NextMenu, kMenu2);
+    r.put32(kMenu + mu_FirstItem, kItem0);
+    r.put32(kMenu2 + mu_NextMenu, 0);
+    r.put32(kMenu2 + mu_FirstItem, kItem2);
+    r.put32(kItem0 + mi_NextItem, kItem1);
+    r.put32(kItem0 + mi_SubItem, kSub0);
+    r.put32(kItem1 + mi_NextItem, 0);
+    r.put32(kItem1 + mi_SubItem, 0);
+    r.put32(kItem2 + mi_NextItem, 0);
+    r.put32(kItem2 + mi_SubItem, 0);
+    r.put32(kSub0 + mi_NextItem, kSub1);
+    r.put32(kSub0 + mi_SubItem, 0);
+    r.put32(kSub1 + mi_NextItem, 0);
+    r.put32(kSub1 + mi_SubItem, 0);
+
+    r.cpu().a[0] = kMenu;
+    r.cpu().d[0] = 0xFFFF;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), 0u);
+    r.cpu().d[0] = 0xF800;  // menu 0, item 0, no subitem
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), kItem0);
+    r.cpu().d[0] = 0xF820;  // menu 0, item 1
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), kItem1);
+    r.cpu().d[0] = 0xF801;  // menu 1, item 0
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), kItem2);
+    r.cpu().d[0] = 0x0000;  // menu 0, item 0, subitem 0
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), kSub0);
+    r.cpu().d[0] = 0x0800;  // menu 0, item 0, subitem 1
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), kSub1);
+    r.cpu().d[0] = 0xF802;  // menu 2 does not exist
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), 0u);
+    r.cpu().d[0] = 0xF8A0;  // item 5 does not exist
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), 0u);
+    r.cpu().d[0] = 0x2800;  // subitem 5 does not exist
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), 0u);
+
+    r.cpu().a[0] = 0;
+    r.cpu().d[0] = 0xF800;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ItemAddress), 0u);
+}
+
+void open_window_logs_the_title() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.str(kWinTitle, "Clock");
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, kWinTitle, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK(logged("intuition: window Clock opened"));
+}
+
 }
 
 int main() {
@@ -4607,5 +4771,11 @@ int main() {
     flush_palette_recomposes_8plane_shadows_and_end_batch_flushes();
     backdrop_window_has_square_corners_no_shadow_and_stays_behind();
     size_box_hit_test_matches_border_placement();
+    lock_pub_screen_returns_the_default_screen();
+    get_default_pub_screen_writes_workbench();
+    get_screen_draw_info_has_the_default_pens_and_topaz();
+    menu_strip_vectors_write_the_window_field();
+    item_address_follows_the_menu_numbers();
+    open_window_logs_the_title();
     return check::finish("test_intuition");
 }

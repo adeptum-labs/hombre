@@ -50,7 +50,9 @@ namespace intuition_lvo {
 
 constexpr u32 AddGadget = 42;
 constexpr u32 CloseScreen = 66;
+constexpr u32 ClearMenuStrip = 54;
 constexpr u32 CloseWindow = 72;
+constexpr u32 ItemAddress = 144;
 constexpr u32 ModifyIDCMP = 150;
 constexpr u32 ModifyProp = 156;
 constexpr u32 OffGadget = 174;
@@ -61,9 +63,12 @@ constexpr u32 RefreshGadgets = 222;
 constexpr u32 RemoveGadget = 228;
 constexpr u32 ScreenToBack = 246;
 constexpr u32 ScreenToFront = 252;
+constexpr u32 SetMenuStrip = 264;
 constexpr u32 SetWindowTitles = 276;
 constexpr u32 WindowToBack = 306;
 constexpr u32 WindowToFront = 312;
+constexpr u32 BeginRefresh = 354;
+constexpr u32 EndRefresh = 366;
 constexpr u32 LockIBase = 414;
 constexpr u32 UnlockIBase = 420;
 constexpr u32 GetScreenData = 426;
@@ -71,6 +76,12 @@ constexpr u32 RefreshGList = 432;
 constexpr u32 AddGList = 438;
 constexpr u32 RemoveGList = 444;
 constexpr u32 NewModifyProp = 468;
+constexpr u32 LockPubScreen = 510;
+constexpr u32 UnlockPubScreen = 516;
+constexpr u32 GetDefaultPubScreen = 582;
+constexpr u32 GetScreenDrawInfo = 690;
+constexpr u32 FreeScreenDrawInfo = 696;
+constexpr u32 ResetMenuStrip = 702;
 constexpr u32 OpenWindowTagList = 606;
 constexpr u32 OpenScreenTagList = 612;
 // The last vector of the 3.9 library; the table reaches down to it.
@@ -194,6 +205,7 @@ private:
         u32 low_colors_bytes = 0;
         u32 title = 0;
         u32 title_bytes = 0;
+        u32 draw_info = 0;  // the DrawInfo GetScreenDrawInfo hands out, made on first use
         u32 width = 0;
         u32 height = 0;
         u32 depth = 0;
