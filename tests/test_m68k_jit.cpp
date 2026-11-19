@@ -1811,6 +1811,71 @@ void init_refuses_bad_setups() {
     CHECK(!g_jit.init(CodeRegion{nullptr, code, sizeof code}, m));
 }
 
+struct PreemptCapture {
+    u32 calls = 0;
+    u32 max_depth = 0;
+    u32 nested_blocks = 0;
+};
+
+void record_preempt(void* ctx) {
+    PreemptCapture& cap = *static_cast<PreemptCapture*>(ctx);
+    ++cap.calls;
+    const u32 depth = g_jit.save_run_state().run_depth;
+    if (depth > cap.max_depth) {
+        cap.max_depth = depth;
+    }
+}
+
+void nested_call_native(void* ctx, Machine&) {
+    PreemptCapture& cap = *static_cast<PreemptCapture*>(ctx);
+    const u32 before = cap.calls;
+    CHECK_EQ(g_jit.save_run_state().run_depth, 1u);
+    CHECK_EQ(g_jit.call_guest(kCode + 0x100, 16), ExitReason::Returned);
+    cap.nested_blocks = cap.calls - before;
+}
+
+void preempt_hook_runs_only_at_depth_one() {
+    Rig r;
+    PreemptCapture cap{};
+    const u16 id = g_jit.add_native(nested_call_native, &cap, "nested");
+    CHECK(id != 0);
+    g_jit.set_preempt_hook(record_preempt, &cap);
+
+    // Outer: A-line native, then JMP kHaltStub.
+    r.program(kCode, {static_cast<u16>(0xA000 | id)});
+    // Inner subroutine at kCode + 0x100: two blocks (MOVEQ #1,D0 ; BRA.S +2 ; NOP ; RTS).
+    r.code(kCode + 0x100, {0x7001, 0x6000, 0x0002, 0x4E71, 0x4E75});
+
+    CHECK_EQ(r.go(kCode), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 1u);
+    CHECK_EQ(cap.max_depth, 1u);
+    CHECK_EQ(cap.nested_blocks, 0u);
+    CHECK_EQ(cap.calls, 3u);  // A-line block, JMP kHaltStub block, kHaltStub block
+}
+
+void run_state_save_and_restore() {
+    Rig r;
+    r.program(kCode, {0x7001, 0x7202, 0x7403});
+    g_jit.set_block_limit(1);
+    r.cpu().pc = kCode;
+    CHECK_EQ(g_jit.run(10), ExitReason::Halt);
+
+    // Manually check save_run_state / restore_run_state round-trip.
+    const Jit::RunState saved = g_jit.save_run_state();
+    g_jit.restore_run_state(Jit::RunState{42, 0});
+    CHECK_EQ(g_jit.save_run_state().budget_left, 42u);
+    CHECK_EQ(g_jit.save_run_state().run_depth, 0u);
+
+    r.cpu().pc = kCode;
+    CHECK_EQ(g_jit.run(2), ExitReason::Budget);
+    CHECK_EQ(g_jit.save_run_state().budget_left, 0u);
+    CHECK_EQ(g_jit.save_run_state().run_depth, 0u);
+
+    g_jit.restore_run_state(saved);
+    CHECK_EQ(g_jit.save_run_state().budget_left, saved.budget_left);
+    CHECK_EQ(g_jit.save_run_state().run_depth, saved.run_depth);
+}
+
 }
 
 int main() {
@@ -1849,5 +1914,7 @@ int main() {
     block_limit_hook();
     address_mask_hook();
     init_refuses_bad_setups();
+    preempt_hook_runs_only_at_depth_one();
+    run_state_save_and_restore();
     return check::finish("test_m68k_jit");
 }

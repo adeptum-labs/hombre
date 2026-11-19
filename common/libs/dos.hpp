@@ -197,14 +197,8 @@ constexpr u32 SetOwner = 996;
 namespace ndk {
 
 constexpr u8 NT_PROCESS = 13;
-constexpr u8 NT_SIGNALSEM = 15;
-constexpr u8 TS_RUN = 2;
 
-// struct Task, the fields dos sets
-constexpr u32 TC_STATE = 15;
-constexpr u32 TC_SPREG = 54;
-constexpr u32 TC_SPLOWER = 58;
-constexpr u32 TC_SPUPPER = 62;
+// struct Task, the field dos sets beyond exec's Task
 constexpr u32 TC_MEMENTRY = 74;
 
 // struct MsgPort
@@ -212,20 +206,6 @@ constexpr u32 MP_FLAGS = 14;
 constexpr u32 MP_SIGBIT = 15;
 constexpr u32 MP_SIGTASK = 16;
 constexpr u32 MP_MSGLIST = 20;
-
-// struct MinList
-constexpr u32 MLH_HEAD = 0;
-constexpr u32 MLH_TAIL = 4;
-constexpr u32 MLH_TAILPRED = 8;
-constexpr u32 MLH_SIZE = 12;
-
-// struct SignalSemaphore
-constexpr u32 SS_NESTCOUNT = 14;
-constexpr u32 SS_WAITQUEUE = 16;
-constexpr u32 SS_MULTIPLELINK = 28;
-constexpr u32 SS_OWNER = 40;
-constexpr u32 SS_QUEUECOUNT = 44;
-constexpr u32 SS_SIZE = 46;
 
 // struct DateStamp
 constexpr u32 ds_Days = 0;

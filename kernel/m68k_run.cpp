@@ -47,6 +47,7 @@
 #include "clock.hpp"
 #include "code_region.hpp"
 #include "rtc.hpp"
+#include "task_switch.hpp"
 #include "usb_keyboard.hpp"
 
 namespace hombre {
@@ -81,6 +82,7 @@ constexpr u32 sigbreakf_ctrl_c = 1u << 12;
 constinit m68k::Machine machine{};
 constinit m68k::Jit jit{};
 constinit Exec exec{};
+constinit TaskStacks task_stacks{};
 constinit Utility utility{};
 constinit Dos dos{};
 constinit Graphics graphics{};
@@ -455,6 +457,27 @@ bool hook_trampoline(void*) {
     return poll_input_while_running();
 }
 
+void task_entry(void* arg) {
+    const u32 id = static_cast<u32>(reinterpret_cast<usize>(arg));
+    exec.task_main(id);
+}
+
+bool task_host_create(void*, u32 id) {
+    return task_stacks.create(id, &task_entry, reinterpret_cast<void*>(static_cast<usize>(id)));
+}
+
+void task_host_switch(void*, u32 from, u32 to) {
+    task_stacks.switch_to(from, to);
+}
+
+void task_host_destroy(void*, u32 id) {
+    task_stacks.destroy(id);
+}
+
+bool task_host_slice_over(void*) {
+    return take_need_resched();
+}
+
 constexpr bool is_console_printable(u8 c) {
     return (c >= 0x20 && c <= 0x7e) || c >= 0xa0;
 }
@@ -557,6 +580,12 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
     }
     jit.set_address_mask(address_mask);
     g_log = &log_line;
+    if (!task_stacks.init_kernel(pages)) {
+        fail("task stack window init failed");
+        return false;
+    }
+    exec.set_task_host(TaskHost{&task_host_create, &task_host_switch, &task_host_destroy,
+                                &task_host_slice_over, &hook_trampoline, nullptr});
     if (!exec.init(machine, free_start, m68k::kGuestBytes)) {
         fail("exec init failed");
         return false;
@@ -753,6 +782,7 @@ bool typed_run(void*, const char* path, const char* args) {
                 handle_decoded_byte(chars[i], &line_editor);
             }
         }
+        exec.yield_if_ready();
         idle_wait();
     }
     shell.print_line(usb_keyboard_result().message);

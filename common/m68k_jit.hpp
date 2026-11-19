@@ -118,6 +118,13 @@ struct Prelude {
 
 class Jit {
 public:
+    struct RunState {
+        u64 budget_left = 0;
+        u32 run_depth = 0;
+    };
+
+    using PreemptHook = void (*)(void* ctx);
+
     // Takes the code region and the machine, writes the Halt and Returned
     // stubs into guest memory and drops all natives and translations. False
     // if the region is too small or guest memory cannot hold the stubs.
@@ -155,6 +162,19 @@ public:
     // addresses they are given, so that they see what translated code sees.
     u32 address_mask() const { return address_mask_; }
 
+    // Called at the top of the run loop when run_depth_ == 1.
+    void set_preempt_hook(PreemptHook fn, void* ctx) {
+        preempt_hook_ = fn;
+        preempt_ctx_ = ctx;
+    }
+
+    RunState save_run_state() const { return RunState{budget_left_, run_depth_}; }
+
+    void restore_run_state(const RunState& state) {
+        budget_left_ = state.budget_left;
+        run_depth_ = state.run_depth;
+    }
+
 private:
     static constexpr u32 kSlotBits = 13;
     static constexpr u32 kSlots = 1u << kSlotBits;
@@ -177,6 +197,8 @@ private:
     u32 address_mask_ = 0xFFFFFFFF;
     u64 budget_left_ = 0;  // blocks the outermost run has left
     u32 run_depth_ = 0;
+    PreemptHook preempt_hook_ = nullptr;
+    void* preempt_ctx_ = nullptr;
     u32 blocks_ = 0;
     u32 next_native_ = 2;
     Block cache_[kSlots]{};

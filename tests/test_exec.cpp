@@ -108,6 +108,7 @@ public:
         g_exec.set_this_task(0);
         g_exec.set_segment_loader(SegmentLoader{nullptr, nullptr});
         g_exec.set_idle_hook(IdleHook{nullptr, nullptr});
+        g_exec.set_task_host(TaskHost{});
         g_exec.set_reply_handler(0, nullptr, nullptr);
         g_log = nullptr;
         munmap(rw_, kRegion);
@@ -2418,6 +2419,470 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     g_exec.delete_port(port);
 }
 
+// --- multi-tasking and semaphores ---------------------------------------
+
+struct FakeHostState {
+    struct Switch {
+        u32 from;
+        u32 to;
+    };
+    bool create_ok = true;
+    bool slice_over = false;
+    bool idle_ok = false;
+    std::vector<u32> created;
+    std::vector<u32> destroyed;
+    std::vector<Switch> switches;
+};
+
+bool fake_create(void* ctx, u32 id) {
+    FakeHostState& s = *static_cast<FakeHostState*>(ctx);
+    if (!s.create_ok) {
+        return false;
+    }
+    s.created.push_back(id);
+    return true;
+}
+
+void fake_switch(void* ctx, u32 from, u32 to) {
+    static_cast<FakeHostState*>(ctx)->switches.push_back({from, to});
+}
+
+void fake_destroy(void* ctx, u32 id) {
+    static_cast<FakeHostState*>(ctx)->destroyed.push_back(id);
+}
+
+bool fake_slice_over(void* ctx) {
+    return static_cast<FakeHostState*>(ctx)->slice_over;
+}
+
+bool fake_idle(void* ctx) {
+    return static_cast<FakeHostState*>(ctx)->idle_ok;
+}
+
+TaskHost make_fake_host(FakeHostState& state) {
+    return TaskHost{fake_create, fake_switch, fake_destroy, fake_slice_over, fake_idle, &state};
+}
+
+u32 setup_child_task(Rig& r, u32 task_addr, u32 stack_top, i8 pri, const char* name,
+                     u32 name_addr) {
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        r.put8(task_addr + i, 0);
+    }
+    r.put8(task_addr + LN_TYPE, NT_TASK);
+    r.put8(task_addr + LN_PRI, static_cast<u8>(pri));
+    r.put32(task_addr + LN_NAME, name != nullptr ? r.str(name_addr, name) : 0);
+    r.put32(task_addr + TC_SPLOWER, stack_top - 4096);
+    r.put32(task_addr + TC_SPUPPER, stack_top);
+    r.put32(task_addr + TC_SPREG, stack_top);
+    return task_addr;
+}
+
+void add_task_populates_lists_stack_and_d0() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    // Equal priority child: queued on TaskReady, no immediate switch.
+    const u32 child1 = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child1", kNames);
+    r.cpu().a[1] = child1;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;  // default finalPC stub
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], child1);
+    CHECK_EQ(r.get8(child1 + TC_STATE), TS_READY);
+    CHECK_EQ(r.get32(child1 + TC_SPREG), kData + 0x2000 - 4);
+    CHECK(r.get32(kData + 0x2000 - 4) != 0u);  // default finalPC stub pushed
+    CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{child1});
+    CHECK_EQ(host.created.size(), 1u);
+    CHECK(host.switches.empty());
+
+    // Custom finalPC is pushed directly.
+    const u32 child2 =
+        setup_child_task(r, kData + 0x200, kData + 0x3000, -1, "child2", kNames + 0x20);
+    r.cpu().a[1] = child2;
+    r.cpu().a[2] = 0x2100;
+    r.cpu().a[3] = 0x2200;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], child2);
+    CHECK_EQ(r.get32(kData + 0x3000 - 4), 0x2200u);
+    CHECK((r.walk(r.base() + TaskReady) == std::vector<u32>{child1, child2}));
+
+    // Create failure returns d0 = 0 and leaves TaskReady unchanged.
+    host.create_ok = false;
+    const u32 child3 = setup_child_task(r, kData + 0x300, kData + 0x4000, 0, nullptr, 0);
+    r.cpu().a[1] = child3;
+    r.cpu().a[2] = 0x2300;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK((r.walk(r.base() + TaskReady) == std::vector<u32>{child1, child2}));
+
+    // Full table returns d0 = 0.
+    host.create_ok = true;
+    for (u32 i = 3; i < Scheduler::kMaxTasks; ++i) {
+        const u32 t =
+            setup_child_task(r, kData + 0x400 + i * 0x80, kData + 0x6000 + i * 0x100, 0, nullptr, 0);
+        r.cpu().a[1] = t;
+        r.cpu().a[2] = 0x2400;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+        CHECK_EQ(r.cpu().d[0], t);
+    }
+    const u32 overflow = setup_child_task(r, kData + 0x3F00, kData + 0x9000, 0, nullptr, 0);
+    r.cpu().a[1] = overflow;
+    r.cpu().a[2] = 0x2500;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+}
+
+void signal_wakes_waiting_task_and_switches_only_for_higher_priority() {
+    {
+        Rig r;
+        FakeHostState host{};
+        g_exec.set_task_host(make_fake_host(host));
+        const u32 boot = make_test_task(r, kData);
+
+        const u32 child1 = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "c1", kNames);
+        r.cpu().a[1] = child1;
+        r.cpu().a[2] = 0x2000;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+        // Unknown task: sets tc_SigRecvd only, no switch.
+        const u32 unknown = kData + 0x400;
+        r.put32(unknown + TC_SIGRECVD, 0);
+        r.cpu().a[1] = unknown;
+        r.cpu().d[0] = 0x0010;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        CHECK_EQ(r.get32(unknown + TC_SIGRECVD), 0x0010u);
+        CHECK(host.switches.empty());
+
+        // Boot calls Wait(0x0020): marks boot Waiting on TaskWait and switches to child1 (id 1).
+        r.cpu().d[0] = 0x0020;
+        CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+        CHECK_EQ(r.get8(boot + TC_STATE), TS_WAIT);
+        CHECK_EQ(r.get32(boot + TC_SIGWAIT), 0x0020u);
+        CHECK(r.walk(r.base() + TaskWait) == std::vector<u32>{boot});
+        CHECK_EQ(host.switches.size(), 1u);
+        CHECK_EQ(host.switches[0].from, 0u);
+        CHECK_EQ(host.switches[0].to, 1u);
+
+        // Signal(boot, 0x0020) wakes boot (pri 0 == 0): moves to TaskReady, no immediate switch!
+        r.cpu().a[1] = boot;
+        r.cpu().d[0] = 0x0020;
+        CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+        CHECK_EQ(r.get8(boot + TC_STATE), TS_READY);
+        CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0x0020u);
+        CHECK(r.walk(r.base() + TaskWait).empty());
+        CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{boot});
+        CHECK_EQ(host.switches.size(), 1u);
+    }
+
+    // Signal waking a higher-priority Waiting task requests an immediate switch.
+    {
+        Rig r2;
+        FakeHostState host2{};
+        g_exec.set_task_host(make_fake_host(host2));
+        make_test_task(r2, kData);
+        const u32 hi = setup_child_task(r2, kData + 0x100, kData + 0x2000, 5, "hi", kNames);
+        r2.cpu().a[1] = hi;
+        r2.cpu().a[2] = 0x2000;
+        r2.cpu().a[3] = 0;
+        CHECK_EQ(r2.exec(exec_lvo::AddTask), ExitReason::Halt);
+        CHECK_EQ(host2.switches.size(), 1u);
+        CHECK_EQ(host2.switches[0].from, 0u);
+        CHECK_EQ(host2.switches[0].to, 1u);
+
+        // Now hi (pri 5) is Running, boot (pri 0) is Ready. hi waits -> switches (1 -> 0).
+        r2.cpu().d[0] = 0x0040;
+        CHECK_EQ(r2.exec(exec_lvo::Wait), ExitReason::Halt);
+        CHECK_EQ(host2.switches.size(), 2u);
+        CHECK_EQ(host2.switches[1].from, 1u);
+        CHECK_EQ(host2.switches[1].to, 0u);
+        CHECK_EQ(r2.get8(hi + TC_STATE), TS_WAIT);
+
+        // boot signals hi (pri 5 > 0): wakes hi AND switches (0 -> 1) at safe point!
+        r2.cpu().a[1] = hi;
+        r2.cpu().d[0] = 0x0040;
+        CHECK_EQ(r2.exec(exec_lvo::Signal), ExitReason::Halt);
+        CHECK_EQ(host2.switches.size(), 3u);
+        CHECK_EQ(host2.switches[2].from, 0u);
+        CHECK_EQ(host2.switches[2].to, 1u);
+        CHECK_EQ(r2.get8(hi + TC_STATE), TS_RUN);
+    }
+}
+
+void rem_task_ready_waiting_and_boot_refused() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    const u32 rdy = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "rdy", kNames);
+    r.cpu().a[1] = rdy;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{rdy});
+
+    // Remove Ready task.
+    r.cpu().a[1] = rdy;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK_EQ(r.get8(rdy + TC_STATE), TS_REMOVED);
+    CHECK(r.walk(r.base() + TaskReady).empty());
+    CHECK_EQ(host.destroyed.size(), 1u);
+    CHECK_EQ(host.destroyed[0], 1u);
+
+    // Add high-pri task, let it Wait so it's in TaskWait, then RemTask it.
+    const u32 wtg = setup_child_task(r, kData + 0x200, kData + 0x3000, 3, "wtg", kNames + 0x20);
+    r.cpu().a[1] = wtg;
+    r.cpu().a[2] = 0x3000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    r.cpu().d[0] = 0x0080;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK(r.walk(r.base() + TaskWait) == std::vector<u32>{wtg});
+
+    r.cpu().a[1] = wtg;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK_EQ(r.get8(wtg + TC_STATE), TS_REMOVED);
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    CHECK_EQ(host.destroyed.size(), 2u);
+
+    // Removing the boot task is refused with a log line.
+    g_lines.clear();
+    r.cpu().a[1] = boot;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK(logged("exec: refusing to RemTask the boot task"));
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+}
+
+void set_task_pri_and_find_task_across_lists() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    r.put32(kData + LN_NAME, r.str(kNames, "boot"));
+
+    const u32 c1 = setup_child_task(r, kData + 0x100, kData + 0x2000, -1, "ready.task", kNames + 0x20);
+    const u32 c2 = setup_child_task(r, kData + 0x200, kData + 0x3000, 2, "wait.task", kNames + 0x40);
+
+    r.cpu().a[1] = c1;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    // Add c2 (pri 2 -> switches to c2), then c2 waits -> back to boot (pri 0 > -1).
+    r.cpu().a[1] = c2;
+    r.cpu().a[2] = 0x3000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    r.cpu().d[0] = 0x0100;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{c1});
+    CHECK(r.walk(r.base() + TaskWait) == std::vector<u32>{c2});
+
+    // FindTask finds running, TaskReady, and TaskWait by name.
+    r.cpu().a[1] = r.str(kNames + 0x60, "boot");
+    CHECK_EQ(r.exec(exec_lvo::FindTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], kData);
+
+    r.cpu().a[1] = r.str(kNames + 0x60, "ready.task");
+    CHECK_EQ(r.exec(exec_lvo::FindTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], c1);
+
+    r.cpu().a[1] = r.str(kNames + 0x60, "wait.task");
+    CHECK_EQ(r.exec(exec_lvo::FindTask), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], c2);
+
+    // SetTaskPri on c1 to 4 returns old -1, updates LN_PRI, and switches (0 -> 1).
+    host.switches.clear();
+    r.cpu().a[1] = c1;
+    r.cpu().d[0] = 4;
+    CHECK_EQ(r.exec(exec_lvo::SetTaskPri), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0xFFFFFFFFu);
+    CHECK_EQ(r.get8(c1 + LN_PRI), 4u);
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].from, 0u);
+    CHECK_EQ(host.switches[0].to, 1u);
+}
+
+void forbid_holds_off_switch_until_permit() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    const u32 hi = setup_child_task(r, kData + 0x100, kData + 0x2000, 5, "hi", kNames);
+    r.cpu().a[1] = hi;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK(host.switches.empty());  // held off by Forbid
+
+    CHECK_EQ(r.exec(exec_lvo::Permit), ExitReason::Halt);
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].from, 0u);
+    CHECK_EQ(host.switches[0].to, 1u);
+}
+
+void semaphores_exclusive_shared_nesting_and_attempt() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+    const u32 other = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "other", kNames);
+    r.cpu().a[1] = other;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    const u32 sem = kData + 0x300;
+    for (u32 i = 0; i < SS_SIZE; ++i) {
+        r.put8(sem + i, 0);
+    }
+    r.put32(sem + LN_NAME, r.str(kNames + 0x20, "test.sem"));
+
+    // AddSemaphore initializes and enqueues on SemaphoreList.
+    r.cpu().a[1] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AddSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get8(sem + LN_TYPE), NT_SIGNALSEM);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 0u);
+    CHECK_EQ(r.get32(sem + SS_OWNER), 0u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0xFFFFu);
+
+    r.cpu().a[1] = r.str(kNames + 0x40, "test.sem");
+    CHECK_EQ(r.exec(exec_lvo::FindSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], sem);
+
+    // Exclusive obtain + nested obtain + AttemptSemaphore by owner.
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get32(sem + SS_OWNER), boot);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 1u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 2u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 1u);
+
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AttemptSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 1u);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 3u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 2u);
+
+    // Switch to `other` (via Wait on boot) -> AttemptSemaphore fails when owned by boot.
+    r.cpu().d[0] = 0x0010;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    // Scheduler current is now `other`; align `ThisTask`? Note Wait kept boot's
+    // m.cpu while fake switch_to updated ThisTask/task_ to `other`!
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AttemptSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AttemptSemaphoreShared), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    // `other` calls ObtainSemaphore(sem) -> blocks and switches back to... wait:
+    // boot is Waiting on 0x0010, so `other` blocking leaves both waiting and
+    // idle_ok == false -> logs "every task waits" and aborts to boot.
+    // Instead, wake boot first with Signal(boot, 0x0010), then `other` obtains
+    // and blocks, switching back to boot!
+    r.cpu().a[1] = boot;
+    r.cpu().d[0] = 0x0010;
+    CHECK_EQ(r.exec(exec_lvo::Signal), ExitReason::Halt);
+
+    host.switches.clear();
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get8(other + TC_STATE), TS_WAIT);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 3u);
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].from, 1u);
+    CHECK_EQ(host.switches[0].to, 0u);
+
+    // Boot releases all 3 nests -> hands off ownership to `other` and wakes it!
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get32(sem + SS_OWNER), boot);
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get32(sem + SS_OWNER), other);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 1u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+    CHECK_EQ(r.get8(other + TC_STATE), TS_READY);
+
+    // Release on behalf of `other` (Wait on boot switches to `other`, then Release).
+    r.cpu().d[0] = 0x0020;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get32(sem + SS_OWNER), 0u);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 0u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0xFFFFu);
+
+    // Shared ownership: multiple AttemptSemaphoreShared succeed, AttemptSemaphore fails.
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ObtainSemaphoreShared), ExitReason::Halt);
+    CHECK_EQ(r.get32(sem + SS_OWNER), 0u);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 1u);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0u);
+
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AttemptSemaphoreShared), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 1u);
+    CHECK_EQ(r.get16(sem + SS_NESTCOUNT), 2u);
+
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AttemptSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    r.cpu().a[0] = sem;
+    CHECK_EQ(r.exec(exec_lvo::ReleaseSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.get16(sem + SS_QUEUECOUNT), 0xFFFFu);
+
+    r.cpu().a[1] = sem;
+    CHECK_EQ(r.exec(exec_lvo::RemSemaphore), ExitReason::Halt);
+    r.cpu().a[1] = r.str(kNames + 0x40, "test.sem");
+    CHECK_EQ(r.exec(exec_lvo::FindSemaphore), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+}
+
+void put_msg_pa_softint_logs_once_and_signals_other_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    r.put8(port + mp_Flags, PA_SOFTINT);
+    const u32 msg1 = kData + 0x200;
+    const u32 msg2 = kData + 0x240;
+    for (u32 i = 0; i < MN_SIZE; ++i) {
+        r.put8(msg1 + i, 0);
+        r.put8(msg2 + i, 0);
+    }
+
+    g_lines.clear();
+    CHECK(g_exec.post_message(port, msg1));
+    CHECK(g_exec.post_message(port, msg2));
+    CHECK_EQ(g_lines.size(), 1u);
+    CHECK(logged("exec: PA_SOFTINT not handled"));
+    CHECK_EQ(r.get32(kData + TC_SIGRECVD), 0u);
+    g_exec.delete_port(port);
+}
+
 }
 
 int main() {
@@ -2477,5 +2942,12 @@ int main() {
     add_find_remove_port_by_name();
     signal_sets_the_bit_for_the_current_task_only();
     null_and_unreadable_port_pointers_fault_cleanly();
+    add_task_populates_lists_stack_and_d0();
+    signal_wakes_waiting_task_and_switches_only_for_higher_priority();
+    rem_task_ready_waiting_and_boot_refused();
+    set_task_pri_and_find_task_across_lists();
+    forbid_holds_off_switch_until_permit();
+    semaphores_exclusive_shared_nesting_and_attempt();
+    put_msg_pa_softint_logs_once_and_signals_other_task();
     return check::finish("test_exec");
 }

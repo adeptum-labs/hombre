@@ -1541,6 +1541,8 @@ bool Jit::init(const CodeRegion& region, Machine& machine) {
     address_mask_ = kNoAddressMask;
     budget_left_ = 0;
     run_depth_ = 0;
+    preempt_hook_ = nullptr;
+    preempt_ctx_ = nullptr;
     flush();
     return true;
 }
@@ -1719,6 +1721,12 @@ ExitReason Jit::run(u64 max_blocks) {
             }
             cpu.exit = ExitReason::Budget;
             break;
+        }
+        if (run_depth_ == 1 && preempt_hook_ != nullptr) {
+            preempt_hook_(preempt_ctx_);
+            if (cpu.exit != ExitReason::None) {
+                break;
+            }
         }
         const u8* code = lookup(cpu.pc);
         if (code == nullptr) {

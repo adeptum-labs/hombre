@@ -210,6 +210,9 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "mousetest: change at 250,120 size 240x160" "mousetest: newsize 200x130" \
 	    "mousetest: change at 250,120 size 200x130" "mousetest: break" \
 	    "m68k: C:mousetest returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t ret" \
+	    "tasktest: signalled" "tasktest: preempted" "tasktest: done" \
+	    "m68k: C:tasktest returned 0"
 # Scrollback boot check: the full-screen shell shows 46 rows, so PageUp
 # steps 45 rows. Enough empty lines pass one page; Shift+Up, PageUp and one
 # wheel notch up (QEMU's mouse_move dz 1) scroll back, and a typed key
@@ -315,7 +318,7 @@ $(ELF2HUNK): tools/elf2hunk.cpp
 # turns the ELF executable into a hunk file.
 M68K_AS       := m68k-linux-gnu-as
 M68K_LD       := m68k-linux-gnu-ld
-M68K_PROGRAMS := version hombretest mousetest
+M68K_PROGRAMS := version hombretest mousetest tasktest
 M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
 
 define require_tool

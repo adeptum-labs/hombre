@@ -25,6 +25,7 @@
 
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
+#include "../sched.hpp"
 #include "../types.hpp"
 #include "native.hpp"
 #include "version.hpp"
@@ -69,7 +70,10 @@ constexpr u32 RemHead = 258;
 constexpr u32 RemTail = 264;
 constexpr u32 Enqueue = 270;
 constexpr u32 FindName = 276;
+constexpr u32 AddTask = 282;
+constexpr u32 RemTask = 288;
 constexpr u32 FindTask = 294;
+constexpr u32 SetTaskPri = 300;
 constexpr u32 SetSignal = 306;
 constexpr u32 Wait = 318;
 constexpr u32 Signal = 324;
@@ -88,14 +92,25 @@ constexpr u32 CloseLibrary = 414;
 constexpr u32 SumLibrary = 426;
 constexpr u32 RawDoFmt = 522;
 constexpr u32 OpenLibrary = 552;
+constexpr u32 InitSemaphore = 558;
+constexpr u32 ObtainSemaphore = 564;
+constexpr u32 ReleaseSemaphore = 570;
+constexpr u32 AttemptSemaphore = 576;
+constexpr u32 ObtainSemaphoreList = 582;
+constexpr u32 ReleaseSemaphoreList = 588;
+constexpr u32 FindSemaphore = 594;
+constexpr u32 AddSemaphore = 600;
+constexpr u32 RemSemaphore = 606;
 constexpr u32 CopyMem = 624;
 constexpr u32 CopyMemQuick = 630;
 constexpr u32 CacheClearU = 636;
 constexpr u32 CacheClearE = 642;
 constexpr u32 CreateMsgPort = 666;
 constexpr u32 DeleteMsgPort = 672;
+constexpr u32 ObtainSemaphoreShared = 678;
 constexpr u32 AllocVec = 684;
 constexpr u32 FreeVec = 690;
+constexpr u32 AttemptSemaphoreShared = 720;
 
 }
 
@@ -127,6 +142,12 @@ constexpr u32 LH_TAIL = 4;
 constexpr u32 LH_TAILPRED = 8;
 constexpr u32 LH_TYPE = 12;
 constexpr u32 LH_SIZE = 14;
+
+// struct MinList
+constexpr u32 MLH_HEAD = 0;
+constexpr u32 MLH_TAIL = 4;
+constexpr u32 MLH_TAILPRED = 8;
+constexpr u32 MLH_SIZE = 12;
 
 // struct Library
 constexpr u32 LIB_FLAGS = 14;
@@ -202,12 +223,31 @@ constexpr u16 RTC_MATCHWORD = 0x4AFC;
 constexpr u8 RTF_AUTOINIT = 0x80;
 
 // struct Task
+constexpr u32 TC_STATE = 15;
+constexpr u32 TC_IDNESTCNT = 16;
+constexpr u32 TC_TDNESTCNT = 17;
 constexpr u32 TC_SIGALLOC = 18;
 constexpr u32 TC_SIGWAIT = 22;
 constexpr u32 TC_SIGRECVD = 26;
+constexpr u32 TC_SPREG = 54;
+constexpr u32 TC_SPLOWER = 58;
+constexpr u32 TC_SPUPPER = 62;
 constexpr u32 TC_SIZE = 92;
 
+constexpr u8 TS_RUN = 2;
+constexpr u8 TS_READY = 3;
+constexpr u8 TS_WAIT = 4;
+constexpr u8 TS_REMOVED = 6;
+
 constexpr u32 SIGBREAKF_CTRL_C = 1u << 12;
+
+// struct SignalSemaphore
+constexpr u32 SS_NESTCOUNT = 14;
+constexpr u32 SS_WAITQUEUE = 16;
+constexpr u32 SS_MULTIPLELINK = 28;
+constexpr u32 SS_OWNER = 40;
+constexpr u32 SS_QUEUECOUNT = 44;
+constexpr u32 SS_SIZE = 46;
 
 // struct MsgPort and struct Message
 constexpr u32 mp_Flags = 14;
@@ -234,8 +274,28 @@ constexpr u8 NT_REPLYMSG = 7;
 constexpr u8 NT_RESOURCE = 8;
 constexpr u8 NT_LIBRARY = 9;
 constexpr u8 NT_MEMORY = 10;
+constexpr u8 NT_SIGNALSEM = 15;
 
 }
+
+// Host context-switch and idle interface supplied by the kernel (or a fake
+// in unit tests).
+struct TaskHost {
+    // Creates a host context that will call Exec::task_main(id) when first
+    // switched to. False when no stack can be had.
+    bool (*create)(void* ctx, u32 id);
+    // Saves the running host context of `from` and resumes `to`.
+    void (*switch_to)(void* ctx, u32 from, u32 to);
+    // Frees the context of a removed task that is not running.
+    void (*destroy)(void* ctx, u32 id);
+    // True once per time slice (take_need_resched).
+    bool (*slice_over)(void* ctx);
+    // Polls input and halts until the next interrupt; called while no
+    // task can run. False when nothing can ever wake a waiter (no
+    // keyboard).
+    bool (*idle)(void* ctx);
+    void* ctx;
+};
 
 // Loads a file the way dos LoadSeg does and hands back its seglist BPTR.
 // The segments must come from Exec::alloc, so that exec can free them.
@@ -292,6 +352,18 @@ public:
     // be set before init and is kept across it.
     void set_idle_hook(const IdleHook& hook) { idle_ = hook; }
 
+    // Supplies the host context-switch and timer callbacks. Kept across init.
+    void set_task_host(const TaskHost& host) { task_host_ = host; }
+
+    // Entry point for newly created host task contexts.
+    void task_main(u32 id);
+
+    // Yields from the boot task when another task is Ready and scheduling is
+    // permitted.
+    void yield_if_ready();
+
+    const Scheduler& scheduler() const { return sched_; }
+
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
     // tc_SigRecvd SetSignal and Wait use. It may be set before init and is
     // kept across it.
@@ -327,6 +399,7 @@ private:
 
     static constexpr u32 kMaxLibraries = 32;
     static constexpr u32 kMaxLoaded = 32;
+    static constexpr u32 kMaxSemaphores = 64;
 
     // Context of the native every unimplemented vector of a library runs.
     struct LibraryInfo {
@@ -334,6 +407,33 @@ private:
         u32 base;
         const char* name;
     };
+
+    struct TaskContext {
+        m68k::CpuState cpu{};
+        m68k::Jit::RunState run_state{};
+        u32 call_depth = 0;
+        u32 task_addr = 0;
+        u64 budget = 0;
+        u8 td_nest = 0xFF;
+        u8 id_nest = 0xFF;
+    };
+
+    struct SemWaitQueue {
+        struct Waiter {
+            u32 id = 0;
+            bool shared = false;
+        };
+        u32 addr = 0;
+        Waiter waiters[Scheduler::kMaxTasks]{};
+        u32 count = 0;
+    };
+
+    bool forbidden() const;
+    void maybe_preempt();
+    void switch_to_task(i32 next_id);
+    void reap_removed();
+    void remove_sem_waiter(u32 task_id);
+    SemWaitQueue* sem_queue(u32 sem_addr, bool create);
 
     m68k::Machine* m_ = nullptr;
     u32 base_ = 0;
@@ -351,8 +451,17 @@ private:
     u16 close_id_ = 0;
     u16 expunge_id_ = 0;
     u16 reserved_id_ = 0;
+    u32 task_exit_stub_ = 0;
     SegmentLoader loader_{nullptr, nullptr};
     IdleHook idle_{nullptr, nullptr};
+    TaskHost task_host_{nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+    Scheduler sched_{};
+    TaskContext tasks_[Scheduler::kMaxTasks]{};
+    SemWaitQueue sem_queues_[kMaxSemaphores]{};
+    bool pending_switch_ = false;
+    bool softint_logged_ = false;
+    bool every_task_waits_logged_ = false;
+    bool abort_to_boot_task_ = false;
     u32 reply_port_ = 0;
     void (*reply_handler_)(void* ctx, u32 message) = nullptr;
     void* reply_ctx_ = nullptr;
