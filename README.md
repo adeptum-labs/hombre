@@ -127,19 +127,28 @@ Early development. The machine boots as follows:
    IDT. A CPU exception prints a register dump on the serial port. The kernel
    then drops the loader's identity mapping, sets up per-CPU data for the boot
    processor and draws the `Hombre` banner on the framebuffer.
-4. The kernel scans the PCI bus and drives a virtio-blk disk by polling. It
+4. It masks the legacy PICs and starts a 1000 Hz local APIC timer,
+   calibrated against the TSC. Waits halt the processor until the next
+   interrupt instead of spinning.
+5. The kernel scans the PCI bus and drives a virtio-blk disk by polling. It
    unpacks a DMS archive natively (no compression, SIMPLE and HEAVY2),
    mounts the OFS or FFS volume read-only and prints the volume name, the
    root directory and `S:Startup-Sequence` on the serial port. Without a
    disk, or with a disk it cannot read, it logs why and carries on.
-5. The kernel runs `C:Version` from the boot disk as translated 68000 code.
+6. The kernel runs `C:Version` from the boot disk as translated 68000 code.
    A hunk loader loads it, a 68000 JIT translates it block by block into
    x86-64 code in a write-xor-execute code region, and native exec,
    utility and dos libraries, written in C++ under `common/libs/`, answer
    its library calls. A library the program opens from the disk's `LIBS:`
    loads and runs as 68000 code too. The program's output and its return
    code appear on the serial port.
-6. The kernel halts.
+7. The HombreShell takes over. exec runs tasks preemptively: each gets its
+   own kernel stack with a guard page, and tasks are switched at the end
+   of each 4 ms time slice, between translated blocks, outside Forbid and
+   Disable, and while a task waits. Signals, message ports, semaphores,
+   devices and timer.device work across tasks, `Delay` sleeps, and dos
+   keeps a context per process, so `Run` and each `NewShell` window run
+   their commands side by side.
 
 ## The name
 
