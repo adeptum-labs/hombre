@@ -68,6 +68,9 @@ constexpr u32 mi_ItemFill = 18;
 constexpr u16 MENUENABLED = 0x0001;
 constexpr u16 ITEMTEXT = 0x0002;
 constexpr u16 ITEMENABLED = 0x0010;
+constexpr u16 CHECKIT = 0x0001;
+constexpr u16 MENUTOGGLE = 0x0008;
+constexpr u16 CHECKED = 0x0100;
 constexpr u32 it_IText = 12;
 
 // struct WBStartup and struct WBArg
@@ -1028,6 +1031,84 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     CHECK_EQ(r.get16(about + mi_Flags) & ITEMTEXT, ITEMTEXT);
 }
 
+void backdrop_toggles_the_root_window() {
+    Rig r;
+    r.workbench.open_desktop();
+    CHECK(r.workbench.backdrop());
+    const u32 backdrop_window = r.workbench.window(0).window;
+    CHECK_EQ(r.get32(backdrop_window + wd_Flags) & WFLG_BACKDROP, WFLG_BACKDROP);
+
+    const u32 item = r.get32(r.workbench.menu() + mu_FirstItem);
+    CHECK(r.str(r.get32(r.get32(item + mi_ItemFill) + it_IText)) == "Backdrop");
+    const u32 flags = r.get16(item + mi_Flags);
+    CHECK_EQ(flags & ITEMENABLED, ITEMENABLED);
+    CHECK_EQ(flags & (CHECKIT | MENUTOGGLE | CHECKED), static_cast<u32>(CHECKIT | MENUTOGGLE | CHECKED));
+
+    const u32 volume = r.find_icon("HombreTest");
+    const u32 ram = r.find_icon("Ram Disk");
+    const i32 volume_left = r.workbench.icon(volume).left;
+    const i32 volume_top = r.workbench.icon(volume).top;
+    const i32 ram_left = r.workbench.icon(ram).left;
+    const i32 ram_top = r.workbench.icon(ram).top;
+
+    r.workbench.open_icon(0, volume);
+    const u32 drawer = r.find_window("HombreTest:");
+    CHECK(drawer != Workbench::kMaxWindows);
+    const u32 drawer_window = r.workbench.window(drawer).window;
+    const u32 before = r.free_bytes();
+
+    // Intuition turns the check mark off before the pick reaches the
+    // desktop.
+    r.put16(item + mi_Flags, r.get16(item + mi_Flags) & ~CHECKED);
+    r.workbench.menu_pick(0, 0);
+    CHECK(!r.workbench.backdrop());
+    CHECK(logged("workbench: backdrop off"));
+    const Workbench::DrawerWindow& root = r.workbench.window(0);
+    CHECK(root.used);
+    CHECK(r.window_title(root.window) == "Workbench");
+    const u32 window_flags = r.get32(root.window + wd_Flags);
+    CHECK_EQ(window_flags & (WFLG_BACKDROP | WFLG_BORDERLESS | WFLG_CLOSEGADGET), 0u);
+    CHECK_EQ(window_flags & (WFLG_SIZEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET),
+             WFLG_SIZEGADGET | WFLG_DRAGBAR | WFLG_DEPTHGADGET);
+    CHECK(root.inner_left > 0 && root.inner_top > 0);
+    CHECK_EQ(r.get32(root.window + 28), r.workbench.menu());  // wd_MenuStrip
+    CHECK_EQ(r.get16(item + mi_Flags) & CHECKED, 0u);
+    CHECK_EQ(r.find_icon("HombreTest"), volume);
+    CHECK_EQ(r.find_icon("Ram Disk"), ram);
+    for (u32 icon : {volume, ram}) {
+        const Workbench::IconEntry& entry = r.workbench.icon(icon);
+        CHECK(entry.left >= 0 && entry.left + entry.width <= root.inner_width);
+        CHECK(entry.top >= 0 && entry.top + entry.height <= root.inner_height);
+    }
+    CHECK_EQ(r.find_window("HombreTest:"), drawer);
+    CHECK_EQ(r.workbench.window(drawer).window, drawer_window);
+    CHECK(r.str(r.get32(r.screen + sc_Title)).rfind("Amiga Workbench", 0) == 0);
+
+    // A double click on the disk in the window finds its drawer open.
+    const Workbench::IconEntry& disk = r.workbench.icon(volume);
+    r.click(0, disk.left + 1, disk.top + 1);
+    r.click(0, disk.left + 1, disk.top + 1);
+    CHECK_EQ(r.find_window("HombreTest:"), drawer);
+    CHECK_EQ(r.workbench.window(drawer).window, drawer_window);
+
+    // A second pick off the menu is not needed to come back.
+    r.workbench.set_backdrop(false);
+    CHECK(!r.workbench.backdrop());
+    r.workbench.set_backdrop(true);
+    CHECK(r.workbench.backdrop());
+    CHECK(logged("workbench: backdrop on"));
+    const Workbench::DrawerWindow& again = r.workbench.window(0);
+    CHECK_EQ(r.get32(again.window + wd_Flags) & WFLG_BACKDROP, WFLG_BACKDROP);
+    CHECK_EQ(r.get16(again.window + wd_Width), 640u);
+    CHECK_EQ(r.get16(again.window + wd_Height), 386u);
+    CHECK_EQ(r.get16(item + mi_Flags) & CHECKED, CHECKED);
+    CHECK_EQ(r.workbench.icon(volume).left, volume_left);
+    CHECK_EQ(r.workbench.icon(volume).top, volume_top);
+    CHECK_EQ(r.workbench.icon(ram).left, ram_left);
+    CHECK_EQ(r.workbench.icon(ram).top, ram_top);
+    CHECK_EQ(r.free_bytes(), before);
+}
+
 }
 
 int main() {
@@ -1050,5 +1131,6 @@ int main() {
     a_resized_drawer_is_measured_again();
     the_startup_message_signals_the_started_process();
     a_program_that_ends_without_replying_gives_back_what_it_held();
+    backdrop_toggles_the_root_window();
     return check::finish("test_workbench");
 }

@@ -76,6 +76,14 @@ constexpr u8 NM_END = 0;
 constexpr u8 NM_TITLE = 1;
 constexpr u8 NM_ITEM = 2;
 constexpr u16 NM_ITEMDISABLED = 0x0010;
+constexpr u16 CHECKIT = 0x0001;
+constexpr u16 MENUTOGGLE = 0x0008;
+constexpr u16 CHECKED = 0x0100;
+
+// struct Menu and struct MenuItem (intuition/intuition.h).
+constexpr u32 mu_FirstItem = 18;
+constexpr u32 mi_NextItem = 0;
+constexpr u32 mi_Flags = 12;
 
 // struct WBStartup and struct WBArg (workbench/startup.h).
 constexpr u32 sm_Message = 0;
@@ -117,6 +125,7 @@ constexpr u16 kDisabled = NM_ITEMDISABLED;
 struct MenuItemSpec {
     const char* label;
     bool enabled;
+    bool toggle = false;  // a check mark each pick turns on or off
 };
 
 struct MenuSpec {
@@ -126,7 +135,7 @@ struct MenuSpec {
 };
 
 constexpr MenuItemSpec kWorkbenchItems[] = {
-    {"Backdrop", false},  {"Execute Command...", false}, {"Redraw All", true},
+    {"Backdrop", true, true}, {"Execute Command...", false}, {"Redraw All", true},
     {"Update All", true}, {"Last Message", false},       {"About...", true},
     {"Quit", false},
 };
@@ -160,6 +169,7 @@ constexpr u32 kMenuCount = sizeof kMenus / sizeof kMenus[0];
 constexpr u32 kMenuWorkbench = 0;
 constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
+constexpr u32 kItemBackdrop = 0;
 
 constexpr u32 text_length(const char* text) {
     u32 n = 0;
@@ -357,8 +367,12 @@ u32 Workbench::build_menu_strip() {
     for (u32 m = 0; m < kMenuCount; ++m) {
         put_entry(NM_TITLE, kMenus[m].title, 0);
         for (u32 i = 0; i < kMenus[m].count; ++i) {
-            put_entry(NM_ITEM, kMenus[m].items[i].label,
-                      kMenus[m].items[i].enabled ? 0 : kDisabled);
+            const MenuItemSpec& spec = kMenus[m].items[i];
+            u16 flags = spec.enabled ? 0 : kDisabled;
+            if (spec.toggle) {
+                flags |= CHECKIT | MENUTOGGLE | (backdrop_ ? CHECKED : 0);
+            }
+            put_entry(NM_ITEM, spec.label, flags);
         }
     }
     put_entry(NM_END, nullptr, 0);
@@ -404,7 +418,10 @@ void Workbench::attach_window(u32 index, u32 window, const char* name, const cha
     }
 }
 
-void Workbench::open_backdrop() {
+// The root window as backdrop_ asks for it: a borderless backdrop under
+// the screen's bar, or an ordinary window of the same size that can be
+// dragged, sized and put behind the drawers, but not closed.
+void Workbench::open_root() {
     Bus b(*machine_);
     const u32 bar_height = b.r8(screen_ + ndk::sc_BarHeight);
     const u32 new_window =
@@ -427,9 +444,23 @@ void Workbench::open_backdrop() {
     b.w16(new_window + ndk::nw_TopEdge, bar_height);
     b.w16(new_window + ndk::nw_Width, 0);
     b.w16(new_window + ndk::nw_Height, 0);
-    b.w32(new_window + ndk::nw_IDCMPFlags,
-          ndk::IDCMP_MOUSEBUTTONS | kIdcmpMenuPick | kIdcmpRefreshWindow);
-    b.w32(new_window + ndk::nw_Flags, ndk::WFLG_BACKDROP | ndk::WFLG_BORDERLESS);
+    if (backdrop_) {
+        b.w32(new_window + ndk::nw_IDCMPFlags,
+              ndk::IDCMP_MOUSEBUTTONS | kIdcmpMenuPick | kIdcmpRefreshWindow);
+        b.w32(new_window + ndk::nw_Flags, ndk::WFLG_BACKDROP | ndk::WFLG_BORDERLESS);
+    } else {
+        b.w8(new_window + ndk::nw_DetailPen, 0);
+        b.w8(new_window + ndk::nw_BlockPen, 1);
+        b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_NEWSIZE |
+                                                   kIdcmpMenuPick | kIdcmpRefreshWindow);
+        b.w32(new_window + ndk::nw_Flags,
+              ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_SIZEGADGET |
+                  ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM | ndk::WFLG_ACTIVATE);
+        b.w16(new_window + ndk::nw_MinWidth, kMinDrawerWidth);
+        b.w16(new_window + ndk::nw_MinHeight, kMinDrawerHeight);
+        b.w16(new_window + ndk::nw_MaxWidth, 0xFFFF);
+        b.w16(new_window + ndk::nw_MaxHeight, 0xFFFF);
+    }
     b.w32(new_window + ndk::nw_Title, title);
     b.w32(new_window + ndk::nw_Screen, screen_);
     b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
@@ -437,10 +468,76 @@ void Workbench::open_backdrop() {
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, sizeof kBackdropName);
     if (window == 0) {
-        LogLine().text("workbench: could not open the backdrop").send();
+        LogLine().text("workbench: could not open the root window").send();
         return;
     }
     attach_window(0, window, kBackdropName, "");
+}
+
+// The right-hand column of the root window, top to bottom, then the next
+// column to the left once one is full.
+void Workbench::place_root_icon(IconEntry& icon) {
+    const DrawerWindow& root = windows_[0];
+    i32 left = root.inner_width - icon.width - kDiskMargin;
+    i32 top = volume_top_ == 0 ? kVolumeTop : volume_top_;
+    if (top + icon.height + static_cast<i32>(kLabelRows) > root.inner_height) {
+        left -= icon.width + kIconGapX;
+        top = kVolumeTop;
+    }
+    icon.left = left < 0 ? 0 : left;
+    icon.top = top;
+    volume_top_ = top + icon.height + static_cast<i32>(kLabelRows) + kIconGapY;
+}
+
+void Workbench::place_root_icons() {
+    volume_top_ = 0;
+    for (IconEntry& icon : icons_) {
+        if (icon.used && icon.owner == 0) {
+            place_root_icon(icon);
+        }
+    }
+}
+
+u32 Workbench::backdrop_item() const {
+    if (menu_ == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    u32 item = b.r32(menu_ + mu_FirstItem);  // the Workbench menu comes first
+    for (u32 i = 0; i < kItemBackdrop && item != 0; ++i) {
+        item = b.r32(item + mi_NextItem);
+    }
+    return b.ok() ? item : 0;
+}
+
+void Workbench::set_backdrop(bool on) {
+    if (!desktop_open_ || !windows_[0].used || on == backdrop_) {
+        return;
+    }
+    const u32 old_window = windows_[0].window;
+    intuition_->clear_menu_strip(old_window);
+    intuition_->close_window(old_window);
+    windows_[0] = DrawerWindow{};
+    backdrop_ = on;
+    open_root();
+    if (!windows_[0].used) {
+        // The old kind of window comes back rather than none at all.
+        backdrop_ = !on;
+        open_root();
+        if (!windows_[0].used) {
+            return;
+        }
+    }
+    place_root_icons();
+    draw_window(0);
+    refresh_title();
+    const u32 item = backdrop_item();
+    if (item != 0) {
+        Bus b(*machine_);
+        const u16 flags = static_cast<u16>(b.r16(item + mi_Flags));
+        b.w16(item + mi_Flags, backdrop_ ? flags | CHECKED : flags & ~CHECKED);
+    }
+    LogLine().text("workbench: backdrop ").text(backdrop_ ? "on" : "off").send();
 }
 
 void Workbench::measure(IconEntry& icon) {
@@ -507,16 +604,7 @@ void Workbench::add_volume(const char* label, const char* icon_path) {
     copy_text(icon->name, sizeof icon->name, label);
     copy_text(icon->file, sizeof icon->file, "Disk");
     measure(*icon);
-    const DrawerWindow& backdrop = windows_[0];
-    i32 left = backdrop.inner_width - icon->width - kDiskMargin;
-    i32 top = volume_top_ == 0 ? kVolumeTop : volume_top_;
-    if (top + icon->height + static_cast<i32>(kLabelRows) > backdrop.inner_height) {
-        left -= icon->width + kIconGapX;
-        top = kVolumeTop;
-    }
-    icon->left = left < 0 ? 0 : left;
-    icon->top = top;
-    volume_top_ = top + icon->height + static_cast<i32>(kLabelRows) + kIconGapY;
+    place_root_icon(*icon);
     LogLine().text("workbench: volume ").text(label).send();
 }
 
@@ -1059,7 +1147,17 @@ void Workbench::menu_pick(u32 window_index, u32 number) {
         return;
     }
     if (menu == kMenuWorkbench) {
-        if (item == 2) {
+        if (item == kItemBackdrop) {
+            // Intuition has turned the check mark over already.
+            const u32 address = backdrop_item();
+            if (address != 0) {
+                Bus b(*machine_);
+                const bool checked = (b.r16(address + mi_Flags) & CHECKED) != 0;
+                if (b.ok()) {
+                    set_backdrop(checked);
+                }
+            }
+        } else if (item == 2) {
             redraw_all();
         } else if (item == 3) {
             update_all();
@@ -1529,7 +1627,7 @@ void Workbench::open_desktop() {
         return;
     }
     menu_ = build_menu_strip();
-    open_backdrop();
+    open_root();
     if (!windows_[0].used) {
         return;
     }
@@ -1685,16 +1783,7 @@ u32 Workbench::add_app_icon(u32 id, u32 user, u32 name, u32 msg_port, u32 lock, 
     copy_text(icon->name, sizeof icon->name, label);
     copy_text(icon->file, sizeof icon->file, label);
     measure(*icon);
-    const DrawerWindow& backdrop = windows_[0];
-    i32 left = backdrop.inner_width - icon->width - kDiskMargin;
-    i32 top = volume_top_ == 0 ? kVolumeTop : volume_top_;
-    if (top + icon->height + static_cast<i32>(kLabelRows) > backdrop.inner_height) {
-        left -= icon->width + kIconGapX;
-        top = kVolumeTop;
-    }
-    icon->left = left < 0 ? 0 : left;
-    icon->top = top;
-    volume_top_ = top + icon->height + static_cast<i32>(kLabelRows) + kIconGapY;
+    place_root_icon(*icon);
     app->icon = static_cast<u32>(icon - icons_);
     draw_window(0);
     return handle;

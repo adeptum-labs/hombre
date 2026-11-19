@@ -37,9 +37,10 @@
 // workbench.library written in C++ for code run by the 68000 translator.
 //
 // StartWorkbench starts the Workbench as a native task with a dos Process
-// of its own: a backdrop window on the default screen with the volume
-// icons of the boot volume and the Ram Disk, and a drawer window for every
-// icon opened. A drawer shows the "<name>.info" files of its directory;
+// of its own: a root window on the default screen with the volume icons of
+// the boot volume and the Ram Disk, and a drawer window for every icon
+// opened. The root window is a backdrop until the Workbench menu's Backdrop
+// item turns it into an ordinary window. A drawer shows the "<name>.info" files of its directory;
 // opening an icon starts its program with a WBStartup message. The other
 // vectors register application windows, icons and menu items, or rescan a
 // drawer. The vector gap at LVO -84 logs "workbench: unimplemented LVO
@@ -110,7 +111,8 @@ public:
         char file[32]{};      // the file the icon stands for
     };
 
-    // An open window of the desktop: the backdrop (index 0) or a drawer.
+    // An open window of the desktop: the root window (index 0), a backdrop
+    // or an ordinary window, or a drawer.
     struct DrawerWindow {
         bool used = false;
         u32 window = 0;
@@ -190,6 +192,7 @@ public:
     u32 reply_port() const { return reply_port_; }
     bool running() const { return running_; }
     bool desktop_open() const { return desktop_open_; }
+    bool backdrop() const { return backdrop_; }
     u32 menu() const { return menu_; }
     const DrawerWindow& window(u32 index) const { return windows_[index]; }
     const IconEntry& icon(u32 index) const { return icons_[index]; }
@@ -260,6 +263,15 @@ public:
     // lies in, or brings its window to the front. A disk's window has none.
     void open_parent(u32 window_index);
 
+    // The Workbench menu's Backdrop: reopens the root window as a backdrop
+    // behind every other window, or as an ordinary "Workbench" window with
+    // a drag bar, depth and size gadgets. Its icons stay, placed again for
+    // the new size, and the menu item's check mark follows.
+    void set_backdrop(bool on);
+
+    // Does what the menu item numbered number picks in the window.
+    void menu_pick(u32 window_index, u32 number);
+
     // Handles the replies of ended programs and the messages waiting at
     // the windows' ports. True when a window had more messages than one
     // pass takes.
@@ -278,7 +290,6 @@ private:
     static void task_entry(void* ctx);
     void run();
     void handle_message(u32 window_index, u32 message);
-    void menu_pick(u32 window_index, u32 number);
     void show_about();
     void refresh_title();
 
@@ -287,7 +298,10 @@ private:
     void measure_window(u32 index);
     void open_drawer_window(const char* path, const char* name, u32 object);
     void release_tool(RunningTool& tool);
-    void open_backdrop();
+    void open_root();
+    void place_root_icon(IconEntry& icon);
+    void place_root_icons();
+    u32 backdrop_item() const;
     void add_volume_icons();
     void add_dir_icon(u32 window_index, const char* entry, bool is_dir);
     void add_volume(const char* label, const char* icon_path);
@@ -334,6 +348,7 @@ private:
     u64 next_refresh_us_ = 0;
     bool running_ = false;
     bool desktop_open_ = false;
+    bool backdrop_ = true;
     IconEntry icons_[kMaxIcons]{};
     DrawerWindow windows_[kMaxWindows]{};
     RunningTool tools_[kMaxTools]{};
