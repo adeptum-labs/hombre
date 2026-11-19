@@ -483,6 +483,143 @@ void math_vectors() {
     CHECK_EQ(r.cpu().d[1], 5u);
 }
 
+// struct Hook
+constexpr u32 h_Entry = 8;
+constexpr u32 kHook = kData + 0x300;
+constexpr u32 kSeen = kData + 0x400;  // where a test hook stores what it got
+
+// Writes the words at addr and returns the address after them.
+u32 put_code(Rig& r, u32 addr, std::initializer_list<u32> words) {
+    for (u32 w : words) {
+        r.put16(addr, w);
+        addr += 2;
+    }
+    return addr;
+}
+
+u32 make_hook(Rig& r, u32 at, u32 entry) {
+    for (u32 i = 0; i < 20; ++i) {
+        r.put8(at + i, 0);
+    }
+    r.put32(at + h_Entry, entry);
+    return at;
+}
+
+void call_hook_pkt_runs_the_entry_with_hook_object_and_message() {
+    Rig r;
+    CHECK_EQ(utility_lvo::CallHookPkt, 102u);
+    // The entry stores A0, A2 and A1, spoils D1, D7, A1 and A3 and returns
+    // $12345678.
+    put_code(r, kCode,
+             {0x23C8, kSeen >> 16, kSeen & 0xFFFF,              // move.l a0,kSeen
+              0x23CA, kSeen >> 16, (kSeen + 4) & 0xFFFF,        // move.l a2,kSeen+4
+              0x23C9, kSeen >> 16, (kSeen + 8) & 0xFFFF,        // move.l a1,kSeen+8
+              0x72FF,                                           // moveq #-1,d1
+              0x7EFF,                                           // moveq #-1,d7
+              0x93C9,                                           // suba.l a1,a1
+              0x97CB,                                           // suba.l a3,a3
+              0x203C, 0x1234, 0x5678,                           // move.l #$12345678,d0
+              0x4E75});                                         // rts
+    const u32 hook = make_hook(r, kHook, kCode);
+    r.cpu().a[0] = hook;
+    r.cpu().a[2] = 0x00AB0000;
+    r.cpu().a[1] = 0x00CD0000;
+    r.cpu().d[0] = 0x0D0D0D0D;
+    r.cpu().d[1] = 0x11111111;
+    r.cpu().d[7] = 0x77777777;
+    r.cpu().a[3] = 0x33333333;
+    CHECK_EQ(r.result(utility_lvo::CallHookPkt), 0x12345678u);
+    CHECK_EQ(r.get32(kSeen), hook);
+    CHECK_EQ(r.get32(kSeen + 4), 0x00AB0000u);
+    CHECK_EQ(r.get32(kSeen + 8), 0x00CD0000u);
+    // Only D0 comes back changed.
+    CHECK_EQ(r.cpu().d[1], 0x11111111u);
+    CHECK_EQ(r.cpu().d[7], 0x77777777u);
+    CHECK_EQ(r.cpu().a[0], hook);
+    CHECK_EQ(r.cpu().a[1], 0x00CD0000u);
+    CHECK_EQ(r.cpu().a[2], 0x00AB0000u);
+    CHECK_EQ(r.cpu().a[3], 0x33333333u);
+    CHECK_EQ(r.cpu().a[7], kStack);
+}
+
+void call_hook_pkt_without_a_hook_or_an_entry_returns_zero() {
+    Rig r;
+    r.cpu().d[0] = 0x55555555;
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kData;
+    r.cpu().a[2] = kData;
+    CHECK_EQ(r.result(utility_lvo::CallHookPkt), 0u);
+
+    r.cpu().d[0] = 0x55555555;
+    r.cpu().a[0] = make_hook(r, kHook, 0);
+    CHECK_EQ(r.result(utility_lvo::CallHookPkt), 0u);
+}
+
+void a_hook_may_call_another_hook() {
+    Rig r;
+    constexpr u32 kInner = kCode + 0x100;
+    constexpr u32 kInnerHook = kHook + 0x40;
+    // The outer entry calls the inner hook through A6 and adds one to what
+    // it returned; the inner one returns 41.
+    put_code(r, kCode,
+             {0x41F9, kInnerHook >> 16, kInnerHook & 0xFFFF,   // lea kInnerHook,a0
+              0x4EAE, 0x10000 - utility_lvo::CallHookPkt,     // jsr CallHookPkt(a6)
+              0x5280,                                          // addq.l #1,d0
+              0x4E75});                                        // rts
+    put_code(r, kInner, {0x7029, 0x4E75});                     // moveq #41,d0 ; rts
+    make_hook(r, kInnerHook, kInner);
+    r.cpu().a[0] = make_hook(r, kHook, kCode);
+    r.cpu().a[1] = 0;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(utility_lvo::CallHookPkt), 42u);
+    CHECK_EQ(r.cpu().a[7], kStack);
+}
+
+void a_hook_that_calls_itself_stops_at_the_nesting_limit() {
+    Rig r;
+    // The entry calls its own hook again and counts the levels on the way
+    // back; the call exec refuses returns 0.
+    put_code(r, kCode,
+             {0x4EAE, 0x10000 - utility_lvo::CallHookPkt,     // jsr CallHookPkt(a6)
+              0x5280,                                          // addq.l #1,d0
+              0x4E75});                                        // rts
+    r.cpu().a[0] = make_hook(r, kHook, kCode);
+    r.cpu().a[1] = 0;
+    r.cpu().a[2] = 0;
+    const u32 levels = r.result(utility_lvo::CallHookPkt);
+    CHECK(levels >= 1);
+    CHECK(levels < 64);
+    CHECK(logged("exec: calls into 68000 code nested too deep"));
+    CHECK_EQ(r.cpu().a[7], kStack);
+
+    // The levels were all given back: the same call nests as deep again.
+    g_lines.clear();
+    r.cpu().a[0] = kHook;
+    CHECK_EQ(r.result(utility_lvo::CallHookPkt), levels);
+}
+
+void a_hook_that_faults_ends_the_run_and_frees_its_nesting_level() {
+    Rig r;
+    put_code(r, kCode, {0x4AFC});  // illegal
+    r.cpu().a[0] = make_hook(r, kHook, kCode);
+    CHECK_EQ(r.call(utility_lvo::CallHookPkt), ExitReason::Illegal);
+
+    // A hook that returns runs as before afterwards, as deep as before.
+    r.cpu() = CpuState{};
+    put_code(r, kCode,
+             {0x4EAE, 0x10000 - utility_lvo::CallHookPkt, 0x5280, 0x4E75});
+    r.cpu().a[0] = kHook;
+    const u32 levels = r.result(utility_lvo::CallHookPkt);
+    put_code(r, kCode, {0x4AFC});
+    r.cpu().a[0] = kHook;
+    CHECK_EQ(r.call(utility_lvo::CallHookPkt), ExitReason::Illegal);
+    r.cpu() = CpuState{};
+    put_code(r, kCode,
+             {0x4EAE, 0x10000 - utility_lvo::CallHookPkt, 0x5280, 0x4E75});
+    r.cpu().a[0] = kHook;
+    CHECK_EQ(r.result(utility_lvo::CallHookPkt), levels);
+}
+
 int main() {
     utility_base_is_built();
     unimplemented_vectors_are_logged();
@@ -492,5 +629,10 @@ int main() {
     tag_walks_are_bounded();
     dates();
     strings_without_regard_to_case();
+    call_hook_pkt_runs_the_entry_with_hook_object_and_message();
+    call_hook_pkt_without_a_hook_or_an_entry_returns_zero();
+    a_hook_may_call_another_hook();
+    a_hook_that_calls_itself_stops_at_the_nesting_limit();
+    a_hook_that_faults_ends_the_run_and_frees_its_nesting_level();
     return check::finish("test_utility");
 }
