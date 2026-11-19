@@ -3076,6 +3076,73 @@ u32 Exec::spawn(u32 task, u32 init_pc, u32 final_pc, bool detached) {
     return task;
 }
 
+u32 Exec::spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, bool detached) {
+    if (m_ == nullptr || body == nullptr) {
+        return 0;
+    }
+    Bus b(*m_);
+    if (task == 0) {
+        fault_null(b);
+        return 0;
+    }
+    if (sched_.find(task) >= 0) {
+        LogLine().text("exec: AddTask of already scheduled task at ").hex(task).send();
+        return 0;
+    }
+    const u32 sp_reg = b.r32(task + TC_SPREG);
+    const u32 existing_alloc = b.r32(task + TC_SIGALLOC);
+    if (!b.ok()) {
+        return 0;
+    }
+    const u32 child_sp = sp_reg - 4;
+    b.w32(child_sp, task_exit_stub_);
+    if (!b.ok()) {
+        return 0;
+    }
+    const i32 id = sched_.add(task, pri);
+    if (id < 0) {
+        return 0;
+    }
+    if (task_host_.create != nullptr &&
+        !task_host_.create(task_host_.ctx, static_cast<u32>(id))) {
+        sched_.remove(id);
+        sched_.release(id);
+        return 0;
+    }
+    if (b.r8(task + LN_TYPE) == 0) {
+        b.w8(task + LN_TYPE, NT_TASK);
+    }
+    b.w8(task + LN_PRI, static_cast<u8>(pri));
+    b.w8(task + TC_STATE, TS_READY);
+    b.w8(task + TC_IDNESTCNT, 0xFF);
+    b.w8(task + TC_TDNESTCNT, 0xFF);
+    if (existing_alloc == 0) {
+        b.w32(task + TC_SIGALLOC, 0x0000FFFF);
+    }
+    b.w32(task + TC_SIGWAIT, 0);
+    b.w32(task + TC_SIGRECVD, 0);
+    b.w32(task + TC_SPREG, child_sp);
+    enqueue(b, base_ + TaskReady, task);
+    if (!b.ok()) {
+        sched_.remove(id);
+        reap_removed();
+        return 0;
+    }
+    TaskContext& tc = tasks_[id];
+    tc = TaskContext{};
+    tc.cpu.a[7] = child_sp;
+    tc.run_state = m68k::Jit::RunState{~0ull, 0};
+    tc.task_addr = task;
+    tc.budget = ~0ull;
+    tc.detached = detached;
+    tc.native_body = body;
+    tc.native_arg = arg;
+    if (sched_.should_switch_now()) {
+        pending_switch_ = true;
+    }
+    return task;
+}
+
 void Exec::set_task_end_hook(void (*hook)(void* ctx, u32 task, bool self), void* ctx) {
     task_end_hook_ = hook;
     task_end_ctx_ = ctx;
@@ -3330,6 +3397,14 @@ void Exec::signal_current_task(u32 mask) {
     }
 }
 
+void Exec::signal_task(u32 task, u32 mask) {
+    if (m_ == nullptr || task == 0) {
+        return;
+    }
+    Bus b(*m_);
+    ExecOps::signal_task(*this, b, task, mask);
+}
+
 void Exec::reset_task_signals() {
     sig_alloc_ = 0x0000FFFF;
     signals_ = 0;
@@ -3553,11 +3628,21 @@ void Exec::task_main(u32 id) {
     b.w8(base_ + TDNestCnt, tasks_[id].td_nest);
     b.w8(base_ + IDNestCnt, tasks_[id].id_nest);
 
-    const ExitReason why = m_->jit->run(tasks_[id].budget);
     char name[kMaxName];
-    read_task_name(*m_, task_, name);
-    LogLine().text("exec: task ").text(name).text(" ended with ")
-        .text(m68k::exit_reason_name(why)).send();
+    if (tasks_[id].native_body != nullptr) {
+        void (*body)(void*) = tasks_[id].native_body;
+        void* arg = tasks_[id].native_arg;
+        tasks_[id].native_body = nullptr;
+        tasks_[id].native_arg = nullptr;
+        body(arg);
+        read_task_name(*m_, task_, name);
+        LogLine().text("exec: task ").text(name).text(" ended").send();
+    } else {
+        const ExitReason why = m_->jit->run(tasks_[id].budget);
+        read_task_name(*m_, task_, name);
+        LogLine().text("exec: task ").text(name).text(" ended with ")
+            .text(m68k::exit_reason_name(why)).send();
+    }
     m_->cpu.exit = ExitReason::None;
     Bus eb(*m_);
     ExecOps::rem_task_id(*this, eb, static_cast<i32>(id));

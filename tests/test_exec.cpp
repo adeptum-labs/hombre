@@ -2960,6 +2960,71 @@ void task_main_clears_exit_logs_name_and_switches_away() {
     CHECK_EQ(r.cpu().exit, ExitReason::None);
 }
 
+struct NativeBodyState {
+    u32 calls = 0;
+    u32 task = 0;
+};
+
+void run_native_body(void* arg) {
+    NativeBodyState& s = *static_cast<NativeBodyState*>(arg);
+    ++s.calls;
+    s.task = g_exec.this_task();
+}
+
+void spawn_native_runs_the_body_and_ends_the_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    NativeBodyState state;
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "native", kNames);
+    CHECK_EQ(g_exec.spawn_native(child, run_native_body, &state, 0, false), child);
+    CHECK_EQ(host.created.size(), 1u);
+    CHECK_EQ(r.get8(child + TC_STATE), TS_READY);
+    CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{child});
+
+    r.cpu().d[0] = 0x0010;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+
+    g_lines.clear();
+    g_exec.task_main(1);
+
+    CHECK_EQ(state.calls, 1u);
+    CHECK_EQ(state.task, child);
+    CHECK(logged("exec: task native ended"));
+    CHECK_EQ(r.get8(child + TC_STATE), TS_REMOVED);
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Removed);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    CHECK_EQ(r.cpu().exit, ExitReason::None);
+}
+
+void signal_task_wakes_a_waiting_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    r.cpu().d[0] = 0x0020;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_WAIT);
+
+    g_exec.signal_task(boot, 0x0020);
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_READY);
+    CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0x0020u);
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{boot});
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+}
+
 void ctrl_c_wakes_boot_task_regardless_of_sigwait() {
     Rig r;
     FakeHostState host{};
@@ -3875,6 +3940,8 @@ int main() {
     semaphores_exclusive_shared_nesting_and_attempt();
     put_msg_pa_softint_logs_once_and_signals_other_task();
     task_main_clears_exit_logs_name_and_switches_away();
+    spawn_native_runs_the_body_and_ends_the_task();
+    signal_task_wakes_a_waiting_task();
     ctrl_c_wakes_boot_task_regardless_of_sigwait();
     add_task_rejects_duplicate_task();
     semaphores_abort_break_release_guard_and_sigwait();

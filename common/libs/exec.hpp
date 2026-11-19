@@ -465,6 +465,16 @@ public:
     // running. Returns task, or 0 if it could not be started.
     u32 spawn(u32 task, u32 init_pc, u32 final_pc, bool detached);
 
+    // Like spawn, but task_main calls body(arg) with the task's exec state
+    // (ThisTask, nest counts) set as for 68000 code, then ends the task as a
+    // returned one. The task must be initialised by the caller. Returns task,
+    // or 0 if it could not be started.
+    u32 spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, bool detached);
+
+    // Sets the bits of mask in the task's tc_SigRecvd and wakes it when it
+    // waits for them.
+    void signal_task(u32 task, u32 mask);
+
     // Called for every task exec removes, before the task's slot is
     // released. self is true when the task removed itself, in which case D0
     // holds its return value.
@@ -539,6 +549,8 @@ private:
         bool sleeping = false;
         bool detached = false;
         u64 sleep_deadline_us = 0;
+        void (*native_body)(void*) = nullptr;
+        void* native_arg = nullptr;
     };
 
     struct SemWaitQueue {
