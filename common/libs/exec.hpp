@@ -539,6 +539,13 @@ public:
     // (returns at once when us == 0 or no clock is wired).
     void sleep_us(u64 us);
 
+    // Blocks the current task until one of the signals in mask is set or us
+    // microseconds have passed, whichever comes first, as a Wait with a
+    // time limit. Returns the signals of mask that were set, cleared from
+    // tc_SigRecvd, or 0 when the time ran out. With us == 0 or no clock
+    // wired it only takes the signals already set.
+    u32 wait_for(u32 mask, u64 us);
+
     // Current monotonic microseconds from TaskHost::now_us, or 0 if unset.
     u64 now_us() const;
 
@@ -579,6 +586,8 @@ private:
         u8 td_nest = 0xFF;
         u8 id_nest = 0xFF;
         bool sleeping = false;
+        // Signals that end the task's sleep early, for wait_for.
+        u32 sleep_signals = 0;
         bool detached = false;
         u64 sleep_deadline_us = 0;
         void (*native_body)(void*) = nullptr;

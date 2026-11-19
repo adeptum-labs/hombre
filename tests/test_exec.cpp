@@ -3003,6 +3003,104 @@ void spawn_native_runs_the_body_and_ends_the_task() {
     CHECK_EQ(r.cpu().exit, ExitReason::None);
 }
 
+// What the idle hook of the wait_for tests does on each call: the clock
+// moves on by step_us, and on call signal_on the task gets signal.
+struct TimedWait {
+    FakeHostState* host;
+    u64 step_us;
+    u32 calls;
+    u32 signal_on;
+    u32 task;
+    u32 signal;
+};
+
+bool timed_wait_idle(void* ctx) {
+    TimedWait& w = *static_cast<TimedWait*>(ctx);
+    ++w.calls;
+    w.host->now_us += w.step_us;
+    if (w.calls == w.signal_on) {
+        g_exec.signal_task(w.task, w.signal);
+    }
+    return false;
+}
+
+void wait_for_takes_signals_already_set_without_blocking() {
+    Rig r;
+    FakeHostState host{};
+    TimedWait wait{&host, 1000, 0, 0, 0, 0};
+    host.on_idle = timed_wait_idle;
+    host.on_idle_ctx = &wait;
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    r.put32(boot + TC_SIGRECVD, 0x00030000);
+    CHECK_EQ(g_exec.wait_for(0x00010000, 5000), 0x00010000u);
+    CHECK_EQ(wait.calls, 0u);
+    // Only the signals waited for are taken.
+    CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0x00020000u);
+
+    // No time to wait only looks at what is set.
+    CHECK_EQ(g_exec.wait_for(0x00040000, 0), 0u);
+    CHECK_EQ(wait.calls, 0u);
+    CHECK_EQ(g_exec.wait_for(0x00020000, 0), 0x00020000u);
+    CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0u);
+}
+
+void wait_for_gives_up_when_the_time_has_passed() {
+    Rig r;
+    FakeHostState host{};
+    host.now_us = 100000;
+    TimedWait wait{&host, 1000, 0, 0, 0, 0};
+    host.on_idle = timed_wait_idle;
+    host.on_idle_ctx = &wait;
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    CHECK_EQ(g_exec.wait_for(0x00010000, 5000), 0u);
+    CHECK_EQ(wait.calls, 5u);
+    CHECK_EQ(host.now_us, 105000u);
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+    CHECK(g_exec.scheduler().slot(0).state == TaskState::Running);
+    CHECK(!g_exec.has_pending_timers());
+    CHECK_EQ(r.cpu().exit, ExitReason::None);
+}
+
+void wait_for_wakes_on_a_signal_before_the_time() {
+    Rig r;
+    FakeHostState host{};
+    host.now_us = 100000;
+    TimedWait wait{&host, 1000, 0, 2, kData, 0x00050000};
+    host.on_idle = timed_wait_idle;
+    host.on_idle_ctx = &wait;
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+
+    // The signal arrives on the second idle call, long before the second
+    // the wait would take.
+    CHECK_EQ(g_exec.wait_for(0x00010000, 1000000), 0x00010000u);
+    CHECK_EQ(wait.calls, 2u);
+    CHECK_EQ(host.now_us, 102000u);
+    CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0x00040000u);
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+    CHECK(g_exec.scheduler().slot(0).state == TaskState::Running);
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    CHECK(r.walk(r.base() + TaskReady).empty());
+    CHECK(!g_exec.has_pending_timers());
+
+    // A signal the wait does not ask for leaves it sleeping to the end.
+    TimedWait other{&host, 1000, 0, 1, kData, 0x00080000};
+    host.on_idle_ctx = &other;
+    CHECK_EQ(g_exec.wait_for(0x00010000, 3000), 0u);
+    CHECK_EQ(other.calls, 3u);
+    CHECK_EQ(r.get32(boot + TC_SIGRECVD), 0x000C0000u);
+
+    // A plain sleep afterwards is not cut short by those signals.
+    TimedWait plain{&host, 1000, 0, 1, kData, 0x00010000};
+    host.on_idle_ctx = &plain;
+    g_exec.sleep_us(4000);
+    CHECK_EQ(plain.calls, 4u);
+}
+
 void signal_task_wakes_a_waiting_task() {
     Rig r;
     FakeHostState host{};
@@ -4121,6 +4219,9 @@ int main() {
     put_msg_pa_softint_logs_once_and_signals_other_task();
     task_main_clears_exit_logs_name_and_switches_away();
     spawn_native_runs_the_body_and_ends_the_task();
+    wait_for_takes_signals_already_set_without_blocking();
+    wait_for_gives_up_when_the_time_has_passed();
+    wait_for_wakes_on_a_signal_before_the_time();
     signal_task_wakes_a_waiting_task();
     ctrl_c_wakes_boot_task_regardless_of_sigwait();
     add_task_rejects_duplicate_task();

@@ -580,7 +580,8 @@ struct ExecOps {
             const bool ctrl_c = (recvd & SIGBREAKF_CTRL_C) != 0;
             // Ctrl+C also cuts a non-boot task's Delay short.
             const bool wake = e.tasks_[id].sleeping
-                                  ? (ctrl_c && id != 0)
+                                  ? ((ctrl_c && id != 0) ||
+                                     (recvd & e.tasks_[id].sleep_signals) != 0)
                                   : ((recvd & wanted) != 0 || (id == 0 && ctrl_c));
             if (wake) {
                 remove(b, addr);
@@ -3393,8 +3394,17 @@ void Exec::sleep_us(u64 us) {
         return true;
     };
 
+    // A signal wait_for waits on ends the sleep before its time.
+    auto signalled = [&]() -> bool {
+        const u32 wanted = tasks_[cur].sleep_signals;
+        return wanted != 0 && (ExecOps::signals(*this, b) & wanted) != 0 && b.ok();
+    };
+
     while (tasks_[cur].sleeping && m_->cpu.exit == ExitReason::None) {
         expire_timers();
+        if (tasks_[cur].sleeping && signalled()) {
+            tasks_[cur].sleeping = false;
+        }
         if (!tasks_[cur].sleeping) {
             if (sched_.slot(static_cast<u32>(cur)).state != TaskState::Running) {
                 ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
@@ -3476,6 +3486,36 @@ void Exec::sleep_us(u64 us) {
             end_run(*m_, ExitReason::Break);
         }
     }
+}
+
+u32 Exec::wait_for(u32 mask, u64 us) {
+    if (m_ == nullptr) {
+        return 0;
+    }
+    const i32 cur = sched_.current();
+    if (cur < 0 || static_cast<u32>(cur) >= Scheduler::kMaxTasks) {
+        return 0;
+    }
+    Bus b(*m_);
+    auto take = [&]() -> u32 {
+        const u32 pending = ExecOps::signals(*this, b);
+        const u32 got = b.ok() ? pending & mask : 0;
+        if (got != 0) {
+            ExecOps::store_signals(*this, b, pending & ~got);
+        }
+        return got;
+    };
+    const u32 got = take();
+    if (got != 0 || us == 0 || !b.ok()) {
+        return got;
+    }
+    tasks_[cur].sleep_signals = mask;
+    sleep_us(us);
+    tasks_[cur].sleep_signals = 0;
+    if (m_->cpu.exit != ExitReason::None || sched_.current() != cur) {
+        return 0;
+    }
+    return take();
 }
 
 void Exec::signal_current_task(u32 mask) {
