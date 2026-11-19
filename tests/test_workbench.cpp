@@ -504,7 +504,7 @@ void desktop_shows_the_volumes_and_their_menus() {
     CHECK_EQ(r.get32(backdrop.window + 28), r.workbench.menu());  // wd_MenuStrip
 
     const std::string title = r.str(r.get32(r.screen + sc_Title));
-    CHECK(title.rfind("Amiga Workbench", 0) == 0);
+    CHECK(title.rfind("Hombre Workbench", 0) == 0);
     CHECK(title.find("graphics mem") != std::string::npos);
     CHECK(title.find("other mem") != std::string::npos);
 }
@@ -1082,7 +1082,7 @@ void backdrop_toggles_the_root_window() {
     }
     CHECK_EQ(r.find_window("HombreTest:"), drawer);
     CHECK_EQ(r.workbench.window(drawer).window, drawer_window);
-    CHECK(r.str(r.get32(r.screen + sc_Title)).rfind("Amiga Workbench", 0) == 0);
+    CHECK(r.str(r.get32(r.screen + sc_Title)).rfind("Hombre Workbench", 0) == 0);
 
     // A double click on the disk in the window finds its drawer open.
     const Workbench::IconEntry& disk = r.workbench.icon(volume);

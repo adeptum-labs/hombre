@@ -927,7 +927,7 @@ void Workbench::refresh_title() {
             text[at++] = part[i];
         }
     };
-    put("Amiga Workbench  ");
+    put("Hombre Workbench  ");
     format_u64(digits, sizeof digits, exec_->free_bytes(), 10);
     put(digits);
     put(" graphics mem  0 other mem");
