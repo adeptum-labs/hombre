@@ -21,17 +21,21 @@
  * Contact: info@adeptum.se
  */
 
+#include "libs/dos.hpp"
 #include "libs/exec.hpp"
 #include "libs/icon.hpp"
 #include "libs/layers.hpp"
 #include "check.hpp"
+#include "ofs_writer.hpp"
 
+#include <string>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <vector>
 
 using namespace hombre;
 using namespace hombre::m68k;
+using namespace hombre::ndk;
 
 namespace {
 
@@ -41,11 +45,35 @@ constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
 constexpr u32 kFreeEnd = 0x400000;
 
-// 16 MiB of guest memory, the Jit, exec, layers.library and icon.library
-// over them.
+constexpr u32 do_Type = 48;
+constexpr u8 kWBProject = 4;
+
+// Static storage, as the kernel keeps them.
+Jit g_jit;
+Exec g_exec;
+Dos g_dos;
+Layers g_layers;
+Icon g_icon;
+std::vector<std::string> g_lines;
+
+void capture(const char* line) { g_lines.push_back(line); }
+
+bool logged_containing(const std::string& text) {
+    for (const std::string& line : g_lines) {
+        if (line.find(text) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// 16 MiB of guest memory, the Jit, exec, layers.library, dos and
+// icon.library over them.
 class Rig {
 public:
-    Rig() : memory_(kGuestBytes) {
+    Rig()
+        : memory_(kGuestBytes), image_(build_adf("LayersIcon", false,
+                                                 {{"Readme", std::vector<u8>{'h', 'i'}}})) {
         fd_ = memfd_create("layers-icon", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -55,17 +83,25 @@ public:
         CHECK(rx != MAP_FAILED);
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
-        machine.cpu = CpuState{};
-        machine.mem = GuestMemory{memory_.data(), kGuestBytes};
-        machine.jit = nullptr;
-        CHECK(jit.init(CodeRegion{rw_, rx_, kRegion}, machine));
-        CHECK(exec.init(machine, kFreeStart, kFreeEnd));
-        CHECK(layers.init(machine, exec));
-        CHECK(icon.init(machine, exec));
-        machine.cpu.a[7] = kStack;
+        m.cpu = CpuState{};
+        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.jit = nullptr;
+        CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
+        g_lines.clear();
+        g_log = capture;
+        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_layers.init(m, g_exec));
+        CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
+        CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
+        CHECK(g_icon.init(m, g_exec, g_dos));
+        m.cpu.a[7] = kStack;
     }
 
     ~Rig() {
+        g_exec.set_this_task(0);
+        g_exec.set_segment_loader(SegmentLoader{nullptr, nullptr});
+        g_exec.set_task_host(TaskHost{});
+        g_log = nullptr;
         munmap(rw_, kRegion);
         munmap(const_cast<u8*>(rx_), kRegion);
         close(fd_);
@@ -74,18 +110,31 @@ public:
     Rig(const Rig&) = delete;
     Rig& operator=(const Rig&) = delete;
 
-    Machine machine;
-    Jit jit;
-    Exec exec;
-    Layers layers;
-    Icon icon;
+    Machine m;
+    AdfVolume volume{};
 
-    u32 layers_base() const { return layers.base(); }
-    u32 icon_base() const { return icon.base(); }
+    u32 layers_base() const { return g_layers.base(); }
+    u32 icon_base() const { return g_icon.base(); }
 
-    void put16(u32 at, u32 v) {
-        memory_[at] = static_cast<u8>(v >> 8);
-        memory_[at + 1] = static_cast<u8>(v);
+    u32 put8(u32 at, u32 v) {
+        memory_[at] = static_cast<u8>(v);
+        return at;
+    }
+
+    u32 put16(u32 at, u32 v) {
+        put8(at, v >> 8);
+        put8(at + 1, v);
+        return at;
+    }
+
+    u32 get8(u32 at) const { return memory_[at]; }
+
+    u32 str(u32 at, const std::string& s) {
+        for (usize i = 0; i < s.size(); ++i) {
+            put8(at + static_cast<u32>(i), static_cast<u8>(s[i]));
+        }
+        put8(at + static_cast<u32>(s.size()), 0);
+        return at;
     }
 
     // JSR -lvo(A6) with A6 = base, from hand-written 68000 code.
@@ -94,23 +143,24 @@ public:
         put16(kCall + 2, static_cast<u32>(0x10000 - lvo));
         put16(kCall + 4, 0x4EF8);  // JMP $400.w
         put16(kCall + 6, 0x0400);
-        jit.flush();
-        machine.cpu.a[6] = base;
-        machine.cpu.a[7] = kStack;
-        machine.cpu.pc = kCall;
-        return jit.run(1000000);
+        g_jit.flush();
+        m.cpu.a[6] = base;
+        m.cpu.a[7] = kStack;
+        m.cpu.pc = kCall;
+        return g_jit.run(1000000);
     }
 
     // Calls the vector, which must return; D0 is what it gave.
     u32 result(u32 base, u32 lvo) {
         CHECK_EQ(call(base, lvo), ExitReason::Halt);
-        return machine.cpu.d[0];
+        return m.cpu.d[0];
     }
 
 private:
     static constexpr usize kRegion = 1 << 20;
 
     std::vector<u8> memory_;
+    std::vector<u8> image_;
     int fd_ = -1;
     u8* rw_ = nullptr;
     const u8* rx_ = nullptr;
@@ -122,34 +172,44 @@ void layer_locks_do_nothing() {
                            layers_lvo::LockLayers,     layers_lvo::UnlockLayers,
                            layers_lvo::LockLayerInfo, layers_lvo::UnlockLayerInfo};
     for (u32 lvo : vectors) {
-        r.machine.cpu.d[0] = 0x12345678;
-        r.machine.cpu.a[0] = kData;
-        r.machine.cpu.a[1] = kData + 0x100;
+        r.m.cpu.d[0] = 0x12345678;
+        r.m.cpu.a[0] = kData;
+        r.m.cpu.a[1] = kData + 0x100;
         CHECK_EQ(r.result(r.layers_base(), lvo), 0x12345678u);
     }
 }
 
 void install_clip_region_returns_zero() {
     Rig r;
-    r.machine.cpu.a[0] = kData;
-    r.machine.cpu.a[1] = kData + 0x100;
+    r.m.cpu.a[0] = kData;
+    r.m.cpu.a[1] = kData + 0x100;
     CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallClipRegion), 0u);
 }
 
-void icon_finds_no_icon_or_tool_type() {
+void icon_reads_what_is_there_and_defaults_the_rest() {
     Rig r;
-    r.machine.cpu.a[0] = kData;
+    r.str(kData, "NoIcon");
+    r.m.cpu.a[0] = kData;
     CHECK_EQ(r.result(r.icon_base(), icon_lvo::GetDiskObject), 0u);
-    CHECK_EQ(r.result(r.icon_base(), icon_lvo::GetDiskObjectNew), 0u);
+    CHECK_EQ(g_dos.last_error(), ERROR_OBJECT_NOT_FOUND);
 
-    r.machine.cpu.a[0] = kData;
-    r.machine.cpu.a[1] = kData + 0x100;
+    // A missing .info falls back to the default icon of the object's type.
+    r.m.cpu.a[0] = kData;
+    const u32 object = r.result(r.icon_base(), icon_lvo::GetDiskObjectNew);
+    CHECK(object != 0);
+    CHECK_EQ(r.get8(object + do_Type), kWBProject);
+    r.m.cpu.a[0] = object;
+    CHECK_EQ(r.call(r.icon_base(), icon_lvo::FreeDiskObject), ExitReason::Halt);
+
+    r.m.cpu.a[0] = 0;
+    r.m.cpu.a[1] = 0;
     CHECK_EQ(r.result(r.icon_base(), icon_lvo::FindToolType), 0u);
     CHECK_EQ(r.result(r.icon_base(), icon_lvo::MatchToolValue), 0u);
 
-    r.machine.cpu.d[0] = 0x12345678;
-    r.machine.cpu.a[0] = kData;
+    r.m.cpu.d[0] = 0x12345678;
+    r.m.cpu.a[0] = kData;
     CHECK_EQ(r.result(r.icon_base(), icon_lvo::FreeDiskObject), 0x12345678u);
+    CHECK(logged_containing("FreeDiskObject"));
 }
 
 }
@@ -157,6 +217,6 @@ void icon_finds_no_icon_or_tool_type() {
 int main() {
     layer_locks_do_nothing();
     install_clip_region_returns_zero();
-    icon_finds_no_icon_or_tool_type();
+    icon_reads_what_is_there_and_defaults_the_rest();
     return check::finish("test_layers_icon");
 }

@@ -716,12 +716,16 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         fail("utility init failed");
         return false;
     }
-    if (!layers.init(machine, exec) || !icon.init(machine, exec)) {
-        fail("layers or icon init failed");
+    if (!layers.init(machine, exec)) {
+        fail("layers init failed");
         return false;
     }
     if (!dos.init(machine, exec, volume, &console_write, &consoles[0])) {
         fail("dos init failed");
+        return false;
+    }
+    if (!icon.init(machine, exec, dos)) {
+        fail("icon init failed");
         return false;
     }
     consoles[0].index = 0;
