@@ -561,13 +561,17 @@ struct ExecOps {
         if (id < 0) {
             return;
         }
-        if (e.sched_.slot(static_cast<u32>(id)).state == TaskState::Waiting &&
-            !e.tasks_[id].sleeping) {
+        if (e.sched_.slot(static_cast<u32>(id)).state == TaskState::Waiting) {
             const u32 wanted = b.r32(addr + TC_SIGWAIT);
             if (!b.ok()) {
                 return;
             }
-            if ((recvd & wanted) != 0 || (id == 0 && (recvd & SIGBREAKF_CTRL_C) != 0)) {
+            const bool ctrl_c = (recvd & SIGBREAKF_CTRL_C) != 0;
+            // Ctrl+C also cuts a non-boot task's Delay short.
+            const bool wake = e.tasks_[id].sleeping
+                                  ? (ctrl_c && id != 0)
+                                  : ((recvd & wanted) != 0 || (id == 0 && ctrl_c));
+            if (wake) {
                 remove(b, addr);
                 b.w8(addr + TC_STATE, TS_READY);
                 e.sched_.wake(id);
@@ -3292,6 +3296,15 @@ void Exec::sleep_us(u64 us) {
 
     const u32 cur_addr = tasks_[cur].task_addr;
     Bus b(*m_);
+    if (cur != 0 && cur_addr != 0) {
+        const u32 recvd = b.r32(cur_addr + TC_SIGRECVD);
+        if (b.ok() && (recvd & SIGBREAKF_CTRL_C) != 0) {
+            b.w32(cur_addr + TC_SIGRECVD, recvd & ~SIGBREAKF_CTRL_C);
+            tasks_[cur].sleeping = false;
+            end_run(*m_, ExitReason::Break);
+            return;
+        }
+    }
     if (cur_addr != 0) {
         b.w32(cur_addr + TC_SIGWAIT, 0);
         b.w8(cur_addr + TC_STATE, TS_WAIT);
@@ -3302,6 +3315,22 @@ void Exec::sleep_us(u64 us) {
         }
     }
     sched_.wait(cur);
+
+    // Ctrl+C wakes a non-boot task out of its sleep so that Break ends its
+    // command; the boot task keeps its old end-of-delay check below.
+    auto ctrl_c_break = [&]() -> bool {
+        if (cur == 0 || cur_addr == 0) {
+            return false;
+        }
+        const u32 recvd = b.r32(cur_addr + TC_SIGRECVD);
+        if (!b.ok() || (recvd & SIGBREAKF_CTRL_C) == 0) {
+            return false;
+        }
+        b.w32(cur_addr + TC_SIGRECVD, recvd & ~SIGBREAKF_CTRL_C);
+        tasks_[cur].sleeping = false;
+        end_run(*m_, ExitReason::Break);
+        return true;
+    };
 
     while (tasks_[cur].sleeping && m_->cpu.exit == ExitReason::None) {
         expire_timers();
@@ -3351,6 +3380,9 @@ void Exec::sleep_us(u64 us) {
         }
         if (next == cur) {
             ExecOps::restore_task_from_wait(*this, b, cur, cur_addr);
+            if (ctrl_c_break()) {
+                return;
+            }
             continue;
         }
         if (task_host_.switch_to == nullptr || !switch_to_task(next)) {
@@ -3359,6 +3391,9 @@ void Exec::sleep_us(u64 us) {
             return;
         }
         if (sched_.current() != cur) {
+            return;
+        }
+        if (ctrl_c_break()) {
             return;
         }
         if (abort_to_boot_task_ && cur == 0) {

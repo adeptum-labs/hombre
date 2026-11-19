@@ -472,7 +472,7 @@ public:
     u32 spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, bool detached);
 
     // Sets the bits of mask in the task's tc_SigRecvd and wakes it when it
-    // waits for them.
+    // waits for them; Ctrl+C also cuts a non-boot task's Delay short.
     void signal_task(u32 task, u32 mask);
 
     // Called for every task exec removes, before the task's slot is
