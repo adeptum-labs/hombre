@@ -356,6 +356,341 @@ void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gfl
     }
 }
 
+// Menu pens on screens of eight planes: near-white paper, dark labels,
+// grey ghosted labels and softer grey shortcuts, the active title bar
+// gradient behind the open title and the highlighted item.
+constexpr u8 kMenuPaper = kFrameLight;
+constexpr u8 kMenuLabel = kFrameDark;
+constexpr u8 kMenuShortcut = kTitleInactive;
+constexpr u8 kMenuGhost = kTrack;
+constexpr u8 kMenuLit = kTitleActive;
+constexpr u8 kMenuBarDark = kKnob2;
+constexpr u8 kMenuBarLight = kTitleActive;
+
+// The same roles on screens of fewer planes, in the classic pens: white
+// paper, black labels and the blue fill under light text for the open
+// title and the highlighted item.
+constexpr u8 kFlatPaper = 2;
+constexpr u8 kFlatLabel = 1;
+constexpr u8 kFlatLit = 2;
+constexpr u8 kFlatFill = 3;
+
+constexpr i32 kMenuTextInset = 4;
+constexpr i32 kMenuCheckColumn = 16;
+constexpr i32 kMenuCornerRadius = 2;
+
+// Small pictures, one string per row, 'X' for a set pixel.
+constexpr const char* kCheckGlyph[] = {
+    "........X",
+    ".......XX",
+    "X.....XX.",
+    "XX...XX..",
+    ".XX.XX...",
+    "..XXX....",
+    "...X.....",
+};
+constexpr i32 kCheckGlyphWidth = 9;
+constexpr i32 kCheckGlyphHeight = 7;
+
+constexpr const char* kAmigaKeyGlyph[] = {
+    ".XXXXXXXX.",
+    "X........X",
+    "X...XX...X",
+    "X..X..X..X",
+    "X..XXXX..X",
+    "X..X..X..X",
+    "X..X..X..X",
+    "X........X",
+    ".XXXXXXXX.",
+};
+constexpr i32 kAmigaKeyGlyphWidth = 10;
+constexpr i32 kAmigaKeyGlyphHeight = 9;
+
+constexpr const char* kSubmenuGlyph[] = {
+    "X...",
+    "XX..",
+    "XXX.",
+    "XXXX",
+    "XXX.",
+    "XX..",
+    "X...",
+};
+constexpr i32 kSubmenuGlyphWidth = 4;
+constexpr i32 kSubmenuGlyphHeight = 7;
+
+Rect clipped(const Rect& r, const raster::Clip& clip) {
+    return Rect{
+        r.x0 > clip.x0 ? r.x0 : clip.x0,
+        r.y0 > clip.y0 ? r.y0 : clip.y0,
+        r.x1 < clip.x1 ? r.x1 : clip.x1,
+        r.y1 < clip.y1 ? r.y1 : clip.y1,
+    };
+}
+
+void fill(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip, i32 x0, i32 y0, i32 x1,
+          i32 y1, u8 pen) {
+    if (x0 <= x1 && y0 <= y1) {
+        raster::fill_rect(b, bitmap, clip, Rect{x0, y0, x1, y1}, pen);
+    }
+}
+
+void draw_glyph(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
+                const char* const* rows, i32 width, i32 height, i32 x, i32 y, u8 pen) {
+    for (i32 row = 0; row < height; ++row) {
+        for (i32 col = 0; col < width; ++col) {
+            if (rows[row][col] == 'X') {
+                fill(b, bitmap, clip, x + col, y + row, x + col, y + row, pen);
+            }
+        }
+    }
+}
+
+// Every other pixel of r in the paper pen: the classic ghosting of a
+// disabled entry where no grey pen exists.
+void ghost(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip, const Rect& r,
+           u8 paper) {
+    const Rect c = clipped(r, clip);
+    for (i32 y = c.y0; y <= c.y1; ++y) {
+        for (i32 x = c.x0 + ((c.x0 + y) & 1); x <= c.x1; x += 2) {
+            raster::write_pixel(b, bitmap, x, y, paper);
+        }
+    }
+}
+
+// The guest string at text, cut to the whole characters that fit before
+// right, with its baseline at baseline.
+void draw_guest_text(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip, u8 pen,
+                     i32 x, i32 baseline, u32 text, i32 right) {
+    if (text == 0 || right < x) {
+        return;
+    }
+    u32 chars = static_cast<u32>((right - x + 1) / 8);
+    if (chars > kMaxTitleChars) {
+        chars = kMaxTitleChars;
+    }
+    const raster::Pens pens{pen, 0, static_cast<u8>(ndk::JAM1)};
+    u8 buffer[kTitleChunk];
+    for (u32 at = 0; at < chars; at += kTitleChunk) {
+        u32 n = chars - at;
+        if (n > kTitleChunk) {
+            n = kTitleChunk;
+        }
+        for (u32 i = 0; i < n; ++i) {
+            buffer[i] = static_cast<u8>(b.r8(text + at + i));
+        }
+        if (!b.ok()) {
+            return;
+        }
+        u32 length = 0;
+        while (length < n && buffer[length] != 0) {
+            ++length;
+        }
+        if (length != 0) {
+            u32 advance = 0;
+            raster::draw_text(b, bitmap, clip, pens, x + static_cast<i32>(at) * 8, baseline,
+                              buffer, length, advance);
+        }
+        if (length < n) {
+            return;
+        }
+    }
+}
+
+// A rectangle with corners cut to the given radius, in one pen or, with
+// steps, a top-to-bottom gradient of that many pens from pen.
+void fill_rounded(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip, const Rect& r,
+                  i32 radius, u8 pen, i32 steps = 1) {
+    const i32 rows = r.y1 - r.y0 + 1;
+    if (rows <= 0 || r.x1 < r.x0) {
+        return;
+    }
+    for (i32 y = r.y0; y <= r.y1; ++y) {
+        const i32 ins = rounded_inset(min_i32(y - r.y0, r.y1 - y), radius);
+        const i32 step = steps > 1 ? ((y - r.y0) * steps) / rows : 0;
+        fill(b, bitmap, clip, r.x0 + ins, y, r.x1 - ins, y, static_cast<u8>(pen + step));
+    }
+}
+
+// The one-pixel frame of a box. Rounded corners cut the bottom ones, and
+// the top ones too unless the box hangs from the bar, whose bottom line
+// then closes the box.
+void draw_box_frame(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
+                    const Rect& box, bool hangs, bool rounded, u8 pen) {
+    const i32 r = rounded ? kMenuCornerRadius : 0;
+    const i32 top = hangs ? 0 : r;
+    const i32 bottom = r;
+    for (i32 y = box.y0; y <= box.y1; ++y) {
+        const i32 from_top = y - box.y0;
+        const i32 from_bottom = box.y1 - y;
+        i32 ins = 0;
+        i32 prev = 0;
+        if (from_bottom < bottom) {
+            ins = rounded_inset(from_bottom, r);
+            prev = from_bottom > 0 ? rounded_inset(from_bottom - 1, r) : ins;
+        } else if (from_top < top) {
+            ins = rounded_inset(from_top, r);
+            prev = from_top > 0 ? rounded_inset(from_top - 1, r) : ins;
+        }
+        const bool edge = (from_bottom == 0) || (!hangs && from_top == 0);
+        if (edge) {
+            fill(b, bitmap, clip, box.x0 + ins, y, box.x1 - ins, y, pen);
+            continue;
+        }
+        // A corner row draws from its inset to the previous row's, so the
+        // diagonal stays connected.
+        fill(b, bitmap, clip, box.x0 + ins, y, box.x0 + max_i32(ins, prev - 1), y, pen);
+        fill(b, bitmap, clip, box.x1 - max_i32(ins, prev - 1), y, box.x1 - ins, y, pen);
+    }
+}
+
+// Window-style shadow: two dark bands and two light ones outside the box.
+void draw_menu_shadow(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
+                      const Rect& box, const u8* strong, const u8* light) {
+    if (!menu_layout::valid(box) || strong == nullptr || light == nullptr) {
+        return;
+    }
+    struct Band {
+        Rect rect;
+        const u8* table;
+    };
+    const Band bands[4] = {
+        {Rect{box.x1 + 1, box.y0 + 4, box.x1 + 2, box.y1}, strong},
+        {Rect{box.x1 + 3, box.y0 + 4, box.x1 + 4, box.y1 + 2}, light},
+        {Rect{box.x0 + 4, box.y1 + 1, box.x1 + 2, box.y1 + 2}, strong},
+        {Rect{box.x0 + 4, box.y1 + 3, box.x1 + 4, box.y1 + 4}, light},
+    };
+    for (const Band& band : bands) {
+        const Rect r = clipped(band.rect, clip);
+        if (menu_layout::valid(r)) {
+            raster::remap_rect(b, bitmap, r, band.table, 256);
+        }
+    }
+}
+
+struct MenuPens {
+    bool high_color;
+    u8 paper;
+    u8 label;
+    u8 shortcut;
+    u8 lit;
+    u8 frame;
+};
+
+MenuPens menu_pens(bool high_color) {
+    if (high_color) {
+        return MenuPens{true, kMenuPaper, kMenuLabel, kMenuShortcut, kMenuLit, kFrameDark};
+    }
+    return MenuPens{false, kFlatPaper, kFlatLabel, kFlatLabel, kFlatLit, kFlatLabel};
+}
+
+// The highlight under an item or the open title: the active title bar
+// gradient, or the blue pen on screens of fewer planes.
+void draw_highlight(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
+                    const Rect& r, const MenuPens& pens) {
+    if (pens.high_color) {
+        fill_rounded(b, bitmap, clip, r, kMenuCornerRadius, kActiveBar0, 8);
+    } else {
+        fill_rounded(b, bitmap, clip, r, 1, kFlatFill);
+    }
+}
+
+void draw_separator(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
+                    const Rect& row, const MenuPens& pens) {
+    const i32 x0 = row.x0 + 3;
+    const i32 x1 = row.x1 - 3;
+    const i32 y = (row.y0 + row.y1) / 2;
+    if (pens.high_color) {
+        fill(b, bitmap, clip, x0, y, x1, y, kMenuBarDark);
+        fill(b, bitmap, clip, x0, y + 1, x1, y + 1, kMenuBarLight);
+    } else {
+        fill(b, bitmap, clip, x0, y, x1, y, pens.label);
+    }
+}
+
+void draw_menu_items(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
+                     const menu_layout::Item* items, const Rect* rects, u32 count, i32 selected,
+                     const MenuPens& pens) {
+    bool checks = false;
+    for (u32 i = 0; i < count; ++i) {
+        checks = checks || items[i].checkit();
+    }
+    for (u32 i = 0; i < count; ++i) {
+        const menu_layout::Item& item = items[i];
+        const Rect& row = rects[i];
+        if (!menu_layout::valid(row)) {
+            continue;
+        }
+        if (!item.text()) {
+            draw_separator(b, bitmap, clip, row, pens);
+            continue;
+        }
+        // The highlight keeps clear of the box frame; the row itself reaches
+        // the frame so the pointer can cross the paper without losing it.
+        const Rect lit{row.x0 + 2, row.y0, row.x1 - 2, row.y1};
+        const bool highlighted = static_cast<i32>(i) == selected && item.enabled();
+        const bool ghosted = !item.enabled();
+        u8 label = pens.label;
+        u8 shortcut = pens.shortcut;
+        if (highlighted) {
+            draw_highlight(b, bitmap, clip, lit, pens);
+            label = pens.lit;
+            shortcut = pens.lit;
+        } else if (ghosted && pens.high_color) {
+            label = kMenuGhost;
+            shortcut = kMenuGhost;
+        }
+        const i32 height = row.y1 - row.y0 + 1;
+        const i32 baseline = row.y0 + max_i32(0, (height - 8) / 2) + 6;
+        if (item.checkit() && item.checked()) {
+            draw_glyph(b, bitmap, clip, kCheckGlyph, kCheckGlyphWidth, kCheckGlyphHeight,
+                       lit.x0 + kMenuTextInset, baseline - 6, label);
+        }
+        const i32 text_x = lit.x0 + kMenuTextInset + (checks ? kMenuCheckColumn : 0);
+        i32 text_right = lit.x1 - kMenuTextInset;
+        if (item.commseq()) {
+            const i32 letter_x = lit.x1 - kMenuTextInset - 8 + 1;
+            const i32 key_x = letter_x - 2 - kAmigaKeyGlyphWidth;
+            draw_glyph(b, bitmap, clip, kAmigaKeyGlyph, kAmigaKeyGlyphWidth, kAmigaKeyGlyphHeight,
+                       key_x, baseline - 7, shortcut);
+            if (item.command != 0) {
+                const raster::Pens text_pens{shortcut, 0, static_cast<u8>(ndk::JAM1)};
+                u32 advance = 0;
+                raster::draw_text(b, bitmap, clip, text_pens, letter_x, baseline, &item.command,
+                                  1, advance);
+            }
+            text_right = key_x - 4;
+        } else if (item.sub != 0) {
+            const i32 arrow_x = lit.x1 - kMenuTextInset - kSubmenuGlyphWidth + 1;
+            draw_glyph(b, bitmap, clip, kSubmenuGlyph, kSubmenuGlyphWidth, kSubmenuGlyphHeight,
+                       arrow_x, baseline - 6, shortcut);
+            text_right = arrow_x - 4;
+        }
+        draw_guest_text(b, bitmap, clip, label, text_x, baseline, item.label, text_right);
+        if (ghosted && !pens.high_color) {
+            ghost(b, bitmap, clip, lit, pens.paper);
+        }
+    }
+}
+
+void draw_menu_box(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
+                   const Rect& box, bool hangs, const menu_layout::Item* items, const Rect* rects,
+                   u32 count, i32 selected, const MenuPens& pens, const u8* strong,
+                   const u8* light) {
+    if (count == 0 || !menu_layout::valid(box)) {
+        return;
+    }
+    draw_menu_shadow(b, bitmap, clip, box, strong, light);
+    const i32 r = pens.high_color ? kMenuCornerRadius : 0;
+    for (i32 y = box.y0; y <= box.y1; ++y) {
+        const i32 from_bottom = box.y1 - y;
+        const i32 from_top = hangs ? r : y - box.y0;
+        const i32 ins = rounded_inset(min_i32(from_top, from_bottom), r);
+        fill(b, bitmap, clip, box.x0 + ins, y, box.x1 - ins, y, pens.paper);
+    }
+    draw_menu_items(b, bitmap, clip, items, rects, count, selected, pens);
+    draw_box_frame(b, bitmap, clip, box, hangs, pens.high_color, pens.frame);
+}
+
 void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, bool high_color) {
     const i32 left = 1;
     const i32 right = w.width - 2;
@@ -573,6 +908,54 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
     }
 
     restore_rp(b, rp, saved);
+}
+
+void draw_menu(Bus& b, const raster::Bitmap& bitmap, const Rect& area, const MenuChrome& menu) {
+    if (menu.width <= 0 || !menu_layout::valid(area)) {
+        return;
+    }
+    const raster::Clip clip{area.x0, area.y0, area.x1, area.y1};
+    const MenuPens pens = menu_pens(menu.depth >= 8);
+    const i32 right = menu.width - 1;
+    const i32 line = static_cast<i32>(kBarHeight);
+
+    // The bar keeps the look of the screen title bar it replaces.
+    if (pens.high_color) {
+        for (i32 y = 0; y < line; ++y) {
+            fill(b, bitmap, clip, 0, y, right, y, static_cast<u8>(kInactiveBar0 + (y * 6) / line));
+        }
+        fill(b, bitmap, clip, 0, line, right, line, kFrameDark);
+    } else {
+        fill(b, bitmap, clip, 0, 0, right, line - 1, kFlatPaper);
+        fill(b, bitmap, clip, 0, line, right, line, kFlatLabel);
+    }
+
+    for (u32 i = 0; i < menu.title_count && i < menu_layout::kMaxTitles; ++i) {
+        const Rect& title = menu.title_rects[i];
+        if (!menu_layout::valid(title)) {
+            continue;
+        }
+        const bool enabled = menu.titles[i].enabled();
+        const bool open = static_cast<i32>(i) == menu.selected_title && enabled;
+        u8 pen = pens.label;
+        if (open) {
+            draw_highlight(b, bitmap, clip, Rect{title.x0, 2, title.x1, line - 2}, pens);
+            pen = pens.lit;
+        } else if (!enabled && pens.high_color) {
+            pen = kMenuGhost;
+        }
+        draw_guest_text(b, bitmap, clip, pen, title.x0 + 8, kTitleBaseline, menu.titles[i].name,
+                        title.x1 - 4);
+        if (!enabled && !pens.high_color) {
+            ghost(b, bitmap, clip, Rect{title.x0, 0, title.x1, line - 1}, kFlatPaper);
+        }
+    }
+
+    draw_menu_box(b, bitmap, clip, menu.box, true, menu.items, menu.item_rects, menu.item_count,
+                  menu.selected_item, pens, menu.strong_shade, menu.light_shade);
+    draw_menu_box(b, bitmap, clip, menu.sub_box, false, menu.sub_items, menu.sub_item_rects,
+                  menu.sub_item_count, menu.selected_sub, pens, menu.strong_shade,
+                  menu.light_shade);
 }
 
 void draw_prop_gadget(Graphics& graphics, Bus& b, u32 rp, const PropChrome& g) {

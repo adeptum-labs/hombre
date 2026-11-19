@@ -25,7 +25,9 @@
 
 #include "../types.hpp"
 #include "gfx.hpp"
+#include "menu_layout.hpp"
 #include "native.hpp"
+#include "raster.hpp"
 
 namespace hombre {
 
@@ -60,11 +62,38 @@ struct PropChrome {
     u16 gflags = 0;
 };
 
+// One menu strip in menu mode: the bar titles, the open title's drop-down
+// box and the submenu box, with the indices of the open title and the
+// highlighted items. The shade tables darken the drop shadows and are null
+// on screens of fewer than eight planes, which draw menus flat.
+struct MenuChrome {
+    i32 width = 0;
+    const menu_layout::Title* titles = nullptr;
+    const Rect* title_rects = nullptr;
+    u32 title_count = 0;
+    i32 selected_title = -1;
+    Rect box{0, 0, -1, -1};
+    const menu_layout::Item* items = nullptr;
+    const Rect* item_rects = nullptr;
+    u32 item_count = 0;
+    i32 selected_item = -1;
+    Rect sub_box{0, 0, -1, -1};
+    const menu_layout::Item* sub_items = nullptr;
+    const Rect* sub_item_rects = nullptr;
+    u32 sub_item_count = 0;
+    i32 selected_sub = -1;
+    u32 depth = 0;
+    const u8* strong_shade = nullptr;
+    const u8* light_shade = nullptr;
+};
+
 void draw_screen_bar(Graphics& graphics, native::Bus& b, u32 rp, u32 width, u32 title);
 void draw_window_bar(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w);
 void draw_window_chrome(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w,
                         const Rect* keep = nullptr);
 void draw_prop_gadget(Graphics& graphics, native::Bus& b, u32 rp, const PropChrome& g);
+void draw_menu(native::Bus& b, const raster::Bitmap& bitmap, const Rect& clip,
+               const MenuChrome& menu);
 
 }
 
