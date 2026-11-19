@@ -33,23 +33,27 @@
 #include "../types.hpp"
 #include "exec.hpp"
 #include "native.hpp"
+#include "utility.hpp"
 #include "version.hpp"
 
 // dos.library written in C++ for code run by the 68000 translator, over one
 // read-only volume.
 //
 // dos keeps its structures in guest memory with the AmigaOS layout: the
-// DosLibrary with its RootNode and DosInfo, a volume node, one Process with
-// its CommandLineInterface, the file handles and the locks. The Process is
-// exec's task. Commands run as the CLI's command, one at a time, on a
-// 4 KiB stack: run_command loads one, gives it its argument line and the
-// console, and calls it.
+// DosLibrary with its RootNode and DosInfo, a volume node, a Process with
+// its CommandLineInterface for each command process, the file handles and
+// the locks. Each Process is exec's task. run_command runs the shell's
+// command on the shell Process, on a 4 KiB stack: it loads it, gives it its
+// argument line and the console, and calls it. CreateProc, CreateNewProc,
+// RunCommand, SystemTagList and Execute give a program Processes of its own,
+// which run in the background unless the call is synchronous.
 //
 // The console is the one interactive stream: what a program writes to it
 // goes to the ConsoleWrite sink, and what it reads is the command's
 // argument line, once, then end of file. Files on the volume can be
 // opened, read and seeked in; anything that would write to the volume
-// fails with ERROR_DISK_WRITE_PROTECTED.
+// fails with ERROR_DISK_WRITE_PROTECTED. NIL: reads end of file and writes
+// to it are discarded.
 //
 // Variables can be local (LocalVar nodes on pr_LocalVars, as SetVar
 // creates by default) or global (files under ENV: on the RAM volume).
@@ -91,6 +95,7 @@ constexpr u32 Info = 114;
 constexpr u32 CreateDir = 120;
 constexpr u32 CurrentDir = 126;
 constexpr u32 IoErr = 132;
+constexpr u32 CreateProc = 138;
 constexpr u32 Exit = 144;
 constexpr u32 LoadSeg = 150;
 constexpr u32 UnLoadSeg = 156;
@@ -101,6 +106,7 @@ constexpr u32 Delay = 198;
 constexpr u32 WaitForChar = 204;
 constexpr u32 ParentDir = 210;
 constexpr u32 IsInteractive = 216;
+constexpr u32 Execute = 222;
 constexpr u32 AllocDosObject = 228;
 constexpr u32 FreeDosObject = 234;
 constexpr u32 DoPkt = 240;
@@ -133,6 +139,8 @@ constexpr u32 Fault = 468;
 constexpr u32 PrintFault = 474;
 constexpr u32 ErrorReport = 480;
 constexpr u32 Cli = 492;
+constexpr u32 CreateNewProc = 498;
+constexpr u32 RunCommand = 504;
 constexpr u32 GetFileSysTask = 522;
 constexpr u32 SetFileSysTask = 528;
 constexpr u32 GetArgStr = 534;
@@ -145,6 +153,7 @@ constexpr u32 SetProgramName = 570;
 constexpr u32 GetProgramName = 576;
 constexpr u32 SetPrompt = 582;
 constexpr u32 GetPrompt = 588;
+constexpr u32 SystemTagList = 606;
 constexpr u32 AssignLock = 612;
 constexpr u32 AssignLate = 618;
 constexpr u32 AssignPath = 624;
@@ -269,6 +278,38 @@ constexpr u32 cli_DefaultStack = 52;  // in longwords
 constexpr u32 cli_StandardOutput = 56;
 constexpr u32 cli_Module = 60;
 constexpr u32 cli_SIZEOF = 64;
+
+// CreateNewProc tags (dos/dostags.h), as their full 32-bit values.
+constexpr u32 NP_Dummy = 0x800003E8;
+constexpr u32 NP_Seglist = NP_Dummy + 1;
+constexpr u32 NP_FreeSeglist = NP_Dummy + 2;
+constexpr u32 NP_Entry = NP_Dummy + 3;
+constexpr u32 NP_Input = NP_Dummy + 4;
+constexpr u32 NP_Output = NP_Dummy + 5;
+constexpr u32 NP_CloseInput = NP_Dummy + 6;
+constexpr u32 NP_CloseOutput = NP_Dummy + 7;
+constexpr u32 NP_Error = NP_Dummy + 8;
+constexpr u32 NP_CloseError = NP_Dummy + 9;
+constexpr u32 NP_CurrentDir = NP_Dummy + 10;
+constexpr u32 NP_StackSize = NP_Dummy + 11;
+constexpr u32 NP_Name = NP_Dummy + 12;
+constexpr u32 NP_Priority = NP_Dummy + 13;
+constexpr u32 NP_ConsoleTask = NP_Dummy + 14;
+constexpr u32 NP_WindowPtr = NP_Dummy + 15;
+constexpr u32 NP_HomeDir = NP_Dummy + 16;
+constexpr u32 NP_CopyVars = NP_Dummy + 17;
+constexpr u32 NP_Cli = NP_Dummy + 18;
+constexpr u32 NP_Path = NP_Dummy + 19;
+constexpr u32 NP_CommandName = NP_Dummy + 20;
+constexpr u32 NP_Arguments = NP_Dummy + 21;
+
+// SystemTagList and Execute tags (dos/dostags.h).
+constexpr u32 SYS_Dummy = 0x80000020;
+constexpr u32 SYS_Input = SYS_Dummy + 1;
+constexpr u32 SYS_Output = SYS_Dummy + 2;
+constexpr u32 SYS_Asynch = SYS_Dummy + 3;
+constexpr u32 SYS_UserShell = SYS_Dummy + 4;
+constexpr u32 SYS_CustomShell = SYS_Dummy + 5;
 
 // struct FileHandle
 constexpr u32 fh_Link = 0;
@@ -633,6 +674,7 @@ public:
     static constexpr u32 kMaxAnchors = 8;     // active MatchFirst/MatchNext anchors
     static constexpr u32 kMaxAnchorDepth = 8;
     static constexpr u32 kMaxLoggedActions = 32;
+    static constexpr u32 kMaxProcs = 8;  // processes and their CLI numbers
 
     // Makes dos.library over the volume, which must stay mounted, with its
     // structures and the shell Process, registers the Process as exec's
@@ -650,6 +692,10 @@ public:
     // ends any other way (cpu.exit then says how). The command is unloaded
     // afterwards.
     bool run_command(const char* path, const char* args, u32& result, u64 max_blocks);
+
+    // Starts path as a background CLI process with args, reading NIL: and
+    // writing to the shell's output. Returns its CLI number, 0 on failure.
+    u32 start_background(const char* path, const char* args);
 
     // LoadSeg of a path, relative to the current directory: the seglist
     // BPTR, or 0 with the Process's IoErr set. Flushes the translations.
@@ -762,9 +808,8 @@ private:
     static constexpr u32 kVectors = dos_lvo::SetOwner / 6;
     static constexpr u32 kHandles = 2 + kMaxFiles;  // the console in and out first
 
-    enum class Stream : u8 { Closed, Console, File };
+    enum class Stream : u8 { Closed, Console, File, Nil };
 
-    static constexpr u32 kMaxProcs = 8;
     struct ProcContext {
         bool used;
         u32 process;       // guest Process
@@ -782,6 +827,16 @@ private:
         bool running;
         bool exited;
         u32 exit_code;
+        u32 seglist;        // the running seglist, when the context owns one
+        bool free_seglist;
+        u32 cli_number;     // CLI number 1..kMaxProcs, 0 when the process has no CLI
+        u32 process_bytes;  // bytes of the Process block, 0 when not owned
+        u32 cli_bytes;      // bytes of the CLI block, 0 when not owned
+        u32 stack_bytes;    // bytes of the stack, 0 when not owned
+        u32 in_handle;      // pr_CIS
+        u32 out_handle;     // pr_COS
+        bool close_input;
+        bool close_output;
     };
     ProcContext procs_[kMaxProcs]{};
     // The context of the running task: the one whose process is exec's
@@ -790,6 +845,36 @@ private:
     ProcContext& cur();
     // The owner value of the current context, 0 when it has no command running.
     u8 cur_owner() const;
+
+    // What spawn_process builds a Process and its context from. Pointers
+    // stay valid only for the call.
+    struct NewProcess {
+        const char* name;
+        u32 seglist;
+        bool free_seglist;
+        u32 entry;
+        u32 stack_bytes;
+        u32 input;   // 0 = NIL:
+        u32 output;  // 0 = the parent's
+        bool close_input;
+        bool close_output;
+        u32 current_dir;  // 0 = the parent's
+        const char* args;
+        const char* command_name;
+        bool cli;
+        u32 priority;
+    };
+    static constexpr u32 kMaxDeferred = kMaxProcs * 2;
+
+    u32 free_proc_slot() const;
+    u32 free_cli_number() const;
+    bool spawn_process(const NewProcess& spec, u32& process, u32& cli_number);
+    u32 open_nil(u8 owner);
+    void process_ended(u32 task, bool self);
+    void defer_free(u32 at, u32 bytes);
+    void drain_deferred();
+    u32 task_array_at(u32 cli) const;
+    u32 stack_size_of(const ProcContext& p) const;
 
     struct FileSlot {
         Stream stream;
@@ -896,6 +981,12 @@ private:
     u32 path_locks_[kMaxPathDirs]{};
     u32 path_nodes_[kMaxPathDirs]{};
     u32 path_count_ = 0;
+
+    // Memory of processes that ended themselves, freed once nothing runs on
+    // it any more.
+    u32 deferred_addr_[kMaxDeferred]{};
+    u32 deferred_bytes_[kMaxDeferred]{};
+    u32 deferred_count_ = 0;
 };
 
 }

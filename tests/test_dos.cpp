@@ -480,6 +480,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::CreateDir, 120u);
     CHECK_EQ(dos_lvo::CurrentDir, 126u);
     CHECK_EQ(dos_lvo::IoErr, 132u);
+    CHECK_EQ(dos_lvo::CreateProc, 138u);
     CHECK_EQ(dos_lvo::Exit, 144u);
     CHECK_EQ(dos_lvo::LoadSeg, 150u);
     CHECK_EQ(dos_lvo::UnLoadSeg, 156u);
@@ -490,6 +491,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::WaitForChar, 204u);
     CHECK_EQ(dos_lvo::ParentDir, 210u);
     CHECK_EQ(dos_lvo::IsInteractive, 216u);
+    CHECK_EQ(dos_lvo::Execute, 222u);
     CHECK_EQ(dos_lvo::AllocDosObject, 228u);
     CHECK_EQ(dos_lvo::FreeDosObject, 234u);
     CHECK_EQ(dos_lvo::DoPkt, 240u);
@@ -522,6 +524,8 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::PrintFault, 474u);
     CHECK_EQ(dos_lvo::ErrorReport, 480u);
     CHECK_EQ(dos_lvo::Cli, 492u);
+    CHECK_EQ(dos_lvo::CreateNewProc, 498u);
+    CHECK_EQ(dos_lvo::RunCommand, 504u);
     CHECK_EQ(dos_lvo::GetFileSysTask, 522u);
     CHECK_EQ(dos_lvo::SetFileSysTask, 528u);
     CHECK_EQ(dos_lvo::GetArgStr, 534u);
@@ -534,6 +538,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::GetProgramName, 576u);
     CHECK_EQ(dos_lvo::SetPrompt, 582u);
     CHECK_EQ(dos_lvo::GetPrompt, 588u);
+    CHECK_EQ(dos_lvo::SystemTagList, 606u);
     CHECK_EQ(dos_lvo::AssignLock, 612u);
     CHECK_EQ(dos_lvo::AssignLate, 618u);
     CHECK_EQ(dos_lvo::AssignPath, 624u);
@@ -935,7 +940,7 @@ void dos_library_is_built() {
     CHECK_EQ(r.get32(ram_dev + dol_Type), DLT_DEVICE);
     CHECK(r.read_bstr(r.get32(ram_dev + dol_Name)) == "RAM");
     const u32 tasks = r.get32(root + rn_TaskArray) << 2;
-    CHECK_EQ(r.get32(tasks), 1u);
+    CHECK_EQ(r.get32(tasks), Dos::kMaxProcs);
     CHECK_EQ(r.get32(tasks + 4), r.proc() + pr_MsgPort);
     // The semaphores are initialised: their wait queues are empty lists.
     const u32 queue = info + di_DevLock + SS_WAITQUEUE;
@@ -1055,8 +1060,8 @@ void unknown_vector_ends_the_run() {
     g_lines.clear();
     CHECK_EQ(r.dos(dos_lvo::SetOwner), ExitReason::Unimplemented);
     CHECK(logged("dos: unimplemented LVO -996"));
-    CHECK_EQ(r.dos(138), ExitReason::Unimplemented);  // CreateProc
-    CHECK(logged("dos: unimplemented LVO -138"));
+    CHECK_EQ(r.dos(246), ExitReason::Unimplemented);
+    CHECK(logged("dos: unimplemented LVO -246"));
 }
 
 void commands_that_cannot_run() {
@@ -6035,6 +6040,147 @@ void delay_blocks_and_wakes_with_fake_host() {
     }
 }
 
+bool noop_create(void*, u32) { return true; }
+void noop_switch(void*, u32, u32) {}
+void noop_destroy(void*, u32) {}
+
+void use_noop_task_host() {
+    g_exec.set_task_host(TaskHost{noop_create, noop_switch, noop_destroy, nullptr, nullptr,
+                                  nullptr, nullptr, nullptr});
+}
+
+u32 load_echo_seg(Rig& r) {
+    r.str(kData, "C:Hello");
+    const u32 seglist = r.call(dos_lvo::LoadSeg, kData);
+    CHECK(seglist != 0);
+    return seglist;
+}
+
+u32 create_cli(Rig& r, u32 seglist, const char* name, const char* args, u32 stack = 0) {
+    const u32 tags = kData + 0x400;
+    const u32 name_at = kData + 0x500;
+    const u32 args_at = kData + 0x600;
+    r.str(name_at, name);
+    r.str(args_at, args);
+    u32 n = 0;
+    auto tag = [&](u32 tag_value, u32 data) {
+        r.put32(tags + n, tag_value);
+        r.put32(tags + n + 4, data);
+        n += 8;
+    };
+    tag(NP_Seglist, seglist);
+    tag(NP_FreeSeglist, 0);
+    tag(NP_Name, name_at);
+    tag(NP_Cli, DOSTRUE);
+    tag(NP_Arguments, args_at);
+    if (stack != 0) {
+        tag(NP_StackSize, stack);
+    }
+    tag(TAG_DONE, 0);
+    return r.call(dos_lvo::CreateNewProc, tags);
+}
+
+void contexts_keep_their_state_apart() {
+    Rig r;
+    use_noop_task_host();
+    const u32 seglist = load_echo_seg(r);
+    const u32 p2 = create_cli(r, seglist, "two", "alpha beta");
+    const u32 p3 = create_cli(r, seglist, "three", "gamma");
+    CHECK(p2 != 0);
+    CHECK(p3 != 0);
+    CHECK_EQ(r.call(dos_lvo::MaxCli), 3u);
+    CHECK_EQ(r.call(dos_lvo::FindCliProc, 2), p2);
+    CHECK_EQ(r.call(dos_lvo::FindCliProc, 3), p3);
+    CHECK_EQ(r.call(dos_lvo::FindCliProc, 4), 0u);
+
+    const u32 root = r.get32(r.base() + dl_Root);
+    const u32 tasks = r.get32(root + rn_TaskArray) << 2;
+    CHECK_EQ(r.get32(tasks), Dos::kMaxProcs);
+    CHECK_EQ(r.get32(tasks + 2 * 4), p2 + pr_MsgPort);
+    CHECK_EQ(r.get32(tasks + 3 * 4), p3 + pr_MsgPort);
+
+    g_exec.set_this_task(p2);
+    CHECK(r.read_str(r.call(dos_lvo::GetArgStr)).find("alpha beta") == 0);
+    r.str(kData, "RAM:ctx2");
+    const u32 h2 = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    r.str(kData, "RAM:T");
+    const u32 l2 = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    g_exec.set_this_task(p3);
+    CHECK(r.read_str(r.call(dos_lvo::GetArgStr)).find("gamma") == 0);
+    r.str(kData, "RAM:ctx3");
+    const u32 h3 = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    r.str(kData, "RAM:T");
+    const u32 l3 = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(h2 != 0);
+    CHECK(h3 != 0);
+    CHECK(h2 != h3);
+    CHECK(l2 != 0);
+    CHECK(l3 != 0);
+    CHECK(l2 != l3);
+
+    g_exec.set_this_task(p2);
+    CHECK_EQ(r.call(dos_lvo::Exit, 7), 7u);
+    r.m.cpu.exit = ExitReason::None;
+    g_exec.set_this_task(r.proc());
+    r.cpu().a[1] = p2;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK(logged("dos: CLI 2 ended, returned 7"));
+    CHECK_EQ(r.call(dos_lvo::FindCliProc, 2), 0u);
+
+    CHECK_EQ(r.call(dos_lvo::Read, h3, kData + 0x300, 4), 0u);
+    CHECK_EQ(r.call(dos_lvo::Read, h2, kData + 0x300, 4), 0xFFFFFFFFu);
+
+    g_exec.set_this_task(p3);
+    CHECK_EQ(r.call(dos_lvo::Exit, 3), 3u);
+    r.m.cpu.exit = ExitReason::None;
+    g_exec.set_this_task(r.proc());
+    r.cpu().a[1] = p3;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK(logged("dos: CLI 3 ended, returned 3"));
+}
+
+void nil_reads_end_of_file_and_swallows_writes() {
+    Rig r;
+    r.str(kData, "NIL:");
+    const u32 handle = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(handle != 0);
+    r.str(kData + 0x100, "abc");
+    CHECK_EQ(r.call(dos_lvo::Write, handle, kData + 0x100, 3), 3u);
+    CHECK_EQ(r.call(dos_lvo::Read, handle, kData + 0x200, 8), 0u);
+    CHECK_EQ(r.call(dos_lvo::Close, handle), DOSTRUE);
+}
+
+void create_new_proc_builds_a_process() {
+    Rig r;
+    use_noop_task_host();
+    const u32 seglist = load_echo_seg(r);
+    const u32 process = create_cli(r, seglist, "newproc", "arg", 2048);
+    CHECK(process != 0);
+    CHECK_EQ(r.get8(process + LN_TYPE), NT_PROCESS);
+    CHECK(r.read_str(r.get32(process + LN_NAME)) == "newproc");
+    CHECK_EQ(r.get32(process + pr_TaskNum), 2u);
+    CHECK_EQ(r.get32(process + pr_StackSize), 2048u);
+    CHECK(r.read_str(r.get32(process + pr_Arguments)).find("arg") == 0);
+    const u32 cli = r.get32(process + pr_CLI) << 2;
+    CHECK(cli != 0);
+    CHECK_EQ(r.get32(cli + cli_Background), DOSTRUE);
+    CHECK_EQ(r.get32(cli + cli_DefaultStack), 512u);
+    CHECK_EQ(r.get32(cli + cli_StandardInput), r.get32(process + pr_CIS));
+    CHECK_EQ(r.get32(cli + cli_CurrentOutput), r.get32(process + pr_COS));
+
+    const u32 root = r.get32(r.base() + dl_Root);
+    const u32 tasks = r.get32(root + rn_TaskArray) << 2;
+    CHECK_EQ(r.get32(tasks + 2 * 4), process + pr_MsgPort);
+
+    g_exec.set_this_task(process);
+    const u32 in = r.call(dos_lvo::Input);
+    CHECK_EQ(in, r.get32(process + pr_CIS));
+    r.str(kData + 0x300, "abc");
+    CHECK_EQ(r.call(dos_lvo::Read, in, kData + 0x380, 8), 0u);
+    CHECK_EQ(r.call(dos_lvo::Write, in, kData + 0x300, 3), 3u);
+    g_exec.set_this_task(r.proc());
+}
+
 }
 
 int main() {
@@ -6135,5 +6281,8 @@ int main() {
     global_variables();
     ram_handler_port_and_zero_dates();
     delay_blocks_and_wakes_with_fake_host();
+    contexts_keep_their_state_apart();
+    nil_reads_end_of_file_and_swallows_writes();
+    create_new_proc_builds_a_process();
     return check::finish("test_dos");
 }

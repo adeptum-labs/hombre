@@ -67,7 +67,9 @@ constexpr u32 align4(u32 v) {
 constexpr u32 kRootAt = 0;
 constexpr u32 kInfoAt = kRootAt + rn_SIZEOF;
 constexpr u32 kTaskArrayAt = align4(kInfoAt + di_SIZEOF);
-constexpr u32 kVolumeAt = kTaskArrayAt + 8;
+// Entry 0 is the highest CLI number, entry n the port of CLI n.
+constexpr u32 kTaskArrayEntries = Dos::kMaxProcs + 1;
+constexpr u32 kVolumeAt = kTaskArrayAt + kTaskArrayEntries * 4;
 constexpr u32 kVolumeNameAt = kVolumeAt + DosList_SIZEOF;  // a BSTR of up to 30 characters
 constexpr u32 kRamVolumeAt = kVolumeNameAt + 32;
 constexpr u32 kRamVolumeNameAt = kRamVolumeAt + DosList_SIZEOF;  // "Ram Disk" BSTR
@@ -664,6 +666,8 @@ struct SegmentTracker {
 struct DosOps {
     static Dos& of(void* ctx) { return *static_cast<Dos*>(ctx); }
 
+    static void task_ended(void* ctx, u32 task, bool self) { of(ctx).process_ended(task, self); }
+
     // --- the Process ---------------------------------------------------------
 
     static void set_io_err(Dos& d, Bus& b, u32 code) { b.w32(d.cur().process + pr_Result2, code); }
@@ -776,6 +780,9 @@ struct DosOps {
             if (d.out_ != nullptr && bytes != 0) {
                 d.out_(d.out_ctx_, data, bytes);
             }
+            return true;
+        }
+        if (f.stream == Dos::Stream::Nil) {
             return true;
         }
         if (f.entry.volume != Dos::kVolRam) {
@@ -1254,6 +1261,11 @@ struct DosOps {
     static bool is_console(const char* name) {
         return same_name(name, length_of(name), "*") ||
                same_name(name, length_of(name), "CONSOLE:");
+    }
+
+    static bool is_nil(const char* name) {
+        return same_name(name, length_of(name), "NIL:") ||
+               same_name(name, length_of(name), "NIL");
     }
 
     static bool is_volume_or_device(const Dos& d, const char* name, u32 len) {
@@ -1985,6 +1997,9 @@ struct DosOps {
             const u32 left = p.input_length > p.input_pos ? p.input_length - p.input_pos : 0u;
             return buffered + left;
         }
+        if (f.stream == Dos::Stream::Nil) {
+            return buffered;
+        }
         const u32 size = fs_size(d, f.entry);
         const u32 left = f.pos < size ? size - f.pos : 0u;
         return buffered + left;
@@ -2021,7 +2036,7 @@ struct DosOps {
             }
             p.input_pos += n;
             got += n;
-        } else {
+        } else if (f.stream != Dos::Stream::Nil) {
             const u32 size = fs_size(d, f.entry);
             const u32 left = f.pos < size ? size - f.pos : 0u;
             const u32 n = rem < left ? rem : left;
@@ -2062,6 +2077,16 @@ struct DosOps {
             }
             d.files_[slot] = make_file_slot(Dos::Stream::Console, DirEntry{}, "", d.cur_owner());
             init_handle(d, b, static_cast<u32>(slot), true);
+            native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
+            return;
+        }
+        if (is_nil(name)) {
+            if (slot < 0) {
+                table_full(d, b, "file handle", Dos::kMaxFiles);
+                return;
+            }
+            d.files_[slot] = make_file_slot(Dos::Stream::Nil, DirEntry{}, "", d.cur_owner());
+            init_handle(d, b, static_cast<u32>(slot), false);
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
         }
@@ -2188,6 +2213,15 @@ struct DosOps {
         native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
     }
 
+    // Releases the handle; ignore it, and leave the console streams open.
+    static void close_handle(Dos& d, u32 bptr) {
+        const i64 slot = handle_slot(d, bptr);
+        if (slot > static_cast<i64>(kConsoleOut)) {
+            release_entry(d, d.files_[slot].entry);
+            d.files_[slot] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
+        }
+    }
+
     // Close(0) does nothing; the console streams stay open whatever is
     // closed.
     static void close(void* ctx, Machine& m) {
@@ -2197,16 +2231,12 @@ struct DosOps {
             native::set_result(m, DOSTRUE);
             return;
         }
-        const i64 slot = handle_slot(d, fh);
-        if (slot < 0) {
+        if (handle_slot(d, fh) < 0) {
             LogLine().text("dos: Close of a bad file handle ").hex(fh).send();
             native::set_result(m, DOSFALSE);
             return;
         }
-        if (slot > kConsoleOut) {
-            release_entry(d, d.files_[slot].entry);
-            d.files_[slot] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
-        }
+        close_handle(d, fh);
         native::set_result(m, DOSTRUE);
     }
 
@@ -3495,11 +3525,27 @@ struct DosOps {
         select(m, of(ctx), pr_FileSystemTask);
     }
 
-    static void max_cli(void*, Machine& m) { native::set_result(m, 1); }
+    static void max_cli(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        u32 highest = 0;
+        for (const Dos::ProcContext& p : d.procs_) {
+            if (p.used && p.cli_number > highest) {
+                highest = p.cli_number;
+            }
+        }
+        native::set_result(m, highest);
+    }
 
     static void find_cli_proc(void* ctx, Machine& m) {
         Dos& d = of(ctx);
-        native::set_result(m, m.cpu.d[1] == 1 ? d.cur().process : 0);
+        const u32 number = m.cpu.d[1];
+        for (const Dos::ProcContext& p : d.procs_) {
+            if (p.used && p.cli_number == number && number != 0) {
+                native::set_result(m, p.process);
+                return;
+            }
+        }
+        native::set_result(m, 0);
     }
 
     static void find_segment(void*, Machine& m) { native::set_result(m, 0); }
@@ -3544,6 +3590,24 @@ struct DosOps {
         }
         out[copy] = '\0';
         return b.ok() && slen + 1 <= size;
+    }
+
+    // Copies the BSTR at bptr into out, without its length byte.
+    static void read_bstr_guest(Bus& b, u32 bptr, char* out, u32 size) {
+        if (size == 0) {
+            return;
+        }
+        out[0] = '\0';
+        if (bptr == 0) {
+            return;
+        }
+        const u32 at = bptr << 2;
+        const u32 len = b.r8(at);
+        const u32 copy = len < size - 1 ? len : size - 1;
+        for (u32 i = 0; i < copy; ++i) {
+            out[i] = static_cast<char>(b.r8(at + 1 + i));
+        }
+        out[copy] = '\0';
     }
 
     static void set_cli_bstr(Dos& d, Bus& b, u32 field, u32 dest, u32 str_addr) {
@@ -7243,22 +7307,420 @@ struct DosOps {
         }
     }
 
-    static void cleanup_command(Dos& d, u32 saved_current_dir, u32 saved_cis, u32 saved_cos,
-                                u8 owner) {
-        Dos::ProcContext& p = d.procs_[0];
-        d.m_->mem.write32(p.process + pr_CurrentDir, saved_current_dir);
+    // --- processes ---------------------------------------------------------
+
+    // The next item of the tag list at item that is no control tag: TAG_IGNORE
+    // is passed over, TAG_MORE continues at the list in its ti_Data, TAG_SKIP
+    // passes over itself and ti_Data more items, and TAG_DONE or a null list
+    // ends it. item is left after the item returned.
+    static u32 next_tag(Bus& b, u32& item, u32& budget) {
+        for (; budget != 0; --budget) {
+            if (item == 0) {
+                return 0;
+            }
+            const u32 tag = b.r32(item + ti_Tag);
+            if (!b.ok()) {
+                return 0;
+            }
+            switch (tag) {
+            case TAG_DONE:
+                return 0;
+            case TAG_IGNORE:
+                item += ti_SIZEOF;
+                break;
+            case TAG_MORE:
+                item = b.r32(item + ti_Data);
+                break;
+            case TAG_SKIP:
+                item += ti_SIZEOF * (b.r32(item + ti_Data) + 1);
+                break;
+            default: {
+                const u32 found = item;
+                item += ti_SIZEOF;
+                --budget;
+                return found;
+            }
+            }
+        }
+        return 0;
+    }
+
+    struct ProcTags {
+        u32 seglist = 0;
+        bool has_seglist = false;
+        bool free_seglist = false;
+        bool free_seglist_set = false;
+        u32 entry = 0;
+        u32 input = 0;
+        u32 output = 0;
+        bool close_input = true;
+        bool close_output = true;
+        u32 current_dir = 0;
+        u32 stack = 0;
+        u32 name = 0;
+        u32 priority = 0;
+        u32 cli = 0;
+        u32 command_name = 0;
+        u32 arguments = 0;
+    };
+
+    static bool read_proc_tags(Bus& b, u32 list, ProcTags& t) {
+        u32 item = list;
+        u32 budget = Utility::kMaxTagItems;
+        for (;;) {
+            const u32 found = next_tag(b, item, budget);
+            if (found == 0) {
+                return b.ok();
+            }
+            const u32 tag = b.r32(found + ti_Tag);
+            const u32 data = b.r32(found + ti_Data);
+            if (!b.ok()) {
+                return false;
+            }
+            switch (tag) {
+            case NP_Seglist:
+                t.seglist = data;
+                t.has_seglist = true;
+                break;
+            case NP_FreeSeglist:
+                t.free_seglist = data != 0;
+                t.free_seglist_set = true;
+                break;
+            case NP_Entry: t.entry = data; break;
+            case NP_Input: t.input = data; break;
+            case NP_Output: t.output = data; break;
+            case NP_CloseInput: t.close_input = data != 0; break;
+            case NP_CloseOutput: t.close_output = data != 0; break;
+            case NP_CurrentDir: t.current_dir = data; break;
+            case NP_StackSize: t.stack = data; break;
+            case NP_Name: t.name = data; break;
+            case NP_Priority: t.priority = data; break;
+            case NP_Cli: t.cli = data; break;
+            case NP_CommandName: t.command_name = data; break;
+            case NP_Arguments: t.arguments = data; break;
+            default: break;
+            }
+        }
+    }
+
+    struct SysTags {
+        u32 input = 0;
+        u32 output = 0;
+        bool asynch = false;
+    };
+
+    static bool read_sys_tags(Bus& b, u32 list, SysTags& t) {
+        u32 item = list;
+        u32 budget = Utility::kMaxTagItems;
+        for (;;) {
+            const u32 found = next_tag(b, item, budget);
+            if (found == 0) {
+                return b.ok();
+            }
+            const u32 tag = b.r32(found + ti_Tag);
+            const u32 data = b.r32(found + ti_Data);
+            if (!b.ok()) {
+                return false;
+            }
+            switch (tag) {
+            case SYS_Input: t.input = data; break;
+            case SYS_Output: t.output = data; break;
+            case SYS_Asynch: t.asynch = data != 0; break;
+            default: break;
+            }
+        }
+    }
+
+    // Runs seglist in the current process with the argument line, saving and
+    // restoring the process's argument state. Returns D0, or Exit's code, or
+    // -1 when the run ended another way.
+    static u32 run_seg(Dos& d, Bus& b, u32 seglist, const char* args, u32 length, u32 input,
+                       u32 output) {
+        Dos::ProcContext& p = d.cur();
+        if (p.args == 0) {
+            return 0xFFFFFFFF;
+        }
+        char saved_input[Dos::kMaxArgs + 2];
+        char saved_args[Dos::kMaxArgs + 2];
+        for (u32 i = 0; i < Dos::kMaxArgs + 2; ++i) {
+            saved_input[i] = p.input[i];
+            saved_args[i] = static_cast<char>(b.r8(p.args + i));
+        }
+        const u32 saved_length = p.input_length;
+        const u32 saved_pos = p.input_pos;
+        const u32 saved_pr_args = b.r32(p.process + pr_Arguments);
+        const u32 saved_cis = b.r32(p.process + pr_CIS);
+        const u32 saved_cos = b.r32(p.process + pr_COS);
+        const bool saved_running = p.running;
+        const bool saved_exited = p.exited;
+        const u32 saved_exit_code = p.exit_code;
+        u32 n = 0;
+        for (; n < length && n < Dos::kMaxArgs; ++n) {
+            p.input[n] = args[n];
+            b.w8(p.args + n, static_cast<u8>(args[n]));
+        }
+        if (n == 0 || p.input[n - 1] != '\n') {
+            p.input[n] = '\n';
+            b.w8(p.args + n, '\n');
+            ++n;
+        }
+        p.input[n] = '\0';
+        p.input_length = n;
+        p.input_pos = 0;
+        b.w8(p.args + n, 0);
+        b.w32(p.process + pr_Arguments, p.args);
+        if (input != 0) {
+            b.w32(p.process + pr_CIS, input);
+        }
+        if (output != 0) {
+            b.w32(p.process + pr_COS, output);
+        }
+        p.running = true;
+        p.exited = false;
+        p.exit_code = 0;
+        const u32 stack_bytes = d.stack_size_of(p);
+        const u32 top = p.stack + stack_bytes;
+        const u32 saved_top4 = b.r32(top - 4);
+        const u32 saved_top8 = b.r32(top - 8);
+        b.w32(top - 4, stack_bytes);
+        CpuState saved_cpu = d.m_->cpu;
+        CpuState& cpu = d.m_->cpu;
+        cpu.exit = ExitReason::None;
+        for (u32 i = 0; i < 8; ++i) {
+            cpu.d[i] = 0;
+            cpu.a[i] = 0;
+        }
+        cpu.d[0] = n;
+        cpu.a[0] = p.args;
+        cpu.a[7] = top - 4;
+        const ExitReason why = d.m_->jit->call_guest((seglist << 2) + 4, ~0ull);
+        u32 rc = 0xFFFFFFFF;
+        if (why == ExitReason::Returned) {
+            rc = cpu.d[0];
+        } else if (why == ExitReason::Halt && p.exited) {
+            rc = p.exit_code;
+            cpu.exit = ExitReason::None;
+        }
+        const bool ended = why == ExitReason::Returned ||
+                           (why == ExitReason::Halt && p.exited);
+        d.m_->cpu = saved_cpu;
+        if (!ended) {
+            d.m_->cpu.exit = why;
+        }
+        p.input_length = saved_length;
+        p.input_pos = saved_pos;
+        for (u32 i = 0; i < Dos::kMaxArgs + 2; ++i) {
+            p.input[i] = saved_input[i];
+            b.w8(p.args + i, static_cast<u8>(saved_args[i]));
+        }
+        b.w32(top - 4, saved_top4);
+        b.w32(top - 8, saved_top8);
+        b.w32(p.process + pr_Arguments, saved_pr_args);
+        b.w32(p.process + pr_CIS, saved_cis);
+        b.w32(p.process + pr_COS, saved_cos);
+        p.running = saved_running;
+        p.exited = saved_exited;
+        p.exit_code = saved_exit_code;
+        return rc;
+    }
+
+    static void create_proc(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        char name[kMaxName];
+        name[0] = '\0';
+        if (m.cpu.d[1] != 0 && !b.string(m.cpu.d[1], name, sizeof name)) {
+            native::set_result(m, 0);
+            return;
+        }
+        Dos::NewProcess spec{};
+        spec.name = name;
+        spec.seglist = m.cpu.d[3];
+        spec.free_seglist = false;
+        spec.stack_bytes = m.cpu.d[4] != 0 ? m.cpu.d[4] : Dos::kStackBytes;
+        spec.close_input = true;
+        spec.close_output = true;
+        spec.args = "";
+        spec.command_name = name;
+        spec.cli = false;
+        spec.priority = m.cpu.d[2];
+        u32 process = 0;
+        u32 cli = 0;
+        if (!d.spawn_process(spec, process, cli)) {
+            native::set_result(m, 0);
+            return;
+        }
+        native::set_result(m, process + pr_MsgPort);
+    }
+
+    static void create_new_proc(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        ProcTags t{};
+        if (!read_proc_tags(b, m.cpu.d[1], t)) {
+            native::set_result(m, 0);
+            return;
+        }
+        char name[kMaxName];
+        char command_name[kMaxName];
+        char args[Dos::kMaxArgs + 1];
+        name[0] = '\0';
+        command_name[0] = '\0';
+        args[0] = '\0';
+        if ((t.name != 0 && !b.string(t.name, name, sizeof name)) ||
+            (t.command_name != 0 && !b.string(t.command_name, command_name,
+                                             sizeof command_name)) ||
+            (t.arguments != 0 && !b.string(t.arguments, args, sizeof args))) {
+            native::set_result(m, 0);
+            return;
+        }
+        Dos::NewProcess spec{};
+        spec.name = name;
+        spec.seglist = t.seglist;
+        spec.free_seglist = t.has_seglist && (t.free_seglist_set ? t.free_seglist : true);
+        spec.entry = t.entry;
+        spec.stack_bytes = t.stack != 0 ? t.stack : Dos::kStackBytes;
+        spec.input = t.input;
+        spec.output = t.output;
+        spec.close_input = t.close_input;
+        spec.close_output = t.close_output;
+        spec.current_dir = t.current_dir;
+        spec.args = args;
+        spec.command_name = command_name;
+        spec.cli = t.cli != 0;
+        spec.priority = t.priority;
+        u32 process = 0;
+        u32 cli = 0;
+        if (!d.spawn_process(spec, process, cli)) {
+            native::set_result(m, 0);
+            return;
+        }
+        native::set_result(m, process);
+    }
+
+    static void run_command_native(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 seglist = m.cpu.d[1];
+        if (seglist == 0) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        char args[Dos::kMaxArgs];
+        u32 length = 0;
+        const u32 given = m.cpu.d[4];
+        for (; length < given && length < Dos::kMaxArgs; ++length) {
+            const u32 c = b.r8(m.cpu.d[3] + length);
+            if (!b.ok()) {
+                native::set_result(m, 0xFFFFFFFF);
+                return;
+            }
+            args[length] = static_cast<char>(c);
+        }
+        if (given > Dos::kMaxArgs) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        native::set_result(m, run_seg(d, b, seglist, args, length, 0, 0));
+    }
+
+    // Runs a command line in the current process, or as a background CLI
+    // process when asynch is true. False when the command is not found or
+    // could not be loaded; rc is its return code otherwise.
+    static bool run_command_line(Dos& d, Bus& b, u32 command, u32 input, u32 output, bool asynch,
+                                 u32& rc) {
+        rc = 0xFFFFFFFF;
+        char line[Dos::kMaxArgs + 1];
+        if (command == 0 || !b.string(command, line, sizeof line)) {
+            return false;
+        }
+        char word[kMaxName];
+        const char* s = line;
+        while (*s == ' ' || *s == '\t') {
+            ++s;
+        }
+        u32 w = 0;
+        while (*s != '\0' && *s != ' ' && *s != '\t' && w + 1 < sizeof word) {
+            word[w++] = *s++;
+        }
+        word[w] = '\0';
+        while (*s == ' ' || *s == '\t') {
+            ++s;
+        }
+        if (word[0] == '\0') {
+            return false;
+        }
+        char path[Dos::kMaxPath];
+        if (!d.find_command(word, path, sizeof path)) {
+            return false;
+        }
+        const u32 seglist = d.load_seg(path);
+        if (seglist == 0) {
+            return false;
+        }
+        if (asynch) {
+            Dos::NewProcess spec{};
+            spec.name = path;
+            spec.seglist = seglist;
+            spec.free_seglist = true;
+            spec.stack_bytes = Dos::kStackBytes;
+            spec.input = input;
+            spec.output = output;
+            spec.close_input = input == 0;
+            spec.close_output = output == 0;
+            spec.args = s;
+            spec.command_name = path;
+            spec.cli = true;
+            u32 process = 0;
+            u32 cli = 0;
+            if (!d.spawn_process(spec, process, cli)) {
+                unload(d, seglist);
+                return false;
+            }
+            rc = 0;
+            return true;
+        }
+        rc = run_seg(d, b, seglist, s, length_of(s), input, output);
+        unload(d, seglist);
+        return true;
+    }
+
+    static void system_tag_list(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        SysTags t{};
+        if (!read_sys_tags(b, m.cpu.d[2], t)) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        u32 rc = 0xFFFFFFFF;
+        run_command_line(d, b, m.cpu.d[1], t.input, t.output, t.asynch, rc);
+        native::set_result(m, rc);
+    }
+
+    static void execute_native(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        u32 rc = 0;
+        const bool ran = run_command_line(d, b, m.cpu.d[1], m.cpu.d[2], m.cpu.d[3], false, rc);
+        native::set_result(m, ran ? DOSTRUE : 0);
+    }
+
+    static void cleanup_command(Dos& d, u32 process, u32 saved_current_dir, u32 saved_cis,
+                                u32 saved_cos, u8 owner) {
+        d.m_->mem.write32(process + pr_CurrentDir, saved_current_dir);
         u32 cur_cis = 0;
-        if (d.m_->mem.read32(p.process + pr_CIS, cur_cis)) {
+        if (d.m_->mem.read32(process + pr_CIS, cur_cis)) {
             const i64 slot = handle_slot(d, cur_cis);
             if (slot > static_cast<i64>(kConsoleOut) && d.files_[slot].owner == owner) {
-                d.m_->mem.write32(p.process + pr_CIS, saved_cis);
+                d.m_->mem.write32(process + pr_CIS, saved_cis);
             }
         }
         u32 cur_cos = 0;
-        if (d.m_->mem.read32(p.process + pr_COS, cur_cos)) {
+        if (d.m_->mem.read32(process + pr_COS, cur_cos)) {
             const i64 slot = handle_slot(d, cur_cos);
             if (slot > static_cast<i64>(kConsoleOut) && d.files_[slot].owner == owner) {
-                d.m_->mem.write32(p.process + pr_COS, saved_cos);
+                d.m_->mem.write32(process + pr_COS, saved_cos);
             }
         }
         for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
@@ -7310,6 +7772,7 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::CreateDir, DosOps::create_dir, "CreateDir"},
     {dos_lvo::CurrentDir, DosOps::current_dir, "CurrentDir"},
     {dos_lvo::IoErr, DosOps::io_err, "IoErr"},
+    {dos_lvo::CreateProc, DosOps::create_proc, "CreateProc"},
     {dos_lvo::Exit, DosOps::exit, "Exit"},
     {dos_lvo::LoadSeg, DosOps::load_seg_lvo, "LoadSeg"},
     {dos_lvo::UnLoadSeg, DosOps::unload_seg, "UnLoadSeg"},
@@ -7320,6 +7783,7 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::WaitForChar, DosOps::wait_for_char, "WaitForChar"},
     {dos_lvo::ParentDir, DosOps::parent_dir, "ParentDir"},
     {dos_lvo::IsInteractive, DosOps::is_interactive, "IsInteractive"},
+    {dos_lvo::Execute, DosOps::execute_native, "Execute"},
     {dos_lvo::AllocDosObject, DosOps::alloc_dos_object, "AllocDosObject"},
     {dos_lvo::FreeDosObject, DosOps::free_dos_object, "FreeDosObject"},
     {dos_lvo::DoPkt, DosOps::do_pkt, "DoPkt"},
@@ -7352,6 +7816,8 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::PrintFault, DosOps::print_fault, "PrintFault"},
     {dos_lvo::ErrorReport, DosOps::error_report, "ErrorReport"},
     {dos_lvo::Cli, DosOps::cli, "Cli"},
+    {dos_lvo::CreateNewProc, DosOps::create_new_proc, "CreateNewProc"},
+    {dos_lvo::RunCommand, DosOps::run_command_native, "RunCommand"},
     {dos_lvo::GetFileSysTask, DosOps::get_file_sys_task, "GetFileSysTask"},
     {dos_lvo::SetFileSysTask, DosOps::set_file_sys_task, "SetFileSysTask"},
     {dos_lvo::GetArgStr, DosOps::get_arg_str, "GetArgStr"},
@@ -7364,6 +7830,7 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::GetProgramName, DosOps::get_program_name, "GetProgramName"},
     {dos_lvo::SetPrompt, DosOps::set_prompt, "SetPrompt"},
     {dos_lvo::GetPrompt, DosOps::get_prompt, "GetPrompt"},
+    {dos_lvo::SystemTagList, DosOps::system_tag_list, "SystemTagList"},
     {dos_lvo::AssignLock, DosOps::assign_lock, "AssignLock"},
     {dos_lvo::AssignLate, DosOps::assign_late, "AssignLate"},
     {dos_lvo::AssignPath, DosOps::assign_path, "AssignPath"},
@@ -7427,6 +7894,410 @@ u8 Dos::cur_owner() const {
     return procs_[i].running ? static_cast<u8>(i + 1) : 0;
 }
 
+u32 Dos::task_array_at(u32 cli) const { return block_ + kTaskArrayAt + cli * 4; }
+
+u32 Dos::stack_size_of(const ProcContext& p) const {
+    return p.stack_bytes != 0 ? p.stack_bytes : kStackBytes;
+}
+
+u32 Dos::free_proc_slot() const {
+    for (u32 i = 1; i < kMaxProcs; ++i) {
+        if (!procs_[i].used) {
+            return i;
+        }
+    }
+    return kMaxProcs;
+}
+
+u32 Dos::free_cli_number() const {
+    for (u32 number = 2; number <= kMaxProcs; ++number) {
+        bool used = false;
+        for (const ProcContext& p : procs_) {
+            if (p.used && p.cli_number == number) {
+                used = true;
+            }
+        }
+        if (!used) {
+            return number;
+        }
+    }
+    return 0;
+}
+
+u32 Dos::open_nil(u8 owner) {
+    if (m_ == nullptr) {
+        return 0;
+    }
+    const i64 slot = DosOps::free_handle(*this);
+    if (slot < 0) {
+        return 0;
+    }
+    Bus b(*m_);
+    files_[slot] = DosOps::make_file_slot(Stream::Nil, DirEntry{}, "", owner);
+    DosOps::init_handle(*this, b, static_cast<u32>(slot), false);
+    if (!b.ok()) {
+        files_[slot] = DosOps::make_file_slot(Stream::Closed, DirEntry{}, "");
+        return 0;
+    }
+    return DosOps::handle_bptr(*this, static_cast<u32>(slot));
+}
+
+void Dos::defer_free(u32 at, u32 bytes) {
+    if (deferred_count_ >= kMaxDeferred) {
+        LogLine().text("dos: deferred free list full").send();
+        return;
+    }
+    deferred_addr_[deferred_count_] = at;
+    deferred_bytes_[deferred_count_] = bytes;
+    ++deferred_count_;
+}
+
+void Dos::drain_deferred() {
+    for (u32 i = 0; i < deferred_count_; ++i) {
+        if (exec_ != nullptr && deferred_addr_[i] != 0) {
+            exec_->free(deferred_addr_[i], deferred_bytes_[i]);
+        }
+    }
+    deferred_count_ = 0;
+}
+
+bool Dos::spawn_process(const NewProcess& spec, u32& process_out, u32& cli_number) {
+    process_out = 0;
+    cli_number = 0;
+    if (m_ == nullptr) {
+        return false;
+    }
+    const u32 index = free_proc_slot();
+    if (index >= kMaxProcs) {
+        return false;
+    }
+    u32 cli = 0;
+    if (spec.cli) {
+        cli = free_cli_number();
+        if (cli == 0) {
+            return false;
+        }
+    }
+    const char* name = spec.name != nullptr ? spec.name : "";
+    const char* args = spec.args != nullptr ? spec.args : "";
+    const u32 stack_bytes = spec.stack_bytes < 1024 ? 1024 : spec.stack_bytes;
+    const u32 name_len = length_of(name);
+    const u32 args_off = align4(pr_SIZEOF + name_len + 1);
+    const u32 process_bytes = args_off + kMaxArgs + 2;
+    constexpr u32 kCliBlockBytes = cli_SIZEOF + 4 * 260;
+    Bus b(*m_);
+    ProcContext& parent = cur();
+    const u32 parent_cli = b.r32(parent.process + pr_CLI);
+    const u32 parent_dir = b.r32(parent.process + pr_CurrentDir);
+    const u32 parent_cos = b.r32(parent.process + pr_COS);
+    u32 process = exec_->alloc(process_bytes, MEMF_PUBLIC | MEMF_CLEAR);
+    u32 cli_at = spec.cli ? exec_->alloc(kCliBlockBytes, MEMF_PUBLIC | MEMF_CLEAR) : 0;
+    u32 stack = exec_->alloc(stack_bytes, MEMF_PUBLIC | MEMF_CLEAR);
+    u32 input = spec.input;
+    u32 output = spec.output;
+    u32 current_dir = spec.current_dir;
+    bool close_input = spec.close_input;
+    u32 created_input = 0;
+    auto rollback = [&]() -> bool {
+        if (created_input != 0) {
+            DosOps::close_handle(*this, created_input);
+        }
+        if (spec.current_dir == 0 && current_dir != 0) {
+            DosOps::free_user_lock(*this, current_dir);
+        }
+        if (stack != 0) {
+            exec_->free(stack, stack_bytes);
+        }
+        if (cli_at != 0) {
+            exec_->free(cli_at, kCliBlockBytes);
+        }
+        if (process != 0) {
+            exec_->free(process, process_bytes);
+        }
+        return false;
+    };
+    if (process == 0 || (spec.cli && cli_at == 0) || stack == 0) {
+        return rollback();
+    }
+    put_string(b, process + pr_SIZEOF, name);
+    const u32 args_at = process + args_off;
+    u32 length = length_of(args);
+    if (length > kMaxArgs) {
+        return rollback();
+    }
+    Dos::ProcContext& p = procs_[index];
+    p = ProcContext{};
+    for (u32 i = 0; i < length; ++i) {
+        p.input[i] = args[i];
+        b.w8(args_at + i, static_cast<u8>(args[i]));
+    }
+    if (length == 0 || p.input[length - 1] != '\n') {
+        p.input[length] = '\n';
+        b.w8(args_at + length, '\n');
+        ++length;
+    }
+    b.w8(args_at + length, 0);
+    p.input[length] = '\0';
+    p.input_length = length;
+    p.input_pos = 0;
+    if (input == 0) {
+        created_input = open_nil(0);
+        input = created_input;
+        close_input = true;
+        if (input == 0) {
+            return rollback();
+        }
+    }
+    if (output == 0) {
+        output = parent_cos;
+    }
+    if (current_dir == 0 && parent_dir != 0) {
+        const Dos::LockSlot* slot = DosOps::find_lock_slot(*this, parent_dir);
+        if (slot == nullptr ||
+            !DosOps::alloc_user_lock(*this, b, slot->path, slot->entry, SHARED_LOCK, current_dir,
+                                     0)) {
+            current_dir = 0;
+        }
+    }
+
+    b.w8(process + LN_TYPE, NT_PROCESS);
+    b.w8(process + LN_PRI, static_cast<u8>(spec.priority));
+    b.w32(process + LN_NAME, process + pr_SIZEOF);
+    const u32 port = process + pr_MsgPort;
+    b.w8(port + LN_TYPE, NT_MSGPORT);
+    b.w8(port + MP_FLAGS, PA_SIGNAL);
+    b.w8(port + MP_SIGBIT, SIGB_DOS);
+    b.w32(port + MP_SIGTASK, process);
+    new_list(b, port + MP_MSGLIST);
+    b.w32(process + pr_TaskNum, cli);
+    b.w32(process + pr_StackSize, stack_bytes);
+    b.w32(process + pr_StackBase, (stack + stack_bytes) >> 2);
+    b.w32(process + TC_SPLOWER, stack);
+    b.w32(process + TC_SPUPPER, stack + stack_bytes);
+    b.w32(process + pr_Result2, 0);
+    b.w32(process + pr_CurrentDir, current_dir);
+    b.w32(process + pr_CIS, input);
+    b.w32(process + pr_COS, output);
+    b.w32(process + pr_FileSystemTask, port_);
+    b.w32(process + pr_CLI, cli_at >> 2);
+    new_list(b, process + pr_LocalVars);
+    b.w32(process + pr_Arguments, args_at);
+    const u32 top = stack + stack_bytes;
+    b.w32(top - 4, stack_bytes);
+    b.w32(process + pr_ReturnAddr, top - 4);
+    b.w32(process + TC_SPREG, top - 4);
+
+    char set_text[260];
+    char prompt_text[260];
+    char command_text[260];
+    set_text[0] = '\0';
+    copy_cstr(prompt_text, kPrompt, sizeof prompt_text);
+    copy_cstr(command_text, spec.command_name != nullptr ? spec.command_name : "",
+              sizeof command_text);
+    if (cli_at != 0) {
+        if (parent_cli != 0) {
+            DosOps::read_bstr_guest(b, b.r32((parent_cli << 2) + cli_SetName), set_text,
+                                    sizeof set_text);
+            char parent_prompt[260];
+            DosOps::read_bstr_guest(b, b.r32((parent_cli << 2) + cli_Prompt), parent_prompt,
+                                    sizeof parent_prompt);
+            if (parent_prompt[0] != '\0') {
+                copy_cstr(prompt_text, parent_prompt, sizeof prompt_text);
+            }
+        }
+        const u32 set_name_at = cli_at + cli_SIZEOF;
+        const u32 prompt_at = set_name_at + 260;
+        const u32 command_name_at = prompt_at + 260;
+        const u32 command_file_at = command_name_at + 260;
+        put_bstr(b, set_name_at, set_text, 255);
+        put_bstr(b, prompt_at, prompt_text, 255);
+        put_bstr(b, command_name_at, command_text, 255);
+        put_bstr(b, command_file_at, "", 0);
+        b.w32(cli_at + cli_Result2, 0);
+        b.w32(cli_at + cli_SetName, set_name_at >> 2);
+        b.w32(cli_at + cli_CommandDir, parent_cli != 0 ? b.r32((parent_cli << 2) + cli_CommandDir)
+                                                       : 0);
+        b.w32(cli_at + cli_ReturnCode, 0);
+        b.w32(cli_at + cli_CommandName, command_name_at >> 2);
+        b.w32(cli_at + cli_FailLevel, kFailLevel);
+        b.w32(cli_at + cli_Prompt, prompt_at >> 2);
+        b.w32(cli_at + cli_StandardInput, input);
+        b.w32(cli_at + cli_CurrentInput, input);
+        b.w32(cli_at + cli_CommandFile, command_file_at >> 2);
+        b.w32(cli_at + cli_Interactive, DOSFALSE);
+        b.w32(cli_at + cli_Background, DOSTRUE);
+        b.w32(cli_at + cli_CurrentOutput, output);
+        b.w32(cli_at + cli_DefaultStack, stack_bytes / 4);
+        b.w32(cli_at + cli_StandardOutput, output);
+        b.w32(cli_at + cli_Module, 0);
+        p.command_name = command_name_at;
+        p.prompt = prompt_at;
+        p.set_name = set_name_at;
+    }
+    if (!b.ok()) {
+        return rollback();
+    }
+
+    const u32 entry = spec.entry != 0 ? spec.entry
+                                     : (spec.seglist != 0 ? (spec.seglist << 2) + 4 : 0);
+    if (entry == 0) {
+        return rollback();
+    }
+    p.used = true;
+    p.process = process;
+    p.cli = cli_at;
+    p.args = args_at;
+    p.stack = stack;
+    p.running = true;
+    p.exited = false;
+    p.exit_code = 0;
+    p.seglist = spec.seglist;
+    p.free_seglist = spec.free_seglist;
+    p.cli_number = cli;
+    p.process_bytes = process_bytes;
+    p.cli_bytes = spec.cli ? kCliBlockBytes : 0;
+    p.stack_bytes = stack_bytes;
+    p.in_handle = input;
+    p.out_handle = output;
+    p.close_input = close_input;
+    p.close_output = spec.close_output;
+    m_->cpu.d[0] = length;
+    m_->cpu.a[0] = args_at;
+    if (exec_->spawn(process, entry, 0, true) == 0) {
+        p = ProcContext{};
+        return rollback();
+    }
+
+    if (spec.current_dir != 0) {
+        const i64 lock = DosOps::lock_slot(*this, spec.current_dir);
+        if (lock >= 0) {
+            lock_slots_[lock].owner = static_cast<u8>(index + 1);
+        }
+    } else if (current_dir != 0) {
+        const i64 lock = DosOps::lock_slot(*this, current_dir);
+        if (lock >= 0) {
+            lock_slots_[lock].owner = static_cast<u8>(index + 1);
+        }
+    }
+    if (cli != 0) {
+        b.w32(task_array_at(cli), port);
+    }
+    process_out = process;
+    cli_number = cli;
+    return b.ok();
+}
+
+void Dos::process_ended(u32 task, bool self) {
+    if (m_ == nullptr) {
+        return;
+    }
+    drain_deferred();
+    u32 index = kMaxProcs;
+    for (u32 i = 0; i < kMaxProcs; ++i) {
+        if (procs_[i].used && procs_[i].process == task) {
+            index = i;
+            break;
+        }
+    }
+    if (index == kMaxProcs || index == 0) {
+        return;
+    }
+    ProcContext& p = procs_[index];
+    Bus b(*m_);
+    char name[kMaxName];
+    name[0] = '\0';
+    const u32 name_at = b.r32(p.process + LN_NAME);
+    if (name_at != 0) {
+        b.string(name_at, name, sizeof name);
+    }
+    u32 rc = 0;
+    if (p.exited) {
+        rc = p.exit_code;
+    } else if (self) {
+        rc = m_->cpu.d[0];
+    }
+    if (p.cli_number != 0) {
+        LogLine().text("dos: CLI ").dec(p.cli_number).text(" ended, returned ").dec(rc).send();
+    } else {
+        LogLine().text("dos: process ").text(name).text(" ended, returned ").dec(rc).send();
+    }
+    u32 current_dir = 0;
+    u32 cis = 0;
+    u32 cos = 0;
+    m_->mem.read32(p.process + pr_CurrentDir, current_dir);
+    m_->mem.read32(p.process + pr_CIS, cis);
+    m_->mem.read32(p.process + pr_COS, cos);
+    DosOps::cleanup_command(*this, p.process, current_dir, cis, cos,
+                            static_cast<u8>(index + 1));
+    if (p.close_input && p.in_handle != 0) {
+        DosOps::close_handle(*this, p.in_handle);
+    }
+    if (p.close_output && p.out_handle != 0) {
+        DosOps::close_handle(*this, p.out_handle);
+    }
+    if (p.free_seglist && p.seglist != 0) {
+        DosOps::unload(*this, p.seglist);
+    }
+    if (p.cli_number != 0) {
+        b.w32(task_array_at(p.cli_number), 0);
+    }
+    if (p.cli_bytes != 0) {
+        exec_->free(p.cli, p.cli_bytes);
+    }
+    if (p.stack_bytes != 0) {
+        if (self) {
+            defer_free(p.stack, p.stack_bytes);
+        } else {
+            exec_->free(p.stack, p.stack_bytes);
+        }
+    }
+    if (p.process_bytes != 0) {
+        if (self) {
+            defer_free(p.process, p.process_bytes);
+        } else {
+            exec_->free(p.process, p.process_bytes);
+        }
+    }
+    p = ProcContext{};
+}
+
+u32 Dos::start_background(const char* path, const char* args) {
+    if (m_ == nullptr || path == nullptr || args == nullptr) {
+        return 0;
+    }
+    const u32 seglist = load_seg(path);
+    if (seglist == 0) {
+        return 0;
+    }
+    const u32 input = open_nil(0);
+    if (input == 0) {
+        DosOps::unload(*this, seglist);
+        return 0;
+    }
+    const u32 output = procs_[0].process != 0 ? procs_[0].out_handle : 0;
+    NewProcess spec{};
+    spec.name = path;
+    spec.seglist = seglist;
+    spec.free_seglist = true;
+    spec.stack_bytes = kStackBytes;
+    spec.input = input;
+    spec.output = output;
+    spec.close_input = true;
+    spec.close_output = true;
+    spec.args = args;
+    spec.command_name = path;
+    spec.cli = true;
+    u32 process = 0;
+    u32 cli = 0;
+    if (!spawn_process(spec, process, cli)) {
+        DosOps::close_handle(*this, input);
+        DosOps::unload(*this, seglist);
+        return 0;
+    }
+    (void)process;
+    return cli;
+}
+
 bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out, void* ctx) {
     m_ = nullptr;
     exec_ = &exec;
@@ -7471,6 +8342,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
         path_nodes_[i] = 0;
     }
     path_count_ = 0;
+    deferred_count_ = 0;
     if (m.jit == nullptr || m.mem.base == nullptr || volume.image == nullptr) {
         return false;
     }
@@ -7535,7 +8407,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     b.w32(root_ + rn_TaskArray, tasks >> 2);
     b.w32(root_ + rn_Info, info >> 2);
     new_list(b, root_ + rn_CliList);
-    b.w32(tasks, 1);
+    b.w32(tasks, Dos::kMaxProcs);
     b.w32(tasks + 4, proc.process + pr_MsgPort);
     b.w32(info + di_DevInfo, volume_node_ >> 2);
     init_semaphore(b, info + di_DevLock);
@@ -7620,6 +8492,11 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     b.w32(proc.cli + cli_CurrentOutput, b.r32(proc.process + pr_COS));
     b.w32(proc.cli + cli_DefaultStack, kStackBytes / 4);
     b.w32(proc.cli + cli_StandardOutput, b.r32(proc.process + pr_COS));
+    proc.cli_number = 1;
+    proc.in_handle = b.r32(proc.process + pr_CIS);
+    proc.out_handle = b.r32(proc.process + pr_COS);
+    proc.close_input = false;
+    proc.close_output = false;
 
     // The console streams.
     files_[kConsoleIn] = DosOps::make_file_slot(Stream::Console, DirEntry{}, "");
@@ -7716,6 +8593,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
 
     exec.set_this_task(proc.process);
     exec.set_segment_loader(SegmentLoader{DosOps::load_segment, this});
+    exec.set_task_end_hook(DosOps::task_ended, this);
     return true;
 }
 
@@ -7863,7 +8741,8 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
     p.running = false;
     exec_->end_child_tasks();
     exec_->reset_nest_counts();
-    DosOps::cleanup_command(*this, saved_current_dir, saved_cis, saved_cos, 1);
+    DosOps::cleanup_command(*this, p.process, saved_current_dir, saved_cis, saved_cos, 1);
+    drain_deferred();
     bool ok = false;
     if (why == ExitReason::Returned) {
         result = cpu.d[0];
