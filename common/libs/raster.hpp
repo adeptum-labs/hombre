@@ -75,6 +75,11 @@ bool visible(const Bitmap& bitmap, const Clip& clip, i64 x, i64 y) {
            static_cast<u64>(y) < bitmap.rows;
 }
 
+bool column_visible(const Bitmap& bitmap, const Clip& clip, i64 x) {
+    return x >= clip.x0 && x <= clip.x1 && x >= 0 &&
+           (static_cast<u64>(x) >> 3) < bitmap.bytes_per_row;
+}
+
 u32 plane_address(const Bitmap& bitmap, u32 plane, u32 x, u32 y) {
     return bitmap.planes[plane] + y * bitmap.bytes_per_row + (x >> 3);
 }
@@ -109,6 +114,58 @@ void plot(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i64 x, i64 y
     }
     write_pixel(bus, bitmap, static_cast<i32>(x), static_cast<i32>(y), pen);
     grow(dirty, static_cast<i32>(x), static_cast<i32>(y));
+}
+
+// The bits of a plane byte from pixel x to the byte's right end, and from
+// its left end to pixel x.
+u8 left_mask(i64 x) {
+    return static_cast<u8>(0xFFu >> (x & 7));
+}
+
+u8 right_mask(i64 x) {
+    return static_cast<u8>(0xFFu << (7 - (x & 7)));
+}
+
+u8 merge(u8 old, u8 value, u8 mask) {
+    return static_cast<u8>((old & ~mask) | (value & mask));
+}
+
+// Sets the masked bits of the span bytes to value; lmask applies to the
+// first byte and rmask to the last, both to a span of one byte.
+void fill_span(u8* row, u32 span, u8 lmask, u8 rmask, u8 value) {
+    if (span == 1) {
+        row[0] = merge(row[0], value, static_cast<u8>(lmask & rmask));
+        return;
+    }
+    row[0] = merge(row[0], value, lmask);
+    for (u32 i = 1; i + 1 < span; ++i) {
+        row[i] = value;
+    }
+    row[span - 1] = merge(row[span - 1], value, rmask);
+}
+
+// Copies the masked bits of the span bytes from src, masked as in fill_span.
+void copy_span(u8* dst, const u8* src, u32 span, u8 lmask, u8 rmask) {
+    if (span == 1) {
+        dst[0] = merge(dst[0], src[0], static_cast<u8>(lmask & rmask));
+        return;
+    }
+    dst[0] = merge(dst[0], src[0], lmask);
+    for (u32 i = 1; i + 1 < span; ++i) {
+        dst[i] = src[i];
+    }
+    dst[span - 1] = merge(dst[span - 1], src[span - 1], rmask);
+}
+
+// The glyph row with its leftmost pixel in bit 7, as in a plane byte.
+u8 plane_bits(u8 glyph_row) {
+    u8 out = 0;
+    for (u32 col = 0; col < 8; ++col) {
+        if (((glyph_row >> col) & 1) != 0) {
+            out |= static_cast<u8>(0x80u >> col);
+        }
+    }
+    return out;
 }
 
 }
@@ -201,9 +258,21 @@ inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     if (left > right || top > bottom) {
         return empty_rect();
     }
-    for (i64 y = top; y <= bottom && bus.ok(); ++y) {
-        for (i64 x = left; x <= right && bus.ok(); ++x) {
-            write_pixel(bus, bitmap, static_cast<i32>(x), static_cast<i32>(y), pen);
+    // A plane byte at a time: whole bytes inside the span, masked at its ends.
+    const u32 first = static_cast<u32>(left) >> 3;
+    const u32 span = (static_cast<u32>(right) >> 3) - first + 1;
+    const u8 lmask = left_mask(left);
+    const u8 rmask = right_mask(right);
+    for (u32 plane = 0; plane < bitmap.depth && plane < 8; ++plane) {
+        const u8 value = ((pen >> plane) & 1) != 0 ? 0xFF : 0x00;
+        for (i64 y = top; y <= bottom; ++y) {
+            u8* row = bus.bytes_at(bitmap.planes[plane] +
+                                       static_cast<u32>(y) * bitmap.bytes_per_row + first,
+                                   span);
+            if (row == nullptr) {
+                break;
+            }
+            fill_span(row, span, lmask, rmask, value);
         }
     }
     return Rect{static_cast<i32>(left), static_cast<i32>(top), static_cast<i32>(right),
@@ -249,6 +318,29 @@ inline Rect draw_text(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     for (u32 i = 0; i < count; ++i) {
         const u8* rows = glyph(static_cast<char>(chars[i]));
         const i64 left = static_cast<i64>(x) + 8 * static_cast<i64>(i);
+        // A JAM2 cell on a byte boundary, all its columns visible: one plane
+        // byte per glyph row and plane.
+        if (mode == ndk::JAM2 && (left & 7) == 0 && column_visible(bitmap, clip, left) &&
+            column_visible(bitmap, clip, left + 7)) {
+            for (u32 row = 0; row < 8; ++row) {
+                const i64 py = static_cast<i64>(baseline_y) - 6 + static_cast<i64>(row);
+                if (!visible(bitmap, clip, left, py)) {
+                    continue;
+                }
+                const u8 bits = plane_bits(rows[row]);
+                for (u32 plane = 0; plane < bitmap.depth && plane < 8; ++plane) {
+                    const u8 value =
+                        static_cast<u8>((((fg >> plane) & 1) != 0 ? bits : 0) |
+                                        (((bg >> plane) & 1) != 0 ? static_cast<u8>(~bits) : 0));
+                    bus.w8(plane_address(bitmap, plane, static_cast<u32>(left),
+                                         static_cast<u32>(py)),
+                           value);
+                }
+                grow(dirty, static_cast<i32>(left), static_cast<i32>(py));
+                grow(dirty, static_cast<i32>(left + 7), static_cast<i32>(py));
+            }
+            continue;
+        }
         for (u32 row = 0; row < 8; ++row) {
             const i64 py = static_cast<i64>(baseline_y) - 6 + static_cast<i64>(row);
             for (u32 col = 0; col < 8; ++col) {
@@ -300,6 +392,44 @@ inline Rect scroll_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip
     }
     if (left > right || top > bottom) {
         return empty_rect();
+    }
+    const Rect area_done{static_cast<i32>(left), static_cast<i32>(top), static_cast<i32>(right),
+                         static_cast<i32>(bottom)};
+
+    if (dx == 0) {
+        // A vertical move keeps every pixel in its byte column: whole plane
+        // rows move, masked at the ends of the span. Rows are walked in the
+        // same order as below, so a source row is read before it is written.
+        const u32 first = static_cast<u32>(left) >> 3;
+        const u32 span = (static_cast<u32>(right) >> 3) - first + 1;
+        const u8 lmask = left_mask(left);
+        const u8 rmask = right_mask(right);
+        for (u32 plane = 0; plane < bitmap.depth && plane < 8; ++plane) {
+            const u8 fill = ((bg_pen >> plane) & 1) != 0 ? 0xFF : 0x00;
+            for (i64 row = 0; row <= bottom - top; ++row) {
+                const i64 y = dy > 0 ? top + row : bottom - row;
+                const i64 source_y = y + dy;
+                u8* out = bus.bytes_at(bitmap.planes[plane] +
+                                           static_cast<u32>(y) * bitmap.bytes_per_row + first,
+                                       span);
+                if (out == nullptr) {
+                    return area_done;
+                }
+                if (source_y >= top && source_y <= bottom) {
+                    const u8* in = bus.bytes_at(
+                        bitmap.planes[plane] +
+                            static_cast<u32>(source_y) * bitmap.bytes_per_row + first,
+                        span);
+                    if (in == nullptr) {
+                        return area_done;
+                    }
+                    copy_span(out, in, span, lmask, rmask);
+                } else {
+                    fill_span(out, span, lmask, rmask, fill);
+                }
+            }
+        }
+        return area_done;
     }
 
     // Each source pixel is read before a write can reach it: a downward
@@ -407,44 +537,46 @@ inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const
     const u8 left_mask = static_cast<u8>(0xFFu >> d_bit);
     const u8 right_mask = static_cast<u8>(0xFFu << (7 - ((vx + uw - 1) & 7)));
 
-    for (u32 plane = 0; plane < depth && bus.ok(); ++plane) {
-        for (u32 row = 0; row < uh && bus.ok(); ++row) {
-            const u32 src_row = src.planes[plane] + (uy + row) * src.bytes_per_row;
-            const u32 dst_row = dst.planes[plane] + (vy + row) * dst.bytes_per_row;
-            for (u32 i = 0; i < byte_count && bus.ok(); ++i) {
-                const u32 db = first_byte + i;
+    const u32 src_count = last_src_byte - first_src_byte + 1;
+
+    for (u32 plane = 0; plane < depth; ++plane) {
+        for (u32 row = 0; row < uh; ++row) {
+            const u8* in = bus.bytes_at(
+                src.planes[plane] + (uy + row) * src.bytes_per_row + first_src_byte, src_count);
+            u8* out = bus.bytes_at(
+                dst.planes[plane] + (vy + row) * dst.bytes_per_row + first_byte, byte_count);
+            if (in == nullptr || out == nullptr) {
+                return;
+            }
+            if (s_bit == d_bit) {
+                copy_span(out, in, byte_count, left_mask, right_mask);
+                continue;
+            }
+            for (u32 i = 0; i < byte_count; ++i) {
                 u8 mask = 0xFF;
-                if (db == first_byte) {
+                if (i == 0) {
                     mask &= left_mask;
                 }
-                if (db == last_byte) {
+                if (i + 1 == byte_count) {
                     mask &= right_mask;
                 }
                 u8 src_byte = 0;
-                if (s_bit >= d_bit) {
-                    const u32 sb = first_src_byte + i;
+                if (s_bit > d_bit) {
                     const u32 shift = s_bit - d_bit;
-                    src_byte = static_cast<u8>(bus.r8(src_row + sb) << shift);
-                    if (shift != 0 && sb < last_src_byte) {
-                        src_byte |= static_cast<u8>(bus.r8(src_row + sb + 1) >> (8 - shift));
+                    src_byte = static_cast<u8>(in[i] << shift);
+                    if (i + 1 < src_count) {
+                        src_byte |= static_cast<u8>(in[i + 1] >> (8 - shift));
                     }
                 } else {
-                    const u32 sb = first_src_byte + i;
                     const u32 shift = d_bit - s_bit;
                     if (i > 0) {
-                        src_byte = static_cast<u8>(bus.r8(src_row + sb - 1) << (8 - shift));
+                        src_byte = static_cast<u8>(in[i - 1] << (8 - shift));
                     }
-                    if (sb <= last_src_byte) {
-                        src_byte |= static_cast<u8>(bus.r8(src_row + sb) >> shift);
+                    if (i < src_count) {
+                        src_byte |= static_cast<u8>(in[i] >> shift);
                     }
                 }
-                const u32 dst_at = dst_row + db;
-                if (mask == 0xFF) {
-                    bus.w8(dst_at, src_byte);
-                } else {
-                    const u8 dst_byte = bus.r8(dst_at);
-                    bus.w8(dst_at, static_cast<u8>((dst_byte & ~mask) | (src_byte & mask)));
-                }
+                out[i] = merge(out[i], src_byte, mask);
             }
         }
     }

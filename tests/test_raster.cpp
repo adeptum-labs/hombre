@@ -24,6 +24,7 @@
 #include "libs/raster.hpp"
 #include "check.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -84,6 +85,16 @@ public:
 
     u8 plane_byte(u32 plane, u32 row, u32 byte) const {
         return memory_[kPlaneBase + plane * kPlaneBytes + row * kBytesPerRow + byte];
+    }
+
+    const std::vector<u8>& memory() const { return memory_; }
+
+    // Fills both plane areas with bytes from a small generator.
+    void scramble(u32 seed) {
+        for (u32 at = kPlaneBase; at < kPlaneBase + 2 * kPlanesBytes; ++at) {
+            seed = seed * 1103515245u + 12345u;
+            memory_[at] = static_cast<u8>(seed >> 16);
+        }
     }
 
     void put8(u32 at, u32 v) { memory_[at] = static_cast<u8>(v); }
@@ -750,6 +761,208 @@ void remap_rect_remaps_masked_spans_and_clips() {
 
 }
 
+// Pixel-at-a-time versions of the calls that work a plane byte at a time;
+// the faster calls must leave exactly the same memory.
+class Random {
+public:
+    explicit Random(u32 seed) : state_(seed) {}
+
+    i32 between(i32 low, i32 high) {
+        state_ = state_ * 1664525u + 1013904223u;
+        return low + static_cast<i32>((state_ >> 8) % static_cast<u32>(high - low + 1));
+    }
+
+private:
+    u32 state_;
+};
+
+bool reference_visible(const raster::Clip& clip, i64 x, i64 y) {
+    return x >= clip.x0 && x <= clip.x1 && y >= clip.y0 && y <= clip.y1 && x >= 0 && y >= 0 &&
+           x < static_cast<i64>(kWidth) && y < static_cast<i64>(kRows);
+}
+
+raster::Clip random_clip(Random& rnd) {
+    return raster::Clip{rnd.between(-20, 300), rnd.between(-4, 8), rnd.between(200, 700),
+                        rnd.between(4, 20)};
+}
+
+Rect random_rect(Random& rnd) {
+    return Rect{rnd.between(-20, 640), rnd.between(-4, 16), rnd.between(-20, 680),
+                rnd.between(-4, 20)};
+}
+
+void fill_rect_matches_pixel_reference() {
+    Random rnd(7);
+    for (u32 round = 0; round < 300; ++round) {
+        Rig fast;
+        Rig slow;
+        fast.scramble(round);
+        slow.scramble(round);
+        const u32 depth = static_cast<u32>(rnd.between(1, 8));
+        const raster::Clip clip = random_clip(rnd);
+        const Rect rect = random_rect(rnd);
+        const u32 pen = static_cast<u32>(rnd.between(0, 255));
+        native::Bus fb = fast.bus();
+        raster::fill_rect(fb, fast.bitmap_at(kPlaneBase, depth), clip, rect, pen);
+        native::Bus sb = slow.bus();
+        const raster::Bitmap bm = slow.bitmap_at(kPlaneBase, depth);
+        for (i64 y = rect.y0; y <= rect.y1; ++y) {
+            for (i64 x = rect.x0; x <= rect.x1; ++x) {
+                if (reference_visible(clip, x, y)) {
+                    raster::write_pixel(sb, bm, static_cast<i32>(x), static_cast<i32>(y), pen);
+                }
+            }
+        }
+        CHECK(fb.ok());
+        CHECK(fast.memory() == slow.memory());
+    }
+}
+
+void vertical_scroll_matches_pixel_reference() {
+    Random rnd(11);
+    for (u32 round = 0; round < 300; ++round) {
+        Rig fast;
+        Rig slow;
+        fast.scramble(round);
+        slow.scramble(round);
+        const u32 depth = static_cast<u32>(rnd.between(1, 8));
+        const raster::Clip clip = random_clip(rnd);
+        const Rect area = random_rect(rnd);
+        const i32 dy = rnd.between(-18, 18);
+        const u32 bg = static_cast<u32>(rnd.between(0, 255));
+        native::Bus fb = fast.bus();
+        const Rect fast_dirty =
+            raster::scroll_rect(fb, fast.bitmap_at(kPlaneBase, depth), clip, 0, dy, area, bg);
+        native::Bus sb = slow.bus();
+        const raster::Bitmap bm = slow.bitmap_at(kPlaneBase, depth);
+        const i64 left = std::max<i64>({area.x0, clip.x0, 0});
+        const i64 top = std::max<i64>({area.y0, clip.y0, 0});
+        const i64 right = std::min<i64>({area.x1, clip.x1, kWidth - 1});
+        const i64 bottom = std::min<i64>({area.y1, clip.y1, kRows - 1});
+        for (i64 row = 0; row <= bottom - top; ++row) {
+            const i64 y = dy > 0 ? top + row : bottom - row;
+            for (i64 x = left; x <= right; ++x) {
+                const i64 source_y = y + dy;
+                const u32 pen = source_y >= top && source_y <= bottom
+                                    ? raster::read_pixel(sb, bm, static_cast<i32>(x),
+                                                         static_cast<i32>(source_y))
+                                    : bg;
+                raster::write_pixel(sb, bm, static_cast<i32>(x), static_cast<i32>(y), pen);
+            }
+        }
+        CHECK(fb.ok());
+        CHECK(fast.memory() == slow.memory());
+        if (left <= right && top <= bottom) {
+            CHECK_EQ(fast_dirty.x0, static_cast<i32>(left));
+            CHECK_EQ(fast_dirty.y0, static_cast<i32>(top));
+            CHECK_EQ(fast_dirty.x1, static_cast<i32>(right));
+            CHECK_EQ(fast_dirty.y1, static_cast<i32>(bottom));
+        } else {
+            CHECK(fast_dirty.x1 < fast_dirty.x0);
+        }
+    }
+}
+
+void copy_rect_matches_pixel_reference() {
+    Random rnd(13);
+    for (u32 round = 0; round < 400; ++round) {
+        Rig fast;
+        Rig slow;
+        fast.scramble(round);
+        slow.scramble(round);
+        const u32 depth = static_cast<u32>(rnd.between(1, 8));
+        const i32 sx = rnd.between(-20, 650);
+        const i32 sy = rnd.between(-4, 18);
+        const i32 dx = rnd.between(-20, 650);
+        const i32 dy = rnd.between(-4, 18);
+        const i32 w = rnd.between(1, 660);
+        const i32 h = rnd.between(1, 20);
+        native::Bus fb = fast.bus();
+        raster::copy_rect(fb, fast.bitmap_at(kPlaneBase, depth), sx, sy,
+                          fast.bitmap_at(kSecondPlaneBase, depth), dx, dy, w, h);
+        native::Bus sb = slow.bus();
+        const raster::Bitmap src = slow.bitmap_at(kPlaneBase, depth);
+        const raster::Bitmap dst = slow.bitmap_at(kSecondPlaneBase, depth);
+        i64 s_x = sx;
+        i64 s_y = sy;
+        i64 d_x = dx;
+        i64 d_y = dy;
+        i64 cw = w;
+        i64 ch = h;
+        if (raster::clip_copy_bounds(src, dst, s_x, s_y, d_x, d_y, cw, ch)) {
+            for (i64 j = 0; j < ch; ++j) {
+                for (i64 i = 0; i < cw; ++i) {
+                    const u32 pen = raster::read_pixel(sb, src, static_cast<i32>(s_x + i),
+                                                       static_cast<i32>(s_y + j));
+                    raster::write_pixel(sb, dst, static_cast<i32>(d_x + i),
+                                        static_cast<i32>(d_y + j), pen);
+                }
+            }
+        }
+        CHECK(fb.ok());
+        CHECK(fast.memory() == slow.memory());
+    }
+}
+
+void jam2_text_matches_pixel_reference() {
+    Random rnd(17);
+    const u8 text[] = "Hombre 3.1 > dir C: {~}";
+    const u32 length = sizeof(text) - 1;
+    for (u32 round = 0; round < 300; ++round) {
+        Rig fast;
+        Rig slow;
+        fast.scramble(round);
+        slow.scramble(round);
+        const u32 depth = static_cast<u32>(rnd.between(1, 8));
+        const raster::Clip clip = random_clip(rnd);
+        const i32 x = (round & 1) != 0 ? rnd.between(-3, 80) * 8 : rnd.between(-24, 650);
+        const i32 baseline = rnd.between(-4, 22);
+        const u8 inverse = (round & 2) != 0 ? static_cast<u8>(ndk::INVERSVID) : 0;
+        const raster::Pens pens{static_cast<u8>(rnd.between(0, 255)),
+                                static_cast<u8>(rnd.between(0, 255)),
+                                static_cast<u8>(ndk::JAM2 | inverse)};
+        native::Bus fb = fast.bus();
+        u32 advance = 0;
+        const Rect fast_dirty = raster::draw_text(fb, fast.bitmap_at(kPlaneBase, depth), clip,
+                                                  pens, x, baseline, text, length, advance);
+        native::Bus sb = slow.bus();
+        const raster::Bitmap bm = slow.bitmap_at(kPlaneBase, depth);
+        const u32 fg = inverse != 0 ? pens.bg : pens.fg;
+        const u32 bg = inverse != 0 ? pens.fg : pens.bg;
+        Rect dirty{0, 0, -1, -1};
+        for (u32 i = 0; i < length; ++i) {
+            const u8* rows = glyph(static_cast<char>(text[i]));
+            for (u32 row = 0; row < 8; ++row) {
+                for (u32 col = 0; col < 8; ++col) {
+                    const i64 px = static_cast<i64>(x) + 8 * i + col;
+                    const i64 py = static_cast<i64>(baseline) - 6 + row;
+                    if (!reference_visible(clip, px, py)) {
+                        continue;
+                    }
+                    const bool set = ((rows[row] >> col) & 1) != 0;
+                    raster::write_pixel(sb, bm, static_cast<i32>(px), static_cast<i32>(py),
+                                        set ? fg : bg);
+                    if (dirty.x1 < dirty.x0) {
+                        dirty = Rect{static_cast<i32>(px), static_cast<i32>(py),
+                                     static_cast<i32>(px), static_cast<i32>(py)};
+                    } else {
+                        dirty.x0 = std::min(dirty.x0, static_cast<i32>(px));
+                        dirty.y0 = std::min(dirty.y0, static_cast<i32>(py));
+                        dirty.x1 = std::max(dirty.x1, static_cast<i32>(px));
+                        dirty.y1 = std::max(dirty.y1, static_cast<i32>(py));
+                    }
+                }
+            }
+        }
+        CHECK(fb.ok());
+        CHECK(fast.memory() == slow.memory());
+        CHECK_EQ(fast_dirty.x0, dirty.x0);
+        CHECK_EQ(fast_dirty.y0, dirty.y0);
+        CHECK_EQ(fast_dirty.x1, dirty.x1);
+        CHECK_EQ(fast_dirty.y1, dirty.y1);
+    }
+}
+
 int main() {
     write_then_read_pixel_roundtrips_every_pen();
     read_outside_gives_all_ones();
@@ -773,5 +986,9 @@ int main() {
     copy_rect_depth_mismatch();
     copy_rect_skip_trims_top_corners_and_clips();
     remap_rect_remaps_masked_spans_and_clips();
+    fill_rect_matches_pixel_reference();
+    vertical_scroll_matches_pixel_reference();
+    copy_rect_matches_pixel_reference();
+    jam2_text_matches_pixel_reference();
     return check::finish("test_raster");
 }
