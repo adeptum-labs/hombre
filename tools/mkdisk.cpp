@@ -23,13 +23,15 @@
 
 // Host only: writes the test disk the boot check mounts.
 //
-//   mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk> <tasktest.hunk> <timertest.hunk>
+//   mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk> <tasktest.hunk>
+//          <timertest.hunk> <loadwb.hunk> <wbtest.hunk>
 //
 // The disk is an OFS volume named HombreTest, packed as a DMS archive with
-// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the five
+// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the seven
 // hunk files, as C/Version, LIBS/hombretest.library, C/mousetest,
-// C/tasktest and C/timertest. The output depends on nothing but this source
-// and the hunk files, so two runs give identical files.
+// C/tasktest, C/timertest and C/LoadWB, and wbtest with its icon in
+// WBStartup, which SYS: names. The output depends on nothing but this
+// source and the hunk files, so two runs give identical files.
 
 #include "dms.hpp"
 #include "dms_writer.hpp"
@@ -52,10 +54,75 @@ std::vector<u8> text(const std::string& s) {
     return std::vector<u8>(s.begin(), s.end());
 }
 
+// The DiskObject of the wbtest icon: a tool with a two-plane image, no
+// default tool and no position of its own, so the Workbench lays it out.
+std::vector<u8> wbtest_info() {
+    std::vector<u8> bytes;
+    auto word = [&](u32 v) {
+        bytes.push_back(static_cast<u8>(v >> 8));
+        bytes.push_back(static_cast<u8>(v));
+    };
+    auto longv = [&](u32 v) {
+        word(v >> 16);
+        word(v);
+    };
+    constexpr u32 kImageWidth = 32;
+    constexpr u32 kImageHeight = 12;
+    constexpr u32 kDepth = 2;
+    word(0xE310);  // do_Magic
+    word(1);       // do_Version
+    // do_Gadget
+    longv(0);  // NextGadget
+    word(0);   // LeftEdge
+    word(0);   // TopEdge
+    word(kImageWidth);
+    word(kImageHeight);
+    word(0);  // Flags
+    word(1);  // Activation: RELVERIFY
+    word(1);  // GadgetType: BOOLGADGET
+    longv(1);  // GadgetRender
+    longv(0);  // SelectRender
+    longv(0);  // GadgetText
+    longv(0);  // MutualExclude
+    longv(0);  // SpecialInfo
+    word(0);   // GadgetID
+    longv(1);  // UserData: WB_DISKREVISION 1
+    bytes.push_back(3);  // do_Type: WBTOOL
+    bytes.push_back(0);  // do_Pad
+    longv(0);            // do_DefaultTool
+    longv(0);            // do_ToolTypes
+    longv(0x80000000);   // do_CurrentX: NO_ICON_POSITION
+    longv(0x80000000);   // do_CurrentY: NO_ICON_POSITION
+    longv(0);            // do_DrawerData
+    longv(0);            // do_ToolWindow
+    longv(4096);         // do_StackSize
+    // The render Image and its plane data, rows top to bottom per plane.
+    word(0);  // LeftEdge
+    word(0);  // TopEdge
+    word(kImageWidth);
+    word(kImageHeight);
+    word(kDepth);
+    longv(1);         // ImageData
+    bytes.push_back(3);  // PlanePick
+    bytes.push_back(0);  // PlaneOnOff
+    longv(0);            // NextImage
+    const u32 row_bytes = (kImageWidth + 15) / 16 * 2;
+    for (u32 plane = 0; plane < kDepth; ++plane) {
+        for (u32 row = 0; row < kImageHeight; ++row) {
+            for (u32 column = 0; column < row_bytes; ++column) {
+                bytes.push_back(static_cast<u8>((row * 7 + column * 13 + plane * 29) & 0xFF));
+            }
+        }
+    }
+    return bytes;
+}
+
 std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vector<u8>& library,
                                 const std::vector<u8>& mousetest,
                                 const std::vector<u8>& tasktest,
-                                const std::vector<u8>& timertest) {
+                                const std::vector<u8>& timertest,
+                                const std::vector<u8>& loadwb,
+                                const std::vector<u8>& wbtest) {
     std::vector<u8> echo(kEchoBytes);
     for (usize i = 0; i < echo.size(); ++i) {
         // A repeating run A..Z that shows where a block boundary was crossed.
@@ -70,6 +137,9 @@ std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vecto
         {"C/mousetest", mousetest},
         {"C/tasktest", tasktest},
         {"C/timertest", timertest},
+        {"C/LoadWB", loadwb},
+        {"WBStartup/wbtest", wbtest},
+        {"WBStartup/wbtest.info", wbtest_info()},
     };
 }
 
@@ -112,10 +182,10 @@ bool write_file(const char* path, const std::vector<u8>& data) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 7) {
+    if (argc != 9) {
         std::fprintf(stderr,
                      "usage: mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk>"
-                     " <tasktest.hunk> <timertest.hunk>\n");
+                     " <tasktest.hunk> <timertest.hunk> <loadwb.hunk> <wbtest.hunk>\n");
         return 2;
     }
     std::vector<u8> version;
@@ -123,14 +193,19 @@ int main(int argc, char** argv) {
     std::vector<u8> mousetest;
     std::vector<u8> tasktest;
     std::vector<u8> timertest;
+    std::vector<u8> loadwb;
+    std::vector<u8> wbtest;
     if (!read_file(argv[2], version) || !read_file(argv[3], library) ||
         !read_file(argv[4], mousetest) || !read_file(argv[5], tasktest) ||
-        !read_file(argv[6], timertest)) {
+        !read_file(argv[6], timertest) || !read_file(argv[7], loadwb) ||
+        !read_file(argv[8], wbtest)) {
         return 1;
     }
     try {
-        const std::vector<u8> adf = build_adf(
-            "HombreTest", false, test_files(version, library, mousetest, tasktest, timertest));
+        const std::vector<u8> adf =
+            build_adf("HombreTest", false,
+                      test_files(version, library, mousetest, tasktest, timertest, loadwb,
+                                 wbtest));
         const std::vector<u8> dms = build_dms(adf, kSimple, kDdTrackBytes);
         return write_file(argv[1], dms) ? 0 : 1;
     } catch (const std::exception& e) {

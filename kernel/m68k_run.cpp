@@ -36,6 +36,7 @@
 #include "../common/libs/native.hpp"
 #include "../common/libs/timer_device.hpp"
 #include "../common/libs/utility.hpp"
+#include "../common/libs/workbench.hpp"
 #include "../common/m68k_decode.hpp"
 #include "../common/m68k_jit.hpp"
 #include "../common/printable.hpp"
@@ -95,6 +96,7 @@ constinit Intuition intuition{};
 constinit GadTools gadtools{};
 constinit Layers layers{};
 constinit Icon icon{};
+constinit Workbench workbench{};
 constinit DisplayState display{};
 constinit AmigaDisplay amiga_display{};
 constinit PointerState pointer{};
@@ -399,6 +401,24 @@ bool other_task_ready() {
 // Gives other tasks the CPU while one wants it. With only shells waiting at
 // their prompts left, one yield lets another shell run before this task
 // halts, so two idle shells do not switch to each other forever.
+// The boot shell opens over the whole screen. Once the Workbench desktop
+// is up, it moves to the lower part of the screen, so the volume icons and
+// drawer windows are in view.
+void make_room_for_workbench(Console& c) {
+    static constinit bool moved = false;
+    if (moved || c.index != 0 || !workbench.desktop_open() || !c.shell.is_open()) {
+        return;
+    }
+    moved = true;
+    // The Workbench screen is 640 x 400.
+    constexpr i32 kScreenWidth = 640;
+    constexpr i32 kScreenHeight = 400;
+    constexpr i32 kHeight = kScreenHeight / 3;
+    const u32 window = c.shell.window();
+    intuition.size_window_to(window, kScreenWidth - 80, kHeight);
+    intuition.move_window_to(window, 0, kScreenHeight - kHeight);
+}
+
 void wait_for_work(const Console& c) {
     if (c.key_count > 0) {
         return;
@@ -728,6 +748,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         fail("icon init failed");
         return false;
     }
+    if (!workbench.init(machine, exec, dos, graphics, intuition, gadtools, icon)) {
+        fail("workbench init failed");
+        return false;
+    }
     consoles[0].index = 0;
     consoles[0].process = dos.process();
     consoles[0].cli = 1;
@@ -1015,6 +1039,7 @@ void shell_loop(Console& c) {
         if (c.commands.ended()) {
             break;
         }
+        make_room_for_workbench(c);
         wait_for_work(c);
     }
     c.line_mode = false;
