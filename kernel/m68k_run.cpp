@@ -92,21 +92,44 @@ constinit Intuition intuition{};
 constinit DisplayState display{};
 constinit AmigaDisplay amiga_display{};
 constinit PointerState pointer{};
-constinit ShellWindow shell{};
 // The default Amiga screen; 0 until it is open.
 constinit u32 amiga_screen = 0;
-// The key slots of the last keyboard report seen while a command waited.
+// The key slots of the last keyboard report seen.
 constinit u8 prev_key_slots[KeyDecoder::kKeySlots]{};
-// The key decoder and console sequence filter of the shell and
-// running-command input paths.
+// The one keyboard's decoder.
 constinit KeyDecoder typed_decoder{};
-constinit CsiFilter console_filter{};
-constinit u8 key_queue[key_queue_cap]{};
-constinit u32 key_queue_head = 0;
-constinit u32 key_queue_count = 0;
 
-// Whether the console output so far ends a line.
-constinit bool console_at_line_start = true;
+struct Console;
+
+// What a shell's line editor callbacks look up from their context.
+struct TypedShell {
+    Console* console = nullptr;
+};
+
+// One shell: its window, its console callbacks and buffers, its command
+// process, and the line editor and builtins that run on it.
+struct Console {
+    ShellWindow shell;
+    CsiFilter filter;
+    u8 key_queue[key_queue_cap]{};
+    u32 key_head = 0;
+    u32 key_count = 0;
+    bool at_line_start = true;
+    bool command_running = false;
+    bool line_mode = false;
+    bool open = false;
+    u8 index = 0;
+    u32 process = 0;
+    u32 cli = 0;
+    Shell line_editor;
+    ShellCommands commands;
+    TypedShell typed{};
+};
+
+constinit Console consoles[Dos::kMaxConsoles]{};
+
+// Whether what reached the serial log so far ends a line.
+constinit bool serial_at_line_start = true;
 
 void write_filtered(const char* text) {
     for (; *text != '\0'; ++text) {
@@ -117,32 +140,32 @@ void write_filtered(const char* text) {
 // The native libraries' diagnostics, one line each. They can carry names
 // from the guest, so they go through the printable filter.
 void log_line(const char* line) {
-    if (!console_at_line_start) {
+    if (!serial_at_line_start) {
         serial::write_char('\n');
-        console_at_line_start = true;
+        serial_at_line_start = true;
     }
     write_filtered(line);
     serial::write_char('\n');
 }
 
-void poll_keys_while_running();
+// Reads the keyboard and gives what it decodes to the console of the active
+// window.
+void poll_keys();
 
-// True while a command runs: its console output is also when the keyboard
-// is read, so keys typed during a long listing are not lost.
-constinit bool command_running = false;
-
-// What the program writes to the console. Newlines and tabs are kept.
-void console_write(void*, const u8* data, u32 bytes) {
+// What a program writes to a console. Newlines and tabs are kept.
+void console_write(void* ctx, const u8* data, u32 bytes) {
+    Console& c = *static_cast<Console*>(ctx);
     for (u32 i = 0; i < bytes; ++i) {
-        const u8 c = data[i];
-        serial::write_char(c == '\n' || c == '\t' ? static_cast<char>(c) : printable_char(c));
-        console_at_line_start = c == '\n';
+        const u8 ch = data[i];
+        serial::write_char(ch == '\n' || ch == '\t' ? static_cast<char>(ch) : printable_char(ch));
+        serial_at_line_start = ch == '\n';
+        c.at_line_start = ch == '\n';
     }
-    if (shell.is_open()) {
-        shell.write(data, bytes);
+    if (c.shell.is_open()) {
+        c.shell.write(data, bytes);
     }
-    if (command_running) {
-        poll_keys_while_running();
+    if (c.command_running) {
+        poll_keys();
     }
 }
 
@@ -226,9 +249,9 @@ void flush_mouse_move() {
 }
 
 void on_shell_view(void*, u32 view) {
-    if (!console_at_line_start) {
+    if (!serial_at_line_start) {
         serial::write_char('\n');
-        console_at_line_start = true;
+        serial_at_line_start = true;
     }
     serial::write("shell: view ");
     serial::write_dec(view);
@@ -270,12 +293,14 @@ void flush_wheel(i32 wheel) {
     if (wheel == 0) {
         return;
     }
-    const u32 win = shell.window();
-    if (win != 0 && intuition.window_under(pointer.x(), pointer.y()) == win) {
-        shell.scroll_by(3 * wheel);
-    } else {
-        intuition.wheel_event(wheel);
+    const u32 win = intuition.window_under(pointer.x(), pointer.y());
+    for (Console& c : consoles) {
+        if (win != 0 && c.open && c.shell.is_open() && c.shell.window() == win) {
+            c.shell.scroll_by(3 * wheel);
+            return;
+        }
     }
+    intuition.wheel_event(wheel);
 }
 
 void poll_mouse() {
@@ -315,82 +340,94 @@ void poll_mouse() {
     }
 }
 
-void key_queue_clear() {
-    key_queue_head = 0;
-    key_queue_count = 0;
+// The console of the active window, or console 0 when no shell window is
+// active.
+Console& active_console() {
+    const u32 window = intuition.active_window();
+    if (window != 0) {
+        for (Console& c : consoles) {
+            if (c.open && c.shell.window() == window) {
+                return c;
+            }
+        }
+    }
+    return consoles[0];
 }
 
-void key_queue_push(u8 ch) {
-    if (key_queue_count >= key_queue_cap) {
+void key_queue_clear(Console& c) {
+    c.key_head = 0;
+    c.key_count = 0;
+}
+
+void key_queue_push(Console& c, u8 ch) {
+    if (c.key_count >= key_queue_cap) {
         return;
     }
-    key_queue[(key_queue_head + key_queue_count) % key_queue_cap] = ch;
-    ++key_queue_count;
+    c.key_queue[(c.key_head + c.key_count) % key_queue_cap] = ch;
+    ++c.key_count;
 }
 
-bool key_queue_pop(u8& out) {
-    if (key_queue_count == 0) {
+bool key_queue_pop(Console& c, u8& out) {
+    if (c.key_count == 0) {
         return false;
     }
-    out = key_queue[key_queue_head];
-    key_queue_head = (key_queue_head + 1) % key_queue_cap;
-    --key_queue_count;
+    out = c.key_queue[c.key_head];
+    c.key_head = (c.key_head + 1) % key_queue_cap;
+    --c.key_count;
     return true;
 }
 
-void handle_decoded_byte(u8 raw, Shell* line_editor) {
+// A filtered keyboard byte: bytes wait in the console's queue for its shell
+// loop or its console input, while scrolling and line editing act at once.
+void handle_decoded_byte(Console& c, u8 raw) {
     u8 out = 0;
-    const ConsoleKey key = console_filter.feed(raw, out);
+    const ConsoleKey key = c.filter.feed(raw, out);
     switch (key) {
     case ConsoleKey::Byte:
-        if (line_editor != nullptr) {
-            line_editor->key(out);
-        } else {
-            key_queue_push(out);
-        }
+        key_queue_push(c, out);
         break;
     case ConsoleKey::RowUp:
-        shell.scroll_by(1);
+        c.shell.scroll_by(1);
         break;
     case ConsoleKey::RowDown:
-        shell.scroll_by(-1);
+        c.shell.scroll_by(-1);
         break;
     case ConsoleKey::PageUp: {
-        const u32 rows = shell.rows();
+        const u32 rows = c.shell.rows();
         const i32 step = rows > 1 ? static_cast<i32>(rows - 1) : 0;
-        shell.scroll_by(step);
+        c.shell.scroll_by(step);
         break;
     }
     case ConsoleKey::PageDown: {
-        const u32 rows = shell.rows();
+        const u32 rows = c.shell.rows();
         const i32 step = rows > 1 ? static_cast<i32>(rows - 1) : 0;
-        shell.scroll_by(-step);
+        c.shell.scroll_by(-step);
         break;
     }
     case ConsoleKey::Top:
-        shell.scroll_to_top();
+        c.shell.scroll_to_top();
         break;
     case ConsoleKey::Bottom:
-        shell.scroll_to_bottom();
+        c.shell.scroll_to_bottom();
         break;
     case ConsoleKey::HistoryUp:
-        if (line_editor != nullptr) {
-            line_editor->history_up();
+        if (c.line_mode) {
+            c.line_editor.history_up();
         }
         break;
     case ConsoleKey::HistoryDown:
-        if (line_editor != nullptr) {
-            line_editor->history_down();
+        if (c.line_mode) {
+            c.line_editor.history_down();
         }
         break;
     case ConsoleKey::CursorLeft:
-        if (line_editor != nullptr) {
-            line_editor->cursor_left();
+        if (c.line_mode) {
+            c.line_editor.cursor_left();
         }
         break;
     case ConsoleKey::CursorRight:
-        if (line_editor != nullptr) {
-            line_editor->cursor_right();
+        if (c.line_mode) {
+            c.line_editor.cursor_right();
         }
         break;
     case ConsoleKey::None:
@@ -408,14 +445,16 @@ bool slots_have_key(const u8* slots, u8 usage) {
     return false;
 }
 
-// Reads the keyboard while a command runs: Ctrl+C becomes the break signal
-// and other keys go to the queue the console input and the shell read.
-void poll_keys_while_running() {
+// Reads the keyboard and routes each decoded byte to the active console:
+// Ctrl+C signals that console's shell process, Ctrl+\ ends its console
+// input, and every other byte waits for the console's reader or line editor.
+void poll_keys() {
     if (usb_keyboard_status() != UsbStatus::Ready) {
         return;
     }
     u8 report[KeyDecoder::kReportBytes];
     for (u32 i = 0; i < poll_budget && usb_keyboard_poll(report); ++i) {
+        Console& c = active_console();
         const bool ctrl = (report[0] & (kModLCtrl | kModRCtrl)) != 0;
         const u8* slots = report + 2;
         u8 chars[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey];
@@ -427,16 +466,16 @@ void poll_keys_while_running() {
                     continue;
                 }
                 if (usage == usage_key_c) {
-                    exec.signal_current_task(sigbreakf_ctrl_c);
+                    exec.signal_task(c.process, sigbreakf_ctrl_c);
                 } else if (usage == usage_key_backslash_us ||
                            usage == usage_key_backslash_iso ||
                            keymap_se(usage, report[0], false) == '\\') {
-                    key_queue_push(ctrl_backslash);
+                    key_queue_push(c, ctrl_backslash);
                 }
             }
         } else {
             for (usize k = 0; k < count; ++k) {
-                handle_decoded_byte(chars[k], nullptr);
+                handle_decoded_byte(c, chars[k]);
             }
         }
         for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
@@ -448,7 +487,7 @@ void poll_keys_while_running() {
 void task_host_poll(void*) {
     intuition.flush_palette();
     poll_mouse();
-    poll_keys_while_running();
+    poll_keys();
 }
 
 bool hook_trampoline(void*) {
@@ -487,64 +526,66 @@ constexpr bool is_console_printable(u8 c) {
     return (c >= 0x20 && c <= 0x7e) || c >= 0xa0;
 }
 
-u32 console_read(void*, u8* buf, u32 size) {
+u32 console_read(void* ctx, u8* buf, u32 size) {
+    Console& c = *static_cast<Console*>(ctx);
     if (buf == nullptr || size == 0) {
         return 0;
     }
-    shell.begin_input();
+    c.shell.begin_input();
     u32 len = 0;
     for (;;) {
         u8 ch = 0;
-        if (!key_queue_pop(ch)) {
+        if (!key_queue_pop(c, ch)) {
             if (usb_keyboard_status() != UsbStatus::Ready) {
                 if (len > 0) {
-                    shell.end_line();
+                    c.shell.end_line();
                 }
                 return 0;
             }
             task_host_poll(nullptr);
-            if (key_queue_count == 0 && !exec.yield_in_native()) {
+            if (c.key_count == 0 && !exec.yield_in_native()) {
                 idle_wait();
             }
             continue;
         }
         if (ch == ctrl_backslash) {
-            shell.end_line();
+            c.shell.end_line();
             return 0;
         }
         if (ch == '\n') {
-            shell.end_line();
+            c.shell.end_line();
             buf[len++] = '\n';
             return len;
         }
         if (ch == '\b') {
-            shell.scroll_to_bottom();
+            c.shell.scroll_to_bottom();
             if (len > 0) {
                 --len;
-                shell.erase_last();
+                c.shell.erase_last();
             }
             continue;
         }
         if (is_console_printable(ch)) {
-            shell.scroll_to_bottom();
+            c.shell.scroll_to_bottom();
             if (len + 1 < size && len < Shell::kMaxLine) {
                 buf[len++] = ch;
-                shell.echo(ch);
+                c.shell.echo(ch);
             }
         }
     }
 }
 
-bool console_ready(void*, u32 timeout_us) {
-    if (key_queue_count > 0) {
+bool console_ready(void* ctx, u32 timeout_us) {
+    Console& c = *static_cast<Console*>(ctx);
+    if (c.key_count > 0) {
         return true;
     }
     if (usb_keyboard_status() != UsbStatus::Ready) {
         return false;
     }
     poll_mouse();
-    poll_keys_while_running();
-    if (key_queue_count > 0) {
+    poll_keys();
+    if (c.key_count > 0) {
         return true;
     }
     if (timeout_us == 0 || clock_us() == 0) {
@@ -553,7 +594,7 @@ bool console_ready(void*, u32 timeout_us) {
     const Deadline deadline = deadline_in_us(timeout_us);
     while (!expired(deadline)) {
         task_host_poll(nullptr);
-        if (key_queue_count > 0) {
+        if (c.key_count > 0) {
             return true;
         }
         if (usb_keyboard_status() != UsbStatus::Ready) {
@@ -564,6 +605,11 @@ bool console_ready(void*, u32 timeout_us) {
         }
     }
     return false;
+}
+
+// Registers a console's output and input with dos.
+void register_console(u8 index) {
+    dos.set_console(index, &console_write, &console_read, &console_ready, &consoles[index]);
 }
 
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
@@ -612,11 +658,15 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         fail("utility init failed");
         return false;
     }
-    if (!dos.init(machine, exec, volume, &console_write, nullptr)) {
+    if (!dos.init(machine, exec, volume, &console_write, &consoles[0])) {
         fail("dos init failed");
         return false;
     }
-    dos.set_console_input(&console_read, &console_ready, nullptr);
+    consoles[0].index = 0;
+    consoles[0].process = dos.process();
+    consoles[0].cli = 1;
+    consoles[0].open = true;
+    register_console(0);
     start_dos_clock();
     machine.cpu.a[7] = boot_stack;
     open_amiga_screen(info);
@@ -625,34 +675,45 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
 
 
 // What a finished program may have left behind: its windows and screens, the
-// messages it never replied to and the signals it allocated.
+// messages it never replied to and the signals it allocated. Ending child
+// tasks and resetting signals belongs to the boot task; a shell's command
+// runs on the shell's own task.
 void reclaim_after_program() {
-    exec.end_child_tasks();
-    exec.reset_nest_counts();
-    if (amiga_screen != 0) {
-        intuition.reclaim(shell.window(), amiga_screen);
+    if (exec.this_task() == dos.process()) {
+        exec.end_child_tasks();
+        exec.reset_nest_counts();
+        exec.reset_task_signals();
     }
-    exec.reset_task_signals();
+    if (amiga_screen != 0) {
+        u32 keep[Dos::kMaxConsoles]{};
+        u32 count = 0;
+        for (Console& c : consoles) {
+            if (c.shell.is_open()) {
+                keep[count++] = c.shell.window();
+            }
+        }
+        intuition.reclaim(keep, count, amiga_screen);
+    }
 }
 
 // Runs the command and reports on serial how it went. False when the
 // program cannot be loaded; any other end is reported and counts as run.
-bool execute(const char* path, const char* args) {
+bool execute(Console& c, const char* path, const char* args) {
     serial::write("m68k: running ");
     write_filtered(path);
     serial::write("\n");
 
     machine.cpu.exit = ExitReason::None;
     u32 result = 0;
-    command_running = true;
-    const bool ok = dos.run_command(path, args, result, block_budget);
-    command_running = false;
-    console_filter.reset();
+    c.command_running = true;
+    const bool ok = dos.run_command_in(c.process, path, args, result, block_budget);
+    c.command_running = false;
+    c.filter.reset();
     reclaim_after_program();
     intuition.flush_palette();
-    if (!console_at_line_start) {
+    if (!serial_at_line_start) {
         serial::write_char('\n');
-        console_at_line_start = true;
+        serial_at_line_start = true;
     }
 
     const m68k::CpuState& cpu = machine.cpu;
@@ -663,7 +724,7 @@ bool execute(const char* path, const char* args) {
         serial::write(" returned ");
         serial::write_dec(result);
     } else if (cpu.exit == ExitReason::None) {
-        // run_command fails without running anything only when it cannot
+        // run_command_in fails without running anything only when it cannot
         // load the program.
         serial::write("could not load ");
         write_filtered(path);
@@ -683,56 +744,57 @@ bool execute(const char* path, const char* args) {
         }
     }
     serial::write("\n");
+    serial_at_line_start = true;
     return loaded;
 }
 
-// The shell's view of the window, the log and the commands.
-struct TypedShell {
-    ShellCommands* commands;
-};
+Console& typed_console(void* ctx) { return *static_cast<TypedShell*>(ctx)->console; }
 
-void shell_print(void*, const char* text) {
+void shell_print(void* ctx, const char* text) {
     if (text == nullptr) {
         return;
     }
+    Console& c = typed_console(ctx);
     u32 len = 0;
     while (text[len] != '\0') {
         ++len;
     }
-    console_write(nullptr, reinterpret_cast<const u8*>(text), len);
+    console_write(&c, reinterpret_cast<const u8*>(text), len);
 }
 
-void write_shell_prompt() {
+void write_shell_prompt(Console& c) {
     char buf[260];
-    format_prompt(dos, 1, buf, sizeof buf);
-    shell.write_prompt_text(buf);
+    format_prompt(dos, c.cli, buf, sizeof buf, c.process);
+    c.shell.write_prompt_text(buf);
 }
 
-void typed_echo(void*, u8 ch) { shell.echo(ch); }
-void typed_erase(void*) { shell.erase_last(); }
-void typed_cursor_back(void*, u32 back) { shell.set_cursor_back(back); }
-void typed_end_line(void*) { shell.end_line(); }
-void typed_message(void*, const char* text) { shell.print_line(text); }
-void typed_prompt(void*) { write_shell_prompt(); }
-void typed_scroll_to_bottom(void*) { shell.scroll_to_bottom(); }
+void typed_echo(void* ctx, u8 ch) { typed_console(ctx).shell.echo(ch); }
+void typed_erase(void* ctx) { typed_console(ctx).shell.erase_last(); }
+void typed_cursor_back(void* ctx, u32 back) {
+    typed_console(ctx).shell.set_cursor_back(back);
+}
+void typed_end_line(void* ctx) { typed_console(ctx).shell.end_line(); }
+void typed_message(void* ctx, const char* text) { typed_console(ctx).shell.print_line(text); }
+void typed_prompt(void* ctx) { write_shell_prompt(typed_console(ctx)); }
+void typed_scroll_to_bottom(void* ctx) { typed_console(ctx).shell.scroll_to_bottom(); }
 void typed_log(void*, const char* text) {
     write_filtered(text);
     serial::write_char('\n');
 }
 
 bool typed_builtin(void* ctx, const char* word, const char* args) {
-    ShellCommands* cmds = static_cast<TypedShell*>(ctx)->commands;
-    if (cmds == nullptr || !cmds->run(word, args)) {
+    Console& c = typed_console(ctx);
+    if (!c.commands.run(word, args)) {
         return false;
     }
-    if (!console_at_line_start) {
+    if (!serial_at_line_start) {
         serial::write_char('\n');
-        console_at_line_start = true;
+        serial_at_line_start = true;
     }
     serial::write("shell: builtin ");
     write_filtered(word);
     serial::write(" returned ");
-    serial::write_dec(dos.last_return_code());
+    serial::write_dec(dos.last_return_code(c.process));
     serial::write("\n");
     return true;
 }
@@ -740,75 +802,162 @@ bool typed_builtin(void* ctx, const char* word, const char* args) {
 // A typed command may fault like any other; the next one starts clean.
 // Keys typed while it ran and not read by it stay queued, and the shell
 // loop gives them to the line editor afterwards, as type-ahead.
-bool typed_run(void*, const char* path, const char* args) {
+bool typed_run(void* ctx, const char* path, const char* args) {
+    Console& c = typed_console(ctx);
     const char* word = path;
     if (word[0] == 'C' && word[1] == ':') {
         word += 2;
     }
     char cmd[Dos::kMaxPath];
-    if (!dos.find_command(word, cmd, sizeof cmd)) {
+    if (!dos.find_command(word, cmd, sizeof cmd, c.process)) {
         return false;
     }
-    const bool loaded = execute(cmd, args);
+    const bool loaded = execute(c, cmd, args);
     if (loaded && (machine.cpu.exit == ExitReason::None ||
                    machine.cpu.exit == ExitReason::Returned)) {
-        const u32 rc = dos.last_return_code();
-        if (rc != 0 && rc >= dos.fail_level()) {
-            if (!console_at_line_start) {
-                console_write(nullptr, reinterpret_cast<const u8*>("\n"), 1);
+        const u32 rc = dos.last_return_code(c.process);
+        if (rc != 0 && rc >= dos.fail_level(c.process)) {
+            if (!c.at_line_start) {
+                console_write(&c, reinterpret_cast<const u8*>("\n"), 1);
             }
             char digits[16];
             format_u64(digits, sizeof digits, rc, 10);
-            shell_print(nullptr, word);
-            shell_print(nullptr, " failed returncode ");
-            shell_print(nullptr, digits);
-            shell_print(nullptr, "\n");
+            shell_print(&c.typed, word);
+            shell_print(&c.typed, " failed returncode ");
+            shell_print(&c.typed, digits);
+            shell_print(&c.typed, "\n");
         }
     }
     return loaded;
 }
 
+constexpr u32 new_shell_width = 480;
+constexpr u32 new_shell_height = 240;
+
+void log_new_shell(u32 cli) {
+    if (!serial_at_line_start) {
+        serial::write_char('\n');
+        serial_at_line_start = true;
+    }
+    serial::write("shell: new shell ");
+    serial::write_dec(cli);
+    serial::write("\n");
+}
+
+void shell_loop(Console& c);
+void shell_task(void* arg);
+
+// Opens the console's window and starts its shell as a native task.
+bool open_new_shell(void* ctx) {
+    (void)ctx;
+    u32 index = Dos::kMaxConsoles;
+    for (u32 i = 1; i < Dos::kMaxConsoles; ++i) {
+        if (!consoles[i].open) {
+            index = i;
+            break;
+        }
+    }
+    if (index == Dos::kMaxConsoles) {
+        return false;
+    }
+    Console& c = consoles[index];
+    c.index = static_cast<u8>(index);
+    c.process = 0;
+    c.cli = 0;
+    c.command_running = false;
+    c.line_mode = false;
+    c.open = false;
+    c.at_line_start = true;
+    c.filter.reset();
+    key_queue_clear(c);
+    const i32 offset = static_cast<i32>(index - 1) * 20;
+    if (!c.shell.open(machine, exec, graphics, intuition, display, 60 + offset, 60 + offset,
+                      new_shell_width, new_shell_height)) {
+        return false;
+    }
+    register_console(static_cast<u8>(index));
+    u32 process = 0;
+    u32 cli = 0;
+    if (!dos.create_shell_process(static_cast<u8>(index), process, cli)) {
+        c.shell.close();
+        return false;
+    }
+    c.process = process;
+    c.cli = cli;
+    c.open = true;
+    log_new_shell(cli);
+    if (exec.spawn_native(process, &shell_task, &c, 0, true) == 0) {
+        c.shell.close();
+        c.open = false;
+        c.process = 0;
+        c.cli = 0;
+        return false;
+    }
+    return true;
+}
+
 // Reads the keyboard for good: keys go to the line editor, Enter runs the
-// line. Never returns; a lost keyboard leaves the window as it is.
-[[noreturn]] void run_shell_loop() {
-    static constinit ShellCommands commands;
-    commands.init(dos, &shell_print, nullptr);
-    static constinit TypedShell typed{};
-    typed.commands = &commands;
-    static constinit Shell line_editor;
-    line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
-                               &typed_message, &typed_prompt, &typed_log, &typed,
-                               &typed_builtin, &typed_scroll_to_bottom,
-                               &typed_cursor_back});
-    serial::write("shell: ready\n");
-    while (usb_keyboard_status() == UsbStatus::Ready) {
+// line. Console 0 never returns; another console returns when its shell
+// ends and leaves its console free for a new shell.
+void shell_loop(Console& c) {
+    c.commands.init(dos, &shell_print, &c.typed);
+    c.commands.set_process(c.process);
+    c.commands.set_new_shell(&open_new_shell, &c);
+    c.typed.console = &c;
+    c.line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
+                                 &typed_message, &typed_prompt, &typed_log, &c.typed,
+                                 &typed_builtin, &typed_scroll_to_bottom,
+                                 &typed_cursor_back});
+    if (c.index == 0) {
+        serial::write("shell: ready\n");
+    } else {
+        write_shell_prompt(c);
+    }
+    c.line_mode = true;
+    while (usb_keyboard_status() == UsbStatus::Ready &&
+           (c.index == 0 || c.shell.is_open())) {
         intuition.flush_palette();
         poll_mouse();
+        poll_keys();
         u8 queued = 0;
-        while (key_queue_pop(queued)) {
-            if (queued != ctrl_backslash) {
-                line_editor.key(queued);
+        while (key_queue_pop(c, queued)) {
+            if (queued == ctrl_backslash) {
+                continue;
+            }
+            if (queued == '\n') {
+                c.line_mode = false;
+                c.line_editor.key(queued);
+                c.line_mode = true;
+            } else {
+                c.line_editor.key(queued);
+            }
+            if (c.commands.ended()) {
+                break;
             }
         }
-        u8 report[KeyDecoder::kReportBytes];
-        if (usb_keyboard_poll(report)) {
-            u8 chars[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey];
-            const usize count = typed_decoder.feed(report, chars, sizeof(chars));
-            for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
-                prev_key_slots[s] = report[2 + s];
-            }
-            for (usize i = 0; i < count; ++i) {
-                handle_decoded_byte(chars[i], &line_editor);
-            }
+        if (c.commands.ended()) {
+            break;
         }
         exec.yield_if_ready();
         idle_wait();
     }
-    shell.print_line(usb_keyboard_result().message);
-    for (;;) {
-        asm volatile("cli; hlt");
+    c.line_mode = false;
+    if (c.index == 0) {
+        c.shell.print_line(usb_keyboard_result().message);
+        for (;;) {
+            asm volatile("cli; hlt");
+        }
     }
+    c.shell.close();
+    c.open = false;
+    c.command_running = false;
+    c.process = 0;
+    c.cli = 0;
+    c.filter.reset();
+    key_queue_clear(c);
 }
+
+void shell_task(void* arg) { shell_loop(*static_cast<Console*>(arg)); }
 
 }
 
@@ -817,9 +966,10 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
     if (!start(info, pages, volume)) {
         return;
     }
+    Console& boot = consoles[0];
     if (amiga_screen != 0) {
-        if (shell.open(machine, exec, graphics, intuition, display)) {
-            shell.set_view_listener(&on_shell_view, nullptr);
+        if (boot.shell.open(machine, exec, graphics, intuition, display)) {
+            boot.shell.set_view_listener(&on_shell_view, nullptr);
             serial::write("intuition: window opened HombreShell\n");
             show_amiga_screen(info);
         } else {
@@ -829,15 +979,15 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolum
             amiga_screen = 0;
         }
     }
-    execute(path, args);
-    key_queue_clear();
-    if (shell.is_open()) {
-        write_shell_prompt();
+    execute(boot, path, args);
+    key_queue_clear(boot);
+    if (boot.shell.is_open()) {
+        write_shell_prompt(boot);
         if (usb_keyboard_status() == UsbStatus::Ready) {
-            run_shell_loop();
+            shell_loop(boot);
         }
         // No keyboard: the window says why, and the boot ends as it always did.
-        shell.print_line(usb_keyboard_result().message);
+        boot.shell.print_line(usb_keyboard_result().message);
     }
 }
 

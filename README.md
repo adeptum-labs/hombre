@@ -51,10 +51,14 @@ Targets:
   down past the newest returns to the line being typed. Left and Right move
   the cursor within the line, and typing and Backspace work at the cursor.
   The shell has the Workbench 3.1 builtins `Cd`, `Echo`, `Path`, `Why`,
-  `Prompt`, `Ask`, `Failat`, `Set`, `Get`, `UnSet`, `SetEnv`, `GetEnv` and
-  `UnSetEnv`; its prompt shows the current directory, and a
-  command whose return code reaches the fail level prints
-  `<word> failed returncode <n>`. Commands are searched in `C:` and the
+  `Prompt`, `Ask`, `Failat`, `Set`, `Get`, `UnSet`, `SetEnv`, `GetEnv`,
+  `UnSetEnv`, `Run`, `NewShell` and `EndCLI`; its prompt shows the current
+  directory, and a command whose return code reaches the fail level prints
+  `<word> failed returncode <n>`. `NewShell` opens another HombreShell window
+  with its own CLI and prompt; the keyboard goes to the active shell window,
+  Ctrl+C breaks only that window's command, and `Run`, `Status` and `Break`
+  work across shells. `EndCLI` closes a NewShell window; the boot shell
+  refuses it. Commands are searched in `C:` and the
   `Path` directories. On a Workbench 3.1 disk the read-only commands work:
   `Dir`, `List`, `Type`, `Info`, `Assign`, `Date` (from the PC's real-time
   clock), `Which`, `Avail`, `Status` and `Version`. The boot disk stays
@@ -63,7 +67,7 @@ Targets:
   there. Its contents live in memory and are lost when the machine
   restarts. At start `T:` and `ENV:` are assigned to `RAM:T` and `RAM:Env`,
   and `ENVARC:` is copied into `ENV:`, as the Workbench Startup-Sequence
-  does; global variables are files in `ENV:`. There is no `Run` yet.
+  does; global variables are files in `ENV:`.
   `tools/probe_commands.sh <disk>
   "<line>"...` boots once per line and shows how each command ends, and
   `make KCXXEXTRA=-DHOMBRE_TRACE_NATIVES` logs every library call.
