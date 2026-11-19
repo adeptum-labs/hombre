@@ -323,20 +323,12 @@ inline Rect scroll_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip
                 static_cast<i32>(bottom)};
 }
 
-// Copies a rectangle between two distinct bitmaps; overlapping regions within
-// the same bitmap are not handled. Each destination byte is built from the one
-// or two source bytes it straddles and masked at the left and right edges.
-inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const Bitmap& dst,
-                      i32 dx, i32 dy, i32 width, i32 height) {
-    if (width <= 0 || height <= 0) {
-        return;
+// Clips a copy rectangle against both bitmaps; false if nothing overlaps.
+inline bool clip_copy_bounds(const Bitmap& src, const Bitmap& dst, i64& s_x, i64& s_y, i64& d_x,
+                             i64& d_y, i64& w, i64& h) {
+    if (w <= 0 || h <= 0) {
+        return false;
     }
-    i64 s_x = sx;
-    i64 s_y = sy;
-    i64 d_x = dx;
-    i64 d_y = dy;
-    i64 w = width;
-    i64 h = height;
     if (s_x < 0) {
         w += s_x;
         d_x -= s_x;
@@ -362,7 +354,7 @@ inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const
     const i64 src_h = static_cast<i64>(src.rows);
     const i64 dst_h = static_cast<i64>(dst.rows);
     if (s_x >= src_w || d_x >= dst_w || s_y >= src_h || d_y >= dst_h) {
-        return;
+        return false;
     }
     if (s_x + w > src_w) {
         w = src_w - s_x;
@@ -376,7 +368,21 @@ inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const
     if (d_y + h > dst_h) {
         h = dst_h - d_y;
     }
-    if (w <= 0 || h <= 0) {
+    return w > 0 && h > 0;
+}
+
+// Copies a rectangle between two distinct bitmaps; overlapping regions within
+// the same bitmap are not handled. Each destination byte is built from the one
+// or two source bytes it straddles and masked at the left and right edges.
+inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const Bitmap& dst,
+                      i32 dx, i32 dy, i32 width, i32 height) {
+    i64 s_x = sx;
+    i64 s_y = sy;
+    i64 d_x = dx;
+    i64 d_y = dy;
+    i64 w = width;
+    i64 h = height;
+    if (!clip_copy_bounds(src, dst, s_x, s_y, d_x, d_y, w, h)) {
         return;
     }
 
@@ -438,6 +444,118 @@ inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const
                 } else {
                     const u8 dst_byte = bus.r8(dst_at);
                     bus.w8(dst_at, static_cast<u8>((dst_byte & ~mask) | (src_byte & mask)));
+                }
+            }
+        }
+    }
+}
+
+// Copies a rectangle between two distinct bitmaps, trimming up to top_rows
+// top-left and top-right corner insets relative to [0, box_width - 1] in src.
+inline void copy_rect_skip(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const Bitmap& dst,
+                           i32 dx, i32 dy, i32 width, i32 height, i32 box_width,
+                           const u8* top_insets, u32 top_rows) {
+    if (top_insets == nullptr || top_rows == 0 || box_width <= 0) {
+        copy_rect(bus, src, sx, sy, dst, dx, dy, width, height);
+        return;
+    }
+    i64 s_x = sx;
+    i64 s_y = sy;
+    i64 d_x = dx;
+    i64 d_y = dy;
+    i64 w = width;
+    i64 h = height;
+    if (!clip_copy_bounds(src, dst, s_x, s_y, d_x, d_y, w, h)) {
+        return;
+    }
+    while (h > 0 && s_y < static_cast<i64>(top_rows) && bus.ok()) {
+        const i64 inset = static_cast<i64>(top_insets[s_y]);
+        const i64 row_x0 = s_x > inset ? s_x : inset;
+        const i64 max_x1 = static_cast<i64>(box_width) - 1 - inset;
+        const i64 s_x1 = s_x + w - 1;
+        const i64 row_x1 = s_x1 < max_x1 ? s_x1 : max_x1;
+        if (row_x0 <= row_x1) {
+            copy_rect(bus, src, static_cast<i32>(row_x0), static_cast<i32>(s_y), dst,
+                      static_cast<i32>(d_x + (row_x0 - s_x)), static_cast<i32>(d_y),
+                      static_cast<i32>(row_x1 - row_x0 + 1), 1);
+        }
+        ++s_y;
+        ++d_y;
+        --h;
+    }
+    if (h > 0 && bus.ok()) {
+        copy_rect(bus, src, static_cast<i32>(s_x), static_cast<i32>(s_y), dst,
+                  static_cast<i32>(d_x), static_cast<i32>(d_y), static_cast<i32>(w),
+                  static_cast<i32>(h));
+    }
+}
+
+// Remaps each pixel inside r (clipped to bitmap) through table[pen] in place,
+// processing one byte column at a time across the active bitplanes.
+inline void remap_rect(native::Bus& bus, const Bitmap& bitmap, Rect r, const u8* table,
+                       u32 table_size = 256) {
+    if (table == nullptr || table_size == 0 || bitmap.depth == 0) {
+        return;
+    }
+    const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
+    const i64 height = static_cast<i64>(bitmap.rows);
+    i64 left = r.x0 > 0 ? r.x0 : 0;
+    i64 top = r.y0 > 0 ? r.y0 : 0;
+    i64 right = r.x1 < width ? r.x1 : width - 1;
+    i64 bottom = r.y1 < height ? r.y1 : height - 1;
+    if (left > right || top > bottom) {
+        return;
+    }
+    const u32 depth = bitmap.depth < 8 ? bitmap.depth : 8;
+    const u32 first_byte = static_cast<u32>(left) >> 3;
+    const u32 last_byte = static_cast<u32>(right) >> 3;
+    const u32 byte_count = last_byte - first_byte + 1;
+    const u8 left_mask = static_cast<u8>(0xFFu >> (static_cast<u32>(left) & 7));
+    const u8 right_mask = static_cast<u8>(0xFFu << (7 - (static_cast<u32>(right) & 7)));
+
+    for (i64 y = top; y <= bottom && bus.ok(); ++y) {
+        const u32 row_offset = static_cast<u32>(y) * bitmap.bytes_per_row + first_byte;
+        u8* plane_ptrs[8]{};
+        for (u32 plane = 0; plane < depth; ++plane) {
+            plane_ptrs[plane] = bus.bytes_at(bitmap.planes[plane] + row_offset, byte_count);
+        }
+        if (!bus.ok()) {
+            return;
+        }
+        for (u32 bi = 0; bi < byte_count; ++bi) {
+            u8 mask = 0xFF;
+            if (bi == 0) {
+                mask &= left_mask;
+            }
+            if (bi == byte_count - 1) {
+                mask &= right_mask;
+            }
+            u8 in_b[8]{};
+            u8 out_b[8]{};
+            for (u32 plane = 0; plane < depth; ++plane) {
+                in_b[plane] = plane_ptrs[plane][bi];
+                out_b[plane] = static_cast<u8>(in_b[plane] & ~mask);
+            }
+            for (u32 bit_i = 0; bit_i < 8; ++bit_i) {
+                const u8 bit = static_cast<u8>(0x80u >> bit_i);
+                if ((mask & bit) == 0) {
+                    continue;
+                }
+                const u32 shift = 7 - bit_i;
+                u32 pen = 0;
+                for (u32 plane = 0; plane < depth; ++plane) {
+                    pen |= static_cast<u32>((in_b[plane] >> shift) & 1u) << plane;
+                }
+                const u32 mapped = pen < table_size ? table[pen] : pen;
+                for (u32 plane = 0; plane < depth; ++plane) {
+                    if (((mapped >> plane) & 1u) != 0) {
+                        out_b[plane] |= bit;
+                    }
+                }
+            }
+            for (u32 plane = 0; plane < depth; ++plane) {
+                if (out_b[plane] != in_b[plane]) {
+                    plane_ptrs[plane][bi] = out_b[plane];
                 }
             }
         }

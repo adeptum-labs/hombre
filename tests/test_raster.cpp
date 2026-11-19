@@ -642,6 +642,112 @@ void copy_rect_depth_mismatch() {
     }
 }
 
+void copy_rect_skip_trims_top_corners_and_clips() {
+    Rig r;
+    native::Bus b = r.bus();
+    const raster::Bitmap src = r.bitmap_at(kSecondPlaneBase);
+    const raster::Bitmap dst = r.bitmap();
+    r.clear_planes();
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 40; ++x) {
+            raster::write_pixel(b, src, x, y, static_cast<u32>(1 + ((x + y * 2) % 3)));
+            raster::write_pixel(b, dst, x, y, 0);
+        }
+    }
+    static constexpr u8 kInsets[3] = {3, 2, 1};
+    raster::copy_rect_skip(b, src, 0, 0, dst, 10, 2, 16, 8, 16, kInsets, 3);
+    CHECK(b.ok());
+
+    auto is_skipped = [](i32 lx, i32 ly) {
+        if (ly >= 0 && ly < 3) {
+            const i32 inset = 3 - ly;
+            return lx < inset || lx >= 16 - inset;
+        }
+        return false;
+    };
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 40; ++x) {
+            if (x >= 10 && x < 26 && y >= 2 && y < 10 && !is_skipped(x - 10, y - 2)) {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y),
+                         raster::read_pixel(b, src, x - 10, y - 2));
+            } else {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y), 0u);
+            }
+        }
+    }
+
+    // Partial sub-rect starting at (sx=1, sy=1) with negative destination offset.
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 40; ++x) {
+            raster::write_pixel(b, dst, x, y, 3);
+        }
+    }
+    raster::copy_rect_skip(b, src, 1, 1, dst, 4, -1, 14, 5, 16, kInsets, 3);
+    CHECK(b.ok());
+    for (i32 y = 0; y < 6; ++y) {
+        for (i32 x = 0; x < 24; ++x) {
+            const i32 sx = 1 + (x - 4);
+            const i32 sy = 1 + (y + 1);
+            if (x >= 4 && x < 18 && y >= 0 && y < 4 && !is_skipped(sx, sy)) {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y), raster::read_pixel(b, src, sx, sy));
+            } else {
+                CHECK_EQ(raster::read_pixel(b, dst, x, y), 3u);
+            }
+        }
+    }
+}
+
+void remap_rect_remaps_masked_spans_and_clips() {
+    Rig r;
+    native::Bus b = r.bus();
+    const raster::Bitmap bm = r.bitmap_at(kPlaneBase, 8);
+    r.clear_planes();
+    u8 table[256]{};
+    for (u32 i = 0; i < 256; ++i) {
+        table[i] = static_cast<u8>((i * 37 + 11) & 0xFF);
+    }
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 40; ++x) {
+            raster::write_pixel(b, bm, x, y, static_cast<u32>((x * 13 + y * 7) & 0xFF));
+        }
+        for (i32 x = 632; x < static_cast<i32>(kWidth); ++x) {
+            raster::write_pixel(b, bm, x, y, static_cast<u32>((x + y * 5) & 0xFF));
+        }
+    }
+
+    raster::remap_rect(b, bm, Rect{5, 2, 27, 6}, table, 256);
+    CHECK(b.ok());
+    for (i32 y = 0; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 0; x < 40; ++x) {
+            const u32 orig = static_cast<u32>((x * 13 + y * 7) & 0xFF);
+            const u32 want = (x >= 5 && x <= 27 && y >= 2 && y <= 6) ? table[orig] : orig;
+            CHECK_EQ(raster::read_pixel(b, bm, x, y), want);
+        }
+    }
+
+    // Clipping at top-left and bottom-right edges, plus empty rect.
+    const std::vector<u8> mid = r.snapshot();
+    raster::remap_rect(b, bm, Rect{20, 10, 10, 12}, table, 256);
+    CHECK(r.snapshot() == mid);
+
+    raster::remap_rect(b, bm, Rect{636, 13, 650, 20}, table, 256);
+    CHECK(b.ok());
+    for (i32 y = 12; y < static_cast<i32>(kRows); ++y) {
+        for (i32 x = 632; x < static_cast<i32>(kWidth); ++x) {
+            const u32 orig = static_cast<u32>((x + y * 5) & 0xFF);
+            const u32 want = (x >= 636 && y >= 13) ? table[orig] : orig;
+            CHECK_EQ(raster::read_pixel(b, bm, x, y), want);
+        }
+    }
+
+    // Invalid plane pointer triggers BusError and stops cleanly.
+    raster::Bitmap bad = bm;
+    bad.planes[0] = kMemoryBytes + 16;
+    raster::remap_rect(b, bad, Rect{0, 0, 7, 1}, table, 256);
+    CHECK(!b.ok());
+    CHECK_EQ(r.machine().cpu.exit, ExitReason::BusError);
+}
+
 }
 
 int main() {
@@ -665,5 +771,7 @@ int main() {
     copy_rect_unaligned_shift();
     copy_rect_clips_to_both_bitmaps();
     copy_rect_depth_mismatch();
+    copy_rect_skip_trims_top_corners_and_clips();
+    remap_rect_remaps_masked_spans_and_clips();
     return check::finish("test_raster");
 }

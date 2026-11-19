@@ -138,6 +138,12 @@ void report(const DisplayState* display, Machine& m, const View& v, const Rect& 
     }
 }
 
+void bump_palette(DisplayState* display) {
+    if (display != nullptr) {
+        ++display->palette_gen;
+    }
+}
+
 void refresh_viewport(const DisplayState* display, Machine& m, Bus& b, u32 vp) {
     if (display == nullptr || display->front_screen == 0 || display->sink.refresh == nullptr) {
         return;
@@ -320,6 +326,7 @@ struct GraphicsNatives {
             }
         }
         if (n != 0 && b.ok()) {
+            bump_palette(g.display_);
             refresh_viewport(g.display_, m, b, vp);
         }
     }
@@ -373,6 +380,7 @@ struct GraphicsNatives {
             b.w16(t.low_table + index * 2, value);
         }
         if (b.ok()) {
+            bump_palette(g.display_);
             refresh_viewport(g.display_, m, b, vp);
         }
     }
@@ -537,6 +545,7 @@ struct GraphicsNatives {
         }
         const ColorMapTables t = colormap_tables(b, b.r32(vp + ndk::vp_ColorMap));
         if (write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
+            bump_palette(g.display_);
             refresh_viewport(g.display_, m, b, vp);
         }
     }
@@ -586,6 +595,7 @@ struct GraphicsNatives {
             p = next;
         }
         if (changed && b.ok()) {
+            bump_palette(g.display_);
             refresh_viewport(g.display_, m, b, vp);
         }
     }
@@ -618,10 +628,13 @@ struct GraphicsNatives {
         }
     }
 
-    static void set_rgb32_cm(void*, Machine& m) {
+    static void set_rgb32_cm(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
         Bus b(m);
         const ColorMapTables t = colormap_tables(b, m.cpu.a[0]);
-        write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3]);
+        if (write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
+            bump_palette(g.display_);
+        }
     }
 };
 

@@ -3690,8 +3690,10 @@ void depth8_chrome_pixel_spot_checks() {
     const u32 w1 = open_win(r, kNewWindow);
     CHECK(w1 != 0);
 
-    CHECK_EQ(screen_pixel(r, screen, 40, 30), static_cast<u32>(chrome::kFrameDark));
-    CHECK_EQ(screen_pixel(r, screen, 259, 30), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 40, 30), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 43, 30), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 259, 30), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 256, 30), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, 40, 149), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, 259, 149), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, 41, 60), static_cast<u32>(chrome::kFrameLight));
@@ -3854,6 +3856,265 @@ void activation_switch_redraws_both_bars() {
     CHECK_EQ(screen_pixel(r, screen, 340, 43), static_cast<u32>(chrome::kActiveBar7));
 }
 
+void fill_backdrop_rect(GfxRig& r, u32 screen, i32 x0, i32 y0, i32 x1, i32 y1, u8 pen) {
+    const u32 brp = r.intuition.backdrop_rastport(screen);
+    CHECK(brp != 0);
+    r.graphics.set_pens(brp, pen, 0, JAM2);
+    r.graphics.rect_fill(brp, x0, y0, x1, y1);
+}
+
+void fill_window_rect(GfxRig& r, u32 window, i32 x0, i32 y0, i32 x1, i32 y1, u8 pen) {
+    const u32 rp = r.get32(window + wd_RPort);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = pen;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = static_cast<u32>(x0);
+    r.cpu().d[1] = static_cast<u32>(y0);
+    r.cpu().d[2] = static_cast<u32>(x1);
+    r.cpu().d[3] = static_cast<u32>(y1);
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+}
+
+u32 rgb24_luminance(u32 rgb24) {
+    const u32 r = (rgb24 >> 16) & 0xFF;
+    const u32 g = (rgb24 >> 8) & 0xFF;
+    const u32 b = rgb24 & 0xFF;
+    return 299u * r + 587u * g + 114u * b;
+}
+
+void rounded_top_corners_on_depth8_show_backdrop_and_chrome() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    fill_backdrop_rect(r, screen, 0, 15, 639, 399, 5);
+
+    put_new_window(r, kNewWindow, 50, 40, 120, 80, WFLG_ACTIVATE | WFLG_CLOSEGADGET, 0, 0, 0);
+    const u32 win = open_win(r, kNewWindow);
+    CHECK(win != 0);
+
+    // Top-left cut corner pixels show the backdrop (pen 5).
+    for (i32 x = 50; x <= 52; ++x) {
+        CHECK_EQ(screen_pixel(r, screen, x, 40), 5u);
+    }
+    CHECK_EQ(screen_pixel(r, screen, 50, 41), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 51, 41), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 42), 5u);
+
+    // Top-right cut corner pixels show the backdrop (pen 5).
+    for (i32 x = 167; x <= 169; ++x) {
+        CHECK_EQ(screen_pixel(r, screen, x, 40), 5u);
+    }
+    CHECK_EQ(screen_pixel(r, screen, 168, 41), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 169, 41), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 169, 42), 5u);
+
+    // Pixels just inside the cut corners show window chrome.
+    CHECK_EQ(screen_pixel(r, screen, 53, 40), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 52, 41), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 53, 41), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 51, 42), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 166, 40), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 167, 41), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 168, 42), static_cast<u32>(chrome::kFrameDark));
+
+    // Bottom corners stay square.
+    CHECK_EQ(screen_pixel(r, screen, 50, 119), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 169, 119), static_cast<u32>(chrome::kFrameDark));
+
+    // Borderless window on an 8-plane screen gets no corner cut.
+    put_new_window(r, kNewWindow, 220, 40, 80, 60, WFLG_BORDERLESS, 0, 0, 0);
+    const u32 borderless = open_win(r, kNewWindow);
+    CHECK(borderless != 0);
+    CHECK_EQ(screen_pixel(r, screen, 220, 40), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 299, 40), static_cast<u32>(chrome::kFrameDark));
+}
+
+void drop_shadow_darkens_backdrop_and_behind_window_only() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    fill_backdrop_rect(r, screen, 0, 15, 639, 399, 5);
+
+    const u8* strong = nullptr;
+    const u8* light = nullptr;
+    CHECK(r.intuition.shade_tables(screen, strong, light));
+    CHECK(strong[5] != 5u && light[5] != 5u);
+    CHECK(strong[2] != 2u && light[2] != 2u);
+
+    // Back window filled with pen 2 inside its interior.
+    put_new_window(r, kNewWindow, 150, 80, 140, 90, 0, 0, 0, 0);
+    const u32 back_win = open_win(r, kNewWindow);
+    CHECK(back_win != 0);
+    fill_window_rect(r, back_win, 4, 16, 135, 85, 2);
+
+    // Front window: left=60, top=50, width=120, height=80 -> right=179, bottom=129.
+    put_new_window(r, kNewWindow, 60, 50, 120, 80, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 front_win = open_win(r, kNewWindow);
+    CHECK(front_win != 0);
+
+    // Shadow over backdrop (above back_win at y=60, and left of back_win at x=70,y=131..133).
+    CHECK_EQ(screen_pixel(r, screen, 180, 60), static_cast<u32>(strong[5]));
+    CHECK_EQ(screen_pixel(r, screen, 181, 60), static_cast<u32>(strong[5]));
+    CHECK_EQ(screen_pixel(r, screen, 182, 60), static_cast<u32>(light[5]));
+    CHECK_EQ(screen_pixel(r, screen, 183, 60), static_cast<u32>(light[5]));
+    CHECK_EQ(screen_pixel(r, screen, 70, 130), static_cast<u32>(strong[5]));
+    CHECK_EQ(screen_pixel(r, screen, 70, 131), static_cast<u32>(strong[5]));
+    CHECK_EQ(screen_pixel(r, screen, 70, 132), static_cast<u32>(light[5]));
+    CHECK_EQ(screen_pixel(r, screen, 70, 133), static_cast<u32>(light[5]));
+
+    // Areas outside the shadow band remain untouched backdrop pen 5.
+    CHECK_EQ(screen_pixel(r, screen, 59, 60), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 180, 53), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 181, 50), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 63, 130), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 184, 60), 5u);
+
+    // Shadow over back_win's interior (pen 2) at y=100, right+1..right+4 (x=180..183).
+    CHECK_EQ(screen_pixel(r, screen, 181, 100), static_cast<u32>(strong[2]));
+    CHECK_EQ(screen_pixel(r, screen, 183, 100), static_cast<u32>(light[2]));
+    // Corner square over back_win (x=180..183, y=130..133): inner 2x2 strong, rest light.
+    CHECK_EQ(screen_pixel(r, screen, 181, 131), static_cast<u32>(strong[2]));
+    CHECK_EQ(screen_pixel(r, screen, 182, 131), static_cast<u32>(light[2]));
+    CHECK_EQ(screen_pixel(r, screen, 181, 132), static_cast<u32>(light[2]));
+    CHECK_EQ(screen_pixel(r, screen, 183, 133), static_cast<u32>(light[2]));
+
+    // front_win's own pixels are never darkened.
+    CHECK_EQ(screen_pixel(r, screen, 80, 80), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 179, 129), static_cast<u32>(chrome::kFrameDark));
+
+    // Backdrop and borderless windows get no shadow.
+    put_new_window(r, kNewWindow, 330, 50, 80, 60, WFLG_BACKDROP, 0, 0, 0);
+    CHECK(open_win(r, kNewWindow) != 0);
+    CHECK_EQ(screen_pixel(r, screen, 411, 70), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 350, 111), 5u);
+
+    put_new_window(r, kNewWindow, 440, 50, 80, 60, WFLG_BORDERLESS, 0, 0, 0);
+    CHECK(open_win(r, kNewWindow) != 0);
+    CHECK_EQ(screen_pixel(r, screen, 521, 70), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 460, 111), 5u);
+}
+
+void moving_and_closing_window_removes_old_shadow() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    fill_backdrop_rect(r, screen, 0, 15, 639, 399, 5);
+
+    const u8* strong = nullptr;
+    const u8* light = nullptr;
+    CHECK(r.intuition.shade_tables(screen, strong, light));
+
+    // Window at (60, 50, 100, 60) -> right=159, bottom=109.
+    r.refreshes.clear();
+    put_new_window(r, kNewWindow, 60, 50, 100, 60, WFLG_ACTIVATE | WFLG_DRAGBAR, 0, 0, 0);
+    const u32 win = open_win(r, kNewWindow);
+    CHECK(win != 0);
+    CHECK(refreshed(r, screen, 60, 50, 163, 113));
+    CHECK_EQ(screen_pixel(r, screen, 161, 60), static_cast<u32>(strong[5]));
+    CHECK_EQ(screen_pixel(r, screen, 100, 113), static_cast<u32>(light[5]));
+
+    // MoveWindow-style move restores old shadow area to plain backdrop.
+    r.refreshes.clear();
+    r.intuition.move_window_to(win, 200, 150);
+    CHECK(refreshed(r, screen, 60, 50, 303, 213));
+    CHECK_EQ(screen_pixel(r, screen, 161, 60), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 113), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 301, 160), static_cast<u32>(strong[5]));
+    CHECK_EQ(screen_pixel(r, screen, 240, 213), static_cast<u32>(light[5]));
+
+    // Drag path also restores old shadow area.
+    press(r, 230, 156);
+    move_to(r, 330, 206);
+    release(r, 330, 206);
+    CHECK_EQ(r.get16(win + wd_LeftEdge), 300u);
+    CHECK_EQ(r.get16(win + wd_TopEdge), 200u);
+    CHECK_EQ(screen_pixel(r, screen, 301, 160), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 240, 213), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 401, 210), static_cast<u32>(strong[5]));
+    CHECK_EQ(screen_pixel(r, screen, 340, 263), static_cast<u32>(light[5]));
+
+    // Closing the window removes its shadow cleanly.
+    r.refreshes.clear();
+    r.cpu().a[0] = win;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK(refreshed(r, screen, 300, 200, 403, 263));
+    CHECK_EQ(screen_pixel(r, screen, 401, 210), 5u);
+    CHECK_EQ(screen_pixel(r, screen, 340, 263), 5u);
+}
+
+void depth2_screen_has_no_corners_and_no_shadow() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    fill_backdrop_rect(r, screen, 0, 15, 639, 399, 3);
+
+    const u8* strong = nullptr;
+    const u8* light = nullptr;
+    CHECK(!r.intuition.shade_tables(screen, strong, light));
+
+    put_new_window(r, kNewWindow, 50, 40, 120, 80, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 win = open_win(r, kNewWindow);
+    CHECK(win != 0);
+
+    // No corner cut on 2-plane screen.
+    CHECK_EQ(screen_pixel(r, screen, 50, 40), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 169, 40), 1u);
+
+    // No shadow on 2-plane screen.
+    CHECK_EQ(screen_pixel(r, screen, 171, 50), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 173, 50), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 121), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 123), 3u);
+}
+
+void shade_table_darkens_default_pen0_and_updates_on_setrgb32() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    const u8* strong = nullptr;
+    const u8* light = nullptr;
+    CHECK(r.intuition.shade_tables(screen, strong, light));
+    const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+    const u32 rgb0 = colormap_rgb24(r, map, 0);
+    const u32 rgb_strong0 = colormap_rgb24(r, map, strong[0]);
+    const u32 rgb_light0 = colormap_rgb24(r, map, light[0]);
+    CHECK(strong[0] != 0u);
+    CHECK(light[0] != 0u);
+    CHECK(rgb24_luminance(rgb_strong0) < rgb24_luminance(rgb0));
+    CHECK(rgb24_luminance(rgb_light0) < rgb24_luminance(rgb0));
+
+    // Change pen 0 to pure white and pens 10/11 to exact 0.70 / 0.85 targets.
+    const u32 vp = screen + sc_ViewPort;
+    auto set_rgb32 = [&](u32 pen, u8 cr, u8 cg, u8 cb) {
+        r.cpu().a[0] = vp;
+        r.cpu().d[0] = pen;
+        r.cpu().d[1] = static_cast<u32>(cr) * 0x01010101u;
+        r.cpu().d[2] = static_cast<u32>(cg) * 0x01010101u;
+        r.cpu().d[3] = static_cast<u32>(cb) * 0x01010101u;
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32), ExitReason::Halt);
+    };
+    set_rgb32(0, 0xFF, 0xFF, 0xFF);
+    set_rgb32(10, 179, 179, 179);  // 255 * 0.70 = 178.5 -> 179
+    set_rgb32(11, 217, 217, 217);  // 255 * 0.85 = 216.75 -> 217
+
+    CHECK(r.intuition.shade_tables(screen, strong, light));
+    CHECK_EQ(strong[0], 10u);
+    CHECK_EQ(light[0], 11u);
+
+    // Opening a window after SetRGB32 uses the rebuilt shade table in compose.
+    put_new_window(r, kNewWindow, 50, 40, 100, 60, 0, 0, 0, 0);
+    CHECK(open_win(r, kNewWindow) != 0);
+    CHECK_EQ(screen_pixel(r, screen, 151, 50), 10u);
+    CHECK_EQ(screen_pixel(r, screen, 153, 50), 11u);
+}
+
 }
 
 int main() {
@@ -3977,5 +4238,10 @@ int main() {
     depth8_prop_gadget_chrome_pixels();
     depth2_fallback_chrome_pens();
     activation_switch_redraws_both_bars();
+    rounded_top_corners_on_depth8_show_backdrop_and_chrome();
+    drop_shadow_darkens_backdrop_and_behind_window_only();
+    moving_and_closing_window_removes_old_shadow();
+    depth2_screen_has_no_corners_and_no_shadow();
+    shade_table_darkens_default_pen0_and_updates_on_setrgb32();
     return check::finish("test_intuition");
 }

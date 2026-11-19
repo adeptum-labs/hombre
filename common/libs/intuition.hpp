@@ -148,6 +148,11 @@ public:
     // it and has no NEWSIZE waiting for a reply.
     void size_window_to(u32 window, i32 width, i32 height);
     void reclaim(u32 keep_window = 0, u32 keep_screen = 0);
+    // Returns pointers to the screen's native 256-entry strong/light shade
+    // tables, rebuilding them if the palette changed. False for unknown or
+    // shallow (< 8 plane) screens.
+    bool shade_tables(u32 screen, const u8*& strong, const u8*& light);
+    u32 backdrop_rastport(u32 screen) const;
 
 private:
     friend struct IntuitionNatives;
@@ -177,8 +182,12 @@ private:
         u32 title_bytes = 0;
         u32 width = 0;
         u32 height = 0;
+        u32 depth = 0;
         u32 first_window = 0;
+        u32 palette_gen = 0;
         Rect pending = {0, 0, -1, -1};
+        u8 strong_shade[256]{};
+        u8 light_shade[256]{};
     };
 
     // What a window owns, with its place in the screen's window list.
@@ -191,6 +200,7 @@ private:
         i32 top = 0;
         i32 width = 0;
         i32 height = 0;
+        u32 flags = 0;
         i32 max_w = 0;
         i32 max_h = 0;
         i32 min_w = 0;
@@ -231,6 +241,7 @@ private:
     static void reply_message(void* ctx, u32 message);
     static void on_damage(void* ctx, m68k::Machine& m, u32 bitmap, const Rect& rect);
 
+    void rebuild_shade_tables(ScreenRecord& srec);
     void compose(u32 screen, Rect r);
     u32 find_screen(u32 screen) const;
     ScreenRecord* find_screen_record(u32 screen);

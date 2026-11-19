@@ -57,6 +57,8 @@ struct DisplayState {
     u32 front_screen = 0;
     // Changes drawn into any bitmap other than the front screen's go here.
     DamageSink damage{nullptr, nullptr};
+    // Incremented whenever a ColorMap is modified through graphics.library.
+    u32 palette_gen = 0;
 };
 
 // Offsets and values of the graphics and Intuition structures, named as the
@@ -293,6 +295,7 @@ constexpr u32 WFLG_DEPTHGADGET = 4;
 constexpr u32 WFLG_CLOSEGADGET = 8;
 constexpr u32 WFLG_SIZEBRIGHT = 0x10;
 constexpr u32 WFLG_SIZEBBOTTOM = 0x20;
+constexpr u32 WFLG_BACKDROP = 0x100;
 constexpr u32 WFLG_REPORTMOUSE = 0x200;
 constexpr u32 WFLG_BORDERLESS = 0x800;
 constexpr u32 WFLG_ACTIVATE = 0x1000;
@@ -366,7 +369,9 @@ constexpr u32 WA_SizeGadget = 0x80000081;
 constexpr u32 WA_DragBar = 0x80000082;
 constexpr u32 WA_DepthGadget = 0x80000083;
 constexpr u32 WA_CloseGadget = 0x80000084;
+constexpr u32 WA_Backdrop = 0x80000085;
 constexpr u32 WA_ReportMouse = 0x80000086;
+constexpr u32 WA_Borderless = 0x80000088;
 constexpr u32 WA_Activate = 0x80000089;
 constexpr u32 WA_SizeBRight = 0x8000008E;
 constexpr u32 WA_SizeBBottom = 0x8000008F;

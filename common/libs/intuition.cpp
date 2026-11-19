@@ -305,8 +305,14 @@ void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
     case ndk::WA_CloseGadget:
         set_window_flag(a.flags, ndk::WFLG_CLOSEGADGET, data);
         break;
+    case ndk::WA_Backdrop:
+        set_window_flag(a.flags, ndk::WFLG_BACKDROP, data);
+        break;
     case ndk::WA_ReportMouse:
         set_window_flag(a.flags, ndk::WFLG_REPORTMOUSE, data);
+        break;
+    case ndk::WA_Borderless:
+        set_window_flag(a.flags, ndk::WFLG_BORDERLESS, data);
         break;
     case ndk::WA_Activate:
         set_window_flag(a.flags, ndk::WFLG_ACTIVATE, data);
@@ -384,6 +390,37 @@ Rect unite_rect(Rect a, const Rect& b) {
         a.y1 = b.y1;
     }
     return a;
+}
+
+constexpr u8 kTopCornerInsets[3] = {3, 2, 1};
+constexpr i32 kShadowSize = 4;
+
+constexpr bool has_rounded_corners(u32 screen_depth, u32 window_flags) {
+    return screen_depth >= 8 && (window_flags & ndk::WFLG_BORDERLESS) == 0;
+}
+
+constexpr bool has_shadow(u32 screen_depth, u32 window_flags) {
+    return screen_depth >= 8 &&
+           (window_flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0;
+}
+
+Rect window_damage_rect(u32 screen_depth, i32 left, i32 top, i32 width, i32 height,
+                        u32 window_flags) {
+    Rect r{left, top, left + width - 1, top + height - 1};
+    if (has_shadow(screen_depth, window_flags)) {
+        r.x1 += kShadowSize;
+        r.y1 += kShadowSize;
+    }
+    return r;
+}
+
+Rect intersect_rect(const Rect& a, const Rect& b) {
+    return Rect{
+        a.x0 > b.x0 ? a.x0 : b.x0,
+        a.y0 > b.y0 ? a.y0 : b.y0,
+        a.x1 < b.x1 ? a.x1 : b.x1,
+        a.y1 < b.y1 ? a.y1 : b.y1,
+    };
 }
 
 // The Window fields a draw or a free needs.
@@ -870,6 +907,9 @@ void Intuition::compose(u32 screen, Rect r) {
         srec->pending = unite_rect(srec->pending, r);
         return;
     }
+    if (srec->depth >= 8 && display_ != nullptr && srec->palette_gen != display_->palette_gen) {
+        rebuild_shade_tables(*srec);
+    }
     Bus b(*machine_);
     raster::Bitmap dst{};
     raster::Bitmap backdrop{};
@@ -892,6 +932,28 @@ void Intuition::compose(u32 screen, Rect r) {
     }
     for (u32 i = count; i > 0; --i) {
         const WindowRecord* wrec = order[i - 1];
+        if (has_shadow(srec->depth, wrec->flags) && wrec->width > 0 && wrec->height > 0) {
+            const i32 wleft = wrec->left;
+            const i32 wtop = wrec->top;
+            const i32 wright = wleft + wrec->width - 1;
+            const i32 wbottom = wtop + wrec->height - 1;
+            struct ShadowBand {
+                Rect rect;
+                const u8* table;
+            };
+            const ShadowBand bands[4] = {
+                {Rect{wright + 1, wtop + 4, wright + 2, wbottom}, srec->strong_shade},
+                {Rect{wright + 3, wtop + 4, wright + 4, wbottom + 2}, srec->light_shade},
+                {Rect{wleft + 4, wbottom + 1, wright + 2, wbottom + 2}, srec->strong_shade},
+                {Rect{wleft + 4, wbottom + 3, wright + 4, wbottom + 4}, srec->light_shade},
+            };
+            for (const ShadowBand& band : bands) {
+                const Rect clipped = intersect_rect(band.rect, r);
+                if (clipped.x0 <= clipped.x1 && clipped.y0 <= clipped.y1) {
+                    raster::remap_rect(b, dst, clipped, band.table, 256);
+                }
+            }
+        }
         const i32 wx0 = r.x0 > wrec->left ? r.x0 : wrec->left;
         const i32 wy0 = r.y0 > wrec->top ? r.y0 : wrec->top;
         const i32 wx1 =
@@ -901,8 +963,14 @@ void Intuition::compose(u32 screen, Rect r) {
         if (wx0 <= wx1 && wy0 <= wy1) {
             raster::Bitmap wbm{};
             if (raster::load_bitmap(b, wrec->bitmap, wbm)) {
-                raster::copy_rect(b, wbm, wx0 - wrec->left, wy0 - wrec->top, dst, wx0, wy0,
-                                  wx1 - wx0 + 1, wy1 - wy0 + 1);
+                if (has_rounded_corners(srec->depth, wrec->flags)) {
+                    raster::copy_rect_skip(b, wbm, wx0 - wrec->left, wy0 - wrec->top, dst, wx0,
+                                           wy0, wx1 - wx0 + 1, wy1 - wy0 + 1, wrec->width,
+                                           kTopCornerInsets, 3);
+                } else {
+                    raster::copy_rect(b, wbm, wx0 - wrec->left, wy0 - wrec->top, dst, wx0, wy0,
+                                      wx1 - wx0 + 1, wy1 - wy0 + 1);
+                }
             }
         }
     }
@@ -910,6 +978,112 @@ void Intuition::compose(u32 screen, Rect r) {
         display_->sink.refresh != nullptr) {
         display_->sink.refresh(display_->sink.ctx, *machine_, screen, r);
     }
+}
+
+void Intuition::rebuild_shade_tables(ScreenRecord& srec) {
+    if (machine_ == nullptr || srec.addr == 0 || srec.depth == 0 || srec.depth > 8) {
+        return;
+    }
+    const u32 count = 1u << srec.depth;
+    for (u32 i = 0; i < 256; ++i) {
+        srec.strong_shade[i] = static_cast<u8>(i);
+        srec.light_shade[i] = static_cast<u8>(i);
+    }
+    Bus b(*machine_);
+    const u32 map = b.r32(srec.addr + ndk::sc_ViewPort + ndk::vp_ColorMap);
+    if (map == 0 || !b.ok()) {
+        return;
+    }
+    const u8 cm_type = static_cast<u8>(b.r8(map + ndk::cm_Type));
+    const u32 cm_count = b.r16(map + ndk::cm_Count);
+    const u32 table = b.r32(map + ndk::cm_ColorTable);
+    const u32 low_table =
+        cm_type >= ndk::COLORMAP_TYPE_V39 ? b.r32(map + ndk::cm_LowColorBits) : 0;
+    if (!b.ok() || table == 0) {
+        return;
+    }
+    const u32 n = cm_count < count ? cm_count : count;
+    u8 red[256]{};
+    u8 green[256]{};
+    u8 blue[256]{};
+    u32 lum[256]{};
+    for (u32 i = 0; i < n; ++i) {
+        const u32 hi = b.r16(table + i * 2);
+        if (low_table != 0) {
+            const u32 lo = b.r16(low_table + i * 2);
+            red[i] = static_cast<u8>((((hi >> 8) & 0xF) << 4) | ((lo >> 8) & 0xF));
+            green[i] = static_cast<u8>((((hi >> 4) & 0xF) << 4) | ((lo >> 4) & 0xF));
+            blue[i] = static_cast<u8>(((hi & 0xF) << 4) | (lo & 0xF));
+        } else {
+            red[i] = static_cast<u8>(((hi >> 8) & 0xF) * 0x11);
+            green[i] = static_cast<u8>(((hi >> 4) & 0xF) * 0x11);
+            blue[i] = static_cast<u8>((hi & 0xF) * 0x11);
+        }
+        lum[i] = 299u * red[i] + 587u * green[i] + 114u * blue[i];
+    }
+    if (!b.ok()) {
+        return;
+    }
+    for (u32 p = 0; p < n; ++p) {
+        const i32 str_r = (static_cast<i32>(red[p]) * 70 + 50) / 100;
+        const i32 str_g = (static_cast<i32>(green[p]) * 70 + 50) / 100;
+        const i32 str_b = (static_cast<i32>(blue[p]) * 70 + 50) / 100;
+        const i32 lgt_r = (static_cast<i32>(red[p]) * 85 + 50) / 100;
+        const i32 lgt_g = (static_cast<i32>(green[p]) * 85 + 50) / 100;
+        const i32 lgt_b = (static_cast<i32>(blue[p]) * 85 + 50) / 100;
+        u32 best_strong = p;
+        u32 best_strong_dist = 0xFFFFFFFFu;
+        u32 best_light = p;
+        u32 best_light_dist = 0xFFFFFFFFu;
+        for (u32 q = 0; q < n; ++q) {
+            if (q == p || lum[q] >= lum[p]) {
+                continue;
+            }
+            const i32 drs = static_cast<i32>(red[q]) - str_r;
+            const i32 dgs = static_cast<i32>(green[q]) - str_g;
+            const i32 dbs = static_cast<i32>(blue[q]) - str_b;
+            const u32 dist_s = static_cast<u32>(drs * drs + dgs * dgs + dbs * dbs);
+            if (dist_s < best_strong_dist) {
+                best_strong_dist = dist_s;
+                best_strong = q;
+            }
+            const i32 drl = static_cast<i32>(red[q]) - lgt_r;
+            const i32 dgl = static_cast<i32>(green[q]) - lgt_g;
+            const i32 dbl = static_cast<i32>(blue[q]) - lgt_b;
+            const u32 dist_l = static_cast<u32>(drl * drl + dgl * dgl + dbl * dbl);
+            if (dist_l < best_light_dist) {
+                best_light_dist = dist_l;
+                best_light = q;
+            }
+        }
+        srec.strong_shade[p] = static_cast<u8>(best_strong);
+        srec.light_shade[p] = static_cast<u8>(best_light);
+    }
+    if (display_ != nullptr) {
+        srec.palette_gen = display_->palette_gen;
+    }
+}
+
+bool Intuition::shade_tables(u32 screen, const u8*& strong, const u8*& light) {
+    ScreenRecord* srec = find_screen_record(screen);
+    if (srec == nullptr || srec->depth < 8) {
+        return false;
+    }
+    if (display_ != nullptr && srec->palette_gen != display_->palette_gen) {
+        rebuild_shade_tables(*srec);
+    }
+    strong = srec->strong_shade;
+    light = srec->light_shade;
+    return true;
+}
+
+u32 Intuition::backdrop_rastport(u32 screen) const {
+    for (const ScreenRecord& rec : screen_records_) {
+        if (rec.addr == screen) {
+            return rec.backdrop_rp;
+        }
+    }
+    return 0;
 }
 
 void Intuition::on_damage(void* ctx, Machine&, u32 bitmap, const Rect& rect) {
@@ -1222,8 +1396,12 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     rec->title_bytes = title_bytes;
     rec->width = a.width;
     rec->height = a.height;
+    rec->depth = a.depth;
     rec->first_window = 0;
     rec->pending = Rect{0, 0, -1, -1};
+    if (a.depth >= 8) {
+        rebuild_shade_tables(*rec);
+    }
 
     const i32 right = static_cast<i32>(a.width) - 1;
     const i32 bottom = static_cast<i32>(a.height) - 1;
@@ -1855,6 +2033,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->top = top;
     rec->width = width;
     rec->height = height;
+    rec->flags = a.flags;
     rec->max_w = max_w;
     rec->max_h = max_h;
     rec->min_w = min_w;
@@ -1903,7 +2082,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     if (a.gadgets != 0) {
         draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
     }
-    compose(screen, Rect{left, top, right, bottom});
+    compose(screen, window_damage_rect(srec->depth, left, top, width, height, a.flags));
     end_batch();
     return window;
 }
@@ -1937,6 +2116,7 @@ void Intuition::close_window(u32 window) {
     const i32 top = rec->top;
     const i32 width = rec->width;
     const i32 height = rec->height;
+    const u32 flags = rec->flags;
 
     ScreenRecord* srec = find_screen_record(screen);
     if (srec != nullptr) {
@@ -1988,7 +2168,7 @@ void Intuition::close_window(u32 window) {
     *rec = WindowRecord{};
 
     if (srec != nullptr) {
-        compose(screen, Rect{left, top, left + width - 1, top + height - 1});
+        compose(screen, window_damage_rect(srec->depth, left, top, width, height, flags));
     }
 }
 
@@ -2135,9 +2315,8 @@ void Intuition::window_to_front(u32 window) {
             rec->next_window = srec->first_window;
             srec->first_window = window;
             write_window_links(rec->screen);
-            compose(rec->screen,
-                    Rect{rec->left, rec->top, rec->left + rec->width - 1,
-                         rec->top + rec->height - 1});
+            compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
+                                                    rec->height, rec->flags));
             return;
         }
         prev = prec->next_window;
@@ -2188,9 +2367,8 @@ void Intuition::window_to_back(u32 window) {
             trec->next_window = window;
             rec->next_window = 0;
             write_window_links(rec->screen);
-            compose(rec->screen,
-                    Rect{rec->left, rec->top, rec->left + rec->width - 1,
-                         rec->top + rec->height - 1});
+            compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
+                                                    rec->height, rec->flags));
             return;
         }
         tail = trec->next_window;
@@ -2342,7 +2520,8 @@ void Intuition::move_window_to(u32 window, i32 left, i32 top) {
     if (left == rec->left && top == rec->top) {
         return;
     }
-    const Rect old{rec->left, rec->top, rec->left + rec->width - 1, rec->top + rec->height - 1};
+    const Rect old = window_damage_rect(srec->depth, rec->left, rec->top, rec->width, rec->height,
+                                          rec->flags);
     rec->left = left;
     rec->top = top;
     Bus b(*machine_);
@@ -2354,7 +2533,8 @@ void Intuition::move_window_to(u32 window, i32 left, i32 top) {
     b.w16(rec->layer + ndk::ly_MaxY, static_cast<u32>(top + rec->height - 1));
     begin_batch();
     compose(rec->screen, old);
-    compose(rec->screen, Rect{left, top, left + rec->width - 1, top + rec->height - 1});
+    compose(rec->screen,
+            window_damage_rect(srec->depth, left, top, rec->width, rec->height, rec->flags));
     end_batch();
 }
 
@@ -2394,7 +2574,8 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     const i32 new_iy1 = height - static_cast<i32>(w.border_bottom) - 1;
     const Rect keep{ix0, iy0, old_ix1 < new_ix1 ? old_ix1 : new_ix1,
                     old_iy1 < new_iy1 ? old_iy1 : new_iy1};
-    const Rect old{rec->left, rec->top, rec->left + rec->width - 1, rec->top + rec->height - 1};
+    const Rect old = window_damage_rect(srec->depth, rec->left, rec->top, rec->width, rec->height,
+                                          rec->flags);
 
     begin_batch();
     rec->width = width;
@@ -2419,7 +2600,7 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
         post_newsize(*rec);
         compose(rec->screen, old);
         compose(rec->screen,
-                Rect{rec->left, rec->top, rec->left + width - 1, rec->top + height - 1});
+                window_damage_rect(srec->depth, rec->left, rec->top, width, height, rec->flags));
     }
     end_batch();
 }

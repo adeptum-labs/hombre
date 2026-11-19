@@ -362,16 +362,30 @@ void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w
     const i32 line = static_cast<i32>(kBarHeight);
 
     if (high_color) {
-        graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
-        graphics.rect_fill(rp, left, 1, right, 1);
+        const bool rounded = w.width >= 7;
+        if (rounded) {
+            graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+            graphics.rect_fill(rp, 2, 1, 2, 1);
+            graphics.rect_fill(rp, w.width - 3, 1, w.width - 3, 1);
+            graphics.rect_fill(rp, 1, 2, 1, 2);
+            graphics.rect_fill(rp, w.width - 2, 2, w.width - 2, 2);
+
+            graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
+            graphics.rect_fill(rp, 3, 1, w.width - 4, 1);
+        } else {
+            graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
+            graphics.rect_fill(rp, left, 1, right, 1);
+        }
 
         const u8 base = w.active ? kActiveBar0 : kInactiveBar0;
         const i32 steps = w.active ? 8 : 6;
         const i32 rows = line - 2;
         for (i32 y = 2; y < line; ++y) {
             const i32 step = ((y - 2) * steps) / rows;
+            const i32 row_left = (rounded && y == 2) ? 2 : left;
+            const i32 row_right = (rounded && y == 2) ? w.width - 3 : right;
             graphics.set_pens(rp, base + static_cast<u8>(step), 0, ndk::JAM2);
-            graphics.rect_fill(rp, left, y, right, y);
+            graphics.rect_fill(rp, row_left, y, row_right, y);
         }
         graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
         graphics.rect_fill(rp, left, line, right, line);
@@ -449,6 +463,8 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
     const i32 right = w.width - 1;
     const i32 bottom = w.height - 1;
 
+    const bool rounded =
+        high_color && (w.flags & ndk::WFLG_BORDERLESS) == 0 && w.width >= 7 && w.height >= 4;
     graphics.set_pens(rp, 0, 0, ndk::JAM2);
     if (keep != nullptr && keep->x0 <= keep->x1 && keep->y0 <= keep->y1) {
         // Only clear areas outside the preserved interior; borders are redrawn below.
@@ -458,12 +474,32 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
         if (keep->y1 < bottom) {
             graphics.rect_fill(rp, 0, keep->y1 + 1, right, bottom);
         }
+        if (rounded) {
+            graphics.rect_fill(rp, 0, 0, 2, 0);
+            graphics.rect_fill(rp, 0, 1, 1, 1);
+            graphics.rect_fill(rp, 0, 2, 0, 2);
+            graphics.rect_fill(rp, right - 2, 0, right, 0);
+            graphics.rect_fill(rp, right - 1, 1, right, 1);
+            graphics.rect_fill(rp, right, 2, right, 2);
+        }
     } else {
         graphics.rect_fill(rp, 0, 0, right, bottom);
     }
 
     const u8 frame_pen = high_color ? kFrameDark : 1;
-    draw_outline_box(graphics, rp, 0, 0, right, bottom, frame_pen);
+    if (rounded) {
+        graphics.set_pens(rp, frame_pen, 0, ndk::JAM2);
+        graphics.rect_fill(rp, 3, 0, right - 3, 0);
+        graphics.rect_fill(rp, 0, bottom, right, bottom);
+        graphics.rect_fill(rp, 0, 3, 0, bottom);
+        graphics.rect_fill(rp, right, 3, right, bottom);
+        graphics.rect_fill(rp, 2, 1, 2, 1);
+        graphics.rect_fill(rp, right - 2, 1, right - 2, 1);
+        graphics.rect_fill(rp, 1, 2, 1, 2);
+        graphics.rect_fill(rp, right - 1, 2, right - 1, 2);
+    } else {
+        draw_outline_box(graphics, rp, 0, 0, right, bottom, frame_pen);
+    }
 
     if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
         draw_bar_contents(graphics, b, rp, w, high_color);
