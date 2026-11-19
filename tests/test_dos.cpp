@@ -6181,6 +6181,215 @@ void create_new_proc_builds_a_process() {
     g_exec.set_this_task(r.proc());
 }
 
+// --- multiple consoles ----------------------------------------------------
+
+struct TestConsole {
+    std::string written;
+    std::vector<std::string> lines;
+    usize next_line = 0;
+    std::vector<u32> timeouts;
+    bool ready = false;
+};
+
+void test_console_write(void* ctx, const u8* data, u32 bytes) {
+    static_cast<TestConsole*>(ctx)->written.append(reinterpret_cast<const char*>(data), bytes);
+}
+
+u32 test_console_read(void* ctx, u8* buf, u32 size) {
+    TestConsole& c = *static_cast<TestConsole*>(ctx);
+    if (c.next_line >= c.lines.size() || size == 0) {
+        return 0;
+    }
+    const std::string& s = c.lines[c.next_line++];
+    const u32 n = static_cast<u32>(std::min<usize>(s.size(), size));
+    std::memcpy(buf, s.data(), n);
+    return n;
+}
+
+bool test_console_ready(void* ctx, u32 timeout_us) {
+    TestConsole& c = *static_cast<TestConsole*>(ctx);
+    c.timeouts.push_back(timeout_us);
+    return c.ready;
+}
+
+void console_handles_write_to_their_console() {
+    Rig r;
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, test_console_ready, &one);
+
+    u32 in0 = 0;
+    u32 out0 = 0;
+    u32 in1 = 0;
+    u32 out1 = 0;
+    CHECK(g_dos.open_console_handles(0, in0, out0));
+    CHECK(g_dos.open_console_handles(1, in1, out1));
+    CHECK(in0 != 0 && out0 != 0 && in1 != 0 && out1 != 0);
+    CHECK(in0 != out0 && in1 != out1);
+
+    r.str(kData, "boot");
+    CHECK_EQ(r.call(dos_lvo::Write, out0, kData, 4), 4u);
+    CHECK_EQ(r.call(dos_lvo::Write, in0, kData, 4), 4u);
+    CHECK(g_console == "bootboot");
+
+    r.str(kData + 0x100, "one");
+    CHECK_EQ(r.call(dos_lvo::Write, out1, kData + 0x100, 3), 3u);
+    CHECK_EQ(r.call(dos_lvo::Write, in1, kData + 0x100, 3), 3u);
+    CHECK(one.written == "oneone");
+    CHECK(g_console == "bootboot");
+
+    // WaitForChar asks the readiness of the handle's console.
+    one.ready = true;
+    CHECK_EQ(r.call(dos_lvo::WaitForChar, in1, 1234), DOSTRUE);
+    CHECK_EQ(one.timeouts.size(), 1u);
+    CHECK_EQ(one.timeouts[0], 1234u);
+
+    u32 bad_in = 1;
+    u32 bad_out = 2;
+    CHECK(!g_dos.open_console_handles(Dos::kMaxConsoles, bad_in, bad_out));
+    CHECK_EQ(bad_in, 0u);
+    CHECK_EQ(bad_out, 0u);
+}
+
+void a_process_reads_and_writes_its_console() {
+    Rig r;
+    TestConsole one;
+    one.lines = {"line\n"};
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+
+    u32 process = 0;
+    u32 cli_number = 0;
+    CHECK(g_dos.create_shell_process(1, process, cli_number));
+    const u32 cis = r.get32(process + pr_CIS);
+    const u32 cos = r.get32(process + pr_COS);
+    CHECK(cis != 0 && cos != 0);
+
+    g_exec.set_this_task(process);
+    r.str(kData, "out");
+    CHECK_EQ(r.call(dos_lvo::Write, cos, kData, 3), 3u);
+    CHECK(one.written == "out");
+    CHECK(g_console.empty());
+
+    // The argument line first, then the console's own reader.
+    CHECK_EQ(r.call(dos_lvo::Read, cis, kData + 0x100, 8), 1u);
+    CHECK_EQ(r.get8(kData + 0x100), static_cast<u32>('\n'));
+    CHECK_EQ(r.call(dos_lvo::Read, cis, kData + 0x100, 8), 5u);
+    CHECK(r.bytes(kData + 0x100, 5) == text("line\n"));
+    g_exec.set_this_task(r.proc());
+}
+
+// A background process writes to the console of the shell that started it
+// and shares that shell's output handle; its end must not close the handle.
+void background_process_uses_and_leaves_its_shell_output() {
+    Rig r;
+    use_noop_task_host();
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, test_console_ready, &one);
+    u32 shell = 0;
+    u32 shell_cli = 0;
+    CHECK(g_dos.create_shell_process(1, shell, shell_cli));
+    g_exec.set_this_task(shell);
+    const u32 shell_out = r.call(dos_lvo::Output);
+
+    const u32 cli = g_dos.start_background("C:Hello", "");
+    CHECK(cli != 0);
+    const u32 process = r.call(dos_lvo::FindCliProc, cli);
+    CHECK(process != 0);
+    CHECK_EQ(r.get32(process + pr_COS), shell_out);
+    r.cpu().a[1] = process;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK(logged_containing(" ended, returned"));
+
+    r.str(kData, "still");
+    CHECK_EQ(r.call(dos_lvo::Write, shell_out, kData, 5), 5u);
+    CHECK(one.written == "still");
+}
+
+void create_shell_process_builds_a_cli() {
+    Rig r;
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+
+    u32 err = 0;
+    CHECK(g_dos.change_dir("S:", err));
+    g_dos.set_prompt("[shell] ");
+
+    u32 process = 0;
+    u32 cli_number = 0;
+    CHECK(g_dos.create_shell_process(1, process, cli_number));
+    CHECK(process != 0);
+    CHECK(process != r.proc());
+    CHECK_EQ(cli_number, 2u);
+    CHECK_EQ(r.get8(process + LN_TYPE), NT_PROCESS);
+    CHECK(r.read_str(r.get32(process + LN_NAME)) == "HombreShell");
+    CHECK_EQ(r.get32(process + pr_TaskNum), 2u);
+    CHECK_EQ(r.get32(process + pr_StackSize), Dos::kStackBytes);
+
+    const u32 cli = r.get32(process + pr_CLI) << 2;
+    const u32 cis = r.get32(process + pr_CIS);
+    const u32 cos = r.get32(process + pr_COS);
+    CHECK(cli != 0);
+    CHECK(cis != 0 && cos != 0 && cis != cos);
+    CHECK_EQ(r.get32(cli + cli_StandardInput), cis);
+    CHECK_EQ(r.get32(cli + cli_CurrentInput), cis);
+    CHECK_EQ(r.get32(cli + cli_StandardOutput), cos);
+    CHECK_EQ(r.get32(cli + cli_CurrentOutput), cos);
+    CHECK_EQ(r.get32(cli + cli_Interactive), DOSTRUE);
+    CHECK_EQ(r.get32(cli + cli_Background), DOSFALSE);
+    CHECK(r.read_bstr(r.get32(cli + cli_Prompt)) == "[shell] ");
+
+    // The current directory is a copy of the boot shell's.
+    const u32 dir = r.get32(process + pr_CurrentDir);
+    CHECK(dir != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, dir, kData, 64), DOSTRUE);
+    CHECK(r.read_str(kData) == "HombreTest:S");
+
+    const u32 root = r.get32(r.base() + dl_Root);
+    const u32 tasks = r.get32(root + rn_TaskArray) << 2;
+    CHECK_EQ(r.get32(tasks + cli_number * 4), process + pr_MsgPort);
+
+    // Its console handles are console 1's.
+    g_exec.set_this_task(process);
+    r.str(kData + 0x200, "shell");
+    CHECK_EQ(r.call(dos_lvo::Write, cos, kData + 0x200, 5), 5u);
+    CHECK(one.written == "shell");
+    CHECK(g_console.empty());
+    g_exec.set_this_task(r.proc());
+}
+
+void run_command_in_runs_commands_in_the_process() {
+    Rig r;
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+    g_dos.set_fail_level(25);
+
+    u32 process = 0;
+    u32 cli_number = 0;
+    CHECK(g_dos.create_shell_process(1, process, cli_number));
+    g_exec.set_this_task(process);
+
+    u32 result = 0;
+    CHECK(g_dos.run_command_in(process, "C:Hello", "", result, kBlocks));
+    CHECK_EQ(result, 3u);
+    CHECK(one.written == "hi\n");
+    CHECK(g_console.empty());
+    CHECK_EQ(g_dos.last_return_code(process), 3u);
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK_EQ(g_dos.fail_level(process), 10u);
+    CHECK_EQ(g_dos.fail_level(), 25u);
+
+    // The command's cleanup leaves the process's own console handles open.
+    r.str(kData + 0x300, "after");
+    CHECK_EQ(r.call(dos_lvo::Write, r.get32(process + pr_COS), kData + 0x300, 5), 5u);
+    CHECK(one.written == "hi\nafter");
+
+    r.call(dos_lvo::SetIoErr, ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(g_dos.last_error(process), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(g_dos.last_error(), 0u);
+
+    CHECK(!g_dos.run_command_in(r.proc() + 4, "C:Hello", "", result, kBlocks));
+    g_exec.set_this_task(r.proc());
+}
+
 }
 
 int main() {
@@ -6282,7 +6491,12 @@ int main() {
     ram_handler_port_and_zero_dates();
     delay_blocks_and_wakes_with_fake_host();
     contexts_keep_their_state_apart();
+    background_process_uses_and_leaves_its_shell_output();
     nil_reads_end_of_file_and_swallows_writes();
     create_new_proc_builds_a_process();
+    console_handles_write_to_their_console();
+    a_process_reads_and_writes_its_console();
+    create_shell_process_builds_a_cli();
+    run_command_in_runs_commands_in_the_process();
     return check::finish("test_dos");
 }

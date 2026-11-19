@@ -48,12 +48,14 @@
 // RunCommand, SystemTagList and Execute give a program Processes of its own,
 // which run in the background unless the call is synchronous.
 //
-// The console is the one interactive stream: what a program writes to it
-// goes to the ConsoleWrite sink, and what it reads is the command's
-// argument line, once, then end of file. Files on the volume can be
-// opened, read and seeked in; anything that would write to the volume
-// fails with ERROR_DISK_WRITE_PROTECTED. NIL: reads end of file and writes
-// to it are discarded.
+// There are four consoles, each with its own write sink and line reader;
+// console 0 is the boot console. Every console stream handle belongs to one
+// of them: what a program writes to it goes to that console's ConsoleWrite
+// sink, and what it reads is the command's argument line, once, then that
+// console's reader. Files on the volume can be opened, read and seeked in;
+// anything that would write to the volume fails with
+// ERROR_DISK_WRITE_PROTECTED. NIL: reads end of file and writes to it are
+// discarded.
 //
 // Variables can be local (LocalVar nodes on pr_LocalVars, as SetVar
 // creates by default) or global (files under ENV: on the RAM volume).
@@ -642,25 +644,27 @@ using hombre::ERROR_NOT_EXECUTABLE;
 
 }
 
-// Where the console output goes: the bytes a program writes to it, as it
+// Where a console's output goes: the bytes a program writes to it, as it
 // writes them.
 using ConsoleWrite = void (*)(void* ctx, const u8* data, u32 bytes);
 
-// Interactive console line input: blocks until a line is typed, returns the
-// byte count written into buf (final '\n' included), or 0 at end of input.
+// A console's line input: blocks until a line is typed, returns the byte
+// count written into buf (final '\n' included), or 0 at end of input.
 using ConsoleRead = u32 (*)(void* ctx, u8* buf, u32 size);
 
-// Interactive console readiness check: returns true if a byte is ready or
-// arrives within timeout_us microseconds.
+// A console's readiness check: returns true if a byte is ready or arrives
+// within timeout_us microseconds.
 using ConsoleReady = bool (*)(void* ctx, u32 timeout_us);
 
 class Dos {
 public:
+    using ConsoleWrite = hombre::ConsoleWrite;
     using ConsoleRead = hombre::ConsoleRead;
     using ConsoleReady = hombre::ConsoleReady;
 
     static constexpr u8 kVolAdf = 0;
     static constexpr u8 kVolRam = 1;
+    static constexpr u32 kMaxConsoles = 4;
     static constexpr u32 kStackBytes = 4096;
     static constexpr u32 kMaxArgs = 512;    // bytes of a command's argument line
     static constexpr u32 kMaxPath = 256;    // bytes of a resolved path, NUL included
@@ -679,19 +683,44 @@ public:
     // Makes dos.library over the volume, which must stay mounted, with its
     // structures and the shell Process, registers the Process as exec's
     // task and dos as exec's segment loader. exec must be initialised. The
-    // console output goes to out with ctx; out may be null. False if exec
-    // runs out of memory or native ids.
+    // boot console's output goes to out with ctx; out may be null. False if
+    // exec runs out of memory or native ids.
     bool init(m68k::Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out, void* ctx);
 
-    // Runs the command at path as the CLI's command: loads it, sets
-    // cli_CommandName and cli_Module, gives it args followed by a newline
-    // in A0 with its length in D0 (and as what the console reads), the
-    // stack size at 4(A7) and the return address at (A7), and calls it for
-    // at most max_blocks blocks. The program's D0, or what it gave Exit, is
-    // stored in result. False, logged, if it cannot be loaded or the run
-    // ends any other way (cpu.exit then says how). The command is unloaded
-    // afterwards.
+    // Runs the command at path in the boot shell's process as the CLI's
+    // command: loads it, sets cli_CommandName and cli_Module, gives it args
+    // followed by a newline in A0 with its length in D0 (and as what the
+    // console reads), the stack size at 4(A7) and the return address at
+    // (A7), and calls it for at most max_blocks blocks. The program's D0,
+    // or what it gave Exit, is stored in result. False, logged, if it cannot
+    // be loaded or the run ends any other way (cpu.exit then says how). The
+    // command is unloaded afterwards.
     bool run_command(const char* path, const char* args, u32& result, u64 max_blocks);
+
+    // run_command for the context whose Process is process; normally called
+    // from that process's own task.
+    bool run_command_in(u32 process, const char* path, const char* args, u32& result,
+                        u64 max_blocks);
+
+    // Builds, but does not start, a CLI process for console: named
+    // "HombreShell", with the console's new handle pair as pr_CIS and
+    // pr_COS, the boot shell's current directory and prompt, an interactive
+    // CLI, a guest stack and a task array entry. process and cli_number
+    // give the Process and its CLI number. False when console does not
+    // exist, no context or CLI number is free, or memory runs out.
+    bool create_shell_process(u8 console, u32& process, u32& cli_number);
+
+    // Makes a new pair of console stream handles bound to console, owned by
+    // nobody, and returns their BPTRs as Open would. False, with the
+    // outputs cleared, if console does not exist or no two handle slots are
+    // free.
+    bool open_console_handles(u8 console, u32& in_fh, u32& out_fh);
+
+    // Sets the write, read and readiness callbacks and their context of
+    // console. Console 0 is the boot console; other consoles have none
+    // until set. Out-of-range consoles are ignored.
+    void set_console(u8 console, ConsoleWrite write, ConsoleRead read, ConsoleReady ready,
+                     void* ctx);
 
     // Starts path as a background CLI process with args, reading NIL: and
     // writing to the shell's output. Returns its CLI number, 0 on failure.
@@ -705,34 +734,37 @@ public:
     // or null to report 0/0/0. Stamps any RAM: nodes whose date is still zero.
     void set_clock(u64 (*now_ticks)());
 
-    // Changes the shell's current directory to path ("/" parent, ":" volume
-    // root, relative, or volume/assign-qualified). Must be a directory
-    // (ERROR_OBJECT_WRONG_TYPE otherwise). Updates pr_CurrentDir (unlocking
-    // the previous lock) and cli_SetName. On failure sets error and IoErr.
-    bool change_dir(const char* path, u32& error);
+    // Changes the process's current directory to path ("/" parent, ":"
+    // volume root, relative, or volume/assign-qualified). Must be a
+    // directory (ERROR_OBJECT_WRONG_TYPE otherwise). Updates pr_CurrentDir
+    // (unlocking the previous lock) and cli_SetName. On failure sets error
+    // and IoErr. process 0 is the boot shell's process.
+    bool change_dir(const char* path, u32& error, u32 process = 0);
 
     // Copies the current directory name (cli_SetName) into out. False if out
-    // is null, size is 0, or the name does not fit.
-    bool current_dir_name(char* out, u32 size) const;
+    // is null, size is 0, or the name does not fit. process 0 is the boot
+    // shell's process.
+    bool current_dir_name(char* out, u32 size, u32 process = 0) const;
 
     // Copies the CLI prompt template (cli_Prompt) into out. False if out is
-    // null, size is 0, or the template does not fit.
-    bool prompt(char* out, u32 size) const;
+    // null, size is 0, or the template does not fit. process 0 is the boot
+    // shell's process.
+    bool prompt(char* out, u32 size, u32 process = 0) const;
 
     // Stores text as the CLI prompt template (cli_Prompt, bounded to 255
-    // bytes).
-    void set_prompt(const char* text);
+    // bytes). process 0 is the boot shell's process.
+    void set_prompt(const char* text, u32 process = 0);
 
     // Gets or sets the last IoErr code (pr_Result2 / cli_Result2).
-    u32 last_error() const;
+    u32 last_error(u32 process = 0) const;
     void set_last_error(u32 code);
 
     // Gets or sets the last CLI command return code (cli_ReturnCode).
-    u32 last_return_code() const;
+    u32 last_return_code(u32 process = 0) const;
     void set_return_code(u32 code);
 
     // Gets or sets the CLI fail limit (cli_FailLevel).
-    u32 fail_level() const;
+    u32 fail_level(u32 process = 0) const;
     void set_fail_level(u32 level);
 
     // Formats the fault text for code without a header into out (at most
@@ -760,14 +792,16 @@ public:
     bool path_name(u32 i, char* out, u32 size) const;
 
     // Resolves command word: if it contains ':' or '/', returns it as is
-    // when it exists as a file; otherwise checks the current directory (the
-    // bare name relative to it), then each path directory in order, then
-    // "C:<word>". Returns false if none exists as a file or out is too small.
-    bool find_command(const char* word, char* out, u32 size);
+    // when it exists as a file; otherwise checks the process's current
+    // directory (the bare name relative to it), then each directory of its
+    // CLI path in order, then "C:<word>". Returns false if none exists as a
+    // file or out is too small. process 0 is the boot shell's process.
+    bool find_command(const char* word, char* out, u32 size, u32 process = 0);
 
-    // Registers the interactive console input callbacks used after the
-    // command's argument line is exhausted (and by WaitForChar /
-    // read_console_line). Pass null to restore immediate EOF.
+    // Registers console 0's interactive input callbacks, used after the
+    // command's argument line is exhausted and by read_console_line.
+    // WaitForChar uses the readiness callback of the handle's console. Pass
+    // null to restore immediate EOF.
     void set_console_input(ConsoleRead read, ConsoleReady ready, void* ctx);
 
     // Reads one line from the interactive console reader into out (trailing
@@ -788,11 +822,12 @@ public:
     // set if missing or on error.
     bool delete_var(const char* name, u32 flags = ndk::LV_VAR);
 
-    // Visits every local variable of type (e.g. LV_VAR) in pr_LocalVars,
-    // passing its name and first line of value.
+    // Visits every local variable of type (e.g. LV_VAR) in the process's
+    // pr_LocalVars, passing its name and first line of value. process 0 is
+    // the boot shell's process.
     void list_local_vars(u32 type,
                          void (*visit)(void* ctx, const char* name, const char* value),
-                         void* ctx) const;
+                         void* ctx, u32 process = 0) const;
 
     // Visits every top-level entry in ENV:, passing its name. False on error.
     bool list_env_vars(void (*visit)(void* ctx, const char* name), void* ctx);
@@ -807,8 +842,19 @@ private:
 
     static constexpr u32 kVectors = dos_lvo::SetOwner / 6;
     static constexpr u32 kHandles = 2 + kMaxFiles;  // the console in and out first
+    static constexpr u8 kNoConsole = 0xFF;
 
     enum class Stream : u8 { Closed, Console, File, Nil };
+
+    // The callbacks of one console. Writes and reads keep their own context
+    // so that init and set_console_input can each set their half.
+    struct ConsoleBinding {
+        ConsoleWrite write = nullptr;
+        ConsoleRead read = nullptr;
+        ConsoleReady ready = nullptr;
+        void* write_ctx = nullptr;
+        void* read_ctx = nullptr;
+    };
 
     struct ProcContext {
         bool used;
@@ -819,8 +865,8 @@ private:
         u32 command_name;  // BSTR buffer of cli_CommandName
         u32 prompt;        // BSTR buffer of cli_Prompt
         u32 set_name;      // BSTR buffer of cli_SetName
-        // The console's input: the argument line, read once, then
-        // console_read_.
+        // The console's input: the argument line, read once, then the
+        // console's reader.
         char input[kMaxArgs + 2];
         u32 input_length;
         u32 input_pos;
@@ -843,11 +889,19 @@ private:
     // this_task(), else context 0 (the boot shell's process).
     u32 cur_index() const;
     ProcContext& cur();
+    // The context whose process is process, or context 0 when process is 0
+    // or not a known process.
+    ProcContext& context_for(u32 process);
+    const ProcContext& context_for(u32 process) const;
+    // The console of the process's pr_CIS handle, or console 0 when it is
+    // not a console handle.
+    u8 console_for_process(u32 process) const;
     // The owner value of the current context, 0 when it has no command running.
     u8 cur_owner() const;
+    void set_context_error(const ProcContext& p, u32 code);
 
-    // What spawn_process builds a Process and its context from. Pointers
-    // stay valid only for the call.
+    // What spawn_process and create_shell_process build a Process and its
+    // context from. Pointers stay valid only for the call.
     struct NewProcess {
         const char* name;
         u32 seglist;
@@ -863,11 +917,17 @@ private:
         const char* command_name;
         bool cli;
         u32 priority;
+        u8 console = kNoConsole;  // bind pr_CIS and pr_COS to this console's new handles
+        bool start = true;        // start a task for the process
+        bool interactive = false; // cli_Interactive
+        bool background = true;   // cli_Background
+        u32 parent = 0;           // the context to inherit from, 0 = the current
     };
     static constexpr u32 kMaxDeferred = kMaxProcs * 2;
 
     u32 free_proc_slot() const;
     u32 free_cli_number() const;
+    bool build_process(const NewProcess& spec, u32& process, u32& cli_number);
     bool spawn_process(const NewProcess& spec, u32& process, u32& cli_number);
     u32 open_nil(u8 owner);
     void process_ended(u32 task, bool self);
@@ -886,6 +946,7 @@ private:
         u8 last_char;
         u8 owner;
         bool exclusive;
+        u8 console;  // the console of a Console stream
         char path[kMaxPath];
     };
 
@@ -944,8 +1005,7 @@ private:
     Exec* exec_ = nullptr;
     AdfVolume volume_{};
     RamFs ram_{};
-    ConsoleWrite out_ = nullptr;
-    void* out_ctx_ = nullptr;
+    ConsoleBinding consoles_[kMaxConsoles]{};
 
     // Guest addresses.
     u32 base_ = 0;
@@ -971,9 +1031,6 @@ private:
     u32 unknown_pkt_count_ = 0;
     NativeVector vectors_[kVectors]{};
     u64 (*now_ticks_)() = nullptr;
-    ConsoleRead console_read_ = nullptr;
-    ConsoleReady console_ready_ = nullptr;
-    void* console_ctx_ = nullptr;
     // The index of the path directory whose lock holds (vol, canonical), or
     // path_count_ when none does.
     u32 path_index_of(u8 vol, const char* canonical) const;
