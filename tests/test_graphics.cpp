@@ -47,10 +47,21 @@ constexpr u32 kTextAttr = kData + 0x500;
 constexpr u32 kOtherFont = kData + 0x600;
 constexpr u32 kStrings = kData + 0x700;
 constexpr u32 kBitmap = kData + 0x800;
+constexpr u32 kAreaInfo = kData + 0x900;
+constexpr u32 kAreaTable = kData + 0xA00;
+constexpr u32 kExtent = kData + 0xB00;
+constexpr u32 kTmpRas = kData + 0xC00;
+constexpr u32 kTmpBuffer = kData + 0xD00;
 constexpr u32 kWidth = 640;
 constexpr u32 kHeight = 400;
 constexpr u32 kBytesPerRow = 80;
 constexpr u32 kPlaneBytes = kBytesPerRow * kHeight;
+
+// struct AreaInfo
+constexpr u32 ai_VctrPtr = 4;
+constexpr u32 ai_FlagPtr = 12;
+constexpr u32 ai_Count = 16;
+constexpr u32 kAreaMax = 16;
 
 struct Surface {
     u32 bitmap;
@@ -122,6 +133,42 @@ std::vector<u8> plane_snapshot(GfxRig& r, const Surface& s) {
         bytes[kPlaneBytes + i] = static_cast<u8>(r.get8(s.plane1 + i));
     }
     return bytes;
+}
+
+void init_area(GfxRig& r, u32 rp, u32 max) {
+    r.cpu().a[0] = kAreaInfo;
+    r.cpu().a[1] = kAreaTable;
+    r.cpu().d[0] = max;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitArea), ExitReason::Halt);
+    r.put32(rp + rp_AreaInfo, kAreaInfo);
+}
+
+u32 area_move(GfxRig& r, u32 rp, i32 x, i32 y) {
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = static_cast<u32>(x);
+    r.cpu().d[1] = static_cast<u32>(y);
+    return r.result(Base::Graphics, graphics_lvo::AreaMove);
+}
+
+u32 area_draw(GfxRig& r, u32 rp, i32 x, i32 y) {
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = static_cast<u32>(x);
+    r.cpu().d[1] = static_cast<u32>(y);
+    return r.result(Base::Graphics, graphics_lvo::AreaDraw);
+}
+
+void area_end(GfxRig& r, u32 rp) {
+    r.cpu().a[1] = rp;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::AreaEnd), ExitReason::Halt);
+}
+
+u32 area_ellipse(GfxRig& r, u32 rp, i32 cx, i32 cy, i32 rx, i32 ry) {
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = static_cast<u32>(cx);
+    r.cpu().d[1] = static_cast<u32>(cy);
+    r.cpu().d[2] = static_cast<u32>(rx);
+    r.cpu().d[3] = static_cast<u32>(ry);
+    return r.result(Base::Graphics, graphics_lvo::AreaEllipse);
 }
 
 void init_bitmap_fills_the_fields() {
@@ -944,6 +991,161 @@ void load_rgb32_caps_colormap_count_at_256() {
     }
 }
 
+void text_extent_reports_five_characters_of_the_8x8_font() {
+    GfxRig r;
+    r.cpu().a[2] = kExtent;
+    r.cpu().d[0] = 5;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::TextExtent), ExitReason::Halt);
+    CHECK_EQ(r.get16(kExtent), 40u);
+    CHECK_EQ(r.get16(kExtent + 2), 8u);
+    CHECK_EQ(r.get16(kExtent + 4), 0u);
+    CHECK_EQ(r.get16(kExtent + 6), 0xFFFAu);  // the baseline is 6 above the top
+    CHECK_EQ(r.get16(kExtent + 8), 39u);
+    CHECK_EQ(r.get16(kExtent + 10), 1u);
+}
+
+void area_fills_square_and_triangle_and_empties_the_table() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    init_area(r, s.rp, kAreaMax);
+
+    CHECK_EQ(area_move(r, s.rp, 10, 10), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 20, 10), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 20, 20), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 10, 20), 0u);
+    area_end(r, s.rp);
+
+    CHECK_EQ(read_pixel(r, s.rp, 10, 10), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 15, 15), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 20, 20), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 9, 15), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 21, 15), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 15, 9), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 15, 21), 0u);
+    CHECK_EQ(r.get16(kAreaInfo + ai_Count), 0u);
+    CHECK_EQ(r.get32(kAreaInfo + ai_VctrPtr), kAreaTable);
+    CHECK_EQ(r.get32(kAreaInfo + ai_FlagPtr), kAreaTable + kAreaMax * 4);
+
+    CHECK_EQ(area_move(r, s.rp, 50, 50), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 70, 50), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 60, 70), 0u);
+    area_end(r, s.rp);
+
+    CHECK_EQ(read_pixel(r, s.rp, 60, 50), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 60, 55), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 60, 65), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 60, 70), 1u);  // the lowest point
+    CHECK_EQ(read_pixel(r, s.rp, 60, 71), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 49, 55), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 69, 55), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 60, 49), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 60, 71), 0u);
+}
+
+void area_draw_past_max_count_returns_minus_one() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    init_area(r, s.rp, 2);
+
+    CHECK_EQ(area_move(r, s.rp, 10, 10), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 20, 20), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 30, 30), 0xFFFFFFFFu);
+    CHECK_EQ(r.get16(kAreaInfo + ai_Count), 2u);
+}
+
+void area_ellipse_fills_symmetrically_about_the_centre() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    init_area(r, s.rp, kAreaMax);
+
+    CHECK_EQ(area_ellipse(r, s.rp, 100, 100, 30, 20), 0u);
+    area_end(r, s.rp);
+
+    CHECK_EQ(read_pixel(r, s.rp, 100, 100), 1u);
+    for (i32 dy = -20; dy <= 20; ++dy) {
+        CHECK_EQ(read_pixel(r, s.rp, 100 - 20, 100 + dy),
+                 read_pixel(r, s.rp, 100 + 20, 100 + dy));
+        CHECK_EQ(read_pixel(r, s.rp, 100 - 30, 100 + dy),
+                 read_pixel(r, s.rp, 100 + 30, 100 + dy));
+    }
+    CHECK_EQ(read_pixel(r, s.rp, 130, 120), 0u);
+}
+
+void area_outline_uses_the_outline_pen() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    init_area(r, s.rp, kAreaMax);
+    r.put16(s.rp + rp_Flags, AREAOUTLINE);
+    r.put8(s.rp + rp_AOlPen, 2);
+
+    area_move(r, s.rp, 10, 10);
+    area_draw(r, s.rp, 20, 10);
+    area_draw(r, s.rp, 20, 20);
+    area_draw(r, s.rp, 10, 20);
+    area_end(r, s.rp);
+
+    CHECK_EQ(read_pixel(r, s.rp, 10, 10), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 20, 10), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 20, 20), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 10, 20), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 15, 10), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 10, 15), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 11, 15), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 9, 15), 0u);
+}
+
+void draw_ellipse_outline_has_no_gaps_and_leaves_the_inside_clear() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    const i32 cx = 100;
+    const i32 cy = 100;
+    const i32 rx = 30;
+    const i32 ry = 20;
+
+    r.cpu().a[1] = s.rp;
+    r.cpu().d[0] = static_cast<u32>(cx);
+    r.cpu().d[1] = static_cast<u32>(cy);
+    r.cpu().d[2] = static_cast<u32>(rx);
+    r.cpu().d[3] = static_cast<u32>(ry);
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::DrawEllipse), ExitReason::Halt);
+
+    CHECK_EQ(read_pixel(r, s.rp, cx, cy - ry), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, cx, cy + ry), 1u);
+    for (i32 y = cy - ry + 1; y < cy + ry; ++y) {
+        bool left = false;
+        bool right = false;
+        for (i32 x = cx - rx - 1; x < cx; ++x) {
+            left = left || read_pixel(r, s.rp, x, y) != 0;
+        }
+        for (i32 x = cx + 1; x <= cx + rx + 1; ++x) {
+            right = right || read_pixel(r, s.rp, x, y) != 0;
+        }
+        CHECK(left && right);
+    }
+    CHECK_EQ(read_pixel(r, s.rp, cx, cy), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, cx + 10, cy), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, cx, cy + 5), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, cx + rx + 1, cy), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, cx, cy - ry - 1), 0u);
+}
+
+void init_tmp_ras_records_the_buffer_and_wait_blit_is_a_no_op() {
+    GfxRig r;
+    r.cpu().a[0] = kTmpRas;
+    r.cpu().a[1] = kTmpBuffer;
+    r.cpu().d[0] = 1234;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::InitTmpRas), kTmpRas);
+    CHECK_EQ(r.get32(kTmpRas), kTmpBuffer);
+    CHECK_EQ(r.get32(kTmpRas + 4), 1234u);
+
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::InitTmpRas), 0u);
+
+    r.cpu().d[0] = 0x1234;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::WaitBlit), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x1234u);
+}
+
 }
 
 int main() {
@@ -974,5 +1176,12 @@ int main() {
     palette_calls_defer_until_flush();
     set_rgb32_cm_refreshes_front_map_only_at_flush();
     load_rgb32_caps_colormap_count_at_256();
+    text_extent_reports_five_characters_of_the_8x8_font();
+    area_fills_square_and_triangle_and_empties_the_table();
+    area_draw_past_max_count_returns_minus_one();
+    area_ellipse_fills_symmetrically_about_the_centre();
+    area_outline_uses_the_outline_pen();
+    draw_ellipse_outline_has_no_gaps_and_leaves_the_inside_clear();
+    init_tmp_ras_records_the_buffer_and_wait_blit_is_a_no_op();
     return check::finish("test_graphics");
 }

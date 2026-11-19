@@ -234,6 +234,140 @@ bool equals_ci(Bus& b, u32 addr, const char* host) {
 
 }
 
+namespace {
+
+// --- area fill ---------------------------------------------------------------
+
+// struct AreaInfo
+constexpr u32 ai_VctrTbl = 0;
+constexpr u32 ai_VctrPtr = 4;
+constexpr u32 ai_FlagTbl = 8;
+constexpr u32 ai_FlagPtr = 12;
+constexpr u32 ai_Count = 16;
+constexpr u32 ai_MaxCount = 18;
+constexpr u32 ai_FirstX = 20;
+constexpr u32 ai_FirstY = 22;
+
+// What each vector of the table is: the first point of a polygon, a
+// further point, or the centre and then the radii of an ellipse.
+constexpr u8 kAreaMove = 1;
+constexpr u8 kAreaDraw = 0;
+constexpr u8 kAreaEllipse = 2;
+constexpr u8 kAreaRadii = 3;
+
+// The most vectors one AreaEnd fills, and the longest polygon it takes.
+constexpr u32 kMaxAreaVectors = 1024;
+constexpr u32 kMaxPolygon = 256;
+
+void fill_span(Bus& b, const View& v, i32 y, i32 x0, i32 x1, u32 pen, Rect& dirty) {
+    if (x1 < x0) {
+        return;
+    }
+    const Rect r = raster::fill_rect(b, v.bitmap, v.clip, Rect{x0, y, x1, y}, pen);
+    dirty = unite(dirty, r);
+}
+
+// Fills the polygon of n points (bitmap coordinates) by the even-odd rule.
+void fill_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n, u32 pen,
+                  Rect& dirty) {
+    if (n < 3) {
+        return;
+    }
+    i32 top = ys[0];
+    i32 bottom = ys[0];
+    for (u32 i = 1; i < n; ++i) {
+        top = ys[i] < top ? ys[i] : top;
+        bottom = ys[i] > bottom ? ys[i] : bottom;
+    }
+    top = top < v.clip.y0 ? v.clip.y0 : top;
+    bottom = bottom > v.clip.y1 ? v.clip.y1 : bottom;
+    for (i32 y = top; y <= bottom; ++y) {
+        i32 cross[kMaxPolygon];
+        u32 count = 0;
+        for (u32 i = 0; i < n && count < kMaxPolygon; ++i) {
+            const u32 j = (i + 1) % n;
+            const i32 ya = ys[i];
+            const i32 yb = ys[j];
+            if (ya == yb) {
+                continue;
+            }
+            const bool upward = ya < yb;
+            const i32 y0 = upward ? ya : yb;
+            const i32 y1 = upward ? yb : ya;
+            if (y < y0 || y >= y1) {
+                continue;
+            }
+            const i32 x0 = upward ? xs[i] : xs[j];
+            const i32 x1 = upward ? xs[j] : xs[i];
+            cross[count++] = x0 + static_cast<i32>((static_cast<i64>(x1 - x0) * (y - y0)) /
+                                                   (y1 - y0));
+        }
+        for (u32 i = 1; i < count; ++i) {
+            const i32 key = cross[i];
+            u32 k = i;
+            while (k > 0 && cross[k - 1] > key) {
+                cross[k] = cross[k - 1];
+                --k;
+            }
+            cross[k] = key;
+        }
+        for (u32 i = 0; i + 1 < count; i += 2) {
+            fill_span(b, v, y, cross[i], cross[i + 1], pen, dirty);
+        }
+    }
+    // The bottom edge rows and lowest points the half-open rule leaves
+    // out, so the outline and the fill meet.
+    for (u32 i = 0; i < n; ++i) {
+        if (ys[i] >= v.clip.y0 && ys[i] <= v.clip.y1) {
+            fill_span(b, v, ys[i], xs[i], xs[i], pen, dirty);
+        }
+        const u32 j = (i + 1) % n;
+        if (ys[i] == ys[j] && ys[i] >= v.clip.y0 && ys[i] <= v.clip.y1) {
+            const i32 a = xs[i] < xs[j] ? xs[i] : xs[j];
+            const i32 c = xs[i] < xs[j] ? xs[j] : xs[i];
+            fill_span(b, v, ys[i], a, c, pen, dirty);
+        }
+    }
+}
+
+// The points of an ellipse with radii a and b around (cx, cy), one call of
+// visit(y, x_left, x_right) per row of the outline, top to bottom.
+template <typename Visit>
+void ellipse_rows(i32 cx, i32 cy, i32 a, i32 rb, Visit visit) {
+    if (a < 0 || rb < 0) {
+        return;
+    }
+    if (rb == 0) {
+        visit(cy, cx - a, cx + a);
+        return;
+    }
+    const i64 a2 = static_cast<i64>(a) * a;
+    const i64 b2 = static_cast<i64>(rb) * rb;
+    for (i32 dy = -rb; dy <= rb; ++dy) {
+        // The widest x with x^2/a^2 + dy^2/b^2 <= 1.
+        const i64 rest = a2 * (b2 - static_cast<i64>(dy) * dy);
+        i64 x = 0;
+        while ((x + 1) * (x + 1) * b2 <= rest) {
+            ++x;
+        }
+        visit(cy + dy, cx - static_cast<i32>(x), cx + static_cast<i32>(x));
+    }
+}
+
+void outline_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n, u32 pen,
+                     Rect& dirty) {
+    for (u32 i = 0; i + 1 < n || (n > 2 && i < n); ++i) {
+        const u32 j = (i + 1) % n;
+        dirty = unite(dirty, raster::draw_line(b, v.bitmap, v.clip, xs[i], ys[i], xs[j], ys[j],
+                                               pen));
+        if (n <= 2) {
+            break;
+        }
+    }
+}
+
+}
+
 struct GraphicsNatives {
     static Graphics& of(void* ctx) { return *static_cast<Graphics*>(ctx); }
 
@@ -261,6 +395,25 @@ struct GraphicsNatives {
     }
 
     static void text_length(void*, Machine& m) { native::set_result(m, 8 * m.cpu.d[0]); }
+
+    // struct TextExtent for count characters of the 8x8 font with its
+    // baseline at 6: te_Width, te_Height, then te_Extent relative to the
+    // pen position.
+    static void text_extent(void*, Machine& m) {
+        Bus b(m);
+        const u32 extent = m.cpu.a[2];
+        const u32 count = m.cpu.d[0] & 0xFFFF;
+        if (extent == 0) {
+            return;
+        }
+        const u32 width = 8 * count;
+        b.w16(extent + 0, width);
+        b.w16(extent + 2, 8);
+        b.w16(extent + 4, 0);
+        b.w16(extent + 6, static_cast<u16>(-6));
+        b.w16(extent + 8, static_cast<u16>(width == 0 ? 0 : width - 1));
+        b.w16(extent + 10, 1);
+    }
 
     static void text(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
@@ -392,6 +545,211 @@ struct GraphicsNatives {
             bump_palette(g.display_);
             mark_viewport_dirty(g.display_, m, vp);
         }
+    }
+
+
+    // --- area fill -----------------------------------------------------------
+
+    static void init_area(void*, Machine& m) {
+        Bus b(m);
+        const u32 ai = m.cpu.a[0];
+        const u32 table = m.cpu.a[1];
+        const u32 max = m.cpu.d[0] & 0xFFFF;
+        if (ai == 0) {
+            return;
+        }
+        b.w32(ai + ai_VctrTbl, table);
+        b.w32(ai + ai_VctrPtr, table);
+        b.w32(ai + ai_FlagTbl, table + max * 4);
+        b.w32(ai + ai_FlagPtr, table + max * 4);
+        b.w16(ai + ai_Count, 0);
+        b.w16(ai + ai_MaxCount, max);
+        b.w16(ai + ai_FirstX, 0);
+        b.w16(ai + ai_FirstY, 0);
+    }
+
+    // Appends a vector to the AreaInfo of rp: 0, or -1 when it is full.
+    static i32 add_vector(Bus& b, u32 rp, i32 x, i32 y, u8 kind) {
+        const u32 ai = b.r32(rp + ndk::rp_AreaInfo);
+        if (ai == 0 || !b.ok()) {
+            return -1;
+        }
+        const u32 count = b.r16(ai + ai_Count);
+        if (count >= b.r16(ai + ai_MaxCount)) {
+            return -1;
+        }
+        const u32 table = b.r32(ai + ai_VctrTbl);
+        const u32 flags = b.r32(ai + ai_FlagTbl);
+        b.w16(table + count * 4, static_cast<u32>(x));
+        b.w16(table + count * 4 + 2, static_cast<u32>(y));
+        b.w8(flags + count, kind);
+        b.w16(ai + ai_Count, count + 1);
+        b.w32(ai + ai_VctrPtr, table + (count + 1) * 4);
+        b.w32(ai + ai_FlagPtr, flags + count + 1);
+        if (kind == kAreaMove) {
+            b.w16(ai + ai_FirstX, static_cast<u32>(x));
+            b.w16(ai + ai_FirstY, static_cast<u32>(y));
+        }
+        b.w16(rp + ndk::rp_cp_x, static_cast<u32>(x));
+        b.w16(rp + ndk::rp_cp_y, static_cast<u32>(y));
+        return b.ok() ? 0 : -1;
+    }
+
+    static void area_move(void*, Machine& m) {
+        Bus b(m);
+        native::set_result(m, static_cast<u32>(add_vector(b, m.cpu.a[1],
+                                                          static_cast<i16>(m.cpu.d[0]),
+                                                          static_cast<i16>(m.cpu.d[1]), kAreaMove)));
+    }
+
+    static void area_draw(void*, Machine& m) {
+        Bus b(m);
+        native::set_result(m, static_cast<u32>(add_vector(b, m.cpu.a[1],
+                                                          static_cast<i16>(m.cpu.d[0]),
+                                                          static_cast<i16>(m.cpu.d[1]), kAreaDraw)));
+    }
+
+    static void area_ellipse(void*, Machine& m) {
+        Bus b(m);
+        const u32 rp = m.cpu.a[1];
+        const u32 ai = b.r32(rp + ndk::rp_AreaInfo);
+        if (ai == 0 || b.r16(ai + ai_Count) + 2 > b.r16(ai + ai_MaxCount)) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        add_vector(b, rp, static_cast<i16>(m.cpu.d[0]), static_cast<i16>(m.cpu.d[1]),
+                   kAreaEllipse);
+        const i32 r = add_vector(b, rp, static_cast<i16>(m.cpu.d[2]),
+                                 static_cast<i16>(m.cpu.d[3]), kAreaRadii);
+        native::set_result(m, static_cast<u32>(r));
+    }
+
+    // Fills every polygon and ellipse gathered since the last AreaEnd with
+    // the A pen, outlines them with the outline pen when AREAOUTLINE is
+    // set, and empties the table.
+    static void area_end(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 rp = m.cpu.a[1];
+        const u32 ai = b.r32(rp + ndk::rp_AreaInfo);
+        if (rp == 0 || ai == 0 || !b.ok()) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        const View v = view(b, rp);
+        u32 count = b.r16(ai + ai_Count);
+        count = count > kMaxAreaVectors ? kMaxAreaVectors : count;
+        const u32 table = b.r32(ai + ai_VctrTbl);
+        const u32 flags = b.r32(ai + ai_FlagTbl);
+        const u32 pen = b.r8(rp + ndk::rp_FgPen);
+        const u32 outline = b.r8(rp + ndk::rp_AOlPen);
+        const bool outlined = (b.r16(rp + ndk::rp_Flags) & ndk::AREAOUTLINE) != 0;
+        Rect dirty{0, 0, -1, -1};
+        i32 xs[kMaxPolygon];
+        i32 ys[kMaxPolygon];
+        u32 n = 0;
+        auto flush = [&]() {
+            if (n > 0 && v.ok) {
+                fill_polygon(b, v, xs, ys, n, pen, dirty);
+                if (outlined) {
+                    outline_polygon(b, v, xs, ys, n, outline, dirty);
+                }
+            }
+            n = 0;
+        };
+        for (u32 i = 0; i < count && b.ok(); ++i) {
+            const u8 kind = static_cast<u8>(b.r8(flags + i));
+            const i32 x = static_cast<i16>(b.r16(table + i * 4)) + v.origin_x;
+            const i32 y = static_cast<i16>(b.r16(table + i * 4 + 2)) + v.origin_y;
+            if (kind == kAreaEllipse && i + 1 < count) {
+                flush();
+                const i32 ra = static_cast<i16>(b.r16(table + (i + 1) * 4));
+                const i32 rb = static_cast<i16>(b.r16(table + (i + 1) * 4 + 2));
+                if (v.ok) {
+                    ellipse_rows(x, y, ra, rb, [&](i32 row, i32 x0, i32 x1) {
+                        fill_span(b, v, row, x0, x1, pen, dirty);
+                    });
+                    if (outlined) {
+                        ellipse_rows(x, y, ra, rb, [&](i32 row, i32 x0, i32 x1) {
+                            fill_span(b, v, row, x0, x0, outline, dirty);
+                            fill_span(b, v, row, x1, x1, outline, dirty);
+                        });
+                    }
+                }
+                ++i;
+                continue;
+            }
+            if (kind == kAreaMove) {
+                flush();
+            }
+            if (n < kMaxPolygon) {
+                xs[n] = x;
+                ys[n] = y;
+                ++n;
+            }
+        }
+        flush();
+        b.w16(ai + ai_Count, 0);
+        b.w32(ai + ai_VctrPtr, table);
+        b.w32(ai + ai_FlagPtr, flags);
+        if (b.ok() && v.ok) {
+            report(g.display_, m, v, dirty);
+        }
+        native::set_result(m, 0);
+    }
+
+    // The outline of an ellipse in the A pen.
+    static void draw_ellipse(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 rp = m.cpu.a[1];
+        const View v = view(b, rp);
+        if (!v.ok) {
+            return;
+        }
+        const i32 cx = static_cast<i16>(m.cpu.d[0]) + v.origin_x;
+        const i32 cy = static_cast<i16>(m.cpu.d[1]) + v.origin_y;
+        const i32 ra = static_cast<i16>(m.cpu.d[2]);
+        const i32 rb = static_cast<i16>(m.cpu.d[3]);
+        const u32 pen = b.r8(rp + ndk::rp_FgPen);
+        Rect dirty{0, 0, -1, -1};
+        i32 prev_left = 0;
+        i32 prev_right = 0;
+        bool first = true;
+        ellipse_rows(cx, cy, ra, rb, [&](i32 row, i32 x0, i32 x1) {
+            if (first || row == cy + rb) {
+                // The top and bottom rows are drawn whole.
+                fill_span(b, v, row, x0, x1, pen, dirty);
+            } else {
+                // Each side runs from this row's edge to the one above, so a
+                // steep part of the outline has no gaps.
+                fill_span(b, v, row, x0 < prev_left ? x0 : prev_left,
+                          x0 < prev_left ? prev_left - 1 : x0, pen, dirty);
+                fill_span(b, v, row, x1 > prev_right ? prev_right + 1 : x1,
+                          x1 > prev_right ? x1 : prev_right, pen, dirty);
+            }
+            prev_left = x0;
+            prev_right = x1;
+            first = false;
+        });
+        if (b.ok()) {
+            report(g.display_, m, v, dirty);
+        }
+    }
+
+    // Drawing finishes before each call returns: there is no blitter to
+    // wait for.
+    static void wait_blit(void*, Machine&) {}
+
+    // A TmpRas only records its buffer: fills need no scratch plane here.
+    static void init_tmp_ras(void*, Machine& m) {
+        Bus b(m);
+        const u32 tr = m.cpu.a[0];
+        if (tr != 0) {
+            b.w32(tr, m.cpu.a[1]);
+            b.w32(tr + 4, m.cpu.d[0]);
+        }
+        native::set_result(m, tr);
     }
 
     static void rect_fill(void* ctx, Machine& m) {
@@ -662,6 +1020,15 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::Text, GraphicsNatives::text, "Text"},
     {graphics_lvo::SetFont, GraphicsNatives::set_font, "SetFont"},
     {graphics_lvo::OpenFont, GraphicsNatives::open_font, "OpenFont"},
+    {graphics_lvo::TextExtent, GraphicsNatives::text_extent, "TextExtent"},
+    {graphics_lvo::DrawEllipse, GraphicsNatives::draw_ellipse, "DrawEllipse"},
+    {graphics_lvo::AreaEllipse, GraphicsNatives::area_ellipse, "AreaEllipse"},
+    {graphics_lvo::AreaMove, GraphicsNatives::area_move, "AreaMove"},
+    {graphics_lvo::AreaDraw, GraphicsNatives::area_draw, "AreaDraw"},
+    {graphics_lvo::AreaEnd, GraphicsNatives::area_end, "AreaEnd"},
+    {graphics_lvo::InitArea, GraphicsNatives::init_area, "InitArea"},
+    {graphics_lvo::InitTmpRas, GraphicsNatives::init_tmp_ras, "InitTmpRas"},
+    {graphics_lvo::WaitBlit, GraphicsNatives::wait_blit, "WaitBlit"},
     {graphics_lvo::CloseFont, GraphicsNatives::close_font, "CloseFont"},
     {graphics_lvo::LoadRGB4, GraphicsNatives::load_rgb4, "LoadRGB4"},
     {graphics_lvo::InitRastPort, GraphicsNatives::init_rastport, "InitRastPort"},
