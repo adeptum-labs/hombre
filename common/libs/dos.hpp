@@ -752,7 +752,7 @@ public:
     bool list_env_vars(void (*visit)(void* ctx, const char* name), void* ctx);
 
     u32 dos_base() const { return base_; }
-    u32 process() const { return process_; }
+    u32 process() const { return procs_[0].process; }
     RamFs& ram() { return ram_; }
     const RamFs& ram() const { return ram_; }
 
@@ -764,6 +764,33 @@ private:
 
     enum class Stream : u8 { Closed, Console, File };
 
+    static constexpr u32 kMaxProcs = 8;
+    struct ProcContext {
+        bool used;
+        u32 process;       // guest Process
+        u32 cli;           // guest CommandLineInterface, 0 when none
+        u32 args;          // guest argument line buffer
+        u32 stack;         // guest stack, kStackBytes
+        u32 command_name;  // BSTR buffer of cli_CommandName
+        u32 prompt;        // BSTR buffer of cli_Prompt
+        u32 set_name;      // BSTR buffer of cli_SetName
+        // The console's input: the argument line, read once, then
+        // console_read_.
+        char input[kMaxArgs + 2];
+        u32 input_length;
+        u32 input_pos;
+        bool running;
+        bool exited;
+        u32 exit_code;
+    };
+    ProcContext procs_[kMaxProcs]{};
+    // The context of the running task: the one whose process is exec's
+    // this_task(), else context 0 (the boot shell's process).
+    u32 cur_index() const;
+    ProcContext& cur();
+    // The owner value of the current context, 0 when it has no command running.
+    u8 cur_owner() const;
+
     struct FileSlot {
         Stream stream;
         DirEntry entry;
@@ -772,14 +799,14 @@ private:
         u8 unget;
         bool has_last;
         u8 last_char;
-        bool command_owned;
+        u8 owner;
         bool exclusive;
         char path[kMaxPath];
     };
 
     struct LockSlot {
         bool used;
-        bool command_owned;
+        u8 owner;
         bool exclusive;
         DirEntry entry;
         char path[kMaxPath];  // from the root, components separated by '/'
@@ -806,7 +833,7 @@ private:
 
     struct AnchorSlot {
         bool used;
-        bool command_owned;
+        u8 owner;
         u32 anchor_addr;  // masked guest AnchorPath address
         bool is_wild;
         bool leaf_empty;
@@ -845,16 +872,9 @@ private:
     u32 ram_device_node_ = 0;
     u32 port_ = 0;      // the ADF file system's MsgPort
     u32 ram_port_ = 0;  // the RAM: file system's MsgPort
-    u32 process_ = 0;
-    u32 cli_ = 0;
-    u32 set_name_ = 0;
-    u32 prompt_ = 0;
-    u32 command_name_ = 0;
     u32 handles_ = 0;
     u32 locks_ = 0;
     u32 assign_locks_ = 0;
-    u32 args_ = 0;
-    u32 stack_ = 0;
 
     FileSlot files_[kHandles]{};
     LockSlot lock_slots_[kMaxLocks]{};
@@ -876,15 +896,6 @@ private:
     u32 path_locks_[kMaxPathDirs]{};
     u32 path_nodes_[kMaxPathDirs]{};
     u32 path_count_ = 0;
-
-    // The console's input: the argument line, read once, then console_read_.
-    char input_[kMaxArgs + 2]{};
-    u32 input_length_ = 0;
-    u32 input_pos_ = 0;
-
-    bool running_ = false;
-    bool exited_ = false;
-    u32 exit_code_ = 0;
 };
 
 }

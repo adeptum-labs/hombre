@@ -666,7 +666,7 @@ struct DosOps {
 
     // --- the Process ---------------------------------------------------------
 
-    static void set_io_err(Dos& d, Bus& b, u32 code) { b.w32(d.process_ + pr_Result2, code); }
+    static void set_io_err(Dos& d, Bus& b, u32 code) { b.w32(d.cur().process + pr_Result2, code); }
 
     // Sets IoErr and D0 together.
     static void fail(Dos& d, Bus& b, u32 code, u32 result) {
@@ -1294,7 +1294,7 @@ struct DosOps {
         if (user >= 0) {
             release_entry(d, d.lock_slots_[user].entry);
             d.lock_slots_[user].used = false;
-            d.lock_slots_[user].command_owned = false;
+            d.lock_slots_[user].owner = 0;
             d.lock_slots_[user].exclusive = false;
             return;
         }
@@ -1302,7 +1302,7 @@ struct DosOps {
         if (assign >= 0) {
             release_entry(d, d.assign_lock_slots_[assign].entry);
             d.assign_lock_slots_[assign].used = false;
-            d.assign_lock_slots_[assign].command_owned = false;
+            d.assign_lock_slots_[assign].owner = 0;
             d.assign_lock_slots_[assign].exclusive = false;
         }
     }
@@ -1317,7 +1317,7 @@ struct DosOps {
             if (!d.assign_lock_slots_[i].used) {
                 Dos::LockSlot& l = d.assign_lock_slots_[i];
                 l.used = true;
-                l.command_owned = false;
+                l.owner = 0;
                 l.exclusive = false;
                 l.entry = entry;
                 char canonical[Dos::kMaxPath];
@@ -1810,6 +1810,7 @@ struct DosOps {
     // directory.
     static bool resolve(Dos& d, Bus& b, const char* name, u8& vol, char (&out)[Dos::kMaxPath],
                         u32& error, u32 depth = 0) {
+        Dos::ProcContext& p = d.cur();
         if (depth >= kMaxAssignDepth) {
             error = ERROR_TOO_MANY_LEVELS;
             return false;
@@ -1821,7 +1822,7 @@ struct DosOps {
         if (name[colon] == ':') {
             const char* rest = name + colon + 1;
             if (colon == 0) {
-                const u32 current = b.r32(d.process_ + pr_CurrentDir);
+                const u32 current = b.r32(p.process + pr_CurrentDir);
                 if (!b.ok()) {
                     return false;
                 }
@@ -1905,7 +1906,7 @@ struct DosOps {
             vol = slot0->entry.volume;
             return apply_relative_path(slot0->path, rest, out, error);
         }
-        const u32 current = b.r32(d.process_ + pr_CurrentDir);
+        const u32 current = b.r32(p.process + pr_CurrentDir);
         if (!b.ok()) {
             return false;
         }
@@ -1943,7 +1944,7 @@ struct DosOps {
     // --- console and files -------------------------------------------------
 
     static Dos::FileSlot make_file_slot(Dos::Stream stream, const DirEntry& entry,
-                                          const char* path, bool command_owned = false,
+                                          const char* path, u8 owner = 0,
                                           bool exclusive = false) {
         Dos::FileSlot s{};
         s.stream = stream;
@@ -1953,33 +1954,35 @@ struct DosOps {
         s.unget = 0;
         s.has_last = false;
         s.last_char = 0;
-        s.command_owned = command_owned;
+        s.owner = owner;
         s.exclusive = exclusive;
         copy_cstr(s.path, path, Dos::kMaxPath);
         return s;
     }
 
     static bool refill_console(Dos& d) {
-        if (d.input_pos_ < d.input_length_) {
+        Dos::ProcContext& p = d.cur();
+        if (p.input_pos < p.input_length) {
             return true;
         }
         if (d.console_read_ == nullptr) {
             return false;
         }
-        u32 n = d.console_read_(d.console_ctx_, reinterpret_cast<u8*>(d.input_),
+        u32 n = d.console_read_(d.console_ctx_, reinterpret_cast<u8*>(p.input),
                                 Dos::kMaxArgs + 1);
         if (n > Dos::kMaxArgs + 1) {
             n = Dos::kMaxArgs + 1;
         }
-        d.input_pos_ = 0;
-        d.input_length_ = n;
+        p.input_pos = 0;
+        p.input_length = n;
         return n > 0;
     }
 
-    static u32 available_bytes(const Dos& d, const Dos::FileSlot& f) {
+    static u32 available_bytes(Dos& d, const Dos::FileSlot& f) {
         const u32 buffered = f.has_unget ? 1u : 0u;
         if (f.stream == Dos::Stream::Console) {
-            const u32 left = d.input_length_ > d.input_pos_ ? d.input_length_ - d.input_pos_ : 0u;
+            const Dos::ProcContext& p = d.cur();
+            const u32 left = p.input_length > p.input_pos ? p.input_length - p.input_pos : 0u;
             return buffered + left;
         }
         const u32 size = fs_size(d, f.entry);
@@ -1995,6 +1998,7 @@ struct DosOps {
             return true;
         }
         Dos::FileSlot& f = d.files_[slot];
+        Dos::ProcContext& p = d.cur();
         if (f.has_unget) {
             to[0] = f.unget;
             f.has_unget = false;
@@ -2007,15 +2011,15 @@ struct DosOps {
         }
         const u32 rem = length - got;
         if (f.stream == Dos::Stream::Console) {
-            if (d.input_pos_ >= d.input_length_ && got == 0) {
+            if (p.input_pos >= p.input_length && got == 0) {
                 refill_console(d);
             }
-            const u32 left = d.input_length_ > d.input_pos_ ? d.input_length_ - d.input_pos_ : 0u;
+            const u32 left = p.input_length > p.input_pos ? p.input_length - p.input_pos : 0u;
             const u32 n = rem < left ? rem : left;
             for (u32 i = 0; i < n; ++i) {
-                to[got + i] = static_cast<u8>(d.input_[d.input_pos_ + i]);
+                to[got + i] = static_cast<u8>(p.input[p.input_pos + i]);
             }
-            d.input_pos_ += n;
+            p.input_pos += n;
             got += n;
         } else {
             const u32 size = fs_size(d, f.entry);
@@ -2056,7 +2060,7 @@ struct DosOps {
                 table_full(d, b, "file handle", Dos::kMaxFiles);
                 return;
             }
-            d.files_[slot] = make_file_slot(Dos::Stream::Console, DirEntry{}, "", d.running_);
+            d.files_[slot] = make_file_slot(Dos::Stream::Console, DirEntry{}, "", d.cur_owner());
             init_handle(d, b, static_cast<u32>(slot), true);
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
@@ -2095,7 +2099,7 @@ struct DosOps {
             }
             char canonical[Dos::kMaxPath];
             fs_canonical(d, vol, resolved, canonical);
-            d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.running_);
+            d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner());
             init_handle(d, b, static_cast<u32>(slot), false);
             native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
             return;
@@ -2177,7 +2181,8 @@ struct DosOps {
         const DirEntry entry = ram_entry(d, node);
         char canonical[Dos::kMaxPath];
         ram_node_path(d.ram_, node, canonical);
-        d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.running_, exclusive);
+        d.files_[slot] = make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner(),
+                                        exclusive);
         retain_entry(d, entry);
         init_handle(d, b, static_cast<u32>(slot), false);
         native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
@@ -2272,7 +2277,7 @@ struct DosOps {
     static void write_chars(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 fh = b.r32(d.process_ + pr_COS);
+        const u32 fh = b.r32(d.cur().process + pr_COS);
         if (b.ok()) {
             write_to_fh(d, b, fh, m.cpu.d[1], m.cpu.d[2], "WriteChars to");
         }
@@ -2384,21 +2389,22 @@ struct DosOps {
     static void input(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 fh = b.r32(d.process_ + pr_CIS);
+        const u32 fh = b.r32(d.cur().process + pr_CIS);
         native::set_result(m, fh);
     }
 
     static void output(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 fh = b.r32(d.process_ + pr_COS);
+        const u32 fh = b.r32(d.cur().process + pr_COS);
         native::set_result(m, fh);
     }
 
     static void select(Machine& m, Dos& d, u32 field) {
         Bus b(m);
-        const u32 old = b.r32(d.process_ + field);
-        b.w32(d.process_ + field, m.cpu.d[1]);
+        Dos::ProcContext& p = d.cur();
+        const u32 old = b.r32(p.process + field);
+        b.w32(p.process + field, m.cpu.d[1]);
         native::set_result(m, old);
     }
 
@@ -2420,7 +2426,7 @@ struct DosOps {
     static void put_str(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 fh = b.r32(d.process_ + pr_COS);
+        const u32 fh = b.r32(d.cur().process + pr_COS);
         if (!b.ok()) {
             return;
         }
@@ -2432,7 +2438,7 @@ struct DosOps {
         Sink out(d, b, static_cast<u32>(slot));
         const bool ok = put_guest_string(b, out, m.cpu.d[1]) && out.flush();
         if (b.ok()) {
-            native::set_result(m, ok ? 0 : b.r32(d.process_ + pr_Result2));
+            native::set_result(m, ok ? 0 : b.r32(d.cur().process + pr_Result2));
         }
     }
 
@@ -2487,7 +2493,7 @@ struct DosOps {
     static void vprintf(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 fh = b.r32(d.process_ + pr_COS);
+        const u32 fh = b.r32(d.cur().process + pr_COS);
         if (b.ok()) {
             printf_to(m, d, fh, m.cpu.d[1], m.cpu.d[2], "VPrintf to");
         }
@@ -2856,14 +2862,14 @@ struct DosOps {
     static void io_err(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 code = b.r32(d.process_ + pr_Result2);
+        const u32 code = b.r32(d.cur().process + pr_Result2);
         native::set_result(m, code);
     }
 
     static void set_io_err_lvo(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 old = b.r32(d.process_ + pr_Result2);
+        const u32 old = b.r32(d.cur().process + pr_Result2);
         set_io_err(d, b, m.cpu.d[1]);
         native::set_result(m, old);
     }
@@ -2933,7 +2939,7 @@ struct DosOps {
         if (code != 0) {
             char text[kFaultText];
             fault_text(b, code, m.cpu.d[2], text);
-            const u32 fh = b.r32(d.process_ + pr_COS);
+            const u32 fh = b.r32(d.cur().process + pr_COS);
             if (!b.ok()) {
                 return;
             }
@@ -2956,7 +2962,7 @@ struct DosOps {
         if (code != 0) {
             char text[kFaultText];
             fault_text(b, code, 0, text);
-            const u32 fh = b.r32(d.process_ + pr_COS);
+            const u32 fh = b.r32(d.cur().process + pr_COS);
             if (!b.ok()) {
                 return;
             }
@@ -2998,7 +3004,7 @@ struct DosOps {
     // to case; 0 if there is none. A node marked LVF_IGNORE has another
     // type, so it never matches.
     static u32 find_var(Dos& d, Bus& b, const char* name, u32 type) {
-        u32 node = b.r32(d.process_ + pr_LocalVars + LH_HEAD);
+        u32 node = b.r32(d.cur().process + pr_LocalVars + LH_HEAD);
         for (u32 n = 0; n < kMaxVars; ++n) {
             const u32 succ = b.r32(node + LN_SUCC);
             if (!b.ok() || succ == 0) {
@@ -3263,7 +3269,7 @@ struct DosOps {
             put_string(b, node + LocalVar_SIZEOF, name);
             b.w8(node + LN_TYPE, type);
             b.w32(node + LN_NAME, node + LocalVar_SIZEOF);
-            add_tail(b, d.process_ + pr_LocalVars, node);
+            add_tail(b, d.cur().process + pr_LocalVars, node);
         } else {
             free_value(d, b, node);
         }
@@ -3472,14 +3478,14 @@ struct DosOps {
     static void cli(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 bptr = b.r32(d.process_ + pr_CLI);
+        const u32 bptr = b.r32(d.cur().process + pr_CLI);
         native::set_result(m, bptr << 2);
     }
 
     static void get_file_sys_task(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 port = b.r32(d.process_ + pr_FileSystemTask);
+        const u32 port = b.r32(d.cur().process + pr_FileSystemTask);
         if (b.ok()) {
             native::set_result(m, port);
         }
@@ -3493,7 +3499,7 @@ struct DosOps {
 
     static void find_cli_proc(void* ctx, Machine& m) {
         Dos& d = of(ctx);
-        native::set_result(m, m.cpu.d[1] == 1 ? d.process_ : 0);
+        native::set_result(m, m.cpu.d[1] == 1 ? d.cur().process : 0);
     }
 
     static void find_segment(void*, Machine& m) { native::set_result(m, 0); }
@@ -3501,7 +3507,7 @@ struct DosOps {
     static void get_arg_str(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 arg = b.r32(d.process_ + pr_Arguments);
+        const u32 arg = b.r32(d.cur().process + pr_Arguments);
         if (b.ok()) {
             native::set_result(m, arg);
         }
@@ -3516,7 +3522,7 @@ struct DosOps {
             return false;
         }
         out[0] = '\0';
-        const u32 cli_bptr = b.r32(d.process_ + pr_CLI);
+        const u32 cli_bptr = b.r32(d.procs_[0].process + pr_CLI);
         if (!b.ok() || cli_bptr == 0) {
             return false;
         }
@@ -3552,7 +3558,7 @@ struct DosOps {
             }
             return;
         }
-        const u32 cli_bptr = b.r32(d.process_ + pr_CLI);
+        const u32 cli_bptr = b.r32(d.cur().process + pr_CLI);
         if (!b.ok()) {
             return;
         }
@@ -3572,7 +3578,7 @@ struct DosOps {
             fail(d, b, ERROR_LINE_TOO_LONG, DOSFALSE);
             return;
         }
-        const u32 cli_bptr = b.r32(d.process_ + pr_CLI);
+        const u32 cli_bptr = b.r32(d.cur().process + pr_CLI);
         if (!b.ok()) {
             return;
         }
@@ -3612,7 +3618,7 @@ struct DosOps {
     static void set_current_dir_name(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        set_cli_bstr(d, b, cli_SetName, d.set_name_, m.cpu.d[1]);
+        set_cli_bstr(d, b, cli_SetName, d.cur().set_name, m.cpu.d[1]);
     }
 
     static void get_current_dir_name(void* ctx, Machine& m) {
@@ -3624,7 +3630,7 @@ struct DosOps {
     static void set_program_name(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        set_cli_bstr(d, b, cli_CommandName, d.command_name_, m.cpu.d[1]);
+        set_cli_bstr(d, b, cli_CommandName, d.cur().command_name, m.cpu.d[1]);
     }
 
     static void get_program_name(void* ctx, Machine& m) {
@@ -3636,7 +3642,7 @@ struct DosOps {
     static void set_prompt(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        set_cli_bstr(d, b, cli_Prompt, d.prompt_, m.cpu.d[1]);
+        set_cli_bstr(d, b, cli_Prompt, d.cur().prompt, m.cpu.d[1]);
     }
 
     static void get_prompt(void* ctx, Machine& m) {
@@ -3648,11 +3654,12 @@ struct DosOps {
     static void check_signal(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
+        Dos::ProcContext& p = d.cur();
         const u32 mask = m.cpu.d[1];
-        const u32 recvd = b.r32(d.process_ + TC_SIGRECVD);
+        const u32 recvd = b.r32(p.process + TC_SIGRECVD);
         const u32 hit = recvd & mask;
         if (hit != 0) {
-            b.w32(d.process_ + TC_SIGRECVD, recvd & ~hit);
+            b.w32(p.process + TC_SIGRECVD, recvd & ~hit);
         }
         if (b.ok()) {
             native::set_result(m, hit);
@@ -3910,11 +3917,12 @@ struct DosOps {
     // as the command's end.
     static void exit(void* ctx, Machine& m) {
         Dos& d = of(ctx);
-        if (!d.running_) {
+        Dos::ProcContext& p = d.cur();
+        if (!p.running) {
             LogLine().text("dos: Exit with no command running").send();
         }
-        d.exited_ = d.running_;
-        d.exit_code_ = m.cpu.d[1];
+        p.exited = p.running;
+        p.exit_code = m.cpu.d[1];
         if (m.cpu.exit == ExitReason::None) {
             m.cpu.d[0] = m.cpu.d[1];
         }
@@ -3945,7 +3953,7 @@ struct DosOps {
     }
 
     static bool alloc_user_lock(Dos& d, Bus& b, const char* path, const DirEntry& entry,
-                                u32 access, u32& bptr_out, bool command_owned) {
+                                u32 access, u32& bptr_out, u8 owner) {
         const bool exclusive = access == EXCLUSIVE_LOCK;
         if (entry.volume == Dos::kVolRam && entry.header_block > 0 &&
             ram_node_busy(d, entry.header_block - 1, exclusive)) {
@@ -3959,7 +3967,7 @@ struct DosOps {
         }
         Dos::LockSlot& l = d.lock_slots_[slot];
         l.used = true;
-        l.command_owned = command_owned;
+        l.owner = owner;
         l.exclusive = exclusive;
         l.entry = entry;
         char canonical[Dos::kMaxPath];
@@ -3973,7 +3981,7 @@ struct DosOps {
 
     static bool alloc_user_lock(Dos& d, Bus& b, const char* path, const DirEntry& entry,
                                 u32 access, u32& bptr_out) {
-        return alloc_user_lock(d, b, path, entry, access, bptr_out, d.running_);
+        return alloc_user_lock(d, b, path, entry, access, bptr_out, d.cur_owner());
     }
 
     static bool free_user_lock(Dos& d, u32 bptr) {
@@ -3986,7 +3994,7 @@ struct DosOps {
         }
         release_entry(d, d.lock_slots_[slot].entry);
         d.lock_slots_[slot].used = false;
-        d.lock_slots_[slot].command_owned = false;
+        d.lock_slots_[slot].owner = 0;
         d.lock_slots_[slot].exclusive = false;
         return true;
     }
@@ -4084,11 +4092,11 @@ struct DosOps {
             table_full(d, b, "file handle", Dos::kMaxFiles);
             return;
         }
-        d.files_[fslot] = make_file_slot(Dos::Stream::File, l.entry, l.path, d.running_,
+        d.files_[fslot] = make_file_slot(Dos::Stream::File, l.entry, l.path, d.cur_owner(),
                                          l.exclusive);
         init_handle(d, b, static_cast<u32>(fslot), false);
         l.used = false;
-        l.command_owned = false;
+        l.owner = 0;
         l.exclusive = false;
         native::set_result(m, handle_bptr(d, static_cast<u32>(fslot)));
     }
@@ -4369,7 +4377,7 @@ struct DosOps {
         }
         const i64 user_lock = lock_slot(d, lock_bptr);
         if (user_lock >= 0) {
-            d.lock_slots_[user_lock].command_owned = false;
+            d.lock_slots_[user_lock].owner = 0;
         }
         if (saved.used) {
             for (u32 i = 0; i < saved.dir_count; ++i) {
@@ -4498,7 +4506,7 @@ struct DosOps {
         }
         const i64 user_lock = lock_slot(d, lock_bptr);
         if (user_lock >= 0) {
-            d.lock_slots_[user_lock].command_owned = false;
+            d.lock_slots_[user_lock].owner = 0;
         }
         relink_dos_list(d, b);
         if (b.ok()) {
@@ -4596,6 +4604,7 @@ struct DosOps {
     static void get_device_proc(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
+        Dos::ProcContext& p = d.cur();
         const u32 last = m.cpu.d[2];
         if (last != 0) {
             const u32 flags = b.r32(last + dvp_Flags);
@@ -4652,7 +4661,7 @@ struct DosOps {
         u32 dvp_flags = 0;
         u32 dvp_node = 0;
         if (name[colon] != ':') {
-            const u32 current = b.r32(d.process_ + pr_CurrentDir);
+            const u32 current = b.r32(p.process + pr_CurrentDir);
             if (!b.ok()) {
                 return;
             }
@@ -4672,7 +4681,7 @@ struct DosOps {
             fail(d, b, ERROR_DEVICE_NOT_MOUNTED, 0);
             return;
         } else if (colon == 0) {
-            const u32 current = b.r32(d.process_ + pr_CurrentDir);
+            const u32 current = b.r32(p.process + pr_CurrentDir);
             if (!b.ok()) {
                 return;
             }
@@ -5158,18 +5167,19 @@ struct DosOps {
     }
 
     static bool check_anchor_break(Dos& d, Bus& b, u32 anchor) {
+        Dos::ProcContext& p = d.cur();
         const u32 break_bits = b.r32(anchor + ap_BreakBits);
         b.w32(anchor + ap_FoundBreak, 0);
         if (!b.ok() || break_bits == 0) {
             return false;
         }
-        const u32 recvd = b.r32(d.process_ + TC_SIGRECVD);
+        const u32 recvd = b.r32(p.process + TC_SIGRECVD);
         if (!b.ok()) {
             return false;
         }
         const u32 hit = recvd & break_bits;
         if (hit != 0) {
-            b.w32(d.process_ + TC_SIGRECVD, recvd & ~hit);
+            b.w32(p.process + TC_SIGRECVD, recvd & ~hit);
             b.w32(anchor + ap_FoundBreak, hit);
             fail(d, b, ERROR_BREAK, ERROR_BREAK);
             return true;
@@ -5270,7 +5280,7 @@ struct DosOps {
         }
         if (!fill_fib(d, b, anchor + ap_Info, entry)) {
             if (b.ok()) {
-                const u32 err = b.r32(d.process_ + pr_Result2);
+                const u32 err = b.r32(d.cur().process + pr_Result2);
                 native::set_result(b.machine(), err);
             }
             return false;
@@ -5284,7 +5294,7 @@ struct DosOps {
         oom = false;
         u32 lock_bptr = 0;
         if (!alloc_user_lock(d, b, dir_path, dir_entry, SHARED_LOCK, lock_bptr)) {
-            oom = b.ok() && b.r32(d.process_ + pr_Result2) == ERROR_NO_FREE_STORE;
+            oom = b.ok() && b.r32(d.cur().process + pr_Result2) == ERROR_NO_FREE_STORE;
             return false;
         }
         const u32 label_len = length_of(label);
@@ -5339,7 +5349,7 @@ struct DosOps {
         }
         s.depth = 0;
         s.used = false;
-        s.command_owned = false;
+        s.owner = 0;
     }
 
     static void cleanup_anchor(Dos& d, Bus& b, u32 slot_idx, u32 anchor) {
@@ -5358,7 +5368,7 @@ struct DosOps {
             b.w8(anchor + ap_Flags, static_cast<u8>(flags | APF_NOMEMERR));
             fail(d, b, ERROR_NO_FREE_STORE, ERROR_NO_FREE_STORE);
         } else {
-            const u32 err = b.r32(d.process_ + pr_Result2);
+            const u32 err = b.r32(d.cur().process + pr_Result2);
             native::set_result(b.machine(), err);
         }
     }
@@ -5491,7 +5501,7 @@ struct DosOps {
                 return;
             }
             s.used = true;
-            s.command_owned = d.running_;
+            s.owner = d.cur_owner();
             s.anchor_addr = key;
             set_io_err(d, b, 0);
             native::set_result(m, 0);
@@ -5553,7 +5563,7 @@ struct DosOps {
             return;
         }
         s.used = true;
-        s.command_owned = d.running_;
+        s.owner = d.cur_owner();
         s.anchor_addr = key;
         set_io_err(d, b, 0);
         native::set_result(m, 0);
@@ -5993,7 +6003,7 @@ struct DosOps {
         DirEntry base_entry{};
         const char* base_path = nullptr;
         if (!lock_entry(d, b, base_lock, base_entry, base_path, zero_vol)) {
-            error = b.ok() ? b.r32(d.process_ + pr_Result2) : 0;
+            error = b.ok() ? b.r32(d.cur().process + pr_Result2) : 0;
             return false;
         }
         u32 colon = 0;
@@ -6030,6 +6040,7 @@ struct DosOps {
     }
 
     static void update_renamed_paths(Dos& d, Bus& b, u32 renamed_node) {
+        Dos::ProcContext& p = d.cur();
         auto update_lock_slot = [&](Dos::LockSlot& l) {
             if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block > 0) {
                 const u32 node = l.entry.header_block - 1;
@@ -6078,8 +6089,8 @@ struct DosOps {
                 }
             }
         }
-        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
-        if (b.ok() && cur != 0 && d.cli_ != 0) {
+        const u32 cur = b.r32(p.process + pr_CurrentDir);
+        if (b.ok() && cur != 0 && p.cli != 0) {
             const Dos::LockSlot* cur_slot = find_lock_slot(d, cur);
             if (cur_slot != nullptr && cur_slot->entry.volume == Dos::kVolRam &&
                 cur_slot->entry.header_block > 0 &&
@@ -6087,8 +6098,8 @@ struct DosOps {
                 char full_name[kMaxName];
                 format_volume_path(volume_name(d, Dos::kVolRam), cur_slot->path, full_name,
                                    sizeof full_name);
-                put_bstr(b, d.set_name_, full_name, 255);
-                b.w32(d.cli_ + cli_SetName, d.set_name_ >> 2);
+                put_bstr(b, p.set_name, full_name, 255);
+                b.w32(p.cli + cli_SetName, p.set_name >> 2);
             }
         }
     }
@@ -6145,7 +6156,7 @@ struct DosOps {
             }
             return;
         }
-        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        const u32 cur = b.r32(d.cur().process + pr_CurrentDir);
         if (b.ok()) {
             delete_file_impl(d, b, cur, name);
         }
@@ -6247,7 +6258,7 @@ struct DosOps {
             }
             return;
         }
-        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        const u32 cur = b.r32(d.cur().process + pr_CurrentDir);
         if (b.ok()) {
             rename_impl(d, b, cur, old_name, cur, new_name);
         }
@@ -6320,7 +6331,7 @@ struct DosOps {
             }
             return;
         }
-        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        const u32 cur = b.r32(d.cur().process + pr_CurrentDir);
         if (b.ok()) {
             create_dir_impl(d, b, cur, name);
         }
@@ -6370,7 +6381,7 @@ struct DosOps {
             }
             return;
         }
-        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        const u32 cur = b.r32(d.cur().process + pr_CurrentDir);
         if (b.ok()) {
             set_protection_impl(d, b, cur, name, m.cpu.d[2]);
         }
@@ -6427,7 +6438,7 @@ struct DosOps {
             }
             return;
         }
-        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        const u32 cur = b.r32(d.cur().process + pr_CurrentDir);
         if (b.ok()) {
             set_comment_impl(d, b, cur, name, comment);
         }
@@ -6487,7 +6498,7 @@ struct DosOps {
             }
             return;
         }
-        const u32 cur = b.r32(d.process_ + pr_CurrentDir);
+        const u32 cur = b.r32(d.cur().process + pr_CurrentDir);
         if (b.ok()) {
             set_file_date_impl(d, b, cur, name, m.cpu.d[2]);
         }
@@ -6555,7 +6566,7 @@ struct DosOps {
         case ACTION_CURRENT_VOLUME: {
             u8 vol = port_vol;
             if (port_vol == Dos::kVolAdf) {
-                const u32 current = b.r32(d.process_ + pr_CurrentDir);
+                const u32 current = b.r32(d.cur().process + pr_CurrentDir);
                 if (!b.ok()) {
                     return;
                 }
@@ -6726,13 +6737,14 @@ struct DosOps {
     // The next line of the console's input, its newline included; false if
     // it is longer than a line can be (it is read all the same).
     static bool console_line(Dos& d, ArgLine& line) {
-        if (d.input_pos_ >= d.input_length_) {
+        Dos::ProcContext& p = d.cur();
+        if (p.input_pos >= p.input_length) {
             refill_console(d);
         }
         u32 n = 0;
         bool fits = true;
-        while (d.input_pos_ < d.input_length_) {
-            const char c = d.input_[d.input_pos_++];
+        while (p.input_pos < p.input_length) {
+            const char c = p.input[p.input_pos++];
             if (n < kMaxLine) {
                 line.text[n++] = c;
             } else {
@@ -6853,7 +6865,7 @@ struct DosOps {
             bool fits = console_line(d, line);
             // A lone '?' asks for the template, and then for the line.
             for (u32 n = 0; fits && n < kMaxPrompts && is_question(line); ++n) {
-                const u32 fh = b.r32(d.process_ + pr_COS);
+                const u32 fh = b.r32(d.cur().process + pr_COS);
                 if (!b.ok()) {
                     return;
                 }
@@ -7117,7 +7129,7 @@ struct DosOps {
             src.use_cs = src.cs_buf != 0;
         }
         if (!src.use_cs) {
-            const u32 fh = b.r32(d.process_ + pr_CIS);
+            const u32 fh = b.r32(d.cur().process + pr_CIS);
             if (!b.ok()) {
                 return;
             }
@@ -7231,38 +7243,40 @@ struct DosOps {
         }
     }
 
-    static void cleanup_command(Dos& d, u32 saved_current_dir, u32 saved_cis, u32 saved_cos) {
-        d.m_->mem.write32(d.process_ + pr_CurrentDir, saved_current_dir);
+    static void cleanup_command(Dos& d, u32 saved_current_dir, u32 saved_cis, u32 saved_cos,
+                                u8 owner) {
+        Dos::ProcContext& p = d.procs_[0];
+        d.m_->mem.write32(p.process + pr_CurrentDir, saved_current_dir);
         u32 cur_cis = 0;
-        if (d.m_->mem.read32(d.process_ + pr_CIS, cur_cis)) {
+        if (d.m_->mem.read32(p.process + pr_CIS, cur_cis)) {
             const i64 slot = handle_slot(d, cur_cis);
-            if (slot > static_cast<i64>(kConsoleOut) && d.files_[slot].command_owned) {
-                d.m_->mem.write32(d.process_ + pr_CIS, saved_cis);
+            if (slot > static_cast<i64>(kConsoleOut) && d.files_[slot].owner == owner) {
+                d.m_->mem.write32(p.process + pr_CIS, saved_cis);
             }
         }
         u32 cur_cos = 0;
-        if (d.m_->mem.read32(d.process_ + pr_COS, cur_cos)) {
+        if (d.m_->mem.read32(p.process + pr_COS, cur_cos)) {
             const i64 slot = handle_slot(d, cur_cos);
-            if (slot > static_cast<i64>(kConsoleOut) && d.files_[slot].command_owned) {
-                d.m_->mem.write32(d.process_ + pr_COS, saved_cos);
+            if (slot > static_cast<i64>(kConsoleOut) && d.files_[slot].owner == owner) {
+                d.m_->mem.write32(p.process + pr_COS, saved_cos);
             }
         }
         for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
-            if (d.anchors_[i].used && d.anchors_[i].command_owned) {
+            if (d.anchors_[i].used && d.anchors_[i].owner == owner) {
                 release_anchor_slot(d, i);
             }
         }
         for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
-            if (d.files_[i].stream != Dos::Stream::Closed && d.files_[i].command_owned) {
+            if (d.files_[i].stream != Dos::Stream::Closed && d.files_[i].owner == owner) {
                 release_entry(d, d.files_[i].entry);
                 d.files_[i] = make_file_slot(Dos::Stream::Closed, DirEntry{}, "");
             }
         }
         for (u32 i = 0; i < Dos::kMaxLocks; ++i) {
-            if (d.lock_slots_[i].used && d.lock_slots_[i].command_owned) {
+            if (d.lock_slots_[i].used && d.lock_slots_[i].owner == owner) {
                 release_entry(d, d.lock_slots_[i].entry);
                 d.lock_slots_[i].used = false;
-                d.lock_slots_[i].command_owned = false;
+                d.lock_slots_[i].owner = 0;
                 d.lock_slots_[i].exclusive = false;
             }
         }
@@ -7396,6 +7410,23 @@ constexpr DosFunction kDosFunctions[] = {
 
 }
 
+u32 Dos::cur_index() const {
+    const u32 task = exec_ != nullptr ? exec_->this_task() : 0;
+    for (u32 i = 0; i < kMaxProcs; ++i) {
+        if (procs_[i].used && procs_[i].process == task) {
+            return i;
+        }
+    }
+    return 0;
+}
+
+Dos::ProcContext& Dos::cur() { return procs_[cur_index()]; }
+
+u8 Dos::cur_owner() const {
+    const u32 i = cur_index();
+    return procs_[i].running ? static_cast<u8>(i + 1) : 0;
+}
+
 bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out, void* ctx) {
     m_ = nullptr;
     exec_ = &exec;
@@ -7404,17 +7435,19 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     out_ = out;
     out_ctx_ = ctx;
     base_ = 0;
-    process_ = 0;
+    for (ProcContext& proc : procs_) {
+        proc = ProcContext{};
+    }
     for (FileSlot& f : files_) {
         f = DosOps::make_file_slot(Stream::Closed, DirEntry{}, "");
     }
     for (LockSlot& l : lock_slots_) {
         l.used = false;
-        l.command_owned = false;
+        l.owner = 0;
     }
     for (LockSlot& l : assign_lock_slots_) {
         l.used = false;
-        l.command_owned = false;
+        l.owner = 0;
     }
     for (AssignEntry& a : assigns_) {
         a = AssignEntry{};
@@ -7438,11 +7471,6 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
         path_nodes_[i] = 0;
     }
     path_count_ = 0;
-    input_length_ = 0;
-    input_pos_ = 0;
-    running_ = false;
-    exited_ = false;
-    exit_code_ = 0;
     if (m.jit == nullptr || m.mem.base == nullptr || volume.image == nullptr) {
         return false;
     }
@@ -7459,16 +7487,18 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     ram_device_node_ = block_ + kRamDeviceAt;
     port_ = block_ + kPortAt;
     ram_port_ = block_ + kRamPortAt;
-    process_ = block_ + kProcessAt;
-    cli_ = block_ + kCliAt;
-    set_name_ = block_ + kSetNameAt;
-    prompt_ = block_ + kPromptAt;
-    command_name_ = block_ + kCommandNameAt;
+    ProcContext& proc = procs_[0];
+    proc.used = true;
+    proc.process = block_ + kProcessAt;
+    proc.cli = block_ + kCliAt;
+    proc.set_name = block_ + kSetNameAt;
+    proc.prompt = block_ + kPromptAt;
+    proc.command_name = block_ + kCommandNameAt;
     handles_ = block_ + kHandlesAt;
     locks_ = block_ + kLocksAt;
     assign_locks_ = block_ + kAssignLocksAt;
-    args_ = block_ + kArgsAt;
-    stack_ = block_ + kStackAt;
+    proc.args = block_ + kArgsAt;
+    proc.stack = block_ + kStackAt;
 
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
@@ -7506,7 +7536,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     b.w32(root_ + rn_Info, info >> 2);
     new_list(b, root_ + rn_CliList);
     b.w32(tasks, 1);
-    b.w32(tasks + 4, process_ + pr_MsgPort);
+    b.w32(tasks + 4, proc.process + pr_MsgPort);
     b.w32(info + di_DevInfo, volume_node_ >> 2);
     init_semaphore(b, info + di_DevLock);
     init_semaphore(b, info + di_EntryLock);
@@ -7547,26 +7577,26 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
 
     // The shell Process and its CLI.
     put_string(b, block_ + kProcessNameAt, kProcessName);
-    b.w8(process_ + LN_TYPE, NT_PROCESS);
-    b.w32(process_ + LN_NAME, block_ + kProcessNameAt);
-    b.w8(process_ + TC_STATE, TS_RUN);
-    b.w32(process_ + TC_SIGALLOC, 0xFFFF);
-    new_list(b, process_ + TC_MEMENTRY);
-    const u32 port = process_ + pr_MsgPort;
+    b.w8(proc.process + LN_TYPE, NT_PROCESS);
+    b.w32(proc.process + LN_NAME, block_ + kProcessNameAt);
+    b.w8(proc.process + TC_STATE, TS_RUN);
+    b.w32(proc.process + TC_SIGALLOC, 0xFFFF);
+    new_list(b, proc.process + TC_MEMENTRY);
+    const u32 port = proc.process + pr_MsgPort;
     b.w8(port + LN_TYPE, NT_MSGPORT);
     b.w8(port + MP_SIGBIT, SIGB_DOS);
-    b.w32(port + MP_SIGTASK, process_);
+    b.w32(port + MP_SIGTASK, proc.process);
     new_list(b, port + MP_MSGLIST);
-    b.w32(process_ + pr_TaskNum, 1);
-    b.w32(process_ + pr_StackSize, kStackBytes);
-    b.w32(process_ + pr_StackBase, (stack_ + kStackBytes) >> 2);
-    b.w32(process_ + TC_SPLOWER, stack_);
-    b.w32(process_ + TC_SPUPPER, stack_ + kStackBytes);
-    b.w32(process_ + pr_CIS, (handles_ + kConsoleIn * fh_SIZEOF) >> 2);
-    b.w32(process_ + pr_COS, (handles_ + kConsoleOut * fh_SIZEOF) >> 2);
-    b.w32(process_ + pr_FileSystemTask, port_);
-    b.w32(process_ + pr_CLI, cli_ >> 2);
-    new_list(b, process_ + pr_LocalVars);
+    b.w32(proc.process + pr_TaskNum, 1);
+    b.w32(proc.process + pr_StackSize, kStackBytes);
+    b.w32(proc.process + pr_StackBase, (proc.stack + kStackBytes) >> 2);
+    b.w32(proc.process + TC_SPLOWER, proc.stack);
+    b.w32(proc.process + TC_SPUPPER, proc.stack + kStackBytes);
+    b.w32(proc.process + pr_CIS, (handles_ + kConsoleIn * fh_SIZEOF) >> 2);
+    b.w32(proc.process + pr_COS, (handles_ + kConsoleOut * fh_SIZEOF) >> 2);
+    b.w32(proc.process + pr_FileSystemTask, port_);
+    b.w32(proc.process + pr_CLI, proc.cli >> 2);
+    new_list(b, proc.process + pr_LocalVars);
 
     char set_name[32];
     u32 n = 0;
@@ -7575,21 +7605,21 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     }
     set_name[n++] = ':';
     set_name[n] = '\0';
-    put_bstr(b, set_name_, set_name, 31);
-    put_bstr(b, prompt_, kPrompt, sizeof kPrompt - 1);
+    put_bstr(b, proc.set_name, set_name, 31);
+    put_bstr(b, proc.prompt, kPrompt, sizeof kPrompt - 1);
     put_bstr(b, block_ + kCommandFileAt, "", 0);
-    put_bstr(b, command_name_, "", 0);
-    b.w32(cli_ + cli_SetName, set_name_ >> 2);
-    b.w32(cli_ + cli_CommandName, command_name_ >> 2);
-    b.w32(cli_ + cli_FailLevel, kFailLevel);
-    b.w32(cli_ + cli_Prompt, prompt_ >> 2);
-    b.w32(cli_ + cli_StandardInput, b.r32(process_ + pr_CIS));
-    b.w32(cli_ + cli_CurrentInput, b.r32(process_ + pr_CIS));
-    b.w32(cli_ + cli_CommandFile, (block_ + kCommandFileAt) >> 2);
-    b.w32(cli_ + cli_Interactive, DOSTRUE);
-    b.w32(cli_ + cli_CurrentOutput, b.r32(process_ + pr_COS));
-    b.w32(cli_ + cli_DefaultStack, kStackBytes / 4);
-    b.w32(cli_ + cli_StandardOutput, b.r32(process_ + pr_COS));
+    put_bstr(b, proc.command_name, "", 0);
+    b.w32(proc.cli + cli_SetName, proc.set_name >> 2);
+    b.w32(proc.cli + cli_CommandName, proc.command_name >> 2);
+    b.w32(proc.cli + cli_FailLevel, kFailLevel);
+    b.w32(proc.cli + cli_Prompt, proc.prompt >> 2);
+    b.w32(proc.cli + cli_StandardInput, b.r32(proc.process + pr_CIS));
+    b.w32(proc.cli + cli_CurrentInput, b.r32(proc.process + pr_CIS));
+    b.w32(proc.cli + cli_CommandFile, (block_ + kCommandFileAt) >> 2);
+    b.w32(proc.cli + cli_Interactive, DOSTRUE);
+    b.w32(proc.cli + cli_CurrentOutput, b.r32(proc.process + pr_COS));
+    b.w32(proc.cli + cli_DefaultStack, kStackBytes / 4);
+    b.w32(proc.cli + cli_StandardOutput, b.r32(proc.process + pr_COS));
 
     // The console streams.
     files_[kConsoleIn] = DosOps::make_file_slot(Stream::Console, DirEntry{}, "");
@@ -7684,7 +7714,7 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
         DosOps::copy_envarc_dir(*this, "Prefs/Env-Archive", env_node, 0, copy_failed);
     }
 
-    exec.set_this_task(process_);
+    exec.set_this_task(proc.process);
     exec.set_segment_loader(SegmentLoader{DosOps::load_segment, this});
     return true;
 }
@@ -7763,7 +7793,8 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
     if (m_ == nullptr || path == nullptr || args == nullptr) {
         return false;
     }
-    if (running_) {
+    ProcContext& p = procs_[0];
+    if (p.running) {
         LogLine().text("dos: ").text(path).text(" started while a command runs").send();
         return false;
     }
@@ -7783,35 +7814,35 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
 
     // The argument line ends in a newline, as the shell passes it.
     for (u32 i = 0; i < length; ++i) {
-        input_[i] = args[i];
+        p.input[i] = args[i];
     }
-    if (length == 0 || input_[length - 1] != '\n') {
-        input_[length++] = '\n';
+    if (length == 0 || p.input[length - 1] != '\n') {
+        p.input[length++] = '\n';
     }
-    input_length_ = length;
-    input_pos_ = 0;
+    p.input_length = length;
+    p.input_pos = 0;
 
     Bus b(*m_);
     for (u32 i = 0; i < length; ++i) {
-        b.w8(args_ + i, static_cast<u8>(input_[i]));
+        b.w8(p.args + i, static_cast<u8>(p.input[i]));
     }
-    b.w8(args_ + length, 0);
-    put_bstr(b, command_name_, path, 255);
-    b.w32(cli_ + cli_CommandName, command_name_ >> 2);
-    b.w32(cli_ + cli_Module, seglist);
-    b.w32(cli_ + cli_ReturnCode, 0);
-    b.w32(process_ + pr_Result2, 0);
-    b.w32(process_ + pr_Arguments, args_);
+    b.w8(p.args + length, 0);
+    put_bstr(b, p.command_name, path, 255);
+    b.w32(p.cli + cli_CommandName, p.command_name >> 2);
+    b.w32(p.cli + cli_Module, seglist);
+    b.w32(p.cli + cli_ReturnCode, 0);
+    b.w32(p.process + pr_Result2, 0);
+    b.w32(p.process + pr_Arguments, p.args);
 
     // The stack: its size at 4(SP), which pr_ReturnAddr points at, and the
     // return address call_guest pushes at (SP).
-    const u32 top = stack_ + kStackBytes;
+    const u32 top = p.stack + kStackBytes;
     b.w32(top - 4, kStackBytes);
-    b.w32(process_ + pr_ReturnAddr, top - 4);
-    b.w32(process_ + TC_SPREG, top - 8);
-    const u32 saved_current_dir = b.r32(process_ + pr_CurrentDir);
-    const u32 saved_cis = b.r32(process_ + pr_CIS);
-    const u32 saved_cos = b.r32(process_ + pr_COS);
+    b.w32(p.process + pr_ReturnAddr, top - 4);
+    b.w32(p.process + TC_SPREG, top - 8);
+    const u32 saved_current_dir = b.r32(p.process + pr_CurrentDir);
+    const u32 saved_cis = b.r32(p.process + pr_CIS);
+    const u32 saved_cos = b.r32(p.process + pr_COS);
     if (!b.ok()) {
         DosOps::unload(*this, seglist);
         return false;
@@ -7822,37 +7853,37 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
         cpu.a[i] = 0;
     }
     cpu.d[0] = length;
-    cpu.a[0] = args_;
+    cpu.a[0] = p.args;
     cpu.a[7] = top - 4;
-    exec_->set_this_task(process_);
+    exec_->set_this_task(p.process);
 
-    running_ = true;
-    exited_ = false;
+    p.running = true;
+    p.exited = false;
     const ExitReason why = m_->jit->call_guest((seglist << 2) + 4, max_blocks);
-    running_ = false;
+    p.running = false;
     exec_->end_child_tasks();
     exec_->reset_nest_counts();
-    DosOps::cleanup_command(*this, saved_current_dir, saved_cis, saved_cos);
+    DosOps::cleanup_command(*this, saved_current_dir, saved_cis, saved_cos, 1);
     bool ok = false;
     if (why == ExitReason::Returned) {
         result = cpu.d[0];
         ok = true;
-    } else if (why == ExitReason::Halt && exited_) {
-        result = exit_code_;
+    } else if (why == ExitReason::Halt && p.exited) {
+        result = p.exit_code;
         cpu.exit = ExitReason::None;
         ok = true;
     } else {
         LogLine().text("dos: ").text(path).text(" ended with ").text(exit_reason_name(why)).send();
     }
-    exited_ = false;
-    input_length_ = 0;
-    input_pos_ = 0;
-    m_->mem.write32(cli_ + cli_Module, 0);
+    p.exited = false;
+    p.input_length = 0;
+    p.input_pos = 0;
+    m_->mem.write32(p.cli + cli_Module, 0);
     if (ok) {
-        m_->mem.write32(cli_ + cli_ReturnCode, result);
+        m_->mem.write32(p.cli + cli_ReturnCode, result);
         u32 io_err = 0;
-        m_->mem.read32(process_ + pr_Result2, io_err);
-        m_->mem.write32(cli_ + cli_Result2, io_err);
+        m_->mem.read32(p.process + pr_Result2, io_err);
+        m_->mem.write32(p.cli + cli_Result2, io_err);
     }
     DosOps::unload(*this, seglist);
     return ok;
@@ -7868,6 +7899,7 @@ bool Dos::change_dir(const char* path, u32& error) {
         set_last_error(error);
         return false;
     }
+    ProcContext& p = cur();
     Bus b(*m_);
     u8 vol = kVolAdf;
     char resolved[kMaxPath];
@@ -7886,19 +7918,19 @@ bool Dos::change_dir(const char* path, u32& error) {
     char canonical[kMaxPath];
     DosOps::fs_canonical(*this, vol, resolved, canonical);
     u32 new_lock = 0;
-    if (!DosOps::alloc_user_lock(*this, b, canonical, entry, SHARED_LOCK, new_lock, false)) {
-        error = b.r32(process_ + pr_Result2);
+    if (!DosOps::alloc_user_lock(*this, b, canonical, entry, SHARED_LOCK, new_lock, 0)) {
+        error = b.r32(p.process + pr_Result2);
         return false;
     }
-    const u32 old_lock = b.r32(process_ + pr_CurrentDir);
-    b.w32(process_ + pr_CurrentDir, new_lock);
+    const u32 old_lock = b.r32(p.process + pr_CurrentDir);
+    b.w32(p.process + pr_CurrentDir, new_lock);
     if (old_lock != 0) {
         DosOps::free_user_lock(*this, old_lock);
     }
     char full_name[kMaxName];
     format_volume_path(DosOps::volume_name(*this, vol), canonical, full_name, sizeof full_name);
-    put_bstr(b, set_name_, full_name, 255);
-    b.w32(cli_ + cli_SetName, set_name_ >> 2);
+    put_bstr(b, p.set_name, full_name, 255);
+    b.w32(p.cli + cli_SetName, p.set_name >> 2);
     error = 0;
     return b.ok();
 }
@@ -7920,12 +7952,16 @@ bool Dos::prompt(char* out, u32 size) const {
 }
 
 void Dos::set_prompt(const char* text) {
-    if (m_ == nullptr || text == nullptr || cli_ == 0) {
+    if (m_ == nullptr || text == nullptr) {
+        return;
+    }
+    ProcContext& p = cur();
+    if (p.cli == 0) {
         return;
     }
     Bus b(*m_);
-    put_bstr(b, prompt_, text, 255);
-    b.w32(cli_ + cli_Prompt, prompt_ >> 2);
+    put_bstr(b, p.prompt, text, 255);
+    b.w32(p.cli + cli_Prompt, p.prompt >> 2);
 }
 
 u32 Dos::last_error() const {
@@ -7933,50 +7969,59 @@ u32 Dos::last_error() const {
         return 0;
     }
     Bus b(*m_);
-    return b.r32(process_ + pr_Result2);
+    return b.r32(procs_[0].process + pr_Result2);
 }
 
 void Dos::set_last_error(u32 code) {
     if (m_ == nullptr) {
         return;
     }
+    ProcContext& p = cur();
     Bus b(*m_);
-    b.w32(process_ + pr_Result2, code);
-    if (cli_ != 0) {
-        b.w32(cli_ + cli_Result2, code);
+    b.w32(p.process + pr_Result2, code);
+    if (p.cli != 0) {
+        b.w32(p.cli + cli_Result2, code);
     }
 }
 
 u32 Dos::last_return_code() const {
-    if (m_ == nullptr || cli_ == 0) {
+    if (m_ == nullptr || procs_[0].cli == 0) {
         return 0;
     }
     Bus b(*m_);
-    return b.r32(cli_ + cli_ReturnCode);
+    return b.r32(procs_[0].cli + cli_ReturnCode);
 }
 
 void Dos::set_return_code(u32 code) {
-    if (m_ == nullptr || cli_ == 0) {
+    if (m_ == nullptr) {
+        return;
+    }
+    ProcContext& p = cur();
+    if (p.cli == 0) {
         return;
     }
     Bus b(*m_);
-    b.w32(cli_ + cli_ReturnCode, code);
+    b.w32(p.cli + cli_ReturnCode, code);
 }
 
 u32 Dos::fail_level() const {
-    if (m_ == nullptr || cli_ == 0) {
+    if (m_ == nullptr || procs_[0].cli == 0) {
         return kFailLevel;
     }
     Bus b(*m_);
-    return b.r32(cli_ + cli_FailLevel);
+    return b.r32(procs_[0].cli + cli_FailLevel);
 }
 
 void Dos::set_fail_level(u32 level) {
-    if (m_ == nullptr || cli_ == 0) {
+    if (m_ == nullptr) {
+        return;
+    }
+    ProcContext& p = cur();
+    if (p.cli == 0) {
         return;
     }
     Bus b(*m_);
-    b.w32(cli_ + cli_FailLevel, level);
+    b.w32(p.cli + cli_FailLevel, level);
 }
 
 u32 Dos::fault(u32 code, char* out, u32 size) const {
@@ -7998,6 +8043,7 @@ bool Dos::path_add(const char* dir, u32& error) {
         set_last_error(error);
         return false;
     }
+    ProcContext& p = cur();
     Bus b(*m_);
     u8 vol = kVolAdf;
     char resolved[kMaxPath];
@@ -8020,8 +8066,8 @@ bool Dos::path_add(const char* dir, u32& error) {
         return true;  // already in the path
     }
     u32 lock_bptr = 0;
-    if (!DosOps::alloc_user_lock(*this, b, canonical, entry, SHARED_LOCK, lock_bptr, false)) {
-        error = b.r32(process_ + pr_Result2);
+    if (!DosOps::alloc_user_lock(*this, b, canonical, entry, SHARED_LOCK, lock_bptr, 0)) {
+        error = b.r32(p.process + pr_Result2);
         return false;
     }
     constexpr u32 kPathNodeBytes = 8;
@@ -8035,7 +8081,7 @@ bool Dos::path_add(const char* dir, u32& error) {
     b.w32(node, 0);
     b.w32(node + 4, lock_bptr);
     if (path_count_ == 0) {
-        b.w32(cli_ + cli_CommandDir, node >> 2);
+        b.w32(p.cli + cli_CommandDir, node >> 2);
     } else {
         b.w32(path_nodes_[path_count_ - 1], node >> 2);
     }
@@ -8071,6 +8117,7 @@ bool Dos::path_remove(const char* dir, u32& error) {
         error = ERROR_INVALID_COMPONENT_NAME;
         return false;
     }
+    ProcContext& p = cur();
     Bus b(*m_);
     u8 vol = kVolAdf;
     char resolved[kMaxPath];
@@ -8100,7 +8147,7 @@ bool Dos::path_remove(const char* dir, u32& error) {
     path_locks_[path_count_] = 0;
     path_nodes_[path_count_] = 0;
     // Relink the guest list in order.
-    b.w32(cli_ + cli_CommandDir, path_count_ == 0 ? 0 : path_nodes_[0] >> 2);
+    b.w32(p.cli + cli_CommandDir, path_count_ == 0 ? 0 : path_nodes_[0] >> 2);
     for (u32 i = 0; i < path_count_; ++i) {
         b.w32(path_nodes_[i], i + 1 < path_count_ ? path_nodes_[i + 1] >> 2 : 0);
     }
@@ -8112,6 +8159,7 @@ void Dos::path_reset() {
     if (m_ == nullptr) {
         return;
     }
+    ProcContext& p = cur();
     constexpr u32 kPathNodeBytes = 8;
     for (u32 i = 0; i < path_count_ && i < kMaxPathDirs; ++i) {
         if (path_locks_[i] != 0) {
@@ -8124,9 +8172,9 @@ void Dos::path_reset() {
         }
     }
     path_count_ = 0;
-    if (cli_ != 0) {
+    if (p.cli != 0) {
         Bus b(*m_);
-        b.w32(cli_ + cli_CommandDir, 0);
+        b.w32(p.cli + cli_CommandDir, 0);
     }
 }
 
@@ -8323,11 +8371,11 @@ bool Dos::delete_var(const char* name, u32 flags) {
 void Dos::list_local_vars(u32 type,
                           void (*visit)(void* ctx, const char* name, const char* value),
                           void* ctx) const {
-    if (m_ == nullptr || visit == nullptr || process_ == 0) {
+    if (m_ == nullptr || visit == nullptr || procs_[0].process == 0) {
         return;
     }
     Bus b(*m_);
-    u32 node = b.r32(process_ + pr_LocalVars + LH_HEAD);
+    u32 node = b.r32(procs_[0].process + pr_LocalVars + LH_HEAD);
     for (u32 n = 0; n < kMaxVars; ++n) {
         const u32 succ = b.r32(node + LN_SUCC);
         if (!b.ok() || succ == 0) {

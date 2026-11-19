@@ -456,6 +456,9 @@ public:
     // kept across it.
     void set_this_task(u32 task_addr);
 
+    // The running task's guest address.
+    u32 this_task() const { return task_; }
+
     // Allocates and initialises a PA_SIGNAL MsgPort for the current task, or
     // returns 0 if memory or signals are exhausted.
     u32 create_port();
