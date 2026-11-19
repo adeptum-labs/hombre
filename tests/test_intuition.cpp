@@ -23,6 +23,7 @@
 
 #include "gfx_rig.hpp"
 #include "hid_mouse.hpp"
+#include "libs/chrome_palette.hpp"
 #include "libs/utility.hpp"
 
 #include <string>
@@ -225,13 +226,20 @@ void open_screen_builds_struct_bitmap_and_colormap() {
     CHECK(map != 0);
     CHECK_EQ(r.get16(vp + vp_DWidth), 640u);
     CHECK_EQ(r.get16(vp + vp_DHeight), 400u);
+    CHECK_EQ(r.get8(map + cm_Type), COLORMAP_TYPE_V39);
     CHECK_EQ(r.get16(map + cm_Count), 4u);
     const u32 colors = r.get32(map + cm_ColorTable);
+    const u32 low_colors = r.get32(map + cm_LowColorBits);
     CHECK(colors != 0);
-    CHECK_EQ(r.get16(colors), 0x0AAAu);
-    CHECK_EQ(r.get16(colors + 2), 0x0000u);
+    CHECK(low_colors != 0);
+    CHECK_EQ(r.get16(colors), 0x0AABu);
+    CHECK_EQ(r.get16(colors + 2), 0x0112u);
     CHECK_EQ(r.get16(colors + 4), 0x0FFFu);
-    CHECK_EQ(r.get16(colors + 6), 0x068Bu);
+    CHECK_EQ(r.get16(colors + 6), 0x036Bu);
+    CHECK_EQ(r.get16(low_colors), 0x0060u);
+    CHECK_EQ(r.get16(low_colors + 2), 0x0CE2u);
+    CHECK_EQ(r.get16(low_colors + 4), 0x0FFFu);
+    CHECK_EQ(r.get16(low_colors + 6), 0x0DF6u);
 
     CHECK_EQ(r.intuition.front_screen(), screen);
     CHECK_EQ(r.display.front_screen, screen);
@@ -299,7 +307,7 @@ void open_screen_taglist_reads_sa_tags() {
     CHECK(second != 0);
     CHECK_EQ(r.get16(second + sc_Width), 100u);
     CHECK_EQ(r.get16(second + sc_Height), 50u);
-    CHECK_EQ(r.get8(second + sc_BitMap + bm_Depth), 2u);
+    CHECK_EQ(r.get8(second + sc_BitMap + bm_Depth), 8u);
     CHECK_EQ(r.display.front_screen, second);
 }
 
@@ -461,6 +469,128 @@ void get_screen_data_copies_struct() {
     r.cpu().d[1] = 12345;
     r.cpu().a[1] = 0;
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::GetScreenData), 0u);
+}
+
+u32 colormap_rgb24(const GfxRig& r, u32 map, u32 pen) {
+    const u32 hi = r.get16(r.get32(map + cm_ColorTable) + pen * 2);
+    const u32 lo = r.get16(r.get32(map + cm_LowColorBits) + pen * 2);
+    const u32 red = (((hi >> 8) & 0xF) << 4) | ((lo >> 8) & 0xF);
+    const u32 green = (((hi >> 4) & 0xF) << 4) | ((lo >> 4) & 0xF);
+    const u32 blue = ((hi & 0xF) << 4) | (lo & 0xF);
+    return (red << 16) | (green << 8) | blue;
+}
+
+void open_screen_honours_depth_and_allocates_planes() {
+    GfxRig r;
+    const u32 before = heap_capacity(r);
+    const u32 requests[] = {8, 3, 0, 9};
+    const u32 expected[] = {8, 3, 8, 8};
+    for (u32 idx = 0; idx < 4; ++idx) {
+        put_new_screen(r, kNewScreen, 128, 64, requests[idx], 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        const u32 want = expected[idx];
+        CHECK_EQ(r.get8(screen + sc_BitMap + bm_Depth), want);
+        for (u32 plane = 0; plane < 8; ++plane) {
+            const u32 ptr = r.get32(screen + sc_BitMap + bm_Planes + plane * 4);
+            if (plane < want) {
+                CHECK(ptr != 0);
+            } else {
+                CHECK_EQ(ptr, 0u);
+            }
+        }
+        r.cpu().a[0] = kBuffer;
+        r.cpu().d[0] = Screen_SIZEOF;
+        r.cpu().d[1] = CUSTOMSCREEN;
+        r.cpu().a[1] = screen;
+        CHECK_EQ(r.result(Base::Intuition, intuition_lvo::GetScreenData), 1u);
+        CHECK_EQ(r.get8(kBuffer + sc_BitMap + bm_Depth), want);
+
+        put_new_window(r, kNewWindow, 0, 0, 64, 32, 0, 0, screen, CUSTOMSCREEN);
+        const u32 win = open_win(r, kNewWindow);
+        CHECK(win != 0);
+        const u32 win_bm = r.get32(r.get32(win + wd_RPort) + rp_BitMap);
+        CHECK_EQ(r.get8(win_bm + bm_Depth), want);
+        for (u32 plane = 0; plane < 8; ++plane) {
+            const u32 ptr = r.get32(win_bm + bm_Planes + plane * 4);
+            if (plane < want) {
+                CHECK(ptr != 0);
+            } else {
+                CHECK_EQ(ptr, 0u);
+            }
+        }
+        r.cpu().a[0] = win;
+        CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+        r.cpu().a[0] = screen;
+        CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseScreen), 1u);
+        CHECK_EQ(heap_capacity(r), before);
+    }
+}
+
+void open_screen_depth8_sets_default_and_chrome_palettes() {
+    GfxRig r;
+    const u32 before = heap_capacity(r);
+    put_new_screen(r, kNewScreen, 128, 64, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+    CHECK(map != 0);
+    CHECK_EQ(r.get8(map + cm_Type), COLORMAP_TYPE_V39);
+    CHECK_EQ(r.get16(map + cm_Count), 256u);
+    CHECK(r.get32(map + cm_ColorTable) != 0);
+    CHECK(r.get32(map + cm_LowColorBits) != 0);
+
+    CHECK_EQ(colormap_rgb24(r, map, 0), 0xA0A6B0u);
+    CHECK_EQ(colormap_rgb24(r, map, 1), 0x1C1E22u);
+    CHECK_EQ(colormap_rgb24(r, map, 2), 0xFFFFFFu);
+    CHECK_EQ(colormap_rgb24(r, map, 3), 0x3D6FB6u);
+    CHECK_EQ(colormap_rgb24(r, map, 4), 0x7A7E86u);
+    CHECK_EQ(colormap_rgb24(r, map, 5), 0xC9CDD4u);
+    CHECK_EQ(colormap_rgb24(r, map, 6), 0xD9A441u);
+    CHECK_EQ(colormap_rgb24(r, map, 7), 0x9E3B3Bu);
+
+    CHECK_EQ(colormap_rgb24(r, map, 8), 0x000000u);
+    CHECK_EQ(colormap_rgb24(r, map, 8 + 1 * 36 + 2 * 6 + 3), 0x336699u);
+    CHECK_EQ(colormap_rgb24(r, map, 8 + 5 * 36 + 3 * 6 + 1), 0xFF9933u);
+    CHECK_EQ(colormap_rgb24(r, map, 223), 0xFFFFFFu);
+
+    CHECK_EQ(colormap_rgb24(r, map, 224), 0x101010u);
+    CHECK_EQ(colormap_rgb24(r, map, 227), 0x707070u);
+    CHECK_EQ(colormap_rgb24(r, map, 231), 0xF0F0F0u);
+
+    for (u32 i = 0; i < chrome::kChromeCount; ++i) {
+        CHECK_EQ(colormap_rgb24(r, map, chrome::kChromeBase + i), chrome::kChromePalette[i]);
+    }
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar0), 0x6D9BE0u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar7), 0x2F5DA6u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kInactiveBar0), 0xE6E8ECu);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kInactiveBar5), 0xBFC3CAu);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kFrameDark), 0x2A2D33u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kFrameLight), 0xF4F5F7u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kCloseFill), 0xE0605Au);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kCloseRing), 0x9A3330u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob0), 0xF2F4F7u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob1), 0xD7DBE1u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob2), 0xB8BEC7u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kTrack), 0x8E949Du);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kTitleActive), 0xFFFFFFu);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kTitleInactive), 0x4A4F57u);
+
+    r.cpu().a[0] = screen;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseScreen), 1u);
+    CHECK_EQ(heap_capacity(r), before);
+
+    put_new_screen(r, kNewScreen, 128, 64, 3, 0, 1, 0);
+    const u32 depth3 = open_new(r, kNewScreen);
+    CHECK(depth3 != 0);
+    const u32 map3 = r.get32(depth3 + sc_ViewPort + vp_ColorMap);
+    CHECK_EQ(r.get16(map3 + cm_Count), 8u);
+    CHECK_EQ(colormap_rgb24(r, map3, 0), 0xA0A6B0u);
+    CHECK_EQ(colormap_rgb24(r, map3, 7), 0x9E3B3Bu);
+    r.cpu().a[0] = depth3;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseScreen), 1u);
+    CHECK_EQ(heap_capacity(r), before);
 }
 
 void unimplemented_vector_ends_run() {
@@ -3461,6 +3591,8 @@ int main() {
     close_front_screen_promotes_next();
     reopen_after_close_reuses_memory();
     get_screen_data_copies_struct();
+    open_screen_honours_depth_and_allocates_planes();
+    open_screen_depth8_sets_default_and_chrome_palettes();
     unimplemented_vector_ends_run();
     open_window_builds_struct_rastport_and_layer();
     open_window_draws_chrome();

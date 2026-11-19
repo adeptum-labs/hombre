@@ -44,6 +44,7 @@ constexpr u32 kBorder = 0xAAAAAA;
 constexpr u32 kScreen = 0x0800;
 constexpr u32 kColourMap = 0x1000;
 constexpr u32 kColourTable = 0x1100;
+constexpr u32 kLowColourTable = 0x1400;
 constexpr u32 kPlaneBase = 0x2000;
 constexpr u32 kScreenWidth = 640;
 constexpr u32 kScreenHeight = 400;
@@ -51,7 +52,7 @@ constexpr u32 kBytesPerRow = kScreenWidth / 8;
 constexpr u32 kPlanes = 2;
 constexpr u32 kPlaneBytes = kBytesPerRow * kScreenHeight;
 constexpr u32 kPlanesBytes = kPlanes * kPlaneBytes;
-constexpr u32 kMemoryBytes = 1 << 18;
+constexpr u32 kMemoryBytes = 1 << 19;
 
 // Pixel memory on the heap with guard bytes before and after it, so that a
 // write outside the buffer shows up in the guards (and in ASan).
@@ -98,11 +99,11 @@ private:
     std::vector<u8> memory_;
 };
 
-// Guest memory holding a Screen, its BitMap, a ColorMap and two 640x400
+// Guest memory holding a Screen, its BitMap, a ColorMap and up to 8 640x400
 // bitmap planes, and a Machine without a Jit.
 class Guest {
 public:
-    Guest() : memory_(kMemoryBytes, kGuardByte) {
+    explicit Guest(u32 depth = kPlanes) : depth_(depth), memory_(kMemoryBytes, kGuardByte) {
         m_.cpu = CpuState{};
         m_.mem = GuestMemory{memory_.data(), kMemoryBytes};
         m_.jit = nullptr;
@@ -112,11 +113,11 @@ public:
 
     Machine& machine() { return m_; }
 
-    void clear_planes() { std::memset(memory_.data() + kPlaneBase, 0, kPlanesBytes); }
+    void clear_planes() { std::memset(memory_.data() + kPlaneBase, 0, depth_ * kPlaneBytes); }
 
     // Gives every pixel of the screen the pen.
     void set_all_pixels(u32 pen) {
-        for (u32 plane = 0; plane < kPlanes; ++plane) {
+        for (u32 plane = 0; plane < depth_; ++plane) {
             std::memset(memory_.data() + kPlaneBase + plane * kPlaneBytes,
                         ((pen >> plane) & 1) != 0 ? 0xFF : 0x00, kPlaneBytes);
         }
@@ -125,7 +126,7 @@ public:
     void set_pixel(u32 x, u32 y, u32 pen) {
         const u32 mask = 0x80 >> (x & 7);
         const u32 at = y * kBytesPerRow + (x >> 3);
-        for (u32 plane = 0; plane < kPlanes; ++plane) {
+        for (u32 plane = 0; plane < depth_; ++plane) {
             u8& byte = memory_[kPlaneBase + plane * kPlaneBytes + at];
             if (((pen >> plane) & 1) != 0) {
                 byte = static_cast<u8>(byte | mask);
@@ -133,6 +134,16 @@ public:
                 byte = static_cast<u8>(byte & ~mask);
             }
         }
+    }
+
+    void set_rgb24(u32 pen, u32 rgb) {
+        const u32 r = (rgb >> 16) & 0xFF;
+        const u32 g = (rgb >> 8) & 0xFF;
+        const u32 b = rgb & 0xFF;
+        const u32 hi = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
+        const u32 lo = ((r & 0xF) << 8) | ((g & 0xF) << 4) | (b & 0xF);
+        put16(kColourTable + pen * 2, hi);
+        put16(kLowColourTable + pen * 2, lo);
     }
 
 private:
@@ -153,19 +164,25 @@ private:
         put16(kScreen + ndk::sc_Width, kScreenWidth);
         put16(kScreen + ndk::sc_Height, kScreenHeight);
         put16(kScreen + ndk::sc_BitMap + ndk::bm_BytesPerRow, kBytesPerRow);
-        put8(kScreen + ndk::sc_BitMap + ndk::bm_Depth, kPlanes);
+        put8(kScreen + ndk::sc_BitMap + ndk::bm_Depth, depth_);
         for (u32 plane = 0; plane < 8; ++plane) {
             put32(kScreen + ndk::sc_BitMap + ndk::bm_Planes + plane * 4,
-                  kPlaneBase + plane * kPlaneBytes);
+                  plane < depth_ ? kPlaneBase + plane * kPlaneBytes : 0);
         }
         put32(kScreen + ndk::sc_ViewPort + ndk::vp_ColorMap, kColourMap);
+        put8(kColourMap + ndk::cm_Flags, 0);
+        put8(kColourMap + ndk::cm_Type,
+             depth_ > 2 ? ndk::COLORMAP_TYPE_V39 : ndk::COLORMAP_TYPE_V1_2);
+        put16(kColourMap + ndk::cm_Count, 1u << depth_);
         put32(kColourMap + ndk::cm_ColorTable, kColourTable);
+        put32(kColourMap + ndk::cm_LowColorBits, depth_ > 2 ? kLowColourTable : 0);
         put16(kColourTable, 0x0AAA);
         put16(kColourTable + 2, 0x0000);
         put16(kColourTable + 4, 0x0FFF);
         put16(kColourTable + 6, 0x068B);
     }
 
+    u32 depth_;
     std::vector<u8> memory_;
     Machine m_;
 };
@@ -556,6 +573,103 @@ void refresh_matches_pixel_reference() {
     CHECK(fb.guards_intact());
 }
 
+void depth8_pens_show_24bit_colours_at_scale_1_and_2() {
+    Guest guest(8);
+    constexpr u32 c0 = 0x123456;
+    constexpr u32 c5 = 0xA0B1C2;
+    constexpr u32 c200 = 0x7E8D9C;
+    constexpr u32 c255 = 0xF0E1D2;
+    guest.set_rgb24(0, c0);
+    guest.set_rgb24(5, c5);
+    guest.set_rgb24(200, c200);
+    guest.set_rgb24(255, c255);
+
+    guest.set_pixel(0, 0, 0);
+    guest.set_pixel(1, 0, 5);
+    guest.set_pixel(9, 0, 200);
+    guest.set_pixel(15, 0, 255);
+
+    Screen fb1(640, 400, 640 * 4, kBgrx);
+    AmigaDisplay d1;
+    d1.init(fb1.framebuffer());
+    CHECK_EQ(d1.scale(), 1u);
+    refresh(d1, guest.machine(), kScreen, Rect{0, 0, 15, 0});
+    CHECK_EQ(fb1.pixel(0, 0), c0);
+    CHECK_EQ(fb1.pixel(1, 0), c5);
+    CHECK_EQ(fb1.pixel(9, 0), c200);
+    CHECK_EQ(fb1.pixel(15, 0), c255);
+    CHECK(fb1.guards_intact());
+
+    Screen fb2(1280, 800, 1280 * 4, kBgrx);
+    AmigaDisplay d2;
+    d2.init(fb2.framebuffer());
+    CHECK_EQ(d2.scale(), 2u);
+    refresh(d2, guest.machine(), kScreen, Rect{0, 0, 15, 0});
+    CHECK_EQ(fb2.pixel(0, 0), c0);
+    CHECK_EQ(fb2.pixel(1, 1), c0);
+    CHECK_EQ(fb2.pixel(2, 0), c5);
+    CHECK_EQ(fb2.pixel(3, 1), c5);
+    CHECK_EQ(fb2.pixel(18, 0), c200);
+    CHECK_EQ(fb2.pixel(19, 1), c200);
+    CHECK_EQ(fb2.pixel(30, 0), c255);
+    CHECK_EQ(fb2.pixel(31, 1), c255);
+    CHECK(fb2.guards_intact());
+}
+
+void depth8_dirty_rect_matches_pixel_reference() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest(8);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    CHECK_EQ(display.scale(), 2u);
+
+    u8* mem = guest.machine().mem.base;
+    u32 rng = 0xCAFEBABEu;
+    for (u32 pen = 0; pen < 256; ++pen) {
+        rng = rng * 1664525u + 1013904223u;
+        guest.set_rgb24(pen, (rng >> 8) & 0xFFFFFFu);
+    }
+    for (u32 i = 0; i < 8 * kPlaneBytes; ++i) {
+        rng = rng * 1664525u + 1013904223u;
+        mem[kPlaneBase + i] = static_cast<u8>(rng >> 24);
+    }
+
+    refresh(display, guest.machine(), kScreen, Rect{3, 5, 77, 41});
+
+    u32 palette[256];
+    for (u32 pen = 0; pen < 256; ++pen) {
+        const u32 hi =
+            (static_cast<u32>(mem[kColourTable + pen * 2]) << 8) | mem[kColourTable + pen * 2 + 1];
+        const u32 lo = (static_cast<u32>(mem[kLowColourTable + pen * 2]) << 8) |
+                       mem[kLowColourTable + pen * 2 + 1];
+        const u32 r = (((hi >> 8) & 0xF) << 4) | ((lo >> 8) & 0xF);
+        const u32 g = (((hi >> 4) & 0xF) << 4) | ((lo >> 4) & 0xF);
+        const u32 b = ((hi & 0xF) << 4) | (lo & 0xF);
+        palette[pen] = (r << 16) | (g << 8) | b;
+    }
+
+    for (u32 fy = 0; fy < 100; ++fy) {
+        for (u32 fx = 0; fx < 170; ++fx) {
+            const u32 lx = fx / 2;
+            const u32 ly = fy / 2;
+            u32 expected = kBorder;
+            if (lx >= 3 && lx <= 77 && ly >= 5 && ly <= 41) {
+                const u32 at = ly * kBytesPerRow + (lx >> 3);
+                const u32 mask = 0x80u >> (lx & 7);
+                u32 pen = 0;
+                for (u32 plane = 0; plane < 8; ++plane) {
+                    if ((mem[kPlaneBase + plane * kPlaneBytes + at] & mask) != 0) {
+                        pen |= 1u << plane;
+                    }
+                }
+                expected = palette[pen];
+            }
+            CHECK_EQ(fb.pixel(fx, fy), expected);
+        }
+    }
+    CHECK(fb.guards_intact());
+}
+
 }
 
 int main() {
@@ -576,5 +690,7 @@ int main() {
     hiding_the_pointer_erases_it();
     pointer_overlay_respects_scale_and_origin();
     refresh_matches_pixel_reference();
+    depth8_pens_show_24bit_colours_at_scale_1_and_2();
+    depth8_dirty_rect_matches_pixel_reference();
     return check::finish("test_amiga_display");
 }

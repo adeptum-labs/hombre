@@ -171,6 +171,8 @@ private:
         u32 colormap_bytes = 0;
         u32 colors = 0;
         u32 colors_bytes = 0;
+        u32 low_colors = 0;
+        u32 low_colors_bytes = 0;
         u32 title = 0;
         u32 title_bytes = 0;
         u32 width = 0;

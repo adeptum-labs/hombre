@@ -70,6 +70,10 @@ constexpr u32 AskFont = 474;
 constexpr u32 AllocRaster = 492;
 constexpr u32 FreeRaster = 498;
 constexpr u32 GetRGB4 = 582;
+constexpr u32 SetRGB32 = 852;
+constexpr u32 LoadRGB32 = 882;
+constexpr u32 GetRGB32 = 900;
+constexpr u32 SetRGB32CM = 996;
 // The last vector of the 3.9 library; the table reaches down to it.
 constexpr u32 Last = 1056;
 

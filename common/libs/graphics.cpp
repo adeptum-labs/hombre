@@ -138,6 +138,59 @@ void report(const DisplayState* display, Machine& m, const View& v, const Rect& 
     }
 }
 
+void refresh_viewport(const DisplayState* display, Machine& m, Bus& b, u32 vp) {
+    if (display == nullptr || display->front_screen == 0 || display->sink.refresh == nullptr) {
+        return;
+    }
+    if (native::guest_address(m, vp) !=
+        native::guest_address(m, display->front_screen + ndk::sc_ViewPort)) {
+        return;
+    }
+    const i32 width = static_cast<i32>(b.r16(display->front_screen + ndk::sc_Width));
+    const i32 height = static_cast<i32>(b.r16(display->front_screen + ndk::sc_Height));
+    if (b.ok() && width > 0 && height > 0) {
+        display->sink.refresh(display->sink.ctx, m, display->front_screen,
+                              Rect{0, 0, width - 1, height - 1});
+    }
+}
+
+struct ColorMapTables {
+    u32 limit = 0;
+    u32 table = 0;
+    u32 low_table = 0;
+    bool ok = false;
+};
+
+ColorMapTables colormap_tables(Bus& b, u32 map) {
+    ColorMapTables t;
+    if (map == 0) {
+        return t;
+    }
+    t.limit = b.r16(map + ndk::cm_Count);
+    t.table = b.r32(map + ndk::cm_ColorTable);
+    if (b.r8(map + ndk::cm_Type) >= ndk::COLORMAP_TYPE_V39) {
+        t.low_table = b.r32(map + ndk::cm_LowColorBits);
+    }
+    t.ok = b.ok() && t.table != 0;
+    return t;
+}
+
+bool write_rgb32_entry(Bus& b, const ColorMapTables& t, u32 index, u32 r, u32 g, u32 bl) {
+    if (!t.ok || index >= t.limit) {
+        return false;
+    }
+    const u32 r8 = (r >> 24) & 0xFF;
+    const u32 g8 = (g >> 24) & 0xFF;
+    const u32 b8 = (bl >> 24) & 0xFF;
+    const u32 hi = ((r8 >> 4) << 8) | ((g8 >> 4) << 4) | (b8 >> 4);
+    b.w16(t.table + index * 2, hi);
+    if (t.low_table != 0) {
+        const u32 lo = ((r8 & 0xF) << 8) | ((g8 & 0xF) << 4) | (b8 & 0xF);
+        b.w16(t.low_table + index * 2, lo);
+    }
+    return b.ok();
+}
+
 // The bytes AllocRaster hands out for width and height, 0 if they do not
 // fit in a guest block.
 u32 raster_bytes(u32 width, u32 height) {
@@ -245,7 +298,8 @@ struct GraphicsNatives {
 
     static void close_font(void*, Machine&) {}
 
-    static void load_rgb4(void*, Machine& m) {
+    static void load_rgb4(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
         Bus b(m);
         const u32 vp = m.cpu.a[0];
         const u32 colors = m.cpu.a[1];
@@ -253,18 +307,20 @@ struct GraphicsNatives {
         if (vp == 0 || colors == 0) {
             return;
         }
-        const u32 map = b.r32(vp + ndk::vp_ColorMap);
-        if (map == 0) {
+        const ColorMapTables t = colormap_tables(b, b.r32(vp + ndk::vp_ColorMap));
+        if (!t.ok) {
             return;
         }
-        const u32 limit = b.r16(map + ndk::cm_Count);
-        const u32 table = b.r32(map + ndk::cm_ColorTable);
-        if (table == 0) {
-            return;
-        }
-        const u32 n = count < limit ? count : limit;
+        const u32 n = count < t.limit ? count : t.limit;
         for (u32 i = 0; i < n; ++i) {
-            b.w16(table + i * 2, b.r16(colors + i * 2));
+            const u32 rgb4 = b.r16(colors + i * 2);
+            b.w16(t.table + i * 2, rgb4);
+            if (t.low_table != 0) {
+                b.w16(t.low_table + i * 2, rgb4 & 0x0FFF);
+            }
+        }
+        if (n != 0 && b.ok()) {
+            refresh_viewport(g.display_, m, b, vp);
         }
     }
 
@@ -298,25 +354,27 @@ struct GraphicsNatives {
                           static_cast<i16>(m.cpu.d[1]));
     }
 
-    static void set_rgb4(void*, Machine& m) {
+    static void set_rgb4(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
         Bus b(m);
         const u32 vp = m.cpu.a[0];
         if (vp == 0) {
             return;
         }
         const u32 index = m.cpu.d[0];
-        const u32 map = b.r32(vp + ndk::vp_ColorMap);
-        if (map == 0) {
-            return;
-        }
-        const u32 limit = b.r16(map + ndk::cm_Count);
-        const u32 table = b.r32(map + ndk::cm_ColorTable);
-        if (table == 0 || index >= limit) {
+        const ColorMapTables t = colormap_tables(b, b.r32(vp + ndk::vp_ColorMap));
+        if (!t.ok || index >= t.limit) {
             return;
         }
         const u32 value =
             ((m.cpu.d[1] & 15) << 8) | ((m.cpu.d[2] & 15) << 4) | (m.cpu.d[3] & 15);
-        b.w16(table + index * 2, value);
+        b.w16(t.table + index * 2, value);
+        if (t.low_table != 0) {
+            b.w16(t.low_table + index * 2, value);
+        }
+        if (b.ok()) {
+            refresh_viewport(g.display_, m, b, vp);
+        }
     }
 
     static void rect_fill(void* ctx, Machine& m) {
@@ -469,6 +527,96 @@ struct GraphicsNatives {
             native::set_result(m, result);
         }
     }
+
+    static void set_rgb32(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 vp = m.cpu.a[0];
+        if (vp == 0) {
+            return;
+        }
+        const ColorMapTables t = colormap_tables(b, b.r32(vp + ndk::vp_ColorMap));
+        if (write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
+            refresh_viewport(g.display_, m, b, vp);
+        }
+    }
+
+    static void load_rgb32(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 vp = m.cpu.a[0];
+        u32 p = m.cpu.a[1];
+        if (vp == 0 || p == 0) {
+            return;
+        }
+        const ColorMapTables t = colormap_tables(b, b.r32(vp + ndk::vp_ColorMap));
+        if (!t.ok) {
+            return;
+        }
+        bool changed = false;
+        constexpr u32 kMaxLoadRecords = 65536;
+        for (u32 rec = 0; rec < kMaxLoadRecords; ++rec) {
+            const u32 header = b.r32(p);
+            p += 4;
+            if (!b.ok()) {
+                return;
+            }
+            const u32 count = header >> 16;
+            if (count == 0) {
+                break;
+            }
+            const u32 first = header & 0xFFFF;
+            for (u32 i = 0; i < count; ++i) {
+                const u32 r = b.r32(p);
+                const u32 gr = b.r32(p + 4);
+                const u32 bl = b.r32(p + 8);
+                p += 12;
+                if (!b.ok()) {
+                    return;
+                }
+                if (write_rgb32_entry(b, t, first + i, r, gr, bl)) {
+                    changed = true;
+                }
+            }
+        }
+        if (changed && b.ok()) {
+            refresh_viewport(g.display_, m, b, vp);
+        }
+    }
+
+    static void get_rgb32(void*, Machine& m) {
+        Bus b(m);
+        const u32 map = m.cpu.a[0];
+        const u32 first = m.cpu.d[0];
+        const u32 ncolors = m.cpu.d[1];
+        const u32 out = m.cpu.a[1];
+        if (map == 0 || out == 0 || ncolors == 0) {
+            return;
+        }
+        const ColorMapTables t = colormap_tables(b, map);
+        if (!t.ok || first >= t.limit) {
+            return;
+        }
+        const u32 avail = t.limit - first;
+        const u32 count = ncolors < avail ? ncolors : avail;
+        for (u32 i = 0; i < count; ++i) {
+            const u32 idx = first + i;
+            const u32 hi = b.r16(t.table + idx * 2);
+            const u32 lo = t.low_table != 0 ? b.r16(t.low_table + idx * 2) : hi;
+            const u32 r8 = (((hi >> 8) & 0xF) << 4) | ((lo >> 8) & 0xF);
+            const u32 g8 = (((hi >> 4) & 0xF) << 4) | ((lo >> 4) & 0xF);
+            const u32 b8 = ((hi & 0xF) << 4) | (lo & 0xF);
+            b.w32(out + i * 12, r8 * 0x01010101u);
+            b.w32(out + i * 12 + 4, g8 * 0x01010101u);
+            b.w32(out + i * 12 + 8, b8 * 0x01010101u);
+        }
+    }
+
+    static void set_rgb32_cm(void*, Machine& m) {
+        Bus b(m);
+        const ColorMapTables t = colormap_tables(b, m.cpu.a[0]);
+        write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3]);
+    }
 };
 
 namespace {
@@ -504,6 +652,10 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::AllocRaster, GraphicsNatives::alloc_raster, "AllocRaster"},
     {graphics_lvo::FreeRaster, GraphicsNatives::free_raster, "FreeRaster"},
     {graphics_lvo::GetRGB4, GraphicsNatives::get_rgb4, "GetRGB4"},
+    {graphics_lvo::SetRGB32, GraphicsNatives::set_rgb32, "SetRGB32"},
+    {graphics_lvo::LoadRGB32, GraphicsNatives::load_rgb32, "LoadRGB32"},
+    {graphics_lvo::GetRGB32, GraphicsNatives::get_rgb32, "GetRGB32"},
+    {graphics_lvo::SetRGB32CM, GraphicsNatives::set_rgb32_cm, "SetRGB32CM"},
 };
 
 }

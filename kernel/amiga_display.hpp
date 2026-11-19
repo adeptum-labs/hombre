@@ -31,6 +31,30 @@
 
 namespace hombre {
 
+namespace detail {
+
+struct BitSpreadTable {
+    u64 entries[256];
+};
+
+constexpr BitSpreadTable make_bit_spread_table() {
+    BitSpreadTable t{};
+    for (u32 v = 0; v < 256; ++v) {
+        u64 out = 0;
+        for (u32 k = 0; k < 8; ++k) {
+            if (((v >> (7 - k)) & 1u) != 0) {
+                out |= 1ULL << (k * 8);
+            }
+        }
+        t.entries[v] = out;
+    }
+    return t;
+}
+
+inline constexpr BitSpreadTable kBitSpread = make_bit_spread_table();
+
+}
+
 // Draws the front screen's bitplanes into the framebuffer: the 640x400
 // logical screen at the largest whole scale that fits, centred, and the rest
 // of the framebuffer in the border colour.
@@ -73,15 +97,27 @@ public:
         const u32 bitmap = screen + ndk::sc_BitMap;
         const u32 bytes_per_row = b.r16(bitmap + ndk::bm_BytesPerRow);
         const u32 depth = b.r8(bitmap + ndk::bm_Depth);
-        u32 planes[kPlanes];
-        for (u32 plane = 0; plane < kPlanes; ++plane) {
+        const u32 used = depth < kMaxPlanes ? depth : kMaxPlanes;
+        u32 planes[kMaxPlanes]{};
+        for (u32 plane = 0; plane < used; ++plane) {
             planes[plane] = b.r32(bitmap + ndk::bm_Planes + plane * 4);
         }
         const u32 colour_map = b.r32(screen + ndk::sc_ViewPort + ndk::vp_ColorMap);
+        const u8 cm_type = static_cast<u8>(b.r8(colour_map + ndk::cm_Type));
+        const u32 cm_count = b.r16(colour_map + ndk::cm_Count);
         const u32 table = b.r32(colour_map + ndk::cm_ColorTable);
-        u32 palette[kColours];
-        for (u32 pen = 0; pen < kColours; ++pen) {
-            palette[pen] = colour(b.r16(table + pen * 2));
+        const u32 low_table =
+            cm_type >= ndk::COLORMAP_TYPE_V39 ? b.r32(colour_map + ndk::cm_LowColorBits) : 0;
+        const u32 palette_count = cm_count < kMaxColours ? cm_count : kMaxColours;
+        u32 palette[kMaxColours]{};
+        if (low_table != 0) {
+            for (u32 pen = 0; pen < palette_count; ++pen) {
+                palette[pen] = colour24(b.r16(table + pen * 2), b.r16(low_table + pen * 2));
+            }
+        } else {
+            for (u32 pen = 0; pen < palette_count; ++pen) {
+                palette[pen] = colour(b.r16(table + pen * 2));
+            }
         }
         if (!b.ok()) {
             return;
@@ -93,31 +129,51 @@ public:
         if (first_x <= last_x && first_y <= last_y) {
             const u32 raw_count = static_cast<u32>(last_x - first_x + 1);
             const u32 count = raw_count < kScreenWidth ? raw_count : kScreenWidth;
-            const u32 used = depth < kPlanes ? depth : kPlanes;
             const u64 left = display.origin_x_ + static_cast<u64>(first_x) * display.scale_;
+            const u32 first_bx = static_cast<u32>(first_x) >> 3;
+            const u32 last_bx = (static_cast<u32>(first_x) + count - 1) >> 3;
+            const u32 bx_count = last_bx - first_bx + 1;
             u32 row[kScreenWidth];
             for (i32 y = first_y; y <= last_y; ++y) {
                 const u32 row_offset = static_cast<u32>(y) * bytes_per_row;
-                u8 plane_bytes[kPlanes] = {};
-                for (u32 i = 0; i < count; ++i) {
-                    const u32 x = static_cast<u32>(first_x) + i;
-                    if (i == 0 || (x & 7) == 0) {
-                        const u32 at = row_offset + (x >> 3);
-                        for (u32 plane = 0; plane < used && b.ok(); ++plane) {
-                            plane_bytes[plane] = b.r8(planes[plane] + at);
-                        }
-                        if (!b.ok()) {
-                            return;
-                        }
-                    }
-                    const u32 mask = 0x80 >> (x & 7);
-                    u32 pen = 0;
+                const u8* plane_ptrs[kMaxPlanes]{};
+                for (u32 plane = 0; plane < used; ++plane) {
+                    plane_ptrs[plane] =
+                        b.bytes_at(planes[plane] + row_offset + first_bx, bx_count);
+                }
+                if (!b.ok()) {
+                    return;
+                }
+                u32 x = static_cast<u32>(first_x);
+                u32 remaining = count;
+                u32 out_i = 0;
+                for (u32 bi = 0; bi < bx_count; ++bi) {
+                    u64 packed = 0;
                     for (u32 plane = 0; plane < used; ++plane) {
-                        if ((plane_bytes[plane] & mask) != 0) {
-                            pen |= 1u << plane;
+                        packed |= detail::kBitSpread.entries[plane_ptrs[plane][bi]] << plane;
+                    }
+                    const u32 bit_off = x & 7;
+                    const u32 avail = 8 - bit_off;
+                    const u32 chunk = remaining < avail ? remaining : avail;
+                    if (chunk == 8) {
+                        row[out_i + 0] = palette[packed & 0xFF];
+                        row[out_i + 1] = palette[(packed >> 8) & 0xFF];
+                        row[out_i + 2] = palette[(packed >> 16) & 0xFF];
+                        row[out_i + 3] = palette[(packed >> 24) & 0xFF];
+                        row[out_i + 4] = palette[(packed >> 32) & 0xFF];
+                        row[out_i + 5] = palette[(packed >> 40) & 0xFF];
+                        row[out_i + 6] = palette[(packed >> 48) & 0xFF];
+                        row[out_i + 7] = palette[(packed >> 56) & 0xFF];
+                    } else {
+                        u64 p = packed >> (bit_off * 8);
+                        for (u32 k = 0; k < chunk; ++k) {
+                            row[out_i + k] = palette[p & 0xFF];
+                            p >>= 8;
                         }
                     }
-                    row[i] = palette[pen];
+                    x += chunk;
+                    out_i += chunk;
+                    remaining -= chunk;
                 }
                 const u64 top = display.origin_y_ + static_cast<u64>(y) * display.scale_;
                 display.fb_.put_row(left, top, row, count, display.scale_);
@@ -197,10 +253,8 @@ private:
     static constexpr u32 kScreenWidth = 640;
     static constexpr u32 kScreenHeight = 400;
     static constexpr u32 kMaxSide = 4096;
-    // The colour table holds four entries, so the first two planes choose a
-    // pen and the rest of a deeper bitmap is not drawn.
-    static constexpr u32 kPlanes = 2;
-    static constexpr u32 kColours = 1 << kPlanes;
+    static constexpr u32 kMaxPlanes = 8;
+    static constexpr u32 kMaxColours = 1u << kMaxPlanes;
     static constexpr u32 kBorder = 0xAAAAAA;
     static constexpr u32 kPointerOutlineColour = 0x000000;
     static constexpr u32 kPointerFillColour = 0xFFFFFF;
@@ -232,10 +286,19 @@ private:
     }
 
     // The 0xRRGGBB colour of a colour table word, a nibble times 17.
-    static u32 colour(u32 rgb) {
-        const u32 red = ((rgb >> 8) & 0xF) * 17;
-        const u32 green = ((rgb >> 4) & 0xF) * 17;
-        const u32 blue = (rgb & 0xF) * 17;
+    static constexpr u32 colour(u32 rgb) {
+        const u32 red = ((rgb >> 8) & 0xF) * 0x11;
+        const u32 green = ((rgb >> 4) & 0xF) * 0x11;
+        const u32 blue = (rgb & 0xF) * 0x11;
+        return (red << 16) | (green << 8) | blue;
+    }
+
+    // The 0xRRGGBB colour combining high nibbles (ColorTable) and low nibbles
+    // (LowColorBits).
+    static constexpr u32 colour24(u32 hi, u32 lo) {
+        const u32 red = (((hi >> 8) & 0xF) << 4) | ((lo >> 8) & 0xF);
+        const u32 green = (((hi >> 4) & 0xF) << 4) | ((lo >> 4) & 0xF);
+        const u32 blue = ((hi & 0xF) << 4) | (lo & 0xF);
         return (red << 16) | (green << 8) | blue;
     }
 

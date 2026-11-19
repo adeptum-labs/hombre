@@ -109,10 +109,19 @@ constexpr u32 ViewPort_SIZEOF = 40;
 static_assert(ViewPort_SIZEOF == 40);
 
 // struct ColorMap
+constexpr u32 cm_Flags = 0;
+constexpr u32 cm_Type = 1;
 constexpr u32 cm_Count = 2;
 constexpr u32 cm_ColorTable = 4;
+constexpr u32 cm_LowColorBits = 12;
+constexpr u32 cm_vp = 20;
 constexpr u32 ColorMap_SIZEOF = 52;
 static_assert(ColorMap_SIZEOF == 52);
+
+constexpr u8 COLORMAP_TYPE_V1_2 = 0x00;
+constexpr u8 COLORMAP_TYPE_V1_4 = 0x01;
+constexpr u8 COLORMAP_TYPE_V36 = COLORMAP_TYPE_V1_4;
+constexpr u8 COLORMAP_TYPE_V39 = 0x02;
 
 // struct Screen
 constexpr u32 sc_FirstWindow = 4;

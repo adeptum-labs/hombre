@@ -24,6 +24,7 @@
 #include "intuition.hpp"
 
 #include "../hid_mouse.hpp"
+#include "chrome_palette.hpp"
 #include "exec.hpp"
 #include "graphics.hpp"
 #include "raster.hpp"
@@ -47,8 +48,31 @@ constexpr u32 kBarHeight = 10;
 constexpr u32 kTitleChunk = 64;
 constexpr u32 kMaxTitleChars = 255;
 
-// The colours of the default four-entry palette, RGB4.
-constexpr u16 kPalette[4] = {0x0AAA, 0x0000, 0x0FFF, 0x068B};
+constexpr u32 kBasePalette[8] = {
+    0xA0A6B0, 0x1C1E22, 0xFFFFFF, 0x3D6FB6, 0x7A7E86, 0xC9CDD4, 0xD9A441, 0x9E3B3B,
+};
+constexpr u32 kCubeLevels[6] = {0x00, 0x33, 0x66, 0x99, 0xCC, 0xFF};
+
+constexpr u32 default_palette_rgb24(u32 pen) {
+    if (pen < 8) {
+        return kBasePalette[pen];
+    }
+    if (pen < 224) {
+        const u32 idx = pen - 8;
+        const u32 r = idx / 36;
+        const u32 g = (idx / 6) % 6;
+        const u32 b = idx % 6;
+        return (kCubeLevels[r] << 16) | (kCubeLevels[g] << 8) | kCubeLevels[b];
+    }
+    if (pen < chrome::kChromeBase) {
+        const u32 v = 0x10u + (pen - 224u) * 0x20u;
+        return (v << 16) | (v << 8) | v;
+    }
+    if (pen < 256) {
+        return chrome::kChromePalette[pen - chrome::kChromeBase];
+    }
+    return 0;
+}
 
 // The fields of a NewScreen as the SA_ tags can override them.
 struct OpenArgs {
@@ -1174,8 +1198,8 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     if (a.height == 0) {
         a.height = 400;
     }
-    if (a.depth != 2) {
-        a.depth = 2;
+    if (a.depth == 0 || a.depth > 8) {
+        a.depth = 8;
     }
     if (a.width > 0xFFFF) {
         a.width = 0xFFFF;
@@ -1201,13 +1225,15 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     }
 
     const u64 bytes_per_row = (static_cast<u64>(a.width) + 15) / 16 * 2;
-    const u64 planes_bytes = 2 * bytes_per_row * a.height;
+    const u64 planes_bytes = static_cast<u64>(a.depth) * bytes_per_row * a.height;
     if (planes_bytes > 0xFFFFFFFF) {
         LogLine().text("intuition: screen too large").send();
         return 0;
     }
     const u32 bpr = static_cast<u32>(bytes_per_row);
     const u32 pbytes = static_cast<u32>(planes_bytes);
+    const u32 color_count = 1u << a.depth;
+    const u32 color_bytes = color_count * 2;
 
     u32 screen = 0;
     u32 planes = 0;
@@ -1216,14 +1242,18 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     u32 backdrop_rp = 0;
     u32 map = 0;
     u32 colors = 0;
+    u32 low_colors = 0;
     u32 title = 0;
     u32 title_bytes = 0;
     auto fail = [&]() -> u32 {
         if (title != 0) {
             exec_->free(title, title_bytes);
         }
+        if (low_colors != 0) {
+            exec_->free(low_colors, color_bytes);
+        }
         if (colors != 0) {
-            exec_->free(colors, 8);
+            exec_->free(colors, color_bytes);
         }
         if (map != 0) {
             exec_->free(map, ndk::ColorMap_SIZEOF);
@@ -1271,8 +1301,12 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     if (map == 0) {
         return fail();
     }
-    colors = exec_->alloc(8, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    colors = exec_->alloc(color_bytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
     if (colors == 0) {
+        return fail();
+    }
+    low_colors = exec_->alloc(color_bytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    if (low_colors == 0) {
         return fail();
     }
     if (a.title != 0) {
@@ -1312,10 +1346,21 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w32(vp + ndk::vp_ColorMap, map);
     b.w16(vp + ndk::vp_DWidth, a.width);
     b.w16(vp + ndk::vp_DHeight, a.height);
-    b.w16(map + ndk::cm_Count, 4);
+    b.w8(map + ndk::cm_Flags, 0);
+    b.w8(map + ndk::cm_Type, ndk::COLORMAP_TYPE_V39);
+    b.w16(map + ndk::cm_Count, color_count);
     b.w32(map + ndk::cm_ColorTable, colors);
-    for (u32 i = 0; i < 4; ++i) {
-        b.w16(colors + i * 2, kPalette[i]);
+    b.w32(map + ndk::cm_LowColorBits, low_colors);
+    b.w32(map + ndk::cm_vp, vp);
+    for (u32 i = 0; i < color_count; ++i) {
+        const u32 rgb = default_palette_rgb24(i);
+        const u32 r8 = (rgb >> 16) & 0xFF;
+        const u32 g8 = (rgb >> 8) & 0xFF;
+        const u32 b8 = rgb & 0xFF;
+        const u32 hi = ((r8 >> 4) << 8) | ((g8 >> 4) << 4) | (b8 >> 4);
+        const u32 lo = ((r8 & 0xF) << 8) | ((g8 & 0xF) << 4) | (b8 & 0xF);
+        b.w16(colors + i * 2, hi);
+        b.w16(low_colors + i * 2, lo);
     }
 
     for (u32 i = kMaxScreens - 1; i > 0; --i) {
@@ -1338,7 +1383,9 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     rec->colormap = map;
     rec->colormap_bytes = ndk::ColorMap_SIZEOF;
     rec->colors = colors;
-    rec->colors_bytes = 8;
+    rec->colors_bytes = color_bytes;
+    rec->low_colors = low_colors;
+    rec->low_colors_bytes = color_bytes;
     rec->title = title;
     rec->title_bytes = title_bytes;
     rec->width = a.width;
@@ -1388,6 +1435,9 @@ bool Intuition::close_screen(u32 screen) {
     }
     if (rec->planes != 0) {
         exec_->free(rec->planes, rec->planes_bytes);
+    }
+    if (rec->low_colors != 0) {
+        exec_->free(rec->low_colors, rec->low_colors_bytes);
     }
     if (rec->colors != 0) {
         exec_->free(rec->colors, rec->colors_bytes);

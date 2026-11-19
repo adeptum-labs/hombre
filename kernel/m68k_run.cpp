@@ -173,7 +173,7 @@ void open_amiga_screen(const BootInfo& info) {
     }
     bus.w16(new_screen + ndk::ns_Width, 640);
     bus.w16(new_screen + ndk::ns_Height, 400);
-    bus.w16(new_screen + ndk::ns_Depth, 2);
+    bus.w16(new_screen + ndk::ns_Depth, 8);
     bus.w16(new_screen + ndk::ns_Type, ndk::CUSTOMSCREEN);
     bus.w32(new_screen + ndk::ns_DefaultTitle, title_at);
     amiga_screen = bus.ok() ? intuition.open_screen(new_screen, 0) : 0;

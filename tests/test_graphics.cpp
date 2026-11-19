@@ -378,6 +378,193 @@ void set_rgb4_and_load_rgb4_write_the_colour_table() {
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetRGB4), 0xFFFFFFFFu);
 }
 
+void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
+    GfxRig r;
+    const u32 color_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 low_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 load_table = r.exec.alloc(512, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 out_table = r.exec.alloc(512, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(color_table != 0 && low_table != 0 && load_table != 0 && out_table != 0);
+
+    const u32 vp = kScreen + sc_ViewPort;
+    r.put16(kScreen + sc_Width, 320);
+    r.put16(kScreen + sc_Height, 200);
+    r.put32(vp + vp_ColorMap, kColorMap);
+    r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+    r.put16(kColorMap + cm_Count, 256);
+    r.put32(kColorMap + cm_ColorTable, color_table);
+    r.put32(kColorMap + cm_LowColorBits, low_table);
+    r.display.front_screen = kScreen;
+
+    // SetRGB32 stores high/low nibbles and refreshes the front screen.
+    r.cpu().a[0] = vp;
+    r.cpu().d[0] = 42;
+    r.cpu().d[1] = 0x12345678u;
+    r.cpu().d[2] = 0xABCDEF01u;
+    r.cpu().d[3] = 0x0F112233u;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32), ExitReason::Halt);
+    CHECK_EQ(r.get16(color_table + 42 * 2), 0x01A0u);
+    CHECK_EQ(r.get16(low_table + 42 * 2), 0x02BFu);
+    CHECK_EQ(r.refreshes.size(), 1u);
+    CHECK_EQ(r.refreshes[0].x0, 0);
+    CHECK_EQ(r.refreshes[0].y0, 0);
+    CHECK_EQ(r.refreshes[0].x1, 319);
+    CHECK_EQ(r.refreshes[0].y1, 199);
+
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = 42;
+    r.cpu().d[1] = 1;
+    r.cpu().a[1] = out_table;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::GetRGB32), ExitReason::Halt);
+    CHECK_EQ(r.get32(out_table), 0x12121212u);
+    CHECK_EQ(r.get32(out_table + 4), 0xABABABABu);
+    CHECK_EQ(r.get32(out_table + 8), 0x0F0F0F0Fu);
+
+    // SetRGB4 replicates the high nibble into LowColorBits.
+    r.cpu().a[0] = vp;
+    r.cpu().d[0] = 7;
+    r.cpu().d[1] = 0xA;
+    r.cpu().d[2] = 0x3;
+    r.cpu().d[3] = 0xE;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB4), ExitReason::Halt);
+    CHECK_EQ(r.get16(color_table + 7 * 2), 0x0A3Eu);
+    CHECK_EQ(r.get16(low_table + 7 * 2), 0x0A3Eu);
+    CHECK_EQ(r.refreshes.size(), 2u);
+
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = 7;
+    r.cpu().d[1] = 1;
+    r.cpu().a[1] = out_table;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::GetRGB32), ExitReason::Halt);
+    CHECK_EQ(r.get32(out_table), 0xAAAAAAAAu);
+    CHECK_EQ(r.get32(out_table + 4), 0x33333333u);
+    CHECK_EQ(r.get32(out_table + 8), 0xEEEEEEEEu);
+
+    // LoadRGB32 multi-entry table with two blocks and a 0-count terminator.
+    u32 p = load_table;
+    r.put32(p, (2u << 16) | 10u);
+    p += 4;
+    r.put32(p, 0x10000000u);
+    r.put32(p + 4, 0x20000000u);
+    r.put32(p + 8, 0x30000000u);
+    p += 12;
+    r.put32(p, (255u << 24) | 0x112233u);
+    r.put32(p + 4, 0x80000000u);
+    r.put32(p + 8, 0x456789ABu);
+    p += 12;
+    r.put32(p, (1u << 16) | 200u);
+    p += 4;
+    r.put32(p, 0x6D000000u);
+    r.put32(p + 4, 0x9B000000u);
+    r.put32(p + 8, 0xE0000000u);
+    p += 12;
+    r.put32(p, 0u);
+
+    r.cpu().a[0] = vp;
+    r.cpu().a[1] = load_table;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::LoadRGB32), ExitReason::Halt);
+    CHECK_EQ(r.refreshes.size(), 3u);
+
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = 2;
+    r.cpu().a[1] = out_table;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::GetRGB32), ExitReason::Halt);
+    CHECK_EQ(r.get32(out_table), 0x10101010u);
+    CHECK_EQ(r.get32(out_table + 4), 0x20202020u);
+    CHECK_EQ(r.get32(out_table + 8), 0x30303030u);
+    CHECK_EQ(r.get32(out_table + 12), 0xFFFFFFFFu);
+    CHECK_EQ(r.get32(out_table + 16), 0x80808080u);
+    CHECK_EQ(r.get32(out_table + 20), 0x45454545u);
+
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = 200;
+    r.cpu().d[1] = 1;
+    r.cpu().a[1] = out_table;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::GetRGB32), ExitReason::Halt);
+    CHECK_EQ(r.get32(out_table), 0x6D6D6D6Du);
+    CHECK_EQ(r.get32(out_table + 4), 0x9B9B9B9Bu);
+    CHECK_EQ(r.get32(out_table + 8), 0xE0E0E0E0u);
+
+    // SetRGB32CM updates the ColorMap without refreshing the display.
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = 255;
+    r.cpu().d[1] = 0x5A000000u;
+    r.cpu().d[2] = 0x6B000000u;
+    r.cpu().d[3] = 0x7C000000u;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32CM), ExitReason::Halt);
+    CHECK_EQ(r.refreshes.size(), 3u);
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = 255;
+    r.cpu().d[1] = 1;
+    r.cpu().a[1] = out_table;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::GetRGB32), ExitReason::Halt);
+    CHECK_EQ(r.get32(out_table), 0x5A5A5A5Au);
+    CHECK_EQ(r.get32(out_table + 4), 0x6B6B6B6Bu);
+    CHECK_EQ(r.get32(out_table + 8), 0x7C7C7C7Cu);
+}
+
+void rect_fill_and_text_pen_200_on_8_planes() {
+    GfxRig r;
+    const u32 width = 64;
+    const u32 height = 32;
+    const u32 row_bytes = (width + 15) / 16 * 2;
+    const u32 plane_bytes = row_bytes * height;
+    u32 planes[8]{};
+    for (u32 plane = 0; plane < 8; ++plane) {
+        planes[plane] = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
+        CHECK(planes[plane] != 0);
+    }
+    r.cpu().a[0] = kBitmap;
+    r.cpu().d[0] = 8;
+    r.cpu().d[1] = width;
+    r.cpu().d[2] = height;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitBitMap), ExitReason::Halt);
+    for (u32 plane = 0; plane < 8; ++plane) {
+        r.put32(kBitmap + bm_Planes + plane * 4, planes[plane]);
+    }
+    r.cpu().a[1] = kRastPort;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitRastPort), ExitReason::Halt);
+    r.put32(kRastPort + rp_BitMap, kBitmap);
+
+    r.cpu().a[1] = kRastPort;
+    r.cpu().d[0] = 200;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    rect_fill(r, kRastPort, 2, 2, 10, 10);
+    for (i32 y = 2; y <= 10; ++y) {
+        for (i32 x = 2; x <= 10; ++x) {
+            CHECK_EQ(read_pixel(r, kRastPort, x, y), 200u);
+        }
+    }
+    CHECK_EQ(read_pixel(r, kRastPort, 1, 2), 0u);
+    CHECK_EQ(read_pixel(r, kRastPort, 11, 2), 0u);
+
+    // 200 == 0b11001000: planes 3, 6, 7 have bit set at (5, 5); others clear.
+    const u32 at = 5 * row_bytes + (5 >> 3);
+    const u32 mask = 0x80u >> (5 & 7);
+    for (u32 plane = 0; plane < 8; ++plane) {
+        const bool want = ((200u >> plane) & 1u) != 0;
+        CHECK_EQ((r.get8(planes[plane] + at) & mask) != 0, want);
+    }
+
+    r.graphics.set_pens(kRastPort, 200, 5, JAM2);
+    move(r, kRastPort, 16, 20);
+    r.str(kStrings, "H");
+    r.cpu().a[1] = kRastPort;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Text), ExitReason::Halt);
+    const u8* rows = glyph('H');
+    for (u32 row = 0; row < 8; ++row) {
+        for (u32 col = 0; col < 8; ++col) {
+            const u32 expected = ((rows[row] >> col) & 1) != 0 ? 200u : 5u;
+            CHECK_EQ(read_pixel(r, kRastPort, 16 + static_cast<i32>(col),
+                                14 + static_cast<i32>(row)),
+                     expected);
+        }
+    }
+}
+
 void clear_screen_clears_from_cp() {
     GfxRig r;
     const Surface s = make_surface(r, kBitmap, kRastPort);
@@ -630,6 +817,8 @@ int main() {
     open_font_topaz_8_returns_the_builtin_font_and_other_names_give_0();
     scroll_raster_moves_pixels();
     set_rgb4_and_load_rgb4_write_the_colour_table();
+    set_rgb32_get_rgb32_and_load_rgb32_v39_palette();
+    rect_fill_and_text_pen_200_on_8_planes();
     clear_screen_clears_from_cp();
     refresh_called_only_for_front_screen_bitmap();
     text_clips_to_layer_bounds();
