@@ -353,9 +353,9 @@ endif
 # Runs WBPattern from the 3.1 Extras disk in DF1:, given as DISK1 beside the
 # Workbench disk in DISK: a preset and Use write its prefs, and the
 # Workbench that LoadWB starts after it reads them for its backdrop.
-# Both boots skip the Startup-Sequence. The second runs AddDataTypes, which
-# the file requester needs to know pictures, and picks a picture through
-# the file requester: Type to
+# Both boots skip the Startup-Sequence and run AddDataTypes, which
+# WBPattern needs, by hand. The second picks a picture through the file
+# requester: Type to
 # Picture, Select Picture, "Pics:" typed into the Drawer field, a double
 # click into the Pics drawer, the scroller dragged to its end, Zz.ilbm (the
 # last file, shown only scrolled) clicked, OK and Use. Each wait is a
@@ -375,7 +375,7 @@ WBPATTERN_PICTURE_MOUSE := mouse_move -90 -139;$(WBP_CLICK);mouse_move 0 22;$(WB
 ifneq ($(and $(strip $(DISK)),$(strip $(DISK1))),)
 check-wbpattern: image $(PIC_DISK)
 	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 "$$DISK1" \
-	    --keys "e x t r a s 3 dot 1 shift-dot p r e f s shift-7 w b p a t t e r n ret l o a d w b ret" \
+	    --keys "a d d d a t a t y p e s spc r e f r e s h spc q u i e t ret e x t r a s 3 dot 1 shift-dot p r e f s shift-7 w b p a t t e r n ret l o a d w b ret" \
 	    --mouse-after "intuition: window WBPattern Preferences opened" \
 	    --mouse "mouse_move 50 -88;mouse_button 1;mouse_button 0;mouse_move -52 31;mouse_button 1;mouse_button 0" \
 	    "intuition: window WBPattern Preferences opened" \

@@ -3017,7 +3017,9 @@ void task_main_clears_exit_logs_name_and_switches_away() {
     g_exec.task_main(1);
 
     CHECK(logged("exec: task child.bad ended with Illegal"));
-    CHECK_EQ(idle_state.calls, 2u);
+    // The crashed child sent Ctrl+C to the boot task that started it, so
+    // the boot task runs again without waiting for the idle hook.
+    CHECK_EQ(idle_state.calls, 0u);
     CHECK_EQ(g_exec.scheduler().current(), 0);
     CHECK(g_exec.scheduler().slot(1).state == TaskState::Removed);
     CHECK_EQ(host.switches.size(), 1u);
