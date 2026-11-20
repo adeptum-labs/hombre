@@ -372,6 +372,26 @@ void a_single_size_flag_adds_no_extra_long() {
     CHECK_EQ(read_long(fixture.mem, 0x1008), 0x33333333u);
 }
 
+void a_hunk_type_marked_for_chip_memory_loads() {
+    HunkFile file;
+    put_header(file, {0x40000001, 1});
+    file.push_long(kCode | 0x40000000);
+    file.push_long(1);
+    file.push_long(0x44444444);
+    file.push_long(kEnd);
+    file.push_long(kData | 0x40000000);
+    file.push_long(1);
+    file.push_long(0x55555555);
+    file.push_long(kEnd);
+
+    Fixture fixture;
+    const Loaded loaded = load(file.bytes, fixture.mem, fixture.bump);
+    CHECK(loaded.error == HunkError::Ok);
+    CHECK_EQ(read_long(fixture.mem, 0x1008), 0x44444444u);
+    const u32 next = read_long(fixture.mem, loaded.seglist << 2);
+    CHECK_EQ(read_long(fixture.mem, (next << 2) + 4), 0x55555555u);
+}
+
 void reloc32short_applies_word_offsets_and_skips_the_padding() {
     HunkFile file;
     put_header(file, {2, 1});
@@ -444,6 +464,7 @@ void rejects_a_total_larger_than_guest_memory() {
 }
 
 int main() {
+    a_hunk_type_marked_for_chip_memory_loads();
     loads_one_code_hunk();
     reloc32_adds_the_target_data_address();
     copies_only_the_body_size_of_a_short_hunk();

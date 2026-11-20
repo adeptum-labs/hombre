@@ -336,6 +336,9 @@ inline HunkError hunk_load(const u8* file, usize bytes, m68k::GuestMemory& mem,
         if (!reader.read_long(type)) {
             return HunkError::Truncated;
         }
+        // A hunk's type word may carry the memory flags its size word in
+        // the header has, as a HUNK_DATA marked for chip memory does.
+        type &= kSizeMask;
         if (type == kHunkCode || type == kHunkData) {
             u32 raw = 0;
             if (!reader.read_long(raw)) {
