@@ -2377,6 +2377,14 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     if (a.inner_height != 0) {
         a.height = a.inner_height + border_top + border_bottom;
     }
+    // A window asked for over the screen's title bar opens below it, as
+    // far down as its height still fits; a backdrop stays where it asked.
+    const i32 bar = static_cast<i32>(b.r8(screen + ndk::sc_BarHeight));
+    if ((a.flags & ndk::WFLG_BACKDROP) == 0 && top < bar) {
+        const i32 fits = a.height == 0 ? bar : screen_h - static_cast<i32>(a.height);
+        const i32 lowest = fits < bar ? fits : bar;
+        top = lowest > top ? lowest : top;
+    }
     const u32 room_x = static_cast<u32>(screen_w - left);
     const u32 room_y = static_cast<u32>(screen_h - top);
     const i32 width =

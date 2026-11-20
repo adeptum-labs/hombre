@@ -846,24 +846,58 @@ void open_window_draws_chrome() {
     CHECK_EQ(screen_pixel(r, screen, 300, 60), 1u);
 }
 
-void open_window_default_is_full_screen_below_bar() {
+void open_window_default_fills_the_screen_below_the_bar() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
+    const u32 bar = r.get8(screen + sc_BarHeight);
+    CHECK(bar > 0);
     put_new_window(r, kNewWindow, 0, 0, 0, 0, 0, 0, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
     CHECK_EQ(r.get16(window + wd_LeftEdge), 0u);
-    CHECK_EQ(r.get16(window + wd_TopEdge), 0u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), bar);
     CHECK_EQ(r.get16(window + wd_Width), 640u);
-    CHECK_EQ(r.get16(window + wd_Height), 400u);
+    CHECK_EQ(r.get16(window + wd_Height), 400u - bar);
     const u32 layer = r.get32(window + wd_WLayer);
     CHECK_EQ(r.get16(layer + ly_MinX), 0u);
-    CHECK_EQ(r.get16(layer + ly_MinY), 0u);
+    CHECK_EQ(r.get16(layer + ly_MinY), bar);
     CHECK_EQ(r.get16(layer + ly_MaxX), 639u);
     CHECK_EQ(r.get16(layer + ly_MaxY), 399u);
-    CHECK_EQ(screen_pixel(r, screen, 0, 0), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 0, bar), 1u);
+}
+
+void windows_open_below_the_screen_bar() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 bar = r.get8(screen + sc_BarHeight);
+
+    // Asked for over the bar, the window opens just below it.
+    put_new_window(r, kNewWindow, 20, 3, 200, 100, 0, 0, 0, 0);
+    const u32 low = open_win(r, kNewWindow);
+    CHECK_EQ(r.get16(low + wd_LeftEdge), 20u);
+    CHECK_EQ(r.get16(low + wd_TopEdge), bar);
+    CHECK_EQ(r.get16(low + wd_Height), 100u);
+
+    // Below the bar it stays where it asked.
+    put_new_window(r, kNewWindow, 20, 50, 200, 100, 0, 0, 0, 0);
+    const u32 placed = open_win(r, kNewWindow);
+    CHECK_EQ(r.get16(placed + wd_TopEdge), 50u);
+
+    // Too tall for the room below the bar, it moves only as far as it
+    // still fits.
+    put_new_window(r, kNewWindow, 0, 0, 200, 395, 0, 0, 0, 0);
+    const u32 tall = open_win(r, kNewWindow);
+    CHECK_EQ(r.get16(tall + wd_TopEdge), 5u);
+    CHECK_EQ(r.get16(tall + wd_Height), 395u);
+
+    // A backdrop stays where it asked.
+    put_new_window(r, kNewWindow, 0, 0, 200, 100, WFLG_BACKDROP, 0, 0, 0);
+    const u32 backdrop = open_win(r, kNewWindow);
+    CHECK_EQ(r.get16(backdrop + wd_TopEdge), 0u);
 }
 
 void open_window_taglist_reads_wa_tags() {
@@ -6076,7 +6110,8 @@ int main() {
     unimplemented_vector_ends_run();
     open_window_builds_struct_rastport_and_layer();
     open_window_draws_chrome();
-    open_window_default_is_full_screen_below_bar();
+    open_window_default_fills_the_screen_below_the_bar();
+    windows_open_below_the_screen_bar();
     open_window_taglist_reads_wa_tags();
     open_window_on_unknown_screen_gives_zero();
     open_window_null_newwindow_gives_zero_and_faults();
