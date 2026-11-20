@@ -109,6 +109,9 @@ constexpr u32 GetBitMapAttr = 960;
 constexpr u32 SetOutlinePen = 978;
 constexpr u32 SetWriteMask = 984;
 constexpr u32 SetMaxPen = 990;
+constexpr u32 ScrollRasterBF = 1002;
+constexpr u32 SetRPAttrsA = 1038;
+constexpr u32 GetRPAttrsA = 1044;
 constexpr u32 LoadRGB32 = 882;
 constexpr u32 GetRGB32 = 900;
 constexpr u32 SetRGB32CM = 996;
@@ -140,6 +143,9 @@ public:
                    u32 minterm, u32 mask);
     void blt_bitmap_rastport(u32 src, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy, i32 width,
                              i32 height, u32 minterm);
+    // The colour of pen index of the ColorMap, eight bits a gun. False for
+    // a bad map or a pen it has not.
+    bool color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue);
     void draw_line(u32 rp, i32 x1, i32 y1);
     u32 text(u32 rp, const u8* chars, u32 count);
     void scroll(u32 rp, i32 dx, i32 dy, i32 x0, i32 y0, i32 x1, i32 y1);

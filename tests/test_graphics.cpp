@@ -1783,6 +1783,26 @@ void text_fit_pens_and_bitmaps_of_v39() {
     r.cpu().a[0] = a.rp;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetOutlinePen), 2u);
 
+    // GetRPAttrsA and SetRPAttrsA.
+    const u32 rp_tags = kTmpBuffer;
+    r.put32(rp_tags, 0x80000002);  // RPTAG_APen
+    r.put32(rp_tags + 4, 1);
+    r.put32(rp_tags + 8, 0x80000004);  // RPTAG_DrMd
+    r.put32(rp_tags + 12, JAM1);
+    r.put32(rp_tags + 16, 0);  // TAG_DONE
+    r.cpu().a[0] = a.rp;
+    r.cpu().a[1] = rp_tags;
+    r.call(Base::Graphics, graphics_lvo::SetRPAttrsA);
+    CHECK_EQ(r.get8(a.rp + rp_FgPen), 1u);
+    CHECK_EQ(r.get8(a.rp + rp_DrawMode), JAM1);
+    r.put32(rp_tags + 4, kTmpBuffer + 0x40);
+    r.put32(rp_tags + 12, kTmpBuffer + 0x44);
+    r.cpu().a[0] = a.rp;
+    r.cpu().a[1] = rp_tags;
+    r.call(Base::Graphics, graphics_lvo::GetRPAttrsA);
+    CHECK_EQ(r.get32(kTmpBuffer + 0x40), 1u);
+    CHECK_EQ(r.get32(kTmpBuffer + 0x44), JAM1);
+
     // AllocBitMap and FreeBitMap balance; GetBitMapAttr reads it.
     const u32 before = r.exec.free_bytes();
     r.cpu().d[0] = 40;

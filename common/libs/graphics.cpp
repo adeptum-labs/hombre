@@ -23,6 +23,8 @@
 
 #include "graphics.hpp"
 
+#include "tags.hpp"
+
 #include "exec.hpp"
 #include "raster.hpp"
 #include "version.hpp"
@@ -1178,6 +1180,87 @@ struct GraphicsNatives {
                        static_cast<i16>(m.cpu.d[4]), static_cast<i16>(m.cpu.d[5]));
     }
 
+    // The RPTAG_ attributes of a RastPort: its font, pens, mode, write mask
+    // and largest pen, and for GetRPAttrsA the bounds drawing may reach.
+    static constexpr u32 RPTAG_Font = 0x80000000;
+    static constexpr u32 RPTAG_APen = 0x80000002;
+    static constexpr u32 RPTAG_BPen = 0x80000003;
+    static constexpr u32 RPTAG_DrMd = 0x80000004;
+    static constexpr u32 RPTAG_OutlinePen = 0x80000005;
+    static constexpr u32 RPTAG_WriteMask = 0x80000006;
+    static constexpr u32 RPTAG_MaxPen = 0x80000007;
+    static constexpr u32 RPTAG_DrawBounds = 0x80000008;
+
+    static void rp_attrs(Machine& m, u32 rp, u32 tags, bool set) {
+        Bus b(m);
+        u32 budget = tags::kMaxTagItems;
+        u32 at = tags;
+        for (;;) {
+            const u32 item = tags::next(b, at, budget);
+            if (item == 0 || rp == 0) {
+                return;
+            }
+            const u32 tag = b.r32(item);
+            const u32 data = b.r32(item + 4);
+            u32 offset = 0;
+            switch (tag) {
+            case RPTAG_Font:
+                if (set) {
+                    b.w32(rp + ndk::rp_Font, data);
+                } else {
+                    b.w32(data, b.r32(rp + ndk::rp_Font));
+                }
+                continue;
+            case RPTAG_APen:
+                offset = ndk::rp_FgPen;
+                break;
+            case RPTAG_BPen:
+                offset = ndk::rp_BgPen;
+                break;
+            case RPTAG_DrMd:
+                offset = ndk::rp_DrawMode;
+                break;
+            case RPTAG_OutlinePen:
+                offset = ndk::rp_AOlPen;
+                break;
+            case RPTAG_WriteMask:
+                offset = ndk::rp_Mask;
+                break;
+            case RPTAG_MaxPen:
+                if (!set) {
+                    b.w32(data, 255);
+                }
+                continue;
+            case RPTAG_DrawBounds:
+                // The whole bitmap: drawing is not recorded.
+                if (!set) {
+                    const u32 bitmap = b.r32(rp + ndk::rp_BitMap);
+                    const u32 width = bitmap != 0 ? b.r16(bitmap + ndk::bm_BytesPerRow) * 8 : 1;
+                    const u32 height = bitmap != 0 ? b.r16(bitmap + ndk::bm_Rows) : 1;
+                    b.w16(data, 0);
+                    b.w16(data + 2, 0);
+                    b.w16(data + 4, width - 1);
+                    b.w16(data + 6, height - 1);
+                }
+                continue;
+            default:
+                continue;
+            }
+            if (set) {
+                b.w8(rp + offset, data & 0xFF);
+            } else {
+                b.w32(data, b.r8(rp + offset));
+            }
+        }
+    }
+
+    static void set_rp_attrs(void*, Machine& m) { rp_attrs(m, m.cpu.a[0], m.cpu.a[1], true); }
+    static void get_rp_attrs(void*, Machine& m) { rp_attrs(m, m.cpu.a[0], m.cpu.a[1], false); }
+
+    // ScrollRasterBF: ScrollRaster; the uncovered part takes pen 0, as the
+    // layer's default backfill gives it.
+    static void scroll_raster_bf(void* ctx, Machine& m) { scroll_raster(ctx, m); }
+
     static void ask_font(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         const u32 rp = m.cpu.a[1];
@@ -1485,6 +1568,9 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::InitArea, GraphicsNatives::init_area, "InitArea"},
     {graphics_lvo::InitTmpRas, GraphicsNatives::init_tmp_ras, "InitTmpRas"},
     {graphics_lvo::WaitBlit, GraphicsNatives::wait_blit, "WaitBlit"},
+    {graphics_lvo::ScrollRasterBF, GraphicsNatives::scroll_raster_bf, "ScrollRasterBF"},
+    {graphics_lvo::SetRPAttrsA, GraphicsNatives::set_rp_attrs, "SetRPAttrsA"},
+    {graphics_lvo::GetRPAttrsA, GraphicsNatives::get_rp_attrs, "GetRPAttrsA"},
     {graphics_lvo::TextFit, GraphicsNatives::text_fit, "TextFit"},
     {graphics_lvo::GetAPen, GraphicsNatives::get_a_pen, "GetAPen"},
     {graphics_lvo::GetBPen, GraphicsNatives::get_b_pen, "GetBPen"},
@@ -1745,6 +1831,23 @@ u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const ra
         report(display_, *machine_, v, Rect{dx, dy, dx + width - 1, dy + height - 1});
     }
     return written;
+}
+
+bool Graphics::color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue) {
+    if (machine_ == nullptr || colormap == 0) {
+        return false;
+    }
+    Bus b(*machine_);
+    const ColorMapTables t = colormap_tables(b, colormap);
+    if (!t.ok || index >= t.limit) {
+        return false;
+    }
+    const u32 hi = b.r16(t.table + index * 2);
+    const u32 lo = t.low_table != 0 ? b.r16(t.low_table + index * 2) : hi;
+    red = static_cast<u8>((((hi >> 8) & 0xF) << 4) | ((lo >> 8) & 0xF));
+    green = static_cast<u8>((((hi >> 4) & 0xF) << 4) | ((lo >> 4) & 0xF));
+    blue = static_cast<u8>(((hi & 0xF) << 4) | (lo & 0xF));
+    return b.ok();
 }
 
 void Graphics::rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
