@@ -79,10 +79,12 @@ constexpr u16 kOptBorder = 0x1;
 // Gadget kinds (libraries/gadtools.h).
 constexpr u32 GENERIC_KIND = 0;
 constexpr u32 BUTTON_KIND = 1;
+constexpr u32 LISTVIEW_KIND = 4;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 CYCLE_KIND = 7;
 constexpr u32 PALETTE_KIND = 8;
 constexpr u32 SCROLLER_KIND = 9;
+constexpr u32 SLIDER_KIND = 11;
 constexpr u32 STRING_KIND = 12;
 constexpr u32 TEXT_KIND = 13;
 constexpr u32 kKinds = 14;
@@ -132,6 +134,25 @@ constexpr u32 gt_Total = 72;
 constexpr u32 gt_Visible = 68;
 constexpr u32 gt_Freedom = 70;
 constexpr u32 kDefaultMaxChars = 64;
+// A slider is a scroller over its levels: its level where a scroller keeps
+// its top, its maximum where a scroller keeps its total, and its minimum,
+// a WORD, where a palette keeps its indicator width.
+constexpr u32 gt_Min = 76;
+constexpr u32 GTSL_Min = 0x80080026;
+constexpr u32 GTSL_Max = 0x80080027;
+constexpr u32 GTSL_Level = 0x80080028;
+constexpr u32 kDefaultSliderMax = 15;
+// A list view keeps its struct List where a text display keeps its text,
+// its selected ordinal, ~0 for none, where a number keeps its number, and
+// its top ordinal where a scroller keeps its total.
+constexpr u32 GTLV_Top = 0x80080005;
+constexpr u32 GTLV_Labels = 0x80080006;
+constexpr u32 GTLV_ReadOnly = 0x80080007;
+constexpr u32 GTLV_Selected = 0x80080036;
+constexpr u32 GTLV_MakeVisible = 0x8008004E;
+constexpr u16 kOptReadOnly = 0x2;
+constexpr u32 kListRowHeight = 8;  // the topaz font
+constexpr u32 kMaxListNodes = 4096;
 constexpr u32 GTTX_Border = 0x80080039;
 constexpr u32 GTNM_Border = 0x8008003A;
 constexpr u32 GT_Underscore = 0x80080040;
@@ -438,6 +459,32 @@ struct GadToolsNatives {
             case GTSC_Total:
                 b.w32(gadget + gt_Total, data);
                 break;
+            case GTSL_Min:
+                b.w16(gadget + gt_Min, data);
+                break;
+            case GTSL_Max:
+                b.w32(gadget + gt_Total, data);
+                break;
+            case GTSL_Level:
+                b.w32(gadget + gt_Number, data);
+                break;
+            case GTLV_Labels:
+                // ~0 takes the list away while the caller changes it.
+                b.w32(gadget + gt_Text, data == 0xFFFFFFFF ? 0 : data);
+                break;
+            case GTLV_Top:
+            case GTLV_MakeVisible:
+                b.w32(gadget + gt_Total, data);
+                break;
+            case GTLV_Selected:
+                b.w32(gadget + gt_Number, data);
+                break;
+            case GTLV_ReadOnly:
+                if (creating) {
+                    b.w16(gadget + gt_Options,
+                          data != 0 ? options | kOptReadOnly : options & ~kOptReadOnly);
+                }
+                break;
             case GTSC_Visible:
                 b.w16(gadget + gt_Visible, data > 0xFFFF ? 0xFFFF : data);
                 break;
@@ -473,9 +520,28 @@ struct GadToolsNatives {
             const bool keep_copy = copy || b.r32(gadget + gt_CopyBytes) != 0;
             set_text(g, b, gadget, text, keep_copy);
         }
-        if (b.r16(gadget + gt_Kind) == SCROLLER_KIND) {
+        const u32 kind = b.r16(gadget + gt_Kind);
+        if (kind == SCROLLER_KIND || kind == SLIDER_KIND) {
             sync_scroller(b, gadget);
         }
+    }
+
+    // A scroller's top, total and visible part; a slider's level less its
+    // minimum, its number of levels and one.
+    static void scroller_span(Bus& b, u32 gadget, u64& top, u64& total, u64& visible) {
+        if (b.r16(gadget + gt_Kind) == SLIDER_KIND) {
+            const i64 min = static_cast<i16>(b.r16(gadget + gt_Min));
+            const i64 max = static_cast<i32>(b.r32(gadget + gt_Total));
+            const i64 level = static_cast<i32>(b.r32(gadget + gt_Number));
+            const i64 clamped = level < min ? min : level > max ? max : level;
+            top = static_cast<u64>(clamped - min);
+            total = max >= min ? static_cast<u64>(max - min + 1) : 1;
+            visible = 1;
+            return;
+        }
+        top = b.r32(gadget + gt_Number);
+        total = b.r32(gadget + gt_Total);
+        visible = b.r16(gadget + gt_Visible);
     }
 
     // A scroller's PropInfo from its top, total and visible part: the
@@ -483,9 +549,10 @@ struct GadToolsNatives {
     static void sync_scroller(Bus& b, u32 gadget) {
         const u32 pi = gadget + gt_PropInfo;
         const bool across = b.r16(gadget + gt_Freedom) == LORIENT_HORIZ;
-        const u64 total = b.r32(gadget + gt_Total);
-        const u64 visible = b.r16(gadget + gt_Visible);
-        const u64 top = b.r32(gadget + gt_Number);
+        u64 top = 0;
+        u64 total = 0;
+        u64 visible = 0;
+        scroller_span(b, gadget, top, total, visible);
         u32 body = ndk::MAXBODY;
         u32 pot = 0;
         if (total > visible) {
@@ -525,22 +592,28 @@ struct GadToolsNatives {
         b.w16(gadget + ndk::gg_Height, b.r16(ng + ng_Height));
         b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
         const bool clicks = kind == BUTTON_KIND || kind == CYCLE_KIND || kind == PALETTE_KIND ||
-                            kind == STRING_KIND;
+                            kind == STRING_KIND || kind == LISTVIEW_KIND;
         b.w16(gadget + ndk::gg_Activation, clicks ? ndk::GACT_RELVERIFY : 0);
         if (kind == PALETTE_KIND) {
             // One plane and colour 1, unless the tags say otherwise.
             b.w16(gadget + gt_Count, 2);
             b.w32(gadget + gt_Number, 1);
         }
-        if (kind == SCROLLER_KIND) {
+        const bool prop = kind == SCROLLER_KIND || kind == SLIDER_KIND;
+        if (prop) {
             b.w16(gadget + gt_Freedom, LORIENT_HORIZ);
         }
+        if (kind == SLIDER_KIND) {
+            b.w32(gadget + gt_Total, kDefaultSliderMax);
+        }
+        if (kind == LISTVIEW_KIND) {
+            b.w32(gadget + gt_Number, 0xFFFFFFFF);
+        }
         b.w16(gadget + ndk::gg_GadgetType,
-              ndk::GTYP_GADTOOLS |
-                  (kind == STRING_KIND     ? ndk::GTYP_STRGADGET
-                   : kind == SCROLLER_KIND ? ndk::GTYP_PROPGADGET
-                                           : ndk::GTYP_BOOLGADGET));
-        if (kind == SCROLLER_KIND) {
+              ndk::GTYP_GADTOOLS | (kind == STRING_KIND ? ndk::GTYP_STRGADGET
+                                    : prop              ? ndk::GTYP_PROPGADGET
+                                                        : ndk::GTYP_BOOLGADGET));
+        if (prop) {
             b.w16(gadget + ndk::gg_Activation,
                   ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE | ndk::GACT_FOLLOWMOUSE);
             b.w32(gadget + ndk::gg_SpecialInfo, gadget + gt_PropInfo);
@@ -553,6 +626,9 @@ struct GadToolsNatives {
         b.w16(gadget + gt_Place, (place & 0x1F) != 0 ? place & 0x1F : default_place);
         b.w32(gadget + gt_Label, b.r32(ng + ng_GadgetText));
         apply_tags(g, b, gadget, m.cpu.a[2], true);
+        if (kind == LISTVIEW_KIND && (b.r16(gadget + gt_Options) & kOptReadOnly) != 0) {
+            b.w16(gadget + ndk::gg_Activation, 0);
+        }
         b.w32(previous + gg_NextGadget, gadget);
         if (!b.ok()) {
             native::set_result(m, 0);
@@ -563,7 +639,8 @@ struct GadToolsNatives {
         }
         if (kind != GENERIC_KIND && kind != BUTTON_KIND && kind != TEXT_KIND &&
             kind != NUMBER_KIND && kind != CYCLE_KIND && kind != PALETTE_KIND &&
-            kind != SCROLLER_KIND && kind != STRING_KIND && kind < kKinds &&
+            kind != SCROLLER_KIND && kind != STRING_KIND && kind != SLIDER_KIND &&
+            kind != LISTVIEW_KIND && kind < kKinds &&
             !g.unhandled_kinds_[kind]) {
             g.unhandled_kinds_[kind] = true;
             LogLine().text("gadtools: gadget kind ").dec(kind).text(" not handled").send();
@@ -585,7 +662,8 @@ struct GadToolsNatives {
         if (window != 0 && b.ok()) {
             const u32 kind = b.r16(gadget + gt_Kind);
             // Intuition draws a scroller's prop and a string's cursor.
-            if ((kind == SCROLLER_KIND || kind == STRING_KIND) && g.intuition_ != nullptr) {
+            if ((kind == SCROLLER_KIND || kind == SLIDER_KIND || kind == STRING_KIND) &&
+                g.intuition_ != nullptr) {
                 g.intuition_->refresh_glist(gadget, window, 1);
             } else {
                 g.render(window, b.r32(window + ndk::wd_RPort), gadget);
@@ -622,8 +700,18 @@ struct GadToolsNatives {
             } else if (tag == GTCY_Labels || tag == GTST_String) {
                 b.w32(data, b.r32(gadget + gt_Text));
                 ++answered;
-            } else if (tag == GTSC_Top) {
+            } else if (tag == GTSC_Top || tag == GTSL_Level || tag == GTLV_Selected) {
                 b.w32(data, b.r32(gadget + gt_Number));
+                ++answered;
+            } else if (tag == GTLV_Top || tag == GTSL_Max) {
+                b.w32(data, b.r32(gadget + gt_Total));
+                ++answered;
+            } else if (tag == GTLV_Labels) {
+                b.w32(data, b.r32(gadget + gt_Text));
+                ++answered;
+            } else if (tag == GTSL_Min) {
+                b.w32(data, static_cast<u32>(static_cast<i32>(static_cast<i16>(
+                                b.r16(gadget + gt_Min)))));
                 ++answered;
             } else if (tag == GTSC_Total) {
                 b.w32(data, b.r32(gadget + gt_Total));
@@ -1111,6 +1199,64 @@ u32 palette_pen(Bus& b, u32 gadget, i32 index) {
 
 }  // namespace
 
+namespace {
+
+// The nodes of the struct List at list, at most kMaxListNodes.
+u32 list_count(Bus& b, u32 list) {
+    u32 count = 0;
+    if (list == 0) {
+        return 0;
+    }
+    for (u32 node = b.r32(list); node != 0 && b.r32(node) != 0 && count < kMaxListNodes &&
+                                 b.ok();
+         node = b.r32(node)) {
+        ++count;
+    }
+    return count;
+}
+
+}
+
+// A list view: the names of its nodes a row each from its top ordinal on,
+// the selected one in the fill pens. TODO: the scroller beside the list.
+void GadTools::draw_list(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
+                         i32 bottom) {
+    Graphics& gfx = *graphics_;
+    const u32 list = b.r32(gadget + gt_Text);
+    const u32 first = b.r32(gadget + gt_Total);
+    const u32 selected = b.r32(gadget + gt_Number);
+    const i32 columns = (right - left - 6) / static_cast<i32>(kGlyphWidth);
+    if (list == 0 || columns <= 0) {
+        return;
+    }
+    u32 ordinal = 0;
+    i32 y = top + 2;
+    for (u32 node = b.r32(list); node != 0 && b.r32(node) != 0 && ordinal < kMaxListNodes &&
+                                 b.ok();
+         node = b.r32(node), ++ordinal) {
+        if (ordinal < first) {
+            continue;
+        }
+        if (y + static_cast<i32>(kListRowHeight) - 1 > bottom - 2) {
+            break;
+        }
+        const bool chosen = ordinal == selected;
+        if (chosen) {
+            gfx.set_pens(rp, kFillPen, 0, ndk::JAM1);
+            gfx.rect_fill(rp, left + 2, y, right - 2, y + static_cast<i32>(kListRowHeight) - 1);
+        }
+        char name[256];
+        const u32 length = read_label(b, b.r32(node + ndk::LN_NAME), 0, name, sizeof name);
+        const u32 shown = length < static_cast<u32>(columns) ? length : static_cast<u32>(columns);
+        if (shown > 0) {
+            gfx.set_pens(rp, chosen ? kFillTextPen : kTextPen, 0, ndk::JAM1);
+            gfx.move(rp, left + 4, y + static_cast<i32>(kGlyphBaseline));
+            gfx.text(rp, reinterpret_cast<const u8*>(name), shown);
+        }
+        y += static_cast<i32>(kListRowHeight);
+    }
+}
+
 void GadTools::draw_cycle(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                           i32 bottom, i32 baseline, bool selected) {
     Graphics& gfx = *graphics_;
@@ -1207,22 +1353,30 @@ u16 GadTools::prop_code(u32 gadget) {
         return 0;
     }
     Bus b(*machine_);
-    if (b.r16(gadget + gt_Kind) != SCROLLER_KIND) {
+    const u32 kind = b.r16(gadget + gt_Kind);
+    if (kind != SCROLLER_KIND && kind != SLIDER_KIND) {
         return 0;
     }
     const u32 pi = gadget + gt_PropInfo;
     const bool across = b.r16(gadget + gt_Freedom) == LORIENT_HORIZ;
-    const u64 total = b.r32(gadget + gt_Total);
-    const u64 visible = b.r16(gadget + gt_Visible);
+    u64 old_top = 0;
+    u64 total = 0;
+    u64 visible = 0;
+    GadToolsNatives::scroller_span(b, gadget, old_top, total, visible);
     const u64 pot = across ? b.r16(pi + ndk::pi_HorizPot) : b.r16(pi + ndk::pi_VertPot);
     const u64 range = total > visible ? total - visible : 0;
     const u32 top = static_cast<u32>((pot * range + ndk::MAXPOT / 2) / ndk::MAXPOT);
+    if (kind == SLIDER_KIND) {
+        // A slider's messages carry its level.
+        const i32 level = static_cast<i16>(b.r16(gadget + gt_Min)) + static_cast<i32>(top);
+        b.w32(gadget + gt_Number, static_cast<u32>(level));
+        return static_cast<u16>(level);
+    }
     b.w32(gadget + gt_Number, top);
     return static_cast<u16>(top);
 }
 
 bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
-    (void)window;
     if (machine_ == nullptr || gadget == 0) {
         return false;
     }
@@ -1253,6 +1407,21 @@ bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
         code = static_cast<u16>(color);
         return b.ok();
     }
+    if (kind == LISTVIEW_KIND) {
+        // The row under the pointer, counted from the list's top.
+        const i32 row = (y - 2) / static_cast<i32>(kListRowHeight);
+        const u32 count = list_count(b, b.r32(gadget + gt_Text));
+        const u32 ordinal = b.r32(gadget + gt_Total) + static_cast<u32>(row < 0 ? 0 : row);
+        if (row < 0 || ordinal >= count) {
+            return false;
+        }
+        b.w32(gadget + gt_Number, ordinal);
+        code = static_cast<u16>(ordinal);
+        if (window != 0) {
+            render(window, b.r32(window + ndk::wd_RPort), gadget);
+        }
+        return b.ok();
+    }
     return kind == BUTTON_KIND;
 }
 
@@ -1260,7 +1429,6 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     if (machine_ == nullptr || graphics_ == nullptr || rp == 0 || gadget == 0) {
         return true;
     }
-    (void)window;
     Bus b(*machine_);
     const i32 left = static_cast<i16>(b.r16(gadget + ndk::gg_LeftEdge));
     const i32 top = static_cast<i16>(b.r16(gadget + ndk::gg_TopEdge));
@@ -1285,10 +1453,17 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     const bool framed = kind == BUTTON_KIND || (options & kOptBorder) != 0 ||
                         (kind != TEXT_KIND && kind != NUMBER_KIND);
     const bool recessed = kind == TEXT_KIND || kind == NUMBER_KIND || kind == STRING_KIND ||
-                          kind == SCROLLER_KIND || selected;
-    // The inside first, then the frame around it.
+                          kind == SCROLLER_KIND || kind == SLIDER_KIND ||
+                          kind == LISTVIEW_KIND || selected;
+    // The inside first, then the frame around it. Intuition draws a
+    // scroller's or slider's box and knob, over which this would paint.
+    const bool prop = kind == SCROLLER_KIND || kind == SLIDER_KIND;
     gfx.set_pens(rp, selected ? kFillPen : 0, 0, ndk::JAM1);
-    if (framed && width > 2 && height > 2) {
+    if (prop) {
+        if (intuition_ != nullptr && window != 0) {
+            intuition_->refresh_glist(gadget, window, 1);
+        }
+    } else if (framed && width > 2 && height > 2) {
         gfx.rect_fill(rp, left + 1, top + 1, right - 1, bottom - 1);
         gfx.set_pens(rp, recessed ? kShadowPen : kShinePen, 0, ndk::JAM1);
         gfx.move(rp, left, bottom);
@@ -1326,6 +1501,8 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         draw_cycle(b, rp, gadget, left, top, right, bottom, baseline, selected);
     } else if (kind == PALETTE_KIND) {
         draw_palette(b, rp, gadget, left, top, right, bottom);
+    } else if (kind == LISTVIEW_KIND) {
+        draw_list(b, rp, gadget, left, top, right, bottom);
     }
     if (length != 0 && room > 0) {
         const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);

@@ -796,7 +796,73 @@ void strings_keep_a_buffer_and_scrollers_their_place() {
     CHECK_EQ(avail_mem(r), before);
 }
 
+// A slider is a prop gadget over its levels, and its messages carry the
+// level; a list view shows its nodes and picks the row clicked.
+void sliders_carry_levels_and_list_views_pick_rows() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    constexpr u32 kSliderKind = 11;
+    constexpr u32 kListViewKind = 4;
+    constexpr u32 GTSL_Min = 0x80080026;
+    constexpr u32 GTSL_Max = 0x80080027;
+    constexpr u32 GTSL_Level = 0x80080028;
+    constexpr u32 GTLV_Labels = 0x80080006;
+    constexpr u32 GTLV_Selected = 0x80080036;
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    put_new_gadget(r, 10, 10, 120, 10, 0, 1, 0, 0);
+    const u32 slider = create_gadget(
+        r, g, kSliderKind, context,
+        r.tags(kTags, {{GTSL_Min, 10}, {GTSL_Max, 19}, {GTSL_Level, 15}, {TAG_DONE, 0}}));
+    CHECK(slider != 0);
+    CHECK_EQ(r.get16(slider + gg_GadgetType), GTYP_GADTOOLS | GTYP_PROPGADGET);
+    const u32 pi = r.get32(slider + gg_SpecialInfo);
+    CHECK_EQ(r.get16(pi + pi_HorizBody), MAXBODY / 10);
+    CHECK_EQ(r.get16(pi + pi_HorizPot), 5u * MAXPOT / 9);
+    r.put16(pi + pi_HorizPot, MAXPOT);
+    CHECK_EQ(g.prop_code(slider), 19u);
+    r.put16(pi + pi_HorizPot, 0);
+    CHECK_EQ(g.prop_code(slider), 10u);
+    r.cpu().a[0] = slider;
+    r.cpu().a[3] = r.tags(kTags, {{GTSL_Level, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), 10u);
+
+    // struct List with three nodes.
+    constexpr u32 kHead = kData + 0x1000;
+    const u32 nodes[3] = {kData + 0x1040, kData + 0x1080, kData + 0x10C0};
+    const char* names[3] = {"One", "Two", "Three"};
+    r.put32(kHead, nodes[0]);
+    r.put32(kHead + 4, 0);
+    r.put32(kHead + 8, nodes[2]);
+    for (u32 i = 0; i < 3; ++i) {
+        r.put32(nodes[i], i + 1 < 3 ? nodes[i + 1] : kHead + 4);
+        r.put32(nodes[i] + 4, i > 0 ? nodes[i - 1] : kHead);
+        r.put32(nodes[i] + 10, r.str(nodes[i] + 0x20, names[i]));
+    }
+    put_new_gadget(r, 10, 30, 120, 40, 0, 2, 0, 0);
+    const u32 list = create_gadget(r, g, kListViewKind, slider,
+                                   r.tags(kTags, {{GTLV_Labels, kHead}, {TAG_DONE, 0}}));
+    CHECK(list != 0);
+    CHECK_EQ(r.get16(list + gg_Activation) & GACT_RELVERIFY, GACT_RELVERIFY);
+    u16 code = 0;
+    // Rows are 8 pixels high under a 2-pixel frame: y 11 is the second row.
+    CHECK(g.release(0, list, 20, 11, code));
+    CHECK_EQ(code, 1u);
+    CHECK(!g.release(0, list, 20, 30, code));
+    r.cpu().a[0] = list;
+    r.cpu().a[3] = r.tags(kTags, {{GTLV_Selected, kAnswer}, {TAG_DONE, 0}});
+    gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA);
+    CHECK_EQ(r.get32(kAnswer), 1u);
+    CHECK(!logged("gadtools: gadget kind 11 not handled"));
+    CHECK(!logged("gadtools: gadget kind 4 not handled"));
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+}
+
 int main() {
+    sliders_carry_levels_and_list_views_pick_rows();
     strings_keep_a_buffer_and_scrollers_their_place();
     cycles_step_through_their_labels_and_palettes_pick_colours();
     visual_info_holds_the_screen_and_is_freed();
