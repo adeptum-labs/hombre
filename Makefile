@@ -91,7 +91,8 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 # HOMBRE_FAULT_TEST. Each is built into its own directory.
 FAULT_TESTS := 1 2 3 4
 
-.PHONY: all image image-nokernel disk-image run check check-workbench test test-dms \
+.PHONY: all image image-nokernel disk-image run check check-workbench check-wbpattern test \
+        test-dms \
         test-m68k clean
 
 all: image
@@ -340,6 +341,25 @@ check-workbench: image
 else
 check-workbench:
 	@echo "set DISK=<path to a Workbench .dms or .adf>" >&2; exit 1
+endif
+
+# Runs WBPattern from the 3.1 Extras disk in DF1:, given as DISK1 beside the
+# Workbench disk in DISK: a preset and Use write its prefs, and the
+# Workbench that LoadWB starts after it reads them for its backdrop.
+ifneq ($(and $(strip $(DISK)),$(strip $(DISK1))),)
+check-wbpattern: image
+	tools/boot_check.sh --disk "$$DISK" --disk1 "$$DISK1" \
+	    --keys "e x t r a s 3 dot 1 shift-dot p r e f s shift-7 w b p a t t e r n ret l o a d w b ret" \
+	    --mouse-after "intuition: window WBPattern Preferences opened" \
+	    --mouse "mouse_move 50 -88;mouse_button 1;mouse_button 0;mouse_move -52 40;mouse_button 1;mouse_button 0" \
+	    "intuition: window WBPattern Preferences opened" \
+	    "m68k: extras3.1:prefs/wbpattern returned 0" \
+	    "workbench: backdrop patterns read"
+	bash tools/log_order.sh build/serial.log \
+	    "m68k: extras3.1:prefs/wbpattern returned 0" "workbench: backdrop patterns read"
+else
+check-wbpattern:
+	@echo "set DISK=<Workbench disk> and DISK1=<Extras disk>" >&2; exit 1
 endif
 
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
