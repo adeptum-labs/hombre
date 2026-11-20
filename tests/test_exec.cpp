@@ -1365,6 +1365,16 @@ void raw_do_fmt_hex_case_and_null_strings() {
     CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::Halt);
     CHECK(r.read_str(kData + 0x400) == "[][][ABCDEF][FF][BEEF][     ]");
     CHECK_EQ(r.cpu().d[0], data + 22);
+
+    // %lU and %D, which locale.library groups, come out as %lu and %d.
+    r.put32(data, 123456);
+    r.put16(data + 4, 0xFFFE);
+    r.cpu().a[0] = r.str(kData, "[%lU][%D]");
+    r.cpu().a[1] = data;
+    r.cpu().a[2] = 0;
+    r.cpu().a[3] = kData + 0x400;
+    CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::Halt);
+    CHECK(r.read_str(kData + 0x400) == "[123456][-2]");
 }
 
 // --- tasks and signals --------------------------------------------------

@@ -376,6 +376,10 @@ bool raw_format(Bus& b, u32 fmt, u32& data, Out& sink) {
         if (!b.ok()) {
             return false;
         }
+        // %D and %U, the numbers locale.library groups, come out plain.
+        if (c == 'D' || c == 'U') {
+            c += 'a' - 'A';
+        }
         bool ok = true;
         switch (c) {
         case 'd':
