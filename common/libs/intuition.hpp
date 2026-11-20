@@ -102,6 +102,16 @@ constexpr u32 OpenWindowTagList = 606;
 constexpr u32 OpenScreenTagList = 612;
 constexpr u32 EraseImage = 630;
 constexpr u32 ObtainGIRPort = 558;
+constexpr u32 IntuiTextLength = 330;
+constexpr u32 InitRequester = 138;
+constexpr u32 ActivateGadget = 462;
+constexpr u32 ClearPointer = 60;
+constexpr u32 SetPointer = 270;
+constexpr u32 SetWindowPointerA = 816;
+constexpr u32 Request = 240;
+constexpr u32 EndRequest = 120;
+constexpr u32 DrawBorder = 108;
+constexpr u32 PrintIText = 216;
 constexpr u32 ReleaseGIRPort = 564;
 constexpr u32 GadgetMouse = 570;
 constexpr u32 NewObjectA = 636;
@@ -519,6 +529,15 @@ private:
         u32 event = 0;
     };
     ActiveCustom custom_;
+    // The windows a Request() blocks, with its Requester, until EndRequest:
+    // a press in one reaches none of its gadgets.
+    struct Block {
+        u32 window = 0;
+        u32 requester = 0;
+    };
+    static constexpr u32 kMaxBlocks = 16;
+    Block blocks_[kMaxBlocks]{};
+    bool blocked(u32 window) const;
     bool bar_button_lit_ = false;  // the held Close or Depth button shows pressed
     u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
     GadgetRenderer gadget_renderer_ = nullptr;

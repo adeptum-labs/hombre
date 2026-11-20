@@ -6280,7 +6280,81 @@ void a_boopsi_gadget_draws_itself_and_takes_the_click() {
     CHECK(bo.free_class(cl));
 }
 
+void intuitext_borders_and_blocking_requests() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    // IntuiTextLength: 8 pixels a character of topaz.
+    const u32 it = kBuffer;
+    r.str(kTitle, "Hello");
+    r.put32(it + 12, kTitle);
+    r.put32(it + 16, 0);
+    r.cpu().a[0] = it;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::IntuiTextLength), 40u);
+
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    put_gadget(r, gad, 0, 20, 20, 40, 14, GFLG_GADGHCOMP, GACT_RELVERIFY, GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 rp = r.get32(window + wd_RPort);
+
+    // DrawBorder: a line of pen 1 through two points.
+    const u32 border = kBuffer + 0x40;
+    const u32 points = kBuffer + 0x60;
+    r.put16(points, 10);
+    r.put16(points + 2, 60);
+    r.put16(points + 4, 20);
+    r.put16(points + 6, 60);
+    r.put16(border, 0);
+    r.put16(border + 2, 0);
+    r.put8(border + 4, 1);
+    r.put8(border + 5, 0);
+    r.put8(border + 6, JAM1);
+    r.put8(border + 7, 2);
+    r.put32(border + 8, points);
+    r.put32(border + 12, 0);
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = border;
+    r.cpu().d[0] = 2;
+    r.cpu().d[1] = 3;
+    r.call(Base::Intuition, intuition_lvo::DrawBorder);
+    CHECK_EQ(window_pixel(r, window, 12, 63), 1u);
+    CHECK_EQ(window_pixel(r, window, 22, 63), 1u);
+    CHECK_EQ(window_pixel(r, window, 23, 63), 0u);
+
+    // InitRequester clears it; Request blocks the window's gadgets until
+    // EndRequest.
+    const u32 req = kBuffer + 0x100;
+    for (u32 i = 0; i < 112; ++i) {
+        r.put8(req + i, 0xAA);
+    }
+    r.cpu().a[0] = req;
+    r.call(Base::Intuition, intuition_lvo::InitRequester);
+    CHECK_EQ(r.get32(req), 0u);
+    CHECK_EQ(r.get32(req + 108), 0u);
+    r.cpu().a[0] = req;
+    r.cpu().a[1] = window;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::Request), 1u);
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+    r.cpu().a[0] = req;
+    r.cpu().a[1] = window;
+    r.call(Base::Intuition, intuition_lvo::EndRequest);
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    reply_msg(r, msg);
+}
+
 int main() {
+    intuitext_borders_and_blocking_requests();
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();
     a_boopsi_gadget_draws_itself_and_takes_the_click();

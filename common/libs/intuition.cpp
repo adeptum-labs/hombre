@@ -1125,6 +1125,157 @@ struct IntuitionNatives {
         of(ctx).on_gadget(m.cpu.a[0], m.cpu.a[1]);
     }
 
+    // struct IntuiText: its pens, draw mode, place, font, text and the next
+    // one of the chain. Text is in the topaz font, 8 pixels to a character.
+    static constexpr u32 kItFrontPen = 0;
+    static constexpr u32 kItBackPen = 1;
+    static constexpr u32 kItDrawMode = 2;
+    static constexpr u32 kItLeftEdge = 4;
+    static constexpr u32 kItTopEdge = 6;
+    static constexpr u32 kItNextText = 16;
+    static constexpr u32 kItChain = 64;
+    static constexpr u32 kItMaxChars = 255;
+
+    static u32 itext_chars(Bus& b, u32 text) {
+        u32 n = 0;
+        while (text != 0 && n < kItMaxChars && b.r8(text + n) != 0 && b.ok()) {
+            ++n;
+        }
+        return n;
+    }
+
+    // IntuiTextLength: the width in pixels of the IntuiText at A0.
+    static void intui_text_length(void*, Machine& m) {
+        Bus b(m);
+        const u32 it = m.cpu.a[0];
+        const u32 chars = it != 0 ? itext_chars(b, b.r32(it + kItText)) : 0;
+        if (b.ok()) {
+            native::set_result(m, chars * 8);
+        }
+    }
+
+    // PrintIText(rp A0, itext A1, left D0, top D1): each IntuiText of the
+    // chain at its place from left, top, the top of its text at that line.
+    static void print_itext(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        Bus b(m);
+        const u32 rp = m.cpu.a[0];
+        const i32 left = static_cast<i16>(m.cpu.d[0] & 0xFFFF);
+        const i32 top = static_cast<i16>(m.cpu.d[1] & 0xFFFF);
+        u32 it = m.cpu.a[1];
+        for (u32 step = 0; rp != 0 && it != 0 && step < kItChain; ++step) {
+            const u32 text = b.r32(it + kItText);
+            const u32 chars = itext_chars(b, text);
+            const i32 x = left + static_cast<i16>(b.r16(it + kItLeftEdge));
+            const i32 y = top + static_cast<i16>(b.r16(it + kItTopEdge));
+            const u32 front = b.r8(it + kItFrontPen);
+            const u32 back = b.r8(it + kItBackPen);
+            const u32 mode = b.r8(it + kItDrawMode);
+            const u32 next = b.r32(it + kItNextText);
+            if (!b.ok()) {
+                return;
+            }
+            if (chars != 0) {
+                u8 buffer[kItMaxChars];
+                for (u32 i = 0; i < chars; ++i) {
+                    buffer[i] = static_cast<u8>(b.r8(text + i));
+                }
+                in.graphics_->set_pens(rp, front, back, mode);
+                in.graphics_->move(rp, x, y + 6);
+                in.graphics_->text(rp, buffer, chars);
+            }
+            it = next;
+        }
+    }
+
+    // Request(requester A0, window A1): the window takes no clicks on its
+    // gadgets until EndRequest. The requester itself is not drawn.
+    static void request(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        const u32 window = m.cpu.a[1];
+        if (window == 0 || !in.window_open(window)) {
+            native::set_result(m, 0);
+            return;
+        }
+        for (Intuition::Block& block : in.blocks_) {
+            if (block.window == 0) {
+                block = Intuition::Block{window, m.cpu.a[0]};
+                native::set_result(m, 1);
+                return;
+            }
+        }
+        native::set_result(m, 0);
+    }
+
+    static void end_request(void* ctx, Machine& m) {
+        for (Intuition::Block& block : of(ctx).blocks_) {
+            if (block.requester == m.cpu.a[0] && block.window == m.cpu.a[1]) {
+                block = Intuition::Block{};
+                return;
+            }
+        }
+    }
+
+    // SetPointer, ClearPointer and SetWindowPointerA: a window's own
+    // pointer, a busy one included, is not shown; the screen's stays.
+    static void keep_pointer(void*, Machine&) {}
+
+    // ActivateGadget: string gadgets take no typing yet, so none becomes
+    // active; TRUE so the program carries on.
+    // TODO: activate string gadgets once they can be edited.
+    static void activate_gadget(void*, Machine& m) { native::set_result(m, 1); }
+
+    // InitRequester: clears the struct Requester at A0.
+    static void init_requester(void*, Machine& m) {
+        Bus b(m);
+        constexpr u32 kRequesterBytes = 112;
+        for (u32 i = 0; m.cpu.a[0] != 0 && i < kRequesterBytes && b.ok(); ++i) {
+            b.w8(m.cpu.a[0] + i, 0);
+        }
+    }
+
+    // DrawBorder(rp A0, border A1, left D0, top D1): each Border of the
+    // chain as lines through its points from left, top.
+    static void draw_border(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        Bus b(m);
+        const u32 rp = m.cpu.a[0];
+        const i32 left = static_cast<i16>(m.cpu.d[0] & 0xFFFF);
+        const i32 top = static_cast<i16>(m.cpu.d[1] & 0xFFFF);
+        u32 border = m.cpu.a[1];
+        for (u32 step = 0; rp != 0 && border != 0 && step < kItChain; ++step) {
+            const i32 x = left + static_cast<i16>(b.r16(border));
+            const i32 y = top + static_cast<i16>(b.r16(border + 2));
+            const u32 front = b.r8(border + 4);
+            const u32 back = b.r8(border + 5);
+            const u32 mode = b.r8(border + 6);
+            const u32 count = b.r8(border + 7);
+            const u32 points = b.r32(border + 8);
+            const u32 next = b.r32(border + 12);
+            if (!b.ok()) {
+                return;
+            }
+            in.graphics_->set_pens(rp, front, back, mode);
+            for (u32 i = 0; i < count && points != 0; ++i) {
+                const i32 px = x + static_cast<i16>(b.r16(points + i * 4));
+                const i32 py = y + static_cast<i16>(b.r16(points + i * 4 + 2));
+                if (!b.ok()) {
+                    return;
+                }
+                if (i == 0) {
+                    in.graphics_->move(rp, px, py);
+                    // A single point is drawn as one.
+                    if (count == 1) {
+                        in.graphics_->draw_line(rp, px, py);
+                    }
+                } else {
+                    in.graphics_->draw_line(rp, px, py);
+                }
+            }
+            border = next;
+        }
+    }
+
     // BOOPSI. A GadgetInfo goes with a method sent to a gadget of a window.
     static void new_object(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).boopsi_.new_object(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2]));
@@ -1271,6 +1422,16 @@ struct IntuitionFunction {
 };
 
 constexpr IntuitionFunction kIntuitionFunctions[] = {
+    {intuition_lvo::IntuiTextLength, IntuitionNatives::intui_text_length, "IntuiTextLength"},
+    {intuition_lvo::InitRequester, IntuitionNatives::init_requester, "InitRequester"},
+    {intuition_lvo::ActivateGadget, IntuitionNatives::activate_gadget, "ActivateGadget"},
+    {intuition_lvo::ClearPointer, IntuitionNatives::keep_pointer, "ClearPointer"},
+    {intuition_lvo::SetPointer, IntuitionNatives::keep_pointer, "SetPointer"},
+    {intuition_lvo::SetWindowPointerA, IntuitionNatives::keep_pointer, "SetWindowPointerA"},
+    {intuition_lvo::Request, IntuitionNatives::request, "Request"},
+    {intuition_lvo::EndRequest, IntuitionNatives::end_request, "EndRequest"},
+    {intuition_lvo::DrawBorder, IntuitionNatives::draw_border, "DrawBorder"},
+    {intuition_lvo::PrintIText, IntuitionNatives::print_itext, "PrintIText"},
     {intuition_lvo::NewObjectA, IntuitionNatives::new_object, "NewObjectA"},
     {intuition_lvo::DisposeObject, IntuitionNatives::dispose_object, "DisposeObject"},
     {intuition_lvo::SetAttrsA, IntuitionNatives::set_attrs, "SetAttrsA"},
@@ -2795,6 +2956,11 @@ void Intuition::close_window(u32 window) {
     if (custom_.window == window) {
         drop_custom_gadget();
     }
+    for (Block& block : blocks_) {
+        if (block.window == window) {
+            block = Block{};
+        }
+    }
     if (menu_.active && menu_.window == window) {
         leave_menu_mode();
     }
@@ -3847,6 +4013,8 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     pressed_gadget_ = GadgetKind::Depth;
                     light_bar_button(true);
                     left_press_consumed = true;
+                } else if (!dragging && blocked(hit)) {
+                    left_press_consumed = true;
                 } else if (!dragging && hit_custom_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
                 } else if (!dragging && hit_bool_gadget(b, hit, x, y)) {
@@ -4779,6 +4947,15 @@ void Intuition::custom_result(Bus& b, u32 result) {
     const u32 msg[] = {ndk::GM_GOINACTIVE, c.info, 0};
     boopsi_.send(boopsi_.class_of(c.gadget), c.gadget, msg, 3);
     drop_custom_gadget();
+}
+
+bool Intuition::blocked(u32 window) const {
+    for (const Block& block : blocks_) {
+        if (window != 0 && block.window == window) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Intuition::drop_custom_gadget() {
