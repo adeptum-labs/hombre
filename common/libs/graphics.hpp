@@ -179,9 +179,11 @@ private:
     NativeVector vectors_[kVectors]{};
     // Who holds each pen of the screen's colour map, for ObtainPen and
     // ReleasePen: how many share it, and whether one holds it alone. The
-    // first kSystemPens are the system's and stay shared.
+    // first kSystemPens, and the grey ramp and window chrome from
+    // kHighSystemPen up, are the system's and stay shared.
     static constexpr u32 kPens = 256;
     static constexpr u32 kSystemPens = 8;
+    static constexpr u32 kHighSystemPen = 224;
     u16 pen_users_[kPens]{};
     bool pen_exclusive_[kPens]{};
     bool pens_ready_ = false;

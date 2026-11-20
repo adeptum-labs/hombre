@@ -1137,6 +1137,55 @@ void area_ellipse_fills_symmetrically_about_the_centre() {
     CHECK_EQ(read_pixel(r, s.rp, 130, 120), 0u);
 }
 
+// Two ellipses in one AreaEnd fill by the even-odd rule: a ring.
+void area_ellipses_fill_together_as_a_ring() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    init_area(r, s.rp, kAreaMax);
+
+    CHECK_EQ(area_ellipse(r, s.rp, 100, 100, 40, 40), 0u);
+    CHECK_EQ(area_ellipse(r, s.rp, 100, 100, 20, 20), 0u);
+    area_end(r, s.rp);
+
+    CHECK_EQ(read_pixel(r, s.rp, 100, 100), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 130, 100), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 100, 70), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 145, 100), 0u);
+}
+
+// ObtainPen hands out free pens, exclusively when asked, and sets their
+// colour; the system's pens are never free.
+void obtain_pen_shares_and_reserves_pens() {
+    GfxRig r;
+    const u32 color_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 low_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+    r.put16(kColorMap + cm_Count, 256);
+    r.put32(kColorMap + cm_ColorTable, color_table);
+    r.put32(kColorMap + cm_LowColorBits, low_table);
+    const auto obtain = [&](u32 n, u32 flags) {
+        r.cpu().a[0] = kColorMap;
+        r.cpu().d[0] = n;
+        r.cpu().d[1] = 0xFFFFFFFF;
+        r.cpu().d[2] = 0;
+        r.cpu().d[3] = 0;
+        r.cpu().d[4] = flags;
+        return r.result(Base::Graphics, graphics_lvo::ObtainPen);
+    };
+    constexpr u32 kExclusive = 1;
+    const u32 pen = obtain(0xFFFFFFFF, kExclusive);
+    CHECK(pen >= 8 && pen < 224);
+    CHECK_EQ(r.get16(color_table + pen * 2), 0x0F00u);
+    CHECK_EQ(obtain(pen, 0), 0xFFFFFFFFu);
+    CHECK_EQ(obtain(1, kExclusive), 0xFFFFFFFFu);
+    CHECK_EQ(obtain(1, 0), 1u);
+    CHECK_EQ(obtain(250, kExclusive), 0xFFFFFFFFu);
+    r.cpu().a[0] = kColorMap;
+    r.cpu().d[0] = pen;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::ReleasePen), ExitReason::Halt);
+    CHECK_EQ(obtain(pen, kExclusive), pen);
+}
+
 void area_outline_uses_the_outline_pen() {
     GfxRig r;
     const Surface s = make_surface(r, kBitmap, kRastPort);
@@ -1864,6 +1913,8 @@ int main() {
     area_fill_of_a_shape_without_width_draws_its_whole_line();
     area_draw_past_max_count_returns_minus_one();
     area_ellipse_fills_symmetrically_about_the_centre();
+    area_ellipses_fill_together_as_a_ring();
+    obtain_pen_shares_and_reserves_pens();
     area_outline_uses_the_outline_pen();
     draw_ellipse_outline_has_no_gaps_and_leaves_the_inside_clear();
     init_tmp_ras_records_the_buffer_and_wait_blit_is_a_no_op();

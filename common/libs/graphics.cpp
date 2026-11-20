@@ -325,6 +325,68 @@ void ellipse_rows(i32 cx, i32 cy, i32 a, i32 rb, Visit visit) {
     }
 }
 
+// The ellipses one AreaEnd fills together.
+struct AreaEllipseShape {
+    i32 cx, cy, a, b;
+};
+constexpr u32 kMaxAreaEllipses = 64;
+
+// Fills the ellipses together by the even-odd rule, as one area: an
+// ellipse inside another leaves a hole, so two make a ring.
+void fill_ellipses(Bus& b, const View& v, const AreaEllipseShape* shapes, u32 count, u32 pen,
+                   Rect& dirty) {
+    if (count == 0) {
+        return;
+    }
+    i32 top = shapes[0].cy - shapes[0].b;
+    i32 bottom = shapes[0].cy + shapes[0].b;
+    for (u32 i = 1; i < count; ++i) {
+        top = shapes[i].cy - shapes[i].b < top ? shapes[i].cy - shapes[i].b : top;
+        bottom = shapes[i].cy + shapes[i].b > bottom ? shapes[i].cy + shapes[i].b : bottom;
+    }
+    top = top < v.clip.y0 ? v.clip.y0 : top;
+    bottom = bottom > v.clip.y1 ? v.clip.y1 : bottom;
+    for (i32 y = top; y <= bottom; ++y) {
+        // Each ellipse the row crosses gives where its span starts and
+        // where the pixel after it is; filling between alternate ones is
+        // the even-odd rule.
+        i32 edges[kMaxAreaEllipses * 2];
+        u32 n = 0;
+        for (u32 i = 0; i < count; ++i) {
+            const AreaEllipseShape& e = shapes[i];
+            const i32 dy = y - e.cy;
+            if (dy < -e.b || dy > e.b) {
+                continue;
+            }
+            i32 x = e.a;
+            if (e.b != 0) {
+                const i64 a2 = static_cast<i64>(e.a) * e.a;
+                const i64 b2 = static_cast<i64>(e.b) * e.b;
+                const i64 rest = a2 * (b2 - static_cast<i64>(dy) * dy);
+                i64 w = 0;
+                while ((w + 1) * (w + 1) * b2 <= rest) {
+                    ++w;
+                }
+                x = static_cast<i32>(w);
+            }
+            edges[n++] = e.cx - x;
+            edges[n++] = e.cx + x + 1;
+        }
+        for (u32 i = 1; i < n; ++i) {
+            const i32 key = edges[i];
+            u32 k = i;
+            while (k > 0 && edges[k - 1] > key) {
+                edges[k] = edges[k - 1];
+                --k;
+            }
+            edges[k] = key;
+        }
+        for (u32 i = 0; i + 1 < n; i += 2) {
+            fill_span(b, v, y, edges[i], edges[i + 1] - 1, pen, dirty);
+        }
+    }
+}
+
 void outline_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n, u32 pen,
                      Rect& dirty) {
     for (u32 i = 0; i + 1 < n || (n > 2 && i < n); ++i) {
@@ -985,6 +1047,8 @@ struct GraphicsNatives {
         i32 xs[kMaxPolygon];
         i32 ys[kMaxPolygon];
         u32 n = 0;
+        AreaEllipseShape ellipses[kMaxAreaEllipses];
+        u32 ellipse_count = 0;
         auto flush = [&]() {
             if (n > 0 && v.ok) {
                 fill_polygon(b, v, xs, ys, n, pen, dirty);
@@ -1002,16 +1066,8 @@ struct GraphicsNatives {
                 flush();
                 const i32 ra = static_cast<i16>(b.r16(table + (i + 1) * 4));
                 const i32 rb = static_cast<i16>(b.r16(table + (i + 1) * 4 + 2));
-                if (v.ok) {
-                    ellipse_rows(x, y, ra, rb, [&](i32 row, i32 x0, i32 x1) {
-                        fill_span(b, v, row, x0, x1, pen, dirty);
-                    });
-                    if (outlined) {
-                        ellipse_rows(x, y, ra, rb, [&](i32 row, i32 x0, i32 x1) {
-                            fill_span(b, v, row, x0, x0, outline, dirty);
-                            fill_span(b, v, row, x1, x1, outline, dirty);
-                        });
-                    }
+                if (ellipse_count < kMaxAreaEllipses && ra >= 0 && rb >= 0) {
+                    ellipses[ellipse_count++] = AreaEllipseShape{x, y, ra, rb};
                 }
                 ++i;
                 continue;
@@ -1026,6 +1082,16 @@ struct GraphicsNatives {
             }
         }
         flush();
+        if (v.ok) {
+            fill_ellipses(b, v, ellipses, ellipse_count, pen, dirty);
+            for (u32 e = 0; outlined && e < ellipse_count; ++e) {
+                const AreaEllipseShape& s = ellipses[e];
+                ellipse_rows(s.cx, s.cy, s.a, s.b, [&](i32 row, i32 x0, i32 x1) {
+                    fill_span(b, v, row, x0, x0, outline, dirty);
+                    fill_span(b, v, row, x1, x1, outline, dirty);
+                });
+            }
+        }
         b.w16(ai + ai_Count, 0);
         b.w32(ai + ai_VctrPtr, table);
         b.w32(ai + ai_FlagPtr, flags);
@@ -1632,7 +1698,8 @@ struct GraphicsNatives {
             return;
         }
         for (u32 i = 0; i < Graphics::kPens; ++i) {
-            g.pen_users_[i] = i < Graphics::kSystemPens ? 1 : 0;
+            g.pen_users_[i] =
+                i < Graphics::kSystemPens || i >= Graphics::kHighSystemPen ? 1 : 0;
             g.pen_exclusive_[i] = false;
         }
         g.pens_ready_ = true;
@@ -1684,7 +1751,8 @@ struct GraphicsNatives {
         i32 pen = -1;
         const u32 wanted = m.cpu.d[0];
         if (wanted == 0xFFFFFFFF) {
-            for (u32 i = count; i-- > Graphics::kSystemPens;) {
+            for (u32 i = count < Graphics::kHighSystemPen ? count : Graphics::kHighSystemPen;
+                 i-- > Graphics::kSystemPens;) {
                 if (g.pen_users_[i] == 0) {
                     pen = static_cast<i32>(i);
                     break;
@@ -1740,7 +1808,8 @@ struct GraphicsNatives {
         const bool exact = pen >= 0 && g.color_of(map, static_cast<u32>(pen), pr, pg, pb) &&
                            pr == (r >> 24) && pg == (gr >> 24) && pb == (bl >> 24);
         if (!exact) {
-            for (u32 i = count; i-- > Graphics::kSystemPens;) {
+            for (u32 i = count < Graphics::kHighSystemPen ? count : Graphics::kHighSystemPen;
+                 i-- > Graphics::kSystemPens;) {
                 if (g.pen_users_[i] == 0) {
                     if (write_rgb32_entry(b, t, i, r, gr, bl)) {
                         bump_palette(g.display_);
