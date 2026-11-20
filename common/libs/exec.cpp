@@ -3856,11 +3856,14 @@ void Exec::task_main(u32 id) {
         read_task_name(*m_, task_, name);
         LogLine().text("exec: task ").text(name).text(" ended with ")
             .text(m68k::exit_reason_name(why)).send();
-        // A task that crashed cannot answer the task that started it, which
-        // may wait for it for good: Ctrl+C tells that one to give up.
+        // A task that crashed cannot answer the boot task's command that
+        // started it, which may wait for it for good: Ctrl+C, which ends the
+        // boot task's Wait, tells that command to give up. Other tasks, the
+        // Workbench's among them, see crashed children for themselves.
         const bool crashed = why != ExitReason::None && why != ExitReason::Halt &&
                              why != ExitReason::Returned && why != ExitReason::Break;
-        if (crashed && tasks_[id].parent != 0 && tasks_[id].parent != task_) {
+        const u32 boot_task = tasks_[0].task_addr;
+        if (crashed && boot_task != 0 && tasks_[id].parent == boot_task) {
             signal_task(tasks_[id].parent, SIGBREAKF_CTRL_C);
         }
     }
