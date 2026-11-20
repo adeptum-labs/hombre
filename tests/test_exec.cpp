@@ -643,6 +643,34 @@ constexpr u32 kNodeC = kData + 0x140;
 constexpr u32 kNodeD = kData + 0x160;
 constexpr u32 kNames = kData + 0x400;
 
+void resources_are_added_found_and_removed() {
+    Rig r;
+    r.node(kNodeA, 0, kNames, "misc.resource");
+    r.node(kNodeB, 10, kNames + 0x20, "potgo.resource");
+    for (u32 n : {kNodeA, kNodeB}) {
+        r.cpu().a[1] = n;
+        CHECK_EQ(r.exec(exec_lvo::AddResource), ExitReason::Halt);
+    }
+    CHECK(r.walk(r.base() + ResourceList) == (std::vector<u32>{kNodeB, kNodeA}));
+
+    r.str(kNames + 0x200, "misc.resource");
+    r.cpu().a[1] = kNames + 0x200;
+    CHECK_EQ(r.exec(exec_lvo::OpenResource), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], kNodeA);
+    r.str(kNames + 0x200, "battclock.resource");
+    r.cpu().a[1] = kNames + 0x200;
+    CHECK_EQ(r.exec(exec_lvo::OpenResource), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[1] = kNodeA;
+    CHECK_EQ(r.exec(exec_lvo::RemResource), ExitReason::Halt);
+    r.str(kNames + 0x200, "misc.resource");
+    r.cpu().a[1] = kNames + 0x200;
+    CHECK_EQ(r.exec(exec_lvo::OpenResource), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK(r.walk(r.base() + ResourceList) == (std::vector<u32>{kNodeB}));
+}
+
 void lists_through_vectors() {
     Rig r;
     r.new_list(kList);
@@ -4164,6 +4192,7 @@ int main() {
     corrupt_free_list_fails_safely();
     memory_functions_through_vectors();
     lists_through_vectors();
+    resources_are_added_found_and_removed();
     list_functions_on_bad_pointers();
     open_exec_library();
     unknown_library_without_loader();

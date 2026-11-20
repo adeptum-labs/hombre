@@ -473,6 +473,31 @@ struct ExecOps {
         remove(b, m.cpu.a[1]);
     }
 
+    // --- resources -------------------------------------------------------
+
+    // AddResource: the node at A1 goes on ResourceList by its priority.
+    static void add_resource_lvo(void* ctx, Machine& m) {
+        Bus b(m);
+        enqueue(b, of(ctx).base_ + ResourceList, m.cpu.a[1]);
+    }
+
+    // RemResource: takes the node at A1 off ResourceList.
+    static void rem_resource_lvo(void*, Machine& m) {
+        Bus b(m);
+        remove(b, m.cpu.a[1]);
+    }
+
+    // OpenResource: the resource named at A1 on ResourceList, or 0.
+    static void open_resource_lvo(void* ctx, Machine& m) {
+        Bus b(m);
+        const u32 name = m.cpu.a[1];
+        const u32 found =
+            name == 0 ? 0
+                      : find_node(b, of(ctx).base_ + ResourceList,
+                                  [&](u32 n) { return b.equals(n, name); });
+        native::set_result(m, found);
+    }
+
     static void rem_head_node(void*, Machine& m) {
         Bus b(m);
         native::set_result(m, rem_head(b, m.cpu.a[0]));
@@ -2629,6 +2654,9 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::CheckIO, ExecOps::check_io_lvo, "CheckIO"},
     {exec_lvo::WaitIO, ExecOps::wait_io_lvo, "WaitIO"},
     {exec_lvo::AbortIO, ExecOps::abort_io_lvo, "AbortIO"},
+    {exec_lvo::AddResource, ExecOps::add_resource_lvo, "AddResource"},
+    {exec_lvo::RemResource, ExecOps::rem_resource_lvo, "RemResource"},
+    {exec_lvo::OpenResource, ExecOps::open_resource_lvo, "OpenResource"},
     {exec_lvo::RawDoFmt, ExecOps::raw_do_fmt, "RawDoFmt"},
     {exec_lvo::OpenLibrary, ExecOps::open_library_lvo, "OpenLibrary"},
     {exec_lvo::InitSemaphore, ExecOps::init_semaphore_lvo, "InitSemaphore"},
