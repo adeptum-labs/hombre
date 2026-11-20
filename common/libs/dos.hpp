@@ -193,6 +193,8 @@ constexpr u32 FreeArgs = 858;
 constexpr u32 FilePart = 870;
 constexpr u32 PathPart = 876;
 constexpr u32 AddPart = 882;
+constexpr u32 StartNotify = 888;
+constexpr u32 EndNotify = 894;
 constexpr u32 SetVar = 900;
 constexpr u32 GetVar = 906;
 constexpr u32 DeleteVar = 912;
@@ -688,7 +690,7 @@ public:
     static constexpr u32 kMaxPath = 256;    // bytes of a resolved path, NUL included
     static constexpr u32 kMaxFiles = 16;    // files and console streams a program opens
     static constexpr u32 kMaxLocks = 128;
-    static constexpr u32 kMaxPathDirs = 8;  // directories in the CLI command search path
+    static constexpr u32 kMaxPathDirs = 16;  // directories in the CLI command search path
     static constexpr u32 kMaxAssigns = 32;
     static constexpr u32 kMaxAssignDirs = 4;
     static constexpr u32 kMaxAssignLocks = 64;

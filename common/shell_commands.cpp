@@ -157,7 +157,7 @@ bool is_builtin_word(const char* word) {
     constexpr const char* kNames[] = {"CD",       "ECHO",   "PATH",   "WHY",   "PROMPT",
                                       "ASK",      "FAILAT", "SET",    "GET",   "UNSET",
                                       "SETENV",   "GETENV", "UNSETENV", "RUN", "NEWSHELL",
-                                      "ENDCLI"};
+                                      "ENDCLI",   "RESIDENT"};
     for (const char* name : kNames) {
         if (eq_nocase(word, name)) {
             return true;
@@ -215,6 +215,10 @@ bool ShellCommands::run(const char* word, const char* args) {
     }
     if (eq_nocase(word, "ENDCLI")) {
         cmd_endcli();
+        return true;
+    }
+    if (eq_nocase(word, "RESIDENT")) {
+        cmd_resident();
         return true;
     }
     if (eq_nocase(word, "CD")) {
@@ -401,6 +405,9 @@ void ShellCommands::cmd_path(const char* args) {
         dos_->set_return_code(0);
         return;
     }
+    // A directory that is not there is reported, and the others still go
+    // into the path.
+    bool failed = false;
     const char* p = args;
     while (next_token(p, tok, sizeof tok)) {
         if (eq_nocase(tok, "SHOW") || eq_nocase(tok, "ADD") || eq_nocase(tok, "QUIET") ||
@@ -417,7 +424,7 @@ void ShellCommands::cmd_path(const char* args) {
             has_remove ? dos_->path_remove(tok, err) : dos_->path_add(tok, err);
         if (!done) {
             dos_->set_last_error(err);
-            dos_->set_return_code(10);
+            failed = true;
             if (!quiet) {
                 char msg[kLineBuf];
                 u32 pos = append_str(msg, sizeof msg, 0, tok);
@@ -425,14 +432,13 @@ void ShellCommands::cmd_path(const char* args) {
                 msg[pos] = '\0';
                 emit(msg);
             }
-            return;
         }
     }
 
     if (show) {
         show_path();
     }
-    dos_->set_return_code(0);
+    dos_->set_return_code(failed ? 10 : 0);
 }
 
 void ShellCommands::cmd_why() {
@@ -602,15 +608,18 @@ void ShellCommands::cmd_newshell() {
     dos_->set_return_code(20);
 }
 
+// Ends the shell; the boot shell too, as the Startup-Sequence ends it.
 void ShellCommands::cmd_endcli() {
     if (process_ == 0 || process_ == dos_->process()) {
-        emit_line("EndCLI: the boot shell cannot end");
-        dos_->set_return_code(10);
-        return;
+        emit_line("Process 1 ending");
     }
     ended_ = true;
     dos_->set_return_code(0);
 }
+
+// Resident: there is no list of resident commands yet, so PURE, REMOVE and
+// the rest are accepted and change nothing. TODO: keep resident commands.
+void ShellCommands::cmd_resident() { dos_->set_return_code(0); }
 
 void ShellCommands::cmd_set_var(const char* args, bool global) {
     const char* p = args;

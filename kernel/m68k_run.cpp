@@ -904,6 +904,8 @@ bool open_redirections(Console& c, u32& input, u32& output, bool& own_output) {
     input = 0;
     output = 0;
     own_output = false;
+    // How the last command ended must not stop dos opening the files.
+    machine.cpu.exit = ExitReason::None;
     if (c.redirect_in[0] != '\0') {
         input = dos.open_redirection(c.redirect_in, false, false);
         if (input == 0) {
@@ -1173,13 +1175,15 @@ u32 run_script_file(Console& c, const char* args) {
         shell_print(&c.typed, "\n");
         return 20;
     }
+    // A Ctrl+D typed before the script starts stops it too, so one held
+    // through the boot skips the Startup-Sequence.
     ++script_depth;
-    if (script_depth == 1) {
-        c.break_script = false;
-    }
     ScriptRunner runner(script_host(c));
     const u32 rc = runner.run(reinterpret_cast<const char*>(text), got);
     --script_depth;
+    if (script_depth == 0) {
+        c.break_script = false;
+    }
     return rc;
 }
 
@@ -1265,6 +1269,22 @@ bool open_new_shell(void* ctx) {
     return true;
 }
 
+// EndCLI in the boot shell: its window closes and the other windows, the
+// Workbench's among them, go on running. Keys reach the console of the
+// active window; with no keyboard there is nothing more to run.
+void end_boot_shell(Console& boot) {
+    boot.shell.close();
+    boot.open = false;
+    log_line("shell: boot shell ended");
+    while (usb_keyboard_status() == UsbStatus::Ready) {
+        intuition.flush_palette();
+        poll_mouse();
+        poll_keys();
+        key_queue_clear(boot);
+        wait_for_work(boot);
+    }
+}
+
 // Reads the keyboard for good: keys go to the line editor, Enter runs the
 // line. Console 0 never returns; another console returns when its shell
 // ends and leaves its console free for a new shell.
@@ -1304,6 +1324,9 @@ void shell_loop(Console& c) {
         wait_for_work(c);
     }
     c.line_mode = false;
+    if (c.index == 0 && c.commands.ended()) {
+        end_boot_shell(c);
+    }
     if (c.index == 0) {
         c.shell.print_line(usb_keyboard_result().message);
         for (;;) {
@@ -1325,6 +1348,7 @@ void shell_task(void* arg) { shell_loop(*static_cast<Console*>(arg)); }
 }
 
 constexpr char kAddDataTypes[] = "C:AddDataTypes";
+constexpr char kStartupSequence[] = "S:Startup-Sequence";
 
 void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& drives,
                       const char* path, const char* args) {
@@ -1344,11 +1368,38 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& 
             amiga_screen = 0;
         }
     }
-    execute(boot, path, args);
-    // The datatypes on the boot disk, as its Startup-Sequence adds them:
-    // datatypes.library opens only once they are listed.
-    if (dos.examine(kAddDataTypes).kind == Dos::TargetKind::File) {
-        execute(boot, kAddDataTypes, "REFRESH QUIET");
+    init_console_shell(boot);
+    if (dos.examine(kStartupSequence).kind == Dos::TargetKind::File) {
+        // As an Amiga boots: the disk's script, in the boot shell. Ctrl+D
+        // stops it there.
+        log_line("startup: running S:Startup-Sequence");
+        char quoted[sizeof kStartupSequence + 2];
+        u32 n = 0;
+        quoted[n++] = '"';
+        for (const char* p = kStartupSequence; *p != '\0'; ++p) {
+            quoted[n++] = *p;
+        }
+        quoted[n++] = '"';
+        quoted[n] = '\0';
+        const u32 rc = run_script_file(boot, quoted);
+        if (!serial_at_line_start) {
+            serial::write_char('\n');
+            serial_at_line_start = true;
+        }
+        serial::write("startup: ended, returned ");
+        serial::write_dec(rc);
+        serial::write("\n");
+        if (boot.commands.ended()) {
+            end_boot_shell(boot);
+            return;
+        }
+    } else {
+        execute(boot, path, args);
+        // The datatypes on the boot disk, as a Startup-Sequence adds them:
+        // datatypes.library opens only once they are listed.
+        if (dos.examine(kAddDataTypes).kind == Dos::TargetKind::File) {
+            execute(boot, kAddDataTypes, "REFRESH QUIET");
+        }
     }
     key_queue_clear(boot);
     if (boot.shell.is_open()) {

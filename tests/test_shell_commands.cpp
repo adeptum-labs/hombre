@@ -271,6 +271,15 @@ void path_show_add_reset() {
     CHECK(out == "NoSuchDir not found\n");
     CHECK_EQ(g_dos.last_return_code(), 10u);
 
+    // A missing directory does not keep the ones after it out.
+    out.clear();
+    CHECK(cmds.run("path", "NoSuchDir C:"));
+    CHECK(out == "NoSuchDir not found\n");
+    CHECK_EQ(g_dos.last_return_code(), 10u);
+    out.clear();
+    CHECK(cmds.run("path", ""));
+    CHECK(out == "Current_directory\nHombreTest:S\nHombreTest:Devs/Sub\nHombreTest:C\nC:\n");
+
     out.clear();
     CHECK(cmds.run("path", "RESET"));
     CHECK_EQ(g_dos.last_return_code(), 0u);
@@ -727,22 +736,27 @@ void newshell_without_a_hook_fails() {
     CHECK_EQ(g_dos.last_return_code(), 20u);
 }
 
-void endcli_refuses_in_the_boot_shell() {
+void endcli_ends_the_boot_shell() {
     Rig rig;
     std::string out;
     ShellCommands cmds(g_dos, print_sink, &out);
-
+    g_dos.set_return_code(5);
+    CHECK(!cmds.ended());
     CHECK(cmds.run("endcli", ""));
-    CHECK(out == "EndCLI: the boot shell cannot end\n");
-    CHECK_EQ(g_dos.last_return_code(), 10u);
-    CHECK(!cmds.ended());
+    CHECK(out == "Process 1 ending\n");
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.ended());
+}
 
-    out.clear();
-    cmds.set_process(g_dos.process());
-    CHECK(cmds.run("ENDCLI", ""));
-    CHECK(out == "EndCLI: the boot shell cannot end\n");
-    CHECK_EQ(g_dos.last_return_code(), 10u);
-    CHECK(!cmds.ended());
+void resident_is_accepted() {
+    Rig rig;
+    std::string out;
+    ShellCommands cmds(g_dos, print_sink, &out);
+    g_dos.set_return_code(5);
+    CHECK(cmds.run("Resident", "C:Assign PURE"));
+    CHECK(cmds.run("RESIDENT", "Assign REMOVE"));
+    CHECK(out.empty());
+    CHECK_EQ(g_dos.last_return_code(), 0u);
 }
 
 void set_process_uses_that_cli() {
@@ -814,7 +828,8 @@ int main() {
     run_starts_a_background_cli();
     newshell_calls_the_hook();
     newshell_without_a_hook_fails();
-    endcli_refuses_in_the_boot_shell();
+    endcli_ends_the_boot_shell();
+    resident_is_accepted();
     set_process_uses_that_cli();
     return check::finish("test_shell_commands");
 }

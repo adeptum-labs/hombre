@@ -37,6 +37,10 @@
 # Swedish layout the keys to the right of p, l and the apostrophe key are
 # bracket_left (å), semicolon (ö) and apostrophe (ä).
 #
+# --no-startup implies --usb-kbd and types Ctrl+D as soon as the keyboard
+# is ready, which stops the disk's S:Startup-Sequence before its first line
+# and leaves the boot shell open.
+#
 # --mouse-after <marker> and --mouse "<commands>" must be given together.
 # --mouse implies the USB devices of --usb-kbd and also attaches a USB mouse
 # (-device usb-mouse); once <marker> shows on the serial console and any
@@ -45,7 +49,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--usb-kbd] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -63,6 +67,7 @@ disk_mode=default
 disk_source=
 disk1_source=
 disk2_source=
+no_startup=false
 while [[ ${1:-} == --* ]]; do
     case $1 in
         --disk)
@@ -83,6 +88,10 @@ while [[ ${1:-} == --* ]]; do
             shift
             ;;
         --usb-kbd) usb_kbd=true ;;
+        --no-startup)
+            usb_kbd=true
+            no_startup=true
+            ;;
         --keys)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
             usb_kbd=true
@@ -160,8 +169,8 @@ fi
 serial_log=$build_dir/serial.log
 monitor_socket=
 monitor_args=()
-if [[ -n $keys || -n $mouse ]]; then
-    command -v socat > /dev/null || { echo "$0: --keys/--mouse needs socat" >&2; exit 1; }
+if [[ -n $keys || -n $mouse || $no_startup == true ]]; then
+    command -v socat > /dev/null || { echo "$0: --keys, --mouse and --no-startup need socat" >&2; exit 1; }
     monitor_socket=$build_dir/monitor.$$.sock
     monitor_args=(-monitor "unix:$monitor_socket,server,nowait")
 fi
@@ -220,8 +229,14 @@ all_markers_present() {
     done
 }
 
+startup_stopped=false
 for ((i = 0; i < timeout_seconds * 4; i++)); do
     all_markers_present "$@" && exit 0
+    if [[ $no_startup == true && $startup_stopped == false ]] &&
+       grep -qF -- "usb: keyboard ready" "$serial_log"; then
+        startup_stopped=true
+        monitor_send "sendkey ctrl-d" || true
+    fi
     if [[ -n $keys && $keys_sent == false ]] && grep -qF -- "shell: ready" "$serial_log"; then
         keys_sent=true
         send_keys || true

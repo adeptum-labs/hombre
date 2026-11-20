@@ -187,7 +187,8 @@ void version_command_fails_without_the_library(const std::vector<u8>& image) {
 void the_other_files_are_unchanged(const std::vector<u8>& image) {
     Rig r(image);
     const std::vector<u8> startup = file_bytes(r.volume, "S/Startup-Sequence");
-    CHECK(std::string(startup.begin(), startup.end()) == "Hombre test startup\n");
+    CHECK(std::string(startup.begin(), startup.end()) ==
+          "Echo \"Hombre test startup\"\nC:Version\n");
     const std::vector<u8> hello = file_bytes(r.volume, "Hello");
     CHECK(std::string(hello.begin(), hello.end()) == "Hello from the Hombre test disk.\n");
     const std::vector<u8> echo = file_bytes(r.volume, "C/Echo");

@@ -2384,6 +2384,13 @@ struct DosOps {
         }
     }
 
+    // StartNotify(request D1): accepted, but no notification is sent yet.
+    // TODO: send the signal or message when the file changes.
+    static void start_notify(void*, Machine& m) { native::set_result(m, DOSTRUE); }
+
+    // EndNotify(request D1): nothing to undo.
+    static void end_notify(void*, Machine&) {}
+
     // Close(0) does nothing; the console streams stay open whatever is
     // closed.
     static void close(void* ctx, Machine& m) {
@@ -8111,6 +8118,8 @@ struct DosFunction {
 constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::Open, DosOps::open, "Open"},
     {dos_lvo::Close, DosOps::close, "Close"},
+    {dos_lvo::StartNotify, DosOps::start_notify, "StartNotify"},
+    {dos_lvo::EndNotify, DosOps::end_notify, "EndNotify"},
     {dos_lvo::Read, DosOps::read, "Read"},
     {dos_lvo::Write, DosOps::write, "Write"},
     {dos_lvo::Input, DosOps::input, "Input"},

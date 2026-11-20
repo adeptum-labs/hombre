@@ -129,7 +129,7 @@ std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vecto
         echo[i] = static_cast<u8>('A' + i % 26);
     }
     return {
-        {"S/Startup-Sequence", text("Hombre test startup\n")},
+        {"S/Startup-Sequence", text("Echo \"Hombre test startup\"\nC:Version\n")},
         {"C/Echo", echo},
         {"Hello", text("Hello from the Hombre test disk.\n")},
         {"C/Version", version},

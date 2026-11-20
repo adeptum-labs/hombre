@@ -4760,12 +4760,12 @@ void many_locks_with_assigns_and_path() {
     Rig r(files);
 
     u32 err = 0;
-    const char* path_dirs[Dos::kMaxPathDirs] = {
+    const char* path_dirs[] = {
         "D1", "D1/D2", "D1/D2/D3", "D1/D2/D3/D4", "D1/D2/D3/D4/D5", "D1/D2/D3/D4/D5/D6",
         "D1/D2/D3/D4/D5/D6/D7", "C:",
     };
-    for (u32 i = 0; i < Dos::kMaxPathDirs; ++i) {
-        CHECK(g_dos.path_add(path_dirs[i], err));
+    for (const char* dir : path_dirs) {
+        CHECK(g_dos.path_add(dir, err));
     }
 
     for (u32 i = 0; i < 10; ++i) {

@@ -193,10 +193,11 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "apic: timer 1000 Hz" \
 	    "framebuffer: " "pci: " "virtio-blk: $$sectors sectors" "virtio-blk: read ok" \
 	    "disk: DMS SIMPLE, 80 tracks" "volume: HombreTest (OFS)" "  S/" "  C/" "  Hello" \
-	    "S:Startup-Sequence:" "  Hombre test startup" "usb: no controller" \
+	    "S:Startup-Sequence:" "  Echo \"Hombre test startup\"" "usb: no controller" \
 	    "intuition: screen opened 640x400" \
-	    "intuition: window opened HombreShell" "m68k: running C:Version" \
-	    "Hombre test version 1" "m68k: C:Version returned 0" "halting"
+	    "intuition: window opened HombreShell" "startup: running S:Startup-Sequence" \
+	    "m68k: running C:Version" "Hombre test version 1" "m68k: C:Version returned 0" \
+	    "startup: ended, returned 0" "halting"
 	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
 	tools/boot_check.sh --disk $(TEST_DISK) --disk1 $(TEST_DISK) \
 	    "virtio-blk: read ok" "volume: HombreTest (OFS)" \
@@ -299,9 +300,14 @@ check-workbench: image
 	    "volume: Workbench3.1 (FFS)" "  S/" "  C/" "S:Startup-Sequence:" \
 	    "; Startup-Sequence for low-density floppies" "usb: no controller" \
 	    "intuition: screen opened 640x400" \
-	    "intuition: window opened HombreShell" "m68k: running C:Version" \
-	    "Kickstart 60.0, Workbench 60.0" "m68k: C:Version returned 0" "halting"
-	tools/boot_check.sh --disk "$$DISK" \
+	    "intuition: window opened HombreShell" "startup: running S:Startup-Sequence" \
+	    "m68k: running C:Version" "m68k: C:Version returned 0" "m68k: C:Assign returned 0" \
+	    "m68k: C:AddDataTypes returned 0" "m68k: C:IPrefs returned 0" "workbench: started" \
+	    "intuition: window Workbench opened" "shell: builtin EndCLI returned 0" \
+	    "startup: ended, returned 0" "shell: boot shell ended" "halting"
+	bash tools/log_order.sh build/serial.log "startup: running S:Startup-Sequence" \
+	    "workbench: started" "shell: boot shell ended"
+	tools/boot_check.sh --no-startup --disk "$$DISK" \
 	    --keys "d i r ret l i s t spc c ret t y p e spc s shift-dot s t a r t u p slash s e q u e n c e ret i n f o ret a s s i g n ret d a t e ret w h i c h spc d i r ret c d spc c ret c d spc shift-7 ret a s k spc q ret y ret w h y ret r u n spc w a i t spc 3 ret e c h o spc h i ret" \
 	    "m68k: C:dir returned 0" "m68k: C:list returned 0" "Directory \"C\" on" \
 	    "m68k: C:type returned 0" "Workbench3.1 [Mounted]" "m68k: C:info returned 0" \
@@ -312,25 +318,25 @@ check-workbench: image
 	    "shell: builtin echo returned 0" "dos: CLI 2 ended, returned 0"
 	bash tools/log_order.sh build/serial.log "shell: builtin echo returned 0" \
 	    "dos: CLI 2 ended, returned 0"
-	tools/boot_check.sh --disk "$$DISK" \
+	tools/boot_check.sh --no-startup --disk "$$DISK" \
 	    --keys "n e w s h e l l ret s t a t u s ret r u n spc w a i t spc 6 0 ret b r e a k spc 3 ret s t a t u s ret" \
 	    "shell: new shell 2" "Process  2:" "[CLI 3]" \
 	    "m68k: C:break returned 0" "dos: CLI 3 ended"
 	bash tools/log_order.sh build/serial.log "m68k: C:break returned 0" \
 	    "dos: CLI 3 ended"
-	tools/boot_check.sh --disk "$$DISK" \
+	tools/boot_check.sh --no-startup --disk "$$DISK" \
 	    --keys "r u n spc u t i l i t i e s shift-7 c l o c k ret e c h o spc h i ret" \
 	    "[CLI 2]" "intuition: window Clock opened" "shell: builtin echo returned 0"
-	tools/boot_check.sh --disk "$$DISK" --keys "l o a d w b ret" \
+	tools/boot_check.sh --no-startup --disk "$$DISK" --keys "l o a d w b ret" \
 	    "m68k: running C:loadwb" "workbench: started" \
 	    "workbench: volume Workbench3.1" "workbench: volume Ram Disk" \
 	    "intuition: window Workbench opened"
-	tools/boot_check.sh --disk "$$DISK" --keys "l o a d w b ret" \
+	tools/boot_check.sh --no-startup --disk "$$DISK" --keys "l o a d w b ret" \
 	    --mouse-after "workbench: volume Ram Disk" \
 	    --mouse "mouse_move 95 -80;mouse_move 95 -80;mouse_move 95 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move -100 12;mouse_move -100 0;mouse_move -100 0;mouse_move -100 0;mouse_move -55 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move 125 40;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0" \
 	    "workbench: opened Workbench3.1" "workbench: opened Utilities" \
 	    "workbench: started Clock" "intuition: window Clock opened"
-	tools/boot_check.sh --disk "$$DISK" \
+	tools/boot_check.sh --no-startup --disk "$$DISK" \
 	    --keys "m a k e d i r spc r a m shift-dot x ret c o p y spc s shift-dot s t a r t u p slash s e q u e n c e spc r a m shift-dot x ret t y p e spc r a m shift-dot x shift-7 s t a r t u p slash s e q u e n c e ret r e n a m e spc r a m shift-dot x spc r a m shift-dot y ret p r o t e c t spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc s spc a d d ret f i l e n o t e spc r a m shift-dot y shift-7 s t a r t u p slash s e q u e n c e spc h e l l o ret l i s t spc r a m shift-dot y ret d e l e t e spc r a m shift-dot y spc a l l ret d i r spc r a m shift-dot ret s e t e n v spc f o o spc b a r ret g e t e n v spc f o o ret t y p e spc e n v shift-dot f o o ret i n f o ret w a i t spc 1 ret" \
 	    "m68k: C:makedir returned 0" "m68k: C:copy returned 0" \
 	    "; Startup-Sequence for low-density floppies" "m68k: C:rename returned 0" \
@@ -347,7 +353,9 @@ endif
 # Runs WBPattern from the 3.1 Extras disk in DF1:, given as DISK1 beside the
 # Workbench disk in DISK: a preset and Use write its prefs, and the
 # Workbench that LoadWB starts after it reads them for its backdrop.
-# The second boot picks a picture through the file requester: Type to
+# Both boots skip the Startup-Sequence. The second runs AddDataTypes, which
+# the file requester needs to know pictures, and picks a picture through
+# the file requester: Type to
 # Picture, Select Picture, "Pics:" typed into the Drawer field, a double
 # click into the Pics drawer, the scroller dragged to its end, Zz.ilbm (the
 # last file, shown only scrolled) clicked, OK and Use. Each wait is a
@@ -366,7 +374,7 @@ WBPATTERN_PICTURE_MOUSE := mouse_move -90 -139;$(WBP_CLICK);mouse_move 0 22;$(WB
 
 ifneq ($(and $(strip $(DISK)),$(strip $(DISK1))),)
 check-wbpattern: image $(PIC_DISK)
-	tools/boot_check.sh --disk "$$DISK" --disk1 "$$DISK1" \
+	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 "$$DISK1" \
 	    --keys "e x t r a s 3 dot 1 shift-dot p r e f s shift-7 w b p a t t e r n ret l o a d w b ret" \
 	    --mouse-after "intuition: window WBPattern Preferences opened" \
 	    --mouse "mouse_move 50 -88;mouse_button 1;mouse_button 0;mouse_move -52 31;mouse_button 1;mouse_button 0" \
@@ -375,8 +383,8 @@ check-wbpattern: image $(PIC_DISK)
 	    "workbench: backdrop patterns read"
 	bash tools/log_order.sh build/serial.log \
 	    "m68k: extras3.1:prefs/wbpattern returned 0" "workbench: backdrop patterns read"
-	tools/boot_check.sh --disk "$$DISK" --disk1 "$$DISK1" --disk2 $(PIC_DISK) \
-	    --keys "e x t r a s 3 dot 1 shift-dot p r e f s shift-7 w b p a t t e r n ret l o a d w b ret" \
+	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 "$$DISK1" --disk2 $(PIC_DISK) \
+	    --keys "a d d d a t a t y p e s spc r e f r e s h spc q u i e t ret e x t r a s 3 dot 1 shift-dot p r e f s shift-7 w b p a t t e r n ret l o a d w b ret" \
 	    --mouse-after "intuition: window WBPattern Preferences opened" \
 	    --mouse "$(WBPATTERN_PICTURE_MOUSE)" \
 	    "intuition: window Select Picture opened" \

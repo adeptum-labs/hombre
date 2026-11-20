@@ -33,8 +33,8 @@ class Dos;
 using ShellPrint = void (*)(void* ctx, const char* text);
 
 // Internal AmigaDOS Shell commands (CD, ECHO, PATH, WHY, PROMPT, ASK, FAILAT,
-// SET, GET, UNSET, SETENV, GETENV, UNSETENV, RUN, NEWSHELL, ENDCLI) backed by
-// a Dos instance and a text output callback.
+// SET, GET, UNSET, SETENV, GETENV, UNSETENV, RUN, NEWSHELL, ENDCLI, RESIDENT)
+// backed by a Dos instance and a text output callback.
 class ShellCommands {
 public:
     constexpr ShellCommands() = default;
@@ -59,7 +59,7 @@ public:
         new_shell_ctx_ = ctx;
     }
 
-    // True once EndCLI has ended a non-boot shell.
+    // True once EndCLI has ended the shell.
     bool ended() const { return ended_; }
 
     // Runs word with args if word matches an internal command (case-insensitive).
@@ -78,6 +78,7 @@ private:
     void cmd_failat(const char* args);
     void cmd_run(const char* args);
     void cmd_newshell();
+    void cmd_resident();
     void cmd_endcli();
     void cmd_set_var(const char* args, bool global);
     void cmd_get_var(const char* args, bool global);
