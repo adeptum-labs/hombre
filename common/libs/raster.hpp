@@ -580,6 +580,33 @@ inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     return dirty;
 }
 
+// Complements the rectangle: every pixel's pen has the bits of mask turned
+// over, as a fill in the COMPLEMENT draw mode does.
+inline Rect complement_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r,
+                            u32 mask) {
+    Rect dirty = empty_rect();
+    const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
+    const i64 height = static_cast<i64>(bitmap.rows);
+    walk_clip(bus, clip, [&](const Clip& part) {
+        const i64 left = r.x0 > part.x0 ? (r.x0 > 0 ? r.x0 : 0) : (part.x0 > 0 ? part.x0 : 0);
+        const i64 top = r.y0 > part.y0 ? (r.y0 > 0 ? r.y0 : 0) : (part.y0 > 0 ? part.y0 : 0);
+        i64 right = r.x1 < part.x1 ? r.x1 : part.x1;
+        i64 bottom = r.y1 < part.y1 ? r.y1 : part.y1;
+        right = right < width ? right : width - 1;
+        bottom = bottom < height ? bottom : height - 1;
+        for (i64 y = top; y <= bottom && bus.ok(); ++y) {
+            for (i64 x = left; x <= right; ++x) {
+                const i32 px = static_cast<i32>(x);
+                const i32 py = static_cast<i32>(y);
+                write_pixel(bus, bitmap, px, py, read_pixel(bus, bitmap, px, py) ^ mask);
+                grow(dirty, px, py);
+            }
+        }
+        return true;
+    });
+    return dirty;
+}
+
 inline Rect draw_line(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 x0, i32 y0,
                       i32 x1, i32 y1, u32 pen) {
     Rect dirty = empty_rect();

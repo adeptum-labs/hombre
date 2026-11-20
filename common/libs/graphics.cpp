@@ -1433,7 +1433,12 @@ void Graphics::rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
         return;
     }
     const Rect area{x0 + v.origin_x, y0 + v.origin_y, x1 + v.origin_x, y1 + v.origin_y};
-    const Rect dirty = raster::fill_rect(b, v.bitmap, v.clip, area, pens(b, rp).fg);
+    const raster::Pens p = pens(b, rp);
+    // COMPLEMENT turns over the pen bits the RastPort's mask lets through.
+    const Rect dirty = (p.mode & ~ndk::INVERSVID) == ndk::COMPLEMENT
+                           ? raster::complement_rect(b, v.bitmap, v.clip, area,
+                                                     b.r8(rp + ndk::rp_Mask))
+                           : raster::fill_rect(b, v.bitmap, v.clip, area, p.fg);
     if (b.ok()) {
         report(display_, *machine_, v, dirty);
     }

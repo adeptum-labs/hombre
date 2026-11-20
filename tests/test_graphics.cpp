@@ -255,6 +255,27 @@ void rect_fill_fills_pen_and_clips() {
     CHECK(r.refreshes.empty());
 }
 
+void rect_fill_complements_in_complement_mode() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    r.graphics.set_pens(s.rp, 2, 0, JAM2);
+    rect_fill(r, s.rp, 0, 0, 3, 3);
+    r.graphics.set_pens(s.rp, 1, 0, COMPLEMENT);
+    rect_fill(r, s.rp, 2, 2, 5, 5);
+    CHECK_EQ(read_pixel(r, s.rp, 0, 0), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 2, 2), 1u);  // 2 turned over in both planes
+    CHECK_EQ(read_pixel(r, s.rp, 5, 5), 3u);  // 0 turned over
+    CHECK_EQ(read_pixel(r, s.rp, 6, 6), 0u);
+    // Twice puts every pixel back.
+    rect_fill(r, s.rp, 2, 2, 5, 5);
+    CHECK_EQ(read_pixel(r, s.rp, 2, 2), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 5, 5), 0u);
+    // The RastPort's mask limits it to the planes it lets through.
+    r.put8(s.rp + rp_Mask, 1);
+    rect_fill(r, s.rp, 0, 0, 0, 0);
+    CHECK_EQ(read_pixel(r, s.rp, 0, 0), 3u);
+}
+
 void write_then_read_pixel_vectors() {
     GfxRig r;
     const Surface s = make_surface(r, kBitmap, kRastPort);
@@ -1627,6 +1648,7 @@ int main() {
     set_apen_bpen_drmd_store_fields();
     move_sets_cp();
     rect_fill_fills_pen_and_clips();
+    rect_fill_complements_in_complement_mode();
     write_then_read_pixel_vectors();
     draw_moves_cp_and_sets_pixels();
     text_draws_glyphs_advances_cp_and_returns_nothing_unsafe();
