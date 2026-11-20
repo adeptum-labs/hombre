@@ -3163,6 +3163,7 @@ void cli_queries() {
     a.open_dos();
     a.move_l(kOut, 1).moveq(64, 2).dos(dos_lvo::GetProgramName).store_d0(kOut + 64);
     a.dos(dos_lvo::GetArgStr).store_d0(kOut + 68);
+    a.dos(dos_lvo::GetProgramDir).store_d0(kOut + 72);
     a.moveq(0, 0).rts();
     std::vector<AdfFile> files = standard_files();
     files.push_back({"C/CliInfo", hunk_file(a.build())});
@@ -3200,9 +3201,20 @@ void cli_queries() {
     CHECK_EQ(r.call(dos_lvo::GetArgStr), kData);
     CHECK_EQ(r.call(dos_lvo::SetArgStr, old_arg), kData);
 
-    // GetProgramName and GetArgStr inside a command.
+    // SetProgramDir hands back the lock it replaces.
+    const u32 home = r.get32(r.proc() + pr_HomeDir);
+    CHECK_EQ(r.call(dos_lvo::SetProgramDir, 0x1234), home);
+    CHECK_EQ(r.call(dos_lvo::GetProgramDir), 0x1234u);
+    CHECK_EQ(r.call(dos_lvo::SetProgramDir, home), 0x1234u);
+
+    // GetProgramName, GetArgStr and GetProgramDir inside a command; the
+    // program's directory lock goes when it ends.
     u32 result = 1;
+    const u32 locks_before = r.chunks().size();
     CHECK(g_dos.run_command("C:CliInfo", "alpha beta", result, kBlocks));
+    CHECK(r.get32(kOut + 72) != 0);
+    CHECK_EQ(r.get32(r.proc() + pr_HomeDir), home);
+    CHECK_EQ(r.chunks().size(), locks_before);
     CHECK_EQ(r.get32(kOut + 64), DOSTRUE);
     CHECK(r.read_str(kOut) == "C:CliInfo");
     CHECK(r.read_str(r.get32(kOut + 68)) == "alpha beta\n");

@@ -3849,6 +3849,56 @@ struct DosOps {
         set_cli_bstr(d, b, cli_CommandName, d.cur().command_name, m.cpu.d[1]);
     }
 
+    // A lock on the directory of the program at path, which the caller
+    // frees: the path up to its last '/' or ':', or the current directory
+    // for a bare name. 0 if it cannot be had.
+    static u32 program_dir_lock(Dos& d, Bus& b, const char* path, u32 process) {
+        char dir[Dos::kMaxPath];
+        u32 cut = 0;
+        u32 length = 0;
+        for (; path[length] != '\0' && length + 1 < Dos::kMaxPath; ++length) {
+            dir[length] = path[length];
+            if (path[length] == ':') {
+                cut = length + 1;
+            } else if (path[length] == '/') {
+                cut = length;
+            }
+        }
+        dir[cut] = '\0';
+        u8 vol = Dos::kVolDf0;
+        char resolved[Dos::kMaxPath];
+        DirEntry entry{};
+        u32 error = 0;
+        if (!locate(d, b, dir, vol, resolved, entry, error, process) || !entry.is_dir) {
+            return 0;
+        }
+        char canonical[Dos::kMaxPath];
+        fs_canonical(d, vol, resolved, canonical);
+        u32 lock = 0;
+        return alloc_user_lock(d, b, canonical, entry, SHARED_LOCK, lock, 0) ? lock : 0;
+    }
+
+    // GetProgramDir: the lock of the running program's directory.
+    static void get_program_dir(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 lock = b.r32(d.cur().process + pr_HomeDir);
+        if (b.ok()) {
+            native::set_result(m, lock);
+        }
+    }
+
+    // SetProgramDir: sets it and returns the old one.
+    static void set_program_dir(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 old = b.r32(d.cur().process + pr_HomeDir);
+        b.w32(d.cur().process + pr_HomeDir, m.cpu.d[1]);
+        if (b.ok()) {
+            native::set_result(m, old);
+        }
+    }
+
     static void get_program_name(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -8047,6 +8097,8 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::GetCurrentDirName, DosOps::get_current_dir_name, "GetCurrentDirName"},
     {dos_lvo::SetProgramName, DosOps::set_program_name, "SetProgramName"},
     {dos_lvo::GetProgramName, DosOps::get_program_name, "GetProgramName"},
+    {dos_lvo::SetProgramDir, DosOps::set_program_dir, "SetProgramDir"},
+    {dos_lvo::GetProgramDir, DosOps::get_program_dir, "GetProgramDir"},
     {dos_lvo::SetPrompt, DosOps::set_prompt, "SetPrompt"},
     {dos_lvo::GetPrompt, DosOps::get_prompt, "GetPrompt"},
     {dos_lvo::SystemTagList, DosOps::system_tag_list, "SystemTagList"},
@@ -9485,10 +9537,14 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
     const u32 saved_current_dir = b.r32(p.process + pr_CurrentDir);
     const u32 saved_cis = b.r32(p.process + pr_CIS);
     const u32 saved_cos = b.r32(p.process + pr_COS);
+    const u32 saved_home_dir = b.r32(p.process + pr_HomeDir);
     if (!b.ok()) {
         DosOps::unload(*this, seglist);
         return false;
     }
+    // PROGDIR: is the directory the program was loaded from.
+    const u32 home_dir = DosOps::program_dir_lock(*this, b, path, p.process);
+    b.w32(p.process + pr_HomeDir, home_dir);
     CpuState& cpu = m_->cpu;
     for (u32 i = 0; i < 8; ++i) {
         cpu.d[i] = 0;
@@ -9515,6 +9571,10 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
     exec_->reset_task_state(p.process);
     DosOps::cleanup_command(*this, p.process, saved_current_dir, saved_cis, saved_cos,
                             static_cast<u8>(index + 1));
+    m_->mem.write32(p.process + pr_HomeDir, saved_home_dir);
+    if (home_dir != 0) {
+        DosOps::free_user_lock(*this, home_dir);
+    }
     drain_deferred();
     bool ok = false;
     if (why == ExitReason::Returned) {
