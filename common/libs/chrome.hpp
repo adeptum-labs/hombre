@@ -95,6 +95,15 @@ void draw_prop_gadget(Graphics& graphics, native::Bus& b, u32 rp, const PropChro
 void draw_menu(native::Bus& b, const raster::Bitmap& bitmap, const Rect& clip,
                const MenuChrome& menu);
 
+enum class Arrow : u8 { Up = 0, Down = 1, Left = 2, Right = 3 };
+
+// A scroll arrow button as width x height pens, row by row, in the look of
+// the sliders' knobs: rounded, shaded and outlined, with a triangle
+// pointing the arrow's way; pressed, it takes the shading of a held knob.
+// On screens of fewer than eight planes it uses the four 3.1 pens.
+void paint_arrow_button(u8* pens, i32 width, i32 height, Arrow arrow, bool pressed,
+                        bool high_color);
+
 }
 
 }

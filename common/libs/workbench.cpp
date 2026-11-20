@@ -23,6 +23,8 @@
 
 #include "workbench.hpp"
 
+#include "chrome.hpp"
+
 #include "../format.hpp"
 
 namespace hombre {
@@ -134,6 +136,7 @@ constexpr u32 kClipBytes = ndk::Region_SIZEOF + ndk::RegionRectangle_SIZEOF;
 // make (12 pixels on the right, 10 at the bottom), around the size gadget
 // in the corner. Their boxes follow the window's size: a RELRIGHT edge
 // counts from the right edge, a RELWIDTH size from the window's width.
+// A slider's thickness is set when it is made, from the screen's aspect.
 struct ScrollGadgetSpec {
     u16 id;
     i16 left;
@@ -142,34 +145,39 @@ struct ScrollGadgetSpec {
     i16 height;
     u16 flags;
     u16 activation;
-    u8 arrow;  // the arrow image, kNoArrow for a slider
+    u8 arrow;  // the chrome::Arrow image, kNoArrow for a slider
 };
-constexpr u8 kArrowUp = 0;
-constexpr u8 kArrowDown = 1;
-constexpr u8 kArrowLeft = 2;
-constexpr u8 kArrowRight = 3;
 constexpr u8 kNoArrow = 0xFF;
 constexpr u16 kArrowFlags = ndk::GFLG_RELRIGHT | ndk::GFLG_RELBOTTOM | ndk::GFLG_GADGIMAGE |
                             ndk::GFLG_GADGHIMAGE;
 constexpr u16 kSliderActivation =
     ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE | ndk::GACT_FOLLOWMOUSE;
 constexpr u16 kArrowActivation = ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE;
+constexpr u8 kUp = static_cast<u8>(chrome::Arrow::Up);
+constexpr u8 kDown = static_cast<u8>(chrome::Arrow::Down);
+constexpr u8 kLeft = static_cast<u8>(chrome::Arrow::Left);
+constexpr u8 kRight = static_cast<u8>(chrome::Arrow::Right);
 // The sliders come first, so their PropInfos and knobs pair with the
 // first two gadgets.
 constexpr ScrollGadgetSpec kScrollSpecs[Workbench::kScrollGadgets] = {
     {Workbench::kScrollVert, -10, 16, 10, -46, ndk::GFLG_RELRIGHT | ndk::GFLG_RELHEIGHT,
      kSliderActivation | ndk::GACT_RIGHTBORDER, kNoArrow},
-    {Workbench::kScrollHoriz, 3, -7, -47, 7, ndk::GFLG_RELBOTTOM | ndk::GFLG_RELWIDTH,
+    {Workbench::kScrollHoriz, 3, -8, -39, 8, ndk::GFLG_RELBOTTOM | ndk::GFLG_RELWIDTH,
      kSliderActivation | ndk::GACT_BOTTOMBORDER, kNoArrow},
     {Workbench::kScrollUp, -11, -29, 12, 10, kArrowFlags,
-     kArrowActivation | ndk::GACT_RIGHTBORDER, kArrowUp},
+     kArrowActivation | ndk::GACT_RIGHTBORDER, kUp},
     {Workbench::kScrollDown, -11, -19, 12, 10, kArrowFlags,
-     kArrowActivation | ndk::GACT_RIGHTBORDER, kArrowDown},
-    {Workbench::kScrollLeft, -43, -9, 16, 10, kArrowFlags,
-     kArrowActivation | ndk::GACT_BOTTOMBORDER, kArrowLeft},
-    {Workbench::kScrollRight, -27, -9, 16, 10, kArrowFlags,
-     kArrowActivation | ndk::GACT_BOTTOMBORDER, kArrowRight},
+     kArrowActivation | ndk::GACT_RIGHTBORDER, kDown},
+    {Workbench::kScrollLeft, -35, -9, 12, 10, kArrowFlags,
+     kArrowActivation | ndk::GACT_BOTTOMBORDER, kLeft},
+    {Workbench::kScrollRight, -23, -9, 12, 10, kArrowFlags,
+     kArrowActivation | ndk::GACT_BOTTOMBORDER, kRight},
 };
+// The room for a slider across its border: ten pixels in the right one,
+// eight in the bottom one, a pixel clear of each edge.
+constexpr i32 kVertSliderRoom = 10;
+constexpr i32 kHorizSliderRoom = 8;
+constexpr i32 kMinSlider = 4;
 constexpr u32 kSliders = 2;
 constexpr u16 kVertSliderFlags = ndk::AUTOKNOB | ndk::FREEVERT | ndk::PROPBORDERLESS |
                                  ndk::PROPNEWLOOK;
@@ -179,15 +187,18 @@ constexpr u32 kPropInfoAt = Workbench::kScrollGadgets * ndk::Gadget_SIZEOF;
 constexpr u32 kKnobAt = kPropInfoAt + kSliders * ndk::PropInfo_SIZEOF;
 constexpr u32 kScrollBlockBytes = kKnobAt + kSliders * Image_SIZEOF;
 
-// The arrow images: up and down fit the right border, left and right the
-// bottom one; each comes plain and pressed, two planes deep.
+// The arrow images, each plain and pressed, as deep as the screen.
 constexpr u32 kArrowImages = 8;
-constexpr u32 kArrowHeight = 10;
+constexpr i32 kArrowWidth = 12;
+constexpr i32 kArrowHeight = 10;
 constexpr u32 kArrowPlaneBytes = kArrowHeight * 2;  // one word a row
-constexpr u32 kArrowDataBytes = 2 * kArrowPlaneBytes;
-constexpr u32 kArrowBlockBytes = kArrowImages * (Image_SIZEOF + kArrowDataBytes);
-constexpr u32 kShinePen = 2;
-constexpr u32 kShadowPen = 1;
+constexpr u32 kMaxArrowDepth = 8;
+
+// struct DrawInfo (intuition/screens.h): the screen's depth and the
+// aspect of its pixels.
+constexpr u32 dri_Depth = 12;
+constexpr u32 dri_ResolutionX = 14;
+constexpr u32 dri_ResolutionY = 16;
 
 // The menu labels, in the order the menus number them.
 constexpr u16 kDisabled = NM_ITEMDISABLED;
@@ -398,49 +409,6 @@ LabelPlace label_place(const IconArt& art, const Workbench::IconEntry& icon) {
         place.y = icon.top + art.top + art.height + kLabelBaseline;
     }
     return place;
-}
-
-// One pixel of a two-plane arrow image, one word to a row, set to pen;
-// the image starts cleared, so pen 0 needs nothing.
-void put_arrow_pixel(Bus& b, u32 data, i32 x, i32 y, u32 pen) {
-    const u32 at = static_cast<u32>(y) * 2 + (static_cast<u32>(x) >> 4) * 2;
-    const u32 bit = 0x8000u >> (static_cast<u32>(x) & 15);
-    for (u32 plane = 0; plane < 2; ++plane) {
-        if ((pen & (1u << plane)) != 0) {
-            const u32 word = data + plane * kArrowPlaneBytes + at;
-            b.w16(word, b.r16(word) | bit);
-        }
-    }
-}
-
-// A raised button, or a pressed one with its edges' pens swapped, with a
-// black triangle pointing the arrow's way.
-void paint_arrow(Bus& b, u32 data, u8 arrow, i32 width, i32 height, bool pressed) {
-    const u32 light = pressed ? kShadowPen : kShinePen;
-    const u32 dark = pressed ? kShinePen : kShadowPen;
-    for (i32 x = 0; x < width; ++x) {
-        put_arrow_pixel(b, data, x, 0, light);
-        put_arrow_pixel(b, data, x, height - 1, dark);
-    }
-    for (i32 y = 1; y < height - 1; ++y) {
-        put_arrow_pixel(b, data, 0, y, light);
-        put_arrow_pixel(b, data, width - 1, y, dark);
-    }
-    const i32 mid_x = (width - 1) / 2;   // the left of the two middle columns
-    const i32 mid_y = (height - 1) / 2;  // the upper of the two middle rows
-    for (i32 i = 0; i < 4; ++i) {
-        for (i32 j = -i; j <= i + 1; ++j) {
-            if (arrow == kArrowUp) {
-                put_arrow_pixel(b, data, mid_x + j, mid_y - 1 + i, kShadowPen);
-            } else if (arrow == kArrowDown) {
-                put_arrow_pixel(b, data, mid_x + j, mid_y + 2 - i, kShadowPen);
-            } else if (arrow == kArrowLeft) {
-                put_arrow_pixel(b, data, mid_x - 2 + i, mid_y + j, kShadowPen);
-            } else {
-                put_arrow_pixel(b, data, mid_x + 3 - i, mid_y + j, kShadowPen);
-            }
-        }
-    }
 }
 
 // One axis of a window's view, inner wide over icons from min to max
@@ -1409,7 +1377,10 @@ void Workbench::scroll_message(u32 window_index, u32 idcmp_class, u16 id) {
 }
 
 // The window's scroll gadgets, linked in kScrollSpecs order, with the
-// sliders' PropInfos and knob images after them in the same block.
+// sliders' PropInfos and knob images after them in the same block. The
+// sliders look as thick across as each other on the screen: the
+// horizontal one is as many pixels high as the vertical one is wide,
+// times the pixels' width over their height, as far as the borders allow.
 u32 Workbench::make_scroll_gadgets() {
     if (arrows_ == 0 && !build_arrow_images()) {
         return 0;
@@ -1419,8 +1390,30 @@ u32 Workbench::make_scroll_gadgets() {
         return 0;
     }
     Bus b(*machine_);
+    const u32 draw_info = intuition_->screen_draw_info(screen_);
+    i32 res_x = draw_info != 0 ? static_cast<i32>(b.r16(draw_info + dri_ResolutionX)) : 0;
+    i32 res_y = draw_info != 0 ? static_cast<i32>(b.r16(draw_info + dri_ResolutionY)) : 0;
+    if (res_x <= 0 || res_y <= 0) {
+        res_x = 1;
+        res_y = 1;
+    }
+    i32 vert = kVertSliderRoom;
+    i32 horiz = (vert * res_x + res_y / 2) / res_y;
+    if (horiz > kHorizSliderRoom) {
+        horiz = kHorizSliderRoom;
+        vert = (horiz * res_y + res_x / 2) / res_x;
+    }
+    vert = vert < kMinSlider ? kMinSlider : (vert > kVertSliderRoom ? kVertSliderRoom : vert);
+    horiz = horiz < kMinSlider ? kMinSlider : horiz;
     for (u32 i = 0; i < kScrollGadgets; ++i) {
-        const ScrollGadgetSpec& spec = kScrollSpecs[i];
+        ScrollGadgetSpec spec = kScrollSpecs[i];
+        if (spec.id == kScrollVert) {
+            spec.left = static_cast<i16>(spec.left + (kVertSliderRoom - vert) / 2);
+            spec.width = static_cast<i16>(vert);
+        } else if (spec.id == kScrollHoriz) {
+            spec.top = static_cast<i16>(spec.top + (kHorizSliderRoom - horiz) / 2);
+            spec.height = static_cast<i16>(horiz);
+        }
         const u32 gadget = block + i * ndk::Gadget_SIZEOF;
         const bool last = i + 1 == kScrollGadgets;
         b.w32(gadget + ndk::gg_NextGadget, last ? 0 : gadget + ndk::Gadget_SIZEOF);
@@ -1454,30 +1447,50 @@ u32 Workbench::make_scroll_gadgets() {
     return block;
 }
 
-// The images of the four arrows, plain and pressed, which every window's
-// arrow gadgets share; they stay as long as the library.
+// The images of the four arrow buttons, plain and pressed, in the
+// window chrome's look and as deep as the screen, which every window's
+// arrows share; they stay as long as the library.
 bool Workbench::build_arrow_images() {
-    const u32 block = exec_->alloc(kArrowBlockBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    Bus b(*machine_);
+    const u32 draw_info = intuition_->screen_draw_info(screen_);
+    u32 depth = draw_info != 0 ? b.r16(draw_info + dri_Depth) : 2;
+    if (depth == 0 || !b.ok()) {
+        depth = 2;
+    }
+    depth = depth > kMaxArrowDepth ? kMaxArrowDepth : depth;
+    const u32 data_bytes = kArrowPlaneBytes * depth;
+    const u32 block_bytes = kArrowImages * (Image_SIZEOF + data_bytes);
+    const u32 block = exec_->alloc(block_bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (block == 0) {
         return false;
     }
-    Bus b(*machine_);
     const u32 data_at = block + kArrowImages * Image_SIZEOF;
+    u8 pens[kArrowWidth * kArrowHeight];
     for (u32 i = 0; i < kArrowImages; ++i) {
-        const u8 arrow = static_cast<u8>(i / 2);
+        const chrome::Arrow arrow = static_cast<chrome::Arrow>(i / 2);
         const bool pressed = (i & 1) != 0;
-        const i32 width = arrow == kArrowUp || arrow == kArrowDown ? 12 : 16;
+        chrome::paint_arrow_button(pens, kArrowWidth, kArrowHeight, arrow, pressed, depth >= 8);
         const u32 image = block + i * Image_SIZEOF;
-        const u32 data = data_at + i * kArrowDataBytes;
-        b.w16(image + im_Width, static_cast<u32>(width));
-        b.w16(image + im_Height, kArrowHeight);
-        b.w16(image + im_Depth, 2);
+        const u32 data = data_at + i * data_bytes;
+        b.w16(image + im_Width, static_cast<u32>(kArrowWidth));
+        b.w16(image + im_Height, static_cast<u32>(kArrowHeight));
+        b.w16(image + im_Depth, depth);
         b.w32(image + im_ImageData, data);
-        b.w8(image + im_PlanePick, 3);
-        paint_arrow(b, data, arrow, width, static_cast<i32>(kArrowHeight), pressed);
+        b.w8(image + im_PlanePick, (1u << depth) - 1);
+        for (u32 plane = 0; plane < depth; ++plane) {
+            for (i32 y = 0; y < kArrowHeight; ++y) {
+                u32 word = 0;
+                for (i32 x = 0; x < kArrowWidth; ++x) {
+                    if ((pens[y * kArrowWidth + x] & (1u << plane)) != 0) {
+                        word |= 0x8000u >> x;
+                    }
+                }
+                b.w16(data + plane * kArrowPlaneBytes + static_cast<u32>(y) * 2, word);
+            }
+        }
     }
     if (!b.ok()) {
-        exec_->free(block, kArrowBlockBytes);
+        exec_->free(block, block_bytes);
         return false;
     }
     arrows_ = block;

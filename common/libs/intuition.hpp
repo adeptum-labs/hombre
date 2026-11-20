@@ -187,6 +187,8 @@ public:
     // Draws the Image chain at image at left, top on the RastPort, as
     // DrawImage does: every pixel's pen comes from the data planes
     // PlanePick selects, the bits of unselected planes from PlaneOnOff.
+    // GetScreenDrawInfo: the screen's DrawInfo, 0 for no open screen.
+    u32 screen_draw_info(u32 screen);
     void draw_image(u32 rp, u32 image, i32 left, i32 top);
 
     // The same image with every pen of its box complemented, as a

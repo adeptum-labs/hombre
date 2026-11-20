@@ -988,4 +988,72 @@ void draw_prop_gadget(Graphics& graphics, Bus& b, u32 rp, const PropChrome& g) {
     restore_rp(b, rp, saved);
 }
 
+void paint_arrow_button(u8* pens, i32 width, i32 height, Arrow arrow, bool pressed,
+                        bool high_color) {
+    if (pens == nullptr || width <= 0 || height <= 0) {
+        return;
+    }
+    auto put = [&](i32 x, i32 y, u8 pen) {
+        if (x >= 0 && x < width && y >= 0 && y < height) {
+            pens[y * width + x] = pen;
+        }
+    };
+    const u8 back = high_color ? kTrack : 0;
+    for (i32 i = 0; i < width * height; ++i) {
+        pens[i] = back;
+    }
+    const i32 radius = min_i32(2, min_i32((width - 1) / 2, (height - 1) / 2));
+    // The body, shaded from top to bottom as a vertical knob is.
+    const u8 shade = pressed ? kActiveBar2 : kKnob0;
+    const i32 steps = pressed ? 4 : 3;
+    const i32 inner_h = height - 2;
+    for (i32 y = 1; y < height - 1; ++y) {
+        const i32 dy = min_i32(y, height - 1 - y);
+        const i32 ins = max_i32(1, rounded_inset(dy, radius));
+        const u8 pen = high_color ? static_cast<u8>(shade + ((y - 1) * steps) / inner_h)
+                                  : (pressed ? 3 : 0);
+        for (i32 x = ins; x <= width - 1 - ins; ++x) {
+            put(x, y, pen);
+        }
+    }
+    // The rounded outline.
+    const u8 line = high_color ? kFrameDark : 1;
+    for (i32 y = 0; y < height; ++y) {
+        const i32 dy = min_i32(y, height - 1 - y);
+        const i32 ins = rounded_inset(dy, radius);
+        if (dy == 0) {
+            for (i32 x = ins; x <= width - 1 - ins; ++x) {
+                put(x, y, line);
+            }
+            continue;
+        }
+        const i32 prev = rounded_inset(dy - 1, radius);
+        for (i32 x = ins; x <= max_i32(ins, prev - 1); ++x) {
+            put(x, y, line);
+            put(width - 1 - x, y, line);
+        }
+    }
+    // The triangle: three rows, two to six pixels across, centred.
+    const u8 mark = high_color ? (pressed ? kFrameLight : kFrameDark) : (pressed ? 2 : 1);
+    const i32 mid_x0 = (width - 1) / 2;
+    const i32 mid_x1 = width / 2;
+    const i32 mid_y0 = (height - 1) / 2;
+    const i32 mid_y1 = height / 2;
+    const i32 top = (height - 3) / 2;
+    const i32 left = (width - 3) / 2;
+    for (i32 i = 0; i < 3; ++i) {
+        if (arrow == Arrow::Up || arrow == Arrow::Down) {
+            const i32 y = arrow == Arrow::Up ? top + i : top + 2 - i;
+            for (i32 x = mid_x0 - i; x <= mid_x1 + i; ++x) {
+                put(x, y, mark);
+            }
+        } else {
+            const i32 x = arrow == Arrow::Left ? left + i : left + 2 - i;
+            for (i32 y = mid_y0 - i; y <= mid_y1 + i; ++y) {
+                put(x, y, mark);
+            }
+        }
+    }
+}
+
 }

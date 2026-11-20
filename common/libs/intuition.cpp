@@ -941,45 +941,8 @@ struct IntuitionNatives {
 
     static void unlock_pub_screen(void*, Machine&) {}
 
-    // A DrawInfo per screen, made on first use and freed with the screen:
-    // the 3.1 default pens, the screen's font, its depth and a 1:1
-    // resolution. FreeScreenDrawInfo leaves it in place.
     static void get_screen_draw_info(void* ctx, Machine& m) {
-        Intuition& g = of(ctx);
-        const u32 screen = m.cpu.a[0];
-        const u32 index = g.find_screen(screen);
-        if (screen == 0 || index >= Intuition::kMaxScreens) {
-            native::set_result(m, 0);
-            return;
-        }
-        Intuition::ScreenRecord& rec = g.screen_records_[index];
-        if (rec.draw_info == 0) {
-            const u32 di = g.exec_->alloc(kDrawInfoBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-            if (di == 0) {
-                native::set_result(m, 0);
-                return;
-            }
-            Bus b(m);
-            const u32 pens = di + kDrawInfoPensAt;
-            for (u32 i = 0; i < kDriPenCount; ++i) {
-                b.w16(pens + i * 2, kDefaultDriPens[i]);
-            }
-            b.w16(pens + kDriPenCount * 2, 0xFFFF);
-            b.w16(di + kDriVersion, 2);
-            b.w16(di + kDriNumPens, kDriPenCount);
-            b.w32(di + kDriPens, pens);
-            b.w32(di + kDriFont, g.graphics_ != nullptr ? g.graphics_->topaz_font() : 0);
-            b.w16(di + kDriDepth, static_cast<u16>(rec.depth));
-            b.w16(di + kDriResolutionX, 44);
-            b.w16(di + kDriResolutionY, 44);
-            b.w32(di + kDriFlags, kDriNewLook);
-            if (!b.ok()) {
-                g.exec_->free(di, kDrawInfoBytes);
-                return;
-            }
-            rec.draw_info = di;
-        }
-        native::set_result(m, rec.draw_info);
+        native::set_result(m, of(ctx).screen_draw_info(m.cpu.a[0]));
     }
 
     static void free_screen_draw_info(void*, Machine&) {}
@@ -4185,6 +4148,43 @@ void Intuition::report_image_damage(const raster::RastPortView& view, const Rect
     if (display_->damage.damaged != nullptr) {
         display_->damage.damaged(display_->damage.ctx, *machine_, view.bitmap_addr, rect);
     }
+}
+
+// A DrawInfo per screen, made on first use and freed with the screen:
+// the 3.1 default pens, the screen's font, its depth and a 1:1
+// resolution. FreeScreenDrawInfo leaves it in place.
+u32 Intuition::screen_draw_info(u32 screen) {
+    const u32 index = find_screen(screen);
+    if (screen == 0 || index >= kMaxScreens) {
+        return 0;
+    }
+    ScreenRecord& rec = screen_records_[index];
+    if (rec.draw_info == 0) {
+        const u32 di = exec_->alloc(kDrawInfoBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (di == 0) {
+            return 0;
+        }
+        Bus b(*machine_);
+        const u32 pens = di + kDrawInfoPensAt;
+        for (u32 i = 0; i < kDriPenCount; ++i) {
+            b.w16(pens + i * 2, kDefaultDriPens[i]);
+        }
+        b.w16(pens + kDriPenCount * 2, 0xFFFF);
+        b.w16(di + kDriVersion, 2);
+        b.w16(di + kDriNumPens, kDriPenCount);
+        b.w32(di + kDriPens, pens);
+        b.w32(di + kDriFont, graphics_ != nullptr ? graphics_->topaz_font() : 0);
+        b.w16(di + kDriDepth, static_cast<u16>(rec.depth));
+        b.w16(di + kDriResolutionX, 44);
+        b.w16(di + kDriResolutionY, 44);
+        b.w32(di + kDriFlags, kDriNewLook);
+        if (!b.ok()) {
+            exec_->free(di, kDrawInfoBytes);
+            return 0;
+        }
+        rec.draw_info = di;
+    }
+    return rec.draw_info;
 }
 
 void Intuition::draw_image(u32 rp, u32 image, i32 left, i32 top) {
