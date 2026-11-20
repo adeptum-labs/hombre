@@ -386,6 +386,8 @@ private:
     void place_icons(u32 window_index);
     void draw_window(u32 window_index);
     void paint_window(u32 window_index);
+    bool load_patterns();
+    void fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom);
     u32 make_scroll_gadgets();
     bool build_arrow_images();
     void update_scroll(u32 window_index);
@@ -441,6 +443,16 @@ private:
     u32 menu_ = 0;
     u32 title_buffer_ = 0;
     u32 arrows_ = 0;  // the arrow gadgets' images, made once
+    // The backdrop patterns of ENV:Sys/WBPattern.prefs, the root window's
+    // and the drawers', each a 16 by 16 pixel BitMap of up to eight planes
+    // to blit from; depth 0 for none. pattern_sum_ tells when the file
+    // changed.
+    struct Pattern {
+        u32 bitmap = 0;
+        u32 depth = 0;
+    };
+    Pattern patterns_[2]{};
+    u32 pattern_sum_ = 0;
     i32 volume_top_ = 0;
     u64 next_refresh_us_ = 0;
     bool running_ = false;

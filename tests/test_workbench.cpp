@@ -1887,7 +1887,66 @@ void a_window_snapshot_is_used_when_the_window_opens_again() {
 }
 }
 
+// WBPattern's prefs: a FORM PREF with a PRHD and one PTRN for the root
+// window, a 16 by 16 pattern of one plane in vertical stripes.
+std::vector<u8> pattern_prefs() {
+    std::vector<u8> f;
+    auto id = [&](const char* s) { f.insert(f.end(), s, s + 4); };
+    auto u32v = [&](u32 v) {
+        for (int i = 3; i >= 0; --i) {
+            f.push_back(static_cast<u8>(v >> (i * 8)));
+        }
+    };
+    auto u16v = [&](u32 v) {
+        f.push_back(static_cast<u8>(v >> 8));
+        f.push_back(static_cast<u8>(v));
+    };
+    id("FORM");
+    u32v(4 + 8 + 6 + 8 + 24 + 32);
+    id("PREF");
+    id("PRHD");
+    u32v(6);
+    u16v(0);
+    u32v(0);
+    id("PTRN");
+    u32v(24 + 32);
+    for (int i = 0; i < 4; ++i) {
+        u32v(0);
+    }
+    u16v(0);   // WBP_ROOT
+    u16v(1);   // WBPF_PATTERN
+    f.push_back(0);   // revision
+    f.push_back(1);   // depth
+    u16v(32);  // data length
+    for (int row = 0; row < 16; ++row) {
+        u16v(0xAAAA);
+    }
+    return f;
+}
+
+void the_backdrop_shows_the_wbpattern_pattern() {
+    Rig r;
+    const char dir[] = "ENV:Sys";
+    for (u32 i = 0; i < sizeof dir; ++i) {
+        r.put8(kData + i, static_cast<u8>(dir[i]));
+    }
+    r.m.cpu.d[1] = kData;
+    CHECK(r.result(g_dos.dos_base(), dos_lvo::CreateDir) != 0);
+    const std::vector<u8> prefs = pattern_prefs();
+    u32 error = 0;
+    CHECK(g_dos.write_file("ENV:Sys/WBPattern.prefs", prefs.data(),
+                           static_cast<u32>(prefs.size()), error));
+    r.workbench.open_desktop();
+    CHECK(logged("workbench: backdrop patterns read"));
+    const Workbench::DrawerWindow& root = r.workbench.window(0);
+    // Away from the icons: pen 1 at even columns, pen 0 at odd ones.
+    CHECK_EQ(r.window_pixel(root.window, root.inner_left + 20, root.inner_top + 300), 1u);
+    CHECK_EQ(r.window_pixel(root.window, root.inner_left + 21, root.inner_top + 300), 0u);
+    CHECK_EQ(r.window_pixel(root.window, root.inner_left + 36, root.inner_top + 301), 1u);
+}
+
 int main() {
+    the_backdrop_shows_the_wbpattern_pattern();
     layout_matches_the_ndk();
     start_starts_the_workbench_once();
     desktop_shows_the_volumes_and_their_menus();

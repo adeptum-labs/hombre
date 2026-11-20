@@ -1242,6 +1242,7 @@ void Workbench::paint_window(u32 window_index) {
     const InnerClip clip(*machine_, drawer.rp, drawer.clip);
     graphics_->set_pens(drawer.rp, 0, 0, ndk::JAM1);
     graphics_->rect_fill(drawer.rp, drawer.inner_left, drawer.inner_top, right, bottom);
+    fill_pattern(drawer, window_index == 0 ? 0 : 1, right, bottom);
     for (u32 i = 0; i < kMaxIcons; ++i) {
         const IconEntry& icon = icons_[i];
         if (icon.used && icon.owner == window_index) {
@@ -1507,6 +1508,121 @@ bool Workbench::build_arrow_images() {
     }
     arrows_ = block;
     return true;
+}
+
+namespace {
+
+constexpr char kPatternPrefs[] = "ENV:Sys/WBPattern.prefs";
+constexpr u32 kMaxPatternPrefs = 2048;
+constexpr i32 kPatternSize = 16;
+constexpr u32 kPatternPlaneBytes = 32;
+constexpr u32 kPatternBlockBytes = ndk::BitMap_SIZEOF + 8 * kPatternPlaneBytes;
+// struct WBPatternPrefs, after its four reserved longs.
+constexpr u32 wbp_Which = 16;
+constexpr u32 wbp_Flags = 18;
+constexpr u32 wbp_Depth = 21;
+constexpr u32 wbp_DataLength = 22;
+constexpr u32 WBPatternPrefs_SIZEOF = 24;
+constexpr u32 WBPF_PATTERN = 1;
+
+u32 be32(const u8* p) {
+    return (static_cast<u32>(p[0]) << 24) | (static_cast<u32>(p[1]) << 16) |
+           (static_cast<u32>(p[2]) << 8) | p[3];
+}
+
+u32 be16(const u8* p) { return (static_cast<u32>(p[0]) << 8) | p[1]; }
+
+bool is_id(const u8* p, const char* id) {
+    return p[0] == id[0] && p[1] == id[1] && p[2] == id[2] && p[3] == id[3];
+}
+
+}
+
+// Reads the backdrop patterns from WBPattern's prefs: a PTRN chunk for the
+// root window (WBP_ROOT) and one for drawers (WBP_DRAWER), each a pattern
+// of depth planes of 16 words. A picture, or a pattern of only pen 0,
+// leaves the plain backdrop. True when the file is not what it was.
+bool Workbench::load_patterns() {
+    static u8 file[kMaxPatternPrefs];
+    u32 got = 0;
+    u32 error = 0;
+    if (!dos_->read_file(kPatternPrefs, file, sizeof file, got, error)) {
+        got = 0;
+    }
+    u32 sum = got;
+    for (u32 i = 0; i < got; ++i) {
+        sum = sum * 31 + file[i];
+    }
+    if (sum == pattern_sum_) {
+        return false;
+    }
+    pattern_sum_ = sum;
+    Bus b(*machine_);
+    for (u32 which = 0; which < 2; ++which) {
+        Pattern& pattern = patterns_[which];
+        pattern.depth = 0;
+        if (pattern.bitmap == 0) {
+            pattern.bitmap = exec_->alloc(kPatternBlockBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+            if (pattern.bitmap == 0) {
+                continue;
+            }
+            b.w16(pattern.bitmap + ndk::bm_BytesPerRow, 2);
+            b.w16(pattern.bitmap + ndk::bm_Rows, kPatternSize);
+            for (u32 plane = 0; plane < 8; ++plane) {
+                b.w32(pattern.bitmap + ndk::bm_Planes + plane * 4,
+                      pattern.bitmap + ndk::BitMap_SIZEOF + plane * kPatternPlaneBytes);
+            }
+        }
+    }
+    if (got < 12 || !is_id(file, "FORM") || !is_id(file + 8, "PREF")) {
+        return true;
+    }
+    for (u32 at = 12; at + 8 <= got;) {
+        const u32 length = be32(file + at + 4);
+        const u8* data = file + at + 8;
+        if (length > got - at - 8) {
+            break;
+        }
+        if (is_id(file + at, "PTRN") && length >= WBPatternPrefs_SIZEOF) {
+            const u32 which = be16(data + wbp_Which);
+            const u32 flags = be16(data + wbp_Flags);
+            const u32 depth = data[wbp_Depth];
+            const u32 bytes = be16(data + wbp_DataLength);
+            bool any = false;
+            if (which < 2 && (flags & WBPF_PATTERN) != 0 && depth >= 1 && depth <= 8 &&
+                bytes >= depth * kPatternPlaneBytes &&
+                WBPatternPrefs_SIZEOF + depth * kPatternPlaneBytes <= length &&
+                patterns_[which].bitmap != 0) {
+                const u32 planes = patterns_[which].bitmap + ndk::BitMap_SIZEOF;
+                for (u32 i = 0; i < depth * kPatternPlaneBytes; ++i) {
+                    const u8 v = data[WBPatternPrefs_SIZEOF + i];
+                    b.w8(planes + i, v);
+                    any = any || v != 0;
+                }
+                b.w8(patterns_[which].bitmap + ndk::bm_Depth, depth);
+                patterns_[which].depth = any ? depth : 0;
+            }
+        }
+        at += 8 + length + (length & 1);
+    }
+    LogLine().text("workbench: backdrop patterns read").send();
+    return true;
+}
+
+// The window's pattern over its inner area, in tiles from its top-left
+// corner; the window's clip keeps them inside.
+void Workbench::fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom) {
+    const Pattern& pattern = patterns_[which];
+    if (pattern.depth == 0 || pattern.bitmap == 0) {
+        return;
+    }
+    for (i32 y = drawer.inner_top; y <= bottom; y += kPatternSize) {
+        for (i32 x = drawer.inner_left; x <= right; x += kPatternSize) {
+            const i32 w = right - x + 1 < kPatternSize ? right - x + 1 : kPatternSize;
+            const i32 h = bottom - y + 1 < kPatternSize ? bottom - y + 1 : kPatternSize;
+            graphics_->blt_bitmap_rastport(pattern.bitmap, 0, 0, drawer.rp, x, y, w, h, 0xC0);
+        }
+    }
 }
 
 void Workbench::redraw_all() {
@@ -2371,6 +2487,10 @@ void Workbench::run() {
         const bool more = pump();
         const u64 now = exec_->now_us();
         if (now >= next_refresh_us_) {
+            // WBPattern's Use takes effect at the next look.
+            if (load_patterns()) {
+                redraw_all();
+            }
             refresh_title();
             next_refresh_us_ = now + kRefreshUs;
         }
@@ -2730,6 +2850,7 @@ void Workbench::open_desktop() {
         return;
     }
     add_volume_icons();
+    load_patterns();
     draw_window(0);
     start_wbstartup();
     desktop_open_ = true;
