@@ -6,167 +6,65 @@ software, on modern hardware and in virtual machines.
 
 ![The Hombre Workbench running Clock](docs/workbench.png)
 
-## Goals
+## Features
 
-- Compatibility with the AmigaOS and MorphOS programming interfaces: exec, dos,
-  intuition, graphics and the rest of the familiar libraries.
-- Run unmodified Amiga 680x0 applications through a built-in 68k CPU
-  translation layer.
-- A modern 64-bit foundation, built for today's hardware.
-- Boot on real x86-64 machines and run under KVM/QEMU.
+- Runs unmodified Amiga 68000 programs through a built-in 68k to x86-64
+  translator.
+- Native AmigaOS libraries written in C++: exec, dos, intuition, graphics,
+  layers, gadtools, icon, workbench and version. No Kickstart ROM needed.
+- Reads real Amiga floppy images, ADF and DMS, in DF0: to DF3:, next to a
+  writable Ram Disk.
+- A Workbench desktop: drawers, icon drag and drop, snapshot, sliders and
+  scroll arrows, menus, backdrop on and off.
+- HombreShell, a native shell with the Workbench 3.1 builtins that runs the
+  3.1 `C:` commands.
+- Starts programs such as Clock and Calculator from the AmigaOS 3.1 disks.
+- A modern window look: shaded title bars, knob-style buttons and soft
+  shadows.
+- A 64-bit kernel with UEFI boot, preemptive multitasking, and USB keyboard
+  and mouse.
 
-## Building and running
+## Documentation
+
+The wiki has the full story:
+
+- **[Feature tour](https://github.com/adeptum-labs/hombre/wiki/Feature-Tour)**:
+  the Workbench, the shell, Amiga programs and disks, with screenshots.
+- **[Getting started](https://github.com/adeptum-labs/hombre/wiki/Getting-Started)**:
+  requirements, building, and booting your Workbench disks.
+- **[How it works](https://github.com/adeptum-labs/hombre/wiki/How-It-Works)**:
+  the design, explained with diagrams.
+- **[Compatibility and status](https://github.com/adeptum-labs/hombre/wiki/Compatibility-and-Status)**:
+  what runs today and what comes next.
+- **[HombreShell](https://github.com/adeptum-labs/hombre/wiki/HombreShell)**:
+  builtins, commands and keys.
+- **[Developer notes](https://github.com/adeptum-labs/hombre/wiki/Developer-Notes)**:
+  make targets, tests, boot checks and the probe script.
+
+## Quick start
 
 Requirements:
 
-- clang 14 or newer (builds the UEFI loader)
-- g++ 12 or newer (builds the kernel and the host tests)
-- GNU binutils with the i386pep target (links the loader)
-- `binutils-m68k-linux-gnu` (assembles the 68000 programs of the test disk,
-  for `make run`, `make check` and `make test`)
-- GNU make
-- mtools and sgdisk (build the boot disk image)
+- clang 14 or newer, g++ 12 or newer and GNU make
+- GNU binutils with the i386pep target, and `binutils-m68k-linux-gnu`
+- mtools and sgdisk
 - QEMU with KVM, and OVMF installed at `/usr/share/OVMF`
-- `socat`, only for the `make check` boot that types on the USB keyboard
-- `xdms` and `unadf`, only for `make test-dms`
 
-Targets:
+Build and boot a Workbench disk:
 
-- `make` builds the loader, the kernel and the bootable disk image
-  `build/hombre.img`.
-- `make run` boots the image in QEMU with KVM. Kernel messages appear on the
-  terminal, which is wired to the serial port COM1. The kernel gets a
-  virtio-blk disk: a generated test disk by default, or the file given as
-  `DISK=`, for example `make run DISK="path/to/disk.dms"`. The file may be
-  a DMS archive or a raw ADF image, and its path may contain spaces.
-  That disk is DF0:, the boot disk; `DISK1=`, `DISK2=` and `DISK3=` put
-  disks in DF1: to DF3:, for example
-  `make run DISK="Workbench.dms" DISK1="Extras.dms"`. A drive without one
-  is empty, and the disks stay in their drives until the machine stops.
-  The QEMU window shows a 256-colour Hombre Workbench screen with a
-  HombreShell window
-  that holds what the disk's `C:Version` prints and a `1.<volume>:>` prompt;
-  the kernel's own messages stay on the serial port. The QEMU window's keyboard
-  is a USB keyboard on an xHCI controller (Swedish layout): type at the
-  prompt, and Enter runs `C:<word>` from the disk with the rest of the line
-  as its arguments (`version` runs `C:Version`; an unknown word prints
-  `Unknown command <word>`). Input needs the controller and keyboard; without
-  them the window says why and the boot ends. The serial port logs `usb:` and
-  `shell:` lines, with each submitted line as `shell: line: <text>`.
-  Up and Down at the prompt bring back the last 16 lines entered; going
-  down past the newest returns to the line being typed. Left and Right move
-  the cursor within the line, and typing and Backspace work at the cursor.
-  The shell has the Workbench 3.1 builtins `Cd`, `Echo`, `Path`, `Why`,
-  `Prompt`, `Ask`, `Failat`, `Set`, `Get`, `UnSet`, `SetEnv`, `GetEnv`,
-  `UnSetEnv`, `Run`, `NewShell` and `EndCLI`; its prompt shows the current
-  directory, and a command whose return code reaches the fail level prints
-  `<word> failed returncode <n>`. `NewShell` opens another HombreShell window
-  with its own CLI and prompt; the keyboard goes to the active shell window,
-  Ctrl+C breaks only that window's command, and `Run`, `Status` and `Break`
-  work across shells. `EndCLI` closes a NewShell window; the boot shell
-  refuses it. Commands are searched in `C:` and the
-  `Path` directories. On a Workbench 3.1 disk the read-only commands work:
-  `Dir`, `List`, `Type`, `Info`, `Assign`, `Date` (from the PC's real-time
-  clock), `Which`, `Avail`, `Status` and `Version`, and
-  `Utilities/Clock` opens its analogue clock window on the Workbench
-  screen, drawn by native gadtools, layers and icon libraries and the
-  graphics area fills. Holding the right mouse button over a window
-  with a menu strip shows its menus in the screen title bar; releasing
-  over an item picks it. The boot
-  disk stays
-  read-only, but `RAM:` (the volume "Ram Disk") can be written: `Copy`,
-  `MakeDir`, `Rename`, `Delete`, `Protect`, `Filenote` and `SetDate` work
-  there. Its contents live in memory and are lost when the machine
-  restarts. At start `T:` and `ENV:` are assigned to `RAM:T` and `RAM:Env`,
-  and `ENVARC:` is copied into `ENV:`, as the Workbench Startup-Sequence
-  does; global variables are files in `ENV:`.
-  `tools/probe_commands.sh <disk>
-  "<line>"...` boots once per line and shows how each command ends, and
-  `make KCXXEXTRA=-DHOMBRE_TRACE_NATIVES` logs every library call.
-  A USB mouse on the same controller moves an Amiga pointer on the screen,
-  and Amiga programs get mouse events in windows that ask for them; Ctrl+C
-  stops a program waiting for events. On the test disk, `mousetest` opens a
-  window and prints the mouse and window events it receives.
-  Windows have a shaded title bar, blue when active and grey when not,
-  close and depth buttons in the look of the slider knobs that turn blue
-  while held, rounded top corners and a soft shadow; on screens of fewer
-  than 256 colours they are drawn flat.
-  Windows can be dragged by their title bar and resized live by the size
-  gadget in the bottom-right corner. The HombreShell window rewraps its text
-  when resized; it opens full screen, so shrink it first to move it.
-  The HombreShell window keeps up to 1024 lines of scrollback and has a
-  proportional scroll bar in its right border. Drag the knob, roll the mouse
-  wheel over the window, or press Shift+Up/Down, Page Up/Page Down or
-  Shift+Home/End to scroll through history; typing returns to the bottom, and
-  scrolling the mouse wheel over another window sends NewMouse wheel events to
-  its IDCMP port.
-- `make check` boots the image headless and verifies the messages on the
-  serial port. The main boot attaches the generated test disk and verifies
-  the volume, the root directory and the startup sequence read from it, and
-  what its `C:Version` prints when the kernel runs it, then the test disk
-  in DF0: and DF1: with the other drives empty. It also boots a
-  drive filled with zero bytes, a test disk with a corrupt track and a
-  machine without a disk, a boot with the kernel missing and a boot without
-  a framebuffer. It also boots kernels that trigger a page
-  fault, a double fault, an unexpected interrupt and a task stack
-  overflow onto its guard page on purpose.
-- `make check-workbench DISK="path/to/Workbench.dms"` boots a real
-  Workbench 3.1 boot disk and verifies its volume, root directory and
-  startup sequence, and that the disk's own `C:Version` runs and returns 0.
-  Two more boots type commands at the shell: the read-only commands and
-  builtins, then a session that makes, copies, renames, protects, lists
-  and deletes files on `RAM:` and sets an environment variable, and
-  further boots open a second shell and start `Utilities/Clock` in the
-  background. `DISK=` is required and the markers fit the 3.1 Workbench disk only.
-- `make test` builds and runs the host unit tests under the address and
-  undefined behaviour sanitizers. It builds the test disk as well, so it
-  needs `binutils-m68k-linux-gnu` too.
-- `make test-m68k M68K_TESTS_DIR=<directory>` runs the 68000 cases of the
-  SingleStepTests/680x0 suite through the 68000 translator and compares the
-  registers and memory each case leaves. The suite is not part of the
-  repository: check it out elsewhere and give its directory.
-  `M68K_FILES=<glob>` picks some of its files, for example `M68K_FILES=ADD*`.
-- `make test-dms DMS_DIR=<directory>` unpacks every DMS archive below the
-  directory with both `xdms` and the project's own unpacker and compares the
-  disk images and what `unadf` reads from them.
+```sh
+make
+make run DISK="path/to/Workbench.dms"
+```
 
-## Status
+`DISK=` is the floppy in DF0:, a DMS archive or a raw ADF image. `DISK1=`,
+`DISK2=` and `DISK3=` put disks in DF1: to DF3:. Without `DISK=`, Hombre
+boots a generated test disk.
 
-Early development. The machine boots as follows:
+Hombre ships no AmigaOS files. Use your own, legally owned AmigaOS disks.
 
-1. The UEFI loader, `BOOTX64.EFI`, loads `KERNEL.ELF` from the boot disk.
-2. It builds page tables, with all memory mapped in the higher half, and
-   passes the kernel a `BootInfo` structure holding the memory map, the
-   framebuffer and the ACPI RSDP.
-3. The kernel reports on serial port COM1 and installs its own GDT, TSS and
-   IDT. A CPU exception prints a register dump on the serial port. The kernel
-   then drops the loader's identity mapping, sets up per-CPU data for the boot
-   processor and draws the `Hombre` banner on the framebuffer.
-4. It masks the legacy PICs and starts a 1000 Hz local APIC timer,
-   calibrated against the TSC. Waits halt the processor until the next
-   interrupt instead of spinning.
-5. The kernel scans the PCI bus and drives a virtio-blk disk by polling. It
-   unpacks a DMS archive natively (no compression, SIMPLE and HEAVY2),
-   mounts the OFS or FFS volume read-only and prints the volume name, the
-   root directory and `S:Startup-Sequence` on the serial port. Without a
-   disk, or with a disk it cannot read, it logs why and carries on.
-6. The kernel runs `C:Version` from the boot disk as translated 68000 code.
-   A hunk loader loads it, a 68000 JIT translates it block by block into
-   x86-64 code in a write-xor-execute code region, and native exec,
-   utility and dos libraries, written in C++ under `common/libs/`, answer
-   its library calls. A library the program opens from the disk's `LIBS:`
-   loads and runs as 68000 code too. The program's output and its return
-   code appear on the serial port.
-7. The HombreShell takes over. exec runs tasks preemptively: each gets its
-   own kernel stack with a guard page, and tasks are switched at the end
-   of each 4 ms time slice, between translated blocks, outside Forbid and
-   Disable, and while a task waits. Signals, message ports, semaphores,
-   devices and timer.device work across tasks, `Delay` sleeps, and dos
-   keeps a context per process, so `Run` and each `NewShell` window run
-   their commands side by side.
+At the shell prompt, type `loadwb` to start the Workbench.
 
-## The name
-
-Hombre was the codename of the next-generation Amiga chipset Commodore was
-developing when it went bankrupt in 1994. The chipset was never released;
-this operating system borrows its name.
+`make test` runs the host unit tests and `make check` runs the headless
+boot checks. See the
+[Developer notes](https://github.com/adeptum-labs/hombre/wiki/Developer-Notes).
