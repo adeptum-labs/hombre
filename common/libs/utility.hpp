@@ -32,10 +32,15 @@
 // utility.library written in C++ for code run by the 68000 translator.
 //
 // It has the tag list walkers (FindTagItem, GetTagData, NextTagItem), the
-// date conversions (Amiga2Date, Date2Amiga) and the case-blind string
-// functions (Stricmp, Strnicmp, ToUpper, ToLower). Case follows ISO 8859-1,
-// as the library does without a locale. Every other vector logs "utility:
+// date conversions (Amiga2Date, Date2Amiga), the case-blind string
+// functions (Stricmp, Strnicmp, ToUpper, ToLower), the named objects and
+// their name spaces, and GetUniqueID. Case follows ISO 8859-1, as the
+// library does without a locale. Every other vector logs "utility:
 // unimplemented LVO -<n>" and ends the run with Unimplemented.
+//
+// A NamedObject's public part is no_Object, the user space it was made
+// with; the rest of its block is this library's: its name, its place in a
+// name space, the name space it holds, and how many finds hold it.
 //
 // Every guest pointer goes through native::Bus, so a bad one ends the run
 // with BusError or AddressError. A tag list walk stops after a bounded
@@ -63,6 +68,14 @@ constexpr u32 ToUpper = 174;
 constexpr u32 ToLower = 180;
 constexpr u32 SMult64 = 198;
 constexpr u32 UMult64 = 204;
+constexpr u32 AddNamedObject = 222;
+constexpr u32 AllocNamedObjectA = 228;
+constexpr u32 AttemptRemNamedObject = 234;
+constexpr u32 FindNamedObject = 240;
+constexpr u32 FreeNamedObject = 246;
+constexpr u32 NamedObjectName = 252;
+constexpr u32 ReleaseNamedObject = 258;
+constexpr u32 RemNamedObject = 264;
 // The last vector of the 3.1 library; the table reaches down to it.
 constexpr u32 GetUniqueID = 270;
 
@@ -93,6 +106,16 @@ constexpr u32 cd_year = 10;
 constexpr u32 cd_wday = 12;
 constexpr u32 CD_SIZE = 14;
 
+// struct NamedObject and the AllocNamedObjectA tags and name space flags
+// (utility/name.h).
+constexpr u32 no_Object = 0;
+constexpr u32 ANO_NameSpace = 4000;
+constexpr u32 ANO_UserSpace = 4001;
+constexpr u32 ANO_Priority = 4002;
+constexpr u32 ANO_Flags = 4003;
+constexpr u32 NSF_NODUPS = 1;
+constexpr u32 NSF_CASE = 2;
+
 // struct UtilityBase
 constexpr u32 ub_Language = 34;
 constexpr u32 ub_Reserved = 35;
@@ -111,9 +134,28 @@ public:
 
     u32 utility_base() const { return base_; }
 
+    // The named object vectors. A null name space is the system's.
+    u32 alloc_named_object(u32 name, u32 tags);
+    bool add_named_object(u32 space, u32 object);
+    bool attempt_rem_named_object(u32 object);
+    u32 find_named_object(u32 space, u32 name, u32 last);
+    void free_named_object(u32 object);
+    u32 named_object_name(u32 object) const;
+    void release_named_object(u32 object);
+    void rem_named_object(u32 object, u32 message);
+    u32 unique_id() { return ++unique_id_; }
+
+    Exec& exec() { return *exec_; }
+
 private:
     static constexpr u32 kVectors = utility_lvo::GetUniqueID / 6;
 
+    void unlink_named_object(u32 object);
+
+    m68k::Machine* machine_ = nullptr;
+    Exec* exec_ = nullptr;
+    u32 root_ = 0;  // the object holding the system's name space
+    u32 unique_id_ = 0;
     u32 base_ = 0;
     NativeVector vectors_[kVectors]{};
 };

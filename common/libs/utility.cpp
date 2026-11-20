@@ -299,7 +299,7 @@ constexpr u64 kHookBlocks = 1ull << 24;
 // h_Entry expects them, and returns its D0. Every other register is as it
 // was. A null hook or entry returns 0.
 void call_hook_pkt(void* ctx, Machine& m) {
-    Exec& exec = *static_cast<Exec*>(ctx);
+    Exec& exec = static_cast<Utility*>(ctx)->exec();
     Bus b(m);
     const u32 hook = m.cpu.a[0];
     const u32 entry = hook != 0 ? b.r32(hook + h_Entry) : 0;
@@ -333,6 +333,40 @@ void call_hook_pkt(void* ctx, Machine& m) {
     m.cpu.d[0] = result;
 }
 
+// --- named objects -------------------------------------------------------------
+
+Utility& of(void* ctx) { return *static_cast<Utility*>(ctx); }
+
+void alloc_named_object(void* ctx, Machine& m) {
+    native::set_result(m, of(ctx).alloc_named_object(m.cpu.a[0], m.cpu.a[1]));
+}
+
+void add_named_object(void* ctx, Machine& m) {
+    native::set_result(m, of(ctx).add_named_object(m.cpu.a[0], m.cpu.a[1]) ? 1 : 0);
+}
+
+void attempt_rem_named_object(void* ctx, Machine& m) {
+    native::set_result(m, of(ctx).attempt_rem_named_object(m.cpu.a[0]) ? 1 : 0);
+}
+
+void find_named_object(void* ctx, Machine& m) {
+    native::set_result(m, of(ctx).find_named_object(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2]));
+}
+
+void free_named_object(void* ctx, Machine& m) { of(ctx).free_named_object(m.cpu.a[0]); }
+
+void named_object_name(void* ctx, Machine& m) {
+    native::set_result(m, of(ctx).named_object_name(m.cpu.a[0]));
+}
+
+void release_named_object(void* ctx, Machine& m) { of(ctx).release_named_object(m.cpu.a[0]); }
+
+void rem_named_object(void* ctx, Machine& m) {
+    of(ctx).rem_named_object(m.cpu.a[0], m.cpu.a[1]);
+}
+
+void get_unique_id(void* ctx, Machine& m) { native::set_result(m, of(ctx).unique_id()); }
+
 struct UtilityFunction {
     u32 lvo;
     m68k::NativeFn fn;
@@ -356,12 +390,44 @@ constexpr UtilityFunction kUtilityFunctions[] = {
     {utility_lvo::Strnicmp, strnicmp, "Strnicmp"},
     {utility_lvo::ToUpper, to_upper, "ToUpper"},
     {utility_lvo::ToLower, to_lower, "ToLower"},
+    {utility_lvo::AddNamedObject, add_named_object, "AddNamedObject"},
+    {utility_lvo::AllocNamedObjectA, alloc_named_object, "AllocNamedObjectA"},
+    {utility_lvo::AttemptRemNamedObject, attempt_rem_named_object, "AttemptRemNamedObject"},
+    {utility_lvo::FindNamedObject, find_named_object, "FindNamedObject"},
+    {utility_lvo::FreeNamedObject, free_named_object, "FreeNamedObject"},
+    {utility_lvo::NamedObjectName, named_object_name, "NamedObjectName"},
+    {utility_lvo::ReleaseNamedObject, release_named_object, "ReleaseNamedObject"},
+    {utility_lvo::RemNamedObject, rem_named_object, "RemNamedObject"},
+    {utility_lvo::GetUniqueID, get_unique_id, "GetUniqueID"},
 };
+
+// The block of a named object: no_Object first, then this library's part,
+// then the name and, 8-byte aligned, the user space.
+constexpr u32 kNoNext = 4;        // the next object of the same name space
+constexpr u32 kNoParent = 8;      // the object whose name space holds it, 0 if none
+constexpr u32 kNoName = 12;       // the name, the copy in the block
+constexpr u32 kNoFirst = 16;      // the first object of the name space it holds
+constexpr u32 kNoSpace = 20;      // its name space's NSF_ flags, kHasSpace if it has one
+constexpr u32 kNoUseCount = 24;   // the finds that hold it
+constexpr u32 kNoPriority = 28;
+constexpr u32 kNoRemoving = 32;   // the message RemNamedObject waits to reply, or kNoMessage
+constexpr u32 kNoBytes = 36;      // the size of the block
+constexpr u32 kNoNameAt = 40;
+constexpr u32 kHasSpace = 0x80000000;
+constexpr u32 kNotRemoving = 0;
+constexpr u32 kRemovingNoMessage = 1;
+constexpr u32 kMaxObjectName = 256;
+// Objects one name space walk visits at most, so a list that loops ends.
+constexpr u32 kMaxSpaceWalk = 65536;
 
 }
 
 bool Utility::init(Machine& m, Exec& exec) {
     base_ = 0;
+    machine_ = &m;
+    exec_ = &exec;
+    root_ = 0;
+    unique_id_ = 0;
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -373,7 +439,7 @@ bool Utility::init(Machine& m, Exec& exec) {
         return false;
     }
     const u32 base = exec.make_native_library(kUtilityName, kHombreLibVersion, vectors_, kVectors,
-                                              &exec, UtilityBase_SIZEOF);
+                                              this, UtilityBase_SIZEOF);
     if (base == 0) {
         exec.free(id_string, sizeof kIdString);
         return false;
@@ -388,7 +454,257 @@ bool Utility::init(Machine& m, Exec& exec) {
         return false;
     }
     base_ = base;
-    return true;
+    // The system's name space: names in it are case-blind and may repeat.
+    root_ = alloc_named_object(0, 0);
+    if (root_ == 0) {
+        return false;
+    }
+    Bus rb(m);
+    rb.w32(root_ + kNoSpace, kHasSpace);
+    return rb.ok();
+}
+
+// AllocNamedObjectA: a new object named name, not yet in a name space.
+// ANO_NameSpace gives it a name space of its own, with ANO_Flags as its
+// NSF_ flags; ANO_UserSpace bytes of cleared memory become its no_Object.
+u32 Utility::alloc_named_object(u32 name, u32 tags) {
+    Bus b(*machine_);
+    u32 length = 0;
+    if (name != 0) {
+        while (length < kMaxObjectName && b.r8(name + length) != 0) {
+            ++length;
+        }
+        if (!b.ok() || length == kMaxObjectName) {
+            return 0;
+        }
+    }
+    auto tag = [&](u32 t, u32 fallback) {
+        const u32 item = find_tag(b, t, tags);
+        return item != 0 ? b.r32(item + ti_Data) : fallback;
+    };
+    const bool space = tag(ANO_NameSpace, 0) != 0;
+    const u32 user = tag(ANO_UserSpace, 0);
+    const u32 priority = tag(ANO_Priority, 0);
+    const u32 flags = tag(ANO_Flags, 0) & (NSF_NODUPS | NSF_CASE);
+    if (!b.ok() || user > 0x10000000) {
+        return 0;
+    }
+    const u32 user_at = (kNoNameAt + length + 1 + 7) & ~7u;
+    const u32 bytes = user_at + user;
+    const u32 object = exec_->alloc(bytes, MEMF_PUBLIC | MEMF_CLEAR);
+    if (object == 0) {
+        return 0;
+    }
+    for (u32 i = 0; i < length; ++i) {
+        b.w8(object + kNoNameAt + i, b.r8(name + i));
+    }
+    b.w32(object + no_Object, user != 0 ? object + user_at : 0);
+    b.w32(object + kNoName, object + kNoNameAt);
+    b.w32(object + kNoSpace, space ? kHasSpace | flags : 0);
+    b.w32(object + kNoPriority, static_cast<u32>(static_cast<i32>(static_cast<i8>(priority))));
+    b.w32(object + kNoBytes, bytes);
+    if (!b.ok()) {
+        exec_->free(object, bytes);
+        return 0;
+    }
+    return object;
+}
+
+// The name space object that space names: the system's for 0. 0 if the
+// object holds no name space.
+static u32 space_of(Bus& b, u32 space, u32 root) {
+    const u32 object = space != 0 ? space : root;
+    return object != 0 && (b.r32(object + kNoSpace) & kHasSpace) != 0 ? object : 0;
+}
+
+static bool same_name(Bus& b, u32 a, u32 c, bool exact) {
+    for (u32 i = 0; i < kMaxObjectName; ++i) {
+        const u32 x = b.r8(a + i);
+        const u32 y = b.r8(c + i);
+        if (!b.ok()) {
+            return false;
+        }
+        if (exact ? x != y : upper(x) != upper(y)) {
+            return false;
+        }
+        if (x == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// AddNamedObject: puts the object into the name space, after the objects
+// of its priority or higher. False if the object is in one already, the
+// name space is none, or it takes no duplicates and has the name.
+bool Utility::add_named_object(u32 space, u32 object) {
+    Bus b(*machine_);
+    const u32 holder = space_of(b, space, root_);
+    if (holder == 0 || object == 0 || b.r32(object + kNoParent) != 0) {
+        return false;
+    }
+    const u32 flags = b.r32(holder + kNoSpace);
+    const u32 name = b.r32(object + kNoName);
+    const i32 priority = static_cast<i32>(b.r32(object + kNoPriority));
+    u32 previous = 0;
+    u32 at = b.r32(holder + kNoFirst);
+    u32 insert_after = 0;
+    bool placed = false;
+    for (u32 step = 0; at != 0 && step < kMaxSpaceWalk; ++step) {
+        if ((flags & NSF_NODUPS) != 0 &&
+            same_name(b, b.r32(at + kNoName), name, (flags & NSF_CASE) != 0)) {
+            return false;
+        }
+        if (!placed && static_cast<i32>(b.r32(at + kNoPriority)) < priority) {
+            insert_after = previous;
+            placed = true;
+        }
+        previous = at;
+        at = b.r32(at + kNoNext);
+    }
+    if (!b.ok()) {
+        return false;
+    }
+    if (!placed) {
+        insert_after = previous;
+    }
+    const u32 next = insert_after != 0 ? b.r32(insert_after + kNoNext) : b.r32(holder + kNoFirst);
+    b.w32(object + kNoNext, next);
+    b.w32(insert_after != 0 ? insert_after + kNoNext : holder + kNoFirst, object);
+    b.w32(object + kNoParent, holder);
+    return b.ok();
+}
+
+// Takes the object out of its name space, if it is in one.
+void Utility::unlink_named_object(u32 object) {
+    Bus b(*machine_);
+    const u32 holder = b.r32(object + kNoParent);
+    if (holder == 0 || !b.ok()) {
+        return;
+    }
+    u32 link = holder + kNoFirst;
+    for (u32 step = 0; step < kMaxSpaceWalk; ++step) {
+        const u32 at = b.r32(link);
+        if (at == 0 || !b.ok()) {
+            break;
+        }
+        if (at == object) {
+            b.w32(link, b.r32(object + kNoNext));
+            break;
+        }
+        link = at + kNoNext;
+    }
+    b.w32(object + kNoNext, 0);
+    b.w32(object + kNoParent, 0);
+}
+
+// FindNamedObject: the next object after last in the name space whose
+// name matches, any object for a null name. A found object is held until
+// ReleaseNamedObject; one being removed is passed over.
+u32 Utility::find_named_object(u32 space, u32 name, u32 last) {
+    Bus b(*machine_);
+    const u32 holder = space_of(b, space, root_);
+    if (holder == 0) {
+        return 0;
+    }
+    const bool exact = (b.r32(holder + kNoSpace) & NSF_CASE) != 0;
+    u32 at = last != 0 && b.r32(last + kNoParent) == holder ? b.r32(last + kNoNext)
+                                                             : b.r32(holder + kNoFirst);
+    for (u32 step = 0; at != 0 && step < kMaxSpaceWalk; ++step) {
+        if (b.r32(at + kNoRemoving) == kNotRemoving &&
+            (name == 0 || same_name(b, b.r32(at + kNoName), name, exact))) {
+            b.w32(at + kNoUseCount, b.r32(at + kNoUseCount) + 1);
+            return b.ok() ? at : 0;
+        }
+        at = b.r32(at + kNoNext);
+    }
+    return 0;
+}
+
+// ReleaseNamedObject: lets go of a find. The last one to let go of an
+// object RemNamedObject is waiting for removes it and replies the message.
+void Utility::release_named_object(u32 object) {
+    if (object == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 count = b.r32(object + kNoUseCount);
+    if (!b.ok() || count == 0) {
+        return;
+    }
+    b.w32(object + kNoUseCount, count - 1);
+    const u32 removing = b.r32(object + kNoRemoving);
+    if (count == 1 && removing != kNotRemoving) {
+        unlink_named_object(object);
+        b.w32(object + kNoRemoving, kNotRemoving);
+        if (removing != kRemovingNoMessage) {
+            exec_->reply_message(removing);
+        }
+    }
+}
+
+// AttemptRemNamedObject: removes the object the caller holds from its name
+// space, unless some other find still holds it.
+bool Utility::attempt_rem_named_object(u32 object) {
+    if (object == 0) {
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 count = b.r32(object + kNoUseCount);
+    if (!b.ok() || count > 1) {
+        return false;
+    }
+    b.w32(object + kNoUseCount, 0);
+    unlink_named_object(object);
+    return b.ok();
+}
+
+// RemNamedObject: removes the object from its name space once nothing
+// holds it; the caller's own find is let go of. The message, if any, is
+// replied when the object is out.
+void Utility::rem_named_object(u32 object, u32 message) {
+    if (object == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 count = b.r32(object + kNoUseCount);
+    if (!b.ok()) {
+        return;
+    }
+    if (count <= 1) {
+        b.w32(object + kNoUseCount, 0);
+        unlink_named_object(object);
+        if (message != 0) {
+            exec_->reply_message(message);
+        }
+        return;
+    }
+    b.w32(object + kNoRemoving, message != 0 ? message : kRemovingNoMessage);
+    b.w32(object + kNoUseCount, count - 1);
+}
+
+// FreeNamedObject: gives the object's memory back; it must be in no name
+// space. The objects of its own name space stay as they are.
+void Utility::free_named_object(u32 object) {
+    if (object == 0 || object == root_) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 bytes = b.r32(object + kNoBytes);
+    if (!b.ok() || bytes < kNoNameAt) {
+        return;
+    }
+    unlink_named_object(object);
+    exec_->free(object, bytes);
+}
+
+u32 Utility::named_object_name(u32 object) const {
+    if (object == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 name = b.r32(object + kNoName);
+    return b.ok() ? name : 0;
 }
 
 }

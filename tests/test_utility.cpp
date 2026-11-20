@@ -260,8 +260,8 @@ void unimplemented_vectors_are_logged() {
     CHECK(logged("utility: unimplemented LVO -42"));
     CHECK_EQ(r.cpu().pc, r.base() - 42);
     g_lines.clear();
-    CHECK_EQ(r.call(utility_lvo::GetUniqueID), ExitReason::Unimplemented);
-    CHECK(logged("utility: unimplemented LVO -270"));
+    CHECK_EQ(r.call(54), ExitReason::Unimplemented);  // FilterTagChanges
+    CHECK(logged("utility: unimplemented LVO -54"));
 }
 
 void get_tag_data_and_find_tag_item() {
@@ -620,7 +620,108 @@ void a_hook_that_faults_ends_the_run_and_frees_its_nesting_level() {
     CHECK_EQ(r.result(utility_lvo::CallHookPkt), levels);
 }
 
+void named_objects_live_in_name_spaces() {
+    Rig r;
+    auto alloc = [&](const char* name, u32 tags) {
+        r.cpu().a[0] = r.str(kData + 0x400, name);
+        r.cpu().a[1] = tags;
+        return r.result(utility_lvo::AllocNamedObjectA);
+    };
+    auto add = [&](u32 space, u32 object) {
+        r.cpu().a[0] = space;
+        r.cpu().a[1] = object;
+        return r.result(utility_lvo::AddNamedObject);
+    };
+    auto find = [&](u32 space, const char* name, u32 last) {
+        r.cpu().a[0] = space;
+        r.cpu().a[1] = name != nullptr ? r.str(kData + 0x500, name) : 0;
+        r.cpu().a[2] = last;
+        return r.result(utility_lvo::FindNamedObject);
+    };
+    auto one = [&](u32 lvo, u32 object) {
+        r.cpu().a[0] = object;
+        return r.result(lvo);
+    };
+
+    // Nothing is in the system's name space yet.
+    CHECK_EQ(find(0, "Pattern", 0), 0u);
+
+    // An object with user space, added to the system's name space and
+    // found there without regard to case.
+    const u32 user = r.tags(kData + 0x200, {{ANO_UserSpace, 64}, {TAG_DONE, 0}});
+    const u32 pattern = alloc("Pattern", user);
+    CHECK(pattern != 0);
+    const u32 space = r.get32(pattern + no_Object);
+    CHECK(space != 0);
+    CHECK_EQ(r.get32(space), 0u);
+    CHECK(r.read_str(one(utility_lvo::NamedObjectName, pattern)) == "Pattern");
+    CHECK_EQ(add(0, pattern), 1u);
+    CHECK_EQ(add(0, pattern), 0u);  // already in one
+    CHECK_EQ(find(0, "PATTERN", 0), pattern);
+    CHECK_EQ(find(0, "Other", 0), 0u);
+
+    // Held by the find, it cannot be removed by another; once let go, it can.
+    CHECK_EQ(find(0, "pattern", 0), pattern);
+    CHECK_EQ(one(utility_lvo::AttemptRemNamedObject, pattern), 0u);
+    one(utility_lvo::ReleaseNamedObject, pattern);
+    CHECK_EQ(one(utility_lvo::AttemptRemNamedObject, pattern), 1u);
+    CHECK_EQ(find(0, "Pattern", 0), 0u);
+
+    // An object with a name space of its own that takes no duplicates and
+    // minds case; its objects go in by priority.
+    const u32 ns_tags = r.tags(kData + 0x240, {{ANO_NameSpace, 1},
+                                               {ANO_Flags, NSF_NODUPS | NSF_CASE},
+                                               {TAG_DONE, 0}});
+    const u32 holder = alloc("Holder", ns_tags);
+    const u32 low = alloc("Low", r.tags(kData + 0x280, {{ANO_Priority, 0xFFFFFFFB},
+                                                       {TAG_DONE, 0}}));
+    const u32 high = alloc("High", r.tags(kData + 0x2C0, {{ANO_Priority, 5}, {TAG_DONE, 0}}));
+    const u32 twin = alloc("High", 0);
+    CHECK_EQ(add(holder, low), 1u);
+    CHECK_EQ(add(holder, high), 1u);
+    CHECK_EQ(add(holder, twin), 0u);  // a duplicate name
+    CHECK_EQ(add(pattern, twin), 0u);  // no name space there
+    CHECK_EQ(find(holder, "high", 0), 0u);
+    CHECK_EQ(find(holder, nullptr, 0), high);
+    CHECK_EQ(find(holder, nullptr, high), low);
+    CHECK_EQ(find(holder, nullptr, low), 0u);
+
+    // RemNamedObject waits for the last holder and replies the message.
+    // A port that only queues: PA_IGNORE and an empty message list.
+    const u32 port = kData + 0x600;
+    r.put8(port + 8, NT_MSGPORT);
+    r.put8(port + mp_Flags, PA_IGNORE);
+    r.put32(port + mp_MsgList, port + mp_MsgList + 4);
+    r.put32(port + mp_MsgList + 4, 0);
+    r.put32(port + mp_MsgList + 8, port + mp_MsgList);
+    const u32 message = kData + 0x640;
+    r.put32(message + mn_ReplyPort, port);
+    auto queued = [&]() {
+        const u32 head = r.get32(port + mp_MsgList);
+        return head == port + mp_MsgList + 4 ? 0u : head;
+    };
+    CHECK_EQ(find(holder, "High", 0), high);  // held twice now
+    r.cpu().a[0] = high;
+    r.cpu().a[1] = message;
+    r.result(utility_lvo::RemNamedObject);
+    CHECK_EQ(queued(), 0u);
+    CHECK_EQ(find(holder, "High", 0), 0u);  // being removed
+    one(utility_lvo::ReleaseNamedObject, high);
+    CHECK_EQ(queued(), message);
+    CHECK_EQ(find(holder, nullptr, 0), low);
+
+    const u32 before = g_exec.free_bytes();
+    one(utility_lvo::FreeNamedObject, twin);
+    CHECK(g_exec.free_bytes() > before);
+
+    // GetUniqueID counts up.
+    const u32 first = r.result(utility_lvo::GetUniqueID);
+    CHECK_EQ(r.result(utility_lvo::GetUniqueID), first + 1);
+    CHECK(g_lines.empty());
+}
+
 int main() {
+    named_objects_live_in_name_spaces();
     utility_base_is_built();
     unimplemented_vectors_are_logged();
     math_vectors();
