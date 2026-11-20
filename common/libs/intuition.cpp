@@ -1251,6 +1251,72 @@ struct IntuitionNatives {
         native::set_result(m, second >= first && second - first <= kDoubleClickUs ? 1 : 0);
     }
 
+    // The default struct Preferences: topaz 8 and the double-click time;
+    // the rest stays 0 until SetPrefs gives more.
+    static void default_prefs(u8* prefs) {
+        for (u32 i = 0; i < Intuition::kPrefsBytes; ++i) {
+            prefs[i] = 0;
+        }
+        constexpr u32 kFontHeight = 0;
+        constexpr u32 kDoubleClick = 20;  // struct timeval: seconds, micros
+        prefs[kFontHeight] = 8;
+        const u32 seconds = static_cast<u32>(kDoubleClickUs / 1000000);
+        const u32 micros = static_cast<u32>(kDoubleClickUs % 1000000);
+        for (u32 i = 0; i < 4; ++i) {
+            prefs[kDoubleClick + i] = static_cast<u8>(seconds >> (24 - 8 * i));
+            prefs[kDoubleClick + 4 + i] = static_cast<u8>(micros >> (24 - 8 * i));
+        }
+    }
+
+    static void copy_prefs_out(Machine& m, const u8* prefs) {
+        Bus b(m);
+        const u32 to = m.cpu.a[0];
+        const u32 size = m.cpu.d[0] < Intuition::kPrefsBytes ? m.cpu.d[0] : Intuition::kPrefsBytes;
+        for (u32 i = 0; to != 0 && i < size && b.ok(); ++i) {
+            b.w8(to + i, prefs[i]);
+        }
+        native::set_result(m, to);
+    }
+
+    // GetDefPrefs(prefs A0, size D0): the defaults into prefs.
+    static void get_def_prefs(void*, Machine& m) {
+        u8 prefs[Intuition::kPrefsBytes];
+        default_prefs(prefs);
+        copy_prefs_out(m, prefs);
+    }
+
+    // GetPrefs(prefs A0, size D0): the preferences in use into prefs.
+    static void get_prefs(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        if (!in.prefs_set_) {
+            default_prefs(in.prefs_);
+            in.prefs_set_ = true;
+        }
+        copy_prefs_out(m, in.prefs_);
+    }
+
+    // SetPrefs(prefs A0, size D0, inform D1): keeps prefs for GetPrefs.
+    // Nothing on the screen follows them yet. TODO: apply them.
+    static void set_prefs(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        Bus b(m);
+        if (!in.prefs_set_) {
+            default_prefs(in.prefs_);
+            in.prefs_set_ = true;
+        }
+        const u32 from = m.cpu.a[0];
+        const u32 size = m.cpu.d[0] < Intuition::kPrefsBytes ? m.cpu.d[0] : Intuition::kPrefsBytes;
+        for (u32 i = 0; from != 0 && i < size && b.ok(); ++i) {
+            in.prefs_[i] = static_cast<u8>(b.r8(from + i));
+        }
+        native::set_result(m, from);
+    }
+
+    // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: the
+    // preferences it reads from ENV: are taken and not applied yet; 0
+    // back. TODO: apply the screen mode, font and pointer prefs.
+    static void set_iprefs(void*, Machine& m) { native::set_result(m, 0); }
+
     // InitRequester: clears the struct Requester at A0.
     static void init_requester(void*, Machine& m) {
         Bus b(m);
@@ -1451,6 +1517,10 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::IntuiTextLength, IntuitionNatives::intui_text_length, "IntuiTextLength"},
     {intuition_lvo::InitRequester, IntuitionNatives::init_requester, "InitRequester"},
     {intuition_lvo::DoubleClick, IntuitionNatives::double_click, "DoubleClick"},
+    {intuition_lvo::GetDefPrefs, IntuitionNatives::get_def_prefs, "GetDefPrefs"},
+    {intuition_lvo::GetPrefs, IntuitionNatives::get_prefs, "GetPrefs"},
+    {intuition_lvo::SetPrefs, IntuitionNatives::set_prefs, "SetPrefs"},
+    {intuition_lvo::SetIPrefs, IntuitionNatives::set_iprefs, "SetIPrefs"},
     {intuition_lvo::ScrollWindowRaster, IntuitionNatives::scroll_window_raster,
      "ScrollWindowRaster"},
     {intuition_lvo::ActivateGadget, IntuitionNatives::activate_gadget, "ActivateGadget"},

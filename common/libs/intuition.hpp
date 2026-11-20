@@ -60,6 +60,10 @@ struct RastPortView;
 namespace intuition_lvo {
 
 constexpr u32 AddGadget = 42;
+constexpr u32 GetDefPrefs = 126;
+constexpr u32 GetPrefs = 132;
+constexpr u32 SetPrefs = 324;
+constexpr u32 SetIPrefs = 576;
 constexpr u32 DrawImage = 114;
 constexpr u32 CloseScreen = 66;
 constexpr u32 ClearMenuStrip = 54;
@@ -554,6 +558,10 @@ private:
         u8 csi = 0;
     };
     ActiveString string_;
+    // The struct Preferences GetPrefs hands out and SetPrefs replaces.
+    static constexpr u32 kPrefsBytes = 232;
+    u8 prefs_[kPrefsBytes]{};
+    bool prefs_set_ = false;
     // The windows a Request() blocks, with its Requester, until EndRequest:
     // a press in one reaches none of its gadgets.
     struct Block {
