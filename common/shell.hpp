@@ -47,7 +47,20 @@ struct ShellHost {
     // Shows the cursor back bytes before the end of the line; without it
     // the cursor stays at the end and Left and Right do nothing.
     void (*cursor_back)(void* ctx, u32 back) = nullptr;
+    // Expands $variables and backquoted commands in line into out; false
+    // when out is too small. Without it lines run as typed.
+    bool (*expand)(void* ctx, const char* line, char* out, u32 size) = nullptr;
+    // Called before each command with where its input and output go: a
+    // file name each, or null for the console; append when output adds
+    // to the file. Without it redirections are dropped.
+    void (*redirect)(void* ctx, const char* input, const char* output, bool append) = nullptr;
 };
+
+// Runs one command line through host: expansion, then <file, >file and
+// >>file taken out of it, then a builtin, or the command, found under C:
+// when its name has no ':' or '/'. A command that cannot be loaded gets
+// "Unknown command". Empty lines do nothing.
+void run_command_line(const ShellHost& host, const char* line);
 
 // One shell session: a fixed line buffer edited by the keyboard and parsed
 // into a command path and its argument text when Enter is pressed. The

@@ -46,6 +46,135 @@ usize append_text(char* out, usize cap, usize at, const char* text) {
 
 }
 
+namespace {
+
+bool is_blank(char c) { return c == ' ' || c == '\t'; }
+
+// Takes <name, >name and >>name, with or without a space before the name,
+// out of line outside quotes. The last of each kind wins.
+void take_redirections(char* line, char* input, char* output, bool& append, u32 size) {
+    input[0] = '\0';
+    output[0] = '\0';
+    append = false;
+    u32 to = 0;
+    bool quoted = false;
+    for (u32 at = 0; line[at] != '\0';) {
+        const char c = line[at];
+        if (c == '"') {
+            quoted = !quoted;
+        }
+        const bool start = to == 0 || is_blank(line[at - 1]);
+        if (quoted || (c != '<' && c != '>') || !start) {
+            line[to++] = line[at++];
+            continue;
+        }
+        char* name = c == '<' ? input : output;
+        if (c == '>') {
+            append = line[at + 1] == '>';
+            at += append ? 2 : 1;
+        } else {
+            ++at;
+        }
+        while (is_blank(line[at])) {
+            ++at;
+        }
+        u32 n = 0;
+        bool name_quoted = false;
+        while (line[at] != '\0' && (name_quoted || !is_blank(line[at]))) {
+            if (line[at] == '"') {
+                name_quoted = !name_quoted;
+            } else if (n + 1 < size) {
+                name[n++] = line[at];
+            }
+            ++at;
+        }
+        name[n] = '\0';
+    }
+    line[to] = '\0';
+}
+
+}
+
+void run_command_line(const ShellHost& host, const char* text) {
+    char line[Shell::kMaxLine + 1];
+    if (host.expand == nullptr || !host.expand(host.ctx, text, line, sizeof line)) {
+        line[append_text(line, sizeof line, 0, text)] = '\0';
+    }
+    char input[Shell::kMaxLine + 1];
+    char output[Shell::kMaxLine + 1];
+    bool append = false;
+    take_redirections(line, input, output, append, sizeof input);
+
+    u32 begin = 0;
+    while (is_blank(line[begin])) {
+        ++begin;
+    }
+    u32 end = begin;
+    while (line[end] != '\0') {
+        ++end;
+    }
+    while (end > begin && is_blank(line[end - 1])) {
+        --end;
+    }
+    if (begin == end) {
+        return;
+    }
+    u32 word_end = begin;
+    while (word_end < end && !is_blank(line[word_end])) {
+        ++word_end;
+    }
+    u32 args_begin = word_end;
+    while (args_begin < end && is_blank(line[args_begin])) {
+        ++args_begin;
+    }
+    line[end] = '\0';
+    line[word_end] = '\0';
+    const char* word = line + begin;
+    const char* args = line + args_begin;
+
+    if (host.redirect != nullptr) {
+        host.redirect(host.ctx, input[0] != '\0' ? input : nullptr,
+                      output[0] != '\0' ? output : nullptr, append);
+    }
+    if (host.builtin != nullptr && host.builtin(host.ctx, word, args)) {
+        if (host.redirect != nullptr) {
+            host.redirect(host.ctx, nullptr, nullptr, false);
+        }
+        return;
+    }
+
+    bool needs_prefix = true;
+    for (const char* p = word; *p != '\0'; ++p) {
+        if (*p == ':' || *p == '/') {
+            needs_prefix = false;
+            break;
+        }
+    }
+    char prefixed[sizeof "C:" + Shell::kMaxLine];
+    const char* path = word;
+    if (needs_prefix) {
+        usize n = append_text(prefixed, sizeof prefixed, 0, "C:");
+        n = append_text(prefixed, sizeof prefixed, n, word);
+        prefixed[n] = '\0';
+        path = prefixed;
+    }
+    const bool ran = host.run(host.ctx, path, args);
+    if (host.redirect != nullptr) {
+        host.redirect(host.ctx, nullptr, nullptr, false);
+    }
+    if (!ran) {
+        char message[sizeof kUnknownLog + Shell::kMaxLine];
+        usize n = append_text(message, sizeof message, 0, kUnknownMessage);
+        n = append_text(message, sizeof message, n, word);
+        message[n] = '\0';
+        host.message(host.ctx, message);
+        n = append_text(message, sizeof message, 0, kUnknownLog);
+        n = append_text(message, sizeof message, n, word);
+        message[n] = '\0';
+        host.log_line(host.ctx, message);
+    }
+}
+
 void Shell::init(const ShellHost& host) {
     host_ = host;
     length_ = 0;
@@ -270,53 +399,8 @@ void Shell::enter() {
         return;
     }
 
-    u32 word_end = begin;
-    while (word_end < end && line_[word_end] != ' ') {
-        ++word_end;
-    }
-    u32 args_begin = word_end;
-    while (args_begin < end && line_[args_begin] == ' ') {
-        ++args_begin;
-    }
     line_[end] = '\0';
-    line_[word_end] = '\0';
-
-    if (host_.builtin != nullptr &&
-        host_.builtin(host_.ctx, line_ + begin, line_ + args_begin)) {
-        host_.prompt(host_.ctx);
-        length_ = 0;
-        line_[0] = '\0';
-        return;
-    }
-
-    bool needs_prefix = true;
-    for (u32 i = begin; i < word_end; ++i) {
-        if (line_[i] == ':' || line_[i] == '/') {
-            needs_prefix = false;
-            break;
-        }
-    }
-
-    char prefixed[sizeof "C:" + kMaxLine];
-    const char* path = line_ + begin;
-    if (needs_prefix) {
-        usize n = append_text(prefixed, sizeof prefixed, 0, "C:");
-        n = append_text(prefixed, sizeof prefixed, n, path);
-        prefixed[n] = '\0';
-        path = prefixed;
-    }
-
-    if (!host_.run(host_.ctx, path, line_ + args_begin)) {
-        char text[sizeof kUnknownLog + kMaxLine];
-        usize n = append_text(text, sizeof text, 0, kUnknownMessage);
-        n = append_text(text, sizeof text, n, line_ + begin);
-        text[n] = '\0';
-        host_.message(host_.ctx, text);
-        n = append_text(text, sizeof text, 0, kUnknownLog);
-        n = append_text(text, sizeof text, n, line_ + begin);
-        text[n] = '\0';
-        host_.log_line(host_.ctx, text);
-    }
+    run_command_line(host_, line_ + begin);
     host_.prompt(host_.ctx);
 
     length_ = 0;

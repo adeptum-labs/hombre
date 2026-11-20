@@ -5344,6 +5344,36 @@ void ram_protection_bits_are_enforced() {
     CHECK_EQ(r.call(dos_lvo::Close, again), DOSTRUE);
 }
 
+// A redirection to a RAM: file writes it new, and >> adds to its end.
+void redirections_write_and_append_to_ram_files() {
+    Rig r;
+    const u8 first[] = {'a', 'b'};
+    const u8 more[] = {'c'};
+    u32 fh = g_dos.open_redirection("RAM:out", true, false);
+    CHECK(fh != 0);
+    CHECK(g_dos.write_handle(fh, first, 2));
+    g_dos.close_redirection(fh);
+    fh = g_dos.open_redirection("RAM:out", true, true);
+    CHECK(fh != 0);
+    CHECK(g_dos.write_handle(fh, more, 1));
+    g_dos.close_redirection(fh);
+    u8 data[8] = {};
+    u32 got = 0;
+    u32 error = 0;
+    CHECK(g_dos.read_file("RAM:out", data, sizeof data, got, error));
+    CHECK_EQ(got, 3u);
+    CHECK(data[0] == 'a' && data[1] == 'b' && data[2] == 'c');
+    fh = g_dos.open_redirection("RAM:out", true, false);
+    g_dos.close_redirection(fh);
+    CHECK(g_dos.read_file("RAM:out", data, sizeof data, got, error));
+    CHECK_EQ(got, 0u);
+    const u32 nil = g_dos.open_redirection("NIL:", true, false);
+    CHECK(nil != 0);
+    CHECK(g_dos.write_handle(nil, first, 2));
+    g_dos.close_redirection(nil);
+    CHECK_EQ(g_dos.open_redirection("RAM:missing", false, false), 0u);
+}
+
 // The file closed hook hears of a file written to, and of no other.
 void closing_a_written_file_calls_the_file_closed_hook() {
     Rig r;
@@ -7192,6 +7222,7 @@ int main() {
     ram_dos_list_match_and_exall();
     ram_open_write_read_and_seek();
     closing_a_written_file_calls_the_file_closed_hook();
+    redirections_write_and_append_to_ram_files();
     ram_protection_bits_are_enforced();
     ram_deep_paths_stay_valid();
     ram_buffered_output_and_set_file_size();

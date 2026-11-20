@@ -24,6 +24,7 @@
 #include "check.hpp"
 #include "shell.hpp"
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -287,6 +288,49 @@ void control_bytes_are_ignored() {
     CHECK(r.calls.empty());
 }
 
+void host_redirect(void* ctx, const char* input, const char* output, bool append) {
+    std::string call = "redirect:";
+    call += input != nullptr ? input : "-";
+    call += append ? ">>" : ">";
+    call += output != nullptr ? output : "-";
+    static_cast<Recorder*>(ctx)->calls.push_back(call);
+}
+
+bool host_expand(void*, const char* line, char* out, u32 size) {
+    std::string text = line;
+    const auto at = text.find("$x");
+    if (at != std::string::npos) {
+        text.replace(at, 2, "42");
+    }
+    std::snprintf(out, size, "%s", text.c_str());
+    return true;
+}
+
+void redirections_are_taken_out_of_the_line() {
+    Recorder r;
+    ShellHost host = make_host(r);
+    host.redirect = host_redirect;
+    run_command_line(host, "Version >NIL: full");
+    run_command_line(host, "echo \"a > b\" >> RAM:log");
+    run_command_line(host, "sort <RAM:in > \"RAM:my out\"");
+    run_command_line(host, "list x>y");
+    CHECK(calls_with(r, "redirect:") ==
+          (std::vector<std::string>{"redirect:->NIL:", "redirect:->-",
+                                    "redirect:->>RAM:log", "redirect:->-",
+                                    "redirect:RAM:in>RAM:my out", "redirect:->-",
+                                    "redirect:->-", "redirect:->-"}));
+    CHECK(r.paths == (std::vector<std::string>{"C:Version", "C:echo", "C:sort", "C:list"}));
+    CHECK(r.args == (std::vector<std::string>{"full", "\"a > b\"", "", "x>y"}));
+}
+
+void lines_are_expanded_before_they_run() {
+    Recorder r;
+    ShellHost host = make_host(r);
+    host.expand = host_expand;
+    run_command_line(host, "echo $x");
+    CHECK(r.args == (std::vector<std::string>{"42"}));
+}
+
 void builtin_is_tried_first() {
     Recorder r;
     r.accept_builtin = "cd";
@@ -531,6 +575,8 @@ history_does_nothing_when_empty();
     second_command_after_unknown_one_works();
     control_bytes_are_ignored();
     builtin_is_tried_first();
+    redirections_are_taken_out_of_the_line();
+    lines_are_expanded_before_they_run();
     backspace_on_empty_line_returns_to_bottom();
     key_on_full_line_returns_to_bottom();
     return check::finish("test_shell");

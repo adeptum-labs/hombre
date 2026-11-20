@@ -46,6 +46,7 @@
 #include "../common/serial.hpp"
 #include "../common/shell.hpp"
 #include "../common/shell_commands.hpp"
+#include "../common/shell_script.hpp"
 #include "../common/shell_window.hpp"
 #include "amiga_display.hpp"
 #include "apic.hpp"
@@ -77,11 +78,13 @@ constexpr u32 free_start = 0x10000;
 constexpr u64 block_budget = 1ull << 24;
 constexpr u32 poll_budget = 64;
 constexpr u8 usage_key_c = 0x06;
+constexpr u8 usage_key_d = 0x07;
 constexpr u8 usage_key_backslash_us = 0x31;
 constexpr u8 usage_key_backslash_iso = 0x32;
 constexpr u8 ctrl_backslash = 0x1C;
 constexpr u32 key_queue_cap = 64;
 constexpr u32 sigbreakf_ctrl_c = 1u << 12;
+constexpr u32 sigbreakf_ctrl_d = 1u << 13;
 
 // Constant initialised, so they sit in .bss (or .data) without a
 // constructor run.
@@ -135,6 +138,14 @@ struct Console {
     Shell line_editor;
     ShellCommands commands;
     TypedShell typed{};
+    ShellHost host{};      // what its lines and scripts run through
+    bool break_script = false;  // Ctrl+D asks a running script to stop
+    // Where the next command's input and output go, from <, > and >>.
+    char redirect_in[Shell::kMaxLine + 1]{};
+    char redirect_out[Shell::kMaxLine + 1]{};
+    bool redirect_append = false;
+    u32 out_handle = 0;      // where builtins print, when not the console
+    u32 capture_handle = 0;  // where a backquoted command's output goes
 };
 
 constinit Console consoles[Dos::kMaxConsoles]{};
@@ -551,6 +562,11 @@ void poll_keys() {
                     if (c.command_running) {
                         exec.signal_task(c.process, sigbreakf_ctrl_c);
                     }
+                } else if (usage == usage_key_d) {
+                    c.break_script = true;
+                    if (c.command_running) {
+                        exec.signal_task(c.process, sigbreakf_ctrl_d);
+                    }
                 } else if (usage == usage_key_backslash_us ||
                            usage == usage_key_backslash_iso ||
                            keymap_se(usage, report[0], false) == '\\') {
@@ -811,7 +827,7 @@ void clear_ctrl_c(u32 process) {
 
 // Runs the command and reports on serial how it went. False when the
 // program cannot be loaded; any other end is reported and counts as run.
-bool execute(Console& c, const char* path, const char* args) {
+bool execute(Console& c, const char* path, const char* args, u32 input = 0, u32 output = 0) {
     serial::write("m68k: running ");
     write_filtered(path);
     serial::write("\n");
@@ -820,7 +836,8 @@ bool execute(Console& c, const char* path, const char* args) {
     u32 result = 0;
     clear_ctrl_c(c.process);
     c.command_running = true;
-    const bool ok = dos.run_command_in(c.process, path, args, result, block_budget);
+    const bool ok =
+        dos.run_command_in(c.process, path, args, result, block_budget, input, output);
     c.command_running = false;
     c.filter.reset();
     reclaim_after_program(c.process);
@@ -873,7 +890,70 @@ void shell_print(void* ctx, const char* text) {
     while (text[len] != '\0') {
         ++len;
     }
+    if (c.out_handle != 0) {
+        dos.write_handle(c.out_handle, reinterpret_cast<const u8*>(text), len);
+        return;
+    }
     console_write(&c, reinterpret_cast<const u8*>(text), len);
+}
+
+// The handles a command's < and > name, opened: false, with the reason
+// printed, when one cannot be. A backquoted command's output goes to the
+// capture file unless it names its own.
+bool open_redirections(Console& c, u32& input, u32& output, bool& own_output) {
+    input = 0;
+    output = 0;
+    own_output = false;
+    if (c.redirect_in[0] != '\0') {
+        input = dos.open_redirection(c.redirect_in, false, false);
+        if (input == 0) {
+            shell_print(&c.typed, "Unable to open redirection file ");
+            shell_print(&c.typed, c.redirect_in);
+            shell_print(&c.typed, "\n");
+            dos.set_return_code(20);
+            return false;
+        }
+    }
+    if (c.redirect_out[0] != '\0') {
+        output = dos.open_redirection(c.redirect_out, true, c.redirect_append);
+        if (output == 0) {
+            dos.close_redirection(input);
+            input = 0;
+            shell_print(&c.typed, "Unable to open redirection file ");
+            shell_print(&c.typed, c.redirect_out);
+            shell_print(&c.typed, "\n");
+            dos.set_return_code(20);
+            return false;
+        }
+        own_output = true;
+    } else {
+        output = c.capture_handle;
+    }
+    return true;
+}
+
+void close_redirections(u32 input, u32 output, bool own_output) {
+    dos.close_redirection(input);
+    if (own_output) {
+        dos.close_redirection(output);
+    }
+}
+
+void copy_name(char* to, const char* from) {
+    u32 n = 0;
+    if (from != nullptr) {
+        for (; from[n] != '\0' && n < Shell::kMaxLine; ++n) {
+            to[n] = from[n];
+        }
+    }
+    to[n] = '\0';
+}
+
+void typed_redirect(void* ctx, const char* input, const char* output, bool append) {
+    Console& c = typed_console(ctx);
+    copy_name(c.redirect_in, input);
+    copy_name(c.redirect_out, output);
+    c.redirect_append = append;
 }
 
 void write_shell_prompt(Console& c) {
@@ -896,10 +976,43 @@ void typed_log(void*, const char* text) {
     serial::write_char('\n');
 }
 
+u32 run_script_file(Console& c, const char* args);
+
+bool same_name(const char* a, const char* b) {
+    for (; *a != '\0' && *b != '\0'; ++a, ++b) {
+        const char x = *a >= 'A' && *a <= 'Z' ? static_cast<char>(*a - 'A' + 'a') : *a;
+        const char y = *b >= 'A' && *b <= 'Z' ? static_cast<char>(*b - 'A' + 'a') : *b;
+        if (x != y) {
+            return false;
+        }
+    }
+    return *a == '\0' && *b == '\0';
+}
+
 bool typed_builtin(void* ctx, const char* word, const char* args) {
     Console& c = typed_console(ctx);
-    if (!c.commands.run(word, args)) {
-        return false;
+    u32 input = 0;
+    u32 output = 0;
+    bool own_output = false;
+    if (same_name(word, "execute")) {
+        if (!open_redirections(c, input, output, own_output)) {
+            return true;
+        }
+        c.out_handle = output;
+        dos.set_return_code(run_script_file(c, args));
+        c.out_handle = 0;
+        close_redirections(input, output, own_output);
+    } else {
+        if (!open_redirections(c, input, output, own_output)) {
+            return true;
+        }
+        c.out_handle = output;
+        const bool ran = c.commands.run(word, args);
+        c.out_handle = 0;
+        close_redirections(input, output, own_output);
+        if (!ran) {
+            return false;
+        }
     }
     if (!serial_at_line_start) {
         serial::write_char('\n');
@@ -924,9 +1037,20 @@ bool typed_run(void* ctx, const char* path, const char* args) {
     }
     char cmd[Dos::kMaxPath];
     if (!dos.find_command(word, cmd, sizeof cmd, c.process)) {
+        dos.set_return_code(20);
         return false;
     }
-    const bool loaded = execute(c, cmd, args);
+    u32 input = 0;
+    u32 output = 0;
+    bool own_output = false;
+    if (!open_redirections(c, input, output, own_output)) {
+        return true;
+    }
+    const bool loaded = execute(c, cmd, args, input, output);
+    close_redirections(input, output, own_output);
+    if (!loaded) {
+        dos.set_return_code(20);
+    }
     if (loaded && (machine.cpu.exit == ExitReason::None ||
                    machine.cpu.exit == ExitReason::Returned)) {
         const u32 rc = dos.last_return_code(c.process);
@@ -943,6 +1067,135 @@ bool typed_run(void* ctx, const char* path, const char* args) {
         }
     }
     return loaded;
+}
+
+// --- scripts ---------------------------------------------------------------
+
+Console& script_console(void* ctx) { return *static_cast<Console*>(ctx); }
+
+u32 script_run_line(void* ctx, const char* line) {
+    Console& c = script_console(ctx);
+    run_command_line(c.host, line);
+    return dos.last_return_code(c.process);
+}
+
+bool script_exists(void*, const char* path) {
+    return dos.examine(path).kind != Dos::TargetKind::Missing;
+}
+
+bool script_get_var(void*, const char* name, char* out, u32 size) {
+    return dos.get_var(name, out, size) >= 0;
+}
+
+// Runs line with its output going to a file in T:, then reads it back.
+bool script_capture(void* ctx, const char* line, char* out, u32 size) {
+    Console& c = script_console(ctx);
+    constexpr char kCapture[] = "T:Hombre-Backquote";
+    const u32 fh = dos.open_redirection(kCapture, true, false);
+    if (fh == 0 || size == 0) {
+        return false;
+    }
+    const u32 outer = c.capture_handle;
+    c.capture_handle = fh;
+    run_command_line(c.host, line);
+    c.capture_handle = outer;
+    dos.close_redirection(fh);
+    u32 got = 0;
+    u32 error = 0;
+    const bool ok = dos.read_file(kCapture, reinterpret_cast<u8*>(out), size - 1, got, error);
+    out[ok ? got : 0] = '\0';
+    dos.delete_file(kCapture, error);
+    return ok;
+}
+
+bool script_break(void* ctx) {
+    Console& c = script_console(ctx);
+    poll_keys();
+    const bool stop = c.break_script;
+    c.break_script = false;
+    return stop;
+}
+
+u32 script_fail_level(void* ctx) { return dos.fail_level(script_console(ctx).process); }
+
+void script_message(void* ctx, const char* text) {
+    shell_print(&script_console(ctx).typed, text);
+}
+
+ScriptHost script_host(Console& c) {
+    return ScriptHost{&script_run_line, &script_exists,      &script_get_var,
+                      &script_capture,  &script_break,       &script_fail_level,
+                      &script_message,  &c};
+}
+
+bool typed_expand(void* ctx, const char* line, char* out, u32 size) {
+    return expand_line(script_host(typed_console(ctx)), line, out, size);
+}
+
+// Scripts read whole into one of these, one per level of Execute.
+constexpr u32 kScriptBytes = 16 * 1024;
+constexpr u32 kScriptDepth = 4;
+constinit u8 script_text[kScriptDepth][kScriptBytes]{};
+constinit u32 script_depth = 0;
+
+// Execute: runs the script the first word of args names. Its arguments
+// are not handed on yet. TODO: handle .KEY and the script's arguments.
+u32 run_script_file(Console& c, const char* args) {
+    char name[Dos::kMaxPath];
+    u32 n = 0;
+    const char* p = args;
+    while (*p == ' ' || *p == '\t') {
+        ++p;
+    }
+    const bool quoted = *p == '"';
+    if (quoted) {
+        ++p;
+    }
+    while (*p != '\0' && n + 1 < sizeof name &&
+           (quoted ? *p != '"' : (*p != ' ' && *p != '\t'))) {
+        name[n++] = *p++;
+    }
+    name[n] = '\0';
+    if (n == 0) {
+        shell_print(&c.typed, "Execute: no script given\n");
+        return 20;
+    }
+    if (script_depth == kScriptDepth) {
+        shell_print(&c.typed, "Execute: scripts nested too deep\n");
+        return 20;
+    }
+    u8* text = script_text[script_depth];
+    u32 got = 0;
+    u32 error = 0;
+    if (!dos.read_file(name, text, kScriptBytes, got, error)) {
+        shell_print(&c.typed, "Execute: cannot read ");
+        shell_print(&c.typed, name);
+        shell_print(&c.typed, "\n");
+        return 20;
+    }
+    ++script_depth;
+    if (script_depth == 1) {
+        c.break_script = false;
+    }
+    ScriptRunner runner(script_host(c));
+    const u32 rc = runner.run(reinterpret_cast<const char*>(text), got);
+    --script_depth;
+    return rc;
+}
+
+bool open_new_shell(void* ctx);
+
+// The console's line editor and builtins, set up before its first line.
+void init_console_shell(Console& c) {
+    c.commands.init(dos, &shell_print, &c.typed);
+    c.commands.set_process(c.process);
+    c.commands.set_new_shell(&open_new_shell, &c);
+    c.typed.console = &c;
+    c.host = ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
+                       &typed_message, &typed_prompt, &typed_log, &c.typed,
+                       &typed_builtin, &typed_scroll_to_bottom, &typed_cursor_back,
+                       &typed_expand, &typed_redirect};
+    c.line_editor.init(c.host);
 }
 
 constexpr u32 new_shell_width = 480;
@@ -1016,14 +1269,7 @@ bool open_new_shell(void* ctx) {
 // line. Console 0 never returns; another console returns when its shell
 // ends and leaves its console free for a new shell.
 void shell_loop(Console& c) {
-    c.commands.init(dos, &shell_print, &c.typed);
-    c.commands.set_process(c.process);
-    c.commands.set_new_shell(&open_new_shell, &c);
-    c.typed.console = &c;
-    c.line_editor.init(ShellHost{&typed_echo, &typed_erase, &typed_end_line, &typed_run,
-                                 &typed_message, &typed_prompt, &typed_log, &c.typed,
-                                 &typed_builtin, &typed_scroll_to_bottom,
-                                 &typed_cursor_back});
+    init_console_shell(c);
     if (c.index == 0) {
         serial::write("shell: ready\n");
     } else {

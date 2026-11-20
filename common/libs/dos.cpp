@@ -9550,7 +9550,7 @@ bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_b
 }
 
 bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& result,
-                         u64 max_blocks) {
+                         u64 max_blocks, u32 input, u32 output) {
     if (m_ == nullptr || path == nullptr || args == nullptr) {
         return false;
     }
@@ -9630,6 +9630,12 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
         DosOps::unload(*this, seglist);
         return false;
     }
+    if (input != 0) {
+        b.w32(p.process + pr_CIS, input);
+    }
+    if (output != 0) {
+        b.w32(p.process + pr_COS, output);
+    }
     // PROGDIR: is the directory the program was loaded from.
     const u32 home_dir = DosOps::program_dir_lock(*this, b, path, p.process);
     b.w32(p.process + pr_HomeDir, home_dir);
@@ -9659,6 +9665,12 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
     exec_->reset_task_state(p.process);
     DosOps::cleanup_command(*this, p.process, saved_current_dir, saved_cis, saved_cos,
                             static_cast<u8>(index + 1));
+    if (input != 0) {
+        m_->mem.write32(p.process + pr_CIS, saved_cis);
+    }
+    if (output != 0) {
+        m_->mem.write32(p.process + pr_COS, saved_cos);
+    }
     m_->mem.write32(p.process + pr_HomeDir, saved_home_dir);
     if (home_dir != 0) {
         DosOps::free_user_lock(*this, home_dir);
@@ -10116,6 +10128,58 @@ bool Dos::read_console_line(char* out, u32 size) {
     }
     out[copy] = '\0';
     return true;
+}
+
+u32 Dos::open_redirection(const char* name, bool output, bool append) {
+    if (m_ == nullptr || exec_ == nullptr || name == nullptr) {
+        return 0;
+    }
+    const u32 length = length_of(name);
+    const u32 copy = exec_->alloc(length + 1, MEMF_PUBLIC);
+    if (copy == 0) {
+        return 0;
+    }
+    Bus b(*m_);
+    for (u32 i = 0; i <= length; ++i) {
+        b.w8(copy + i, static_cast<u8>(name[i]));
+    }
+    CpuState& cpu = m_->cpu;
+    const u32 d0 = cpu.d[0];
+    const u32 d1 = cpu.d[1];
+    const u32 d2 = cpu.d[2];
+    cpu.d[1] = copy;
+    cpu.d[2] = !output ? MODE_OLDFILE : append ? MODE_READWRITE : MODE_NEWFILE;
+    DosOps::open(this, *m_);
+    const u32 fh = cpu.d[0];
+    cpu.d[0] = d0;
+    cpu.d[1] = d1;
+    cpu.d[2] = d2;
+    exec_->free(copy, length + 1);
+    if (fh != 0 && append) {
+        const i64 slot = DosOps::handle_slot(*this, fh);
+        if (slot >= 0 && files_[slot].stream == Stream::File) {
+            files_[slot].pos = DosOps::fs_size(*this, files_[slot].entry);
+        }
+    }
+    return fh;
+}
+
+void Dos::close_redirection(u32 fh) {
+    if (fh != 0) {
+        DosOps::close_handle(*this, fh);
+    }
+}
+
+bool Dos::write_handle(u32 fh, const u8* data, u32 bytes) {
+    if (m_ == nullptr) {
+        return false;
+    }
+    const i64 slot = DosOps::handle_slot(*this, fh);
+    if (slot < 0) {
+        return false;
+    }
+    Bus b(*m_);
+    return DosOps::write_slot(*this, b, static_cast<u32>(slot), data, bytes);
 }
 
 void Dos::set_file_closed(FileClosed hook, void* ctx) {

@@ -722,8 +722,19 @@ public:
 
     // run_command for the context whose Process is process; normally called
     // from that process's own task.
+    // input and output, when not 0, are file handles the command gets as
+    // its Input() and Output() instead of the process's own.
     bool run_command_in(u32 process, const char* path, const char* args, u32& result,
-                        u64 max_blocks);
+                        u64 max_blocks, u32 input = 0, u32 output = 0);
+
+    // A file handle for a command's redirected input or output: NIL:, the
+    // console, a file to read, or a RAM: file to write, which append adds
+    // to the end of. 0, with the error in IoErr, when it cannot be opened.
+    u32 open_redirection(const char* name, bool output, bool append);
+    void close_redirection(u32 fh);
+
+    // Writes bytes to an open file handle; false if it cannot.
+    bool write_handle(u32 fh, const u8* data, u32 bytes);
 
     // Builds, but does not start, a CLI process for console: named
     // "HombreShell", with the console's new handle pair as pr_CIS and
