@@ -25,11 +25,12 @@
 
 #include "../common/amiga_fs.hpp"
 #include "../common/boot_info.hpp"
+#include "../common/libs/dos.hpp"
 #include "page_alloc.hpp"
 
 namespace hombre {
 
-// Runs the 68000 program at `path` on the mounted volume with the argument
+// Runs the 68000 program at `path` on the boot volume with the argument
 // line `args`, as translated code over exec and dos. The guest gets 16 MiB
 // of memory from `pages`, seen through a 24-bit address bus as on a 68000,
 // and the run stops after 2^24 blocks.
@@ -42,8 +43,10 @@ namespace hombre {
 // own. A setup step that fails logs one "m68k: " line. Always returns.
 //
 // Call it once per boot, after mem_init and after the lower half is gone.
-// The volume must stay mounted, and its image in memory, for good.
-void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume,
+// drives holds the volume in each floppy drive; DF0: must hold one, the
+// boot volume. The volumes must stay mounted, and their images in memory,
+// for good.
+void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& drives,
                       const char* path, const char* args);
 
 }

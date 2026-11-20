@@ -38,8 +38,12 @@ namespace hombre {
 
 namespace {
 
-// Constant initialised, so they sit in .bss without a constructor run.
-constinit VirtioBlk boot_drive;
+// Constant initialised, so they sit in .bss without a constructor run:
+// the floppy drives DF0: to DF3:.
+constinit VirtioBlk drive_devices[kFloppyDrives];
+
+// The virtio-blk device in PCI slot kFirstDriveSlot + n is drive n.
+constexpr u8 kFirstDriveSlot = 0x10;
 
 constexpr u64 page_size = 4096;
 constexpr u64 max_drive_bytes = 8ull << 20;
@@ -82,22 +86,17 @@ bool log_pci_function(void*, PciAddress address, u16 vendor, u16 device) {
     return false;
 }
 
-// Starts the drive on the PCI bus. Logs one line and returns false when a
-// step fails or there is no drive.
-bool open_drive(PhysAllocator& phys_pages, MmioMapper& mmio) {
-    pci_scan(&log_pci_function, nullptr);
-
-    PciAddress address;
-    if (!virtio_blk_find(address)) {
-        serial::write("no boot disk\n");
-        return false;
-    }
-    if (!boot_drive.init(address, mmio, phys_pages)) {
+// Starts a drive's device. Logs one line, after the prefix, and returns
+// false when a step fails.
+bool open_drive(PhysAllocator& phys_pages, MmioMapper& mmio, VirtioBlk& device,
+                PciAddress address, const char* prefix) {
+    serial::write(prefix);
+    if (!device.init(address, mmio, phys_pages)) {
         serial::write("virtio-blk: init failed\n");
         return false;
     }
     serial::write("virtio-blk: ");
-    serial::write_dec(boot_drive.sector_count());
+    serial::write_dec(device.sector_count());
     serial::write(" sectors\n");
     return true;
 }
@@ -105,8 +104,10 @@ bool open_drive(PhysAllocator& phys_pages, MmioMapper& mmio) {
 // Reads the whole drive into fresh pages. Logs one line and returns false on
 // failure. The pages are only given back when the device can no longer
 // write to them.
-bool read_drive(PhysAllocator& phys_pages, Image& drive) {
-    const u64 sectors = boot_drive.sector_count();
+bool read_drive(PhysAllocator& phys_pages, VirtioBlk& device, const char* prefix,
+                Image& drive) {
+    const u64 sectors = device.sector_count();
+    serial::write(prefix);
     if (sectors == 0) {
         serial::write("disk: empty drive\n");
         return false;
@@ -122,9 +123,10 @@ bool read_drive(PhysAllocator& phys_pages, Image& drive) {
         serial::write("virtio-blk: no memory\n");
         return false;
     }
-    if (!boot_drive.read(0, static_cast<u32>(sectors), buffer)) {
+    if (!device.read(0, static_cast<u32>(sectors), buffer)) {
         serial::write("virtio-blk: read failed\n");
-        if (!boot_drive.quiesced()) {
+        if (!device.quiesced()) {
+            serial::write(prefix);
             serial::write("virtio-blk: device not reset, buffer kept\n");
         } else {
             phys_pages.free_pages(buffer, page_count);
@@ -136,7 +138,8 @@ bool read_drive(PhysAllocator& phys_pages, Image& drive) {
     return true;
 }
 
-void write_dms_error(DmsError error, const DmsInfo& info) {
+void write_dms_error(DmsError error, const DmsInfo& info, const char* prefix) {
+    serial::write(prefix);
     serial::write("disk: dms error: ");
     serial::write(dms_error_name(error));
     if (info.failed_track != dms_detail::no_track) {
@@ -148,13 +151,15 @@ void write_dms_error(DmsError error, const DmsInfo& info) {
 
 // Unpacks the DMS archive in `drive` into fresh pages. Logs one line and
 // returns false on failure.
-bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, Image& image) {
+bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, const char* prefix,
+                Image& image) {
     DmsInfo info;
     const DmsError header = dms_read_header(drive.data, drive.bytes, info);
     if (header != DmsError::Ok) {
-        write_dms_error(header, info);
+        write_dms_error(header, info, prefix);
         return false;
     }
+    serial::write(prefix);
     if (info.image_bytes == 0 || info.image_bytes > max_dms_image_bytes) {
         serial::write("disk: bad image size\n");
         return false;
@@ -173,7 +178,7 @@ bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, Image& image) {
     const DmsError error =
         dms_unpack(drive.data, drive.bytes, out, info.image_bytes, work, info);
     if (error != DmsError::Ok) {
-        write_dms_error(error, info);
+        write_dms_error(error, info, "");
         return false;
     }
     serial::write("disk: DMS ");
@@ -283,56 +288,138 @@ void print_startup_sequence(const AdfVolume& volume) {
     }
 }
 
-// Mounts the volume, prints it and runs C:Version from it. The image stays
-// in memory for good, as dos needs it.
-void mount_and_run(const BootInfo& info, PhysAllocator& phys_pages, const Image& image) {
-    AdfVolume volume;
+// Reads the drive's disk and unpacks it when it is a DMS archive. Logs,
+// after the prefix, and returns false when a step fails.
+bool load_disk(PhysAllocator& phys_pages, MmioMapper& mmio, VirtioBlk& device,
+               PciAddress address, const char* prefix, Image& image) {
+    if (!open_drive(phys_pages, mmio, device, address, prefix)) {
+        return false;
+    }
+    Image drive;
+    if (!read_drive(phys_pages, device, prefix, drive)) {
+        return false;
+    }
+    switch (detect_disk_format(drive.data, drive.bytes)) {
+    case DiskFormat::Dms:
+        return unpack_dms(phys_pages, drive, prefix, image);
+    case DiskFormat::Adf:
+        serial::write(prefix);
+        serial::write("disk: ADF\n");
+        image = drive;
+        return true;
+    case DiskFormat::Unknown:
+        serial::write(prefix);
+        serial::write("disk: unknown format\n");
+        return false;
+    }
+    return false;
+}
+
+// Mounts the disk's volume. Logs, after the prefix, the volume or why it
+// does not mount.
+bool mount_disk(const Image& image, const char* prefix, AdfVolume& volume) {
     const FsError error = adf_mount(image.data, image.bytes, volume);
+    serial::write(prefix);
     if (error != FsError::Ok) {
         serial::write("disk: mount error: ");
         serial::write(fs_error_name(error));
         serial::write("\n");
-        return;
+        return false;
     }
     if (!volume.bootblock_checksum_ok) {
         serial::write("disk: bootblock checksum bad\n");
+        serial::write(prefix);
     }
     serial::write("volume: ");
     write_name(volume.name, sizeof(volume.name));
     serial::write(volume.ffs ? " (FFS)\n" : " (OFS)\n");
-
-    print_root(volume);
-    print_startup_sequence(volume);
-    m68k_run_command(info, phys_pages, volume, "C:Version", "");
+    return true;
 }
+
+// The drive a virtio-blk device at the address is: its PCI slot on bus 0,
+// or kFloppyDrives for none.
+u32 drive_of(PciAddress address) {
+    if (address.bus != 0 || address.function != 0 || address.device < kFirstDriveSlot ||
+        address.device >= kFirstDriveSlot + kFloppyDrives) {
+        return kFloppyDrives;
+    }
+    return address.device - kFirstDriveSlot;
+}
+
+bool same_address(PciAddress a, PciAddress b) {
+    return a.bus == b.bus && a.device == b.device && a.function == b.function;
+}
+
+// The volumes stay mounted, and their images in memory, for good, as dos
+// needs them.
+constinit AdfVolume drive_volumes[kFloppyDrives]{};
 
 }
 
 void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& mmio) {
-    if (!open_drive(phys_pages, mmio)) {
-        return;
-    }
-    Image drive;
-    if (!read_drive(phys_pages, drive)) {
-        return;
-    }
-    Image image;
-    switch (detect_disk_format(drive.data, drive.bytes)) {
-    case DiskFormat::Dms:
-        if (!unpack_dms(phys_pages, drive, image)) {
-            return;
+    pci_scan(&log_pci_function, nullptr);
+
+    // Each drive by its slot; a single device elsewhere is DF0: as before
+    // drives had slots.
+    PciAddress found[kFloppyDrives * 2];
+    const u32 count = virtio_blk_find_all(found, kFloppyDrives * 2);
+    PciAddress addresses[kFloppyDrives]{};
+    bool present[kFloppyDrives]{};
+    for (u32 i = 0; i < count; ++i) {
+        const u32 drive = drive_of(found[i]);
+        if (drive < kFloppyDrives && !present[drive]) {
+            addresses[drive] = found[i];
+            present[drive] = true;
         }
-        break;
-    case DiskFormat::Adf:
-        serial::write("disk: ADF\n");
-        image = drive;
-        break;
-    case DiskFormat::Unknown:
-        serial::write("disk: unknown format\n");
+    }
+    if (!present[0] && count == 1 && drive_of(found[0]) == kFloppyDrives) {
+        addresses[0] = found[0];
+        present[0] = true;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        bool used = false;
+        for (u32 n = 0; n < kFloppyDrives; ++n) {
+            used = used || (present[n] && same_address(addresses[n], found[i]));
+        }
+        if (!used) {
+            serial::write("virtio-blk: device in no drive slot ignored\n");
+        }
+    }
+    if (!present[0]) {
+        serial::write("no boot disk\n");
+        return;
+    }
+
+    // DF0: holds the boot volume; without it nothing starts.
+    Image boot;
+    if (!load_disk(phys_pages, mmio, drive_devices[0], addresses[0], "", boot)) {
         return;
     }
     usb_keyboard_start(mmio, phys_pages);
-    mount_and_run(info, phys_pages, image);
+    if (!mount_disk(boot, "", drive_volumes[0])) {
+        return;
+    }
+    print_root(drive_volumes[0]);
+    print_startup_sequence(drive_volumes[0]);
+
+    // DF1: to DF3: are empty unless their disk reads and mounts.
+    Drives drives;
+    drives.volume[0] = &drive_volumes[0];
+    for (u32 n = 1; n < kFloppyDrives; ++n) {
+        char prefix[] = "drive 0: ";
+        prefix[6] = static_cast<char>('0' + n);
+        if (!present[n]) {
+            serial::write(prefix);
+            serial::write("no disk\n");
+            continue;
+        }
+        Image image;
+        if (load_disk(phys_pages, mmio, drive_devices[n], addresses[n], prefix, image) &&
+            mount_disk(image, prefix, drive_volumes[n])) {
+            drives.volume[n] = &drive_volumes[n];
+        }
+    }
+    m68k_run_command(info, phys_pages, drives, "C:Version", "");
 }
 
 }

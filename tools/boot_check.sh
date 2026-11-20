@@ -43,7 +43,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--usb-kbd] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--usb-kbd] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -59,6 +59,7 @@ mouse_after=
 mouse=
 disk_mode=default
 disk_source=
+disk1_source=
 while [[ ${1:-} == --* ]]; do
     case $1 in
         --disk)
@@ -68,6 +69,11 @@ while [[ ${1:-} == --* ]]; do
             shift
             ;;
         --no-disk) disk_mode=none ;;
+        --disk1)
+            [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
+            disk1_source=$2
+            shift
+            ;;
         --usb-kbd) usb_kbd=true ;;
         --keys)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
@@ -125,9 +131,16 @@ case $disk_mode in
         ;;
     none) disk= ;;
 esac
+# Drive n sits in PCI slot 0x10 + n: DF0: the boot disk, DF1: the second.
 if [[ -n $disk ]]; then
     disk_args=(-drive "if=none,id=disk0,format=raw,readonly=on,file=$disk"
-               -device virtio-blk-pci,disable-legacy=on,drive=disk0)
+               -device virtio-blk-pci,disable-legacy=on,drive=disk0,addr=0x10)
+fi
+if [[ -n $disk1_source ]]; then
+    disk1=$build_dir/boot-check-disk1.img
+    "$tools_dir/make_disk.sh" "$disk1_source" "$disk1"
+    disk_args+=(-drive "if=none,id=disk1,format=raw,readonly=on,file=$disk1"
+                -device virtio-blk-pci,disable-legacy=on,drive=disk1,addr=0x11)
 fi
 
 serial_log=$build_dir/serial.log

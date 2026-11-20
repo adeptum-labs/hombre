@@ -37,6 +37,10 @@ Targets:
   virtio-blk disk: a generated test disk by default, or the file given as
   `DISK=`, for example `make run DISK="path/to/disk.dms"`. The file may be
   a DMS archive or a raw ADF image, and its path may contain spaces.
+  That disk is DF0:, the boot disk; `DISK1=`, `DISK2=` and `DISK3=` put
+  disks in DF1: to DF3:, for example
+  `make run DISK="Workbench.dms" DISK1="Extras.dms"`. A drive without one
+  is empty, and the disks stay in their drives until the machine stops.
   The QEMU window shows a 256-colour Hombre Workbench screen with a
   HombreShell window
   that holds what the disk's `C:Version` prints and a `1.<volume>:>` prompt;
@@ -96,7 +100,8 @@ Targets:
 - `make check` boots the image headless and verifies the messages on the
   serial port. The main boot attaches the generated test disk and verifies
   the volume, the root directory and the startup sequence read from it, and
-  what its `C:Version` prints when the kernel runs it. It also boots a
+  what its `C:Version` prints when the kernel runs it, then the test disk
+  in DF0: and DF1: with the other drives empty. It also boots a
   drive filled with zero bytes, a test disk with a corrupt track and a
   machine without a disk, a boot with the kernel missing and a boot without
   a framebuffer. It also boots kernels that trigger a page

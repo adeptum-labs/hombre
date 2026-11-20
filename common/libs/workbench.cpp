@@ -705,7 +705,7 @@ void Workbench::free_icons(u32 owner) {
     }
 }
 
-void Workbench::add_volume(const char* label, const char* icon_path) {
+void Workbench::add_volume(const char* label, const char* icon_path, u8 drive) {
     if (!windows_[0].used) {
         return;
     }
@@ -725,6 +725,7 @@ void Workbench::add_volume(const char* label, const char* icon_path) {
     }
     copy_text(icon->name, sizeof icon->name, label);
     copy_text(icon->file, sizeof icon->file, "Disk");
+    icon->drive = drive;
     measure(*icon);
     read_position(*icon);
     if (!icon->placed) {
@@ -733,22 +734,48 @@ void Workbench::add_volume(const char* label, const char* icon_path) {
     LogLine().text("workbench: volume ").text(label).send();
 }
 
+// A disk in every drive that holds one, DF0: first, then the Ram Disk.
 void Workbench::add_volume_icons() {
-    const char* volume = dos_->volume_name();
-    if (volume[0] != '\0') {
-        char device[Dos::kMaxPath];
-        copy_text(device, sizeof device, volume);
-        const u32 length = text_length(device);
-        if (length + 2 <= sizeof device) {
-            device[length] = ':';
-            device[length + 1] = '\0';
-            char path[Dos::kMaxPath];
-            if (join_path(device, "Disk", path)) {
-                add_volume(volume, path);
-            }
+    for (u32 n = 0; n < dos_->drive_count(); ++n) {
+        if (!dos_->has_disk(n)) {
+            continue;
+        }
+        IconEntry probe;
+        copy_text(probe.name, sizeof probe.name, dos_->volume_name(n));
+        probe.type = kDisk;
+        probe.drive = static_cast<u8>(n);
+        char root[Dos::kMaxPath];
+        char path[Dos::kMaxPath];
+        if (volume_root(probe, root) && join_path(root, "Disk", path)) {
+            add_volume(probe.name, path, probe.drive);
         }
     }
-    add_volume(kRamDiskName, "RAM:Disk");
+    add_volume(kRamDiskName, "RAM:Disk", kNoDrive);
+}
+
+// The root of the disk an icon stands for: "Name:" by its volume's name,
+// or "DFn:" when another drive holds a disk of the same name.
+bool Workbench::volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) const {
+    bool shared = false;
+    if (icon.drive != kNoDrive) {
+        for (u32 n = 0; n < dos_->drive_count(); ++n) {
+            shared = shared || (n != icon.drive && dos_->has_disk(n) &&
+                                same_ci(dos_->volume_name(n), icon.name));
+        }
+    }
+    if (shared) {
+        const char device[] = {'D', 'F', static_cast<char>('0' + icon.drive), ':', '\0'};
+        copy_text(out, sizeof out, device);
+        return true;
+    }
+    const u32 length = text_length(icon.name);
+    if (length + 2 > sizeof out) {
+        return false;
+    }
+    copy_text(out, sizeof out, icon.name);
+    out[length] = ':';
+    out[length + 1] = '\0';
+    return true;
 }
 
 // --- drawer windows ------------------------------------------------------
@@ -866,14 +893,7 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
 bool Workbench::icon_target_path(u32 window_index, const IconEntry& icon,
                                  char (&out)[Dos::kMaxPath]) const {
     if (window_index == 0 && icon.type == kDisk) {
-        const u32 length = text_length(icon.name);
-        if (length + 2 > sizeof out) {
-            return false;
-        }
-        copy_text(out, sizeof out, icon.name);
-        out[length] = ':';
-        out[length + 1] = '\0';
-        return true;
+        return volume_root(icon, out);
     }
     return join_path(windows_[window_index].path, icon.file, out);
 }
@@ -1392,8 +1412,10 @@ void Workbench::open_selected(u32 window_index) {
 
 namespace {
 
-// The volume a path is on, RAM: by the Ram Disk's name.
-void volume_of(const char* path, char (&out)[Dos::kMaxPath]) {
+// The volume a path is on: a floppy's by its drive ("DFn"), whether the
+// path names the drive or the disk's volume, and RAM: by the Ram Disk's
+// name.
+void volume_of(const Dos& dos, const char* path, char (&out)[Dos::kMaxPath]) {
     copy_text(out, sizeof out, path);
     for (u32 i = 0; out[i] != '\0'; ++i) {
         if (out[i] == ':') {
@@ -1403,14 +1425,22 @@ void volume_of(const char* path, char (&out)[Dos::kMaxPath]) {
     }
     if (same_ci(out, "RAM")) {
         copy_text(out, sizeof out, "Ram Disk");
+        return;
+    }
+    for (u32 n = 0; n < dos.drive_count(); ++n) {
+        const char device[] = {'D', 'F', static_cast<char>('0' + n), '\0'};
+        if (same_ci(out, device) || (dos.has_disk(n) && same_ci(out, dos.volume_name(n)))) {
+            copy_text(out, sizeof out, device);
+            return;
+        }
     }
 }
 
-bool same_volume(const char* a, const char* b) {
+bool same_volume(const Dos& dos, const char* a, const char* b) {
     char va[Dos::kMaxPath];
     char vb[Dos::kMaxPath];
-    volume_of(a, va);
-    volume_of(b, vb);
+    volume_of(dos, a, va);
+    volume_of(dos, b, vb);
     return same_ci(va, vb);
 }
 
@@ -1487,7 +1517,7 @@ bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to
         show_error("cannot copy", icon.file, error);
         return false;
     }
-    if (!same_volume(from, to)) {
+    if (!same_volume(*dos_, from, to)) {
         LogLine().text("workbench: copied ").text(src).text(" to ").text(to).send();
         return true;
     }

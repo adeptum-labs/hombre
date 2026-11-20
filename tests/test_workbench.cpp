@@ -287,8 +287,11 @@ std::vector<AdfFile> test_files() {
 // and made the default one.
 class Rig {
 public:
-    explicit Rig(const std::vector<AdfFile>& files = test_files())
-        : memory_(kGuestBytes), image_(build_adf("HombreTest", false, files)) {
+    explicit Rig(const std::vector<AdfFile>& files = test_files(),
+                 std::vector<u8> second = {}, u32 second_drive = 1)
+        : memory_(kGuestBytes),
+          image_(build_adf("HombreTest", false, files)),
+          second_image_(std::move(second)) {
         fd_ = memfd_create("workbench", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -306,7 +309,16 @@ public:
         g_log = capture;
         CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
-        CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
+        if (second_image_.empty()) {
+            CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
+        } else {
+            CHECK(adf_mount(second_image_.data(), second_image_.size(), second_volume) ==
+                  FsError::Ok);
+            Drives drives;
+            drives.volume[0] = &volume;
+            drives.volume[second_drive] = &second_volume;
+            CHECK(g_dos.init(m, g_exec, drives, nullptr, nullptr));
+        }
         CHECK(g_icon.init(m, g_exec, g_dos));
         g_display = DisplayState{};
         CHECK(g_graphics.init(m, g_exec, g_display));
@@ -334,6 +346,7 @@ public:
 
     Machine m;
     AdfVolume volume{};
+    AdfVolume second_volume{};
     Workbench workbench;
     u32 screen = 0;
     u32 free_bytes() const { return g_exec.free_bytes(); }
@@ -530,6 +543,7 @@ private:
     static constexpr usize kRegion = 1 << 20;
     std::vector<u8> memory_;
     std::vector<u8> image_;
+    std::vector<u8> second_image_;
     int fd_ = -1;
     u8* rw_ = nullptr;
     const u8* rx_ = nullptr;
@@ -1456,6 +1470,54 @@ void a_resized_drawer_clips_its_icons_and_keeps_their_places() {
     CHECK_EQ(r.free_bytes(), before);
 }
 
+void every_disk_in_a_drive_gets_an_icon() {
+    {
+        const i32 nowhere = static_cast<i32>(kNoIconPosition);
+        const std::vector<AdfFile> second_files = {
+            {"Docs.info", drawer_icon_info(nowhere, nowhere, 30, 50, 300, 120)},
+            {"Docs/Readme", text("second")},
+        };
+        Rig r(test_files(), build_adf("Second", false, second_files), 2);
+        r.workbench.open_desktop();
+        const u32 first = r.find_icon_in(0, "HombreTest");
+        const u32 second = r.find_icon_in(0, "Second");
+        const u32 ram = r.find_icon_in(0, "Ram Disk");
+        CHECK(first != Workbench::kNoIcon);
+        CHECK(second != Workbench::kNoIcon);
+        CHECK(ram != Workbench::kNoIcon);
+        CHECK(first < second && second < ram);
+        CHECK(logged("workbench: volume Second"));
+        r.workbench.open_icon(0, second);
+        const u32 window = r.find_window("Second:");
+        CHECK(window != Workbench::kMaxWindows);
+        CHECK(r.find_icon_in(window, "Docs") != Workbench::kNoIcon);
+        CHECK(r.window_title(r.workbench.window(window).window) == "Second");
+    }
+
+    // Two disks of one name open their own drives.
+    const std::vector<AdfFile> twin_files = {{"Only.info", icon_info(kWBTool, 10, 10)}};
+    Rig twins(test_files(), build_adf("HombreTest", false, twin_files), 1);
+    twins.workbench.open_desktop();
+    u32 disks[2] = {Workbench::kNoIcon, Workbench::kNoIcon};
+    u32 found = 0;
+    for (u32 i = 0; i < Workbench::kMaxIcons && found < 2; ++i) {
+        const Workbench::IconEntry& icon = twins.workbench.icon(i);
+        if (icon.used && icon.owner == 0 && std::string(icon.name) == "HombreTest") {
+            disks[found++] = i;
+        }
+    }
+    CHECK_EQ(found, 2u);
+    twins.workbench.open_icon(0, disks[0]);
+    twins.workbench.open_icon(0, disks[1]);
+    const u32 df0 = twins.find_window("DF0:");
+    const u32 df1 = twins.find_window("DF1:");
+    CHECK(df0 != Workbench::kMaxWindows);
+    CHECK(df1 != Workbench::kMaxWindows);
+    CHECK(twins.find_icon_in(df1, "Only") != Workbench::kNoIcon);
+    CHECK(twins.find_icon_in(df0, "Tools") != Workbench::kNoIcon);
+    CHECK(twins.window_title(twins.workbench.window(df1).window) == "HombreTest");
+}
+
 void snapshot_and_unsnapshot_store_the_icon_place() {
     Rig r;
     put_ram_project("Note");
@@ -1559,6 +1621,7 @@ int main() {
     a_dragged_disk_keeps_its_place_over_a_backdrop_toggle();
     a_disk_icon_inside_a_drawer_is_no_volume();
     a_resized_drawer_clips_its_icons_and_keeps_their_places();
+    every_disk_in_a_drive_gets_an_icon();
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();
     return check::finish("test_workbench");

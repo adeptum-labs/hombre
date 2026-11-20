@@ -60,11 +60,12 @@
 // Variables can be local (LocalVar nodes on pr_LocalVars, as SetVar
 // creates by default) or global (files under ENV: on the RAM volume).
 //
-// Paths are AmigaDOS paths: DF0:, RAM:, T:, ENV:, C:, LIBS:, S:, SYS:,
-// the volume name, ":" and any active assign; any other device is not
-// mounted. A path without a device is relative to the current directory, a
-// leading or doubled '/' goes up one level, and names compare without
-// regard to case.
+// Paths are AmigaDOS paths: DF0: to DF3:, RAM:, T:, ENV:, C:, LIBS:, S:,
+// SYS:, the name of a volume in a drive, ":" and any active assign; any
+// other device is not mounted, and a drive without a disk gives
+// ERROR_NO_DISK. The default assigns point into DF0:. A path without a
+// device is relative to the current directory, a leading or doubled '/'
+// goes up one level, and names compare without regard to case.
 //
 // Every guest pointer a native takes goes through native::Bus, so a bad
 // one ends the run with BusError or AddressError; walks over guest strings
@@ -448,6 +449,7 @@ constexpr u32 id_SIZEOF = 36;
 constexpr u32 ID_WRITE_PROTECTED = 80;
 constexpr u32 ID_VALIDATED = 82;
 constexpr u32 ID_DOS_DISK = 0x444F5300;  // 'DOS\0'
+constexpr u32 ID_NO_DISK_PRESENT = 0xFFFFFFFF;  // -1
 
 // struct CSource and struct RDArgs
 constexpr u32 CS_Buffer = 0;
@@ -656,14 +658,25 @@ using ConsoleRead = u32 (*)(void* ctx, u8* buf, u32 size);
 // within timeout_us microseconds.
 using ConsoleReady = bool (*)(void* ctx, u32 timeout_us);
 
+// The floppy drives dos serves as DF0: to DF3:.
+constexpr u32 kFloppyDrives = 4;
+
+// The volume in each drive at boot; null for a drive without a disk.
+struct Drives {
+    const AdfVolume* volume[kFloppyDrives]{};
+};
+
 class Dos {
 public:
     using ConsoleWrite = hombre::ConsoleWrite;
     using ConsoleRead = hombre::ConsoleRead;
     using ConsoleReady = hombre::ConsoleReady;
 
-    static constexpr u8 kVolAdf = 0;
-    static constexpr u8 kVolRam = 1;
+    // Volume ids: the floppy drives DF0: to DF3: are 0 to 3, so a
+    // DirEntry's zero volume is DF0:, and RAM: comes after them.
+    static constexpr u32 kMaxDrives = kFloppyDrives;
+    static constexpr u8 kVolDf0 = 0;
+    static constexpr u8 kVolRam = static_cast<u8>(kMaxDrives);
     static constexpr u32 kMaxConsoles = 4;
     static constexpr u32 kStackBytes = 4096;
     static constexpr u32 kMaxArgs = 512;    // bytes of a command's argument line
@@ -680,11 +693,16 @@ public:
     static constexpr u32 kMaxLoggedActions = 32;
     static constexpr u32 kMaxProcs = 8;  // processes and their CLI numbers
 
-    // Makes dos.library over the volume, which must stay mounted, with its
-    // structures and the shell Process, registers the Process as exec's
-    // task and dos as exec's segment loader. exec must be initialised. The
-    // boot console's output goes to out with ctx; out may be null. False if
-    // exec runs out of memory or native ids.
+    // Makes dos.library over the volumes in the drives, which must stay
+    // mounted, with its structures and the shell Process, registers the
+    // Process as exec's task and dos as exec's segment loader. DF0: must
+    // hold a disk: it is the boot volume the default assigns point into.
+    // DF1: to DF3: may be empty. exec must be initialised. The boot
+    // console's output goes to out with ctx; out may be null. False if exec
+    // runs out of memory or native ids.
+    bool init(m68k::Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, void* ctx);
+
+    // The same with the volume in DF0: and the other drives empty.
     bool init(m68k::Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out, void* ctx);
 
     // Runs the command at path in the boot shell's process as the CLI's
@@ -749,8 +767,16 @@ public:
     // a file on RAM: protected from reading is not.
     bool read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error);
 
-    // The name of the volume dos serves as DF0:.
-    const char* volume_name() const { return volume_.name; }
+    // The name of the volume in DF0:, the boot volume.
+    const char* volume_name() const { return drives_[0].volume.name; }
+
+    // The drives DF0: to DF3:, whether one holds a disk and the name of its
+    // volume ("" for an empty drive).
+    u32 drive_count() const { return kMaxDrives; }
+    bool has_disk(u32 drive) const { return drive < kMaxDrives && drives_[drive].has_disk; }
+    const char* volume_name(u32 drive) const {
+        return has_disk(drive) ? drives_[drive].volume.name : "";
+    }
 
     // Visits every entry of the directory name, in the order ExNext gives
     // them: the entry's own name and whether it is a directory. False with
@@ -1070,7 +1096,12 @@ private:
 
     m68k::Machine* m_ = nullptr;
     Exec* exec_ = nullptr;
-    AdfVolume volume_{};
+    // A floppy drive and the volume of the disk in it.
+    struct Drive {
+        bool has_disk = false;
+        AdfVolume volume{};
+    };
+    Drive drives_[kMaxDrives]{};
     RamFs ram_{};
     ConsoleBinding consoles_[kMaxConsoles]{};
 
@@ -1078,12 +1109,12 @@ private:
     u32 base_ = 0;
     u32 block_ = 0;
     u32 root_ = 0;
-    u32 volume_node_ = 0;
+    u32 volume_node_[kMaxDrives]{};
     u32 ram_volume_node_ = 0;
-    u32 device_node_ = 0;
+    u32 device_node_[kMaxDrives]{};
     u32 ram_device_node_ = 0;
-    u32 port_ = 0;      // the ADF file system's MsgPort
-    u32 ram_port_ = 0;  // the RAM: file system's MsgPort
+    u32 port_[kMaxDrives]{};  // each drive's file system MsgPort
+    u32 ram_port_ = 0;        // the RAM: file system's MsgPort
     u32 handles_ = 0;
     u32 locks_ = 0;
     u32 assign_locks_ = 0;

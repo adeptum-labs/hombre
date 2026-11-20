@@ -27,12 +27,15 @@ IMAGE        := $(BUILD)/hombre.img
 IMAGE_NOKERN := $(BUILD)/hombre-nokernel.img
 OVMF         := /usr/share/OVMF
 
-# The drive make run attaches as a virtio-blk disk. DISK may be any path,
-# spaces and & included, and defaults to the generated test disk. It reaches
-# the recipe through the environment, so no character in it is shell syntax.
+# The drives make run attaches as virtio-blk disks: DISK is DF0:, the boot
+# disk, and the optional DISK1, DISK2 and DISK3 are DF1: to DF3:; a drive
+# without one is empty. Each may be any path, spaces and & included; DISK
+# defaults to the generated test disk. They reach the recipes through the
+# environment, so no character in them is shell syntax. Drive n sits in PCI
+# slot 0x10 + n, which is how the kernel tells the drives apart.
 TEST_DISK := $(BUILD)/test-disk.dms
 DISK      ?= $(TEST_DISK)
-export DISK
+export DISK DISK1 DISK2 DISK3
 DISK_IMG  := $(BUILD)/disk.img
 
 # Drives for the negative boots: 1000 zero bytes, and the test disk with one
@@ -161,13 +164,21 @@ $(foreach n,$(FAULT_TESTS),$(eval $(call FAULT_VARIANT,$(n))))
 # error while the firmware is still in 32-bit mode.
 run: image disk-image
 	cp $(OVMF)/OVMF_VARS_4M.fd $(BUILD)/OVMF_VARS.fd
+	extra=; \
+	for n in 1 2 3; do \
+	    if [ -f $(BUILD)/disk$$n.img ]; then \
+	        extra="$$extra -drive if=none,id=disk$$n,format=raw,readonly=on,file=$(BUILD)/disk$$n.img"; \
+	        extra="$$extra -device virtio-blk-pci,disable-legacy=on,drive=disk$$n,addr=0x1$$n"; \
+	    fi; \
+	done; \
 	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M -no-reboot \
 	    -serial stdio \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF)/OVMF_CODE_4M.fd \
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
 	    -drive format=raw,file=$(IMAGE) \
 	    -drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG) \
-	    -device virtio-blk-pci,disable-legacy=on,drive=disk0 \
+	    -device virtio-blk-pci,disable-legacy=on,drive=disk0,addr=0x10 \
+	    $$extra \
 	    -device qemu-xhci -device usb-kbd -device usb-mouse
 
 # The boots attach the generated test disk whatever DISK says, so they stay
@@ -184,6 +195,12 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "intuition: screen opened 640x400" \
 	    "intuition: window opened HombreShell" "m68k: running C:Version" \
 	    "Hombre test version 1" "m68k: C:Version returned 0" "halting"
+	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
+	tools/boot_check.sh --disk $(TEST_DISK) --disk1 $(TEST_DISK) \
+	    "virtio-blk: read ok" "volume: HombreTest (OFS)" \
+	    "drive 1: virtio-blk: $$sectors sectors" "drive 1: virtio-blk: read ok" \
+	    "drive 1: disk: DMS SIMPLE, 80 tracks" "drive 1: volume: HombreTest (OFS)" \
+	    "drive 2: no disk" "drive 3: no disk" "m68k: C:Version returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "v e r s i o n ret z z z ret bracket_left apostrophe semicolon ret" \
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
@@ -411,14 +428,20 @@ $(CORRUPT_DISK): $(TEST_DISK)
 	cp $< $@
 	printf '\377' | dd of=$@ bs=1 seek=100 conv=notrunc
 
-# disk-image pads DISK to whole 512-byte sectors in DISK_IMG. When DISK is
-# the default test disk, that is built first.
+# disk-image pads DISK to whole 512-byte sectors in DISK_IMG, and DISK1 to
+# DISK3, when set, in $(BUILD)/disk1.img to disk3.img. When DISK is the
+# default test disk, that is built first.
 ifeq ($(origin DISK),file)
 disk-image: $(TEST_DISK)
 endif
 
 disk-image:
 	tools/make_disk.sh "$$DISK" $(DISK_IMG)
+	for n in 1 2 3; do \
+	    eval "src=\$${DISK$$n:-}"; \
+	    rm -f $(BUILD)/disk$$n.img; \
+	    if [ -n "$$src" ]; then tools/make_disk.sh "$$src" $(BUILD)/disk$$n.img || exit 1; fi; \
+	done
 
 # Unpacks every DMS archive below DMS_DIR with both xdms and adftool and
 # compares the images. The path reaches the script through the environment,

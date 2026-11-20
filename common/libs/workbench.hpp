@@ -37,9 +37,9 @@
 // workbench.library written in C++ for code run by the 68000 translator.
 //
 // StartWorkbench starts the Workbench as a native task with a dos Process
-// of its own: a root window on the default screen with the volume icons of
-// the boot volume and the Ram Disk, and a drawer window for every icon
-// opened. The root window is a backdrop until the Workbench menu's Backdrop
+// of its own: a root window on the default screen with the icons of the
+// disks in the floppy drives and of the Ram Disk, and a drawer window for
+// every icon opened. The root window is a backdrop until the Workbench menu's Backdrop
 // item turns it into an ordinary window. A drawer shows the "<name>.info"
 // files of its directory; opening an icon starts its program with a
 // WBStartup message. An icon dragged within its window takes the new
@@ -81,6 +81,7 @@ public:
     // The most messages of one window a pass over the ports handles.
     static constexpr u32 kMaxMessagesPerPump = 64;
     static constexpr u32 kNoIcon = 0xFFFFFFFF;
+    static constexpr u8 kNoDrive = 0xFF;
     static constexpr u32 kAppBytes = 16;
     // Two clicks on the same icon within this many microseconds open it:
     // a second, so an unhurried double click still counts.
@@ -113,6 +114,8 @@ public:
         u32 tool_window = 0;  // the guest string of the DiskObject
         char name[32]{};      // the label under the icon
         char file[32]{};      // the file the icon stands for
+        // A floppy's disk icon: the drive it is in; kNoDrive otherwise.
+        u8 drive = kNoDrive;
     };
 
     // An open window of the desktop: the root window (index 0), a backdrop
@@ -341,7 +344,8 @@ private:
     u32 backdrop_item() const;
     void add_volume_icons();
     void add_dir_icon(u32 window_index, const char* entry, bool is_dir);
-    void add_volume(const char* label, const char* icon_path);
+    void add_volume(const char* label, const char* icon_path, u8 drive);
+    bool volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) const;
     void fill_drawer(u32 window_index);
     void place_icons(u32 window_index);
     void draw_window(u32 window_index);

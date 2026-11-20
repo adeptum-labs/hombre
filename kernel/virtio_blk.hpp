@@ -371,4 +371,9 @@ private:
 // device 0x1042 (modern) or 0x1001 (transitional).
 bool virtio_blk_find(PciAddress& found);
 
+// Finds every virtio-blk function, in the order the PCI scan meets them,
+// and stores at most max of their addresses in found. Returns how many it
+// stored.
+u32 virtio_blk_find_all(PciAddress* found, u32 max);
+
 }

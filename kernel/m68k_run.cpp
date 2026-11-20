@@ -694,7 +694,7 @@ void register_console(u8 index) {
 
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
 // line and returns false when a step fails.
-bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) {
+bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     constexpr u64 guest_pages = m68k::kGuestBytes / page_size;
     const u64 guest = pages.alloc_pages(guest_pages);
     if (guest == 0) {
@@ -746,7 +746,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume) 
         fail("version init failed");
         return false;
     }
-    if (!dos.init(machine, exec, volume, &console_write, &consoles[0])) {
+    if (!dos.init(machine, exec, drives, &console_write, &consoles[0])) {
         fail("dos init failed");
         return false;
     }
@@ -1069,9 +1069,9 @@ void shell_task(void* arg) { shell_loop(*static_cast<Console*>(arg)); }
 
 }
 
-void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const AdfVolume& volume,
+void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& drives,
                       const char* path, const char* args) {
-    if (!start(info, pages, volume)) {
+    if (!start(info, pages, drives)) {
         return;
     }
     Console& boot = consoles[0];

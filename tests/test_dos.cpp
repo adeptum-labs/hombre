@@ -366,8 +366,13 @@ public:
     explicit Rig(const std::vector<AdfFile>& files = standard_files(), bool ffs = false)
         : Rig(build_adf("HombreTest", ffs, files)) {}
 
-    explicit Rig(std::vector<u8> image, u32 free_end = kFreeEnd)
-        : memory_(kGuestBytes), image_(std::move(image)) {
+    // The first image in DF0:, the second in drive second_drive.
+    Rig(std::vector<u8> image, std::vector<u8> second, u32 second_drive)
+        : Rig(std::move(image), kFreeEnd, std::move(second), second_drive) {}
+
+    explicit Rig(std::vector<u8> image, u32 free_end = kFreeEnd, std::vector<u8> second = {},
+                 u32 second_drive = 1)
+        : memory_(kGuestBytes), image_(std::move(image)), second_image_(std::move(second)) {
         fd_ = memfd_create("dos", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -387,7 +392,16 @@ public:
         CHECK(g_exec.init(m, kFreeStart, free_end));
         CHECK(g_timer.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
-        CHECK(g_dos.init(m, g_exec, volume, console, &g_console));
+        if (second_image_.empty()) {
+            CHECK(g_dos.init(m, g_exec, volume, console, &g_console));
+        } else {
+            CHECK(adf_mount(second_image_.data(), second_image_.size(), second_volume) ==
+                  FsError::Ok);
+            Drives drives;
+            drives.volume[0] = &volume;
+            drives.volume[second_drive] = &second_volume;
+            CHECK(g_dos.init(m, g_exec, drives, console, &g_console));
+        }
         m.cpu.a[7] = kStack;
     }
 
@@ -406,6 +420,7 @@ public:
 
     Machine m;
     AdfVolume volume{};
+    AdfVolume second_volume{};
 
     CpuState& cpu() { return m.cpu; }
     u32 base() const { return g_dos.dos_base(); }
@@ -513,6 +528,7 @@ private:
     static constexpr usize kRegion = 1 << 20;
     std::vector<u8> memory_;
     std::vector<u8> image_;
+    std::vector<u8> second_image_;
     int fd_ = -1;
     u8* rw_ = nullptr;
     const u8* rx_ = nullptr;
@@ -1001,7 +1017,15 @@ void dos_library_is_built() {
     CHECK(dev != 0);
     CHECK_EQ(r.get32(dev + dol_Type), DLT_DEVICE);
     CHECK(r.read_bstr(r.get32(dev + dol_Name)) == "DF0");
-    const u32 ram_dev = r.get32(dev + dol_Next) << 2;
+    // DF1: to DF3: are there with no disk in them.
+    u32 last_drive = dev;
+    for (const char* name : {"DF1", "DF2", "DF3"}) {
+        last_drive = r.get32(last_drive + dol_Next) << 2;
+        CHECK(last_drive != 0);
+        CHECK_EQ(r.get32(last_drive + dol_Type), DLT_DEVICE);
+        CHECK(r.read_bstr(r.get32(last_drive + dol_Name)) == name);
+    }
+    const u32 ram_dev = r.get32(last_drive + dol_Next) << 2;
     CHECK(ram_dev != 0);
     CHECK_EQ(r.get32(ram_dev + dol_Type), DLT_DEVICE);
     CHECK(r.read_bstr(r.get32(ram_dev + dol_Name)) == "RAM");
@@ -1975,6 +1999,164 @@ void examine_and_ex_next() {
     r.cpu().d[1] = dir;
     r.cpu().d[2] = fib + 1;
     CHECK_EQ(r.dos(dos_lvo::ExNext), ExitReason::AddressError);
+}
+
+// --- drives -----------------------------------------------------------------
+
+std::vector<u8> second_disk(const std::string& label) {
+    return build_adf(label.c_str(), false, {{"Docs/Readme", text("on the second disk")},
+                                   {"Notes", text("notes")}});
+}
+
+std::string read_whole(Rig& r, const std::string& name) {
+    r.str(kData + 0x600, name);
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE);
+    CHECK(fh != 0);
+    if (fh == 0) {
+        return "";
+    }
+    const u32 n = r.call(dos_lvo::Read, fh, kData + 0x700, 64);
+    r.call(dos_lvo::Close, fh);
+    std::string text;
+    for (u32 i = 0; i < n && i < 64; ++i) {
+        text.push_back(static_cast<char>(r.get8(kData + 0x700 + i)));
+    }
+    return text;
+}
+
+void a_second_drive_is_its_own_volume() {
+    Rig r(build_adf("HombreTest", false, standard_files()), second_disk("Second"), 1);
+
+    // By device and by volume name, read from the second disk.
+    CHECK(read_whole(r, "DF1:Docs/Readme") == "on the second disk");
+    CHECK(read_whole(r, "Second:Notes") == "notes");
+    CHECK(read_whole(r, "DF0:S/Startup-Sequence") == "echo hello\n");
+
+    // Locks and handles carry the second drive's port, not RAM:'s.
+    r.str(kData, "DF1:Docs");
+    const u32 docs = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(docs != 0);
+    r.str(kData + 0x80, "DF1:");
+    const u32 dp = r.call(dos_lvo::GetDeviceProc, kData + 0x80, 0);
+    CHECK(dp != 0);
+    const u32 port1 = r.get32(dp + dvp_Port);
+    r.call(dos_lvo::FreeDeviceProc, dp);
+    const u32 port0 = r.call(dos_lvo::GetFileSysTask);
+    CHECK(port1 != 0);
+    CHECK(port1 != port0);
+    CHECK_EQ(r.get32((docs << 2) + fl_Task), port1);
+    r.str(kData + 0x100, "DF1:Notes");
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x100, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.get32(handle_at(fh) + fh_Type), port1);
+    r.call(dos_lvo::Close, fh);
+
+    // The directory lists the second disk's entries.
+    const u32 fib = kData + 0x800;
+    r.str(kData, "Second:");
+    const u32 root1 = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::Examine, root1, fib), DOSTRUE);
+    CHECK(r.read_str(fib + fib_FileName) == "Second");
+    std::vector<std::string> names;
+    for (u32 i = 0; i < 10 && r.call(dos_lvo::ExNext, root1, fib) == DOSTRUE; ++i) {
+        names.push_back(r.read_str(fib + fib_FileName));
+    }
+    std::sort(names.begin(), names.end());
+    CHECK(names == (std::vector<std::string>{"Docs", "Notes"}));
+
+    // Two roots at the same block of different disks are not the same.
+    r.str(kData, "DF0:");
+    const u32 root0 = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::SameLock, root0, root1), LOCK_DIFFERENT);
+
+    // Info names the unit and the volume; a packet to the drive's port
+    // answers for that drive.
+    const u32 id = kData + 0x400;
+    CHECK_EQ(r.call(dos_lvo::Info, root1, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_UnitNumber), 1u);
+    CHECK_EQ(r.get32(id + id_DiskType), ID_DOS_DISK);
+    const u32 volume1 = r.get32(id + id_VolumeNode);
+    CHECK(r.read_bstr(r.get32((volume1 << 2) + dol_Name)) == "Second");
+    CHECK_EQ(r.call(dos_lvo::Info, root0, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_UnitNumber), 0u);
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port1, ACTION_DISK_INFO, id >> 2), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_UnitNumber), 1u);
+    CHECK_EQ(r.get32(id + id_VolumeNode), volume1);
+
+    // The second disk is read-only like the first.
+    r.str(kData, "DF1:New");
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+
+    // The default assigns stay on the boot disk.
+    r.str(kData, "C:");
+    const u32 c = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(c != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, c, kData + 0x200, 64), DOSTRUE);
+    CHECK(r.read_str(kData + 0x200) == "HombreTest:C");
+
+    // The DosList lists both volumes and every drive.
+    const u32 head = r.call(dos_lvo::LockDosList, LDF_ALL | LDF_READ);
+    std::vector<std::string> volumes;
+    u32 cur = head;
+    for (u32 i = 0; i < 64; ++i) {
+        cur = r.call(dos_lvo::NextDosEntry, cur, LDF_VOLUMES);
+        if (cur == 0) {
+            break;
+        }
+        volumes.push_back(r.read_bstr(r.get32(cur + dol_Name)));
+    }
+    r.call(dos_lvo::UnLockDosList, LDF_ALL | LDF_READ);
+    CHECK(volumes == (std::vector<std::string>{"HombreTest", "Second", "Ram Disk"}));
+    for (u32 lock : {docs, root1, root0, c}) {
+        r.call(dos_lvo::UnLock, lock);
+    }
+}
+
+void a_drive_without_a_disk_says_so() {
+    Rig r(build_adf("HombreTest", false, standard_files()), second_disk("Third"), 2);
+
+    // DF1: is there but empty; DF2: holds Third.
+    r.str(kData, "DF1:");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_NO_DISK);
+    r.str(kData, "DF1:Anything");
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_NO_DISK);
+    r.str(kData, "DF1:New");
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_NO_DISK);
+    CHECK(read_whole(r, "DF2:Notes") == "notes");
+    r.str(kData, "DF3:");
+    CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData), DOSTRUE);
+    r.str(kData, "DF4:");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+
+    // Its port answers DISK_INFO with no disk present.
+    r.str(kData + 0x80, "DF1:");
+    const u32 dp = r.call(dos_lvo::GetDeviceProc, kData + 0x80, 0);
+    CHECK(dp != 0);
+    const u32 port = r.get32(dp + dvp_Port);
+    CHECK(r.read_bstr(r.get32(r.get32(dp + dvp_DevNode) + dol_Name)) == "DF1");
+    r.call(dos_lvo::FreeDeviceProc, dp);
+    const u32 id = kData + 0x400;
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_DISK_INFO, id >> 2), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_DiskType), ID_NO_DISK_PRESENT);
+    CHECK_EQ(r.get32(id + id_UnitNumber), 1u);
+    CHECK_EQ(r.get32(id + id_VolumeNode), 0u);
+}
+
+void the_first_disk_wins_a_shared_name() {
+    {
+        Rig r(build_adf("HombreTest", false, standard_files()), second_disk("HombreTest"), 1);
+        CHECK(read_whole(r, "HombreTest:S/Startup-Sequence") == "echo hello\n");
+        CHECK(read_whole(r, "DF1:Notes") == "notes");
+    }
+    // A disk named RAM is reached before the Ram Disk's device name.
+    Rig named_ram(build_adf("HombreTest", false, standard_files()), second_disk("RAM"), 3);
+    CHECK(read_whole(named_ram, "RAM:Notes") == "notes");
+    CHECK(read_whole(named_ram, "DF3:Docs/Readme") == "on the second disk");
 }
 
 void info_on_the_volume() {
@@ -3982,6 +4164,9 @@ void dos_list_walk() {
                          {DLT_VOLUME, "HombreTest"},
                          {DLT_VOLUME, "Ram Disk"},
                          {DLT_DEVICE, "DF0"},
+                         {DLT_DEVICE, "DF1"},
+                         {DLT_DEVICE, "DF2"},
+                         {DLT_DEVICE, "DF3"},
                          {DLT_DEVICE, "RAM"},
                          {DLT_DIRECTORY, "SYS"},
                          {DLT_DIRECTORY, "C"},
@@ -6853,6 +7038,9 @@ void paths_belong_to_each_process() {
 }
 
 int main() {
+    a_second_drive_is_its_own_volume();
+    a_drive_without_a_disk_says_so();
+    the_first_disk_wins_a_shared_name();
     layout_matches_the_ndk();
     dos_library_is_built();
     command_writes_to_the_console();

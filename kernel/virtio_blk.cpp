@@ -311,6 +311,35 @@ bool VirtioBlk::stop() {
     return false;
 }
 
+namespace {
+
+struct FindAllState {
+    PciAddress* out;
+    u32 max;
+    u32 count;
+};
+
+bool collect_block_device(void* ctx, PciAddress address, u16 vendor, u16 device) {
+    FindState one{{0, 0, 0}, false};
+    if (!match_block_device(&one, address, vendor, device)) {
+        return false;
+    }
+    FindAllState* state = static_cast<FindAllState*>(ctx);
+    if (state->count < state->max) {
+        state->out[state->count] = address;
+    }
+    ++state->count;
+    return false;
+}
+
+}
+
+u32 virtio_blk_find_all(PciAddress* found, u32 max) {
+    FindAllState state{found, max, 0};
+    pci_scan(&collect_block_device, &state);
+    return state.count < max ? state.count : max;
+}
+
 bool virtio_blk_find(PciAddress& found) {
     FindState state{{0, 0, 0}, false};
     pci_scan(&match_block_device, &state);
