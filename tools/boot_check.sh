@@ -27,6 +27,8 @@
 # build/disk.img (made by make disk-image) is attached as a read-only
 # virtio-blk drive. --disk <file> attaches a copy of that file padded to
 # whole sectors instead, and --no-disk attaches no drive.
+# --disk1 <file> and --disk2 <file> attach copies of more disks as DF1:
+# and DF2:.
 #
 # --usb-kbd attaches an xHCI controller with a USB keyboard. --keys "<names>"
 # implies it and, once "shell: ready" shows on the serial console, types the
@@ -43,7 +45,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--usb-kbd] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--usb-kbd] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -60,6 +62,7 @@ mouse=
 disk_mode=default
 disk_source=
 disk1_source=
+disk2_source=
 while [[ ${1:-} == --* ]]; do
     case $1 in
         --disk)
@@ -72,6 +75,11 @@ while [[ ${1:-} == --* ]]; do
         --disk1)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
             disk1_source=$2
+            shift
+            ;;
+        --disk2)
+            [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
+            disk2_source=$2
             shift
             ;;
         --usb-kbd) usb_kbd=true ;;
@@ -141,6 +149,12 @@ if [[ -n $disk1_source ]]; then
     "$tools_dir/make_disk.sh" "$disk1_source" "$disk1"
     disk_args+=(-drive "if=none,id=disk1,format=raw,readonly=on,file=$disk1"
                 -device virtio-blk-pci,disable-legacy=on,drive=disk1,addr=0x11)
+fi
+if [[ -n $disk2_source ]]; then
+    disk2=$build_dir/boot-check-disk2.img
+    "$tools_dir/make_disk.sh" "$disk2_source" "$disk2"
+    disk_args+=(-drive "if=none,id=disk2,format=raw,readonly=on,file=$disk2"
+                -device virtio-blk-pci,disable-legacy=on,drive=disk2,addr=0x12)
 fi
 
 serial_log=$build_dir/serial.log
