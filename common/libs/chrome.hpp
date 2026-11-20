@@ -37,6 +37,11 @@ namespace chrome {
 
 constexpr u32 kBarHeight = 14;
 constexpr u32 kBorderTop = 15;
+// The screen's WBorTop: programs size a title bar as WBorTop plus the
+// screen font's height (topaz 8) plus one, and that has to come to
+// kBorderTop.
+constexpr u32 kTitleFontHeight = 8;
+constexpr u32 kWBorTop = kBorderTop - kTitleFontHeight - 1;
 constexpr u32 kBorderLeft = 2;
 constexpr u32 kBorderRight = 2;
 constexpr u32 kBorderBottom = 2;

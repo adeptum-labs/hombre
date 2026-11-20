@@ -354,22 +354,22 @@ endif
 # second of no-op moves.
 WBP_CLICK := mouse_button 1;mouse_button 0
 WBP_WAIT  := mouse_move 0 0;mouse_move 0 0;mouse_move 0 0;mouse_move 0 0
-WBPATTERN_PICTURE_MOUSE := mouse_move -90 -130;$(WBP_CLICK);mouse_move 0 22;$(WBP_CLICK);\
-    $(WBP_WAIT);$(WBP_WAIT);mouse_move 0 53;$(WBP_CLICK);\
+WBPATTERN_PICTURE_MOUSE := mouse_move -90 -139;$(WBP_CLICK);mouse_move 0 22;$(WBP_CLICK);\
+    $(WBP_WAIT);$(WBP_WAIT);mouse_move 0 61;$(WBP_CLICK);\
     sendkey shift-p;sendkey i;sendkey c;sendkey s;sendkey shift-dot;sendkey ret;\
-    $(WBP_WAIT);$(WBP_WAIT);mouse_move -160 -103;$(WBP_CLICK);$(WBP_CLICK);\
+    $(WBP_WAIT);$(WBP_WAIT);mouse_move -160 -102;$(WBP_CLICK);$(WBP_CLICK);\
     $(WBP_WAIT);$(WBP_WAIT);$(WBP_WAIT);$(WBP_WAIT);\
     mouse_move 262 13;mouse_button 1;mouse_move 0 50;mouse_move 0 50;mouse_button 0;\
     $(WBP_WAIT);mouse_move -262 -32;$(WBP_CLICK);$(WBP_WAIT);\
     mouse_move 0 56;$(WBP_CLICK);$(WBP_WAIT);$(WBP_WAIT);\
-    mouse_move 248 -27;$(WBP_CLICK)
+    mouse_move 248 -36;$(WBP_CLICK)
 
 ifneq ($(and $(strip $(DISK)),$(strip $(DISK1))),)
 check-wbpattern: image $(PIC_DISK)
 	tools/boot_check.sh --disk "$$DISK" --disk1 "$$DISK1" \
 	    --keys "e x t r a s 3 dot 1 shift-dot p r e f s shift-7 w b p a t t e r n ret l o a d w b ret" \
 	    --mouse-after "intuition: window WBPattern Preferences opened" \
-	    --mouse "mouse_move 50 -88;mouse_button 1;mouse_button 0;mouse_move -52 40;mouse_button 1;mouse_button 0" \
+	    --mouse "mouse_move 50 -88;mouse_button 1;mouse_button 0;mouse_move -52 31;mouse_button 1;mouse_button 0" \
 	    "intuition: window WBPattern Preferences opened" \
 	    "m68k: extras3.1:prefs/wbpattern returned 0" \
 	    "workbench: backdrop patterns read"

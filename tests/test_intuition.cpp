@@ -363,7 +363,7 @@ void open_screen_builds_struct_bitmap_and_colormap() {
     CHECK_EQ(r.get16(screen + sc_Width), 640u);
     CHECK_EQ(r.get16(screen + sc_Height), 400u);
     CHECK_EQ(r.get8(screen + sc_BarHeight), 14u);
-    CHECK_EQ(r.get8(screen + sc_WBorTop), 15u);
+    CHECK_EQ(r.get8(screen + sc_WBorTop), 6u);
     CHECK_EQ(r.get8(screen + sc_WBorLeft), 2u);
     CHECK_EQ(r.get8(screen + sc_WBorRight), 2u);
     CHECK_EQ(r.get8(screen + sc_WBorBottom), 2u);

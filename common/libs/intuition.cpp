@@ -2154,7 +2154,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w16(screen + ndk::sc_Width, a.width);
     b.w16(screen + ndk::sc_Height, a.height);
     b.w8(screen + ndk::sc_BarHeight, chrome::kBarHeight);
-    b.w8(screen + ndk::sc_WBorTop, chrome::kBorderTop);
+    b.w8(screen + ndk::sc_WBorTop, chrome::kWBorTop);
     b.w8(screen + ndk::sc_WBorLeft, chrome::kBorderLeft);
     b.w8(screen + ndk::sc_WBorRight, chrome::kBorderRight);
     b.w8(screen + ndk::sc_WBorBottom, chrome::kBorderBottom);
