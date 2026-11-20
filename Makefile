@@ -298,7 +298,7 @@ check-workbench: image
 	    "; Startup-Sequence for low-density floppies" "usb: no controller" \
 	    "intuition: screen opened 640x400" \
 	    "intuition: window opened HombreShell" "m68k: running C:Version" \
-	    "Kickstart 60.0, Workbench 40.42" "m68k: C:Version returned 0" "halting"
+	    "Kickstart 60.0, Workbench 60.0" "m68k: C:Version returned 0" "halting"
 	tools/boot_check.sh --disk "$$DISK" \
 	    --keys "d i r ret l i s t spc c ret t y p e spc s shift-dot s t a r t u p slash s e q u e n c e ret i n f o ret a s s i g n ret d a t e ret w h i c h spc d i r ret c d spc c ret c d spc shift-7 ret a s k spc q ret y ret w h y ret r u n spc w a i t spc 3 ret e c h o spc h i ret" \
 	    "m68k: C:dir returned 0" "m68k: C:list returned 0" "Directory \"C\" on" \
