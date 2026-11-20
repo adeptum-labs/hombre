@@ -200,7 +200,7 @@ std::vector<u8> icon_info(u8 type, i32 current_x, i32 current_y) {
 }
 
 std::vector<u8> drawer_icon_info(i32 current_x, i32 current_y, i32 left, i32 top, i32 width,
-                                 i32 height) {
+                                 i32 height, i32 scroll_x = 0, i32 scroll_y = 0) {
     Info f;
     put_header(f, kWBDrawer, current_x, current_y, true, false);
     // OldDrawerData: the NewWindow of the drawer.
@@ -222,8 +222,8 @@ std::vector<u8> drawer_icon_info(i32 current_x, i32 current_y, i32 left, i32 top
     f.word(0);   // MaxWidth
     f.word(0);   // MaxHeight
     f.word(1);   // Type: WBENCHSCREEN
-    f.u32v(0);   // CurrentX
-    f.u32v(0);   // CurrentY
+    f.u32v(static_cast<u32>(scroll_x));  // CurrentX
+    f.u32v(static_cast<u32>(scroll_y));  // CurrentY
     put_image(f, 32, 12, 2, 12);
     // The OS 2 disk revision follows the other parts.
     f.u32v(0);  // dd_Flags
@@ -447,6 +447,38 @@ public:
             }
         }
         return pen;
+    }
+
+    // A gadget's box in its window, its edges and size taken from the
+    // window's as Intuition takes them; x1 and y1 are its last pixels.
+    struct Box {
+        i32 x0;
+        i32 y0;
+        i32 x1;
+        i32 y1;
+        bool holds(i32 x, i32 y) const { return x >= x0 && x <= x1 && y >= y0 && y <= y1; }
+    };
+    Box gadget_box(u32 window, u32 gadget) const {
+        const i32 width = static_cast<i16>(get16(window + wd_Width));
+        const i32 height = static_cast<i16>(get16(window + wd_Height));
+        const u32 flags = get16(gadget + gg_Flags);
+        i32 x = static_cast<i16>(get16(gadget + gg_LeftEdge));
+        i32 y = static_cast<i16>(get16(gadget + gg_TopEdge));
+        i32 w = static_cast<i16>(get16(gadget + gg_Width));
+        i32 h = static_cast<i16>(get16(gadget + gg_Height));
+        x += (flags & GFLG_RELRIGHT) != 0 ? width - 1 : 0;
+        y += (flags & GFLG_RELBOTTOM) != 0 ? height - 1 : 0;
+        w += (flags & GFLG_RELWIDTH) != 0 ? width : 0;
+        h += (flags & GFLG_RELHEIGHT) != 0 ? height : 0;
+        return Box{x, y, x + w - 1, y + h - 1};
+    }
+
+    // The screen point at the middle of a window's scroll gadget.
+    std::pair<i32, i32> gadget_middle(u32 window_index, u16 id) const {
+        const u32 window = workbench.window(window_index).window;
+        const Box box = gadget_box(window, workbench.scroll_gadget(window_index, id));
+        return {static_cast<i16>(get16(window + wd_LeftEdge)) + (box.x0 + box.x1) / 2,
+                static_cast<i16>(get16(window + wd_TopEdge)) + (box.y0 + box.y1) / 2};
     }
 
     // One press and release of the left button at x, y of the window's
@@ -1440,10 +1472,18 @@ void a_resized_drawer_clips_its_icons_and_keeps_their_places() {
     const i32 inner_right = static_cast<i32>(width) - static_cast<i32>(r.get8(window + wd_BorderRight));
     const i32 inner_bottom =
         static_cast<i32>(height) - static_cast<i32>(r.get8(window + wd_BorderBottom));
+    // The sliders show the new size once the desktop has measured it.
+    const Rig::Box vert =
+        r.gadget_box(window, r.workbench.scroll_gadget(labels, Workbench::kScrollVert));
+    const Rig::Box horiz =
+        r.gadget_box(window, r.workbench.scroll_gadget(labels, Workbench::kScrollHoriz));
     auto read_frame = [&]() {
         std::vector<u32> pens;
         for (i32 y = 0; y < static_cast<i32>(height); ++y) {
             for (i32 x = 0; x < static_cast<i32>(width); ++x) {
+                if (vert.holds(x, y) || horiz.holds(x, y)) {
+                    continue;
+                }
                 if (x < left || x >= inner_right || y < top || y >= inner_bottom) {
                     pens.push_back(r.window_pixel(window, x, y));
                 }
@@ -1468,6 +1508,232 @@ void a_resized_drawer_clips_its_icons_and_keeps_their_places() {
     r.workbench.open_icon(root, r.find_icon_in(root, "Tools"));
     r.workbench.close_drawer(r.find_window("HombreTest:Tools"));
     CHECK_EQ(r.free_bytes(), before);
+}
+
+// A drawer of two icons, one far below the other, in a window too short
+// for both.
+std::vector<AdfFile> scroll_files(i32 scroll_x = 0, i32 scroll_y = 0) {
+    std::vector<AdfFile> files = test_files();
+    files.push_back({"Long.info", drawer_icon_info(static_cast<i32>(kNoIconPosition),
+                                                   static_cast<i32>(kNoIconPosition), 40, 50,
+                                                   240, 110, scroll_x, scroll_y)});
+    files.push_back({"Long/Top.info", icon_info(kWBTool, 10, 10)});
+    files.push_back({"Long/Bottom.info", icon_info(kWBTool, 10, 300)});
+    return files;
+}
+
+u32 open_long(Rig& r) {
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon_in(root, "Long"));
+    const u32 long_drawer = r.find_window("HombreTest:Long");
+    CHECK(long_drawer != Workbench::kMaxWindows);
+    return long_drawer;
+}
+
+// The left button pressed and released at a screen point.
+void click_at(Rig& r, std::pair<i32, i32> at) {
+    g_intuition.pointer_event(at.first, at.second, 1, 1, 0, true);
+    r.workbench.pump();
+    g_intuition.pointer_event(at.first, at.second, 0, 0, 1, false);
+    r.workbench.pump();
+}
+
+void drawers_have_scroll_gadgets_in_their_borders() {
+    Rig r;
+    r.workbench.open_desktop();
+    // The backdrop has none.
+    CHECK_EQ(r.workbench.window(0).gadgets, 0u);
+    CHECK_EQ(r.get32(r.workbench.window(0).window + wd_FirstGadget), 0u);
+    // The first window makes the arrows every window shares.
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    r.workbench.close_drawer(r.find_window("HombreTest:"));
+    const u32 before = r.free_bytes();
+
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 drawer = r.find_window("HombreTest:");
+    const u32 window = r.workbench.window(drawer).window;
+    CHECK_EQ(r.get32(window + wd_FirstGadget), r.workbench.scroll_gadget(drawer, 1));
+    const i32 width = static_cast<i16>(r.get16(window + wd_Width));
+    const i32 height = static_cast<i16>(r.get16(window + wd_Height));
+    const Rect size = Intuition::size_box_rect(0, 0, width, height, r.get32(window + wd_Flags));
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    u32 gadget = r.get32(window + wd_FirstGadget);
+    for (u16 id = 1; id <= Workbench::kScrollGadgets; ++id) {
+        CHECK_EQ(gadget, r.workbench.scroll_gadget(drawer, id));
+        CHECK_EQ(r.get16(gadget + gg_GadgetID), static_cast<u32>(id));
+        const Rig::Box box = r.gadget_box(window, gadget);
+        CHECK(box.x0 <= box.x1 && box.y0 <= box.y1);
+        // In the borders, clear of the size gadget and the title bar.
+        CHECK(box.x0 >= 0 && box.x1 < width && box.y0 >= w.inner_top && box.y1 < height);
+        CHECK(box.x1 < size.x0 || box.y1 < size.y0);
+        const bool right = box.x0 >= w.inner_left + w.inner_width;
+        const bool bottom = box.y0 >= w.inner_top + w.inner_height;
+        CHECK(right || bottom);
+        gadget = r.get32(gadget + gg_NextGadget);
+    }
+    CHECK_EQ(gadget, 0u);
+    CHECK_EQ(r.get16(r.workbench.scroll_gadget(drawer, Workbench::kScrollVert) + gg_GadgetType) &
+                 GTYP_GTYPEMASK,
+             GTYP_PROPGADGET);
+    CHECK_EQ(r.get16(r.workbench.scroll_gadget(drawer, Workbench::kScrollUp) + gg_GadgetType) &
+                 GTYP_GTYPEMASK,
+             GTYP_BOOLGADGET);
+
+    // Closing the drawer gives its gadgets back.
+    r.workbench.close_drawer(drawer);
+    CHECK_EQ(r.free_bytes(), before);
+
+    // The root window has them while it is no backdrop.
+    r.workbench.set_backdrop(false);
+    CHECK(r.workbench.scroll_gadget(0, Workbench::kScrollVert) != 0);
+    CHECK_EQ(r.get32(r.workbench.window(0).window + wd_FirstGadget),
+             r.workbench.scroll_gadget(0, Workbench::kScrollVert));
+    r.workbench.set_backdrop(true);
+    CHECK_EQ(r.workbench.scroll_gadget(0, Workbench::kScrollVert), 0u);
+}
+
+void the_arrows_and_sliders_scroll_a_drawer() {
+    Rig r(scroll_files());
+    const u32 drawer = open_long(r);
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    const u32 window = w.window;
+    const u32 top_icon = r.find_icon_in(drawer, "Top");
+    const u32 vert = r.workbench.scroll_gadget(drawer, Workbench::kScrollVert);
+    const u32 horiz = r.workbench.scroll_gadget(drawer, Workbench::kScrollHoriz);
+    const u32 vert_info = r.get32(vert + gg_SpecialInfo);
+    const u32 horiz_info = r.get32(horiz + gg_SpecialInfo);
+    CHECK_EQ(w.scroll_x, 0);
+    CHECK_EQ(w.scroll_y, 0);
+    // Taller than the window, as wide as it.
+    const Workbench::Extent e = r.workbench.extent(drawer);
+    CHECK(e.max_y > 300);
+    CHECK(r.get16(vert_info + pi_VertBody) < MAXBODY);
+    CHECK_EQ(r.get16(vert_info + pi_VertPot), 0u);
+    CHECK_EQ(r.get16(horiz_info + pi_HorizBody), MAXBODY);
+
+    // The icon's image, where it is drawn with the view scrolled down by.
+    auto image = [&](i32 down) {
+        std::vector<u32> pens;
+        for (i32 y = 0; y < 12; ++y) {
+            for (i32 x = 0; x < 32; ++x) {
+                pens.push_back(r.window_pixel(window, w.inner_left + 10 + x,
+                                              w.inner_top + 10 - down + y));
+            }
+        }
+        return pens;
+    };
+    const std::vector<u32> plain = image(0);
+
+    // Up and left go nowhere from the origin.
+    click_at(r, r.gadget_middle(drawer, Workbench::kScrollUp));
+    click_at(r, r.gadget_middle(drawer, Workbench::kScrollLeft));
+    click_at(r, r.gadget_middle(drawer, Workbench::kScrollRight));
+    CHECK_EQ(w.scroll_x, 0);
+    CHECK_EQ(w.scroll_y, 0);
+
+    // Down moves the view, the icons with it, and the slider's knob.
+    click_at(r, r.gadget_middle(drawer, Workbench::kScrollDown));
+    CHECK_EQ(w.scroll_y, Workbench::kScrollStep);
+    CHECK(image(Workbench::kScrollStep) == plain);
+    CHECK(r.get16(vert_info + pi_VertPot) > 0u);
+    // A click where the icon shows now selects it.
+    r.click(drawer, 13, 13 - Workbench::kScrollStep);
+    const std::vector<u32> selected = image(Workbench::kScrollStep);
+    for (usize i = 0; i < plain.size(); ++i) {
+        CHECK_EQ(selected[i], plain[i] ^ 3u);
+    }
+    r.click(drawer, 200, 60);
+
+    // An icon dragged within the window lands where the view shows it.
+    r.drag(drawer, 13, 13 - Workbench::kScrollStep, r.screen_x(drawer, 113),
+           r.screen_y(drawer, 25));
+    CHECK_EQ(r.workbench.icon(top_icon).left, 110);
+    CHECK_EQ(r.workbench.icon(top_icon).top, 25 + Workbench::kScrollStep - 3);
+
+    // The knob dragged to the bottom shows the end of the icons.
+    const Rig::Box track = r.gadget_box(window, vert);
+    const i32 left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 top = static_cast<i16>(r.get16(window + wd_TopEdge));
+    const i32 knob_x = left + (track.x0 + track.x1) / 2;
+    // The knob's top, a little below where the view's scroll puts it.
+    const i32 knob_y = top + track.y0 + 2 +
+                       static_cast<i32>((track.y1 - track.y0) *
+                                        static_cast<u64>(r.get16(vert_info + pi_VertPot)) /
+                                        MAXPOT / 8);
+    g_intuition.pointer_event(knob_x, knob_y, 1, 1, 0, true);
+    r.workbench.pump();
+    g_intuition.pointer_event(knob_x, top + track.y1 + 200, 1, 0, 0, true);
+    r.workbench.pump();
+    g_intuition.pointer_event(knob_x, top + track.y1 + 200, 0, 0, 1, false);
+    r.workbench.pump();
+    const Workbench::Extent end = r.workbench.extent(drawer);
+    CHECK_EQ(w.scroll_y, end.max_y - w.inner_height);
+    CHECK_EQ(r.get16(vert_info + pi_VertPot), MAXPOT);
+    // Down goes no further.
+    click_at(r, r.gadget_middle(drawer, Workbench::kScrollDown));
+    CHECK_EQ(w.scroll_y, end.max_y - w.inner_height);
+
+    // A click on the track above the knob pages back towards the top.
+    g_intuition.pointer_event(knob_x, top + track.y0 + 1, 1, 1, 0, true);
+    r.workbench.pump();
+    g_intuition.pointer_event(knob_x, top + track.y0 + 1, 0, 0, 1, false);
+    r.workbench.pump();
+    CHECK(w.scroll_y < end.max_y - w.inner_height);
+
+    // A taller window needs less of a scroll, and the view stays inside.
+    g_intuition.move_window_to(window, 40, 12);
+    g_intuition.size_window_to(window, 240, 388);
+    r.workbench.pump();
+    const Workbench::Extent fits = r.workbench.extent(drawer);
+    CHECK(w.inner_height >= fits.max_y);
+    CHECK_EQ(w.scroll_y, 0);
+    CHECK_EQ(r.get16(vert_info + pi_VertBody), MAXBODY);
+}
+
+void a_window_snapshot_keeps_its_scroll() {
+    // A drawer kept scrolled opens scrolled, as far as its icons reach.
+    {
+        Rig r(scroll_files(0, 40));
+        const u32 drawer = open_long(r);
+        CHECK_EQ(r.workbench.window(drawer).scroll_y, 40);
+    }
+    {
+        Rig r(scroll_files(0, 5000));
+        const u32 drawer = open_long(r);
+        const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+        CHECK_EQ(w.scroll_y, r.workbench.extent(drawer).max_y - w.inner_height);
+    }
+
+    Rig r;
+    for (const char* name : {"A", "B", "C", "D", "E", "F", "G", "H"}) {
+        put_ram_project(name);
+    }
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+    const u32 ram = r.find_window("Ram Disk:");
+    CHECK(ram != Workbench::kMaxWindows);
+    const u32 window = r.workbench.window(ram).window;
+    g_intuition.size_window_to(window, 200, 90);
+    r.workbench.pump();
+    CHECK(r.workbench.extent(ram).max_x > r.workbench.window(ram).inner_width + 16);
+    click_at(r, r.gadget_middle(ram, Workbench::kScrollRight));
+    click_at(r, r.gadget_middle(ram, Workbench::kScrollRight));
+    CHECK_EQ(r.workbench.window(ram).scroll_x, 2 * Workbench::kScrollStep);
+
+    CHECK(r.workbench.snapshot_window(ram, false));
+    const u32 object = g_icon.load_object("RAM:Disk");
+    CHECK(object != 0);
+    const u32 data = r.get32(object + do_DrawerData);
+    CHECK_EQ(r.get32(data + 48), static_cast<u32>(2 * Workbench::kScrollStep));
+    CHECK_EQ(r.get32(data + 52), 0u);
+    g_icon.free_object(object);
+
+    r.workbench.close_drawer(ram);
+    r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+    const u32 again = r.find_window("Ram Disk:");
+    CHECK_EQ(r.workbench.window(again).scroll_x, 2 * Workbench::kScrollStep);
 }
 
 void every_disk_in_a_drive_gets_an_icon() {
@@ -1621,6 +1887,9 @@ int main() {
     a_dragged_disk_keeps_its_place_over_a_backdrop_toggle();
     a_disk_icon_inside_a_drawer_is_no_volume();
     a_resized_drawer_clips_its_icons_and_keeps_their_places();
+    drawers_have_scroll_gadgets_in_their_borders();
+    the_arrows_and_sliders_scroll_a_drawer();
+    a_window_snapshot_keeps_its_scroll();
     every_disk_in_a_drive_gets_an_icon();
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();

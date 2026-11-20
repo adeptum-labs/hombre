@@ -51,6 +51,10 @@ constexpr u32 do_DrawerData = 66;
 constexpr u32 do_ToolWindow = 70;
 constexpr u32 do_StackSize = 74;
 constexpr u32 kNoIconPosition = 0x80000000;
+
+// struct DrawerData after its NewWindow: where the window was scrolled to.
+constexpr u32 dd_CurrentX = 48;
+constexpr u32 dd_CurrentY = 52;
 constexpr u32 kMinStack = 4096;
 
 // struct Image (intuition/intuition.h).
@@ -58,6 +62,10 @@ constexpr u32 im_LeftEdge = 0;
 constexpr u32 im_TopEdge = 2;
 constexpr u32 im_Width = 4;
 constexpr u32 im_Height = 6;
+constexpr u32 im_Depth = 8;
+constexpr u32 im_ImageData = 10;
+constexpr u32 im_PlanePick = 14;
+constexpr u32 Image_SIZEOF = 20;
 
 // struct IntuiMessage classes and input codes intuition sends.
 constexpr u32 kIdcmpRefreshWindow = 0x00000004;
@@ -114,12 +122,72 @@ constexpr i32 kGridMarginY = 8;
 constexpr i32 kDefaultDrawerWidth = 320;
 constexpr i32 kDefaultDrawerHeight = 160;
 constexpr u32 kMinDrawerWidth = 90;
-constexpr u32 kMinDrawerHeight = 40;
+// Tall enough for the title bar, both vertical arrows and a slider.
+constexpr u32 kMinDrawerHeight = 56;
 constexpr i32 kCascadeX = 40;
 constexpr i32 kCascadeY = 44;
 constexpr i32 kCascadeStep = 20;
 constexpr u32 kMaxWindowTitle = 64;
 constexpr u32 kClipBytes = ndk::Region_SIZEOF + ndk::RegionRectangle_SIZEOF;
+
+// The scroll gadgets in the borders WFLG_SIZEBRIGHT and WFLG_SIZEBBOTTOM
+// make (12 pixels on the right, 10 at the bottom), around the size gadget
+// in the corner. Their boxes follow the window's size: a RELRIGHT edge
+// counts from the right edge, a RELWIDTH size from the window's width.
+struct ScrollGadgetSpec {
+    u16 id;
+    i16 left;
+    i16 top;
+    i16 width;
+    i16 height;
+    u16 flags;
+    u16 activation;
+    u8 arrow;  // the arrow image, kNoArrow for a slider
+};
+constexpr u8 kArrowUp = 0;
+constexpr u8 kArrowDown = 1;
+constexpr u8 kArrowLeft = 2;
+constexpr u8 kArrowRight = 3;
+constexpr u8 kNoArrow = 0xFF;
+constexpr u16 kArrowFlags = ndk::GFLG_RELRIGHT | ndk::GFLG_RELBOTTOM | ndk::GFLG_GADGIMAGE |
+                            ndk::GFLG_GADGHIMAGE;
+constexpr u16 kSliderActivation =
+    ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE | ndk::GACT_FOLLOWMOUSE;
+constexpr u16 kArrowActivation = ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE;
+// The sliders come first, so their PropInfos and knobs pair with the
+// first two gadgets.
+constexpr ScrollGadgetSpec kScrollSpecs[Workbench::kScrollGadgets] = {
+    {Workbench::kScrollVert, -10, 16, 10, -46, ndk::GFLG_RELRIGHT | ndk::GFLG_RELHEIGHT,
+     kSliderActivation | ndk::GACT_RIGHTBORDER, kNoArrow},
+    {Workbench::kScrollHoriz, 3, -7, -47, 7, ndk::GFLG_RELBOTTOM | ndk::GFLG_RELWIDTH,
+     kSliderActivation | ndk::GACT_BOTTOMBORDER, kNoArrow},
+    {Workbench::kScrollUp, -11, -29, 12, 10, kArrowFlags,
+     kArrowActivation | ndk::GACT_RIGHTBORDER, kArrowUp},
+    {Workbench::kScrollDown, -11, -19, 12, 10, kArrowFlags,
+     kArrowActivation | ndk::GACT_RIGHTBORDER, kArrowDown},
+    {Workbench::kScrollLeft, -43, -9, 16, 10, kArrowFlags,
+     kArrowActivation | ndk::GACT_BOTTOMBORDER, kArrowLeft},
+    {Workbench::kScrollRight, -27, -9, 16, 10, kArrowFlags,
+     kArrowActivation | ndk::GACT_BOTTOMBORDER, kArrowRight},
+};
+constexpr u32 kSliders = 2;
+constexpr u16 kVertSliderFlags = ndk::AUTOKNOB | ndk::FREEVERT | ndk::PROPBORDERLESS |
+                                 ndk::PROPNEWLOOK;
+constexpr u16 kHorizSliderFlags = ndk::AUTOKNOB | ndk::FREEHORIZ | ndk::PROPBORDERLESS |
+                                  ndk::PROPNEWLOOK;
+constexpr u32 kPropInfoAt = Workbench::kScrollGadgets * ndk::Gadget_SIZEOF;
+constexpr u32 kKnobAt = kPropInfoAt + kSliders * ndk::PropInfo_SIZEOF;
+constexpr u32 kScrollBlockBytes = kKnobAt + kSliders * Image_SIZEOF;
+
+// The arrow images: up and down fit the right border, left and right the
+// bottom one; each comes plain and pressed, two planes deep.
+constexpr u32 kArrowImages = 8;
+constexpr u32 kArrowHeight = 10;
+constexpr u32 kArrowPlaneBytes = kArrowHeight * 2;  // one word a row
+constexpr u32 kArrowDataBytes = 2 * kArrowPlaneBytes;
+constexpr u32 kArrowBlockBytes = kArrowImages * (Image_SIZEOF + kArrowDataBytes);
+constexpr u32 kShinePen = 2;
+constexpr u32 kShadowPen = 1;
 
 // The menu labels, in the order the menus number them.
 constexpr u16 kDisabled = NM_ITEMDISABLED;
@@ -310,6 +378,111 @@ IconArt art_of(Bus& b, u32 object) {
     return art;
 }
 
+// The label under an icon in drawer coordinates: the start of its
+// baseline and its width, centred under the image when there is one.
+struct LabelPlace {
+    i32 x = 0;
+    i32 y = 0;
+    i32 span = 0;
+};
+
+constexpr i32 kLabelAscent = 6;  // the topaz font's rows above the baseline
+
+LabelPlace label_place(const IconArt& art, const Workbench::IconEntry& icon) {
+    LabelPlace place;
+    place.span = static_cast<i32>(text_length(icon.name) * kLabelWidth);
+    place.x = icon.left;
+    place.y = icon.top + icon.height + kLabelBaseline;
+    if (art.render != 0 && art.width > 0) {
+        place.x = icon.left + art.left + (art.width - place.span) / 2;
+        place.y = icon.top + art.top + art.height + kLabelBaseline;
+    }
+    return place;
+}
+
+// One pixel of a two-plane arrow image, one word to a row, set to pen;
+// the image starts cleared, so pen 0 needs nothing.
+void put_arrow_pixel(Bus& b, u32 data, i32 x, i32 y, u32 pen) {
+    const u32 at = static_cast<u32>(y) * 2 + (static_cast<u32>(x) >> 4) * 2;
+    const u32 bit = 0x8000u >> (static_cast<u32>(x) & 15);
+    for (u32 plane = 0; plane < 2; ++plane) {
+        if ((pen & (1u << plane)) != 0) {
+            const u32 word = data + plane * kArrowPlaneBytes + at;
+            b.w16(word, b.r16(word) | bit);
+        }
+    }
+}
+
+// A raised button, or a pressed one with its edges' pens swapped, with a
+// black triangle pointing the arrow's way.
+void paint_arrow(Bus& b, u32 data, u8 arrow, i32 width, i32 height, bool pressed) {
+    const u32 light = pressed ? kShadowPen : kShinePen;
+    const u32 dark = pressed ? kShinePen : kShadowPen;
+    for (i32 x = 0; x < width; ++x) {
+        put_arrow_pixel(b, data, x, 0, light);
+        put_arrow_pixel(b, data, x, height - 1, dark);
+    }
+    for (i32 y = 1; y < height - 1; ++y) {
+        put_arrow_pixel(b, data, 0, y, light);
+        put_arrow_pixel(b, data, width - 1, y, dark);
+    }
+    const i32 mid_x = (width - 1) / 2;   // the left of the two middle columns
+    const i32 mid_y = (height - 1) / 2;  // the upper of the two middle rows
+    for (i32 i = 0; i < 4; ++i) {
+        for (i32 j = -i; j <= i + 1; ++j) {
+            if (arrow == kArrowUp) {
+                put_arrow_pixel(b, data, mid_x + j, mid_y - 1 + i, kShadowPen);
+            } else if (arrow == kArrowDown) {
+                put_arrow_pixel(b, data, mid_x + j, mid_y + 2 - i, kShadowPen);
+            } else if (arrow == kArrowLeft) {
+                put_arrow_pixel(b, data, mid_x - 2 + i, mid_y + j, kShadowPen);
+            } else {
+                put_arrow_pixel(b, data, mid_x + 3 - i, mid_y + j, kShadowPen);
+            }
+        }
+    }
+}
+
+// One axis of a window's view, inner wide over icons from min to max
+// (min is never past the origin): it scrolls from min to the furthest
+// point that still shows max, and never less far than the origin, so the
+// view a window opens with is always one it can keep.
+i32 scroll_limit(i32 max, i32 inner) { return max - inner > 0 ? max - inner : 0; }
+
+u32 slider_body(i32 min, i32 max, i32 inner) {
+    const i32 travel = scroll_limit(max, inner) - min;
+    if (inner <= 0 || travel <= 0) {
+        return ndk::MAXBODY;
+    }
+    const u64 total = static_cast<u64>(travel) + static_cast<u64>(inner);
+    return static_cast<u32>(static_cast<u64>(inner) * ndk::MAXBODY / total);
+}
+
+u32 slider_pot(i32 min, i32 max, i32 inner, i32 scroll) {
+    const i32 travel = scroll_limit(max, inner) - min;
+    if (travel <= 0) {
+        return 0;
+    }
+    const u64 offset = static_cast<u64>(scroll - min);
+    return static_cast<u32>((offset * ndk::MAXPOT + static_cast<u64>(travel) / 2) /
+                            static_cast<u64>(travel));
+}
+
+i32 scroll_of_pot(i32 min, i32 max, i32 inner, u32 pot) {
+    const i32 travel = scroll_limit(max, inner) - min;
+    if (travel <= 0) {
+        return min;
+    }
+    return min + static_cast<i32>((static_cast<u64>(pot) * static_cast<u64>(travel) +
+                                   ndk::MAXPOT / 2) /
+                                  ndk::MAXPOT);
+}
+
+i32 clamp_scroll(i32 scroll, i32 min, i32 max, i32 inner) {
+    const i32 limit = scroll_limit(max, inner);
+    return scroll < min ? min : (scroll > limit ? limit : scroll);
+}
+
 // The window's clip Region in its layer while the Workbench draws, and
 // the layer's own region back after: Intuition draws the frame through the
 // same layer.
@@ -481,21 +654,26 @@ void Workbench::measure_window(u32 index) {
     b.w16(rect + ndk::rr_bounds + 6, static_cast<u32>(w.inner_height - 1));
 }
 
-// Gives back the window record and its clip Region; the window itself is
-// the caller's to close.
+// Gives back the window record, its clip Region and its scroll gadgets;
+// the window itself is the caller's to close first.
 void Workbench::release_window(u32 index) {
     DrawerWindow& w = windows_[index];
     if (w.clip != 0) {
         exec_->free(w.clip, kClipBytes);
     }
+    if (w.gadgets != 0) {
+        exec_->free(w.gadgets, kScrollBlockBytes);
+    }
     w = DrawerWindow{};
 }
 
-void Workbench::attach_window(u32 index, u32 window, const char* name, const char* path) {
+void Workbench::attach_window(u32 index, u32 window, const char* name, const char* path,
+                              u32 gadgets) {
     DrawerWindow& w = windows_[index];
     w = DrawerWindow{};
     w.used = true;
     w.window = window;
+    w.gadgets = gadgets;
     Bus b(*machine_);
     w.user_port = b.r32(window + ndk::wd_UserPort);
     w.rp = b.r32(window + ndk::wd_RPort);
@@ -534,6 +712,7 @@ void Workbench::open_root() {
     b.w16(new_window + ndk::nw_TopEdge, bar_height);
     b.w16(new_window + ndk::nw_Width, 0);
     b.w16(new_window + ndk::nw_Height, 0);
+    const u32 gadgets = backdrop_ ? 0 : make_scroll_gadgets();
     if (backdrop_) {
         b.w32(new_window + ndk::nw_IDCMPFlags,
               ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | kIdcmpMenuPick |
@@ -542,9 +721,11 @@ void Workbench::open_root() {
     } else {
         b.w8(new_window + ndk::nw_DetailPen, 0);
         b.w8(new_window + ndk::nw_BlockPen, 1);
-        b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
-                                                   ndk::IDCMP_NEWSIZE | kIdcmpMenuPick |
-                                                   kIdcmpRefreshWindow);
+        b.w32(new_window + ndk::nw_IDCMPFlags,
+              ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | ndk::IDCMP_NEWSIZE |
+                  ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP | kIdcmpMenuPick |
+                  kIdcmpRefreshWindow);
+        b.w32(new_window + ndk::nw_FirstGadget, gadgets);
         b.w32(new_window + ndk::nw_Flags,
               ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_SIZEGADGET |
                   ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM | ndk::WFLG_ACTIVATE);
@@ -560,10 +741,13 @@ void Workbench::open_root() {
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, sizeof kBackdropName);
     if (window == 0) {
+        if (gadgets != 0) {
+            exec_->free(gadgets, kScrollBlockBytes);
+        }
         LogLine().text("workbench: could not open the root window").send();
         return;
     }
-    attach_window(0, window, kBackdropName, "");
+    attach_window(0, window, kBackdropName, "", gadgets);
 }
 
 // The right-hand column of the root window, top to bottom, then the next
@@ -925,12 +1109,16 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     i32 top = -1;
     i32 width = 0;
     i32 height = 0;
+    i32 scroll_x = 0;
+    i32 scroll_y = 0;
     const u32 drawer_data = object != 0 ? b.r32(object + do_DrawerData) : 0;
     if (drawer_data != 0) {
         left = static_cast<i16>(b.r16(drawer_data + ndk::nw_LeftEdge));
         top = static_cast<i16>(b.r16(drawer_data + ndk::nw_TopEdge));
         width = static_cast<i16>(b.r16(drawer_data + ndk::nw_Width));
         height = static_cast<i16>(b.r16(drawer_data + ndk::nw_Height));
+        scroll_x = static_cast<i32>(b.r32(drawer_data + dd_CurrentX));
+        scroll_y = static_cast<i32>(b.r32(drawer_data + dd_CurrentY));
     }
     if (width <= 0) {
         width = kDefaultDrawerWidth;
@@ -948,12 +1136,16 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
         exec_->alloc(ndk::NewWindow_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     const u32 title_bytes = text_length(name) + 1;
     const u32 title = exec_->alloc(title_bytes, ndk::MEMF_PUBLIC);
-    if (new_window == 0 || title == 0) {
+    const u32 gadgets = make_scroll_gadgets();
+    if (new_window == 0 || title == 0 || gadgets == 0) {
         if (new_window != 0) {
             exec_->free(new_window, ndk::NewWindow_SIZEOF);
         }
         if (title != 0) {
             exec_->free(title, title_bytes);
+        }
+        if (gadgets != 0) {
+            exec_->free(gadgets, kScrollBlockBytes);
         }
         LogLine().text("workbench: no memory for ").text(name).send();
         return;
@@ -969,7 +1161,9 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     b.w8(new_window + ndk::nw_BlockPen, 1);
     b.w32(new_window + ndk::nw_IDCMPFlags,
           ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
-              ndk::IDCMP_NEWSIZE | kIdcmpMenuPick | kIdcmpRefreshWindow);
+              ndk::IDCMP_NEWSIZE | ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP |
+              kIdcmpMenuPick | kIdcmpRefreshWindow);
+    b.w32(new_window + ndk::nw_FirstGadget, gadgets);
     b.w32(new_window + ndk::nw_Flags,
           ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
               ndk::WFLG_SIZEGADGET | ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM |
@@ -989,10 +1183,14 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, title_bytes);
     if (window == 0) {
+        exec_->free(gadgets, kScrollBlockBytes);
         LogLine().text("workbench: could not open ").text(name).send();
         return;
     }
-    attach_window(slot, window, name, path);
+    attach_window(slot, window, name, path, gadgets);
+    // The view a snapshot kept; drawing keeps it inside the icons.
+    windows_[slot].scroll_x = scroll_x;
+    windows_[slot].scroll_y = scroll_y;
     fill_drawer(slot);
     draw_window(slot);
     LogLine().text("workbench: opened ").text(name).send();
@@ -1018,8 +1216,10 @@ void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, boo
     }
     Bus b(*machine_);
     const IconArt art = art_of(b, icon.object);
-    const i32 left = drawer.inner_left + icon.left;
-    const i32 top = drawer.inner_top + icon.top;
+    const i32 origin_x = drawer.inner_left - drawer.scroll_x;
+    const i32 origin_y = drawer.inner_top - drawer.scroll_y;
+    const i32 left = origin_x + icon.left;
+    const i32 top = origin_y + icon.top;
     if (art.render != 0) {
         if (selected && art.select != 0) {
             intuition_->draw_image(drawer.rp, art.select, left, top);
@@ -1031,21 +1231,24 @@ void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, boo
             intuition_->draw_image(drawer.rp, art.render, left, top);
         }
     }
-    const u32 length = text_length(icon.name);
-    const i32 span = static_cast<i32>(length * kLabelWidth);
-    i32 label_x = left;
-    i32 label_y = top + icon.height + kLabelBaseline;
-    if (art.render != 0 && art.width > 0) {
-        label_x = left + art.left + (art.width - span) / 2;
-        label_y = top + art.top + art.height + kLabelBaseline;
-    }
+    const LabelPlace label = label_place(art, icon);
     // A label past the inner edges is cut off there, as the image is.
     graphics_->set_pens(drawer.rp, 1, 0, ndk::JAM1);
-    graphics_->move(drawer.rp, label_x, label_y);
-    graphics_->text(drawer.rp, reinterpret_cast<const u8*>(icon.name), length);
+    graphics_->move(drawer.rp, origin_x + label.x, origin_y + label.y);
+    graphics_->text(drawer.rp, reinterpret_cast<const u8*>(icon.name), text_length(icon.name));
 }
 
+// The window's view kept inside its icons and its sliders set to match,
+// then its icons drawn.
 void Workbench::draw_window(u32 window_index) {
+    if (!windows_[window_index].used) {
+        return;
+    }
+    update_scroll(window_index);
+    paint_window(window_index);
+}
+
+void Workbench::paint_window(u32 window_index) {
     if (!windows_[window_index].used) {
         return;
     }
@@ -1065,6 +1268,220 @@ void Workbench::draw_window(u32 window_index) {
             draw_icon(drawer, icon, selected == i);
         }
     }
+}
+
+Workbench::Extent Workbench::extent(u32 window_index) const {
+    Extent e;
+    Bus b(*machine_);
+    for (const IconEntry& icon : icons_) {
+        if (!icon.used || icon.owner != window_index) {
+            continue;
+        }
+        const LabelPlace label = label_place(art_of(b, icon.object), icon);
+        const i32 x0 = label.x < icon.left ? label.x : icon.left;
+        const i32 x1 = label.x + label.span > icon.left + icon.width ? label.x + label.span
+                                                                     : icon.left + icon.width;
+        const i32 y0 = icon.top;
+        const i32 label_bottom = label.y - kLabelAscent + static_cast<i32>(kLabelRows);
+        const i32 y1 = label_bottom > icon.top + icon.height ? label_bottom
+                                                             : icon.top + icon.height;
+        e.min_x = x0 < e.min_x ? x0 : e.min_x;
+        e.min_y = y0 < e.min_y ? y0 : e.min_y;
+        e.max_x = x1 + kGridMarginX > e.max_x ? x1 + kGridMarginX : e.max_x;
+        e.max_y = y1 + kGridMarginY > e.max_y ? y1 + kGridMarginY : e.max_y;
+    }
+    return e;
+}
+
+// Keeps the view inside the window's icons and sets the sliders to it; a
+// window without scroll gadgets shows its icons from the origin.
+void Workbench::update_scroll(u32 window_index) {
+    DrawerWindow& w = windows_[window_index];
+    if (!w.used) {
+        return;
+    }
+    if (w.gadgets == 0) {
+        w.scroll_x = 0;
+        w.scroll_y = 0;
+        return;
+    }
+    const Extent e = extent(window_index);
+    w.scroll_x = clamp_scroll(w.scroll_x, e.min_x, e.max_x, w.inner_width);
+    w.scroll_y = clamp_scroll(w.scroll_y, e.min_y, e.max_y, w.inner_height);
+    Bus b(*machine_);
+    for (u32 i = 0; i < kSliders; ++i) {
+        const bool vertical = kScrollSpecs[i].id == kScrollVert;
+        const u32 gadget = w.gadgets + i * ndk::Gadget_SIZEOF;
+        const u32 pi = w.gadgets + kPropInfoAt + i * ndk::PropInfo_SIZEOF;
+        const u32 flags = vertical ? kVertSliderFlags : kHorizSliderFlags;
+        u32 hpot = 0;
+        u32 vpot = 0;
+        u32 hbody = ndk::MAXBODY;
+        u32 vbody = ndk::MAXBODY;
+        if (vertical) {
+            vpot = slider_pot(e.min_y, e.max_y, w.inner_height, w.scroll_y);
+            vbody = slider_body(e.min_y, e.max_y, w.inner_height);
+        } else {
+            hpot = slider_pot(e.min_x, e.max_x, w.inner_width, w.scroll_x);
+            hbody = slider_body(e.min_x, e.max_x, w.inner_width);
+        }
+        // Only a slider that changes is drawn again.
+        if (b.r16(pi + ndk::pi_HorizPot) == hpot && b.r16(pi + ndk::pi_VertPot) == vpot &&
+            b.r16(pi + ndk::pi_HorizBody) == hbody && b.r16(pi + ndk::pi_VertBody) == vbody) {
+            continue;
+        }
+        intuition_->new_modify_prop(gadget, w.window, flags, hpot, vpot, hbody, vbody, 1);
+    }
+}
+
+void Workbench::scroll_by(u32 window_index, i32 dx, i32 dy) {
+    DrawerWindow& w = windows_[window_index];
+    const i32 old_x = w.scroll_x;
+    const i32 old_y = w.scroll_y;
+    w.scroll_x += dx;
+    w.scroll_y += dy;
+    update_scroll(window_index);
+    if (w.scroll_x != old_x || w.scroll_y != old_y) {
+        paint_window(window_index);
+    }
+}
+
+// The view where the user has put the sliders. Intuition has drawn their
+// knobs already, so they are not set again.
+void Workbench::follow_sliders(u32 window_index) {
+    DrawerWindow& w = windows_[window_index];
+    if (w.gadgets == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 vert = w.gadgets + kPropInfoAt;
+    const u32 horiz = vert + ndk::PropInfo_SIZEOF;
+    const u32 vpot = b.r16(vert + ndk::pi_VertPot);
+    const u32 hpot = b.r16(horiz + ndk::pi_HorizPot);
+    if (!b.ok()) {
+        return;
+    }
+    const Extent e = extent(window_index);
+    const i32 x = scroll_of_pot(e.min_x, e.max_x, w.inner_width, hpot);
+    const i32 y = scroll_of_pot(e.min_y, e.max_y, w.inner_height, vpot);
+    if (x != w.scroll_x || y != w.scroll_y) {
+        w.scroll_x = x;
+        w.scroll_y = y;
+        paint_window(window_index);
+    }
+}
+
+u16 Workbench::scroll_gadget_id(u32 window_index, u32 address) const {
+    const u32 block = windows_[window_index].gadgets;
+    if (block == 0 || address < block) {
+        return 0;
+    }
+    const u32 offset = address - block;
+    if (offset % ndk::Gadget_SIZEOF != 0 || offset / ndk::Gadget_SIZEOF >= kScrollGadgets) {
+        return 0;
+    }
+    return kScrollSpecs[offset / ndk::Gadget_SIZEOF].id;
+}
+
+u32 Workbench::scroll_gadget(u32 window_index, u16 id) const {
+    if (window_index >= kMaxWindows || windows_[window_index].gadgets == 0) {
+        return 0;
+    }
+    for (u32 i = 0; i < kScrollGadgets; ++i) {
+        if (kScrollSpecs[i].id == id) {
+            return windows_[window_index].gadgets + i * ndk::Gadget_SIZEOF;
+        }
+    }
+    return 0;
+}
+
+// A slider moved, by its knob or a click beside it, or an arrow pressed.
+void Workbench::scroll_message(u32 window_index, u32 idcmp_class, u16 id) {
+    if (id == kScrollVert || id == kScrollHoriz) {
+        follow_sliders(window_index);
+    } else if (idcmp_class == ndk::IDCMP_GADGETDOWN) {
+        // TODO: repeat while the arrow is held, once Intuition sends
+        // IDCMP_INTUITICKS.
+        const i32 dx = id == kScrollLeft ? -kScrollStep : (id == kScrollRight ? kScrollStep : 0);
+        const i32 dy = id == kScrollUp ? -kScrollStep : (id == kScrollDown ? kScrollStep : 0);
+        scroll_by(window_index, dx, dy);
+    }
+}
+
+// The window's scroll gadgets, linked in kScrollSpecs order, with the
+// sliders' PropInfos and knob images after them in the same block.
+u32 Workbench::make_scroll_gadgets() {
+    if (arrows_ == 0 && !build_arrow_images()) {
+        return 0;
+    }
+    const u32 block = exec_->alloc(kScrollBlockBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (block == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    for (u32 i = 0; i < kScrollGadgets; ++i) {
+        const ScrollGadgetSpec& spec = kScrollSpecs[i];
+        const u32 gadget = block + i * ndk::Gadget_SIZEOF;
+        const bool last = i + 1 == kScrollGadgets;
+        b.w32(gadget + ndk::gg_NextGadget, last ? 0 : gadget + ndk::Gadget_SIZEOF);
+        b.w16(gadget + ndk::gg_LeftEdge, static_cast<u16>(spec.left));
+        b.w16(gadget + ndk::gg_TopEdge, static_cast<u16>(spec.top));
+        b.w16(gadget + ndk::gg_Width, static_cast<u16>(spec.width));
+        b.w16(gadget + ndk::gg_Height, static_cast<u16>(spec.height));
+        b.w16(gadget + ndk::gg_Flags, spec.flags);
+        b.w16(gadget + ndk::gg_Activation, spec.activation);
+        b.w16(gadget + ndk::gg_GadgetID, spec.id);
+        if (spec.arrow == kNoArrow) {
+            const u32 pi = block + kPropInfoAt + i * ndk::PropInfo_SIZEOF;
+            const bool vertical = spec.id == kScrollVert;
+            b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_PROPGADGET);
+            b.w32(gadget + ndk::gg_GadgetRender, block + kKnobAt + i * Image_SIZEOF);
+            b.w32(gadget + ndk::gg_SpecialInfo, pi);
+            b.w16(pi + ndk::pi_Flags, vertical ? kVertSliderFlags : kHorizSliderFlags);
+            b.w16(pi + ndk::pi_HorizBody, ndk::MAXBODY);
+            b.w16(pi + ndk::pi_VertBody, ndk::MAXBODY);
+        } else {
+            const u32 plain = arrows_ + (spec.arrow * 2u) * Image_SIZEOF;
+            b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_BOOLGADGET);
+            b.w32(gadget + ndk::gg_GadgetRender, plain);
+            b.w32(gadget + ndk::gg_SelectRender, plain + Image_SIZEOF);
+        }
+    }
+    if (!b.ok()) {
+        exec_->free(block, kScrollBlockBytes);
+        return 0;
+    }
+    return block;
+}
+
+// The images of the four arrows, plain and pressed, which every window's
+// arrow gadgets share; they stay as long as the library.
+bool Workbench::build_arrow_images() {
+    const u32 block = exec_->alloc(kArrowBlockBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (block == 0) {
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 data_at = block + kArrowImages * Image_SIZEOF;
+    for (u32 i = 0; i < kArrowImages; ++i) {
+        const u8 arrow = static_cast<u8>(i / 2);
+        const bool pressed = (i & 1) != 0;
+        const i32 width = arrow == kArrowUp || arrow == kArrowDown ? 12 : 16;
+        const u32 image = block + i * Image_SIZEOF;
+        const u32 data = data_at + i * kArrowDataBytes;
+        b.w16(image + im_Width, static_cast<u32>(width));
+        b.w16(image + im_Height, kArrowHeight);
+        b.w16(image + im_Depth, 2);
+        b.w32(image + im_ImageData, data);
+        b.w8(image + im_PlanePick, 3);
+        paint_arrow(b, data, arrow, width, static_cast<i32>(kArrowHeight), pressed);
+    }
+    if (!b.ok()) {
+        exec_->free(block, kArrowBlockBytes);
+        return false;
+    }
+    arrows_ = block;
+    return true;
 }
 
 void Workbench::redraw_all() {
@@ -1149,8 +1566,8 @@ void Workbench::mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us) {
     }
     cancel_drag();
     const DrawerWindow& drawer = windows_[window_index];
-    const i32 x = mx - drawer.inner_left;
-    const i32 y = my - drawer.inner_top;
+    const i32 x = mx - drawer.inner_left + drawer.scroll_x;
+    const i32 y = my - drawer.inner_top + drawer.scroll_y;
     const u32 hit = icon_at(window_index, x, y);
     const ClickAction action = clicks_[window_index].click(hit, now_us);
     switch (action) {
@@ -1274,8 +1691,8 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
         return;
     }
     const DrawerWindow& to = windows_[target];
-    const i32 px = sx - origin_x - to.inner_left;
-    const i32 py = sy - origin_y - to.inner_top;
+    const i32 px = sx - origin_x - to.inner_left + to.scroll_x;
+    const i32 py = sy - origin_y - to.inner_top + to.scroll_y;
     const i32 left = px - drag.grab_x;
     const i32 top = py - drag.grab_y;
     u32 on = icon_at(target, px, py);
@@ -1698,6 +2115,8 @@ bool Workbench::snapshot_window(u32 window_index, bool all) {
         b.w16(data + ndk::nw_TopEdge, b.r16(drawer.window + ndk::wd_TopEdge));
         b.w16(data + ndk::nw_Width, b.r16(drawer.window + ndk::wd_Width));
         b.w16(data + ndk::nw_Height, b.r16(drawer.window + ndk::wd_Height));
+        b.w32(data + dd_CurrentX, static_cast<u32>(drawer.scroll_x));
+        b.w32(data + dd_CurrentY, static_cast<u32>(drawer.scroll_y));
         saved = b.ok() && icon_->save_object(path, object, error);
     }
     icon_->free_object(object);
@@ -1836,6 +2255,7 @@ void Workbench::handle_message(u32 window_index, u32 message) {
     const i32 my = static_cast<i16>(b.r16(message + ndk::im_MouseY));
     const u64 when = static_cast<u64>(b.r32(message + ndk::im_Seconds)) * 1000000 +
                      b.r32(message + ndk::im_Micros);
+    const u16 scroll_id = scroll_gadget_id(window_index, b.r32(message + ndk::im_IAddress));
     // The message goes back before it is acted on: closing the window it
     // came from takes the port and everything still tied to it away.
     exec_->reply_message(message);
@@ -1847,6 +2267,10 @@ void Workbench::handle_message(u32 window_index, u32 message) {
     } else if (idcmp_class == ndk::IDCMP_NEWSIZE) {
         measure_window(window_index);
         draw_window(window_index);
+    } else if (scroll_id != 0 &&
+               (idcmp_class == ndk::IDCMP_GADGETDOWN || idcmp_class == ndk::IDCMP_GADGETUP ||
+                idcmp_class == ndk::IDCMP_MOUSEMOVE)) {
+        scroll_message(window_index, idcmp_class, scroll_id);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTDOWN) {
         mouse_click(window_index, mx, my, when);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTUP) {

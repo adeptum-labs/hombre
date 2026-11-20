@@ -44,8 +44,10 @@
 // files of its directory; opening an icon starts its program with a
 // WBStartup message. An icon dragged within its window takes the new
 // place; dropped on another drawer, or a drawer's or disk's icon, its file
-// moves there on the same volume and is copied to another. Snapshot keeps
-// an icon's place, or a drawer window's box, in the .info. The other
+// moves there on the same volume and is copied to another. A window with
+// borders scrolls over its icons with the sliders and arrows in its right
+// and bottom borders. Snapshot keeps an icon's place, or a drawer window's
+// box and scroll, in the .info. The other
 // vectors register application windows, icons and menu items, or rescan a
 // drawer. The vector gap at LVO -84 logs "workbench: unimplemented LVO
 // -<n>" and ends the run with Unimplemented.
@@ -121,7 +123,8 @@ public:
     // An open window of the desktop: the root window (index 0), a backdrop
     // or an ordinary window, or a drawer. clip is a Region of its inner
     // area that the Workbench's drawing stays inside, so icons past the
-    // edges of a sized window are cut off rather than moved.
+    // edges of a sized window are cut off rather than moved; the window's
+    // scroll gadgets bring them into view.
     struct DrawerWindow {
         bool used = false;
         u32 window = 0;
@@ -134,6 +137,34 @@ public:
         i32 inner_height = 0;
         char name[32]{};
         char path[Dos::kMaxPath]{};
+        // The drawer point shown at the inner area's top-left corner.
+        i32 scroll_x = 0;
+        i32 scroll_y = 0;
+        // The block of its scroll gadgets, the window's gadget list; 0 for
+        // a backdrop, which has none.
+        u32 gadgets = 0;
+    };
+
+    // The scroll gadgets of a window, by their GadgetID: the two sliders
+    // in the right and bottom borders and the arrows beside them.
+    static constexpr u16 kScrollVert = 1;
+    static constexpr u16 kScrollHoriz = 2;
+    static constexpr u16 kScrollUp = 3;
+    static constexpr u16 kScrollDown = 4;
+    static constexpr u16 kScrollLeft = 5;
+    static constexpr u16 kScrollRight = 6;
+    static constexpr u32 kScrollGadgets = 6;
+    // How far one click on an arrow moves the view.
+    static constexpr i32 kScrollStep = 8;
+
+    // The box the icons of a window take, in drawer coordinates: the
+    // origin, every icon with its label, and a margin past the right and
+    // bottom ones. max is one past the last point.
+    struct Extent {
+        i32 min_x = 0;
+        i32 min_y = 0;
+        i32 max_x = 0;
+        i32 max_y = 0;
     };
 
     // What a click did to the icons of its window.
@@ -227,6 +258,10 @@ public:
     const App& app(u32 index) const { return apps_[index]; }
     const IconDrag& drag() const { return drag_; }
 
+    // The window's scroll gadget with the GadgetID id; 0 when it has none.
+    u32 scroll_gadget(u32 window_index, u16 id) const;
+    Extent extent(u32 window_index) const;
+
     // StartWorkbench: starts the Workbench as a detached task with a
     // Process of its own and returns DOSTRUE. A call while it runs returns
     // DOSTRUE without a second desktop.
@@ -306,8 +341,9 @@ public:
     bool snapshot_icon(u32 window_index, u32 icon_index);
     bool unsnapshot_icon(u32 window_index, u32 icon_index);
 
-    // Window > Snapshot: stores the drawer window's place and size in the
-    // icon of its drawer or disk, and with all every icon's place too.
+    // Window > Snapshot: stores the drawer window's place, size and scroll
+    // in the icon of its drawer or disk, and with all every icon's place
+    // too.
     bool snapshot_window(u32 window_index, bool all);
 
     // Handles the replies of ended programs and the messages waiting at
@@ -332,7 +368,7 @@ private:
     void refresh_title();
 
     u32 build_menu_strip();
-    void attach_window(u32 index, u32 window, const char* name, const char* path);
+    void attach_window(u32 index, u32 window, const char* name, const char* path, u32 gadgets);
     void measure_window(u32 index);
     void release_window(u32 index);
     void open_drawer_window(const char* path, const char* name, u32 object);
@@ -349,6 +385,14 @@ private:
     void fill_drawer(u32 window_index);
     void place_icons(u32 window_index);
     void draw_window(u32 window_index);
+    void paint_window(u32 window_index);
+    u32 make_scroll_gadgets();
+    bool build_arrow_images();
+    void update_scroll(u32 window_index);
+    void scroll_by(u32 window_index, i32 dx, i32 dy);
+    void follow_sliders(u32 window_index);
+    u16 scroll_gadget_id(u32 window_index, u32 address) const;
+    void scroll_message(u32 window_index, u32 idcmp_class, u16 id);
     void draw_icon(const DrawerWindow& drawer, const IconEntry& icon, bool selected);
     void redraw_all();
     void update_all();
@@ -396,6 +440,7 @@ private:
     u32 reply_port_ = 0;
     u32 menu_ = 0;
     u32 title_buffer_ = 0;
+    u32 arrows_ = 0;  // the arrow gadgets' images, made once
     i32 volume_top_ = 0;
     u64 next_refresh_us_ = 0;
     bool running_ = false;

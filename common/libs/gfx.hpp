@@ -338,6 +338,9 @@ constexpr u32 GACT_RELVERIFY = 0x1;
 constexpr u32 GACT_IMMEDIATE = 0x2;
 constexpr u32 GACT_FOLLOWMOUSE = 0x8;
 constexpr u32 GACT_RIGHTBORDER = 0x10;
+constexpr u32 GACT_LEFTBORDER = 0x20;
+constexpr u32 GACT_TOPBORDER = 0x40;
+constexpr u32 GACT_BOTTOMBORDER = 0x80;
 
 constexpr u32 GTYP_PROPGADGET = 3;
 constexpr u32 GTYP_GTYPEMASK = 7;
