@@ -978,7 +978,7 @@ void typed_log(void*, const char* text) {
     serial::write_char('\n');
 }
 
-u32 run_script_file(Console& c, const char* args);
+u32 run_script_file(Console& c, const char* args, bool early_break = false);
 
 bool same_name(const char* a, const char* b) {
     for (; *a != '\0' && *b != '\0'; ++a, ++b) {
@@ -1142,7 +1142,9 @@ constinit u32 script_depth = 0;
 
 // Execute: runs the script the first word of args names. Its arguments
 // are not handed on yet. TODO: handle .KEY and the script's arguments.
-u32 run_script_file(Console& c, const char* args) {
+// Only with early_break does a Ctrl+D typed before the script starts stop
+// it, so one held through the boot skips the Startup-Sequence.
+u32 run_script_file(Console& c, const char* args, bool early_break) {
     char name[Dos::kMaxPath];
     u32 n = 0;
     const char* p = args;
@@ -1175,8 +1177,10 @@ u32 run_script_file(Console& c, const char* args) {
         shell_print(&c.typed, "\n");
         return 20;
     }
-    // A Ctrl+D typed before the script starts stops it too, so one held
-    // through the boot skips the Startup-Sequence.
+    if (script_depth == 0 && !early_break) {
+        poll_keys();
+        c.break_script = false;
+    }
     ++script_depth;
     ScriptRunner runner(script_host(c));
     const u32 rc = runner.run(reinterpret_cast<const char*>(text), got);
@@ -1349,6 +1353,7 @@ void shell_task(void* arg) { shell_loop(*static_cast<Console*>(arg)); }
 
 constexpr char kAddDataTypes[] = "C:AddDataTypes";
 constexpr char kStartupSequence[] = "S:Startup-Sequence";
+constexpr u64 kStartupGraceUs = 750000;
 
 void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& drives,
                       const char* path, const char* args) {
@@ -1372,6 +1377,15 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& 
     if (dos.examine(kStartupSequence).kind == Dos::TargetKind::File) {
         // As an Amiga boots: the disk's script, in the boot shell. Ctrl+D
         // stops it there.
+        // Time to type Ctrl+D before the script starts: the boot gets from
+        // a ready keyboard to here in a fraction of a second.
+        if (usb_keyboard_status() == UsbStatus::Ready && clock_us() != 0) {
+            const Deadline deadline = deadline_in_us(kStartupGraceUs);
+            while (!expired(deadline) && !boot.break_script) {
+                poll_keys();
+                idle_wait();
+            }
+        }
         log_line("startup: running S:Startup-Sequence");
         char quoted[sizeof kStartupSequence + 2];
         u32 n = 0;
@@ -1381,7 +1395,7 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& 
         }
         quoted[n++] = '"';
         quoted[n] = '\0';
-        const u32 rc = run_script_file(boot, quoted);
+        const u32 rc = run_script_file(boot, quoted, true);
         if (!serial_at_line_start) {
             serial::write_char('\n');
             serial_at_line_start = true;

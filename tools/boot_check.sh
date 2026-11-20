@@ -37,9 +37,9 @@
 # Swedish layout the keys to the right of p, l and the apostrophe key are
 # bracket_left (å), semicolon (ö) and apostrophe (ä).
 #
-# --no-startup implies --usb-kbd and types Ctrl+D as soon as the keyboard
-# is ready, which stops the disk's S:Startup-Sequence before its first line
-# and leaves the boot shell open.
+# --no-startup implies --usb-kbd and types Ctrl+D from QEMU's start until
+# the Startup-Sequence ends, which stops the disk's S:Startup-Sequence and
+# leaves the boot shell open.
 #
 # --mouse-after <marker> and --mouse "<commands>" must be given together.
 # --mouse implies the USB devices of --usb-kbd and also attaches a USB mouse
@@ -229,12 +229,14 @@ all_markers_present() {
     done
 }
 
-startup_stopped=false
 for ((i = 0; i < timeout_seconds * 4; i++)); do
     all_markers_present "$@" && exit 0
-    if [[ $no_startup == true && $startup_stopped == false ]] &&
-       grep -qF -- "usb: keyboard ready" "$serial_log"; then
-        startup_stopped=true
+    # Ctrl+D again and again from QEMU's start until the Startup-Sequence is
+    # over. QEMU queues the keys until the kernel reads the keyboard, so one
+    # is waiting when the script starts, however quickly the boot gets
+    # there; keys sent before the kernel resets the keyboard are lost.
+    if [[ $no_startup == true && -S $monitor_socket ]] &&
+       ! grep -qF -- "startup: ended" "$serial_log"; then
         monitor_send "sendkey ctrl-d" || true
     fi
     if [[ -n $keys && $keys_sent == false ]] && grep -qF -- "shell: ready" "$serial_log"; then
