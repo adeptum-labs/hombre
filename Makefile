@@ -34,6 +34,7 @@ OVMF         := /usr/share/OVMF
 # environment, so no character in them is shell syntax. Drive n sits in PCI
 # slot 0x10 + n, which is how the kernel tells the drives apart.
 TEST_DISK := $(BUILD)/test-disk.dms
+PIC_DISK  := $(BUILD)/pic-disk.adf
 DISK      ?= $(TEST_DISK)
 export DISK DISK1 DISK2 DISK3
 DISK_IMG  := $(BUILD)/disk.img
@@ -424,7 +425,6 @@ $(MKDISK): tools/mkdisk.cpp $(COMMON_HOBJ)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
 MKPICDISK := $(BUILD)/tools/mkpicdisk
-PIC_DISK  := $(BUILD)/pic-disk.adf
 
 $(MKPICDISK): tools/mkpicdisk.cpp $(COMMON_HOBJ)
 	@mkdir -p $(@D)

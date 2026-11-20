@@ -178,13 +178,26 @@ qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
 qemu_pid=$!
 trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; rm -f "$monitor_socket"' EXIT
 
+# Sends one HMP command, then waits 0.25 s. Every command goes over one
+# connection to the monitor, opened by the first: a connection per command
+# can be accepted only after its client gave up and closed it, when QEMU's
+# main loop stalls, and QEMU then drops the command unread.
+monitor_fd=
+monitor_send() {
+    if [[ -z $monitor_fd ]]; then
+        exec {monitor_fd}> >(exec socat - "UNIX-CONNECT:$monitor_socket" > /dev/null)
+    fi
+    echo "$1" >&"$monitor_fd" || return 1
+    sleep 0.25
+}
+trap '' PIPE
+
 # Types the keys once the shell reads the keyboard. Best effort: a missing
 # marker is reported with the others at the end.
 send_keys() {
     local key
     for key in $keys; do
-        echo "sendkey $key" | socat - "UNIX-CONNECT:$monitor_socket" > /dev/null || return 1
-        sleep 0.25
+        monitor_send "sendkey $key" || return 1
     done
 }
 keys_sent=false
@@ -195,8 +208,7 @@ send_mouse() {
     IFS=';' read -ra cmds <<< "$mouse"
     for cmd in "${cmds[@]}"; do
         [[ -n $cmd ]] || continue
-        echo "$cmd" | socat - "UNIX-CONNECT:$monitor_socket" > /dev/null || return 1
-        sleep 0.25
+        monitor_send "$cmd" || return 1
     done
 }
 mouse_sent=false
