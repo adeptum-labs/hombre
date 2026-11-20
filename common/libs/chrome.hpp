@@ -43,6 +43,30 @@ constexpr u32 kBorderBottom = 2;
 constexpr u32 kSizeBorderRight = 12;
 constexpr u32 kSizeBorderBottom = 10;
 
+// The close and depth buttons of a window's title bar: both the same size,
+// the same distance in from the window's left and right edges, and centred
+// in the bar.
+constexpr i32 kBarButtonWidth = 13;
+constexpr i32 kBarButtonHeight = 11;
+constexpr i32 kBarButtonInset = 3;
+constexpr i32 kBarButtonTop = 2;
+
+enum class BarButton : u8 { None = 0, Close = 1, Depth = 2 };
+
+// The box of the close button, in window coordinates.
+constexpr Rect close_button_box() {
+    return Rect{kBarButtonInset, kBarButtonTop, kBarButtonInset + kBarButtonWidth - 1,
+                kBarButtonTop + kBarButtonHeight - 1};
+}
+
+// The box of the depth button of a window `width` pixels wide, in window
+// coordinates.
+constexpr Rect depth_button_box(i32 width) {
+    const i32 x1 = width - 1 - kBarButtonInset;
+    return Rect{x1 - kBarButtonWidth + 1, kBarButtonTop, x1,
+                kBarButtonTop + kBarButtonHeight - 1};
+}
+
 struct WindowChrome {
     i32 width = 0;
     i32 height = 0;
@@ -53,6 +77,7 @@ struct WindowChrome {
     u32 border_right = 0;
     u32 border_bottom = 0;
     bool active = false;
+    BarButton pressed = BarButton::None;  // the bar button the pointer holds down
 };
 
 struct PropChrome {

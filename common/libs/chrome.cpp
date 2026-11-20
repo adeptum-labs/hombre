@@ -36,11 +36,10 @@ namespace {
 constexpr u32 kTitleChunk = 64;
 constexpr u32 kMaxTitleChars = 255;
 constexpr i32 kTitleBaseline = 9;
-constexpr i32 kCloseCenterX = 8;
-constexpr i32 kCloseCenterY = 7;
-constexpr i32 kDepthRightOffset = 9;
-constexpr i32 kDepthCenterY = 7;
-constexpr i32 kButtonRadius = 5;
+constexpr i32 kBarButtonRadius = 2;
+// The gaps between a bar button and the first and last pixel of the title.
+constexpr i32 kTitleGapLeft = 4;
+constexpr i32 kTitleGapRight = 3;
 
 struct RpState {
     u8 fg = 0;
@@ -129,73 +128,6 @@ void draw_frame_box(Graphics& graphics, u32 rp, const Rect& box, u8 fill_pen, u8
     draw_outline_box(graphics, rp, box.x0, box.y0, box.x1, box.y1, border_pen);
 }
 
-// Integer midpoint circle rasterisation: optional filled disc plus 1-px ring.
-void draw_circle(Graphics& graphics, u32 rp, i32 cx, i32 cy, i32 radius, u8 fill_pen, u8 ring_pen,
-                 bool filled) {
-    if (filled) {
-        graphics.set_pens(rp, fill_pen, 0, ndk::JAM2);
-        i32 x = radius;
-        i32 y = 0;
-        i32 d = 1 - radius;
-        while (x >= y) {
-            graphics.rect_fill(rp, cx - x, cy + y, cx + x, cy + y);
-            if (y != 0) {
-                graphics.rect_fill(rp, cx - x, cy - y, cx + x, cy - y);
-            }
-            if (x != y) {
-                graphics.rect_fill(rp, cx - y, cy + x, cx + y, cy + x);
-                graphics.rect_fill(rp, cx - y, cy - x, cx + y, cy - x);
-            }
-            ++y;
-            if (d < 0) {
-                d += 2 * y + 1;
-            } else {
-                --x;
-                d += 2 * (y - x) + 1;
-            }
-        }
-    }
-
-    graphics.set_pens(rp, ring_pen, 0, ndk::JAM2);
-    i32 x = radius;
-    i32 y = 0;
-    i32 d = 1 - radius;
-    auto plot = [&](i32 px, i32 py) { graphics.rect_fill(rp, px, py, px, py); };
-    while (x >= y) {
-        plot(cx + x, cy + y);
-        plot(cx - x, cy + y);
-        plot(cx + x, cy - y);
-        plot(cx - x, cy - y);
-        plot(cx + y, cy + x);
-        plot(cx - y, cy + x);
-        plot(cx + y, cy - x);
-        plot(cx - y, cy - x);
-        ++y;
-        if (d < 0) {
-            d += 2 * y + 1;
-        } else {
-            --x;
-            d += 2 * (y - x) + 1;
-        }
-    }
-}
-
-void draw_close_button(Graphics& graphics, u32 rp, bool active, bool high_color) {
-    const u8 fill = high_color ? (active ? kCloseFill : kInactiveBar5) : (active ? 2 : 0);
-    const u8 ring = high_color ? (active ? kCloseRing : kFrameDark) : 1;
-    draw_circle(graphics, rp, kCloseCenterX, kCloseCenterY, kButtonRadius, fill, ring, true);
-}
-
-void draw_depth_button(Graphics& graphics, u32 rp, i32 width, bool active, bool high_color) {
-    const i32 cx = width - kDepthRightOffset;
-    const i32 cy = kDepthCenterY;
-    const u8 pen = high_color ? (active ? kFrameLight : kFrameDark) : (active ? 2 : 1);
-    draw_circle(graphics, rp, cx, cy, kButtonRadius, 0, pen, false);
-    draw_outline_box(graphics, rp, cx - 3, cy - 3, cx, cy, pen);
-    graphics.set_pens(rp, pen, 0, ndk::JAM2);
-    graphics.rect_fill(rp, cx - 1, cy - 1, cx + 2, cy + 2);
-}
-
 void draw_size_gadget(Graphics& graphics, u32 rp, i32 width, i32 height, bool high_color) {
     if (width < static_cast<i32>(kSizeBorderRight) ||
         height < static_cast<i32>(kSizeBorderBottom)) {
@@ -259,6 +191,73 @@ void draw_rounded_outline(Graphics& graphics, u32 rp, const Rect& box, i32 radiu
             graphics.rect_fill(rp, right_start, y, rx, y);
         }
     }
+}
+
+// The body of a title-bar button, in the look of the sliders' knobs:
+// rounded, outlined and shaded from top to bottom. Held down, it takes the
+// shading of a held knob. On screens of fewer than eight planes the body is
+// flat: the background pen, or the fill pen while held.
+void draw_bar_button_body(Graphics& graphics, u32 rp, const Rect& box, bool pressed,
+                          bool high_color) {
+    const u8 shade = pressed ? kActiveBar2 : kKnob0;
+    const i32 steps = pressed ? 4 : 3;
+    const i32 inner_h = box.y1 - box.y0 - 1;
+    for (i32 y = box.y0 + 1; y < box.y1; ++y) {
+        const i32 dy = min_i32(y - box.y0, box.y1 - y);
+        const i32 ins = max_i32(1, rounded_inset(dy, kBarButtonRadius));
+        const u8 pen = high_color
+                           ? static_cast<u8>(shade + ((y - box.y0 - 1) * steps) / inner_h)
+                           : static_cast<u8>(pressed ? 3 : 0);
+        graphics.set_pens(rp, pen, 0, ndk::JAM2);
+        graphics.rect_fill(rp, box.x0 + ins, y, box.x1 - ins, y);
+    }
+    draw_rounded_outline(graphics, rp, box, kBarButtonRadius, high_color ? kFrameDark : 1);
+}
+
+// The close button: a round stud in the middle of the body, red in the
+// active window and grey in the others.
+void draw_close_button(Graphics& graphics, u32 rp, bool active, bool pressed, bool high_color) {
+    const Rect box = close_button_box();
+    draw_bar_button_body(graphics, rp, box, pressed, high_color);
+    u8 rim = pressed ? 2 : 1;
+    u8 core = 2;
+    if (high_color) {
+        rim = pressed ? kFrameLight : (active ? kCloseRing : kTitleInactive);
+        core = active ? kCloseFill : kTrack;
+    }
+    const i32 cx = (box.x0 + box.x1) / 2;
+    const i32 cy = (box.y0 + box.y1) / 2;
+    graphics.set_pens(rp, rim, 0, ndk::JAM2);
+    graphics.rect_fill(rp, cx - 1, cy - 2, cx + 1, cy + 2);
+    graphics.rect_fill(rp, cx - 2, cy - 1, cx + 2, cy + 1);
+    graphics.set_pens(rp, core, 0, ndk::JAM2);
+    graphics.rect_fill(rp, cx - 1, cy - 1, cx + 1, cy + 1);
+}
+
+// The depth button: two overlapping sheets, the light one in front of the
+// shaded one.
+void draw_depth_button(Graphics& graphics, u32 rp, i32 width, bool active, bool pressed,
+                       bool high_color) {
+    const Rect box = depth_button_box(width);
+    draw_bar_button_body(graphics, rp, box, pressed, high_color);
+    u8 line = pressed ? 2 : 1;
+    u8 back = 0;
+    u8 front = 2;
+    if (high_color) {
+        line = pressed ? kFrameLight : (active ? kFrameDark : kTitleInactive);
+        back = kKnob2;
+        front = kFrameLight;
+    }
+    const i32 cx = (box.x0 + box.x1) / 2;
+    const i32 cy = (box.y0 + box.y1) / 2;
+    const Rect behind{cx - 3, cy - 3, cx + 1, cy + 1};
+    if (pressed) {
+        // The sheet behind lets the held body's shading show through.
+        draw_outline_box(graphics, rp, behind.x0, behind.y0, behind.x1, behind.y1, line);
+    } else {
+        draw_frame_box(graphics, rp, behind, back, line);
+    }
+    draw_frame_box(graphics, rp, Rect{cx - 1, cy - 1, cx + 3, cy + 3}, front, line);
 }
 
 void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gflags,
@@ -733,14 +732,19 @@ void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w
     }
 
     if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        draw_close_button(graphics, rp, w.active, high_color);
+        draw_close_button(graphics, rp, w.active, w.pressed == BarButton::Close, high_color);
     }
     if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
-        draw_depth_button(graphics, rp, w.width, w.active, high_color);
+        draw_depth_button(graphics, rp, w.width, w.active, w.pressed == BarButton::Depth,
+                          high_color);
     }
 
-    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0 ? 17 : 4;
-    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0 ? w.width - 17 : w.width - 4;
+    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0
+                           ? close_button_box().x1 + kTitleGapLeft
+                           : 4;
+    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0
+                            ? depth_button_box(w.width).x0 - kTitleGapRight
+                            : w.width - 4;
     const u8 text_pen = high_color ? (w.active ? kTitleActive : kTitleInactive) : (w.active ? 2 : 1);
     graphics.set_pens(rp, text_pen, 0, ndk::JAM1);
     draw_title(graphics, b, rp, w.title, text_x, kTitleBaseline, text_x1);

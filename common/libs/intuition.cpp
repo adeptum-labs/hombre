@@ -774,7 +774,7 @@ PropGeometry load_prop_geometry(Bus& b, const WindowView& w, u32 gadget) {
     return g;
 }
 
-chrome::WindowChrome to_chrome(const WindowView& w, bool active) {
+chrome::WindowChrome to_chrome(const WindowView& w, bool active, chrome::BarButton pressed) {
     return chrome::WindowChrome{
         w.width,
         w.height,
@@ -785,6 +785,7 @@ chrome::WindowChrome to_chrome(const WindowView& w, bool active) {
         w.border_right,
         w.border_bottom,
         active,
+        pressed,
     };
 }
 
@@ -1208,12 +1209,13 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
 }
 
 Rect Intuition::close_box_rect(i32 left, i32 top) {
-    return Rect{left + 3, top + 2, left + 13, top + 12};
+    const Rect box = chrome::close_button_box();
+    return Rect{left + box.x0, top + box.y0, left + box.x1, top + box.y1};
 }
 
 Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width) {
-    const i32 cx = left + width - 9;
-    return Rect{cx - 5, top + 2, cx + 5, top + 12};
+    const Rect box = chrome::depth_button_box(width);
+    return Rect{left + box.x0, top + box.y0, left + box.x1, top + box.y1};
 }
 
 Rect Intuition::size_box_rect(i32 left, i32 top, i32 width, i32 height, u32 flags) {
@@ -1236,6 +1238,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     active_window_ = 0;
     pressed_gadget_window_ = 0;
     pressed_gadget_ = GadgetKind::None;
+    bar_button_lit_ = false;
     drag_ = Drag::None;
     drag_window_ = 0;
     drag_gadget_ = 0;
@@ -2211,13 +2214,33 @@ void Intuition::redraw_window_bar(u32 window) {
         return;
     }
     w.rp = rec->rp;
-    chrome::draw_window_bar(*graphics_, b, rec->rp, to_chrome(w, active_window_ == window));
+    chrome::draw_window_bar(*graphics_, b, rec->rp,
+                            to_chrome(w, active_window_ == window, held_bar_button(window)));
     const i32 bar_bottom = static_cast<i32>(chrome::kBarHeight);
     const i32 y1 = rec->height - 1 < bar_bottom ? rec->height - 1 : bar_bottom;
     if (rec->width > 0 && y1 >= 0) {
         compose(rec->screen,
                 Rect{rec->left, rec->top, rec->left + rec->width - 1, rec->top + y1});
     }
+}
+
+chrome::BarButton Intuition::held_bar_button(u32 window) const {
+    if (!bar_button_lit_ || window == 0 || window != pressed_gadget_window_) {
+        return chrome::BarButton::None;
+    }
+    if (pressed_gadget_ == GadgetKind::Close) {
+        return chrome::BarButton::Close;
+    }
+    return pressed_gadget_ == GadgetKind::Depth ? chrome::BarButton::Depth
+                                                : chrome::BarButton::None;
+}
+
+void Intuition::light_bar_button(bool lit) {
+    if (lit == bar_button_lit_) {
+        return;
+    }
+    bar_button_lit_ = lit;
+    redraw_window_bar(pressed_gadget_window_);
 }
 
 void Intuition::activate_window(u32 window) {
@@ -2600,7 +2623,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     }
     WindowView w = load_window(b, window);
     w.rp = rp;
-    chrome::draw_window_chrome(*graphics_, b, rp, to_chrome(w, active_window_ == window));
+    chrome::draw_window_chrome(*graphics_, b, rp,
+                               to_chrome(w, active_window_ == window, held_bar_button(window)));
     if (a.gadgets != 0) {
         draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
     }
@@ -2637,6 +2661,7 @@ void Intuition::close_window(u32 window) {
     if (pressed_gadget_window_ == window) {
         pressed_gadget_window_ = 0;
         pressed_gadget_ = GadgetKind::None;
+        bar_button_lit_ = false;
     }
     if (drag_window_ == window) {
         drag_window_ = 0;
@@ -3223,8 +3248,9 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
         w.rp = rec->rp;
         if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
             begin_batch();
-            chrome::draw_window_bar(*graphics_, b, rec->rp,
-                                    to_chrome(w, active_window_ == window));
+            chrome::draw_window_bar(
+                *graphics_, b, rec->rp,
+                to_chrome(w, active_window_ == window, held_bar_button(window)));
             end_batch();
         }
     }
@@ -3645,6 +3671,8 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
     }
 
     if ((pressed & kMouseLeft) != 0) {
+        // A press that follows a lost release leaves no bar button down.
+        light_bar_button(false);
         if (hit != 0) {
             activate_window(hit);
             const WindowView w = load_window(b, hit);
@@ -3654,11 +3682,13 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     in_rect(close_box_rect(w.left, w.top), x, y)) {
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Close;
+                    light_bar_button(true);
                     left_press_consumed = true;
                 } else if (bordered && (w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
                            in_rect(depth_box_rect(w.left, w.top, w.width), x, y)) {
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Depth;
+                    light_bar_button(true);
                     left_press_consumed = true;
                 } else if (!dragging && hit_bool_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
@@ -3673,6 +3703,19 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
             pressed_gadget_window_ = 0;
             pressed_gadget_ = GadgetKind::None;
         }
+    }
+
+    // A held bar button shows pressed only while the pointer is over it.
+    if (pressed_gadget_ == GadgetKind::Close || pressed_gadget_ == GadgetKind::Depth) {
+        bool over = false;
+        if (hit == pressed_gadget_window_) {
+            const WindowView w = load_window(b, hit);
+            const Rect box = pressed_gadget_ == GadgetKind::Close
+                                 ? close_box_rect(w.left, w.top)
+                                 : depth_box_rect(w.left, w.top, w.width);
+            over = w.ok && in_rect(box, x, y);
+        }
+        light_bar_button(over && (released & kMouseLeft) == 0);
     }
 
     if ((released & kMouseLeft) != 0 && pressed_gadget_ != GadgetKind::None) {
@@ -3833,7 +3876,9 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     w.width = width;
     w.height = height;
     w.rp = rec->rp;
-    chrome::draw_window_chrome(*graphics_, b, rec->rp, to_chrome(w, active_window_ == window), &keep);
+    chrome::draw_window_chrome(
+        *graphics_, b, rec->rp,
+        to_chrome(w, active_window_ == window, held_bar_button(window)), &keep);
     if (w.first_gadget != 0) {
         draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
     }
@@ -4007,6 +4052,7 @@ void Intuition::reclaim_owned_by(u32 task, const u32* keep_windows, u32 count,
     }
     pressed_gadget_window_ = 0;
     pressed_gadget_ = GadgetKind::None;
+    bar_button_lit_ = false;
 }
 
 u32 Intuition::window_owner(u32 window) const {

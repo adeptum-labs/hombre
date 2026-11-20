@@ -45,6 +45,10 @@ namespace hombre {
 class Exec;
 class Graphics;
 
+namespace chrome {
+enum class BarButton : u8;
+}
+
 namespace raster {
 struct Bitmap;
 struct RastPortView;
@@ -407,6 +411,12 @@ private:
     bool move_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after);
     void activate_window(u32 window);
     void redraw_window_bar(u32 window);
+    // The title-bar button of `window` that shows pressed: the one the left
+    // button holds, while the pointer is over it.
+    chrome::BarButton held_bar_button(u32 window) const;
+    // Shows the held title-bar button pressed or released, redrawing its
+    // window's bar when that changes.
+    void light_bar_button(bool lit);
     bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
     void post_newsize(WindowRecord& rec);
     void route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
@@ -463,6 +473,7 @@ private:
     u32 active_window_ = 0;
     u32 pressed_gadget_window_ = 0;
     GadgetKind pressed_gadget_ = GadgetKind::None;
+    bool bar_button_lit_ = false;  // the held Close or Depth button shows pressed
     u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
     GadgetRenderer gadget_renderer_ = nullptr;
     void* gadget_renderer_ctx_ = nullptr;

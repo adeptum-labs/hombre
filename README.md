@@ -88,8 +88,9 @@ Targets:
   stops a program waiting for events. On the test disk, `mousetest` opens a
   window and prints the mouse and window events it receives.
   Windows have a shaded title bar, blue when active and grey when not,
-  round close and depth buttons, rounded top corners and a soft shadow;
-  on screens of fewer than 256 colours they are drawn flat.
+  close and depth buttons in the look of the slider knobs that turn blue
+  while held, rounded top corners and a soft shadow; on screens of fewer
+  than 256 colours they are drawn flat.
   Windows can be dragged by their title bar and resized live by the size
   gadget in the bottom-right corner. The HombreShell window rewraps its text
   when resized; it opens full screen, so shrink it first to move it.

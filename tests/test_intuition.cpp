@@ -23,6 +23,7 @@
 
 #include "gfx_rig.hpp"
 #include "hid_mouse.hpp"
+#include "libs/chrome.hpp"
 #include "libs/chrome_palette.hpp"
 #include "libs/utility.hpp"
 
@@ -823,11 +824,18 @@ void open_window_draws_chrome() {
     CHECK_EQ(screen_pixel(r, screen, 100, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 100, 74), 1u);
     CHECK_EQ(screen_pixel(r, screen, 100, 75), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 58, 62), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 58, 67), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 62), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 67), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 67, 63), 1u);
+    // The close button: its outline, its body and the stud in the middle.
+    CHECK_EQ(screen_pixel(r, screen, 59, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 55, 67), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 57, 67), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 59, 67), 2u);
+    // The depth button: its outline, the sheet behind and the one in front.
+    CHECK_EQ(screen_pixel(r, screen, 240, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 237, 64), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 238, 65), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 239, 66), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 240, 67), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 69, 63), 1u);
 
     // Without the close gadget the bar has no button in that corner.
     put_new_window(r, kNewWindow, 300, 60, 200, 100, 0, 0, 0, 0);
@@ -1087,7 +1095,7 @@ void set_window_titles_redraws_title() {
     put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET, kWinTitle, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
-    CHECK_EQ(screen_pixel(r, screen, 67, 63), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 69, 63), 0u);
 
     r.str(kWinTitle, "B");
     r.cpu().a[0] = window;
@@ -1098,14 +1106,14 @@ void set_window_titles_redraws_title() {
     CHECK(title != 0);
     CHECK(title != kWinTitle);
     CHECK(r.read_str(title) == "B");
-    CHECK_EQ(screen_pixel(r, screen, 67, 63), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 69, 63), 1u);
 
     r.cpu().a[0] = window;
     r.cpu().a[1] = 0;
     r.cpu().a[2] = 0xFFFFFFFF;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
     CHECK_EQ(r.get32(window + wd_Title), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 67, 63), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 69, 63), 0u);
 
     r.cpu().a[0] = window;
     r.cpu().a[1] = 0xFFFFFFFF;
@@ -1159,7 +1167,8 @@ void open_window_reads_32_bit_flags() {
     CHECK_EQ(r.get32(window + wd_Flags), flags);
     CHECK_EQ(screen_pixel(r, screen, 58, 62), 1u);
     CHECK_EQ(screen_pixel(r, screen, 58, 67), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 62), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 240, 67), 2u);
 
     put_new_window(r, kNewWindow, 300, 60, 100, 50, WFLG_BORDERLESS, 0, 0, 0);
     const u32 borderless = open_win(r, kNewWindow);
@@ -1913,7 +1922,7 @@ void hit_rectangles_match_the_drawn_boxes() {
     const i32 depth_cx = (depth_box.x0 + depth_box.x1) / 2;
     const i32 depth_cy = (depth_box.y0 + depth_box.y1) / 2;
 
-    CHECK_EQ(screen_pixel(r, screen, close_cx, close_cy), 0u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx, close_cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0), 1u);
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y1), 1u);
     CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_cy), 1u);
@@ -1924,7 +1933,7 @@ void hit_rectangles_match_the_drawn_boxes() {
     CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y1), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1, depth_cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_box.y0), 0u);
     CHECK_EQ(screen_pixel(r, screen, close_box.x1 + 1, close_box.y0), 0u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0 - 1, depth_box.y0), 0u);
@@ -4123,11 +4132,20 @@ void depth8_chrome_pixel_spot_checks() {
     CHECK_EQ(prev_bar, static_cast<u32>(chrome::kActiveBar7));
     CHECK_EQ(screen_pixel(r, screen, 120, 44), static_cast<u32>(chrome::kFrameDark));
 
-    CHECK_EQ(screen_pixel(r, screen, 48, 37), static_cast<u32>(chrome::kCloseFill));
-    CHECK_EQ(screen_pixel(r, screen, 48, 32), static_cast<u32>(chrome::kCloseRing));
-    CHECK_EQ(screen_pixel(r, screen, 251, 32), static_cast<u32>(chrome::kFrameLight));
-    CHECK_EQ(screen_pixel(r, screen, 251, 37), static_cast<u32>(chrome::kFrameLight));
-    CHECK_EQ(screen_pixel(r, screen, 57, 33), static_cast<u32>(chrome::kTitleActive));
+    // The close button: outline, shaded body and the red stud with its rim.
+    CHECK_EQ(screen_pixel(r, screen, 49, 32), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 45, 33), static_cast<u32>(chrome::kKnob0));
+    CHECK_EQ(screen_pixel(r, screen, 45, 41), static_cast<u32>(chrome::kKnob2));
+    CHECK_EQ(screen_pixel(r, screen, 49, 37), static_cast<u32>(chrome::kCloseFill));
+    CHECK_EQ(screen_pixel(r, screen, 47, 37), static_cast<u32>(chrome::kCloseRing));
+    // The depth button: outline, the shaded sheet behind and the light one
+    // in front, each with its dark edge.
+    CHECK_EQ(screen_pixel(r, screen, 250, 32), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 247, 34), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 248, 35), static_cast<u32>(chrome::kKnob2));
+    CHECK_EQ(screen_pixel(r, screen, 249, 36), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 250, 37), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 59, 33), static_cast<u32>(chrome::kTitleActive));
     CHECK_EQ(screen_pixel(r, screen, 256, 146), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, 257, 147), static_cast<u32>(chrome::kFrameLight));
 
@@ -4145,10 +4163,15 @@ void depth8_chrome_pixel_spot_checks() {
         prev_inact = p;
     }
     CHECK_EQ(prev_inact, static_cast<u32>(chrome::kInactiveBar5));
-    CHECK_EQ(screen_pixel(r, screen, 48, 37), static_cast<u32>(chrome::kInactiveBar5));
-    CHECK_EQ(screen_pixel(r, screen, 48, 32), static_cast<u32>(chrome::kFrameDark));
-    CHECK_EQ(screen_pixel(r, screen, 251, 32), static_cast<u32>(chrome::kFrameDark));
-    CHECK_EQ(screen_pixel(r, screen, 57, 33), static_cast<u32>(chrome::kTitleInactive));
+    // An inactive window keeps the buttons' bodies and greys their symbols.
+    CHECK_EQ(screen_pixel(r, screen, 49, 32), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 45, 33), static_cast<u32>(chrome::kKnob0));
+    CHECK_EQ(screen_pixel(r, screen, 49, 37), static_cast<u32>(chrome::kTrack));
+    CHECK_EQ(screen_pixel(r, screen, 47, 37), static_cast<u32>(chrome::kTitleInactive));
+    CHECK_EQ(screen_pixel(r, screen, 250, 32), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 249, 36), static_cast<u32>(chrome::kTitleInactive));
+    CHECK_EQ(screen_pixel(r, screen, 250, 37), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 59, 33), static_cast<u32>(chrome::kTitleInactive));
     CHECK_EQ(screen_pixel(r, screen, 400, 32), static_cast<u32>(chrome::kActiveBar0));
     CHECK_EQ(screen_pixel(r, screen, 400, 43), static_cast<u32>(chrome::kActiveBar7));
 }
@@ -4225,8 +4248,9 @@ void depth2_fallback_chrome_pens() {
 
     CHECK_EQ(screen_pixel(r, screen, 20, 20), 1u);
     CHECK_EQ(screen_pixel(r, screen, 100, 25), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 37, 23), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 28, 27), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 39, 23), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 29, 27), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 25, 27), 0u);
     CHECK_EQ(screen_pixel(r, screen, 28, 22), 1u);
     CHECK_EQ(window_pixel(r, active, 25, 25), 2u);
     CHECK_EQ(window_pixel(r, active, 23, 21), 1u);
@@ -4237,7 +4261,7 @@ void depth2_fallback_chrome_pens() {
     CHECK(inactive != 0);
     CHECK_EQ(screen_pixel(r, screen, 320, 25), 0u);
     CHECK_EQ(screen_pixel(r, screen, 260, 20), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 277, 23), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 279, 23), 1u);
 }
 
 void activation_switch_redraws_both_bars() {
@@ -4264,6 +4288,118 @@ void activation_switch_redraws_both_bars() {
     CHECK_EQ(screen_pixel(r, screen, 120, 43), static_cast<u32>(chrome::kInactiveBar5));
     CHECK_EQ(screen_pixel(r, screen, 340, 32), static_cast<u32>(chrome::kActiveBar0));
     CHECK_EQ(screen_pixel(r, screen, 340, 43), static_cast<u32>(chrome::kActiveBar7));
+}
+
+void bar_buttons_are_centred_and_mirror_each_other() {
+    const Rect close_box = chrome::close_button_box();
+    const Rect depth_box = chrome::depth_button_box(200);
+    CHECK_EQ(close_box.x1 - close_box.x0 + 1, chrome::kBarButtonWidth);
+    CHECK_EQ(close_box.y1 - close_box.y0 + 1, chrome::kBarButtonHeight);
+    CHECK_EQ(depth_box.x1 - depth_box.x0 + 1, chrome::kBarButtonWidth);
+    CHECK_EQ(depth_box.y0, close_box.y0);
+    CHECK_EQ(depth_box.y1, close_box.y1);
+    // Row 0 is the frame and row kBarHeight the line under the bar.
+    CHECK_EQ(close_box.y0 - 1, static_cast<i32>(chrome::kBarHeight) - 1 - close_box.y1);
+    CHECK_EQ(close_box.x0, 199 - depth_box.x1);
+
+    const Rect close_hit = Intuition::close_box_rect(50, 60);
+    const Rect depth_hit = Intuition::depth_box_rect(50, 60, 200);
+    CHECK_EQ(close_hit.x0, 50 + close_box.x0);
+    CHECK_EQ(close_hit.y0, 60 + close_box.y0);
+    CHECK_EQ(close_hit.x1, 50 + close_box.x1);
+    CHECK_EQ(close_hit.y1, 60 + close_box.y1);
+    CHECK_EQ(depth_hit.x0, 50 + depth_box.x0);
+    CHECK_EQ(depth_hit.y0, 60 + depth_box.y0);
+    CHECK_EQ(depth_hit.x1, 50 + depth_box.x1);
+    CHECK_EQ(depth_hit.y1, 60 + depth_box.y1);
+}
+
+bool held_shade(u32 pen) { return pen >= chrome::kActiveBar2 && pen <= chrome::kActiveBar5; }
+
+bool knob_shade(u32 pen) { return pen >= chrome::kKnob0 && pen <= chrome::kKnob2; }
+
+void held_bar_button_shows_pressed_while_the_pointer_is_over_it() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100,
+                   WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_CLOSEWINDOW);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    const Rect close_box = Intuition::close_box_rect(50, 60);
+    const Rect depth_box = Intuition::depth_box_rect(50, 60, 200);
+    const i32 close_cx = (close_box.x0 + close_box.x1) / 2;
+    const i32 depth_cx = (depth_box.x0 + depth_box.x1) / 2;
+    const i32 cy = (close_box.y0 + close_box.y1) / 2;
+    // A pixel of each body beside its symbol.
+    const i32 close_body = close_box.x0 + 2;
+    const i32 depth_body = depth_box.x0 + 1;
+    CHECK(knob_shade(screen_pixel(r, screen, close_body, cy)));
+    CHECK(knob_shade(screen_pixel(r, screen, depth_body, cy)));
+
+    press(r, close_cx, cy);
+    CHECK(held_shade(screen_pixel(r, screen, close_body, cy)));
+    CHECK_EQ(screen_pixel(r, screen, close_cx - 2, cy), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, close_cx, cy), static_cast<u32>(chrome::kCloseFill));
+    CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0),
+             static_cast<u32>(chrome::kFrameDark));
+    CHECK(knob_shade(screen_pixel(r, screen, depth_body, cy)));
+
+    // Off the button it rises again, and back over it it goes down again.
+    move_to(r, close_box.x1 + 10, cy);
+    CHECK(knob_shade(screen_pixel(r, screen, close_body, cy)));
+    CHECK_EQ(screen_pixel(r, screen, close_cx - 2, cy), static_cast<u32>(chrome::kCloseRing));
+    move_to(r, close_cx, cy);
+    CHECK(held_shade(screen_pixel(r, screen, close_body, cy)));
+    release(r, close_cx, cy);
+    CHECK(knob_shade(screen_pixel(r, screen, close_body, cy)));
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_CLOSEWINDOW);
+    reply_msg(r, msg);
+
+    press(r, depth_cx, cy);
+    CHECK(held_shade(screen_pixel(r, screen, depth_body, cy)));
+    CHECK_EQ(screen_pixel(r, screen, depth_cx + 1, cy + 1),
+             static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, depth_cx - 3, cy - 3),
+             static_cast<u32>(chrome::kFrameLight));
+    CHECK(knob_shade(screen_pixel(r, screen, close_body, cy)));
+    // Released off the button, it rises and the window stays where it is.
+    move_to(r, depth_cx, depth_box.y1 + 30);
+    CHECK(knob_shade(screen_pixel(r, screen, depth_body, cy)));
+    release(r, depth_cx, depth_box.y1 + 30);
+    CHECK(knob_shade(screen_pixel(r, screen, depth_body, cy)));
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), window);
+    CHECK_EQ(get_msg(r, port), 0u);
+}
+
+void held_bar_button_uses_the_fill_pen_on_a_four_colour_screen() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100,
+                   WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    const Rect depth_box = Intuition::depth_box_rect(50, 60, 200);
+    const i32 cx = (depth_box.x0 + depth_box.x1) / 2;
+    const i32 cy = (depth_box.y0 + depth_box.y1) / 2;
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 0u);
+    CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), 1u);
+    press(r, cx, cy);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), 2u);
+    CHECK_EQ(screen_pixel(r, screen, cx - 2, cy - 2), 3u);
+    release(r, cx, cy);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 0u);
 }
 
 void fill_backdrop_rect(GfxRig& r, u32 screen, i32 x0, i32 y0, i32 x1, i32 y1, u8 pen) {
@@ -6049,6 +6185,9 @@ int main() {
     depth8_prop_gadget_chrome_pixels();
     depth2_fallback_chrome_pens();
     activation_switch_redraws_both_bars();
+    bar_buttons_are_centred_and_mirror_each_other();
+    held_bar_button_shows_pressed_while_the_pointer_is_over_it();
+    held_bar_button_uses_the_fill_pen_on_a_four_colour_screen();
     rounded_top_corners_on_depth8_show_backdrop_and_chrome();
     drop_shadow_darkens_backdrop_and_behind_window_only();
     moving_and_closing_window_removes_old_shadow();
