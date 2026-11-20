@@ -1146,12 +1146,12 @@ void unknown_vector_ends_the_run() {
     CHECK_EQ(r.cpu().exit, ExitReason::Unimplemented);
     CHECK(logged("dos: unimplemented LVO -162"));
     CHECK(logged_containing("C:Unknown"));
-    // The last vector of the table, and one between two implemented ones.
+    // The last vector of the table, and one next to implemented ones.
     g_lines.clear();
     CHECK_EQ(r.dos(dos_lvo::SetOwner), ExitReason::Unimplemented);
     CHECK(logged("dos: unimplemented LVO -996"));
-    CHECK_EQ(r.dos(246), ExitReason::Unimplemented);
-    CHECK(logged("dos: unimplemented LVO -246"));
+    CHECK_EQ(r.dos(258), ExitReason::Unimplemented);  // ReplyPkt
+    CHECK(logged("dos: unimplemented LVO -258"));
 }
 
 void commands_that_cannot_run() {
@@ -3699,12 +3699,32 @@ void dopkt_disk_info_and_unknown_action() {
     CHECK(parent != 0);
     CHECK_EQ(r.call(dos_lvo::SameLock, parent, devs), LOCK_SAME);
 
+    // The packets answer with BCPL strings, as a filesystem does.
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_EXAMINE_OBJECT, sub, fib >> 2), DOSTRUE);
-    CHECK(read_fib(r, fib).name == "Sub");
+    CHECK_EQ(r.get8(fib + fib_FileName), 3u);
+    CHECK(r.read_str(fib + fib_FileName + 1).substr(0, 3) == "Sub");
+    CHECK_EQ(r.get8(fib + fib_Comment), 0u);
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_EXAMINE_NEXT, sub, fib >> 2), DOSTRUE);
-    CHECK(read_fib(r, fib).name == "Deep");
+    CHECK_EQ(r.get8(fib + fib_FileName), 4u);
+    CHECK(r.read_str(fib + fib_FileName + 1).substr(0, 4) == "Deep");
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_EXAMINE_NEXT, sub, fib >> 2), DOSFALSE);
     CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+
+    // SendPkt does the action and replies the packet to the reply port,
+    // where WaitPkt finds it.
+    const u32 sp = kData + 0x700;
+    const u32 packet = sp + MN_SIZE;
+    for (u32 i = 0; i < sp_SIZEOF; ++i) {
+        r.put8(sp + i, 0);
+    }
+    r.put32(sp + LN_NAME, packet);
+    r.put32(packet + dp_Link, sp);
+    r.put32(packet + dp_Type, ACTION_IS_FILESYSTEM);
+    const u32 reply = r.proc() + pr_MsgPort;
+    r.call(dos_lvo::SendPkt, packet, port, reply);
+    CHECK_EQ(r.get32(packet + dp_Res1), DOSTRUE);
+    CHECK_EQ(r.get32(packet + dp_Port), reply);
+    CHECK_EQ(r.call(dos_lvo::WaitPkt), packet);
 
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, parent), DOSTRUE);
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, dup), DOSTRUE);

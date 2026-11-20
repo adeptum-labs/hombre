@@ -5157,6 +5157,24 @@ struct DosOps {
     }
 
     // Fills a FileInfoBlock from an entry and its metadata.
+    // A filesystem answers an examine packet with BCPL strings: the name
+    // and comment in the FileInfoBlock get their length in front.
+    static void fib_to_bstrs(Bus& b, u32 fib) {
+        const u32 fields[] = {fib_FileName, fib_Comment};
+        const u32 room[] = {107, 79};
+        for (u32 f = 0; f < 2; ++f) {
+            const u32 at = fib + fields[f];
+            u32 length = 0;
+            while (length < room[f] && b.r8(at + length) != 0) {
+                ++length;
+            }
+            for (u32 i = length; i > 0; --i) {
+                b.w8(at + i, b.r8(at + i - 1));
+            }
+            b.w8(at, length);
+        }
+    }
+
     static bool fill_fib(Dos& d, Bus& b, u32 fib, const DirEntry& entry) {
         FsMeta meta{};
         const u32 err = fs_meta(d, entry, meta);
@@ -6827,6 +6845,62 @@ struct DosOps {
         }
     }
 
+    // SendPkt(packet D1, port D2, reply port D3): the packet's action is
+    // done at once, as DoPkt does it, its results go in dp_Res1 and
+    // dp_Res2, and its message comes back to the reply port for WaitPkt.
+    static void send_pkt(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 packet = m.cpu.d[1];
+        const u32 port = m.cpu.d[2];
+        const u32 reply = m.cpu.d[3];
+        const u32 message = b.r32(packet + dp_Link);
+        u32 saved[8];
+        for (u32 i = 0; i < 8; ++i) {
+            saved[i] = m.cpu.d[i];
+        }
+        m.cpu.d[0] = 0;
+        m.cpu.d[1] = port;
+        m.cpu.d[2] = b.r32(packet + dp_Type);
+        for (u32 i = 0; i < 4; ++i) {
+            m.cpu.d[3 + i] = b.r32(packet + dp_Arg1 + i * 4);
+        }
+        if (!b.ok()) {
+            return;
+        }
+        do_pkt(ctx, m);
+        const u32 res1 = m.cpu.d[0];
+        const u32 res2 = b.r32(d.cur().process + pr_Result2);
+        for (u32 i = 0; i < 8; ++i) {
+            m.cpu.d[i] = saved[i];
+        }
+        b.w32(packet + dp_Res1, res1);
+        b.w32(packet + dp_Res2, res2);
+        b.w32(packet + dp_Port, reply);
+        b.w32(message + mn_ReplyPort, reply);
+        if (b.ok() && message != 0) {
+            d.exec_->reply_message(message);
+        }
+    }
+
+    // WaitPkt: the packet of the next message at the process's port.
+    static void wait_pkt(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 port = d.cur().process + pr_MsgPort;
+        u32 message = d.exec_->get_message(port);
+        if (message == 0) {
+            const u32 bit = b.r8(port + mp_SigBit);
+            d.exec_->wait_for(1u << bit, 0);
+            message = d.exec_->get_message(port);
+        }
+        const u32 packet = message != 0 ? b.r32(message + LN_NAME) : 0;
+        if (b.ok()) {
+            b.w32(d.cur().process + pr_Result2, packet != 0 ? b.r32(packet + dp_Res2) : 0);
+            native::set_result(m, packet);
+        }
+    }
+
     static void do_pkt(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -6963,11 +7037,13 @@ struct DosOps {
             return;
         case ACTION_EXAMINE_OBJECT:
             if (examine_impl(d, b, arg1, arg2 << 2, port_vol)) {
+                fib_to_bstrs(b, arg2 << 2);
                 set_io_err(d, b, 0);
             }
             return;
         case ACTION_EXAMINE_NEXT:
             if (ex_next_impl(d, b, arg1, arg2 << 2, port_vol)) {
+                fib_to_bstrs(b, arg2 << 2);
                 set_io_err(d, b, 0);
             }
             return;
@@ -8097,6 +8173,8 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::GetCurrentDirName, DosOps::get_current_dir_name, "GetCurrentDirName"},
     {dos_lvo::SetProgramName, DosOps::set_program_name, "SetProgramName"},
     {dos_lvo::GetProgramName, DosOps::get_program_name, "GetProgramName"},
+    {dos_lvo::SendPkt, DosOps::send_pkt, "SendPkt"},
+    {dos_lvo::WaitPkt, DosOps::wait_pkt, "WaitPkt"},
     {dos_lvo::SetProgramDir, DosOps::set_program_dir, "SetProgramDir"},
     {dos_lvo::GetProgramDir, DosOps::get_program_dir, "GetProgramDir"},
     {dos_lvo::SetPrompt, DosOps::set_prompt, "SetPrompt"},
