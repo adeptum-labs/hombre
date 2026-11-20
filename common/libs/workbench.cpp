@@ -1559,6 +1559,7 @@ bool Workbench::load_patterns() {
     pattern_sum_ = sum;
     Bus b(*machine_);
     for (u32 which = 0; which < 2; ++which) {
+        drop_picture(which);
         Pattern& pattern = patterns_[which];
         pattern.depth = 0;
         if (pattern.bitmap == 0) {
@@ -1601,6 +1602,20 @@ bool Workbench::load_patterns() {
                 }
                 b.w8(patterns_[which].bitmap + ndk::bm_Depth, depth);
                 patterns_[which].depth = any ? depth : 0;
+            } else if (which < 2 && (flags & WBPF_PATTERN) == 0 && bytes != 0 &&
+                       WBPatternPrefs_SIZEOF + bytes <= length) {
+                // A picture: its file name follows.
+                char name[Dos::kMaxPath];
+                u32 n = 0;
+                for (; n < bytes && n + 1 < sizeof name; ++n) {
+                    const u8 c = data[WBPatternPrefs_SIZEOF + n];
+                    if (c == 0) {
+                        break;
+                    }
+                    name[n] = static_cast<char>(c);
+                }
+                name[n] = '\0';
+                load_picture(which, name);
             }
         }
         at += 8 + length + (length & 1);
@@ -1613,16 +1628,205 @@ bool Workbench::load_patterns() {
 // corner; the window's clip keeps them inside.
 void Workbench::fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom) {
     const Pattern& pattern = patterns_[which];
-    if (pattern.depth == 0 || pattern.bitmap == 0) {
+    const u32 bitmap = pattern.picture != 0 ? pattern.picture : pattern.bitmap;
+    if (pattern.depth == 0 || bitmap == 0 || pattern.width <= 0 || pattern.height <= 0) {
         return;
     }
-    for (i32 y = drawer.inner_top; y <= bottom; y += kPatternSize) {
-        for (i32 x = drawer.inner_left; x <= right; x += kPatternSize) {
-            const i32 w = right - x + 1 < kPatternSize ? right - x + 1 : kPatternSize;
-            const i32 h = bottom - y + 1 < kPatternSize ? bottom - y + 1 : kPatternSize;
-            graphics_->blt_bitmap_rastport(pattern.bitmap, 0, 0, drawer.rp, x, y, w, h, 0xC0);
+    for (i32 y = drawer.inner_top; y <= bottom; y += pattern.height) {
+        for (i32 x = drawer.inner_left; x <= right; x += pattern.width) {
+            const i32 w = right - x + 1 < pattern.width ? right - x + 1 : pattern.width;
+            const i32 h = bottom - y + 1 < pattern.height ? bottom - y + 1 : pattern.height;
+            graphics_->blt_bitmap_rastport(bitmap, 0, 0, drawer.rp, x, y, w, h, 0xC0);
         }
     }
+}
+
+void Workbench::drop_picture(u32 which) {
+    Pattern& pattern = patterns_[which];
+    if (pattern.picture != 0) {
+        exec_->free(pattern.picture, pattern.picture_bytes);
+    }
+    pattern.picture = 0;
+    pattern.picture_bytes = 0;
+    pattern.width = kPatternSize;
+    pattern.height = kPatternSize;
+}
+
+namespace {
+
+constexpr u32 kMaxPicture = 256 * 1024;
+constexpr u32 kMaxPictureSide = 1024;
+
+// Unpacks one row of ByteRun1 data from at into out: false if it runs
+// past the end of the data.
+bool unpack_row(const u8* data, u32 size, u32& at, u8* out, u32 bytes) {
+    u32 done = 0;
+    while (done < bytes) {
+        if (at >= size) {
+            return false;
+        }
+        const i32 n = static_cast<i8>(data[at++]);
+        if (n >= 0) {
+            const u32 count = static_cast<u32>(n) + 1;
+            if (at + count > size || done + count > bytes) {
+                return false;
+            }
+            for (u32 i = 0; i < count; ++i) {
+                out[done++] = data[at++];
+            }
+        } else if (n != -128) {
+            const u32 count = static_cast<u32>(-n) + 1;
+            if (at >= size || done + count > bytes) {
+                return false;
+            }
+            const u8 value = data[at++];
+            for (u32 i = 0; i < count; ++i) {
+                out[done++] = value;
+            }
+        }
+    }
+    return true;
+}
+
+}
+
+// An ILBM picture as a backdrop: its colours go to the nearest pens of the
+// screen, and it tiles the window as large as it is. A file that cannot
+// be read or is no ILBM of up to eight planes leaves the plain backdrop.
+void Workbench::load_picture(u32 which, const char* name) {
+    static u8 file[kMaxPicture];
+    static u8 rows[9][kMaxPictureSide / 8];
+    u32 got = 0;
+    u32 error = 0;
+    if (!dos_->read_file(name, file, sizeof file, got, error) || got < 12 ||
+        !is_id(file, "FORM") || !is_id(file + 8, "ILBM")) {
+        LogLine().text("workbench: no picture in ").text(name).send();
+        return;
+    }
+    u32 width = 0;
+    u32 height = 0;
+    u32 planes = 0;
+    u32 masking = 0;
+    u32 compression = 0;
+    const u8* cmap = nullptr;
+    u32 colors = 0;
+    const u8* body = nullptr;
+    u32 body_bytes = 0;
+    for (u32 at = 12; at + 8 <= got;) {
+        const u32 length = be32(file + at + 4);
+        const u8* data = file + at + 8;
+        if (length > got - at - 8) {
+            break;
+        }
+        if (is_id(file + at, "BMHD") && length >= 20) {
+            width = be16(data);
+            height = be16(data + 2);
+            planes = data[8];
+            masking = data[9];
+            compression = data[10];
+        } else if (is_id(file + at, "CMAP")) {
+            cmap = data;
+            colors = length / 3;
+        } else if (is_id(file + at, "BODY")) {
+            body = data;
+            body_bytes = length;
+        }
+        at += 8 + length + (length & 1);
+    }
+    if (body == nullptr || width == 0 || height == 0 || width > kMaxPictureSide ||
+        height > kMaxPictureSide || planes == 0 || planes > 8 || compression > 1) {
+        LogLine().text("workbench: cannot show the picture ").text(name).send();
+        return;
+    }
+    // The screen's pens nearest each colour of the picture.
+    Bus b(*machine_);
+    const u32 screen_bitmap = screen_ + ndk::sc_BitMap;
+    const u32 depth = b.r8(screen_bitmap + ndk::bm_Depth);
+    const u32 colormap = b.r32(screen_ + ndk::sc_ViewPort + ndk::vp_ColorMap);
+    if (!b.ok() || depth == 0 || depth > 8) {
+        return;
+    }
+    u8 pens[256]{};
+    const u32 screen_pens = 1u << depth;
+    for (u32 c = 0; c < (1u << planes); ++c) {
+        const i32 r = c < colors ? cmap[c * 3] : 0;
+        const i32 g = c < colors ? cmap[c * 3 + 1] : 0;
+        const i32 bl = c < colors ? cmap[c * 3 + 2] : 0;
+        u32 best = 0;
+        i32 best_distance = -1;
+        for (u32 pen = 0; pen < screen_pens; ++pen) {
+            u8 pr = 0;
+            u8 pg = 0;
+            u8 pb = 0;
+            if (!graphics_->color_of(colormap, pen, pr, pg, pb)) {
+                break;
+            }
+            const i32 distance = (r - pr) * (r - pr) + (g - pg) * (g - pg) + (bl - pb) * (bl - pb);
+            if (best_distance < 0 || distance < best_distance) {
+                best_distance = distance;
+                best = pen;
+            }
+        }
+        pens[c] = static_cast<u8>(best);
+    }
+    const u32 row_bytes = ((width + 15) / 16) * 2;
+    const u32 plane_bytes = row_bytes * height;
+    const u32 bytes = ndk::BitMap_SIZEOF + depth * plane_bytes;
+    const u32 bitmap = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (bitmap == 0) {
+        return;
+    }
+    b.w16(bitmap + ndk::bm_BytesPerRow, row_bytes);
+    b.w16(bitmap + ndk::bm_Rows, height);
+    b.w8(bitmap + ndk::bm_Depth, depth);
+    for (u32 plane = 0; plane < depth; ++plane) {
+        b.w32(bitmap + ndk::bm_Planes + plane * 4,
+              bitmap + ndk::BitMap_SIZEOF + plane * plane_bytes);
+    }
+    // Each row has a row of every plane, and of the mask with
+    // mskHasMask, plain or packed with ByteRun1.
+    const u32 stored = planes + (masking == 1 ? 1 : 0);
+    u32 at = 0;
+    bool whole = true;
+    for (u32 y = 0; y < height && whole; ++y) {
+        for (u32 p = 0; p < stored && whole; ++p) {
+            if (compression == 1) {
+                whole = unpack_row(body, body_bytes, at, rows[p], row_bytes);
+            } else if (at + row_bytes <= body_bytes) {
+                for (u32 i = 0; i < row_bytes; ++i) {
+                    rows[p][i] = body[at++];
+                }
+            } else {
+                whole = false;
+            }
+        }
+        for (u32 x = 0; x < width && whole; ++x) {
+            u32 index = 0;
+            for (u32 p = 0; p < planes; ++p) {
+                index |= ((rows[p][x / 8] >> (7 - (x & 7))) & 1u) << p;
+            }
+            const u32 pen = pens[index];
+            for (u32 plane = 0; plane < depth; ++plane) {
+                if ((pen >> plane) & 1) {
+                    const u32 byte = bitmap + ndk::BitMap_SIZEOF + plane * plane_bytes +
+                                     y * row_bytes + x / 8;
+                    b.w8(byte, b.r8(byte) | (0x80u >> (x & 7)));
+                }
+            }
+        }
+    }
+    if (!whole || !b.ok()) {
+        exec_->free(bitmap, bytes);
+        LogLine().text("workbench: the picture ").text(name).text(" is cut short").send();
+        return;
+    }
+    Pattern& pattern = patterns_[which];
+    pattern.picture = bitmap;
+    pattern.picture_bytes = bytes;
+    pattern.width = static_cast<i32>(width);
+    pattern.height = static_cast<i32>(height);
+    pattern.depth = depth;
+    LogLine().text("workbench: backdrop picture ").text(name).send();
 }
 
 void Workbench::redraw_all() {

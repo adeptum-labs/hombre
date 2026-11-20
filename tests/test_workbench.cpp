@@ -1945,7 +1945,100 @@ void the_backdrop_shows_the_wbpattern_pattern() {
     CHECK_EQ(r.window_pixel(root.window, root.inner_left + 36, root.inner_top + 301), 1u);
 }
 
+// An ILBM of one plane, 16 by 8, in vertical stripes: colour 1 (white)
+// at even columns, colour 0 (black) at odd ones, packed with ByteRun1.
+std::vector<u8> stripe_ilbm() {
+    std::vector<u8> body;
+    for (int row = 0; row < 8; ++row) {
+        body.push_back(static_cast<u8>(257 - 2));  // two of
+        body.push_back(0xAA);
+    }
+    std::vector<u8> f;
+    auto id = [&](const char* s) { f.insert(f.end(), s, s + 4); };
+    auto u32v = [&](u32 v) {
+        for (int i = 3; i >= 0; --i) {
+            f.push_back(static_cast<u8>(v >> (i * 8)));
+        }
+    };
+    id("FORM");
+    u32v(4 + 8 + 20 + 8 + 6 + 8 + static_cast<u32>(body.size()));
+    id("ILBM");
+    id("BMHD");
+    u32v(20);
+    for (u8 v : {0, 16, 0, 8, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 10, 11, 1, 64, 0, 200}) {
+        f.push_back(v);
+    }
+    id("CMAP");
+    u32v(6);
+    for (u8 v : {0, 0, 0, 255, 255, 255}) {
+        f.push_back(v);
+    }
+    id("BODY");
+    u32v(static_cast<u32>(body.size()));
+    f.insert(f.end(), body.begin(), body.end());
+    return f;
+}
+
+// WBPattern's prefs naming a picture for the root window.
+std::vector<u8> picture_prefs(const std::string& name) {
+    std::vector<u8> f;
+    auto id = [&](const char* s) { f.insert(f.end(), s, s + 4); };
+    auto u32v = [&](u32 v) {
+        for (int i = 3; i >= 0; --i) {
+            f.push_back(static_cast<u8>(v >> (i * 8)));
+        }
+    };
+    const u32 data = 24 + static_cast<u32>(name.size()) + 1;
+    id("FORM");
+    u32v(4 + 8 + data + (data & 1));
+    id("PREF");
+    id("PTRN");
+    u32v(data);
+    for (int i = 0; i < 16; ++i) {
+        f.push_back(0);
+    }
+    f.push_back(0);  // WBP_ROOT
+    f.push_back(0);
+    f.push_back(0);  // a picture, no WBPF_PATTERN
+    f.push_back(0);
+    f.push_back(0);  // revision
+    f.push_back(0);  // depth
+    f.push_back(0);
+    f.push_back(static_cast<u8>(name.size() + 1));
+    f.insert(f.end(), name.begin(), name.end());
+    f.push_back(0);
+    if (data & 1) {
+        f.push_back(0);
+    }
+    return f;
+}
+
+void the_backdrop_shows_a_wbpattern_picture() {
+    Rig r;
+    const char dir[] = "ENV:Sys";
+    for (u32 i = 0; i < sizeof dir; ++i) {
+        r.put8(kData + i, static_cast<u8>(dir[i]));
+    }
+    r.m.cpu.d[1] = kData;
+    CHECK(r.result(g_dos.dos_base(), dos_lvo::CreateDir) != 0);
+    const std::vector<u8> picture = stripe_ilbm();
+    const std::vector<u8> prefs = picture_prefs("RAM:Stripes.ilbm");
+    u32 error = 0;
+    CHECK(g_dos.write_file("RAM:Stripes.ilbm", picture.data(), static_cast<u32>(picture.size()),
+                           error));
+    CHECK(g_dos.write_file("ENV:Sys/WBPattern.prefs", prefs.data(),
+                           static_cast<u32>(prefs.size()), error));
+    r.workbench.open_desktop();
+    CHECK(logged("workbench: backdrop picture RAM:Stripes.ilbm"));
+    const Workbench::DrawerWindow& root = r.workbench.window(0);
+    // White is pen 2 and black pen 1 of the screen, the picture tiled.
+    CHECK_EQ(r.window_pixel(root.window, root.inner_left + 20, root.inner_top + 300), 2u);
+    CHECK_EQ(r.window_pixel(root.window, root.inner_left + 21, root.inner_top + 300), 1u);
+    CHECK_EQ(r.window_pixel(root.window, root.inner_left + 36, root.inner_top + 301), 2u);
+}
+
 int main() {
+    the_backdrop_shows_a_wbpattern_picture();
     the_backdrop_shows_the_wbpattern_pattern();
     layout_matches_the_ndk();
     start_starts_the_workbench_once();
