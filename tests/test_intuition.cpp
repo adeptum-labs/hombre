@@ -3213,6 +3213,131 @@ constexpr u32 kGad3 = kData + 0x840;
 constexpr u32 kProp4 = kData + 0x880;
 constexpr u32 kGad4 = kData + 0x8C0;
 
+GfxRig* g_rig_for_render = nullptr;
+u32 g_renders = 0;
+u32 g_rendered_flags = 0;
+
+void count_render(void*, u32, u32, u32 gadget) {
+    ++g_renders;
+    g_rendered_flags = g_rig_for_render->get16(gadget + gg_Flags);
+}
+
+void a_boolean_gadget_reports_its_release() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(gad != 0);
+    put_gadget(r, gad, 0, 20, 20, 40, 14, GFLG_GADGHCOMP, GACT_RELVERIFY | GACT_IMMEDIATE,
+               GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_GADGETDOWN);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 rp = r.get32(window + wd_RPort);
+    r.put8(rp + rp_FgPen, 2);
+    r.put8(rp + rp_DrawMode, JAM2);
+    const u32 plain = window_pixel(r, window, 25, 25);
+
+    // Pressed: selected, its box complemented, GADGETDOWN for IMMEDIATE.
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETDOWN);
+    CHECK_EQ(r.get32(msg + im_IAddress), gad);
+    reply_msg(r, msg);
+    CHECK_EQ(r.get16(gad + gg_Flags) & GFLG_SELECTED, GFLG_SELECTED);
+    CHECK_EQ(window_pixel(r, window, 25, 25), ~plain & 3u);
+    CHECK_EQ(r.get8(rp + rp_FgPen), 2u);
+    CHECK_EQ(r.get8(rp + rp_DrawMode), JAM2);
+
+    // Let go over it: GADGETUP, and the box as it was.
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    CHECK_EQ(r.get32(msg + im_IAddress), gad);
+    reply_msg(r, msg);
+    CHECK_EQ(r.get16(gad + gg_Flags) & GFLG_SELECTED, 0u);
+    CHECK_EQ(window_pixel(r, window, 25, 25), plain);
+
+    // Let go away from it: no GADGETUP.
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    reply_msg(r, get_msg(r, port));
+    r.intuition.pointer_event(200, 120, 1, 0, 0, true);
+    r.intuition.pointer_event(200, 120, 0, 0, 1, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+    CHECK_EQ(r.get16(gad + gg_Flags) & GFLG_SELECTED, 0u);
+    CHECK_EQ(window_pixel(r, window, 25, 25), plain);
+
+    // A disabled gadget takes no clicks.
+    r.put16(gad + gg_Flags, GFLG_GADGHCOMP | GFLG_DISABLED);
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.exec.free(gad, Gadget_SIZEOF);
+}
+
+void a_gadtools_gadget_is_drawn_by_its_renderer() {
+    GfxRig r;
+    g_rig_for_render = &r;
+    g_renders = 0;
+    r.intuition.set_gadget_renderer(&count_render, nullptr);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    put_gadget(r, gad, 0, 20, 20, 40, 14, GFLG_GADGHNONE, GACT_RELVERIFY,
+               GTYP_GADTOOLS | GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    CHECK_EQ(g_renders, 1u);  // drawn as the window opened
+
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    CHECK_EQ(g_renders, 2u);
+    CHECK_EQ(g_rendered_flags & GFLG_SELECTED, GFLG_SELECTED);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    CHECK_EQ(g_renders, 3u);
+    CHECK_EQ(g_rendered_flags & GFLG_SELECTED, 0u);
+    const u32 msg = get_msg(r, r.get32(window + wd_UserPort));
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    reply_msg(r, msg);
+    CHECK(!logged("intuition: gadget type"));
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.exec.free(gad, Gadget_SIZEOF);
+    r.intuition.set_gadget_renderer(nullptr, nullptr);
+    g_rig_for_render = nullptr;
+}
+
+void inner_size_tags_size_the_window_around_its_inside() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 tags = r.tags(kTagList, {{WA_Left, 10}, {WA_Top, 20}, {WA_InnerWidth, 150},
+                                       {WA_InnerHeight, 60}, {WA_DragBar, 1},
+                                       {WA_CloseGadget, 1}, {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, 0, tags);
+    CHECK(window != 0);
+    const u32 left = r.get8(window + wd_BorderLeft);
+    const u32 right = r.get8(window + wd_BorderRight);
+    const u32 top = r.get8(window + wd_BorderTop);
+    const u32 bottom = r.get8(window + wd_BorderBottom);
+    CHECK_EQ(r.get16(window + wd_Width), 150 + left + right);
+    CHECK_EQ(r.get16(window + wd_Height), 60 + top + bottom);
+}
+
 void open_window_links_and_draws_prop_gadget() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -3564,12 +3689,12 @@ void disabled_gadget_ignores_input() {
     CHECK_EQ(g_prop_pots.size(), 1u);
 }
 
-void non_prop_gadget_is_linked_not_hit() {
+void a_boolean_gadget_takes_the_click_from_the_window() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     CHECK(open_new(r, kNewScreen) != 0);
 
-    put_gadget(r, kGad1, 0, 20, 20, 40, 20, 0, GACT_IMMEDIATE, 1, 0);
+    put_gadget(r, kGad1, 0, 20, 20, 40, 20, 0, GACT_IMMEDIATE, GTYP_BOOLGADGET, 0);
     put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
     r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETDOWN | IDCMP_MOUSEBUTTONS);
     r.put32(kNewWindow + nw_FirstGadget, kGad1);
@@ -3582,17 +3707,12 @@ void non_prop_gadget_is_linked_not_hit() {
     press(r, 80, 80);
     release(r, 80, 80);
 
-    u32 count = 0;
-    for (const std::string& line : gfx_test::g_lines) {
-        if (line == "intuition: gadget type 1 not handled") {
-            ++count;
-        }
-    }
-    CHECK_EQ(count, 1u);
+    // GADGETDOWN for the IMMEDIATE gadget, and no button messages: the
+    // gadget had the click.
+    CHECK(!logged("intuition: gadget type 1 not handled"));
     const std::vector<u32> classes = queued_classes(r, window);
-    CHECK_EQ(classes.size(), 2u);
-    CHECK_EQ(classes[0], IDCMP_MOUSEBUTTONS);
-    CHECK_EQ(classes[1], IDCMP_MOUSEBUTTONS);
+    CHECK_EQ(classes.size(), 1u);
+    CHECK_EQ(classes[0], IDCMP_GADGETDOWN);
 }
 
 void gadget_list_cycle_is_bounded() {
@@ -5904,6 +6024,9 @@ int main() {
     size_hook_called_per_step();
     close_during_drag_ends_drag();
     open_window_links_and_draws_prop_gadget();
+    a_boolean_gadget_reports_its_release();
+    a_gadtools_gadget_is_drawn_by_its_renderer();
+    inner_size_tags_size_the_window_around_its_inside();
     wa_gadgets_tag_links_list();
     add_and_remove_glist_positions();
     new_modify_prop_moves_knob();
@@ -5912,7 +6035,7 @@ int main() {
     container_click_pages_by_body();
     gadget_idcmp_down_move_up();
     disabled_gadget_ignores_input();
-    non_prop_gadget_is_linked_not_hit();
+    a_boolean_gadget_takes_the_click_from_the_window();
     gadget_list_cycle_is_bounded();
     close_during_knob_drag();
     wheel_event_posts_newmouse_rawkey();

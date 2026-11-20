@@ -341,6 +341,14 @@ constexpr u32 GACT_RIGHTBORDER = 0x10;
 
 constexpr u32 GTYP_PROPGADGET = 3;
 constexpr u32 GTYP_GTYPEMASK = 7;
+constexpr u32 GTYP_BOOLGADGET = 1;
+constexpr u32 GTYP_GADTOOLS = 0x100;  // a gadget gadtools.library made and draws
+
+constexpr u32 GFLG_GADGHIGHBITS = 0x3;
+constexpr u32 GFLG_GADGHCOMP = 0x0;
+constexpr u32 GFLG_GADGHIMAGE = 0x2;
+constexpr u32 GFLG_GADGHNONE = 0x3;
+constexpr u32 GFLG_GADGIMAGE = 0x4;
 
 constexpr u32 AUTOKNOB = 0x1;
 constexpr u32 FREEHORIZ = 0x2;
@@ -391,6 +399,8 @@ constexpr u32 WA_MinWidth = 0x80000072;
 constexpr u32 WA_MinHeight = 0x80000073;
 constexpr u32 WA_MaxWidth = 0x80000074;
 constexpr u32 WA_MaxHeight = 0x80000075;
+constexpr u32 WA_InnerWidth = 0x80000076;
+constexpr u32 WA_InnerHeight = 0x80000077;
 constexpr u32 WA_SizeGadget = 0x80000081;
 constexpr u32 WA_DragBar = 0x80000082;
 constexpr u32 WA_DepthGadget = 0x80000083;

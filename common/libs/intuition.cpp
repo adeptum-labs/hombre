@@ -357,6 +357,8 @@ struct WindowArgs {
     u32 min_height = 0;
     u32 max_width = 0;
     u32 max_height = 0;
+    u32 inner_width = 0;   // the size inside the borders, when given instead
+    u32 inner_height = 0;
     u32 gadgets = 0;
     bool custom_screen = false;
 };
@@ -404,6 +406,12 @@ void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
         break;
     case ndk::WA_Height:
         a.height = data;
+        break;
+    case ndk::WA_InnerWidth:
+        a.inner_width = data;
+        break;
+    case ndk::WA_InnerHeight:
+        a.inner_height = data;
         break;
     case ndk::WA_DetailPen:
         a.detail = data & 0xFF;
@@ -2365,12 +2373,6 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     if (top >= screen_h) {
         top = screen_h - 1;
     }
-    const u32 room_x = static_cast<u32>(screen_w - left);
-    const u32 room_y = static_cast<u32>(screen_h - top);
-    const i32 width =
-        a.width == 0 || a.width > room_x ? static_cast<i32>(room_x) : static_cast<i32>(a.width);
-    const i32 height =
-        a.height == 0 || a.height > room_y ? static_cast<i32>(room_y) : static_cast<i32>(a.height);
     const bool borderless = (a.flags & ndk::WFLG_BORDERLESS) != 0;
     const bool has_size = !borderless && (a.flags & ndk::WFLG_SIZEGADGET) != 0;
     const bool size_bottom = has_size && (a.flags & ndk::WFLG_SIZEBBOTTOM) != 0;
@@ -2381,6 +2383,20 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         borderless ? 1 : (size_right ? chrome::kSizeBorderRight : chrome::kBorderRight);
     const u32 border_bottom =
         borderless ? 1 : (size_bottom ? chrome::kSizeBorderBottom : chrome::kBorderBottom);
+    // WA_InnerWidth and WA_InnerHeight size the window by what lies inside
+    // its borders.
+    if (a.inner_width != 0) {
+        a.width = a.inner_width + border_left + border_right;
+    }
+    if (a.inner_height != 0) {
+        a.height = a.inner_height + border_top + border_bottom;
+    }
+    const u32 room_x = static_cast<u32>(screen_w - left);
+    const u32 room_y = static_cast<u32>(screen_h - top);
+    const i32 width =
+        a.width == 0 || a.width > room_x ? static_cast<i32>(room_x) : static_cast<i32>(a.width);
+    const i32 height =
+        a.height == 0 || a.height > room_y ? static_cast<i32>(room_y) : static_cast<i32>(a.height);
 
     const i32 floor_w = 40;
     const i32 floor_h = static_cast<i32>(border_top) + 10;
@@ -3681,6 +3697,8 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Depth;
                     left_press_consumed = true;
+                } else if (!dragging && hit_bool_gadget(b, hit, x, y)) {
+                    left_press_consumed = true;
                 } else if (!dragging && hit_prop_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
                 } else if (bordered && !dragging && start_drag(hit, x, y)) {
@@ -3700,7 +3718,9 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         pressed_gadget_window_ = 0;
         pressed_gadget_ = GadgetKind::None;
         left_release_consumed = true;
-        if (gad_window != 0 && hit == gad_window && gad_kind != GadgetKind::Prop) {
+        if (gad_kind == GadgetKind::Bool) {
+            release_bool_gadget(b, gad_window, x, y);
+        } else if (gad_window != 0 && hit == gad_window && gad_kind != GadgetKind::Prop) {
             const WindowView w = load_window(b, gad_window);
             if (w.ok && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
                 if (gad_kind == GadgetKind::Close && (w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
@@ -4397,10 +4417,121 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
         }
         if (gtype == ndk::GTYP_PROPGADGET) {
             draw_prop_gadget(*graphics_, b, w, gadget);
+        } else if (gtype == ndk::GTYP_BOOLGADGET) {
+            draw_bool_gadget(b, window, w.rp, gadget);
         } else {
             log_unhandled_gadget_type(gtype);
         }
         gadget = next;
+    }
+}
+
+// A boolean gadget as it stands: gadtools draws its own; any other shows
+// its image, the select image while selected with GFLG_GADGHIMAGE, and
+// its box complemented while selected with GFLG_GADGHCOMP.
+void Intuition::draw_bool_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
+    const u32 type = b.r16(gadget + ndk::gg_GadgetType);
+    const u32 flags = b.r16(gadget + ndk::gg_Flags);
+    if (!b.ok() || rp == 0) {
+        return;
+    }
+    if ((type & ndk::GTYP_GADTOOLS) != 0) {
+        if (gadget_renderer_ != nullptr) {
+            gadget_renderer_(gadget_renderer_ctx_, window, rp, gadget);
+        }
+        return;
+    }
+    const WindowView w = load_window(b, window);
+    const Rect box = resolve_gadget_box(b, w, gadget);
+    if (!w.ok || box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
+    const bool selected = (flags & ndk::GFLG_SELECTED) != 0;
+    const u32 highlight = flags & ndk::GFLG_GADGHIGHBITS;
+    if ((flags & ndk::GFLG_GADGIMAGE) != 0) {
+        const u32 select = b.r32(gadget + ndk::gg_SelectRender);
+        const u32 render = b.r32(gadget + ndk::gg_GadgetRender);
+        const bool high = selected && highlight == ndk::GFLG_GADGHIMAGE && select != 0;
+        const u32 image = high ? select : render;
+        if (image != 0) {
+            draw_image(rp, image, box.x0, box.y0);
+        }
+    }
+    if (selected && highlight == ndk::GFLG_GADGHCOMP) {
+        // The program's pens and draw mode stay as they were.
+        const u32 fg = b.r8(rp + ndk::rp_FgPen);
+        const u32 bg = b.r8(rp + ndk::rp_BgPen);
+        const u32 mode = b.r8(rp + ndk::rp_DrawMode);
+        graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
+        graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+        graphics_->set_pens(rp, fg, bg, mode);
+    }
+}
+
+bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
+    const WindowRecord* rec = find_window_record(window);
+    const WindowView w = load_window(b, window);
+    if (rec == nullptr || !w.ok) {
+        return false;
+    }
+    const i32 wx = x - w.left;
+    const i32 wy = y - w.top;
+    u32 gadget = w.first_gadget;
+    for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
+        const u32 gflags = b.r16(gadget + ndk::gg_Flags);
+        const u32 activation = b.r16(gadget + ndk::gg_Activation);
+        const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return false;
+        }
+        if (gtype != ndk::GTYP_BOOLGADGET || (gflags & ndk::GFLG_DISABLED) != 0 ||
+            (activation & (ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE)) == 0 ||
+            !in_rect(resolve_gadget_box(b, w, gadget), wx, wy)) {
+            gadget = next;
+            continue;
+        }
+        b.w16(gadget + ndk::gg_Flags, gflags | ndk::GFLG_SELECTED);
+        draw_bool_gadget(b, window, rec->rp, gadget);
+        pressed_gadget_window_ = window;
+        pressed_gadget_ = GadgetKind::Bool;
+        pressed_bool_gadget_ = gadget;
+        if ((activation & ndk::GACT_IMMEDIATE) != 0) {
+            post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+        }
+        return true;
+    }
+    return false;
+}
+
+// The left button let go of the boolean gadget it held: the gadget shows
+// unselected, and a release over it reports GADGETUP.
+void Intuition::release_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
+    const u32 gadget = pressed_bool_gadget_;
+    pressed_bool_gadget_ = 0;
+    const WindowRecord* rec = find_window_record(window);
+    if (gadget == 0 || rec == nullptr || !window_open(window)) {
+        return;
+    }
+    const WindowView w = load_window(b, window);
+    const u32 gflags = b.r16(gadget + ndk::gg_Flags);
+    const u32 activation = b.r16(gadget + ndk::gg_Activation);
+    if (!w.ok || !b.ok()) {
+        return;
+    }
+    const bool inside = window_at(x, y) == window &&
+                        in_rect(resolve_gadget_box(b, w, gadget), x - w.left, y - w.top);
+    if ((gflags & ndk::GFLG_GADGHIGHBITS) == ndk::GFLG_GADGHCOMP &&
+        (b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) == 0) {
+        // Complementing the box again puts back what was under it.
+        draw_bool_gadget(b, window, rec->rp, gadget);
+        b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
+    } else {
+        b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
+        draw_bool_gadget(b, window, rec->rp, gadget);
+    }
+    if (inside && (activation & ndk::GACT_RELVERIFY) != 0) {
+        post_intuimessage(window, ndk::IDCMP_GADGETUP, 0, gadget);
     }
 }
 
@@ -4631,7 +4762,9 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
             return false;
         }
         if (gtype != ndk::GTYP_PROPGADGET) {
-            log_unhandled_gadget_type(gtype);
+            if (gtype != ndk::GTYP_BOOLGADGET) {
+                log_unhandled_gadget_type(gtype);
+            }
             gadget = next;
             continue;
         }

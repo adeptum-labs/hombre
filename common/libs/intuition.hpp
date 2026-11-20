@@ -105,6 +105,9 @@ class Intuition {
 public:
     using WindowHook = void (*)(void* ctx, u32 window);
     using GadgetHook = void (*)(void* ctx, u32 gadget, u32 vert_pot);
+    // Draws a GTYP_GADTOOLS gadget of the window through rp, as its
+    // GFLG_SELECTED flag shows it.
+    using GadgetRenderer = void (*)(void* ctx, u32 window, u32 rp, u32 gadget);
 
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
@@ -170,6 +173,11 @@ public:
     void on_gadget(u32 gadget, u32 window);
     void off_gadget(u32 gadget, u32 window);
     void set_gadget_hook(u32 gadget, GadgetHook hook, void* ctx);
+    // The library that draws GTYP_GADTOOLS gadgets: gadtools.
+    void set_gadget_renderer(GadgetRenderer renderer, void* ctx) {
+        gadget_renderer_ = renderer;
+        gadget_renderer_ctx_ = ctx;
+    }
     void wheel_event(i32 steps);
     u32 window_under(i32 x, i32 y) const { return window_at(x, y); }
     void begin_batch();
@@ -370,7 +378,7 @@ private:
         menu_layout::Geometry geometry{};
     };
 
-    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2, Prop = 3 };
+    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2, Prop = 3, Bool = 4 };
     enum class Drag : u8 { None = 0, Move = 1, Size = 2, Prop = 3 };
 
     static void reply_message(void* ctx, u32 message);
@@ -420,6 +428,9 @@ private:
     void set_gadget_disabled(u32 gadget, u32 window, bool disabled);
     void draw_gadget_list(native::Bus& b, u32 window, u32 first, u32 max_count);
     bool hit_prop_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    bool hit_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    void release_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    void draw_bool_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
     void drag_prop(i32 x, i32 y);
     void end_prop_drag();
     void call_gadget_hook(u32 gadget, u32 vert_pot);
@@ -450,6 +461,9 @@ private:
     u32 active_window_ = 0;
     u32 pressed_gadget_window_ = 0;
     GadgetKind pressed_gadget_ = GadgetKind::None;
+    u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
+    GadgetRenderer gadget_renderer_ = nullptr;
+    void* gadget_renderer_ctx_ = nullptr;
     // The window the left button drags, and the pointer's offset from its
     // top-left corner (Move) or to its bottom-right corner (Size), or from
     // the knob's top-left corner (Prop).
