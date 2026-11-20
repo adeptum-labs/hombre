@@ -1070,6 +1070,8 @@ void shell_task(void* arg) { shell_loop(*static_cast<Console*>(arg)); }
 
 }
 
+constexpr char kAddDataTypes[] = "C:AddDataTypes";
+
 void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& drives,
                       const char* path, const char* args) {
     if (!start(info, pages, drives)) {
@@ -1089,6 +1091,11 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& 
         }
     }
     execute(boot, path, args);
+    // The datatypes on the boot disk, as its Startup-Sequence adds them:
+    // datatypes.library opens only once they are listed.
+    if (dos.examine(kAddDataTypes).kind == Dos::TargetKind::File) {
+        execute(boot, kAddDataTypes, "REFRESH QUIET");
+    }
     key_queue_clear(boot);
     if (boot.shell.is_open()) {
         write_shell_prompt(boot);
