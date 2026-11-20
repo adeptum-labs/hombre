@@ -2690,6 +2690,13 @@ void Workbench::run() {
     for (;;) {
         const bool more = pump();
         const u64 now = exec_->now_us();
+        if (patterns_changed_) {
+            // WBPattern's Test and Use show at once.
+            patterns_changed_ = false;
+            if (load_patterns()) {
+                redraw_all();
+            }
+        }
         if (now >= next_refresh_us_) {
             // WBPattern's Use takes effect at the next look.
             if (load_patterns()) {
@@ -2707,6 +2714,36 @@ void Workbench::run() {
 }
 
 void Workbench::task_entry(void* ctx) { static_cast<Workbench*>(ctx)->run(); }
+
+// A file written and closed: when it is the pattern prefs, the Workbench
+// wakes to read them.
+void Workbench::file_closed(void* ctx, const char* path) {
+    Workbench& wb = *static_cast<Workbench*>(ctx);
+    constexpr char kName[] = "WBPattern.prefs";
+    constexpr u32 kNameLength = sizeof kName - 1;
+    u32 length = 0;
+    while (path[length] != '\0') {
+        ++length;
+    }
+    if (length < kNameLength) {
+        return;
+    }
+    for (u32 i = 0; i < kNameLength; ++i) {
+        char c = path[length - kNameLength + i];
+        char want = kName[i];
+        c = c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        want = want >= 'A' && want <= 'Z' ? static_cast<char>(want - 'A' + 'a') : want;
+        if (c != want) {
+            return;
+        }
+    }
+    wb.patterns_changed_ = true;
+    Bus b(*wb.machine_);
+    const u32 bit = wb.reply_port_ != 0 ? b.r8(wb.reply_port_ + ndk::mp_SigBit) : 32;
+    if (b.ok() && bit < 32 && wb.process_ != 0) {
+        wb.exec_->signal_task(wb.process_, 1u << bit);
+    }
+}
 
 // --- starting programs ---------------------------------------------------
 
@@ -3055,6 +3092,7 @@ void Workbench::open_desktop() {
     }
     add_volume_icons();
     load_patterns();
+    dos_->set_file_closed(&Workbench::file_closed, this);
     draw_window(0);
     start_wbstartup();
     desktop_open_ = true;

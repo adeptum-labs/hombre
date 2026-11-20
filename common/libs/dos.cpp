@@ -797,6 +797,7 @@ struct DosOps {
         if (f.stream == Dos::Stream::Nil) {
             return true;
         }
+        f.written = true;
         if (f.entry.volume != Dos::kVolRam) {
             set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
             return false;
@@ -2369,7 +2370,16 @@ struct DosOps {
     static void close_handle(Dos& d, u32 bptr) {
         const i64 slot = handle_slot(d, bptr);
         if (slot > static_cast<i64>(kConsoleOut)) {
-            release_entry(d, d.files_[slot].entry);
+            const Dos::FileSlot& f = d.files_[slot];
+            if (f.written && f.stream == Dos::Stream::File && d.file_closed_ != nullptr) {
+                char path[Dos::kMaxPath];
+                copy_cstr(path, f.path, Dos::kMaxPath);
+                release_entry(d, f.entry);
+                close_slot(d, static_cast<u32>(slot));
+                d.file_closed_(d.file_closed_ctx_, path);
+                return;
+            }
+            release_entry(d, f.entry);
             close_slot(d, static_cast<u32>(slot));
         }
     }
@@ -10106,6 +10116,11 @@ bool Dos::read_console_line(char* out, u32 size) {
     }
     out[copy] = '\0';
     return true;
+}
+
+void Dos::set_file_closed(FileClosed hook, void* ctx) {
+    file_closed_ = hook;
+    file_closed_ctx_ = ctx;
 }
 
 void Dos::set_clock(u64 (*now_ticks)()) {

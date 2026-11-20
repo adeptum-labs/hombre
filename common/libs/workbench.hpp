@@ -362,6 +362,7 @@ private:
     static constexpr u32 kTaskStackBytes = 8192;
 
     static void task_entry(void* ctx);
+    static void file_closed(void* ctx, const char* path);
     void run();
     void handle_message(u32 window_index, u32 message);
     void show_about();
@@ -462,6 +463,7 @@ private:
     u32 pattern_sum_ = 0;
     i32 volume_top_ = 0;
     u64 next_refresh_us_ = 0;
+    bool patterns_changed_ = false;  // WBPattern's prefs were written
     bool running_ = false;
     bool desktop_open_ = false;
     bool backdrop_ = true;

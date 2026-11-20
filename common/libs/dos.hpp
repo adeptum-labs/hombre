@@ -822,6 +822,11 @@ public:
     // Deletes the file name, on RAM: only.
     bool delete_file(const char* name, u32& error);
 
+    // Called with the path of each file that was written to when it is
+    // closed, as a file notification would be. Null turns it off.
+    using FileClosed = void (*)(void* ctx, const char* path);
+    void set_file_closed(FileClosed hook, void* ctx);
+
     // Sets the clock source returning 50 Hz AmigaDOS ticks since 1978-01-01,
     // or null to report 0/0/0. Stamps any RAM: nodes whose date is still zero.
     void set_clock(u64 (*now_ticks)());
@@ -1045,6 +1050,7 @@ private:
         bool exclusive;
         u8 console;       // the console of a Console stream
         u8 generation;    // changes each time the slot is opened
+        bool written;     // a file written to since it was opened
         char path[kMaxPath];
     };
 
@@ -1125,6 +1131,8 @@ private:
     u32 assign_locks_ = 0;
 
     FileSlot files_[kHandles]{};
+    FileClosed file_closed_ = nullptr;
+    void* file_closed_ctx_ = nullptr;
     LockSlot lock_slots_[kMaxLocks]{};
     LockSlot assign_lock_slots_[kMaxAssignLocks]{};
     AssignEntry assigns_[kMaxAssigns]{};

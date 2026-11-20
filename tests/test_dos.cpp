@@ -5344,6 +5344,37 @@ void ram_protection_bits_are_enforced() {
     CHECK_EQ(r.call(dos_lvo::Close, again), DOSTRUE);
 }
 
+// The file closed hook hears of a file written to, and of no other.
+void closing_a_written_file_calls_the_file_closed_hook() {
+    Rig r;
+    static std::string heard;
+    static u32 calls = 0;
+    heard.clear();
+    calls = 0;
+    g_dos.set_file_closed(
+        [](void*, const char* path) {
+            heard = path;
+            ++calls;
+        },
+        nullptr);
+    const u32 buf = kData + 0x200;
+    r.str(kData, "RAM:notes.txt");
+    const u32 written = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(written != 0);
+    r.str(buf, "hi");
+    CHECK_EQ(r.call(dos_lvo::Write, written, buf, 2), 2u);
+    CHECK_EQ(calls, 0u);
+    CHECK_EQ(r.call(dos_lvo::Close, written), DOSTRUE);
+    CHECK_EQ(calls, 1u);
+    CHECK(heard.find("notes.txt") != std::string::npos);
+    const u32 read = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(read != 0);
+    CHECK_EQ(r.call(dos_lvo::Read, read, buf, 2), 2u);
+    CHECK_EQ(r.call(dos_lvo::Close, read), DOSTRUE);
+    CHECK_EQ(calls, 1u);
+    g_dos.set_file_closed(nullptr, nullptr);
+}
+
 void ram_open_write_read_and_seek() {
     Rig r;
     const u32 buf = kData + 0x200;
@@ -7160,6 +7191,7 @@ int main() {
     ram_volume_read_operations();
     ram_dos_list_match_and_exall();
     ram_open_write_read_and_seek();
+    closing_a_written_file_calls_the_file_closed_hook();
     ram_protection_bits_are_enforced();
     ram_deep_paths_stay_valid();
     ram_buffered_output_and_set_file_size();
