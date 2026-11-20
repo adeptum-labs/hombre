@@ -108,6 +108,8 @@ constexpr u32 ActivateGadget = 462;
 constexpr u32 ClearPointer = 60;
 constexpr u32 SetPointer = 270;
 constexpr u32 SetWindowPointerA = 816;
+constexpr u32 DoubleClick = 102;
+constexpr u32 ScrollWindowRaster = 798;
 constexpr u32 Request = 240;
 constexpr u32 EndRequest = 120;
 constexpr u32 DrawBorder = 108;
@@ -141,6 +143,9 @@ public:
     // A click let go over a GTYP_GADTOOLS gadget at x, y of its box: the
     // gadget takes its new state and sets the code of its GADGETUP.
     using GadgetRelease = bool (*)(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code);
+    // A GTYP_GADTOOLS prop gadget moved: the gadget takes its new state
+    // from its PropInfo and gives the code its messages carry.
+    using GadgetPropCode = u16 (*)(void* ctx, u32 gadget);
 
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
@@ -213,6 +218,14 @@ public:
     }
     // Takes the renderer's ctx.
     void set_gadget_release(GadgetRelease release) { gadget_release_ = release; }
+    void set_gadget_prop_code(GadgetPropCode code) { gadget_prop_code_ = code; }
+
+    // A string gadget being edited takes the keyboard: true while one is,
+    // and a decoded key byte for it (CSI sequences for the cursor keys).
+    bool string_active() const { return string_.gadget != 0; }
+    void string_key(u8 byte);
+    // Makes the string gadget of the window the one being edited.
+    bool activate_string(u32 gadget, u32 window);
     void wheel_event(i32 steps);
     u32 window_under(i32 x, i32 y) const { return window_at(x, y); }
     void begin_batch();
@@ -481,6 +494,10 @@ private:
     bool hit_prop_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     bool hit_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void draw_custom_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
+    void draw_string_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
+    bool hit_string_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    void end_string(bool verify, u16 code);
+    Rect string_text_box(native::Bus& b, u32 window, u32 gadget, u32& columns);
     bool hit_custom_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void custom_input(native::Bus& b, i32 x, i32 y, u32 code);
     void custom_result(native::Bus& b, u32 result);
@@ -529,6 +546,14 @@ private:
         u32 event = 0;
     };
     ActiveCustom custom_;
+    // The string gadget being edited, its window, and how far a CSI
+    // sequence of the keyboard has come.
+    struct ActiveString {
+        u32 window = 0;
+        u32 gadget = 0;
+        u8 csi = 0;
+    };
+    ActiveString string_;
     // The windows a Request() blocks, with its Requester, until EndRequest:
     // a press in one reaches none of its gadgets.
     struct Block {
@@ -543,6 +568,8 @@ private:
     GadgetRenderer gadget_renderer_ = nullptr;
     void* gadget_renderer_ctx_ = nullptr;
     GadgetRelease gadget_release_ = nullptr;
+    GadgetPropCode gadget_prop_code_ = nullptr;
+    u16 prop_code(native::Bus& b, u32 gadget);
     // The window the left button drags, and the pointer's offset from its
     // top-left corner (Move) or to its bottom-right corner (Size), or from
     // the knob's top-left corner (Prop).

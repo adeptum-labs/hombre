@@ -40,6 +40,9 @@ using i16 = __INT16_TYPE__;
 
 namespace {
 
+// Two clicks this close together make a double click.
+constexpr u64 kDoubleClickUs = 1000000;
+
 // struct InputEvent (devices/inputevent.h) and the mouse codes a custom
 // gadget gets.
 constexpr u32 ie_Class = 4;
@@ -1220,10 +1223,33 @@ struct IntuitionNatives {
     // pointer, a busy one included, is not shown; the screen's stays.
     static void keep_pointer(void*, Machine&) {}
 
-    // ActivateGadget: string gadgets take no typing yet, so none becomes
-    // active; TRUE so the program carries on.
-    // TODO: activate string gadgets once they can be edited.
-    static void activate_gadget(void*, Machine& m) { native::set_result(m, 1); }
+    // ActivateGadget: a string gadget becomes the one being edited.
+    static void activate_gadget(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).activate_string(m.cpu.a[0], m.cpu.a[1]) ? 1 : 0);
+    }
+
+    // ScrollWindowRaster(window A1, dx D0, dy D1, xmin D2, ymin D3, xmax D4,
+    // ymax D5): the box of the window's raster scrolls; what it uncovers
+    // takes pen 0 for the program to draw again.
+    static void scroll_window_raster(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        const Intuition::WindowRecord* rec = in.find_window_record(m.cpu.a[1]);
+        if (rec == nullptr) {
+            return;
+        }
+        const auto word = [&](u32 r) { return static_cast<i32>(static_cast<i16>(r & 0xFFFF)); };
+        in.graphics_->scroll(rec->rp, word(m.cpu.d[0]), word(m.cpu.d[1]), word(m.cpu.d[2]),
+                             word(m.cpu.d[3]), word(m.cpu.d[4]), word(m.cpu.d[5]));
+    }
+
+    // DoubleClick(seconds D0, micros D1, seconds D2, micros D3): whether
+    // the second click came within a second of the first, the Workbench's
+    // double-click time.
+    static void double_click(void*, Machine& m) {
+        const u64 first = static_cast<u64>(m.cpu.d[0]) * 1000000 + m.cpu.d[1];
+        const u64 second = static_cast<u64>(m.cpu.d[2]) * 1000000 + m.cpu.d[3];
+        native::set_result(m, second >= first && second - first <= kDoubleClickUs ? 1 : 0);
+    }
 
     // InitRequester: clears the struct Requester at A0.
     static void init_requester(void*, Machine& m) {
@@ -1424,6 +1450,9 @@ struct IntuitionFunction {
 constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::IntuiTextLength, IntuitionNatives::intui_text_length, "IntuiTextLength"},
     {intuition_lvo::InitRequester, IntuitionNatives::init_requester, "InitRequester"},
+    {intuition_lvo::DoubleClick, IntuitionNatives::double_click, "DoubleClick"},
+    {intuition_lvo::ScrollWindowRaster, IntuitionNatives::scroll_window_raster,
+     "ScrollWindowRaster"},
     {intuition_lvo::ActivateGadget, IntuitionNatives::activate_gadget, "ActivateGadget"},
     {intuition_lvo::ClearPointer, IntuitionNatives::keep_pointer, "ClearPointer"},
     {intuition_lvo::SetPointer, IntuitionNatives::keep_pointer, "SetPointer"},
@@ -2956,6 +2985,9 @@ void Intuition::close_window(u32 window) {
     if (custom_.window == window) {
         drop_custom_gadget();
     }
+    if (string_.window == window) {
+        string_ = ActiveString{};
+    }
     for (Block& block : blocks_) {
         if (block.window == window) {
             block = Block{};
@@ -3996,6 +4028,15 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
     if ((pressed & kMouseLeft) != 0) {
         // A press that follows a lost release leaves no bar button down.
         light_bar_button(false);
+        // A press anywhere but on it ends the editing of a string gadget.
+        if (string_.gadget != 0) {
+            const u32 editing = string_.gadget;
+            const WindowView sw = load_window(b, string_.window);
+            if (!sw.ok || hit != string_.window ||
+                !in_rect(resolve_gadget_box(b, sw, editing), x - sw.left, y - sw.top)) {
+                end_string(false, 0);
+            }
+        }
         if (hit != 0) {
             activate_window(hit);
             const WindowView w = load_window(b, hit);
@@ -4014,6 +4055,8 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     light_bar_button(true);
                     left_press_consumed = true;
                 } else if (!dragging && blocked(hit)) {
+                    left_press_consumed = true;
+                } else if (!dragging && hit_string_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
                 } else if (!dragging && hit_custom_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
@@ -4838,6 +4881,8 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
             draw_bool_gadget(b, window, w.rp, gadget);
         } else if (gtype == ndk::GTYP_CUSTOMGADGET) {
             draw_custom_gadget(b, window, w.rp, gadget);
+        } else if (gtype == ndk::GTYP_STRGADGET) {
+            draw_string_gadget(b, window, w.rp, gadget);
         } else {
             log_unhandled_gadget_type(gtype);
         }
@@ -4947,6 +4992,232 @@ void Intuition::custom_result(Bus& b, u32 result) {
     const u32 msg[] = {ndk::GM_GOINACTIVE, c.info, 0};
     boopsi_.send(boopsi_.class_of(c.gadget), c.gadget, msg, 3);
     drop_custom_gadget();
+}
+
+// --- string gadgets -------------------------------------------------------
+
+// The part of a string gadget's box its text shows in, and how many
+// characters of the topaz font fit there; gadtools frames its own.
+Rect Intuition::string_text_box(Bus& b, u32 window, u32 gadget, u32& columns) {
+    const WindowView w = load_window(b, window);
+    Rect box = resolve_gadget_box(b, w, gadget);
+    if ((b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0) {
+        box.x0 += 4;
+        box.x1 -= 4;
+    }
+    const i32 width = box.x1 - box.x0 + 1;
+    columns = width > 0 ? static_cast<u32>(width) / 8 : 0;
+    return box;
+}
+
+// The text from the display position on, and while it is being edited the
+// cursor as a complemented character cell, which the display position
+// keeps in view.
+void Intuition::draw_string_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
+    const u32 si = b.r32(gadget + ndk::gg_SpecialInfo);
+    if (!b.ok() || rp == 0 || si == 0) {
+        return;
+    }
+    const bool framed = gadtools_draws(b, window, rp, gadget);
+    u32 columns = 0;
+    const Rect box = string_text_box(b, window, gadget, columns);
+    if (box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
+    const u32 buffer = b.r32(si + ndk::si_Buffer);
+    const u32 count = b.r16(si + ndk::si_NumChars);
+    const u32 pos = b.r16(si + ndk::si_BufferPos);
+    u32 disp = b.r16(si + ndk::si_DispPos);
+    const bool editing = string_.gadget == gadget;
+    if (editing && columns != 0) {
+        disp = pos < disp ? pos : (pos >= disp + columns ? pos - columns + 1 : disp);
+        b.w16(si + ndk::si_DispPos, disp);
+    }
+    const u32 fg = b.r8(rp + ndk::rp_FgPen);
+    const u32 bg = b.r8(rp + ndk::rp_BgPen);
+    const u32 mode = b.r8(rp + ndk::rp_DrawMode);
+    const u32 cx = b.r16(rp + ndk::rp_cp_x);
+    const u32 cy = b.r16(rp + ndk::rp_cp_y);
+    const i32 top = box.y0 + (box.y1 - box.y0 + 1 - 8) / 2;
+    if (!framed) {
+        graphics_->set_pens(rp, 0, 0, ndk::JAM1);
+        graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+    }
+    u8 text[256];
+    u32 shown = 0;
+    for (u32 i = disp; i < count && shown < columns && shown < sizeof text && buffer != 0; ++i) {
+        text[shown++] = static_cast<u8>(b.r8(buffer + i));
+    }
+    if (shown != 0 && b.ok()) {
+        graphics_->set_pens(rp, 1, 0, ndk::JAM1);
+        graphics_->move(rp, box.x0, top + 6);
+        graphics_->text(rp, text, shown);
+    }
+    if (editing && pos >= disp && pos - disp < columns) {
+        const i32 x = box.x0 + static_cast<i32>((pos - disp) * 8);
+        graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
+        graphics_->rect_fill(rp, x, top, x + 7, top + 7);
+    }
+    graphics_->set_pens(rp, fg, bg, mode);
+    b.w16(rp + ndk::rp_cp_x, cx);
+    b.w16(rp + ndk::rp_cp_y, cy);
+}
+
+bool Intuition::activate_string(u32 gadget, u32 window) {
+    if (machine_ == nullptr || gadget == 0 || !window_open(window)) {
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 type = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+    const u32 flags = b.r16(gadget + ndk::gg_Flags);
+    if (!b.ok() || type != ndk::GTYP_STRGADGET || (flags & ndk::GFLG_DISABLED) != 0 ||
+        b.r32(gadget + ndk::gg_SpecialInfo) == 0) {
+        return false;
+    }
+    if (string_.gadget != 0 && string_.gadget != gadget) {
+        end_string(false, 0);
+    }
+    string_ = ActiveString{window, gadget, 0};
+    const WindowRecord* rec = find_window_record(window);
+    if (rec != nullptr) {
+        draw_string_gadget(b, window, rec->rp, gadget);
+    }
+    return true;
+}
+
+// A press on a string gadget makes it the one being edited, with the
+// cursor at the character under the pointer.
+bool Intuition::hit_string_gadget(Bus& b, u32 window, i32 x, i32 y) {
+    const WindowView w = load_window(b, window);
+    if (!w.ok) {
+        return false;
+    }
+    u32 gadget = w.first_gadget;
+    for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
+        const u32 type = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return false;
+        }
+        if (type == ndk::GTYP_STRGADGET &&
+            in_rect(resolve_gadget_box(b, w, gadget), x - w.left, y - w.top)) {
+            const u32 si = b.r32(gadget + ndk::gg_SpecialInfo);
+            u32 columns = 0;
+            const Rect text = string_text_box(b, window, gadget, columns);
+            const i32 col = (x - w.left - text.x0) / 8;
+            const u32 count = b.r16(si + ndk::si_NumChars);
+            const u32 at = b.r16(si + ndk::si_DispPos) + static_cast<u32>(col > 0 ? col : 0);
+            b.w16(si + ndk::si_BufferPos, at < count ? at : count);
+            if (!activate_string(gadget, window)) {
+                return false;
+            }
+            if ((b.r16(gadget + ndk::gg_Activation) & ndk::GACT_IMMEDIATE) != 0) {
+                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+            }
+            return true;
+        }
+        gadget = next;
+    }
+    return false;
+}
+
+// Ends the editing; Return or Tab on a GACT_RELVERIFY gadget reports
+// GADGETUP with the key that ended it.
+void Intuition::end_string(bool verify, u16 code) {
+    const ActiveString s = string_;
+    string_ = ActiveString{};
+    if (s.gadget == 0 || !window_open(s.window)) {
+        return;
+    }
+    Bus b(*machine_);
+    const WindowRecord* rec = find_window_record(s.window);
+    if (rec != nullptr) {
+        draw_string_gadget(b, s.window, rec->rp, s.gadget);
+    }
+    if (verify && (b.r16(s.gadget + ndk::gg_Activation) & ndk::GACT_RELVERIFY) != 0) {
+        post_intuimessage(s.window, ndk::IDCMP_GADGETUP, code, s.gadget);
+    }
+}
+
+// Edits the string with a key: characters go in at the cursor, Backspace
+// and Del take one out, the cursor keys move it, Return and Tab end the
+// editing with GADGETUP, and Esc ends it without.
+void Intuition::string_key(u8 byte) {
+    if (string_.gadget == 0) {
+        return;
+    }
+    if (!window_open(string_.window)) {
+        string_ = ActiveString{};
+        return;
+    }
+    Bus b(*machine_);
+    const u32 gadget = string_.gadget;
+    const u32 si = b.r32(gadget + ndk::gg_SpecialInfo);
+    const u32 buffer = b.r32(si + ndk::si_Buffer);
+    const u32 max = b.r16(si + ndk::si_MaxChars);
+    u32 count = b.r16(si + ndk::si_NumChars);
+    u32 pos = b.r16(si + ndk::si_BufferPos);
+    if (!b.ok() || buffer == 0) {
+        return;
+    }
+    pos = pos > count ? count : pos;
+    if (string_.csi == 1) {
+        string_.csi = 0;
+        if (byte == 'C' && pos < count) {
+            ++pos;
+        } else if (byte == 'D' && pos > 0) {
+            --pos;
+        } else if (byte < 0x40 || byte > 0x7E) {
+            string_.csi = 2;  // a longer sequence, passed over to its end
+        }
+    } else if (string_.csi == 2) {
+        if (byte >= 0x40 && byte <= 0x7E) {
+            string_.csi = 0;
+        }
+        return;
+    } else if (byte == 0x9B) {
+        string_.csi = 1;
+        return;
+    } else if (byte == '\n' || byte == '\r' || byte == '\t') {
+        end_string(true, byte == '\t' ? 0x09 : 0x0D);
+        return;
+    } else if (byte == 0x1B) {
+        end_string(false, 0);
+        return;
+    } else if (byte == 0x08 || byte == 0x7F) {
+        const u32 at = byte == 0x08 ? (pos > 0 ? pos - 1 : count) : pos;
+        if (at < count) {
+            for (u32 i = at; i + 1 < count; ++i) {
+                b.w8(buffer + i, b.r8(buffer + i + 1));
+            }
+            --count;
+            pos = at;
+        }
+    } else if (byte >= 0x20 && (byte < 0x7F || byte >= 0xA0) && count + 1 < max) {
+        for (u32 i = count; i > pos; --i) {
+            b.w8(buffer + i, b.r8(buffer + i - 1));
+        }
+        b.w8(buffer + pos, byte);
+        ++count;
+        ++pos;
+    }
+    b.w8(buffer + count, 0);
+    b.w16(si + ndk::si_NumChars, count);
+    b.w16(si + ndk::si_BufferPos, pos);
+    const WindowRecord* rec = find_window_record(string_.window);
+    if (rec != nullptr && b.ok()) {
+        draw_string_gadget(b, string_.window, rec->rp, gadget);
+    }
+}
+
+// The code a prop gadget's messages carry: what gadtools makes of its
+// pot for a scroller of its own, 0 for any other.
+u16 Intuition::prop_code(Bus& b, u32 gadget) {
+    if (gadget_prop_code_ == nullptr ||
+        (b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) == 0) {
+        return 0;
+    }
+    return gadget_prop_code_(gadget_renderer_ctx_, gadget);
 }
 
 bool Intuition::blocked(u32 window) const {
@@ -5322,7 +5593,8 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
             return false;
         }
         if (gtype != ndk::GTYP_PROPGADGET) {
-            if (gtype != ndk::GTYP_BOOLGADGET && gtype != ndk::GTYP_CUSTOMGADGET) {
+            if (gtype != ndk::GTYP_BOOLGADGET && gtype != ndk::GTYP_CUSTOMGADGET &&
+                gtype != ndk::GTYP_STRGADGET) {
                 log_unhandled_gadget_type(gtype);
             }
             gadget = next;
@@ -5349,7 +5621,7 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
             draw_w.rp = rec->rp;
             draw_prop_gadget(*graphics_, b, draw_w, gadget);
             if ((activation & ndk::GACT_IMMEDIATE) != 0) {
-                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, prop_code(b, gadget), gadget);
             }
             return true;
         }
@@ -5381,10 +5653,10 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
         call_gadget_hook(gadget, new_vpot);
         if (window_open(window)) {
             if ((activation & ndk::GACT_IMMEDIATE) != 0) {
-                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, prop_code(b, gadget), gadget);
             }
             if ((activation & ndk::GACT_RELVERIFY) != 0) {
-                post_intuimessage(window, ndk::IDCMP_GADGETUP, 0, gadget);
+                post_intuimessage(window, ndk::IDCMP_GADGETUP, prop_code(b, gadget), gadget);
             }
             pressed_gadget_window_ = window;
             pressed_gadget_ = GadgetKind::Prop;
@@ -5443,7 +5715,7 @@ void Intuition::drag_prop(i32 x, i32 y) {
         call_gadget_hook(gadget, new_vpot);
     }
     if (window_open(window) && (activation & ndk::GACT_FOLLOWMOUSE) != 0) {
-        post_intuimessage(window, ndk::IDCMP_MOUSEMOVE, 0, gadget);
+        post_intuimessage(window, ndk::IDCMP_MOUSEMOVE, prop_code(b, gadget), gadget);
     }
 }
 
@@ -5480,7 +5752,7 @@ void Intuition::end_prop_drag() {
         }
     }
     if ((gflags & ndk::GFLG_DISABLED) == 0 && (activation & ndk::GACT_RELVERIFY) != 0) {
-        post_intuimessage(window, ndk::IDCMP_GADGETUP, 0, gadget);
+        post_intuimessage(window, ndk::IDCMP_GADGETUP, prop_code(b, gadget), gadget);
     }
 }
 

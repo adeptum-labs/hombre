@@ -23,6 +23,8 @@
 
 #include "gadtools.hpp"
 
+#include "intuition.hpp"
+
 #include "gfx.hpp"
 #include "graphics.hpp"
 #include "utility.hpp"
@@ -65,7 +67,11 @@ constexpr u32 gt_ColorOffset = 70;
 constexpr u32 gt_ColorTable = 72;
 constexpr u32 gt_IndicatorWidth = 76;
 constexpr u32 gt_IndicatorHeight = 78;
-constexpr u32 kGadgetBytes = 80;
+// A string gadget's StringInfo, whose buffer is the text copy.
+constexpr u32 gt_StringInfo = 80;
+// A scroller's PropInfo, which Intuition moves.
+constexpr u32 gt_PropInfo = gt_StringInfo + ndk::StringInfo_SIZEOF;
+constexpr u32 kGadgetBytes = gt_PropInfo + ndk::PropInfo_SIZEOF + 2;
 constexpr u32 kMaxCycleLabels = 256;
 constexpr u32 kMaxPaletteColors = 256;
 constexpr u16 kOptBorder = 0x1;
@@ -352,6 +358,15 @@ struct GadToolsNatives {
         }
         b.w32(gadget + gt_Text, at);
         b.w32(gadget + gt_CopyBytes, bytes);
+        if (buffer) {
+            const u32 si = gadget + gt_StringInfo;
+            b.w32(si + ndk::si_Buffer, at);
+            b.w16(si + ndk::si_MaxChars, bytes);
+            b.w16(si + ndk::si_NumChars, length);
+            b.w16(si + ndk::si_BufferPos, length);
+            b.w16(si + ndk::si_DispPos, 0);
+            b.w32(gadget + ndk::gg_SpecialInfo, si);
+        }
     }
 
     // The tags a gadget takes at CreateGadgetA and GT_SetGadgetAttrsA.
@@ -458,6 +473,32 @@ struct GadToolsNatives {
             const bool keep_copy = copy || b.r32(gadget + gt_CopyBytes) != 0;
             set_text(g, b, gadget, text, keep_copy);
         }
+        if (b.r16(gadget + gt_Kind) == SCROLLER_KIND) {
+            sync_scroller(b, gadget);
+        }
+    }
+
+    // A scroller's PropInfo from its top, total and visible part: the
+    // knob as long as the part that shows, as far along as the top.
+    static void sync_scroller(Bus& b, u32 gadget) {
+        const u32 pi = gadget + gt_PropInfo;
+        const bool across = b.r16(gadget + gt_Freedom) == LORIENT_HORIZ;
+        const u64 total = b.r32(gadget + gt_Total);
+        const u64 visible = b.r16(gadget + gt_Visible);
+        const u64 top = b.r32(gadget + gt_Number);
+        u32 body = ndk::MAXBODY;
+        u32 pot = 0;
+        if (total > visible) {
+            body = static_cast<u32>(visible * ndk::MAXBODY / total);
+            const u64 range = total - visible;
+            pot = static_cast<u32>((top > range ? range : top) * ndk::MAXPOT / range);
+        }
+        b.w16(pi + ndk::pi_Flags, ndk::AUTOKNOB | ndk::PROPNEWLOOK |
+                                      (across ? ndk::FREEHORIZ : ndk::FREEVERT));
+        b.w16(pi + ndk::pi_HorizPot, across ? pot : 0);
+        b.w16(pi + ndk::pi_VertPot, across ? 0 : pot);
+        b.w16(pi + ndk::pi_HorizBody, across ? body : ndk::MAXBODY);
+        b.w16(pi + ndk::pi_VertBody, across ? ndk::MAXBODY : body);
     }
 
     // CreateGadgetA: kind in D0, the gadget before it at A0, the NewGadget
@@ -483,7 +524,8 @@ struct GadToolsNatives {
         b.w16(gadget + ndk::gg_Width, b.r16(ng + ng_Width));
         b.w16(gadget + ndk::gg_Height, b.r16(ng + ng_Height));
         b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
-        const bool clicks = kind == BUTTON_KIND || kind == CYCLE_KIND || kind == PALETTE_KIND;
+        const bool clicks = kind == BUTTON_KIND || kind == CYCLE_KIND || kind == PALETTE_KIND ||
+                            kind == STRING_KIND;
         b.w16(gadget + ndk::gg_Activation, clicks ? ndk::GACT_RELVERIFY : 0);
         if (kind == PALETTE_KIND) {
             // One plane and colour 1, unless the tags say otherwise.
@@ -493,7 +535,16 @@ struct GadToolsNatives {
         if (kind == SCROLLER_KIND) {
             b.w16(gadget + gt_Freedom, LORIENT_HORIZ);
         }
-        b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_GADTOOLS | ndk::GTYP_BOOLGADGET);
+        b.w16(gadget + ndk::gg_GadgetType,
+              ndk::GTYP_GADTOOLS |
+                  (kind == STRING_KIND     ? ndk::GTYP_STRGADGET
+                   : kind == SCROLLER_KIND ? ndk::GTYP_PROPGADGET
+                                           : ndk::GTYP_BOOLGADGET));
+        if (kind == SCROLLER_KIND) {
+            b.w16(gadget + ndk::gg_Activation,
+                  ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE | ndk::GACT_FOLLOWMOUSE);
+            b.w32(gadget + ndk::gg_SpecialInfo, gadget + gt_PropInfo);
+        }
         b.w16(gadget + ndk::gg_GadgetID, b.r16(ng + ng_GadgetID));
         b.w32(gadget + ndk::gg_UserData, b.r32(ng + ng_UserData));
         b.w16(gadget + gt_Kind, kind);
@@ -532,7 +583,13 @@ struct GadToolsNatives {
         Bus b(m);
         apply_tags(g, b, gadget, m.cpu.a[3], false);
         if (window != 0 && b.ok()) {
-            g.render(window, b.r32(window + ndk::wd_RPort), gadget);
+            const u32 kind = b.r16(gadget + gt_Kind);
+            // Intuition draws a scroller's prop and a string's cursor.
+            if ((kind == SCROLLER_KIND || kind == STRING_KIND) && g.intuition_ != nullptr) {
+                g.intuition_->refresh_glist(gadget, window, 1);
+            } else {
+                g.render(window, b.r32(window + ndk::wd_RPort), gadget);
+            }
         }
     }
 
@@ -1093,46 +1150,6 @@ void GadTools::draw_cycle(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 rig
     gfx.text(rp, reinterpret_cast<const u8*>(text), shown);
 }
 
-// A scroller's knob, as long as the part of the total that shows and as
-// far along as its top.
-void GadTools::draw_scroller(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
-                             i32 bottom) {
-    Graphics& gfx = *graphics_;
-    const bool across = b.r16(gadget + gt_Freedom) == LORIENT_HORIZ;
-    const u64 total = b.r32(gadget + gt_Total);
-    const u64 visible = b.r16(gadget + gt_Visible);
-    const u64 first = b.r32(gadget + gt_Number);
-    const i32 x0 = left + 2;
-    const i32 y0 = top + 2;
-    const i32 x1 = right - 2;
-    const i32 y1 = bottom - 2;
-    const i32 span = across ? x1 - x0 + 1 : y1 - y0 + 1;
-    if (span <= 0 || y1 < y0 || x1 < x0) {
-        return;
-    }
-    i32 knob = span;
-    i32 at = 0;
-    if (total > visible && total != 0) {
-        knob = static_cast<i32>(static_cast<u64>(span) * visible / total);
-        knob = knob < 4 ? (span < 4 ? span : 4) : knob;
-        const u64 range = total - visible;
-        const u64 shown = first > range ? range : first;
-        at = static_cast<i32>(static_cast<u64>(span - knob) * shown / range);
-    }
-    const Rect k = across ? Rect{x0 + at, y0, x0 + at + knob - 1, y1}
-                          : Rect{x0, y0 + at, x1, y0 + at + knob - 1};
-    gfx.set_pens(rp, 0, 0, ndk::JAM1);
-    gfx.rect_fill(rp, k.x0, k.y0, k.x1, k.y1);
-    gfx.set_pens(rp, kShinePen, 0, ndk::JAM1);
-    gfx.move(rp, k.x0, k.y1);
-    gfx.draw_line(rp, k.x0, k.y0);
-    gfx.draw_line(rp, k.x1, k.y0);
-    gfx.set_pens(rp, kShadowPen, 0, ndk::JAM1);
-    gfx.move(rp, k.x1, k.y0 + 1);
-    gfx.draw_line(rp, k.x1, k.y1);
-    gfx.draw_line(rp, k.x0 + 1, k.y1);
-}
-
 void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                             i32 bottom) {
     Graphics& gfx = *graphics_;
@@ -1183,6 +1200,27 @@ void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 r
 // on to its next choice, a palette takes the colour under the pointer.
 // The code its IDCMP_GADGETUP carries; false for a kind that is no
 // gadtools gadget.
+// A scroller Intuition moved: its top from the knob's place, which its
+// messages carry.
+u16 GadTools::prop_code(u32 gadget) {
+    if (machine_ == nullptr || gadget == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    if (b.r16(gadget + gt_Kind) != SCROLLER_KIND) {
+        return 0;
+    }
+    const u32 pi = gadget + gt_PropInfo;
+    const bool across = b.r16(gadget + gt_Freedom) == LORIENT_HORIZ;
+    const u64 total = b.r32(gadget + gt_Total);
+    const u64 visible = b.r16(gadget + gt_Visible);
+    const u64 pot = across ? b.r16(pi + ndk::pi_HorizPot) : b.r16(pi + ndk::pi_VertPot);
+    const u64 range = total > visible ? total - visible : 0;
+    const u32 top = static_cast<u32>((pot * range + ndk::MAXPOT / 2) / ndk::MAXPOT);
+    b.w32(gadget + gt_Number, top);
+    return static_cast<u16>(top);
+}
+
 bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
     (void)window;
     if (machine_ == nullptr || gadget == 0) {
@@ -1270,16 +1308,24 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     // What a display shows, cut to fit inside it.
     char text[256];
     u32 length = 0;
-    if (kind == TEXT_KIND || kind == STRING_KIND) {
+    // A string gadget shows its text from its display position on;
+    // Intuition draws the cursor over it while it is being edited.
+    if (kind == TEXT_KIND) {
         length = read_label(b, b.r32(gadget + gt_Text), 0, text, sizeof text);
+    } else if (kind == STRING_KIND) {
+        const u32 si = gadget + gt_StringInfo;
+        const u32 disp = b.r16(si + ndk::si_DispPos);
+        const u32 count = b.r16(si + ndk::si_NumChars);
+        const u32 buffer = b.r32(si + ndk::si_Buffer);
+        for (u32 i = disp; buffer != 0 && i < count && length < sizeof text; ++i) {
+            text[length++] = static_cast<char>(b.r8(buffer + i));
+        }
     } else if (kind == NUMBER_KIND) {
         length = format_number(static_cast<i32>(b.r32(gadget + gt_Number)), text);
     } else if (kind == CYCLE_KIND) {
         draw_cycle(b, rp, gadget, left, top, right, bottom, baseline, selected);
     } else if (kind == PALETTE_KIND) {
         draw_palette(b, rp, gadget, left, top, right, bottom);
-    } else if (kind == SCROLLER_KIND) {
-        draw_scroller(b, rp, gadget, left, top, right, bottom);
     }
     if (length != 0 && room > 0) {
         const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);

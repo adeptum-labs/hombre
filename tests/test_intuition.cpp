@@ -6353,7 +6353,87 @@ void intuitext_borders_and_blocking_requests() {
     reply_msg(r, msg);
 }
 
+void a_string_gadget_is_edited_from_the_keyboard() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    // A string gadget of 40 characters at most, holding "ab".
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 si = r.exec.alloc(StringInfo_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 buffer = r.exec.alloc(40, MEMF_PUBLIC | MEMF_CLEAR);
+    r.str(buffer, "ab");
+    r.put32(si + si_Buffer, buffer);
+    r.put16(si + si_MaxChars, 40);
+    r.put16(si + si_NumChars, 2);
+    put_gadget(r, gad, 0, 20, 20, 120, 10, GFLG_GADGHCOMP, GACT_RELVERIFY, GTYP_STRGADGET, 0);
+    r.put32(gad + gg_SpecialInfo, si);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    CHECK(!r.intuition.string_active());
+
+    // A click after the text puts the cursor at its end; typing goes in
+    // there, Backspace and the cursor keys edit it.
+    r.intuition.pointer_event(50 + 20 + 100, 50 + 24, 1, 1, 0, true);
+    r.intuition.pointer_event(50 + 20 + 100, 50 + 24, 0, 0, 1, false);
+    CHECK(r.intuition.string_active());
+    CHECK_EQ(r.get16(si + si_BufferPos), 2u);
+    for (const u8 key : {u8('c'), u8(0x08), u8('d'), u8(0x9B), u8('D'), u8(0x9B), u8('D'),
+                         u8('X'), u8(0x7F)}) {
+        r.intuition.string_key(key);
+    }
+    CHECK(r.read_str(buffer) == "aXd");
+    CHECK_EQ(r.get16(si + si_NumChars), 3u);
+    CHECK_EQ(get_msg(r, port), 0u);
+    // Return ends it with GADGETUP.
+    r.intuition.string_key('\n');
+    CHECK(!r.intuition.string_active());
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    CHECK_EQ(r.get32(msg + im_IAddress), gad);
+    reply_msg(r, msg);
+
+    // ActivateGadget starts the editing again; Esc ends it with no word.
+    r.cpu().a[0] = gad;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ActivateGadget), 1u);
+    CHECK(r.intuition.string_active());
+    r.intuition.string_key(0x1B);
+    CHECK(!r.intuition.string_active());
+    CHECK_EQ(get_msg(r, port), 0u);
+    // Typing is not taken past MaxChars - 1.
+    r.cpu().a[0] = gad;
+    r.cpu().a[1] = window;
+    r.call(Base::Intuition, intuition_lvo::ActivateGadget);
+    for (u32 i = 0; i < 50; ++i) {
+        r.intuition.string_key('z');
+    }
+    CHECK_EQ(r.get16(si + si_NumChars), 39u);
+    // A press elsewhere ends it.
+    r.intuition.pointer_event(200, 130, 1, 1, 0, true);
+    r.intuition.pointer_event(200, 130, 0, 0, 1, false);
+    CHECK(!r.intuition.string_active());
+
+    // DoubleClick: within a second.
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = 500000;
+    r.cpu().d[2] = 11;
+    r.cpu().d[3] = 400000;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 1u);
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = 0;
+    r.cpu().d[2] = 11;
+    r.cpu().d[3] = 1;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 0u);
+}
+
 int main() {
+    a_string_gadget_is_edited_from_the_keyboard();
     intuitext_borders_and_blocking_requests();
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();

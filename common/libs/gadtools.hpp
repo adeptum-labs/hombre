@@ -42,6 +42,7 @@
 namespace hombre {
 
 class Graphics;
+class Intuition;
 
 // Library vector offsets of gadtools.library, n of LVO -n, as the 3.1
 // function description numbers them.
@@ -93,6 +94,13 @@ public:
         return static_cast<GadTools*>(ctx)->render(window, rp, gadget);
     }
     bool release(u32 window, u32 gadget, i32 x, i32 y, u16& code);
+    u16 prop_code(u32 gadget);
+    static u16 prop_gadget_code(void* ctx, u32 gadget) {
+        return static_cast<GadTools*>(ctx)->prop_code(gadget);
+    }
+    // Intuition, which draws the scrollers and string gadgets gadtools
+    // makes when their attributes change.
+    void set_intuition(Intuition* intuition) { intuition_ = intuition; }
     static bool release_gadget(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code) {
         return static_cast<GadTools*>(ctx)->release(window, gadget, x, y, code);
     }
@@ -105,14 +113,13 @@ private:
     void draw_palette(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                       i32 bottom);
     void ghost(u32 rp, u32 flags, i32 left, i32 top, i32 right, i32 bottom);
-    void draw_scroller(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
-                       i32 bottom);
 
     static constexpr u32 kVectors = gadtools_lvo::GT_GetGadgetAttrsA / 6;
 
     m68k::Machine* machine_ = nullptr;
     Exec* exec_ = nullptr;
     Graphics* graphics_ = nullptr;
+    Intuition* intuition_ = nullptr;
     u32 base_ = 0;
     bool unhandled_kinds_[14]{};
     NativeVector vectors_[kVectors]{};

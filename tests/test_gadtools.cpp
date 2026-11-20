@@ -746,6 +746,13 @@ void strings_keep_a_buffer_and_scrollers_their_place() {
     r.cpu().a[3] = r.tags(kTags, {{GTST_String, kAnswer}, {TAG_DONE, 0}});
     CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
     CHECK(r.read_str(r.get32(kAnswer)) == "Work:");
+    // An Intuition string gadget, its StringInfo over that buffer.
+    CHECK_EQ(r.get16(string + gg_GadgetType), GTYP_GADTOOLS | GTYP_STRGADGET);
+    const u32 si = r.get32(string + gg_SpecialInfo);
+    CHECK(si != 0);
+    CHECK_EQ(r.get32(si + si_Buffer), r.get32(kAnswer));
+    CHECK_EQ(r.get16(si + si_NumChars), 5u);
+    CHECK(r.get16(si + si_MaxChars) >= 64u);
     // An empty string gadget still has a buffer to read.
     put_new_gadget(r, 10, 40, 120, 14, 0, 2, 0, 0);
     const u32 empty = create_gadget(r, g, STRING_KIND, string, 0);
@@ -767,6 +774,20 @@ void strings_keep_a_buffer_and_scrollers_their_place() {
     CHECK_EQ(r.get32(kAnswer), 5u);
     CHECK_EQ(r.get32(kAnswer + 4), 100u);
     CHECK_EQ(r.get32(kAnswer + 8), 10u);
+    // An Intuition prop gadget across, a tenth of it showing, the top 5 of
+    // 90 along; a knob moved to its end tops at 90.
+    CHECK_EQ(r.get16(scroller + gg_GadgetType), GTYP_GADTOOLS | GTYP_PROPGADGET);
+    const u32 pi = r.get32(scroller + gg_SpecialInfo);
+    CHECK(pi != 0);
+    CHECK_EQ(r.get16(pi + pi_Flags) & FREEHORIZ, FREEHORIZ);
+    CHECK_EQ(r.get16(pi + pi_HorizBody), 10u * MAXBODY / 100);
+    CHECK_EQ(r.get16(pi + pi_HorizPot), 5u * MAXPOT / 90);
+    r.put16(pi + pi_HorizPot, MAXPOT);
+    CHECK_EQ(g.prop_code(scroller), 90u);
+    r.cpu().a[0] = scroller;
+    r.cpu().a[3] = r.tags(kTags, {{GTSC_Top, kAnswer}, {TAG_DONE, 0}});
+    gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA);
+    CHECK_EQ(r.get32(kAnswer), 90u);
     CHECK(!logged("gadtools: gadget kind 12 not handled"));
     CHECK(!logged("gadtools: gadget kind 9 not handled"));
 

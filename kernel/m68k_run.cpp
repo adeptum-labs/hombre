@@ -205,6 +205,8 @@ void open_amiga_screen(const BootInfo& info) {
     intuition.set_clock(&clock_us);
     intuition.set_gadget_renderer(&GadTools::render_gadget, &gadtools);
     intuition.set_gadget_release(&GadTools::release_gadget);
+    intuition.set_gadget_prop_code(&GadTools::prop_gadget_code);
+    gadtools.set_intuition(&intuition);
     constexpr char title[] = "Hombre Workbench";
     const u32 new_screen = exec.alloc(ndk::NewScreen_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     const u32 title_at = exec.alloc(sizeof(title), ndk::MEMF_PUBLIC);
@@ -554,6 +556,11 @@ void poll_keys() {
                            keymap_se(usage, report[0], false) == '\\') {
                     key_queue_push(c, ctrl_backslash);
                 }
+            }
+        } else if (intuition.string_active()) {
+            // A string gadget being edited takes the keys.
+            for (usize k = 0; k < count; ++k) {
+                intuition.string_key(chars[k]);
             }
         } else {
             for (usize k = 0; k < count; ++k) {

@@ -345,6 +345,18 @@ constexpr u32 GACT_BOTTOMBORDER = 0x80;
 constexpr u32 GTYP_PROPGADGET = 3;
 constexpr u32 GTYP_GTYPEMASK = 7;
 constexpr u32 GTYP_BOOLGADGET = 1;
+constexpr u32 GTYP_STRGADGET = 4;
+
+// struct StringInfo, the SpecialInfo of a string gadget.
+constexpr u32 si_Buffer = 0;
+constexpr u32 si_UndoBuffer = 4;
+constexpr u32 si_BufferPos = 8;
+constexpr u32 si_MaxChars = 10;
+constexpr u32 si_DispPos = 12;
+constexpr u32 si_UndoPos = 14;
+constexpr u32 si_NumChars = 16;
+constexpr u32 si_DispCount = 18;
+constexpr u32 StringInfo_SIZEOF = 36;
 constexpr u32 GTYP_GADTOOLS = 0x100;  // a gadget gadtools.library made and draws
 
 constexpr u32 GFLG_GADGHIGHBITS = 0x3;
