@@ -642,6 +642,47 @@ struct GraphicsNatives {
                           static_cast<i16>(m.cpu.d[1]));
     }
 
+    // PolyDraw(rp A1, count D0, array A0): lines from the pen position
+    // through count points, WORD x and y pairs.
+    static void poly_draw(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 rp = m.cpu.a[1];
+        const u32 array = m.cpu.a[0];
+        const u32 count = m.cpu.d[0] & 0xFFFF;
+        for (u32 i = 0; i < count && b.ok(); ++i) {
+            const i32 x = static_cast<i16>(b.r16(array + i * 4));
+            const i32 y = static_cast<i16>(b.r16(array + i * 4 + 2));
+            if (b.ok()) {
+                g.draw_line(rp, x, y);
+            }
+        }
+    }
+
+    // ClipBlit(src rp A0, x D0, y D1, dst rp A1, x D2, y D3, width D4,
+    // height D5, minterm D6): from the source rastport's bitmap, offset by
+    // its layer. Parts of the source that other windows cover are copied
+    // as they are on the screen.
+    static void clip_blit(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const auto word = [&](u32 r) { return static_cast<i32>(static_cast<i16>(r & 0xFFFF)); };
+        const u32 src = m.cpu.a[0];
+        const u32 bitmap = b.r32(src + ndk::rp_BitMap);
+        const u32 layer = b.r32(src + ndk::rp_Layer);
+        i32 x = word(m.cpu.d[0]);
+        i32 y = word(m.cpu.d[1]);
+        if (layer != 0) {
+            x += static_cast<i16>(b.r16(layer + ndk::ly_MinX));
+            y += static_cast<i16>(b.r16(layer + ndk::ly_MinY));
+        }
+        if (!b.ok() || bitmap == 0) {
+            return;
+        }
+        g.blt_bitmap_rastport(bitmap, x, y, m.cpu.a[1], word(m.cpu.d[2]), word(m.cpu.d[3]),
+                              word(m.cpu.d[4]), word(m.cpu.d[5]), m.cpu.d[6] & 0xFF);
+    }
+
     static void set_rgb4(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
@@ -1107,6 +1148,58 @@ struct GraphicsNatives {
         native::set_result(m, b.ok() ? pen : 0xFFFFFFFF);
     }
 
+    // BltTemplate(source A0, bit x D0, modulo D1, rp A1, x D2, y D3, width
+    // D4, height D5): a one-bit template drawn with the rastport's pens and
+    // draw mode, as text is: set bits in the foreground pen, clear ones in
+    // the background pen under JAM2, COMPLEMENT flipping instead.
+    static void blt_template(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        const u32 rp = m.cpu.a[1];
+        const u32 source = m.cpu.a[0];
+        if (rp == 0 || source == 0) {
+            return;
+        }
+        Bus b(m);
+        const View v = raster::load_rastport(b, rp);
+        if (!v.ok) {
+            return;
+        }
+        const raster::Pens p = pens(b, rp);
+        const u32 first_bit = m.cpu.d[0] & 0xF;
+        const i32 modulo = static_cast<i16>(m.cpu.d[1]);
+        const i32 x0 = static_cast<i16>(m.cpu.d[2]) + v.origin_x;
+        const i32 y0 = static_cast<i16>(m.cpu.d[3]) + v.origin_y;
+        const i32 width = static_cast<i16>(m.cpu.d[4]);
+        const i32 height = static_cast<i16>(m.cpu.d[5]);
+        const bool inverse = (p.mode & ndk::INVERSVID) != 0;
+        for (i32 row = 0; row < height && b.ok(); ++row) {
+            const u32 line = source + static_cast<u32>(row * modulo);
+            for (i32 col = 0; col < width && b.ok(); ++col) {
+                const u32 bit = first_bit + static_cast<u32>(col);
+                const bool set = ((b.r8(line + bit / 8) >> (7 - bit % 8)) & 1) != 0;
+                const bool on = set != inverse;
+                const i32 x = x0 + col;
+                const i32 y = y0 + row;
+                if (!drawable(b, v, x, y)) {
+                    continue;
+                }
+                if ((p.mode & ndk::COMPLEMENT) != 0) {
+                    if (on) {
+                        raster::write_pixel(b, v.bitmap, x, y,
+                                            ~raster::read_pixel(b, v.bitmap, x, y) & 0xFF);
+                    }
+                } else if (on) {
+                    raster::write_pixel(b, v.bitmap, x, y, p.fg);
+                } else if ((p.mode & ndk::JAM2) != 0) {
+                    raster::write_pixel(b, v.bitmap, x, y, p.bg);
+                }
+            }
+        }
+        if (b.ok() && width > 0 && height > 0) {
+            report(g.display_, m, v, Rect{x0, y0, x0 + width - 1, y0 + height - 1});
+        }
+    }
+
     static void write_pixel(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         const u32 rp = m.cpu.a[1];
@@ -1534,6 +1627,258 @@ struct GraphicsNatives {
         }
     }
 
+    static void ready_pens(Graphics& g) {
+        if (g.pens_ready_) {
+            return;
+        }
+        for (u32 i = 0; i < Graphics::kPens; ++i) {
+            g.pen_users_[i] = i < Graphics::kSystemPens ? 1 : 0;
+            g.pen_exclusive_[i] = false;
+        }
+        g.pens_ready_ = true;
+    }
+
+    // The pen of the colour map closest to r, g, b (32-bit components),
+    // among the first count pens and those that may be shared when
+    // shared_only.
+    static i32 nearest_pen(Graphics& g, u32 map, u32 count, u32 r, u32 gr, u32 bl,
+                           bool shared_only) {
+        i32 best = -1;
+        u32 best_distance = 0xFFFFFFFF;
+        for (u32 pen = 0; pen < count && pen < Graphics::kPens; ++pen) {
+            if (shared_only && (g.pen_exclusive_[pen] || g.pen_users_[pen] == 0)) {
+                continue;
+            }
+            u8 pr = 0;
+            u8 pg = 0;
+            u8 pb = 0;
+            if (!g.color_of(map, pen, pr, pg, pb)) {
+                continue;
+            }
+            const i32 dr = static_cast<i32>(pr) - static_cast<i32>(r >> 24);
+            const i32 dg = static_cast<i32>(pg) - static_cast<i32>(gr >> 24);
+            const i32 db = static_cast<i32>(pb) - static_cast<i32>(bl >> 24);
+            const u32 distance = static_cast<u32>(dr * dr + dg * dg + db * db);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best = static_cast<i32>(pen);
+            }
+        }
+        return best;
+    }
+
+    // ObtainPen(cm A0, n D0, r D1, g D2, b D3, flags D4): pen n, or any free
+    // one when n is -1, for the caller; PENF_EXCLUSIVE keeps it from being
+    // shared, and its colour is set unless PENF_NO_SETCOLOR. -1 when none.
+    static void obtain_pen(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        ready_pens(g);
+        constexpr u32 kExclusive = 1;
+        constexpr u32 kNoSetColor = 2;
+        const u32 map = m.cpu.a[0];
+        const ColorMapTables t = colormap_tables(b, map);
+        const u32 count = t.limit < Graphics::kPens ? t.limit : Graphics::kPens;
+        const u32 flags = m.cpu.d[4];
+        const bool exclusive = (flags & kExclusive) != 0;
+        i32 pen = -1;
+        const u32 wanted = m.cpu.d[0];
+        if (wanted == 0xFFFFFFFF) {
+            for (u32 i = count; i-- > Graphics::kSystemPens;) {
+                if (g.pen_users_[i] == 0) {
+                    pen = static_cast<i32>(i);
+                    break;
+                }
+            }
+        } else if (wanted < count && !g.pen_exclusive_[wanted] &&
+                   (g.pen_users_[wanted] == 0 || !exclusive)) {
+            pen = static_cast<i32>(wanted);
+        }
+        if (pen < 0) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        const bool fresh = g.pen_users_[pen] == 0;
+        ++g.pen_users_[pen];
+        g.pen_exclusive_[pen] = exclusive;
+        if (fresh && (flags & kNoSetColor) == 0 &&
+            write_rgb32_entry(b, t, static_cast<u32>(pen), m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
+            bump_palette(g.display_);
+            mark_colormap_dirty(g.display_, m, map);
+        }
+        native::set_result(m, static_cast<u32>(pen));
+    }
+
+    // ReleasePen(cm A0, n D0): one user fewer of pen n.
+    static void release_pen(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        ready_pens(g);
+        const u32 pen = m.cpu.d[0];
+        if (pen < Graphics::kPens && g.pen_users_[pen] > 0) {
+            if (--g.pen_users_[pen] == 0) {
+                g.pen_exclusive_[pen] = false;
+            }
+        }
+    }
+
+    // ObtainBestPenA(cm A0, r D1, g D2, b D3, tags A1): the shared pen
+    // closest to the colour, or a free one set to it when none is close.
+    static void obtain_best_pen(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        ready_pens(g);
+        const u32 map = m.cpu.a[0];
+        const ColorMapTables t = colormap_tables(b, map);
+        const u32 count = t.limit < Graphics::kPens ? t.limit : Graphics::kPens;
+        const u32 r = m.cpu.d[1];
+        const u32 gr = m.cpu.d[2];
+        const u32 bl = m.cpu.d[3];
+        i32 pen = nearest_pen(g, map, count, r, gr, bl, true);
+        u8 pr = 0;
+        u8 pg = 0;
+        u8 pb = 0;
+        const bool exact = pen >= 0 && g.color_of(map, static_cast<u32>(pen), pr, pg, pb) &&
+                           pr == (r >> 24) && pg == (gr >> 24) && pb == (bl >> 24);
+        if (!exact) {
+            for (u32 i = count; i-- > Graphics::kSystemPens;) {
+                if (g.pen_users_[i] == 0) {
+                    if (write_rgb32_entry(b, t, i, r, gr, bl)) {
+                        bump_palette(g.display_);
+                        mark_colormap_dirty(g.display_, m, map);
+                        pen = static_cast<i32>(i);
+                    }
+                    break;
+                }
+            }
+        }
+        if (pen < 0) {
+            native::set_result(m, 0xFFFFFFFF);
+            return;
+        }
+        ++g.pen_users_[pen];
+        native::set_result(m, static_cast<u32>(pen));
+    }
+
+    // FindColor(cm A3, r D1, g D2, b D3, maxpen D4): the closest pen up to
+    // maxpen, or of the whole map when maxpen is -1. Nothing is obtained.
+    static void find_color(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 map = m.cpu.a[3];
+        const ColorMapTables t = colormap_tables(b, map);
+        u32 count = t.limit < Graphics::kPens ? t.limit : Graphics::kPens;
+        const u32 max_pen = m.cpu.d[4];
+        if (max_pen != 0xFFFFFFFF && max_pen + 1 < count) {
+            count = max_pen + 1;
+        }
+        const i32 pen = nearest_pen(g, map, count, m.cpu.d[1], m.cpu.d[2], m.cpu.d[3], false);
+        native::set_result(m, pen < 0 ? 0 : static_cast<u32>(pen));
+    }
+
+    // GetVPModeID(vp A0): every screen is 640 by 400, high resolution and
+    // interlaced: HIRESLACE_KEY of the default monitor.
+    static void get_vp_mode_id(void*, Machine& m) {
+        constexpr u32 kHiresLaceKey = 0x8004;
+        native::set_result(m, m.cpu.a[0] != 0 ? kHiresLaceKey : 0xFFFFFFFF);
+    }
+
+    // FindDisplayInfo(ID D0): a handle for the one mode, 0 for any other.
+    static void find_display_info(void*, Machine& m) {
+        constexpr u32 kHiresLaceKey = 0x8004;
+        constexpr u32 kHandle = 0x00010000;  // never read, only handed back
+        native::set_result(m, m.cpu.d[0] == kHiresLaceKey ? kHandle : 0);
+    }
+
+    // NextDisplayInfo(last ID D0): the one mode after INVALID_ID, then
+    // INVALID_ID.
+    static void next_display_info(void*, Machine& m) {
+        constexpr u32 kHiresLaceKey = 0x8004;
+        native::set_result(m, m.cpu.d[0] == 0xFFFFFFFF ? kHiresLaceKey : 0xFFFFFFFF);
+    }
+
+    // GetDisplayInfoData(handle A0, buf A1, size D0, tagID D1, ID D2): the
+    // DisplayInfo, DimensionInfo or NameInfo of the 640 by 400, 8-plane,
+    // 24-bit colour mode; the number of bytes written, 0 for other tags.
+    static void get_display_info_data(void*, Machine& m) {
+        Bus b(m);
+        constexpr u32 kDisp = 0x80000000;
+        constexpr u32 kDims = 0x80001000;
+        constexpr u32 kName = 0x80003000;
+        constexpr u32 kHiresLaceKey = 0x8004;
+        const u32 buf = m.cpu.a[1];
+        const u32 tag = m.cpu.d[1];
+        u8 data[88] = {};
+        u32 bytes = 0;
+        const auto put16 = [&](u32 at, u32 v) {
+            data[at] = static_cast<u8>(v >> 8);
+            data[at + 1] = static_cast<u8>(v);
+        };
+        const auto put32 = [&](u32 at, u32 v) {
+            put16(at, v >> 16);
+            put16(at + 2, v & 0xFFFF);
+        };
+        const auto rect = [&](u32 at) {
+            put16(at, 0);
+            put16(at + 2, 0);
+            put16(at + 4, 639);
+            put16(at + 6, 399);
+        };
+        if (tag == kDisp) {
+            bytes = 56;
+            put32(18, 0x00000001);  // PropertyFlags: DIPF_IS_LACE
+            put16(22, 22);          // Resolution: ticks a pixel across
+            put16(24, 22);          // and down
+            put16(26, 35);          // PixelSpeed, ns
+            put16(28, 1);           // NumStdSprites
+            put16(30, 0xFFFF);      // PaletteRange: 24-bit colour
+            put16(32, 22);
+            put16(34, 22);
+            data[40] = 8;  // RedBits
+            data[41] = 8;  // GreenBits
+            data[42] = 8;  // BlueBits
+        } else if (tag == kDims) {
+            bytes = 88;
+            put16(16, 8);       // MaxDepth
+            put16(18, 16);      // MinRasterWidth
+            put16(20, 16);      // MinRasterHeight
+            put16(22, 16368);   // MaxRasterWidth
+            put16(24, 16384);   // MaxRasterHeight
+            rect(26);           // Nominal
+            rect(34);           // MaxOScan
+            rect(42);           // VideoOScan
+            rect(50);           // TxtOScan
+            rect(58);           // StdOScan
+        } else if (tag == kName) {
+            bytes = 56;
+            constexpr char kModeName[] = "HOMBRE:640x400";
+            for (u32 i = 0; kModeName[i] != '\0'; ++i) {
+                data[16 + i] = static_cast<u8>(kModeName[i]);
+            }
+        }
+        if (bytes == 0 || buf == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        put32(0, tag);
+        put32(4, kHiresLaceKey);
+        put32(8, 0);
+        put32(12, (bytes + 7) / 8);  // QueryHeader Length, in double longwords
+        const u32 n = m.cpu.d[0] < bytes ? m.cpu.d[0] : bytes;
+        for (u32 i = 0; i < n && b.ok(); ++i) {
+            b.w8(buf + i, data[i]);
+        }
+        native::set_result(m, n);
+    }
+
+    // BestModeIDA(tags A0): the one mode there is, whatever is asked.
+    static void best_mode_id(void*, Machine& m) {
+        constexpr u32 kHiresLaceKey = 0x8004;
+        native::set_result(m, kHiresLaceKey);
+    }
+
+    // ModeNotAvailable(modeID D0): 0, every mode is there to ask for.
+    static void mode_not_available(void*, Machine& m) { native::set_result(m, 0); }
+
     static void set_rgb32_cm(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
@@ -1619,6 +1964,20 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::LoadRGB32, GraphicsNatives::load_rgb32, "LoadRGB32"},
     {graphics_lvo::GetRGB32, GraphicsNatives::get_rgb32, "GetRGB32"},
     {graphics_lvo::SetRGB32CM, GraphicsNatives::set_rgb32_cm, "SetRGB32CM"},
+    {graphics_lvo::ObtainPen, GraphicsNatives::obtain_pen, "ObtainPen"},
+    {graphics_lvo::GetVPModeID, GraphicsNatives::get_vp_mode_id, "GetVPModeID"},
+    {graphics_lvo::BestModeIDA, GraphicsNatives::best_mode_id, "BestModeIDA"},
+    {graphics_lvo::PolyDraw, GraphicsNatives::poly_draw, "PolyDraw"},
+    {graphics_lvo::BltTemplate, GraphicsNatives::blt_template, "BltTemplate"},
+    {graphics_lvo::ClipBlit, GraphicsNatives::clip_blit, "ClipBlit"},
+    {graphics_lvo::FindDisplayInfo, GraphicsNatives::find_display_info, "FindDisplayInfo"},
+    {graphics_lvo::NextDisplayInfo, GraphicsNatives::next_display_info, "NextDisplayInfo"},
+    {graphics_lvo::GetDisplayInfoData, GraphicsNatives::get_display_info_data,
+     "GetDisplayInfoData"},
+    {graphics_lvo::ModeNotAvailable, GraphicsNatives::mode_not_available, "ModeNotAvailable"},
+    {graphics_lvo::ReleasePen, GraphicsNatives::release_pen, "ReleasePen"},
+    {graphics_lvo::ObtainBestPenA, GraphicsNatives::obtain_best_pen, "ObtainBestPenA"},
+    {graphics_lvo::FindColor, GraphicsNatives::find_color, "FindColor"},
 };
 
 }

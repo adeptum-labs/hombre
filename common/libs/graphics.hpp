@@ -97,7 +97,19 @@ constexpr u32 TextExtent = 690;
 constexpr u32 TextFit = 696;
 constexpr u32 FreeRaster = 498;
 constexpr u32 GetRGB4 = 582;
+constexpr u32 BltTemplate = 36;
+constexpr u32 PolyDraw = 336;
+constexpr u32 ClipBlit = 552;
+constexpr u32 FindDisplayInfo = 726;
+constexpr u32 NextDisplayInfo = 732;
+constexpr u32 GetDisplayInfoData = 756;
+constexpr u32 GetVPModeID = 792;
+constexpr u32 ModeNotAvailable = 798;
+constexpr u32 ObtainBestPenA = 840;
 constexpr u32 SetRGB32 = 852;
+constexpr u32 ReleasePen = 948;
+constexpr u32 ObtainPen = 954;
+constexpr u32 FindColor = 1008;
 constexpr u32 GetAPen = 858;
 constexpr u32 GetBPen = 864;
 constexpr u32 GetDrMd = 870;
@@ -112,6 +124,7 @@ constexpr u32 SetMaxPen = 990;
 constexpr u32 ScrollRasterBF = 1002;
 constexpr u32 SetRPAttrsA = 1038;
 constexpr u32 GetRPAttrsA = 1044;
+constexpr u32 BestModeIDA = 1050;
 constexpr u32 LoadRGB32 = 882;
 constexpr u32 GetRGB32 = 900;
 constexpr u32 SetRGB32CM = 996;
@@ -164,6 +177,14 @@ private:
     u32 topaz_name_ = 0;
     u32 topaz_attr_ = 0;
     NativeVector vectors_[kVectors]{};
+    // Who holds each pen of the screen's colour map, for ObtainPen and
+    // ReleasePen: how many share it, and whether one holds it alone. The
+    // first kSystemPens are the system's and stay shared.
+    static constexpr u32 kPens = 256;
+    static constexpr u32 kSystemPens = 8;
+    u16 pen_users_[kPens]{};
+    bool pen_exclusive_[kPens]{};
+    bool pens_ready_ = false;
     u32 blit(native::Bus& b, u32 src, i32 sx, i32 sy, const raster::RastPortView& v,
              const raster::Clip* clip, i32 dx, i32 dy, i32 width, i32 height, u32 minterm,
              u32 mask);
