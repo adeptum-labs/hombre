@@ -1642,7 +1642,93 @@ void clip_region_of_a_superbitmap_layer_is_window_relative() {
 }
 
 
+// The pen at x, y of a two-plane surface.
+u32 surface_pen(GfxRig& r, const Surface& s, u32 width, u32 x, u32 y) {
+    const u32 at = y * ((width + 15) / 16 * 2) + x / 8;
+    const u32 mask = 0x80u >> (x & 7);
+    return ((r.get8(s.plane0 + at) & mask) != 0 ? 1u : 0u) |
+           ((r.get8(s.plane1 + at) & mask) != 0 ? 2u : 0u);
+}
+
+void blt_bitmap_copies_through_the_minterm_and_mask() {
+    GfxRig r;
+    const Surface a = make_sized_surface(r, kBitmap, kRastPort, 32, 8);
+    const Surface b = make_sized_surface(r, kBitmap + 0x40, kRastPort + 0x80, 32, 8);
+    // Pen 3 at 2..5 of row 1 in a, pen 1 at 8 of row 1.
+    for (u32 x = 2; x <= 5; ++x) {
+        r.put8(a.plane0 + 4 + x / 8, r.get8(a.plane0 + 4 + x / 8) | (0x80u >> (x & 7)));
+        r.put8(a.plane1 + 4 + x / 8, r.get8(a.plane1 + 4 + x / 8) | (0x80u >> (x & 7)));
+    }
+    r.put8(a.plane0 + 4 + 1, 0x80);
+
+    // A copy (minterm 0xC0) of 8 by 2 from 2,1 to 10,3, both planes.
+    CHECK_EQ(r.graphics.blt_bitmap(a.bitmap, 2, 1, b.bitmap, 10, 3, 8, 2, 0xC0, 0xFF), 2u);
+    for (u32 x = 10; x <= 13; ++x) {
+        CHECK_EQ(surface_pen(r, b, 32, x, 3), 3u);
+    }
+    CHECK_EQ(surface_pen(r, b, 32, 16, 3), 1u);
+    CHECK_EQ(surface_pen(r, b, 32, 14, 3), 0u);
+    CHECK_EQ(surface_pen(r, b, 32, 10, 4), 0u);
+    CHECK_EQ(surface_pen(r, b, 32, 9, 3), 0u);
+
+    // The mask leaves plane 1 alone; minterm 0x30 writes the inverse.
+    CHECK_EQ(r.graphics.blt_bitmap(a.bitmap, 2, 1, b.bitmap, 10, 3, 4, 1, 0x30, 0x01), 1u);
+    CHECK_EQ(surface_pen(r, b, 32, 10, 3), 2u);
+
+    // Within one bitmap, overlapping: right by one keeps the source whole.
+    CHECK_EQ(r.graphics.blt_bitmap(a.bitmap, 2, 1, a.bitmap, 3, 1, 4, 1, 0xC0, 0xFF), 2u);
+    for (u32 x = 3; x <= 6; ++x) {
+        CHECK_EQ(surface_pen(r, a, 32, x, 1), 3u);
+    }
+    // Down by one, through the same plane, also keeps it whole.
+    CHECK_EQ(r.graphics.blt_bitmap(a.bitmap, 0, 1, a.bitmap, 0, 2, 32, 2, 0xC0, 0xFF), 2u);
+    CHECK_EQ(surface_pen(r, a, 32, 4, 2), 3u);
+    CHECK_EQ(surface_pen(r, a, 32, 4, 3), 0u);
+
+    // Rectangles are cut to the bitmaps.
+    CHECK_EQ(r.graphics.blt_bitmap(a.bitmap, 28, 0, b.bitmap, -2, 0, 8, 1, 0xC0, 0xFF), 2u);
+    CHECK_EQ(r.graphics.blt_bitmap(a.bitmap, 40, 0, b.bitmap, 0, 0, 8, 1, 0xC0, 0xFF), 0u);
+
+    // BltClear: bytes, and rows of bytes with flag bit 1.
+    r.cpu().a[1] = a.plane0;
+    r.cpu().d[0] = 4;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::BltClear), ExitReason::Halt);
+    CHECK_EQ(r.get32(a.plane0), 0u);
+    CHECK(r.get32(a.plane0 + 4) != 0u);
+    r.cpu().a[1] = a.plane0;
+    r.cpu().d[0] = (2u << 16) | 4;
+    r.cpu().d[1] = 2;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::BltClear), ExitReason::Halt);
+    CHECK_EQ(r.get32(a.plane0 + 4), 0u);
+}
+
+void blt_bitmap_rastport_draws_inside_the_rastport() {
+    GfxRig r;
+    const Surface src = make_sized_surface(r, kBitmap, kRastPort, 16, 4);
+    const Surface dst = make_sized_surface(r, kBitmap + 0x40, kRastPort + 0x80, 32, 8);
+    r.put16(src.plane0, 0xFFFF);
+    // The RastPort's mask keeps plane 1 out.
+    r.put8(dst.rp + rp_Mask, 0x01);
+    r.cpu().a[0] = src.bitmap;
+    r.cpu().d[0] = 0;
+    r.cpu().d[1] = 0;
+    r.cpu().a[1] = dst.rp;
+    r.cpu().d[2] = 4;
+    r.cpu().d[3] = 2;
+    r.cpu().d[4] = 8;
+    r.cpu().d[5] = 1;
+    r.cpu().d[6] = 0xC0;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::BltBitMapRastPort), ExitReason::Halt);
+    CHECK_EQ(surface_pen(r, dst, 32, 4, 2), 1u);
+    CHECK_EQ(surface_pen(r, dst, 32, 11, 2), 1u);
+    CHECK_EQ(surface_pen(r, dst, 32, 12, 2), 0u);
+    CHECK_EQ(surface_pen(r, dst, 32, 4, 3), 0u);
+}
+
 int main() {
+    blt_bitmap_copies_through_the_minterm_and_mask();
+    blt_bitmap_rastport_draws_inside_the_rastport();
     init_bitmap_fills_the_fields();
     init_rastport_sets_default_pens();
     set_apen_bpen_drmd_store_fields();

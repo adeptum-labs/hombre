@@ -998,6 +998,38 @@ struct GraphicsNatives {
     // wait for.
     static void wait_blit(void*, Machine&) {}
 
+    // BltBitMapRastPort(src A0, x D0, y D1, rp A1, x D2, y D3, width D4,
+    // height D5, minterm D6).
+    static void blt_bitmap_rastport(void* ctx, Machine& m) {
+        const auto word = [&](u32 r) { return static_cast<i32>(static_cast<i16>(r & 0xFFFF)); };
+        of(ctx).blt_bitmap_rastport(m.cpu.a[0], word(m.cpu.d[0]), word(m.cpu.d[1]), m.cpu.a[1],
+                                    word(m.cpu.d[2]), word(m.cpu.d[3]), word(m.cpu.d[4]),
+                                    word(m.cpu.d[5]), m.cpu.d[6] & 0xFF);
+    }
+
+    // BltBitMap(src A0, x D0, y D1, dst A1, x D2, y D3, width D4, height
+    // D5, minterm D6, mask D7, tempA A2): WORD positions and sizes.
+    static void blt_bitmap(void* ctx, Machine& m) {
+        const auto word = [&](u32 r) { return static_cast<i32>(static_cast<i16>(r & 0xFFFF)); };
+        native::set_result(m, of(ctx).blt_bitmap(m.cpu.a[0], word(m.cpu.d[0]), word(m.cpu.d[1]),
+                                                 m.cpu.a[1], word(m.cpu.d[2]), word(m.cpu.d[3]),
+                                                 word(m.cpu.d[4]), word(m.cpu.d[5]),
+                                                 m.cpu.d[6] & 0xFF, m.cpu.d[7] & 0xFF));
+    }
+
+    // BltClear: clears the memory block, D0 bytes long, or, with bit 1 of
+    // the flags in D1, D0's upper word rows of its lower word bytes. The
+    // blit is always done when it returns.
+    static void blt_clear(void*, Machine& m) {
+        const u32 count = m.cpu.d[0];
+        const u32 bytes = (m.cpu.d[1] & 2) != 0 ? (count >> 16) * (count & 0xFFFF) : count;
+        Bus b(m);
+        const u32 memory = m.cpu.a[1];
+        for (u32 i = 0; i < bytes && b.ok(); ++i) {
+            b.w8(memory + i, 0);
+        }
+    }
+
     // A TmpRas only records its buffer: fills need no scratch plane here.
     static void init_tmp_ras(void*, Machine& m) {
         Bus b(m);
@@ -1286,6 +1318,10 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::InitArea, GraphicsNatives::init_area, "InitArea"},
     {graphics_lvo::InitTmpRas, GraphicsNatives::init_tmp_ras, "InitTmpRas"},
     {graphics_lvo::WaitBlit, GraphicsNatives::wait_blit, "WaitBlit"},
+    {graphics_lvo::BltBitMap, GraphicsNatives::blt_bitmap, "BltBitMap"},
+    {graphics_lvo::BltBitMapRastPort, GraphicsNatives::blt_bitmap_rastport,
+     "BltBitMapRastPort"},
+    {graphics_lvo::BltClear, GraphicsNatives::blt_clear, "BltClear"},
     {graphics_lvo::NewRegion, GraphicsNatives::new_region, "NewRegion"},
     {graphics_lvo::DisposeRegion, GraphicsNatives::dispose_region, "DisposeRegion"},
     {graphics_lvo::ClearRegion, GraphicsNatives::clear_region, "ClearRegion"},
@@ -1421,6 +1457,115 @@ void Graphics::move(u32 rp, i32 x, i32 y) {
     Bus b(*machine_);
     b.w16(rp + ndk::rp_cp_x, static_cast<u32>(x));
     b.w16(rp + ndk::rp_cp_y, static_cast<u32>(y));
+}
+
+u32 Graphics::blt_bitmap(u32 src_addr, i32 sx, i32 sy, u32 dst_addr, i32 dx, i32 dy,
+                         i32 width, i32 height, u32 minterm, u32 mask) {
+    Bus b(*machine_);
+    raster::Bitmap dst{};
+    if (dst_addr == 0 || !raster::load_bitmap(b, dst_addr, dst)) {
+        return 0;
+    }
+    View v{};
+    v.bitmap = dst;
+    v.bitmap_addr = dst_addr;
+    return blit(b, src_addr, sx, sy, v, nullptr, dx, dy, width, height, minterm, mask);
+}
+
+// BltBitMapRastPort: the same into the RastPort's bitmap, inside its
+// layer and clip, at the RastPort's coordinates.
+void Graphics::blt_bitmap_rastport(u32 src_addr, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy,
+                                   i32 width, i32 height, u32 minterm) {
+    if (rp == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const View v = raster::load_rastport(b, rp);
+    if (!v.ok) {
+        return;
+    }
+    blit(b, src_addr, sx, sy, v, &v.clip, dx + v.origin_x, dy + v.origin_y, width, height,
+         minterm, b.r8(rp + ndk::rp_Mask));
+}
+
+u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const raster::Clip* clip,
+                   i32 dx, i32 dy, i32 width, i32 height, u32 minterm, u32 mask) {
+    raster::Bitmap src{};
+    if (src_addr == 0 || !raster::load_bitmap(b, src_addr, src)) {
+        return 0;
+    }
+    const raster::Bitmap& dst = v.bitmap;
+    // Both rectangles inside their bitmaps.
+    if (sx < 0) {
+        width += sx;
+        dx -= sx;
+        sx = 0;
+    }
+    if (sy < 0) {
+        height += sy;
+        dy -= sy;
+        sy = 0;
+    }
+    if (dx < 0) {
+        width += dx;
+        sx -= dx;
+        dx = 0;
+    }
+    if (dy < 0) {
+        height += dy;
+        sy -= dy;
+        dy = 0;
+    }
+    const i32 src_w = static_cast<i32>(src.bytes_per_row * 8);
+    const i32 dst_w = static_cast<i32>(dst.bytes_per_row * 8);
+    width = sx + width > src_w ? src_w - sx : width;
+    width = dx + width > dst_w ? dst_w - dx : width;
+    height = sy + height > static_cast<i32>(src.rows) ? static_cast<i32>(src.rows) - sy : height;
+    height = dy + height > static_cast<i32>(dst.rows) ? static_cast<i32>(dst.rows) - dy : height;
+    if (width <= 0 || height <= 0) {
+        return 0;
+    }
+    // With A always set, the minterm's upper four bits give the result for
+    // each pair of source (B) and destination (C) bits.
+    static_assert(sizeof blit_row_ >= raster::kMaxBytesPerRow * 8);
+    const u32 planes = src.depth < dst.depth ? src.depth : dst.depth;
+    u32 written = 0;
+    u8* row = blit_row_;
+    for (u32 plane = 0; plane < planes; ++plane) {
+        if ((mask & (1u << plane)) == 0) {
+            continue;
+        }
+        ++written;
+        // A copy down the same plane goes from the bottom, so no row is
+        // read after it was written.
+        const bool upward = src.planes[plane] == dst.planes[plane] && dy > sy;
+        for (i32 n = 0; n < height && b.ok(); ++n) {
+            const i32 r = upward ? height - 1 - n : n;
+            const u32 src_row = src.planes[plane] + static_cast<u32>(sy + r) * src.bytes_per_row;
+            const u32 dst_row = dst.planes[plane] + static_cast<u32>(dy + r) * dst.bytes_per_row;
+            for (i32 x = 0; x < width; ++x) {
+                const u32 at = static_cast<u32>(sx + x);
+                row[x] = static_cast<u8>((b.r8(src_row + (at >> 3)) >> (7 - (at & 7))) & 1);
+            }
+            for (i32 x = 0; x < width; ++x) {
+                if (clip != nullptr && !raster::in_clip(b, *clip, dx + x, dy + r)) {
+                    continue;
+                }
+                const u32 at = static_cast<u32>(dx + x);
+                const u32 byte = b.r8(dst_row + (at >> 3));
+                const u32 bit = 0x80u >> (at & 7);
+                const u32 c = (byte & bit) != 0 ? 1 : 0;
+                const u32 result = (minterm >> (4 + 2 * row[x] + c)) & 1;
+                if (result != c) {
+                    b.w8(dst_row + (at >> 3), result != 0 ? byte | bit : byte & ~bit);
+                }
+            }
+        }
+    }
+    if (b.ok()) {
+        report(display_, *machine_, v, Rect{dx, dy, dx + width - 1, dy + height - 1});
+    }
+    return written;
 }
 
 void Graphics::rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {

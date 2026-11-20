@@ -42,10 +42,17 @@ namespace hombre {
 
 class Exec;
 
+namespace raster {
+struct Clip;
+struct RastPortView;
+}
+
 // Library vector offsets of graphics.library, n of LVO -n, as the 3.1
 // function description numbers them.
 namespace graphics_lvo {
 
+constexpr u32 BltBitMap = 30;
+constexpr u32 BltBitMapRastPort = 606;
 constexpr u32 ClearScreen = 48;
 constexpr u32 TextLength = 54;
 constexpr u32 Text = 60;
@@ -65,6 +72,7 @@ constexpr u32 AreaDraw = 258;
 constexpr u32 AreaEnd = 264;
 constexpr u32 InitArea = 282;
 constexpr u32 SetRGB4 = 288;
+constexpr u32 BltClear = 300;
 constexpr u32 RectFill = 306;
 constexpr u32 ReadPixel = 318;
 constexpr u32 WritePixel = 324;
@@ -113,6 +121,13 @@ public:
     void set_pens(u32 rp, u32 fg, u32 bg, u32 mode);
     void move(u32 rp, i32 x, i32 y);
     void rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1);
+    // BltBitMap: copies a rectangle between bitmaps, or within one, plane
+    // by plane through the minterm and the plane mask. The number of
+    // planes written.
+    u32 blt_bitmap(u32 src, i32 sx, i32 sy, u32 dst, i32 dx, i32 dy, i32 width, i32 height,
+                   u32 minterm, u32 mask);
+    void blt_bitmap_rastport(u32 src, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy, i32 width,
+                             i32 height, u32 minterm);
     void draw_line(u32 rp, i32 x1, i32 y1);
     u32 text(u32 rp, const u8* chars, u32 count);
     void scroll(u32 rp, i32 dx, i32 dy, i32 x0, i32 y0, i32 x1, i32 y1);
@@ -131,6 +146,11 @@ private:
     u32 topaz_name_ = 0;
     u32 topaz_attr_ = 0;
     NativeVector vectors_[kVectors]{};
+    u32 blit(native::Bus& b, u32 src, i32 sx, i32 sy, const raster::RastPortView& v,
+             const raster::Clip* clip, i32 dx, i32 dy, i32 width, i32 height, u32 minterm,
+             u32 mask);
+    // One row of BltBitMap's source plane, a byte a pixel.
+    u8 blit_row_[4096]{};
 };
 
 }
