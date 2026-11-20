@@ -1317,6 +1317,10 @@ struct IntuitionNatives {
     // back. TODO: apply the screen mode, font and pointer prefs.
     static void set_iprefs(void*, Machine& m) { native::set_result(m, 0); }
 
+    // PubScreenStatus(screen A0, flags D0): public screens are not tracked
+    // yet, so no visitor ever holds one up; 0 back.
+    static void pub_screen_status(void*, Machine& m) { native::set_result(m, 0); }
+
     // InitRequester: clears the struct Requester at A0.
     static void init_requester(void*, Machine& m) {
         Bus b(m);
@@ -1521,6 +1525,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::GetPrefs, IntuitionNatives::get_prefs, "GetPrefs"},
     {intuition_lvo::SetPrefs, IntuitionNatives::set_prefs, "SetPrefs"},
     {intuition_lvo::SetIPrefs, IntuitionNatives::set_iprefs, "SetIPrefs"},
+    {intuition_lvo::PubScreenStatus, IntuitionNatives::pub_screen_status, "PubScreenStatus"},
     {intuition_lvo::ScrollWindowRaster, IntuitionNatives::scroll_window_raster,
      "ScrollWindowRaster"},
     {intuition_lvo::ActivateGadget, IntuitionNatives::activate_gadget, "ActivateGadget"},

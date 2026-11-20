@@ -64,6 +64,7 @@ constexpr u32 GetDefPrefs = 126;
 constexpr u32 GetPrefs = 132;
 constexpr u32 SetPrefs = 324;
 constexpr u32 SetIPrefs = 576;
+constexpr u32 PubScreenStatus = 552;
 constexpr u32 DrawImage = 114;
 constexpr u32 CloseScreen = 66;
 constexpr u32 ClearMenuStrip = 54;
