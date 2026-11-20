@@ -4,6 +4,8 @@ Hombre is an operating system for x86-64 PCs that is compatible with AmigaOS
 and MorphOS. It aims to run classic Amiga 680x0 applications alongside native
 software, on modern hardware and in virtual machines.
 
+![The Hombre Workbench running Clock](docs/workbench.png)
+
 ## Goals
 
 - Compatibility with the AmigaOS and MorphOS programming interfaces: exec, dos,
