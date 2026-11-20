@@ -213,6 +213,17 @@ void install_clip_region_keeps_the_region_and_returns_the_one_before() {
     r.m.cpu.a[0] = 0;
     r.m.cpu.a[1] = first;
     CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallClipRegion), 0u);
+
+    // InstallLayerHook swaps the layer's backfill hook.
+    r.put16(layer + 118, 0);
+    r.put16(layer + 120, 0);
+    r.m.cpu.a[0] = layer;
+    r.m.cpu.a[1] = 1;
+    CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallLayerHook), 0u);
+    r.m.cpu.a[0] = layer;
+    r.m.cpu.a[1] = 0;
+    CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallLayerHook), 1u);
+    CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallLayerInfoHook), 0u);
 }
 
 void version_library_carries_the_system_version() {

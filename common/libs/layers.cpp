@@ -53,6 +53,30 @@ void install_clip_region(void*, Machine& m) {
     }
 }
 
+// struct Layer's BackFill: the hook that fills what drawing uncovers.
+constexpr u32 ly_BackFill = 118;
+
+// InstallLayerHook: the layer at A0 takes the backfill hook at A1 and the
+// one it had comes back. The display fills uncovered parts with pen 0,
+// whatever the hook.
+void install_layer_hook(void*, Machine& m) {
+    Bus b(m);
+    const u32 layer = m.cpu.a[0];
+    if (layer == 0) {
+        native::set_result(m, 0);
+        return;
+    }
+    const u32 old = b.r32(layer + ly_BackFill);
+    b.w32(layer + ly_BackFill, m.cpu.a[1]);
+    if (b.ok()) {
+        native::set_result(m, old);
+    }
+}
+
+// InstallLayerInfoHook: the screen's backfill hook; there is none to give
+// back, the default.
+void install_layer_info_hook(void*, Machine& m) { native::set_result(m, 0); }
+
 struct Function {
     u32 lvo;
     m68k::NativeFn fn;
@@ -67,6 +91,8 @@ constexpr Function kFunctions[] = {
     {layers_lvo::LockLayerInfo, nothing, "LockLayerInfo"},
     {layers_lvo::UnlockLayerInfo, nothing, "UnlockLayerInfo"},
     {layers_lvo::InstallClipRegion, install_clip_region, "InstallClipRegion"},
+    {layers_lvo::InstallLayerHook, install_layer_hook, "InstallLayerHook"},
+    {layers_lvo::InstallLayerInfoHook, install_layer_info_hook, "InstallLayerInfoHook"},
 };
 
 }

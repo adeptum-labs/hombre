@@ -51,8 +51,11 @@ constexpr u32 UnlockLayers = 114;
 constexpr u32 LockLayerInfo = 120;
 constexpr u32 UnlockLayerInfo = 138;
 constexpr u32 InstallClipRegion = 174;
-// The last vector of the 3.1 library; the table reaches down to it.
-constexpr u32 Last = 180;
+constexpr u32 InstallLayerHook = 198;
+constexpr u32 InstallLayerInfoHook = 204;
+// The last vector of the 3.1 library, DoHookClipRects; the table reaches
+// down to it.
+constexpr u32 Last = 216;
 
 }
 
