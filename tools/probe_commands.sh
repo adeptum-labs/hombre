@@ -24,7 +24,12 @@
 # prompt and prints what became of it: the library vectors it was missing,
 # the console output and how the run ended.
 #
-# usage: tools/probe_commands.sh <disk> "<command line>"...
+# usage: tools/probe_commands.sh [--disk1 <disk>] <disk> "<command line>"...
+# <disk> is DF0:, the boot disk; --disk1 puts a second disk in DF1:.
+# With PROBE_SCREENSHOT=<file.ppm> the screen is saved after each line.
+# PROBE_MOUSE="<commands>" sends ';'-separated QEMU monitor commands, such
+# as "mouse_move 10 10;mouse_button 1;mouse_button 0", to a USB mouse once
+# the command has started (the pointer starts at 120,100), before that.
 #
 # Each boot runs on a private copy of the image, so a running "make run"
 # does not hold it. A boot ends when the command's end shows on the serial
@@ -33,7 +38,14 @@
 
 set -euo pipefail
 
-[[ $# -ge 2 ]] || { echo "usage: $0 <disk> \"<command line>\"..." >&2; exit 2; }
+usage="usage: $0 [--disk1 <disk>] <disk> \"<command line>\"..."
+disk1_source=
+if [[ ${1:-} == --disk1 ]]; then
+    [[ $# -ge 2 ]] || { echo "$usage" >&2; exit 2; }
+    disk1_source=$2
+    shift 2
+fi
+[[ $# -ge 2 ]] || { echo "$usage" >&2; exit 2; }
 disk=$1
 shift
 command -v socat > /dev/null || { echo "$0: needs socat" >&2; exit 2; }
@@ -52,6 +64,15 @@ cleanup() {
 }
 trap cleanup EXIT
 cp "$image" "$work/hombre.img"
+
+# Drive n sits in PCI slot 0x10 + n, as make run attaches them.
+drive_args=(-drive "if=none,id=disk0,format=raw,readonly=on,file=$disk"
+            -device virtio-blk-pci,disable-legacy=on,drive=disk0,addr=0x10)
+if [[ -n $disk1_source ]]; then
+    "$root/tools/make_disk.sh" "$disk1_source" "$work/disk1.img"
+    drive_args+=(-drive "if=none,id=disk1,format=raw,readonly=on,file=$work/disk1.img"
+                 -device virtio-blk-pci,disable-legacy=on,drive=disk1,addr=0x11)
+fi
 
 # The QEMU key names that type one character on the Swedish layout.
 key_of() {
@@ -97,9 +118,8 @@ for line in "$@"; do
         -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
         -drive if=pflash,format=raw,file="$work/vars.fd" \
         -drive format=raw,file="$work/hombre.img" \
-        -drive if=none,id=disk0,format=raw,readonly=on,file="$disk" \
-        -device virtio-blk-pci,disable-legacy=on,drive=disk0 \
-        -device qemu-xhci -device usb-kbd > /dev/null 2>&1 &
+        "${drive_args[@]}" \
+        -device qemu-xhci -device usb-kbd -device usb-mouse > /dev/null 2>&1 &
     qemu_pid=$!
     echo "=== $line"
     if wait_for "shell: ready" 60; then
@@ -111,6 +131,19 @@ for line in "$@"; do
         wait_for "m68k: .* (returned|at pc=)|could not load|budget exhausted|shell: unknown" 30 ||
             echo "(no end within 30 s)"
         sleep 0.5
+        if [[ -n ${PROBE_MOUSE:-} ]]; then
+            IFS=';' read -ra mouse_commands <<< "$PROBE_MOUSE"
+            for command in "${mouse_commands[@]}"; do
+                monitor "$command"
+                sleep 0.25
+            done
+            sleep 1
+        fi
+        if [[ -n ${PROBE_SCREENSHOT:-} ]]; then
+            # The screen as the command left it, for a program that stays.
+            monitor "screendump $PROBE_SCREENSHOT"
+            sleep 1
+        fi
         sed -n '/^shell: line: /,$p' "$work/serial.log" | tr -d '\r' | head -60
     else
         echo "(the shell did not start)"
