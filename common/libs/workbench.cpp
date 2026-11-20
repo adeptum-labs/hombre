@@ -1094,11 +1094,23 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     if (height <= 0) {
         height = kDefaultDrawerHeight;
     }
+    // A box at the screen's corner is the place of an icon that was never
+    // snapshot, as a default drawer icon's is: such a window cascades as
+    // one without a box does.
+    if (left == 0 && top == 0) {
+        left = -1;
+        top = -1;
+    }
     if (left < 0) {
         left = kCascadeX + kCascadeStep * static_cast<i32>(slot - 1);
     }
     if (top < 0) {
         top = kCascadeY + kCascadeStep * static_cast<i32>(slot - 1);
+    }
+    // No drawer opens over the screen's title bar.
+    const i32 bar_height = static_cast<i32>(b.r8(screen_ + ndk::sc_BarHeight));
+    if (top < bar_height) {
+        top = bar_height;
     }
     const u32 new_window =
         exec_->alloc(ndk::NewWindow_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);

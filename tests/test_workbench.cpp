@@ -1736,6 +1736,33 @@ void a_window_snapshot_keeps_its_scroll() {
     CHECK_EQ(r.workbench.window(again).scroll_x, 2 * Workbench::kScrollStep);
 }
 
+void drawers_open_below_the_screen_bar() {
+    std::vector<AdfFile> files = test_files();
+    files.push_back({"High.info", drawer_icon_info(static_cast<i32>(kNoIconPosition),
+                                                   static_cast<i32>(kNoIconPosition), 30, 3,
+                                                   240, 110)});
+    Rig r(files);
+    r.workbench.open_desktop();
+    const u32 screen = r.get32(r.workbench.window(0).window + wd_WScreen);
+    const u32 bar = r.get8(screen + sc_BarHeight);
+    CHECK(bar > 0);
+
+    // The Ram Disk has no Disk.info: its default box at the corner is no
+    // place, so its window cascades.
+    r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+    const u32 ram = r.workbench.window(r.find_window("Ram Disk:")).window;
+    CHECK(r.get16(ram + wd_LeftEdge) != 0);
+    CHECK(r.get16(ram + wd_TopEdge) > bar);
+
+    // A box kept over the bar opens just below it.
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon_in(root, "High"));
+    const u32 high = r.workbench.window(r.find_window("HombreTest:High")).window;
+    CHECK_EQ(r.get16(high + wd_LeftEdge), 30u);
+    CHECK_EQ(r.get16(high + wd_TopEdge), bar);
+}
+
 void every_disk_in_a_drive_gets_an_icon() {
     {
         const i32 nowhere = static_cast<i32>(kNoIconPosition);
@@ -1890,6 +1917,7 @@ int main() {
     drawers_have_scroll_gadgets_in_their_borders();
     the_arrows_and_sliders_scroll_a_drawer();
     a_window_snapshot_keeps_its_scroll();
+    drawers_open_below_the_screen_bar();
     every_disk_in_a_drive_gets_an_icon();
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();
