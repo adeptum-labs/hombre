@@ -1801,6 +1801,59 @@ struct ExecOps {
         sum_library(b, m.cpu.a[1]);
     }
 
+    // Alert(alertNum): logged. A recoverable alert returns to its caller; a
+    // dead-end one (bit 31 set) ends the task that raised it.
+    static void alert(void*, Machine& m) {
+        const u32 number = m.cpu.d[7];
+        const bool dead_end = (number & 0x80000000u) != 0;
+        LogLine().text("exec: Alert ").hex(number).text(dead_end ? " (dead end)" : "").send();
+        if (dead_end) {
+            end_run(m, ExitReason::Halt);
+        }
+    }
+
+    // SetFunction(library, offset, function): the vector at offset becomes a
+    // JMP to function, and the old function comes back in D0. A native
+    // vector is an A-line call and an RTS; the call moves to a stub of its
+    // own, so the old function stays callable.
+    static void set_function(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 lib = m.cpu.a[1];
+        const i32 offset = static_cast<i32>(m.cpu.a[0]);
+        const u32 function = m.cpu.d[0];
+        const u32 vec = lib + static_cast<u32>(offset);
+        const u32 w0 = b.r16(vec);
+        if (!b.ok() || lib == 0 || offset >= 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        u32 old = 0;
+        if (w0 == native::kJmpAbsL) {
+            old = b.r32(vec + 2);
+        } else if ((w0 & 0xF000u) == native::kALine) {
+            // A vector with no native of its own is A-line words without
+            // the RTS; its stub gets one.
+            old = e.alloc(4, MEMF_PUBLIC);
+            if (old == 0) {
+                native::set_result(m, 0);
+                return;
+            }
+            b.w16(old, static_cast<u16>(w0));
+            b.w16(old + 2, native::kRts);
+        } else {
+            LogLine().text("exec: SetFunction of an unknown vector at ").hex(vec).send();
+            native::set_result(m, 0);
+            return;
+        }
+        b.w16(vec, native::kJmpAbsL);
+        b.w32(vec + 2, function);
+        b.w8(lib + LIB_FLAGS, static_cast<u8>(b.r8(lib + LIB_FLAGS) | LIBF_CHANGED));
+        sum_library(b, lib);
+        m.jit->flush();
+        native::set_result(m, old);
+    }
+
     static void make_library_lvo(void* ctx, Machine& m) {
         Bus b(m);
         const CpuState& c = m.cpu;
@@ -2647,6 +2700,8 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::OldOpenLibrary, ExecOps::old_open_library, "OldOpenLibrary"},
     {exec_lvo::CloseLibrary, ExecOps::close_library, "CloseLibrary"},
     {exec_lvo::SumLibrary, ExecOps::sum_library_lvo, "SumLibrary"},
+    {exec_lvo::SetFunction, ExecOps::set_function, "SetFunction"},
+    {exec_lvo::Alert, ExecOps::alert, "Alert"},
     {exec_lvo::OpenDevice, ExecOps::open_device_lvo, "OpenDevice"},
     {exec_lvo::CloseDevice, ExecOps::close_device_lvo, "CloseDevice"},
     {exec_lvo::DoIO, ExecOps::do_io_lvo, "DoIO"},
@@ -3801,6 +3856,13 @@ void Exec::task_main(u32 id) {
         read_task_name(*m_, task_, name);
         LogLine().text("exec: task ").text(name).text(" ended with ")
             .text(m68k::exit_reason_name(why)).send();
+        // A task that crashed cannot answer the task that started it, which
+        // may wait for it for good: Ctrl+C tells that one to give up.
+        const bool crashed = why != ExitReason::None && why != ExitReason::Halt &&
+                             why != ExitReason::Returned && why != ExitReason::Break;
+        if (crashed && tasks_[id].parent != 0 && tasks_[id].parent != task_) {
+            signal_task(tasks_[id].parent, SIGBREAKF_CTRL_C);
+        }
     }
     m_->cpu.exit = ExitReason::None;
     Bus eb(*m_);

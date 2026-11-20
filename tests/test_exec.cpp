@@ -1230,6 +1230,31 @@ void init_resident_and_make_library_through_vectors() {
     CHECK_EQ(r.exec(exec_lvo::SumLibrary), ExitReason::Halt);
     CHECK(logged_containing("exec: checksum"));
 
+    // SetFunction: a JMP vector gives back its old target, and a native
+    // vector its A-line call and RTS moved to a stub of their own.
+    r.cpu().a[1] = lib;
+    r.cpu().a[0] = static_cast<u32>(-6);
+    r.cpu().d[0] = 0x00333333;
+    CHECK_EQ(r.exec(exec_lvo::SetFunction), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x00222222u);
+    CHECK_EQ(r.get16(lib - 6), 0x4EF9u);
+    CHECK_EQ(r.get32(lib - 4), 0x00333333u);
+    CHECK_EQ(r.get32(lib + LIB_SUM),
+             r.get32(lib - 12) + r.get32(lib - 8) + r.get32(lib - 4));
+    const u32 native_vec = r.base() - exec_lvo::SumLibrary;
+    const u32 call = r.get16(native_vec);
+    CHECK_EQ(call & 0xF000u, 0xA000u);
+    r.cpu().a[1] = r.base();
+    r.cpu().a[0] = static_cast<u32>(-static_cast<i32>(exec_lvo::SumLibrary));
+    r.cpu().d[0] = 0x00444444;
+    CHECK_EQ(r.exec(exec_lvo::SetFunction), ExitReason::Halt);
+    const u32 stub = r.cpu().d[0];
+    CHECK(stub != 0);
+    CHECK_EQ(r.get16(stub), call);
+    CHECK_EQ(r.get16(stub + 2), 0x4E75u);
+    CHECK_EQ(r.get16(native_vec), 0x4EF9u);
+    CHECK_EQ(r.get32(native_vec + 2), 0x00444444u);
+
     // A data size below the Library structure gets a whole Library, and
     // lib_PosSize says so.
     r.put32(table, 0x00123456);
