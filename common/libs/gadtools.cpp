@@ -46,8 +46,62 @@ constexpr u32 kVisualInfoBytes = 16;
 // struct Gadget
 constexpr u32 gg_NextGadget = 0;
 constexpr u32 gg_Flags = 12;
-constexpr u32 kGadgetBytes = 44;
 constexpr u16 GFLG_GADGHNONE = 3;
+
+// Every gadget gadtools makes is a struct Gadget followed by what gadtools
+// keeps of it: its kind, the label and its placement, the text or number
+// it shows, whether it has a frame, and a copy of its text it owns.
+constexpr u32 gt_Kind = 44;
+constexpr u32 gt_Place = 46;
+constexpr u32 gt_Label = 48;
+constexpr u32 gt_Text = 52;
+constexpr u32 gt_Number = 56;
+constexpr u32 gt_Options = 60;
+constexpr u32 gt_Underscore = 62;
+constexpr u32 gt_CopyBytes = 64;
+constexpr u32 kGadgetBytes = 68;
+constexpr u16 kOptBorder = 0x1;
+
+// Gadget kinds (libraries/gadtools.h).
+constexpr u32 GENERIC_KIND = 0;
+constexpr u32 BUTTON_KIND = 1;
+constexpr u32 NUMBER_KIND = 6;
+constexpr u32 TEXT_KIND = 13;
+constexpr u32 kKinds = 14;
+
+// struct NewGadget.
+constexpr u32 ng_LeftEdge = 0;
+constexpr u32 ng_TopEdge = 2;
+constexpr u32 ng_Width = 4;
+constexpr u32 ng_Height = 6;
+constexpr u32 ng_GadgetText = 8;
+constexpr u32 ng_GadgetID = 16;
+constexpr u32 ng_Flags = 18;
+constexpr u32 ng_UserData = 26;
+
+// Label placement, ng_Flags.
+constexpr u32 PLACETEXT_LEFT = 0x1;
+constexpr u32 PLACETEXT_RIGHT = 0x2;
+constexpr u32 PLACETEXT_ABOVE = 0x4;
+constexpr u32 PLACETEXT_BELOW = 0x8;
+constexpr u32 PLACETEXT_IN = 0x10;
+
+// The tags of the gadgets gadtools makes.
+constexpr u32 GA_Disabled = 0x8003000E;
+constexpr u32 GTTX_Text = 0x8008000B;
+constexpr u32 GTTX_CopyText = 0x8008000C;
+constexpr u32 GTNM_Number = 0x8008000D;
+constexpr u32 GTTX_Border = 0x80080039;
+constexpr u32 GTNM_Border = 0x8008003A;
+constexpr u32 GT_Underscore = 0x80080040;
+
+// The 3.1 default pens of a pressed button: FILLPEN and FILLTEXTPEN.
+constexpr u32 kFillPen = 3;
+constexpr u32 kFillTextPen = 2;
+constexpr u32 kTextPen = 1;
+constexpr u32 kGlyphWidth = 8;   // the topaz font
+constexpr u32 kGlyphHeight = 8;
+constexpr u32 kGlyphBaseline = 6;
 
 // The 3.1 default pens of a bevel box: SHINEPEN and SHADOWPEN.
 constexpr u32 kShinePen = 2;
@@ -132,6 +186,43 @@ constexpr u32 kItemPadding = 8;  // columns around an item's label
 
 }
 
+namespace {
+
+// The pens, draw mode and pen position of a RastPort, put back when it
+// goes: gadgets draw through the window's RastPort, whose state belongs
+// to the program.
+class RastPortState {
+public:
+    RastPortState(Bus& b, u32 rp)
+        : b_(b),
+          rp_(rp),
+          fg_(b.r8(rp + ndk::rp_FgPen)),
+          bg_(b.r8(rp + ndk::rp_BgPen)),
+          mode_(b.r8(rp + ndk::rp_DrawMode)),
+          x_(b.r16(rp + ndk::rp_cp_x)),
+          y_(b.r16(rp + ndk::rp_cp_y)) {}
+    ~RastPortState() {
+        b_.w8(rp_ + ndk::rp_FgPen, fg_);
+        b_.w8(rp_ + ndk::rp_BgPen, bg_);
+        b_.w8(rp_ + ndk::rp_DrawMode, mode_);
+        b_.w16(rp_ + ndk::rp_cp_x, x_);
+        b_.w16(rp_ + ndk::rp_cp_y, y_);
+    }
+    RastPortState(const RastPortState&) = delete;
+    RastPortState& operator=(const RastPortState&) = delete;
+
+private:
+    Bus& b_;
+    u32 rp_;
+    u32 fg_;
+    u32 bg_;
+    u32 mode_;
+    u32 x_;
+    u32 y_;
+};
+
+}  // namespace
+
 struct GadToolsNatives {
     static GadTools& of(void* ctx) { return *static_cast<GadTools*>(ctx); }
 
@@ -170,6 +261,8 @@ struct GadToolsNatives {
         }
         Bus b(m);
         b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
+        b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_GADTOOLS | ndk::GTYP_BOOLGADGET);
+        b.w16(gadget + gt_Kind, GENERIC_KIND);
         if (list != 0) {
             b.w32(list, gadget);
         }
@@ -183,9 +276,191 @@ struct GadToolsNatives {
         u32 gadget = m.cpu.a[0];
         for (u32 i = 0; gadget != 0 && i < kMaxChain && b.ok(); ++i) {
             const u32 next = b.r32(gadget + gg_NextGadget);
+            drop_text_copy(g, b, gadget);
             g.exec_->free(gadget, kGadgetBytes);
             gadget = next;
         }
+    }
+
+    static void drop_text_copy(GadTools& g, Bus& b, u32 gadget) {
+        const u32 bytes = b.r32(gadget + gt_CopyBytes);
+        const u32 text = b.r32(gadget + gt_Text);
+        if (b.ok() && bytes != 0 && text != 0) {
+            g.exec_->free(text, bytes);
+        }
+        b.w32(gadget + gt_CopyBytes, 0);
+    }
+
+    // GTTX_Text: the text the gadget shows; with GTTX_CopyText gadtools
+    // keeps a copy of its own.
+    static void set_text(GadTools& g, Bus& b, u32 gadget, u32 text, bool copy) {
+        drop_text_copy(g, b, gadget);
+        if (!copy || text == 0) {
+            b.w32(gadget + gt_Text, text);
+            return;
+        }
+        const u32 length = label_length(b, text);
+        const u32 bytes = length + 1;
+        const u32 at = g.exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (at == 0) {
+            b.w32(gadget + gt_Text, 0);
+            return;
+        }
+        for (u32 i = 0; i < length; ++i) {
+            b.w8(at + i, b.r8(text + i));
+        }
+        b.w32(gadget + gt_Text, at);
+        b.w32(gadget + gt_CopyBytes, bytes);
+    }
+
+    // The tags a gadget takes at CreateGadgetA and GT_SetGadgetAttrsA.
+    static void apply_tags(GadTools& g, Bus& b, u32 gadget, u32 tags, bool creating) {
+        bool copy = false;
+        u32 text = 0;
+        bool has_text = false;
+        for (u32 item = tags, i = 0; item != 0 && i < kMaxTags && b.ok(); ++i) {
+            const u32 tag = b.r32(item);
+            const u32 data = b.r32(item + 4);
+            if (tag == ndk::TAG_DONE) {
+                break;
+            }
+            if (tag == ndk::TAG_MORE) {
+                item = data;
+                continue;
+            }
+            const u16 options = static_cast<u16>(b.r16(gadget + gt_Options));
+            switch (tag) {
+            case GA_Disabled: {
+                const u32 flags = b.r16(gadget + gg_Flags);
+                b.w16(gadget + gg_Flags,
+                      data != 0 ? flags | ndk::GFLG_DISABLED : flags & ~ndk::GFLG_DISABLED);
+                break;
+            }
+            case GTTX_Text:
+                text = data;
+                has_text = true;
+                break;
+            case GTTX_CopyText:
+                copy = creating && data != 0;
+                break;
+            case GTNM_Number:
+                b.w32(gadget + gt_Number, data);
+                break;
+            case GTTX_Border:
+            case GTNM_Border:
+                if (creating) {
+                    b.w16(gadget + gt_Options,
+                          data != 0 ? options | kOptBorder : options & ~kOptBorder);
+                }
+                break;
+            case GT_Underscore:
+                if (creating) {
+                    b.w8(gadget + gt_Underscore, data & 0xFF);
+                }
+                break;
+            default:
+                break;
+            }
+            item += 8;
+        }
+        if (has_text) {
+            const bool keep_copy = copy || b.r32(gadget + gt_CopyBytes) != 0;
+            set_text(g, b, gadget, text, keep_copy);
+        }
+    }
+
+    // CreateGadgetA: kind in D0, the gadget before it at A0, the NewGadget
+    // at A1 and tags at A2. Buttons, text and number displays work; any
+    // other kind makes a gadget that shows its frame and does nothing.
+    static void create_gadget(void* ctx, Machine& m) {
+        GadTools& g = of(ctx);
+        const u32 kind = m.cpu.d[0];
+        const u32 previous = m.cpu.a[0];
+        const u32 ng = m.cpu.a[1];
+        if (previous == 0 || ng == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 gadget = g.exec_->alloc(kGadgetBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (gadget == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        Bus b(m);
+        b.w16(gadget + ndk::gg_LeftEdge, b.r16(ng + ng_LeftEdge));
+        b.w16(gadget + ndk::gg_TopEdge, b.r16(ng + ng_TopEdge));
+        b.w16(gadget + ndk::gg_Width, b.r16(ng + ng_Width));
+        b.w16(gadget + ndk::gg_Height, b.r16(ng + ng_Height));
+        b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
+        b.w16(gadget + ndk::gg_Activation, kind == BUTTON_KIND ? ndk::GACT_RELVERIFY : 0);
+        b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_GADTOOLS | ndk::GTYP_BOOLGADGET);
+        b.w16(gadget + ndk::gg_GadgetID, b.r16(ng + ng_GadgetID));
+        b.w32(gadget + ndk::gg_UserData, b.r32(ng + ng_UserData));
+        b.w16(gadget + gt_Kind, kind);
+        const u32 place = b.r32(ng + ng_Flags);
+        const u32 default_place = kind == BUTTON_KIND ? PLACETEXT_IN : PLACETEXT_LEFT;
+        b.w16(gadget + gt_Place, (place & 0x1F) != 0 ? place & 0x1F : default_place);
+        b.w32(gadget + gt_Label, b.r32(ng + ng_GadgetText));
+        apply_tags(g, b, gadget, m.cpu.a[2], true);
+        b.w32(previous + gg_NextGadget, gadget);
+        if (!b.ok()) {
+            native::set_result(m, 0);
+            return;
+        }
+        if (kind != BUTTON_KIND && kind != TEXT_KIND && kind != NUMBER_KIND &&
+            kind < kKinds && !g.unhandled_kinds_[kind]) {
+            g.unhandled_kinds_[kind] = true;
+            LogLine().text("gadtools: gadget kind ").dec(kind).text(" not handled").send();
+        }
+        native::set_result(m, gadget);
+    }
+
+    // GT_SetGadgetAttrsA: the gadget at A0 of the window at A1 takes the
+    // tags at A3 and is drawn again.
+    static void set_gadget_attrs(void* ctx, Machine& m) {
+        GadTools& g = of(ctx);
+        const u32 gadget = m.cpu.a[0];
+        const u32 window = m.cpu.a[1];
+        if (gadget == 0) {
+            return;
+        }
+        Bus b(m);
+        apply_tags(g, b, gadget, m.cpu.a[3], false);
+        if (window != 0 && b.ok()) {
+            g.render(window, b.r32(window + ndk::wd_RPort), gadget);
+        }
+    }
+
+    // GT_GetGadgetAttrsA: each tag at A3 gets the value at its ti_Data.
+    // Returns the number of tags answered.
+    static void get_gadget_attrs(void*, Machine& m) {
+        const u32 gadget = m.cpu.a[0];
+        Bus b(m);
+        u32 answered = 0;
+        for (u32 item = m.cpu.a[3], i = 0; gadget != 0 && item != 0 && i < kMaxTags && b.ok();
+             ++i) {
+            const u32 tag = b.r32(item);
+            const u32 data = b.r32(item + 4);
+            if (tag == ndk::TAG_DONE) {
+                break;
+            }
+            if (tag == ndk::TAG_MORE) {
+                item = data;
+                continue;
+            }
+            if (tag == GA_Disabled) {
+                b.w32(data, (b.r16(gadget + gg_Flags) & ndk::GFLG_DISABLED) != 0 ? 1 : 0);
+                ++answered;
+            } else if (tag == GTTX_Text) {
+                b.w32(data, b.r32(gadget + gt_Text));
+                ++answered;
+            } else if (tag == GTNM_Number) {
+                b.w32(data, b.r32(gadget + gt_Number));
+                ++answered;
+            }
+            item += 8;
+        }
+        native::set_result(m, answered);
     }
 
     static u32 label_length(Bus& b, u32 label) {
@@ -294,9 +569,24 @@ struct GadToolsNatives {
 
     static void post_filter_imsg(void*, Machine& m) { native::set_result(m, m.cpu.a[1]); }
 
-    // Gadgets draw themselves through intuition, so there is nothing to
-    // refresh here.
-    static void refresh_window(void*, Machine&) {}
+    // GT_RefreshWindow: draws every gadtools gadget of the window at A0.
+    static void refresh_window(void* ctx, Machine& m) {
+        GadTools& g = of(ctx);
+        const u32 window = m.cpu.a[0];
+        if (window == 0) {
+            return;
+        }
+        Bus b(m);
+        const u32 rp = b.r32(window + ndk::wd_RPort);
+        u32 gadget = b.r32(window + ndk::wd_FirstGadget);
+        for (u32 i = 0; gadget != 0 && i < kMaxChain && b.ok(); ++i) {
+            const u32 next = b.r32(gadget + gg_NextGadget);
+            if ((b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0) {
+                g.render(window, rp, gadget);
+            }
+            gadget = next;
+        }
+    }
 
     static void begin_refresh(void*, Machine&) {}
 
@@ -332,6 +622,7 @@ struct GadToolsNatives {
             }
             item += 8;
         }
+        const RastPortState keep(b, rp);
         const u32 light = recessed ? kShadowPen : kShinePen;
         const u32 dark = recessed ? kShinePen : kShadowPen;
         const i32 right = left + width - 1;
@@ -498,7 +789,10 @@ struct GadToolsFunction {
 };
 
 constexpr GadToolsFunction kGadToolsFunctions[] = {
+    {gadtools_lvo::CreateGadgetA, GadToolsNatives::create_gadget, "CreateGadgetA"},
     {gadtools_lvo::FreeGadgets, GadToolsNatives::free_gadgets, "FreeGadgets"},
+    {gadtools_lvo::GT_SetGadgetAttrsA, GadToolsNatives::set_gadget_attrs, "GT_SetGadgetAttrsA"},
+    {gadtools_lvo::GT_GetGadgetAttrsA, GadToolsNatives::get_gadget_attrs, "GT_GetGadgetAttrsA"},
     {gadtools_lvo::CreateMenusA, GadToolsNatives::create_menus, "CreateMenusA"},
     {gadtools_lvo::FreeMenus, GadToolsNatives::free_menus, "FreeMenus"},
     {gadtools_lvo::LayoutMenuItemsA, GadToolsNatives::layout_menu_items, "LayoutMenuItemsA"},
@@ -518,11 +812,140 @@ constexpr GadToolsFunction kGadToolsFunctions[] = {
 
 }
 
+namespace {
+
+// Up to max characters of the text at addr, without the underscore
+// character that marks a keyboard shortcut.
+u32 read_label(Bus& b, u32 addr, u8 underscore, char* out, u32 max) {
+    u32 n = 0;
+    for (u32 i = 0; addr != 0 && n < max && i < 255; ++i) {
+        const u8 c = static_cast<u8>(b.r8(addr + i));
+        if (!b.ok() || c == 0) {
+            break;
+        }
+        if (underscore != 0 && c == underscore) {
+            continue;
+        }
+        out[n++] = static_cast<char>(c);
+    }
+    return n;
+}
+
+u32 format_number(i32 value, char* out) {
+    char digits[12];
+    u32 n = 0;
+    u32 magnitude = value < 0 ? static_cast<u32>(-(value + 1)) + 1 : static_cast<u32>(value);
+    do {
+        digits[n++] = static_cast<char>('0' + magnitude % 10);
+        magnitude /= 10;
+    } while (magnitude != 0);
+    u32 at = 0;
+    if (value < 0) {
+        out[at++] = '-';
+    }
+    while (n > 0) {
+        out[at++] = digits[--n];
+    }
+    return at;
+}
+
+}  // namespace
+
+void GadTools::render(u32 window, u32 rp, u32 gadget) {
+    if (machine_ == nullptr || graphics_ == nullptr || rp == 0 || gadget == 0) {
+        return;
+    }
+    (void)window;
+    Bus b(*machine_);
+    const i32 left = static_cast<i16>(b.r16(gadget + ndk::gg_LeftEdge));
+    const i32 top = static_cast<i16>(b.r16(gadget + ndk::gg_TopEdge));
+    const i32 width = static_cast<i16>(b.r16(gadget + ndk::gg_Width));
+    const i32 height = static_cast<i16>(b.r16(gadget + ndk::gg_Height));
+    const u32 flags = b.r16(gadget + gg_Flags);
+    const u32 kind = b.r16(gadget + gt_Kind);
+    const u32 place = b.r16(gadget + gt_Place);
+    const u32 options = b.r16(gadget + gt_Options);
+    const u8 underscore = static_cast<u8>(b.r8(gadget + gt_Underscore));
+    if (!b.ok() || width <= 0 || height <= 0) {
+        return;
+    }
+    const RastPortState keep(b, rp);
+    Graphics& gfx = *graphics_;
+    const i32 right = left + width - 1;
+    const i32 bottom = top + height - 1;
+    const bool selected = (flags & ndk::GFLG_SELECTED) != 0;
+    const bool framed = kind == BUTTON_KIND || (options & kOptBorder) != 0 ||
+                        (kind != TEXT_KIND && kind != NUMBER_KIND);
+    const bool recessed = kind == TEXT_KIND || kind == NUMBER_KIND || selected;
+    // The inside first, then the frame around it.
+    gfx.set_pens(rp, selected ? kFillPen : 0, 0, ndk::JAM1);
+    if (framed && width > 2 && height > 2) {
+        gfx.rect_fill(rp, left + 1, top + 1, right - 1, bottom - 1);
+        gfx.set_pens(rp, recessed ? kShadowPen : kShinePen, 0, ndk::JAM1);
+        gfx.move(rp, left, bottom);
+        gfx.draw_line(rp, left, top);
+        gfx.draw_line(rp, right, top);
+        gfx.set_pens(rp, recessed ? kShinePen : kShadowPen, 0, ndk::JAM1);
+        gfx.move(rp, right, top + 1);
+        gfx.draw_line(rp, right, bottom);
+        gfx.draw_line(rp, left + 1, bottom);
+    } else {
+        gfx.rect_fill(rp, left, top, right, bottom);
+    }
+    const i32 baseline =
+        top + (height - static_cast<i32>(kGlyphHeight)) / 2 + static_cast<i32>(kGlyphBaseline);
+    const i32 room = (width - (framed ? 8 : 0)) / static_cast<i32>(kGlyphWidth);
+
+    // What a display shows, cut to fit inside it.
+    char text[256];
+    u32 length = 0;
+    if (kind == TEXT_KIND) {
+        length = read_label(b, b.r32(gadget + gt_Text), 0, text, sizeof text);
+    } else if (kind == NUMBER_KIND) {
+        length = format_number(static_cast<i32>(b.r32(gadget + gt_Number)), text);
+    }
+    if (length != 0 && room > 0) {
+        const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);
+        gfx.set_pens(rp, kTextPen, 0, ndk::JAM1);
+        gfx.move(rp, left + (framed ? 4 : 0), baseline);
+        gfx.text(rp, reinterpret_cast<const u8*>(text), shown);
+    }
+
+    // The label, inside a button or beside the gadget.
+    char label[128];
+    const u32 label_chars = read_label(b, b.r32(gadget + gt_Label), underscore, label,
+                                       sizeof label);
+    if (label_chars == 0) {
+        return;
+    }
+    const i32 span = static_cast<i32>(label_chars * kGlyphWidth);
+    i32 x = left - span - static_cast<i32>(kGlyphWidth);
+    i32 y = baseline;
+    if ((place & PLACETEXT_IN) != 0) {
+        x = left + (width - span) / 2;
+    } else if ((place & PLACETEXT_RIGHT) != 0) {
+        x = right + 1 + static_cast<i32>(kGlyphWidth);
+    } else if ((place & PLACETEXT_ABOVE) != 0) {
+        x = left + (width - span) / 2;
+        y = top - 4 - static_cast<i32>(kGlyphHeight - kGlyphBaseline);
+    } else if ((place & PLACETEXT_BELOW) != 0) {
+        x = left + (width - span) / 2;
+        y = bottom + 3 + static_cast<i32>(kGlyphBaseline);
+    }
+    const bool inside = (place & PLACETEXT_IN) != 0;
+    gfx.set_pens(rp, inside && selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
+    gfx.move(rp, x, y);
+    gfx.text(rp, reinterpret_cast<const u8*>(label), label_chars);
+}
+
 bool GadTools::init(Machine& m, Exec& exec, Graphics& graphics) {
     machine_ = &m;
     exec_ = &exec;
     graphics_ = &graphics;
     base_ = 0;
+    for (bool& seen : unhandled_kinds_) {
+        seen = false;
+    }
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }

@@ -32,9 +32,12 @@
 // gadtools.library written in C++ for code run by the 68000 translator.
 //
 // It hands out visual info for a screen, makes the context gadget a
-// gadget list starts with, filters and replies IntuiMessages, refreshes
-// windows and draws bevel boxes. Every other vector logs "gadtools:
-// unimplemented LVO -<n>" and ends the run with Unimplemented.
+// gadget list starts with and the gadgets after it, filters and replies
+// IntuiMessages, refreshes windows and draws bevel boxes. Buttons, text
+// and number displays work; a gadget of another kind shows its frame and
+// does nothing, and the first of each such kind logs "gadtools: gadget
+// kind <n> not handled". Every other vector logs "gadtools: unimplemented
+// LVO -<n>" and ends the run with Unimplemented.
 
 namespace hombre {
 
@@ -81,6 +84,13 @@ public:
     u32 create_menus(u32 array);
     bool layout_menus(u32 menu);
 
+    // Draws a gadget gadtools made, through rp of the window, as it stands:
+    // Intuition calls it when a button is pressed or let go.
+    void render(u32 window, u32 rp, u32 gadget);
+    static void render_gadget(void* ctx, u32 window, u32 rp, u32 gadget) {
+        static_cast<GadTools*>(ctx)->render(window, rp, gadget);
+    }
+
 private:
     friend struct GadToolsNatives;
 
@@ -90,6 +100,7 @@ private:
     Exec* exec_ = nullptr;
     Graphics* graphics_ = nullptr;
     u32 base_ = 0;
+    bool unhandled_kinds_[14]{};
     NativeVector vectors_[kVectors]{};
 };
 

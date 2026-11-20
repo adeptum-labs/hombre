@@ -53,6 +53,29 @@ constexpr u32 kList = kData + 0x800;
 constexpr u32 kMessage = kData + 0x880;
 constexpr u32 kBitmap = kData + 0x900;
 constexpr u32 kRastPort = kData + 0xA00;
+constexpr u32 kNewGadget = kData + 0xB00;
+constexpr u32 kLabel = kData + 0xB40;
+constexpr u32 kText = kData + 0xB60;
+constexpr u32 kAnswer = kData + 0xB80;
+
+// struct NewGadget, the gadget kinds and their tags.
+constexpr u32 ng_LeftEdge = 0;
+constexpr u32 ng_TopEdge = 2;
+constexpr u32 ng_Width = 4;
+constexpr u32 ng_Height = 6;
+constexpr u32 ng_GadgetText = 8;
+constexpr u32 ng_GadgetID = 16;
+constexpr u32 ng_Flags = 18;
+constexpr u32 ng_UserData = 26;
+constexpr u32 BUTTON_KIND = 1;
+constexpr u32 NUMBER_KIND = 6;
+constexpr u32 TEXT_KIND = 13;
+constexpr u32 GA_Disabled = 0x8003000E;
+constexpr u32 GTTX_Text = 0x8008000B;
+constexpr u32 GTTX_CopyText = 0x8008000C;
+constexpr u32 GTNM_Number = 0x8008000D;
+constexpr u32 GTTX_Border = 0x80080039;
+constexpr u32 kFillPen = 3;
 
 // struct NewMenu
 constexpr u32 nm_Type = 0;
@@ -467,6 +490,155 @@ void draw_bevel_box_recessed_swaps_the_pens() {
     CHECK_EQ(read_pixel(r, rp, 30, 30), 0u);
 }
 
+void draw_bevel_box_leaves_the_rastport_as_it_was() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 rp = make_surface(r);
+    r.put8(rp + rp_FgPen, 3);
+    r.put8(rp + rp_BgPen, 2);
+    r.put8(rp + rp_DrawMode, JAM2);
+    r.put16(rp + rp_cp_x, 5);
+    r.put16(rp + rp_cp_y, 6);
+
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = r.tags(kTags, {{GTBB_Recessed, 1}, {TAG_DONE, 0}});
+    r.cpu().d[0] = 20;
+    r.cpu().d[1] = 20;
+    r.cpu().d[2] = 40;
+    r.cpu().d[3] = 30;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::DrawBevelBoxA), ExitReason::Halt);
+    CHECK_EQ(r.get8(rp + rp_FgPen), 3u);
+    CHECK_EQ(r.get8(rp + rp_BgPen), 2u);
+    CHECK_EQ(r.get8(rp + rp_DrawMode), JAM2);
+    CHECK_EQ(r.get16(rp + rp_cp_x), 5u);
+    CHECK_EQ(r.get16(rp + rp_cp_y), 6u);
+}
+
+void put_new_gadget(GfxRig& r, i32 left, i32 top, u32 width, u32 height, u32 label, u32 id,
+                    u32 flags, u32 user) {
+    r.put16(kNewGadget + ng_LeftEdge, static_cast<u32>(left));
+    r.put16(kNewGadget + ng_TopEdge, static_cast<u32>(top));
+    r.put16(kNewGadget + ng_Width, width);
+    r.put16(kNewGadget + ng_Height, height);
+    r.put32(kNewGadget + ng_GadgetText, label);
+    r.put16(kNewGadget + ng_GadgetID, id);
+    r.put32(kNewGadget + ng_Flags, flags);
+    r.put32(kNewGadget + ng_UserData, user);
+}
+
+u32 create_gadget(GfxRig& r, GadTools& g, u32 kind, u32 previous, u32 tags) {
+    r.cpu().d[0] = kind;
+    r.cpu().a[0] = previous;
+    r.cpu().a[1] = kNewGadget;
+    r.cpu().a[2] = tags;
+    return gt_result(r, g, gadtools_lvo::CreateGadgetA);
+}
+
+void create_gadget_makes_buttons_and_displays() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 before = avail_mem(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    CHECK(context != 0);
+    CHECK_EQ(r.get16(context + gg_GadgetType), GTYP_GADTOOLS | GTYP_BOOLGADGET);
+
+    // A button reports when it is let go.
+    r.str(kLabel, "_Ok");
+    put_new_gadget(r, 10, 20, 60, 14, kLabel, 7, 0, 0x1234);
+    const u32 button = create_gadget(r, g, BUTTON_KIND, context, 0);
+    CHECK(button != 0);
+    CHECK_EQ(r.get32(context + gg_NextGadget), button);
+    CHECK_EQ(r.get16(button + gg_LeftEdge), 10u);
+    CHECK_EQ(r.get16(button + gg_TopEdge), 20u);
+    CHECK_EQ(r.get16(button + gg_Width), 60u);
+    CHECK_EQ(r.get16(button + gg_Height), 14u);
+    CHECK_EQ(r.get16(button + gg_GadgetType), GTYP_GADTOOLS | GTYP_BOOLGADGET);
+    CHECK_EQ(r.get16(button + gg_Activation), GACT_RELVERIFY);
+    CHECK_EQ(r.get16(button + gg_GadgetID), 7u);
+    CHECK_EQ(r.get32(button + gg_UserData), 0x1234u);
+
+    // A text display keeps a copy of its text; a disabled number display
+    // reports its number.
+    r.str(kText, "hello");
+    put_new_gadget(r, 10, 40, 100, 12, 0, 8, 0, 0);
+    const u32 text = create_gadget(
+        r, g, TEXT_KIND, button,
+        r.tags(kTags, {{GTTX_Text, kText}, {GTTX_CopyText, 1}, {GTTX_Border, 1}, {TAG_DONE, 0}}));
+    CHECK(text != 0);
+    CHECK_EQ(r.get16(text + gg_Activation), 0u);
+    r.str(kText, "XXXXX");
+    r.cpu().a[0] = text;
+    r.cpu().a[3] = r.tags(kTags, {{GTTX_Text, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK(r.read_str(r.get32(kAnswer)) == "hello");
+
+    put_new_gadget(r, 10, 60, 100, 12, 0, 9, 0, 0);
+    const u32 number_tags =
+        r.tags(kTags, {{GTNM_Number, 42}, {GA_Disabled, 1}, {TAG_DONE, 0}});
+    const u32 number = create_gadget(r, g, NUMBER_KIND, text, number_tags);
+    CHECK(number != 0);
+    CHECK_EQ(r.get16(number + gg_Flags) & GFLG_DISABLED, GFLG_DISABLED);
+    r.cpu().a[0] = number;
+    r.cpu().a[1] = 0;
+    r.cpu().a[3] = r.tags(kTags, {{GTNM_Number, 7}, {GA_Disabled, 0}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_SetGadgetAttrsA), ExitReason::Halt);
+    CHECK_EQ(r.get16(number + gg_Flags) & GFLG_DISABLED, 0u);
+    r.cpu().a[0] = number;
+    r.cpu().a[3] = r.tags(kTags, {{GTNM_Number, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), 7u);
+
+    // No previous gadget, no gadget.
+    CHECK_EQ(create_gadget(r, g, BUTTON_KIND, 0, 0), 0u);
+
+    r.cpu().a[0] = context;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::FreeGadgets), ExitReason::Halt);
+    CHECK_EQ(avail_mem(r), before);
+}
+
+void a_button_draws_raised_and_pressed() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 rp = make_surface(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    r.str(kLabel, "Go");
+    put_new_gadget(r, 20, 20, 40, 14, kLabel, 1, 0, 0);
+    const u32 button = create_gadget(r, g, BUTTON_KIND, context, 0);
+    r.put8(rp + rp_FgPen, 2);
+    r.put8(rp + rp_DrawMode, JAM2);
+
+    g.render(0, rp, button);
+    CHECK_EQ(read_pixel(r, rp, 30, 20), kShinePen);
+    CHECK_EQ(read_pixel(r, rp, 20, 30), kShinePen);
+    CHECK_EQ(read_pixel(r, rp, 30, 33), kShadowPen);
+    CHECK_EQ(read_pixel(r, rp, 59, 30), kShadowPen);
+    u32 label_pixels = 0;
+    for (i32 y = 21; y < 33; ++y) {
+        for (i32 x = 21; x < 59; ++x) {
+            label_pixels += read_pixel(r, rp, x, y) == 1 ? 1 : 0;
+        }
+    }
+    CHECK(label_pixels > 0);
+
+    // Pressed: recessed and filled.
+    r.put16(button + gg_Flags, r.get16(button + gg_Flags) | GFLG_SELECTED);
+    g.render(0, rp, button);
+    CHECK_EQ(read_pixel(r, rp, 30, 20), kShadowPen);
+    CHECK_EQ(read_pixel(r, rp, 30, 33), kShinePen);
+    CHECK_EQ(read_pixel(r, rp, 22, 22), kFillPen);
+
+    // The program's pens and draw mode are untouched.
+    CHECK_EQ(r.get8(rp + rp_FgPen), 2u);
+    CHECK_EQ(r.get8(rp + rp_DrawMode), JAM2);
+    r.cpu().a[0] = context;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::FreeGadgets), ExitReason::Halt);
+}
+
 }
 
 int main() {
@@ -479,5 +651,8 @@ int main() {
     filter_vectors_return_a1();
     draw_bevel_box_uses_shine_and_shadow_pens();
     draw_bevel_box_recessed_swaps_the_pens();
+    draw_bevel_box_leaves_the_rastport_as_it_was();
+    create_gadget_makes_buttons_and_displays();
+    a_button_draws_raised_and_pressed();
     return check::finish("test_gadtools");
 }
