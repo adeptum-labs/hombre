@@ -495,6 +495,43 @@ struct GraphicsNatives {
         b.w16(extent + 10, 1);
     }
 
+    // TextFit(rp A1, string A0, length D0, extent A2, limit A3, direction
+    // D1, width D2, height D3): how many characters of the topaz font fit
+    // in width by height pixels, with their TextExtent at A2.
+    static void text_fit(void*, Machine& m) {
+        Bus b(m);
+        const u32 length = m.cpu.d[0] & 0xFFFF;
+        u32 width = m.cpu.d[2] & 0xFFFF;
+        u32 height = m.cpu.d[3] & 0xFFFF;
+        // A constraining TextExtent limits the text to its box as well.
+        const u32 limit = m.cpu.a[3];
+        if (limit != 0) {
+            const i32 box_w = static_cast<i16>(b.r16(limit + 8)) -
+                              static_cast<i16>(b.r16(limit + 4)) + 1;
+            const i32 box_h = static_cast<i16>(b.r16(limit + 10)) -
+                              static_cast<i16>(b.r16(limit + 6)) + 1;
+            const u32 w = box_w > 0 ? static_cast<u32>(box_w) : 0;
+            const u32 h = box_h > 0 ? static_cast<u32>(box_h) : 0;
+            width = width == 0 || w < width ? w : width;
+            height = height == 0 || h < height ? h : height;
+        }
+        u32 fit = height < 8 ? 0 : width / 8;
+        fit = fit < length ? fit : length;
+        const u32 extent = m.cpu.a[2];
+        if (extent != 0) {
+            const u32 span = 8 * fit;
+            b.w16(extent + 0, span);
+            b.w16(extent + 2, 8);
+            b.w16(extent + 4, 0);
+            b.w16(extent + 6, static_cast<u16>(-6));
+            b.w16(extent + 8, static_cast<u16>(span == 0 ? 0 : span - 1));
+            b.w16(extent + 10, 1);
+        }
+        if (b.ok()) {
+            native::set_result(m, fit);
+        }
+    }
+
     static void text(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
@@ -1166,6 +1203,136 @@ struct GraphicsNatives {
         native::set_result(m, result);
     }
 
+    // The pen and mode readers of V39, and their setters.
+    static void get_a_pen(void*, Machine& m) { rp_byte(m, ndk::rp_FgPen); }
+    static void get_b_pen(void*, Machine& m) { rp_byte(m, ndk::rp_BgPen); }
+    static void get_dr_md(void*, Machine& m) { rp_byte(m, ndk::rp_DrawMode); }
+    static void get_outline_pen(void*, Machine& m) { rp_byte(m, ndk::rp_AOlPen); }
+
+    static void rp_byte(Machine& m, u32 offset) {
+        Bus b(m);
+        const u32 value = b.r8(m.cpu.a[0] + offset);
+        if (b.ok()) {
+            native::set_result(m, value);
+        }
+    }
+
+    // SetABPenDrMd(rp A1, apen D0, bpen D1, mode D2).
+    static void set_ab_pen_dr_md(void* ctx, Machine& m) {
+        of(ctx).set_pens(m.cpu.a[1], m.cpu.d[0] & 0xFF, m.cpu.d[1] & 0xFF, m.cpu.d[2] & 0xFF);
+    }
+
+    // SetOutlinePen(rp A0, pen D0): the old outline pen.
+    static void set_outline_pen(void*, Machine& m) {
+        Bus b(m);
+        const u32 rp = m.cpu.a[0];
+        const u32 old = b.r8(rp + ndk::rp_AOlPen);
+        b.w8(rp + ndk::rp_AOlPen, m.cpu.d[0] & 0xFF);
+        b.w16(rp + ndk::rp_Flags, b.r16(rp + ndk::rp_Flags) | ndk::AREAOUTLINE);
+        if (b.ok()) {
+            native::set_result(m, old);
+        }
+    }
+
+    // SetWriteMask(rp A0, mask D0): the planes drawing may change.
+    static void set_write_mask(void*, Machine& m) {
+        Bus b(m);
+        b.w8(m.cpu.a[0] + ndk::rp_Mask, m.cpu.d[0] & 0xFF);
+        if (b.ok()) {
+            native::set_result(m, 1);
+        }
+    }
+
+    // SetMaxPen(rp A0, pen D0) only tells which pens drawing will use.
+    static void set_max_pen(void*, Machine&) {}
+
+    // GetBitMapAttr(bitmap A0, attribute D1): BMA_HEIGHT, BMA_DEPTH,
+    // BMA_WIDTH or BMA_FLAGS.
+    static void get_bitmap_attr(void*, Machine& m) {
+        Bus b(m);
+        const u32 bitmap = m.cpu.a[0];
+        u32 value = 0;
+        switch (m.cpu.d[1]) {
+        case 0:
+            value = b.r16(bitmap + ndk::bm_Rows);
+            break;
+        case 4:
+            value = b.r8(bitmap + ndk::bm_Depth);
+            break;
+        case 8:
+            value = b.r16(bitmap + ndk::bm_BytesPerRow) * 8;
+            break;
+        case 12:
+            value = b.r8(bitmap + ndk::bm_Flags);
+            break;
+        default:
+            break;
+        }
+        if (b.ok()) {
+            native::set_result(m, value);
+        }
+    }
+
+    // AllocBitMap(width D0, height D1, depth D2, flags D3, friend A0): a
+    // BitMap and its planes, all of them cleared.
+    static void alloc_bitmap(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        const u32 width = m.cpu.d[0];
+        const u32 height = m.cpu.d[1];
+        const u32 depth = m.cpu.d[2];
+        const u32 row_bytes = ((width + 15) / 16) * 2;
+        native::set_result(m, 0);
+        if (g.exec_ == nullptr || depth == 0 || depth > 8 || row_bytes == 0 || height == 0 ||
+            row_bytes > 0xFFFF || height > 0xFFFF) {
+            return;
+        }
+        const u32 bitmap = g.exec_->alloc(ndk::BitMap_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (bitmap == 0) {
+            return;
+        }
+        Bus b(m);
+        b.w16(bitmap + ndk::bm_BytesPerRow, row_bytes);
+        b.w16(bitmap + ndk::bm_Rows, height);
+        b.w8(bitmap + ndk::bm_Flags, m.cpu.d[3] & 0xFF);
+        b.w8(bitmap + ndk::bm_Depth, depth);
+        for (u32 plane = 0; plane < depth; ++plane) {
+            const u32 at = g.exec_->alloc(row_bytes * height, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+            if (at == 0) {
+                free_bitmap_planes(g, b, bitmap, plane);
+                return;
+            }
+            b.w32(bitmap + ndk::bm_Planes + plane * 4, at);
+        }
+        if (b.ok()) {
+            native::set_result(m, bitmap);
+        }
+    }
+
+    static void free_bitmap_planes(Graphics& g, Bus& b, u32 bitmap, u32 planes) {
+        const u32 bytes = b.r16(bitmap + ndk::bm_BytesPerRow) * b.r16(bitmap + ndk::bm_Rows);
+        for (u32 plane = 0; plane < planes; ++plane) {
+            const u32 at = b.r32(bitmap + ndk::bm_Planes + plane * 4);
+            if (at != 0 && b.ok()) {
+                g.exec_->free(at, bytes);
+            }
+        }
+        g.exec_->free(bitmap, ndk::BitMap_SIZEOF);
+    }
+
+    // FreeBitMap(bitmap A0): one AllocBitMap made.
+    static void free_bitmap(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        const u32 bitmap = m.cpu.a[0];
+        if (bitmap == 0 || g.exec_ == nullptr) {
+            return;
+        }
+        Bus b(m);
+        const u32 depth = b.r8(bitmap + ndk::bm_Depth);
+        if (b.ok() && depth <= 8) {
+            free_bitmap_planes(g, b, bitmap, depth);
+        }
+    }
+
     static void free_raster(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         const u32 p = m.cpu.a[0];
@@ -1318,6 +1485,18 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::InitArea, GraphicsNatives::init_area, "InitArea"},
     {graphics_lvo::InitTmpRas, GraphicsNatives::init_tmp_ras, "InitTmpRas"},
     {graphics_lvo::WaitBlit, GraphicsNatives::wait_blit, "WaitBlit"},
+    {graphics_lvo::TextFit, GraphicsNatives::text_fit, "TextFit"},
+    {graphics_lvo::GetAPen, GraphicsNatives::get_a_pen, "GetAPen"},
+    {graphics_lvo::GetBPen, GraphicsNatives::get_b_pen, "GetBPen"},
+    {graphics_lvo::GetDrMd, GraphicsNatives::get_dr_md, "GetDrMd"},
+    {graphics_lvo::GetOutlinePen, GraphicsNatives::get_outline_pen, "GetOutlinePen"},
+    {graphics_lvo::SetABPenDrMd, GraphicsNatives::set_ab_pen_dr_md, "SetABPenDrMd"},
+    {graphics_lvo::AllocBitMap, GraphicsNatives::alloc_bitmap, "AllocBitMap"},
+    {graphics_lvo::FreeBitMap, GraphicsNatives::free_bitmap, "FreeBitMap"},
+    {graphics_lvo::GetBitMapAttr, GraphicsNatives::get_bitmap_attr, "GetBitMapAttr"},
+    {graphics_lvo::SetOutlinePen, GraphicsNatives::set_outline_pen, "SetOutlinePen"},
+    {graphics_lvo::SetWriteMask, GraphicsNatives::set_write_mask, "SetWriteMask"},
+    {graphics_lvo::SetMaxPen, GraphicsNatives::set_max_pen, "SetMaxPen"},
     {graphics_lvo::BltBitMap, GraphicsNatives::blt_bitmap, "BltBitMap"},
     {graphics_lvo::BltBitMapRastPort, GraphicsNatives::blt_bitmap_rastport,
      "BltBitMapRastPort"},

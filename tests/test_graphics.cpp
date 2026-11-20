@@ -1726,7 +1726,89 @@ void blt_bitmap_rastport_draws_inside_the_rastport() {
     CHECK_EQ(surface_pen(r, dst, 32, 4, 3), 0u);
 }
 
+void text_fit_pens_and_bitmaps_of_v39() {
+    GfxRig r;
+    const Surface a = make_sized_surface(r, kBitmap, kRastPort, 32, 8);
+    // TextFit: 10 of 12 characters fit 85 pixels; a constraining extent
+    // of 40 pixels lets 5 fit.
+    r.str(kStrings, "abcdefghijkl");
+    r.cpu().a[1] = a.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 12;
+    r.cpu().a[2] = kExtent;
+    r.cpu().a[3] = 0;
+    r.cpu().d[1] = 1;
+    r.cpu().d[2] = 85;
+    r.cpu().d[3] = 8;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::TextFit), 10u);
+    CHECK_EQ(r.get16(kExtent), 80u);
+    const u32 limit = kExtent + 0x20;
+    r.put16(limit + 4, 0);
+    r.put16(limit + 6, static_cast<u16>(-6));
+    r.put16(limit + 8, 39);
+    r.put16(limit + 10, 1);
+    r.cpu().a[1] = a.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 12;
+    r.cpu().a[2] = 0;
+    r.cpu().a[3] = limit;
+    r.cpu().d[2] = 0;
+    r.cpu().d[3] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::TextFit), 5u);
+    // Too low for the font: nothing fits.
+    r.cpu().a[3] = 0;
+    r.cpu().d[2] = 85;
+    r.cpu().d[3] = 7;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::TextFit), 0u);
+
+    // The pens and mode, set together and read back.
+    r.cpu().a[1] = a.rp;
+    r.cpu().d[0] = 3;
+    r.cpu().d[1] = 2;
+    r.cpu().d[2] = JAM2;
+    r.call(Base::Graphics, graphics_lvo::SetABPenDrMd);
+    r.cpu().a[0] = a.rp;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetAPen), 3u);
+    r.cpu().a[0] = a.rp;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetBPen), 2u);
+    r.cpu().a[0] = a.rp;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDrMd), JAM2);
+    r.cpu().a[0] = a.rp;
+    r.cpu().d[0] = 0x01;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::SetWriteMask), 1u);
+    CHECK_EQ(r.get8(a.rp + rp_Mask), 0x01u);
+    r.cpu().a[0] = a.rp;
+    r.cpu().d[0] = 2;
+    r.call(Base::Graphics, graphics_lvo::SetOutlinePen);
+    r.cpu().a[0] = a.rp;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetOutlinePen), 2u);
+
+    // AllocBitMap and FreeBitMap balance; GetBitMapAttr reads it.
+    const u32 before = r.exec.free_bytes();
+    r.cpu().d[0] = 40;
+    r.cpu().d[1] = 10;
+    r.cpu().d[2] = 3;
+    r.cpu().d[3] = 0;
+    r.cpu().a[0] = 0;
+    const u32 bm = r.result(Base::Graphics, graphics_lvo::AllocBitMap);
+    CHECK(bm != 0);
+    CHECK_EQ(r.get16(bm + bm_BytesPerRow), 6u);
+    r.cpu().a[0] = bm;
+    r.cpu().d[1] = 8;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetBitMapAttr), 48u);
+    r.cpu().a[0] = bm;
+    r.cpu().d[1] = 4;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetBitMapAttr), 3u);
+    r.cpu().a[0] = bm;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetBitMapAttr), 10u);
+    r.cpu().a[0] = bm;
+    r.call(Base::Graphics, graphics_lvo::FreeBitMap);
+    CHECK_EQ(r.exec.free_bytes(), before);
+}
+
 int main() {
+    text_fit_pens_and_bitmaps_of_v39();
     blt_bitmap_copies_through_the_minterm_and_mask();
     blt_bitmap_rastport_draws_inside_the_rastport();
     init_bitmap_fills_the_fields();
