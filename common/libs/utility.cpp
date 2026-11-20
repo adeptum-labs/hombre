@@ -333,6 +333,181 @@ void call_hook_pkt(void* ctx, Machine& m) {
     m.cpu.d[0] = result;
 }
 
+// --- tag list editing ------------------------------------------------------
+
+// The tag lists AllocateTagItems and CloneTagItems hand out carry their
+// item count in the long before them, for FreeTagItems.
+constexpr u32 kTagHeader = 4;
+
+u32 alloc_tags(Exec& exec, Bus& b, u32 count) {
+    if (count >= Utility::kMaxTagItems) {
+        return 0;
+    }
+    const u32 block = exec.alloc(kTagHeader + count * ti_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    if (block == 0) {
+        return 0;
+    }
+    b.w32(block, count);
+    return block + kTagHeader;
+}
+
+bool in_array(Bus& b, u32 tag, u32 array) {
+    for (u32 i = 0; array != 0 && i < Utility::kMaxTagItems; ++i) {
+        const u32 entry = b.r32(array + i * 4);
+        if (!b.ok() || entry == TAG_DONE) {
+            return false;
+        }
+        if (entry == tag) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// PackBoolTags(flags D0, tags A0, boolean map A1): each tag of the map
+// that the list has sets its flag bits when its data is not 0, clears
+// them when it is.
+void pack_bool_tags(void*, Machine& m) {
+    Bus b(m);
+    u32 flags = m.cpu.d[0];
+    u32 map = m.cpu.a[1];
+    u32 budget = Utility::kMaxTagItems;
+    for (;;) {
+        const u32 entry = next_tag(b, map, budget);
+        if (entry == 0) {
+            break;
+        }
+        const u32 item = find_tag(b, b.r32(entry + ti_Tag), m.cpu.a[0]);
+        if (item != 0) {
+            const u32 bits = b.r32(entry + ti_Data);
+            flags = b.r32(item + ti_Data) != 0 ? flags | bits : flags & ~bits;
+        }
+    }
+    if (b.ok()) {
+        native::set_result(m, flags);
+    }
+}
+
+// TagInArray(tag D0, array A0): whether the TAG_DONE-ended array of tags
+// holds it.
+void tag_in_array(void*, Machine& m) {
+    Bus b(m);
+    const bool found = in_array(b, m.cpu.d[0], m.cpu.a[0]);
+    if (b.ok()) {
+        native::set_result(m, found ? 1 : 0);
+    }
+}
+
+// FilterTagItems(tags A0, array A1, logic D0): with TAGFILTER_AND the
+// items whose tags the array lacks become TAG_IGNORE, with TAGFILTER_NOT
+// those it has. The number of items left.
+void filter_tag_items(void*, Machine& m) {
+    Bus b(m);
+    u32 at = m.cpu.a[0];
+    u32 budget = Utility::kMaxTagItems;
+    u32 left = 0;
+    for (;;) {
+        const u32 item = next_tag(b, at, budget);
+        if (item == 0) {
+            break;
+        }
+        const bool listed = in_array(b, b.r32(item + ti_Tag), m.cpu.a[1]);
+        if (listed == (m.cpu.d[0] == TAGFILTER_NOT)) {
+            b.w32(item + ti_Tag, TAG_IGNORE);
+        } else {
+            ++left;
+        }
+    }
+    if (b.ok()) {
+        native::set_result(m, left);
+    }
+}
+
+// MapTags(tags A0, map A1, type D0): each item takes the tag the map
+// gives its own; one the map lacks becomes TAG_IGNORE, or stays with
+// MAP_KEEP_NOT_FOUND.
+void map_tags(void*, Machine& m) {
+    Bus b(m);
+    u32 at = m.cpu.a[0];
+    u32 budget = Utility::kMaxTagItems;
+    for (;;) {
+        const u32 item = next_tag(b, at, budget);
+        if (item == 0) {
+            break;
+        }
+        const u32 to = find_tag(b, b.r32(item + ti_Tag), m.cpu.a[1]);
+        if (to != 0) {
+            b.w32(item + ti_Tag, b.r32(to + ti_Data));
+        } else if (m.cpu.d[0] == MAP_REMOVE_NOT_FOUND) {
+            b.w32(item + ti_Tag, TAG_IGNORE);
+        }
+    }
+}
+
+// AllocateTagItems(count D0): a cleared list of so many items.
+void allocate_tag_items(void* ctx, Machine& m) {
+    Bus b(m);
+    native::set_result(m, alloc_tags(static_cast<Utility*>(ctx)->exec(), b, m.cpu.d[0]));
+}
+
+// CloneTagItems(tags A0): a new list of the items of the list, its control
+// tags followed, ended with TAG_DONE.
+void clone_tag_items(void* ctx, Machine& m) {
+    Bus b(m);
+    u32 at = m.cpu.a[0];
+    u32 budget = Utility::kMaxTagItems;
+    u32 count = 0;
+    while (next_tag(b, at, budget) != 0) {
+        ++count;
+    }
+    const u32 clone = b.ok() ? alloc_tags(static_cast<Utility*>(ctx)->exec(), b, count + 1) : 0;
+    if (clone == 0) {
+        native::set_result(m, 0);
+        return;
+    }
+    at = m.cpu.a[0];
+    budget = Utility::kMaxTagItems;
+    for (u32 i = 0; i < count; ++i) {
+        const u32 item = next_tag(b, at, budget);
+        b.w32(clone + i * ti_SIZEOF + ti_Tag, b.r32(item + ti_Tag));
+        b.w32(clone + i * ti_SIZEOF + ti_Data, b.r32(item + ti_Data));
+    }
+    b.w32(clone + count * ti_SIZEOF + ti_Tag, TAG_DONE);
+    native::set_result(m, clone);
+}
+
+// RefreshTagItemClones(clone A0, original A1): the clone's items take the
+// original's data again.
+void refresh_tag_item_clones(void*, Machine& m) {
+    Bus b(m);
+    u32 at = m.cpu.a[1];
+    u32 budget = Utility::kMaxTagItems;
+    for (u32 i = 0; m.cpu.a[0] != 0; ++i) {
+        const u32 item = next_tag(b, at, budget);
+        const u32 clone = m.cpu.a[0] + i * ti_SIZEOF;
+        if (item == 0 || b.r32(clone + ti_Tag) == TAG_DONE || !b.ok()) {
+            break;
+        }
+        b.w32(clone + ti_Tag, b.r32(item + ti_Tag));
+        b.w32(clone + ti_Data, b.r32(item + ti_Data));
+    }
+}
+
+// FreeTagItems(tags A0): gives back a list AllocateTagItems or
+// CloneTagItems made.
+void free_tag_items(void* ctx, Machine& m) {
+    const u32 list = m.cpu.a[0];
+    if (list < kTagHeader) {
+        return;
+    }
+    Bus b(m);
+    const u32 count = b.r32(list - kTagHeader);
+    if (b.ok()) {
+        static_cast<Utility*>(ctx)->exec().free(list - kTagHeader,
+                                                kTagHeader + count * ti_SIZEOF);
+    }
+}
+
 // --- named objects -------------------------------------------------------------
 
 Utility& of(void* ctx) { return *static_cast<Utility*>(ctx); }
@@ -377,6 +552,14 @@ constexpr UtilityFunction kUtilityFunctions[] = {
     {utility_lvo::FindTagItem, find_tag_item, "FindTagItem"},
     {utility_lvo::GetTagData, get_tag_data, "GetTagData"},
     {utility_lvo::NextTagItem, next_tag_item, "NextTagItem"},
+    {utility_lvo::PackBoolTags, pack_bool_tags, "PackBoolTags"},
+    {utility_lvo::MapTags, map_tags, "MapTags"},
+    {utility_lvo::AllocateTagItems, allocate_tag_items, "AllocateTagItems"},
+    {utility_lvo::CloneTagItems, clone_tag_items, "CloneTagItems"},
+    {utility_lvo::FreeTagItems, free_tag_items, "FreeTagItems"},
+    {utility_lvo::RefreshTagItemClones, refresh_tag_item_clones, "RefreshTagItemClones"},
+    {utility_lvo::TagInArray, tag_in_array, "TagInArray"},
+    {utility_lvo::FilterTagItems, filter_tag_items, "FilterTagItems"},
     {utility_lvo::CallHookPkt, call_hook_pkt, "CallHookPkt"},
     {utility_lvo::Amiga2Date, amiga2date, "Amiga2Date"},
     {utility_lvo::Date2Amiga, date2amiga, "Date2Amiga"},

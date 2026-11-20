@@ -31,7 +31,10 @@
 
 // utility.library written in C++ for code run by the 68000 translator.
 //
-// It has the tag list walkers (FindTagItem, GetTagData, NextTagItem), the
+// It has the tag list walkers and editors (FindTagItem, GetTagData,
+// NextTagItem, PackBoolTags, MapTags, FilterTagItems, TagInArray) and the
+// tag list allocators (AllocateTagItems, CloneTagItems,
+// RefreshTagItemClones, FreeTagItems), the
 // date conversions (Amiga2Date, Date2Amiga), the case-blind string
 // functions (Stricmp, Strnicmp, ToUpper, ToLower), the named objects and
 // their name spaces, and GetUniqueID. Case follows ISO 8859-1, as the
@@ -54,7 +57,15 @@ namespace utility_lvo {
 
 constexpr u32 FindTagItem = 30;
 constexpr u32 GetTagData = 36;
+constexpr u32 PackBoolTags = 42;
 constexpr u32 NextTagItem = 48;
+constexpr u32 MapTags = 60;
+constexpr u32 AllocateTagItems = 66;
+constexpr u32 CloneTagItems = 72;
+constexpr u32 FreeTagItems = 78;
+constexpr u32 RefreshTagItemClones = 84;
+constexpr u32 TagInArray = 90;
+constexpr u32 FilterTagItems = 96;
 constexpr u32 CallHookPkt = 102;
 constexpr u32 Amiga2Date = 120;
 constexpr u32 Date2Amiga = 126;
@@ -94,6 +105,12 @@ constexpr u32 TAG_DONE = 0;
 constexpr u32 TAG_IGNORE = 1;
 constexpr u32 TAG_MORE = 2;
 constexpr u32 TAG_SKIP = 3;
+
+// FilterTagItems' logic and MapTags' map type.
+constexpr u32 TAGFILTER_AND = 0;
+constexpr u32 TAGFILTER_NOT = 1;
+constexpr u32 MAP_REMOVE_NOT_FOUND = 0;
+constexpr u32 MAP_KEEP_NOT_FOUND = 1;
 
 // struct ClockData, whose fields the includes name sec, min, hour, mday,
 // month, year and wday; the cd_ prefix keeps them from clashing.

@@ -256,12 +256,12 @@ void utility_base_is_built() {
 
 void unimplemented_vectors_are_logged() {
     Rig r;
-    CHECK_EQ(r.call(42), ExitReason::Unimplemented);  // PackBoolTags
-    CHECK(logged("utility: unimplemented LVO -42"));
-    CHECK_EQ(r.cpu().pc, r.base() - 42);
-    g_lines.clear();
     CHECK_EQ(r.call(54), ExitReason::Unimplemented);  // FilterTagChanges
     CHECK(logged("utility: unimplemented LVO -54"));
+    CHECK_EQ(r.cpu().pc, r.base() - 54);
+    g_lines.clear();
+    CHECK_EQ(r.call(186), ExitReason::Unimplemented);  // ApplyTagChanges
+    CHECK(logged("utility: unimplemented LVO -186"));
 }
 
 void get_tag_data_and_find_tag_item() {
@@ -720,7 +720,76 @@ void named_objects_live_in_name_spaces() {
     CHECK(g_lines.empty());
 }
 
+void tag_lists_are_edited_cloned_and_freed() {
+    Rig r;
+    const u32 before = g_exec.free_bytes();
+    // PackBoolTags: tag 1 sets bit 0, tag 2 clears bit 2, tag 3 is absent.
+    const u32 map = r.tags(kData + 0x300, {{kTagUser + 1, 1}, {kTagUser + 2, 4},
+                                          {kTagUser + 3, 8}, {TAG_DONE, 0}});
+    const u32 list = r.tags(kData, {{kTagUser + 1, 9}, {kTagUser + 2, 0}, {TAG_DONE, 0}});
+    r.cpu().d[0] = 0x0C;
+    r.cpu().a[0] = list;
+    r.cpu().a[1] = map;
+    CHECK_EQ(r.result(utility_lvo::PackBoolTags), 0x09u);
+
+    // TagInArray and FilterTagItems.
+    const u32 array = kData + 0x400;
+    r.put32(array, kTagUser + 2);
+    r.put32(array + 4, TAG_DONE);
+    r.cpu().d[0] = kTagUser + 2;
+    r.cpu().a[0] = array;
+    CHECK_EQ(r.result(utility_lvo::TagInArray), 1u);
+    r.cpu().d[0] = kTagUser + 1;
+    r.cpu().a[0] = array;
+    CHECK_EQ(r.result(utility_lvo::TagInArray), 0u);
+    r.cpu().a[0] = list;
+    r.cpu().a[1] = array;
+    r.cpu().d[0] = TAGFILTER_NOT;
+    CHECK_EQ(r.result(utility_lvo::FilterTagItems), 1u);
+    CHECK_EQ(r.get32(list + 8), TAG_IGNORE);
+    CHECK_EQ(r.get32(list), kTagUser + 1);
+
+    // MapTags renames tag 1 to tag 7 and drops what the map lacks.
+    const u32 mapped = r.tags(kData + 0x500, {{kTagUser + 1, 1}, {kTagUser + 5, 5},
+                                             {TAG_DONE, 0}});
+    const u32 renames = r.tags(kData + 0x540, {{kTagUser + 1, kTagUser + 7}, {TAG_DONE, 0}});
+    r.cpu().a[0] = mapped;
+    r.cpu().a[1] = renames;
+    r.cpu().d[0] = MAP_REMOVE_NOT_FOUND;
+    r.call(utility_lvo::MapTags);
+    CHECK_EQ(r.get32(mapped), kTagUser + 7);
+    CHECK_EQ(r.get32(mapped + 8), TAG_IGNORE);
+
+    // CloneTagItems follows TAG_MORE and passes control tags over;
+    // RefreshTagItemClones copies the data again; FreeTagItems frees.
+    const u32 more = r.tags(kData + 0x600, {{kTagUser + 4, 40}, {TAG_DONE, 0}});
+    const u32 source = r.tags(kData + 0x640, {{kTagUser + 3, 30}, {TAG_IGNORE, 0},
+                                             {TAG_MORE, more}});
+    r.cpu().a[0] = source;
+    const u32 clone = r.result(utility_lvo::CloneTagItems);
+    CHECK(clone != 0);
+    CHECK_EQ(r.get32(clone), kTagUser + 3);
+    CHECK_EQ(r.get32(clone + 8), kTagUser + 4);
+    CHECK_EQ(r.get32(clone + 12), 40u);
+    CHECK_EQ(r.get32(clone + 16), TAG_DONE);
+    r.put32(more + 4, 41);
+    r.cpu().a[0] = clone;
+    r.cpu().a[1] = source;
+    r.call(utility_lvo::RefreshTagItemClones);
+    CHECK_EQ(r.get32(clone + 12), 41u);
+    r.cpu().a[0] = clone;
+    r.call(utility_lvo::FreeTagItems);
+    r.cpu().d[0] = 3;
+    const u32 fresh = r.result(utility_lvo::AllocateTagItems);
+    CHECK(fresh != 0);
+    CHECK_EQ(r.get32(fresh + 16), 0u);
+    r.cpu().a[0] = fresh;
+    r.call(utility_lvo::FreeTagItems);
+    CHECK_EQ(g_exec.free_bytes(), before);
+}
+
 int main() {
+    tag_lists_are_edited_cloned_and_freed();
     named_objects_live_in_name_spaces();
     utility_base_is_built();
     unimplemented_vectors_are_logged();
