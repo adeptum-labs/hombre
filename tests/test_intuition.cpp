@@ -3260,9 +3260,10 @@ GfxRig* g_rig_for_render = nullptr;
 u32 g_renders = 0;
 u32 g_rendered_flags = 0;
 
-void count_render(void*, u32, u32, u32 gadget) {
+bool count_render(void*, u32, u32, u32 gadget) {
     ++g_renders;
     g_rendered_flags = g_rig_for_render->get16(gadget + gg_Flags);
+    return true;
 }
 
 void a_boolean_gadget_reports_its_release() {
@@ -6092,7 +6093,197 @@ void easy_request_ends_on_the_classes_its_idcmp_pointer_holds() {
 
 }
 
+
+// A gadgetclass subclass dispatcher in 68000 code, at kData + 0x1C00: hit
+// on GM_HITTEST, counts GM_RENDER at kData + 0x1F00, stays active on
+// GM_GOACTIVE, and ends GM_HANDLEINPUT with GMR_NOREUSE | GMR_VERIFY and
+// termination 7. Any other method goes to the superclass, as
+// DoSuperMethod does.
+constexpr u32 kDispatcher = kData + 0x1C00;
+constexpr u32 kRenders = kData + 0x1F00;
+
+void put_dispatcher(GfxRig& r) {
+    const u16 code[] = {
+        0x2011,                          // move.l (a1),d0
+        0x0C80, 0x0000, 0x0000, 0x6604,  // cmpi.l #GM_HITTEST,d0; bne.s
+        0x7004, 0x4E75,                  // moveq #GMR_GADGETHIT,d0; rts
+        0x0C80, 0x0000, 0x0001, 0x660A,  // cmpi.l #GM_RENDER,d0; bne.s
+        0x52B9, static_cast<u16>(kRenders >> 16), static_cast<u16>(kRenders),  // addq.l #1
+        0x7000, 0x4E75,                  // moveq #0,d0; rts
+        0x0C80, 0x0000, 0x0002, 0x6604,  // cmpi.l #GM_GOACTIVE,d0; bne.s
+        0x7000, 0x4E75,                  // moveq #GMR_MEACTIVE,d0; rts
+        0x0C80, 0x0000, 0x0003, 0x660C,  // cmpi.l #GM_HANDLEINPUT,d0; bne.s
+        0x2069, 0x000C,                  // movea.l 12(a1),a0: the termination
+        0x7007, 0x2080,                  // moveq #7,d0; move.l d0,(a0)
+        0x700A, 0x4E75,                  // moveq #NOREUSE|VERIFY,d0; rts
+        0x2068, 0x0018,                  // movea.l cl_Super(a0),a0
+        0x2F28, 0x0008, 0x4E75,          // move.l h_Entry(a0),-(sp); rts
+    };
+    for (u32 i = 0; i < sizeof code / sizeof code[0]; ++i) {
+        r.put16(kDispatcher + i * 2, code[i]);
+    }
+    r.put32(kRenders, 0);
+    r.jit.flush();
+}
+
+void boopsi_system_classes_and_gadget_objects() {
+    GfxRig r;
+    hombre::Boopsi& bo = r.intuition.boopsi();
+    const u32 root = bo.find_class_named("rootclass");
+    const u32 gadget_class = bo.find_class_named("gadgetclass");
+    CHECK(root != 0 && gadget_class != 0 && bo.find_class_named("imageclass") != 0);
+    CHECK_EQ(r.get32(gadget_class + cl_Super), root);
+    CHECK_EQ(r.get16(gadget_class + cl_InstOffset), 0u);
+    CHECK_EQ(r.get16(gadget_class + cl_InstSize), ExtGadget_SIZEOF);
+    const u32 before = r.exec.free_bytes();
+
+    // NewObjectA by public name: the GA_ tags fill the Gadget.
+    const u32 previous = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    r.str(kTitle, "gadgetclass");
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kTitle;
+    r.cpu().a[2] = r.tags(kTagList, {{GA_Left, 10}, {GA_Top, 20}, {GA_Width, 30},
+                                      {GA_Height, 40}, {GA_ID, 7}, {GA_RelVerify, 1},
+                                      {GA_UserData, 99}, {GA_Previous, previous},
+                                      {TAG_DONE, 0}});
+    const u32 g = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(g != 0);
+    CHECK_EQ(r.get16(g + gg_GadgetType), GTYP_CUSTOMGADGET);
+    CHECK_EQ(r.get16(g + gg_LeftEdge), 10u);
+    CHECK_EQ(r.get16(g + gg_TopEdge), 20u);
+    CHECK_EQ(r.get16(g + gg_Width), 30u);
+    CHECK_EQ(r.get16(g + gg_Height), 40u);
+    CHECK_EQ(r.get16(g + gg_GadgetID), 7u);
+    CHECK_EQ(r.get16(g + gg_Activation) & GACT_RELVERIFY, GACT_RELVERIFY);
+    CHECK_EQ(r.get32(g + gg_UserData), 99u);
+    CHECK_EQ(r.get32(previous + gg_NextGadget), g);
+    CHECK_EQ(bo.class_of(g), gadget_class);
+    CHECK_EQ(r.get32(gadget_class + cl_ObjectCount), 1u);
+
+    // GetAttr and SetAttrsA.
+    r.cpu().d[0] = GA_Left;
+    r.cpu().a[0] = g;
+    r.cpu().a[1] = kBuffer;
+    CHECK(r.result(Base::Intuition, intuition_lvo::GetAttr) != 0);
+    CHECK_EQ(r.get32(kBuffer), 10u);
+    r.cpu().a[0] = g;
+    r.cpu().a[1] = r.tags(kTagList, {{GA_Disabled, 1}, {GA_Left, 12}, {TAG_DONE, 0}});
+    CHECK(r.result(Base::Intuition, intuition_lvo::SetAttrsA) != 0);
+    CHECK_EQ(r.get16(g + gg_Flags) & GFLG_DISABLED, GFLG_DISABLED);
+    CHECK_EQ(r.get16(g + gg_LeftEdge), 12u);
+
+    // DisposeObject gives its memory back.
+    r.cpu().a[0] = g;
+    r.call(Base::Intuition, intuition_lvo::DisposeObject);
+    CHECK_EQ(r.get32(gadget_class + cl_ObjectCount), 0u);
+    r.exec.free(previous, Gadget_SIZEOF);
+    CHECK_EQ(r.exec.free_bytes(), before);
+
+    // An unknown class makes no object.
+    r.str(kTitle, "noclass");
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kTitle;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::NewObjectA), 0u);
+}
+
+void a_class_in_68000_code_reaches_its_superclass() {
+    GfxRig r;
+    put_dispatcher(r);
+    hombre::Boopsi& bo = r.intuition.boopsi();
+    r.str(kTitle, "testgclass");
+    r.str(kTitle + 0x20, "gadgetclass");
+    r.cpu().a[0] = kTitle;
+    r.cpu().a[1] = kTitle + 0x20;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = 8;
+    r.cpu().d[1] = 0;
+    const u32 cl = r.result(Base::Intuition, intuition_lvo::MakeClass);
+    CHECK(cl != 0);
+    CHECK_EQ(r.get16(cl + cl_InstOffset), ExtGadget_SIZEOF);
+    CHECK_EQ(r.get16(cl + cl_InstSize), 8u);
+    r.put32(cl + h_Entry, kDispatcher);
+    CHECK_EQ(bo.find_class_named("testgclass"), 0u);
+    r.cpu().a[0] = cl;
+    r.call(Base::Intuition, intuition_lvo::AddClass);
+    CHECK_EQ(bo.find_class_named("testgclass"), cl);
+
+    // OM_NEW passes through the 68000 dispatcher to gadgetclass.
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kTitle;
+    r.cpu().a[2] = r.tags(kTagList, {{GA_Width, 16}, {TAG_DONE, 0}});
+    const u32 g = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(g != 0);
+    CHECK_EQ(bo.class_of(g), cl);
+    CHECK_EQ(r.get16(g + gg_GadgetType), GTYP_CUSTOMGADGET);
+    CHECK_EQ(r.get16(g + gg_Width), 16u);
+
+    // A class with objects or subclasses stays.
+    r.cpu().a[0] = cl;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::FreeClass), 0u);
+    r.cpu().a[0] = g;
+    r.call(Base::Intuition, intuition_lvo::DisposeObject);
+    r.cpu().a[0] = cl;
+    r.call(Base::Intuition, intuition_lvo::RemoveClass);
+    CHECK_EQ(bo.find_class_named("testgclass"), 0u);
+    r.cpu().a[0] = cl;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::FreeClass), 1u);
+}
+
+void a_boopsi_gadget_draws_itself_and_takes_the_click() {
+    GfxRig r;
+    put_dispatcher(r);
+    hombre::Boopsi& bo = r.intuition.boopsi();
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 cl = bo.make_class(0, 0, bo.gadget_class(), 0, 0);
+    r.put32(cl + h_Entry, kDispatcher);
+    const u32 tags = r.tags(kTagList, {{GA_Left, 20}, {GA_Top, 20}, {GA_Width, 40},
+                                       {GA_Height, 14}, {GA_RelVerify, 1}, {GA_Immediate, 1},
+                                       {TAG_DONE, 0}});
+    const u32 g = bo.new_object(cl, 0, tags);
+    CHECK(g != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_GADGETDOWN);
+    r.put32(kNewWindow + nw_FirstGadget, g);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    // Drawn with the window.
+    CHECK(r.get32(kRenders) >= 1u);
+
+    // The press: GM_HITTEST, GM_GOACTIVE and GADGETDOWN; the release:
+    // GM_HANDLEINPUT ends with GADGETUP carrying the termination.
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETDOWN);
+    CHECK_EQ(r.get32(msg + im_IAddress), g);
+    reply_msg(r, msg);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    CHECK_EQ(r.get16(msg + im_Code), 7u);
+    CHECK_EQ(r.get32(msg + im_IAddress), g);
+    reply_msg(r, msg);
+
+    // A press beside it reaches no gadget.
+    r.intuition.pointer_event(150, 120, 1, 1, 0, true);
+    r.intuition.pointer_event(150, 120, 0, 0, 1, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    r.cpu().a[0] = window;
+    r.call(Base::Intuition, intuition_lvo::CloseWindow);
+    bo.dispose_object(g);
+    CHECK(bo.free_class(cl));
+}
+
 int main() {
+    boopsi_system_classes_and_gadget_objects();
+    a_class_in_68000_code_reaches_its_superclass();
+    a_boopsi_gadget_draws_itself_and_takes_the_click();
     screen_font_is_a_textattr_naming_topaz();
     open_screen_builds_struct_bitmap_and_colormap();
     open_screen_clears_and_draws_title_bar();

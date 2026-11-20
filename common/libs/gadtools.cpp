@@ -59,13 +59,23 @@ constexpr u32 gt_Number = 56;
 constexpr u32 gt_Options = 60;
 constexpr u32 gt_Underscore = 62;
 constexpr u32 gt_CopyBytes = 64;
-constexpr u32 kGadgetBytes = 68;
+// A cycle gadget's number of labels, a palette's number of colours.
+constexpr u32 gt_Count = 68;
+constexpr u32 gt_ColorOffset = 70;
+constexpr u32 gt_ColorTable = 72;
+constexpr u32 gt_IndicatorWidth = 76;
+constexpr u32 gt_IndicatorHeight = 78;
+constexpr u32 kGadgetBytes = 80;
+constexpr u32 kMaxCycleLabels = 256;
+constexpr u32 kMaxPaletteColors = 256;
 constexpr u16 kOptBorder = 0x1;
 
 // Gadget kinds (libraries/gadtools.h).
 constexpr u32 GENERIC_KIND = 0;
 constexpr u32 BUTTON_KIND = 1;
 constexpr u32 NUMBER_KIND = 6;
+constexpr u32 CYCLE_KIND = 7;
+constexpr u32 PALETTE_KIND = 8;
 constexpr u32 TEXT_KIND = 13;
 constexpr u32 kKinds = 14;
 
@@ -91,6 +101,15 @@ constexpr u32 GA_Disabled = 0x8003000E;
 constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTTX_CopyText = 0x8008000C;
 constexpr u32 GTNM_Number = 0x8008000D;
+constexpr u32 GTCY_Labels = 0x8008000E;
+constexpr u32 GTCY_Active = 0x8008000F;
+constexpr u32 GTPA_Depth = 0x80080010;
+constexpr u32 GTPA_Color = 0x80080011;
+constexpr u32 GTPA_ColorOffset = 0x80080012;
+constexpr u32 GTPA_IndicatorWidth = 0x80080013;
+constexpr u32 GTPA_IndicatorHeight = 0x80080014;
+constexpr u32 GTPA_NumColors = 0x80080046;
+constexpr u32 GTPA_ColorTable = 0x80080052;
 constexpr u32 GTTX_Border = 0x80080039;
 constexpr u32 GTNM_Border = 0x8008003A;
 constexpr u32 GT_Underscore = 0x80080040;
@@ -276,8 +295,11 @@ struct GadToolsNatives {
         u32 gadget = m.cpu.a[0];
         for (u32 i = 0; gadget != 0 && i < kMaxChain && b.ok(); ++i) {
             const u32 next = b.r32(gadget + gg_NextGadget);
-            drop_text_copy(g, b, gadget);
-            g.exec_->free(gadget, kGadgetBytes);
+            // A gadget of the program's own in the chain is its to free.
+            if ((b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0) {
+                drop_text_copy(g, b, gadget);
+                g.exec_->free(gadget, kGadgetBytes);
+            }
             gadget = next;
         }
     }
@@ -344,7 +366,37 @@ struct GadToolsNatives {
                 copy = creating && data != 0;
                 break;
             case GTNM_Number:
+            case GTCY_Active:
+            case GTPA_Color:
                 b.w32(gadget + gt_Number, data);
+                break;
+            case GTCY_Labels: {
+                u32 count = 0;
+                while (data != 0 && count < kMaxCycleLabels && b.r32(data + count * 4) != 0 &&
+                       b.ok()) {
+                    ++count;
+                }
+                b.w32(gadget + gt_Text, data);
+                b.w16(gadget + gt_Count, count);
+                break;
+            }
+            case GTPA_Depth:
+                b.w16(gadget + gt_Count, data < 8 ? 1u << data : kMaxPaletteColors);
+                break;
+            case GTPA_NumColors:
+                b.w16(gadget + gt_Count, data < kMaxPaletteColors ? data : kMaxPaletteColors);
+                break;
+            case GTPA_ColorOffset:
+                b.w16(gadget + gt_ColorOffset, data);
+                break;
+            case GTPA_ColorTable:
+                b.w32(gadget + gt_ColorTable, data);
+                break;
+            case GTPA_IndicatorWidth:
+                b.w16(gadget + gt_IndicatorWidth, data);
+                break;
+            case GTPA_IndicatorHeight:
+                b.w16(gadget + gt_IndicatorHeight, data);
                 break;
             case GTTX_Border:
             case GTNM_Border:
@@ -392,7 +444,13 @@ struct GadToolsNatives {
         b.w16(gadget + ndk::gg_Width, b.r16(ng + ng_Width));
         b.w16(gadget + ndk::gg_Height, b.r16(ng + ng_Height));
         b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
-        b.w16(gadget + ndk::gg_Activation, kind == BUTTON_KIND ? ndk::GACT_RELVERIFY : 0);
+        const bool clicks = kind == BUTTON_KIND || kind == CYCLE_KIND || kind == PALETTE_KIND;
+        b.w16(gadget + ndk::gg_Activation, clicks ? ndk::GACT_RELVERIFY : 0);
+        if (kind == PALETTE_KIND) {
+            // One plane and colour 1, unless the tags say otherwise.
+            b.w16(gadget + gt_Count, 2);
+            b.w32(gadget + gt_Number, 1);
+        }
         b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_GADTOOLS | ndk::GTYP_BOOLGADGET);
         b.w16(gadget + ndk::gg_GadgetID, b.r16(ng + ng_GadgetID));
         b.w32(gadget + ndk::gg_UserData, b.r32(ng + ng_UserData));
@@ -407,7 +465,8 @@ struct GadToolsNatives {
             native::set_result(m, 0);
             return;
         }
-        if (kind != BUTTON_KIND && kind != TEXT_KIND && kind != NUMBER_KIND &&
+        if (kind != GENERIC_KIND && kind != BUTTON_KIND && kind != TEXT_KIND &&
+            kind != NUMBER_KIND && kind != CYCLE_KIND && kind != PALETTE_KIND &&
             kind < kKinds && !g.unhandled_kinds_[kind]) {
             g.unhandled_kinds_[kind] = true;
             LogLine().text("gadtools: gadget kind ").dec(kind).text(" not handled").send();
@@ -454,8 +513,11 @@ struct GadToolsNatives {
             } else if (tag == GTTX_Text) {
                 b.w32(data, b.r32(gadget + gt_Text));
                 ++answered;
-            } else if (tag == GTNM_Number) {
+            } else if (tag == GTNM_Number || tag == GTCY_Active || tag == GTPA_Color) {
                 b.w32(data, b.r32(gadget + gt_Number));
+                ++answered;
+            } else if (tag == GTCY_Labels) {
+                b.w32(data, b.r32(gadget + gt_Text));
                 ++answered;
             }
             item += 8;
@@ -851,9 +913,219 @@ u32 format_number(i32 value, char* out) {
 
 }  // namespace
 
-void GadTools::render(u32 window, u32 rp, u32 gadget) {
-    if (machine_ == nullptr || graphics_ == nullptr || rp == 0 || gadget == 0) {
+namespace {
+
+// The cycle glyph, a loop with its arrow, 12 by 7 pixels.
+constexpr const char* kCycleGlyph[] = {
+    "..XXXXXX....",
+    ".X......X...",
+    "X........X..",
+    "X......XXXXX",
+    "X.......XXX.",
+    ".X.......X..",
+    "..XXXX......",
+};
+constexpr i32 kCycleGlyphWidth = 12;
+constexpr i32 kCycleGlyphHeight = 7;
+// The part of a cycle gadget left of its separator.
+constexpr i32 kCycleKnob = 20;
+
+// A palette's cells: the area they fill and how many columns and rows,
+// chosen so a cell is as near square as the area allows.
+struct PaletteGrid {
+    i32 x = 0;
+    i32 y = 0;
+    i32 columns = 1;
+    i32 rows = 1;
+    i32 cell_w = 0;
+    i32 cell_h = 0;
+    i32 colors = 0;
+    Rect indicator{0, 0, -1, -1};
+};
+
+PaletteGrid palette_grid(Bus& b, u32 gadget, i32 left, i32 top, i32 right, i32 bottom) {
+    PaletteGrid g;
+    g.colors = static_cast<i32>(b.r16(gadget + gt_Count));
+    const i32 ind_w = static_cast<i32>(b.r16(gadget + gt_IndicatorWidth));
+    const i32 ind_h = static_cast<i32>(b.r16(gadget + gt_IndicatorHeight));
+    i32 x0 = left + 2;
+    i32 y0 = top + 2;
+    const i32 x1 = right - 2;
+    const i32 y1 = bottom - 2;
+    if (ind_w > 0) {
+        g.indicator = Rect{x0, y0, x0 + ind_w - 1, y1};
+        x0 += ind_w + 2;
+    } else if (ind_h > 0) {
+        g.indicator = Rect{x0, y0, x1, y0 + ind_h - 1};
+        y0 += ind_h + 2;
+    }
+    const i32 w = x1 - x0 + 1;
+    const i32 h = y1 - y0 + 1;
+    g.x = x0;
+    g.y = y0;
+    if (g.colors <= 0 || w <= 0 || h <= 0) {
+        g.colors = 0;
+        return g;
+    }
+    i32 best = -1;
+    for (i32 columns = 1; columns <= g.colors; ++columns) {
+        const i32 rows = (g.colors + columns - 1) / columns;
+        const i32 cw = w / columns;
+        const i32 ch = h / rows;
+        if (cw < 1 || ch < 1) {
+            continue;
+        }
+        const i32 score = cw > ch ? cw - ch : ch - cw;
+        if (best < 0 || score < best) {
+            best = score;
+            g.columns = columns;
+            g.rows = rows;
+            g.cell_w = cw;
+            g.cell_h = ch;
+        }
+    }
+    if (best < 0) {
+        g.colors = 0;
+    }
+    return g;
+}
+
+// The pen of the palette's colour number index.
+u32 palette_pen(Bus& b, u32 gadget, i32 index) {
+    const u32 table = b.r32(gadget + gt_ColorTable);
+    return table != 0 ? b.r8(table + static_cast<u32>(index))
+                      : b.r16(gadget + gt_ColorOffset) + static_cast<u32>(index);
+}
+
+}  // namespace
+
+void GadTools::draw_cycle(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
+                          i32 bottom, i32 baseline, bool selected) {
+    Graphics& gfx = *graphics_;
+    const i32 gx = left + 4;
+    const i32 gy = top + (bottom - top + 1 - kCycleGlyphHeight) / 2;
+    gfx.set_pens(rp, selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
+    for (i32 row = 0; row < kCycleGlyphHeight; ++row) {
+        for (i32 col = 0; col < kCycleGlyphWidth; ++col) {
+            if (kCycleGlyph[row][col] == 'X') {
+                gfx.rect_fill(rp, gx + col, gy + row, gx + col, gy + row);
+            }
+        }
+    }
+    // The separator, a groove between the glyph and the choice.
+    const i32 sx = left + kCycleKnob - 2;
+    gfx.set_pens(rp, kShadowPen, 0, ndk::JAM1);
+    gfx.rect_fill(rp, sx, top + 2, sx, bottom - 2);
+    gfx.set_pens(rp, kShinePen, 0, ndk::JAM1);
+    gfx.rect_fill(rp, sx + 1, top + 2, sx + 1, bottom - 2);
+    const u32 labels = b.r32(gadget + gt_Text);
+    const u32 count = b.r16(gadget + gt_Count);
+    const u32 active = b.r32(gadget + gt_Number);
+    if (labels == 0 || active >= count) {
         return;
+    }
+    char text[128];
+    const u32 length = read_label(b, b.r32(labels + active * 4), 0, text, sizeof text);
+    const i32 x0 = left + kCycleKnob;
+    const i32 room = (right - 3 - x0) / static_cast<i32>(kGlyphWidth);
+    if (length == 0 || room <= 0) {
+        return;
+    }
+    const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);
+    const i32 span = static_cast<i32>(shown * kGlyphWidth);
+    gfx.set_pens(rp, selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
+    gfx.move(rp, x0 + (right - 3 - x0 - span) / 2, baseline);
+    gfx.text(rp, reinterpret_cast<const u8*>(text), shown);
+}
+
+void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
+                            i32 bottom) {
+    Graphics& gfx = *graphics_;
+    const PaletteGrid g = palette_grid(b, gadget, left, top, right, bottom);
+    const u32 color = b.r32(gadget + gt_Number);
+    if (g.indicator.x1 >= g.indicator.x0) {
+        gfx.set_pens(rp, color, 0, ndk::JAM1);
+        gfx.rect_fill(rp, g.indicator.x0 + 1, g.indicator.y0 + 1, g.indicator.x1 - 1,
+                      g.indicator.y1 - 1);
+        gfx.set_pens(rp, kShadowPen, 0, ndk::JAM1);
+        gfx.move(rp, g.indicator.x0, g.indicator.y1);
+        gfx.draw_line(rp, g.indicator.x0, g.indicator.y0);
+        gfx.draw_line(rp, g.indicator.x1, g.indicator.y0);
+        gfx.set_pens(rp, kShinePen, 0, ndk::JAM1);
+        gfx.move(rp, g.indicator.x1, g.indicator.y0 + 1);
+        gfx.draw_line(rp, g.indicator.x1, g.indicator.y1);
+        gfx.draw_line(rp, g.indicator.x0 + 1, g.indicator.y1);
+    }
+    for (i32 i = 0; i < g.colors; ++i) {
+        const i32 cx = g.x + (i % g.columns) * g.cell_w;
+        const i32 cy = g.y + (i / g.columns) * g.cell_h;
+        const u32 pen = palette_pen(b, gadget, i);
+        const i32 inset = g.cell_w > 4 && g.cell_h > 4 ? 1 : 0;
+        gfx.set_pens(rp, pen, 0, ndk::JAM1);
+        gfx.rect_fill(rp, cx + inset, cy + inset, cx + g.cell_w - 1 - inset,
+                      cy + g.cell_h - 1 - inset);
+        if (pen == color) {
+            // The chosen colour is framed black inside white.
+            gfx.set_pens(rp, kShinePen, 0, ndk::JAM1);
+            gfx.move(rp, cx, cy);
+            gfx.draw_line(rp, cx + g.cell_w - 1, cy);
+            gfx.draw_line(rp, cx + g.cell_w - 1, cy + g.cell_h - 1);
+            gfx.draw_line(rp, cx, cy + g.cell_h - 1);
+            gfx.draw_line(rp, cx, cy);
+            if (g.cell_w > 4 && g.cell_h > 4) {
+                gfx.set_pens(rp, kTextPen, 0, ndk::JAM1);
+                gfx.move(rp, cx + 1, cy + 1);
+                gfx.draw_line(rp, cx + g.cell_w - 2, cy + 1);
+                gfx.draw_line(rp, cx + g.cell_w - 2, cy + g.cell_h - 2);
+                gfx.draw_line(rp, cx + 1, cy + g.cell_h - 2);
+                gfx.draw_line(rp, cx + 1, cy + 1);
+            }
+        }
+    }
+}
+
+// A click let go over the gadget at x, y of its box: a cycle gadget moves
+// on to its next choice, a palette takes the colour under the pointer.
+// The code its IDCMP_GADGETUP carries; false for a kind that is no
+// gadtools gadget.
+bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
+    (void)window;
+    if (machine_ == nullptr || gadget == 0) {
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 kind = b.r16(gadget + gt_Kind);
+    if (kind == CYCLE_KIND) {
+        const u32 count = b.r16(gadget + gt_Count);
+        const u32 active = b.r32(gadget + gt_Number);
+        const u32 next = count != 0 ? (active + 1) % count : 0;
+        b.w32(gadget + gt_Number, next);
+        code = static_cast<u16>(next);
+        return b.ok();
+    }
+    if (kind == PALETTE_KIND) {
+        const i32 width = static_cast<i16>(b.r16(gadget + ndk::gg_Width));
+        const i32 height = static_cast<i16>(b.r16(gadget + ndk::gg_Height));
+        const PaletteGrid g = palette_grid(b, gadget, 0, 0, width - 1, height - 1);
+        u32 color = b.r32(gadget + gt_Number);
+        if (g.colors > 0 && x >= g.x && y >= g.y) {
+            const i32 col = (x - g.x) / g.cell_w;
+            const i32 row = (y - g.y) / g.cell_h;
+            const i32 index = row * g.columns + col;
+            if (col < g.columns && index < g.colors) {
+                color = palette_pen(b, gadget, index);
+            }
+        }
+        b.w32(gadget + gt_Number, color);
+        code = static_cast<u16>(color);
+        return b.ok();
+    }
+    return kind == BUTTON_KIND;
+}
+
+bool GadTools::render(u32 window, u32 rp, u32 gadget) {
+    if (machine_ == nullptr || graphics_ == nullptr || rp == 0 || gadget == 0) {
+        return true;
     }
     (void)window;
     Bus b(*machine_);
@@ -863,11 +1135,14 @@ void GadTools::render(u32 window, u32 rp, u32 gadget) {
     const i32 height = static_cast<i16>(b.r16(gadget + ndk::gg_Height));
     const u32 flags = b.r16(gadget + gg_Flags);
     const u32 kind = b.r16(gadget + gt_Kind);
+    if (kind == GENERIC_KIND) {
+        return false;
+    }
     const u32 place = b.r16(gadget + gt_Place);
     const u32 options = b.r16(gadget + gt_Options);
     const u8 underscore = static_cast<u8>(b.r8(gadget + gt_Underscore));
     if (!b.ok() || width <= 0 || height <= 0) {
-        return;
+        return true;
     }
     const RastPortState keep(b, rp);
     Graphics& gfx = *graphics_;
@@ -903,6 +1178,10 @@ void GadTools::render(u32 window, u32 rp, u32 gadget) {
         length = read_label(b, b.r32(gadget + gt_Text), 0, text, sizeof text);
     } else if (kind == NUMBER_KIND) {
         length = format_number(static_cast<i32>(b.r32(gadget + gt_Number)), text);
+    } else if (kind == CYCLE_KIND) {
+        draw_cycle(b, rp, gadget, left, top, right, bottom, baseline, selected);
+    } else if (kind == PALETTE_KIND) {
+        draw_palette(b, rp, gadget, left, top, right, bottom);
     }
     if (length != 0 && room > 0) {
         const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);
@@ -916,7 +1195,7 @@ void GadTools::render(u32 window, u32 rp, u32 gadget) {
     const u32 label_chars = read_label(b, b.r32(gadget + gt_Label), underscore, label,
                                        sizeof label);
     if (label_chars == 0) {
-        return;
+        return true;
     }
     const i32 span = static_cast<i32>(label_chars * kGlyphWidth);
     i32 x = left - span - static_cast<i32>(kGlyphWidth);
@@ -936,6 +1215,7 @@ void GadTools::render(u32 window, u32 rp, u32 gadget) {
     gfx.set_pens(rp, inside && selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
     gfx.move(rp, x, y);
     gfx.text(rp, reinterpret_cast<const u8*>(label), label_chars);
+    return true;
 }
 
 bool GadTools::init(Machine& m, Exec& exec, Graphics& graphics) {

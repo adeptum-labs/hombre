@@ -85,14 +85,25 @@ public:
     bool layout_menus(u32 menu);
 
     // Draws a gadget gadtools made, through rp of the window, as it stands:
-    // Intuition calls it when a button is pressed or let go.
-    void render(u32 window, u32 rp, u32 gadget);
-    static void render_gadget(void* ctx, u32 window, u32 rp, u32 gadget) {
-        static_cast<GadTools*>(ctx)->render(window, rp, gadget);
+    // Intuition calls it when a button is pressed or let go. False for a
+    // GENERIC_KIND gadget, which its program draws, as Intuition does any
+    // other boolean gadget.
+    bool render(u32 window, u32 rp, u32 gadget);
+    static bool render_gadget(void* ctx, u32 window, u32 rp, u32 gadget) {
+        return static_cast<GadTools*>(ctx)->render(window, rp, gadget);
+    }
+    bool release(u32 window, u32 gadget, i32 x, i32 y, u16& code);
+    static bool release_gadget(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code) {
+        return static_cast<GadTools*>(ctx)->release(window, gadget, x, y, code);
     }
 
 private:
     friend struct GadToolsNatives;
+
+    void draw_cycle(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
+                    i32 bottom, i32 baseline, bool selected);
+    void draw_palette(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
+                      i32 bottom);
 
     static constexpr u32 kVectors = gadtools_lvo::GT_GetGadgetAttrsA / 6;
 

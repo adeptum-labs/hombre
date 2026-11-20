@@ -70,6 +70,14 @@ constexpr u32 ng_UserData = 26;
 constexpr u32 BUTTON_KIND = 1;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 TEXT_KIND = 13;
+constexpr u32 CYCLE_KIND = 7;
+constexpr u32 PALETTE_KIND = 8;
+constexpr u32 GTCY_Labels = 0x8008000E;
+constexpr u32 GTCY_Active = 0x8008000F;
+constexpr u32 GTPA_Depth = 0x80080010;
+constexpr u32 GTPA_Color = 0x80080011;
+constexpr u32 GTPA_ColorOffset = 0x80080012;
+constexpr u32 GTPA_NumColors = 0x80080046;
 constexpr u32 GA_Disabled = 0x8003000E;
 constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTTX_CopyText = 0x8008000C;
@@ -641,7 +649,82 @@ void a_button_draws_raised_and_pressed() {
 
 }
 
+void cycles_step_through_their_labels_and_palettes_pick_colours() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+
+    // A cycle gadget of three labels, the second active.
+    const u32 labels = kText;
+    r.str(kText + 0x10, "One");
+    r.str(kText + 0x18, "Two");
+    r.str(kText + 0x20, "Three");
+    r.put32(labels, kText + 0x10);
+    r.put32(labels + 4, kText + 0x18);
+    r.put32(labels + 8, kText + 0x20);
+    r.put32(labels + 12, 0);
+    put_new_gadget(r, 10, 20, 120, 14, 0, 3, 0, 0);
+    const u32 cycle = create_gadget(
+        r, g, CYCLE_KIND, context,
+        r.tags(kTags, {{GTCY_Labels, labels}, {GTCY_Active, 1}, {TAG_DONE, 0}}));
+    CHECK(cycle != 0);
+    CHECK_EQ(r.get16(cycle + gg_Activation), GACT_RELVERIFY);
+    u16 code = 0;
+    CHECK(g.release(0, cycle, 5, 5, code));
+    CHECK_EQ(code, 2u);
+    CHECK(g.release(0, cycle, 5, 5, code));
+    CHECK_EQ(code, 0u);  // round to the first again
+    r.cpu().a[0] = cycle;
+    r.cpu().a[3] = r.tags(kTags, {{GTCY_Active, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), 0u);
+
+    // A palette of four colours from pen 4 in a 40 by 10 box: four cells
+    // in a row, each 9 by 6 inside the frame.
+    put_new_gadget(r, 10, 40, 40, 10, 0, 4, 0, 0);
+    const u32 palette = create_gadget(
+        r, g, PALETTE_KIND, cycle,
+        r.tags(kTags, {{GTPA_Depth, 2}, {GTPA_ColorOffset, 4}, {GTPA_Color, 5},
+                       {TAG_DONE, 0}}));
+    CHECK(palette != 0);
+    CHECK_EQ(r.get16(palette + gg_Activation), GACT_RELVERIFY);
+    CHECK(g.release(0, palette, 30, 5, code));
+    CHECK_EQ(code, 7u);
+    CHECK(g.release(0, palette, 3, 5, code));
+    CHECK_EQ(code, 4u);
+    r.cpu().a[0] = palette;
+    r.cpu().a[3] = r.tags(kTags, {{GTPA_Color, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), 4u);
+    // GTPA_NumColors counts the colours itself.
+    r.cpu().a[0] = palette;
+    r.cpu().a[1] = 0;
+    r.cpu().a[3] = r.tags(kTags, {{GTPA_NumColors, 2}, {TAG_DONE, 0}});
+    gt_result(r, g, gadtools_lvo::GT_SetGadgetAttrsA);
+    CHECK(g.release(0, palette, 30, 5, code));
+    CHECK_EQ(code, 5u);
+    // A button lets go with code 0; a generic gadget is its program's.
+    put_new_gadget(r, 10, 60, 40, 10, 0, 5, 0, 0);
+    const u32 generic = create_gadget(r, g, 0, palette, 0);
+    CHECK(!g.release(0, generic, 1, 1, code));
+    CHECK(!g.render(0, kRastPort, generic));
+
+    // FreeGadgets leaves a gadget of the program's own in the chain to it.
+    const u32 own = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put16(own + gg_GadgetType, GTYP_BOOLGADGET);
+    r.put32(generic + gg_NextGadget, own);
+    r.put16(own + gg_Flags, 0x1234);
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    CHECK_EQ(r.get16(own + gg_Flags), 0x1234u);
+    CHECK(!logged("exec: FreeMem of a bad block"));
+    r.exec.free(own, Gadget_SIZEOF);
+}
+
 int main() {
+    cycles_step_through_their_labels_and_palettes_pick_colours();
     visual_info_holds_the_screen_and_is_freed();
     create_context_stores_and_frees_the_gadget();
     create_menus_builds_the_chain_and_flags();

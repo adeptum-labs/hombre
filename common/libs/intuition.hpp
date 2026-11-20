@@ -24,6 +24,7 @@
 #pragma once
 
 #include "../types.hpp"
+#include "boopsi.hpp"
 #include "gfx.hpp"
 #include "menu_layout.hpp"
 #include "native.hpp"
@@ -100,6 +101,20 @@ constexpr u32 ResetMenuStrip = 702;
 constexpr u32 OpenWindowTagList = 606;
 constexpr u32 OpenScreenTagList = 612;
 constexpr u32 EraseImage = 630;
+constexpr u32 ObtainGIRPort = 558;
+constexpr u32 ReleaseGIRPort = 564;
+constexpr u32 GadgetMouse = 570;
+constexpr u32 NewObjectA = 636;
+constexpr u32 DisposeObject = 642;
+constexpr u32 SetAttrsA = 648;
+constexpr u32 GetAttr = 654;
+constexpr u32 SetGadgetAttrsA = 660;
+constexpr u32 NextObject = 666;
+constexpr u32 MakeClass = 678;
+constexpr u32 AddClass = 684;
+constexpr u32 RemoveClass = 708;
+constexpr u32 FreeClass = 714;
+constexpr u32 DoGadgetMethodA = 810;
 // The last vector of the 3.9 library; the table reaches down to it.
 constexpr u32 Last = 828;
 
@@ -110,8 +125,12 @@ public:
     using WindowHook = void (*)(void* ctx, u32 window);
     using GadgetHook = void (*)(void* ctx, u32 gadget, u32 vert_pot);
     // Draws a GTYP_GADTOOLS gadget of the window through rp, as its
-    // GFLG_SELECTED flag shows it.
-    using GadgetRenderer = void (*)(void* ctx, u32 window, u32 rp, u32 gadget);
+    // GFLG_SELECTED flag shows it. False when the gadget is its program's
+    // to draw, as a GENERIC_KIND one is.
+    using GadgetRenderer = bool (*)(void* ctx, u32 window, u32 rp, u32 gadget);
+    // A click let go over a GTYP_GADTOOLS gadget at x, y of its box: the
+    // gadget takes its new state and sets the code of its GADGETUP.
+    using GadgetRelease = bool (*)(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code);
 
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
@@ -182,6 +201,8 @@ public:
         gadget_renderer_ = renderer;
         gadget_renderer_ctx_ = ctx;
     }
+    // Takes the renderer's ctx.
+    void set_gadget_release(GadgetRelease release) { gadget_release_ = release; }
     void wheel_event(i32 steps);
     u32 window_under(i32 x, i32 y) const { return window_at(x, y); }
     void begin_batch();
@@ -193,6 +214,14 @@ public:
     // PlanePick selects, the bits of unselected planes from PlaneOnOff.
     // GetScreenDrawInfo: the screen's DrawInfo, 0 for no open screen.
     u32 screen_draw_info(u32 screen);
+
+    // BOOPSI: the classes and objects of the BOOPSI vectors.
+    Boopsi& boopsi() { return boopsi_; }
+
+    // A GadgetInfo for a gadget of the window, in guest memory, and its
+    // release. 0 if the window is not open or memory runs out.
+    u32 make_gadget_info(u32 window);
+    void free_gadget_info(u32 info);
     void draw_image(u32 rp, u32 image, i32 left, i32 top);
 
     // The same image with every pen of its box complemented, as a
@@ -441,8 +470,15 @@ private:
     void draw_gadget_list(native::Bus& b, u32 window, u32 first, u32 max_count);
     bool hit_prop_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     bool hit_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    void draw_custom_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
+    bool hit_custom_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    void custom_input(native::Bus& b, i32 x, i32 y, u32 code);
+    void custom_result(native::Bus& b, u32 result);
+    void drop_custom_gadget();
     void release_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void draw_bool_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
+    bool gadtools_draws(native::Bus& b, u32 window, u32 rp, u32 gadget);
+    void complement_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
     void drag_prop(i32 x, i32 y);
     void end_prop_drag();
     void call_gadget_hook(u32 gadget, u32 vert_pot);
@@ -473,10 +509,21 @@ private:
     u32 active_window_ = 0;
     u32 pressed_gadget_window_ = 0;
     GadgetKind pressed_gadget_ = GadgetKind::None;
+    // The BOOPSI gadget that has the input, between GM_GOACTIVE and
+    // GM_GOINACTIVE: its window, its GadgetInfo, and the InputEvent and
+    // termination long its methods get.
+    struct ActiveCustom {
+        u32 window = 0;
+        u32 gadget = 0;
+        u32 info = 0;
+        u32 event = 0;
+    };
+    ActiveCustom custom_;
     bool bar_button_lit_ = false;  // the held Close or Depth button shows pressed
     u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
     GadgetRenderer gadget_renderer_ = nullptr;
     void* gadget_renderer_ctx_ = nullptr;
+    GadgetRelease gadget_release_ = nullptr;
     // The window the left button drags, and the pointer's offset from its
     // top-left corner (Move) or to its bottom-right corner (Size), or from
     // the knob's top-left corner (Prop).
@@ -509,6 +556,7 @@ private:
     GadgetHookEntry gadget_hooks_[kMaxGadgetHooks]{};
     bool unhandled_gadget_types_[8]{};
     NativeVector vectors_[kVectors]{};
+    Boopsi boopsi_;
 };
 
 }

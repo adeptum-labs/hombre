@@ -40,6 +40,27 @@ using i16 = __INT16_TYPE__;
 
 namespace {
 
+// struct InputEvent (devices/inputevent.h) and the mouse codes a custom
+// gadget gets.
+constexpr u32 ie_Class = 4;
+constexpr u32 ie_Code = 6;
+constexpr u32 ie_Qualifier = 8;
+constexpr u32 kEventBytes = 24;  // the InputEvent, then the termination long
+constexpr u32 kTermination = 24;
+constexpr u32 IECLASS_RAWMOUSE = 2;
+constexpr u32 IECODE_LBUTTON = 0x68;
+constexpr u32 IECODE_UP_PREFIX = 0x80;
+constexpr u32 IECODE_NOBUTTON = 0xFF;
+constexpr u32 IEQUALIFIER_LEFTBUTTON = 0x4000;
+
+u32 pack_point(i32 x, i32 y) {
+    return (static_cast<u32>(x) << 16) | (static_cast<u32>(y) & 0xFFFF);
+}
+
+}
+
+namespace {
+
 constexpr char kIntuitionName[] = "intuition.library";
 
 // struct Screen's sc_NextScreen, the pointer before sc_FirstWindow.
@@ -1104,6 +1125,100 @@ struct IntuitionNatives {
         of(ctx).on_gadget(m.cpu.a[0], m.cpu.a[1]);
     }
 
+    // BOOPSI. A GadgetInfo goes with a method sent to a gadget of a window.
+    static void new_object(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).boopsi_.new_object(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2]));
+    }
+
+    static void dispose_object(void* ctx, Machine& m) {
+        of(ctx).boopsi_.dispose_object(m.cpu.a[0]);
+    }
+
+    static void set_attrs(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).boopsi_.set_attrs(m.cpu.a[0], m.cpu.a[1], 0));
+    }
+
+    static void get_attr(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).boopsi_.get_attr(m.cpu.d[0], m.cpu.a[0], m.cpu.a[1]));
+    }
+
+    static void set_gadget_attrs(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        const u32 info = m.cpu.a[1] != 0 ? in.make_gadget_info(m.cpu.a[1]) : 0;
+        const u32 result = in.boopsi_.set_attrs(m.cpu.a[0], m.cpu.a[3], info);
+        in.free_gadget_info(info);
+        native::set_result(m, result);
+    }
+
+    static void next_object(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).boopsi_.next_object(m.cpu.a[0]));
+    }
+
+    static void make_class(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).boopsi_.make_class(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2],
+                                                         m.cpu.d[0], m.cpu.d[1]));
+    }
+
+    static void add_class(void* ctx, Machine& m) { of(ctx).boopsi_.add_class(m.cpu.a[0]); }
+
+    static void remove_class(void* ctx, Machine& m) {
+        of(ctx).boopsi_.remove_class(m.cpu.a[0]);
+    }
+
+    static void free_class(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).boopsi_.free_class(m.cpu.a[0]) ? 1 : 0);
+    }
+
+    // The GadgetInfo goes where the method has it: after the MethodID for
+    // a GM_ method, after the tag list for ndk::OM_NEW, ndk::OM_SET, ndk::OM_NOTIFY and
+    // ndk::OM_UPDATE.
+    static void do_gadget_method(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        Bus b(m);
+        const u32 msg = m.cpu.a[3];
+        const u32 method = b.r32(msg);
+        if (!b.ok()) {
+            return;
+        }
+        const u32 info = m.cpu.a[1] != 0 ? in.make_gadget_info(m.cpu.a[1]) : 0;
+        if (method < 0x100) {
+            b.w32(msg + 4, info);
+        } else if (method == ndk::OM_NEW || method == ndk::OM_SET || method == ndk::OM_NOTIFY ||
+                   method == ndk::OM_UPDATE) {
+            b.w32(msg + 8, info);
+        }
+        const u32 result = b.ok() ? in.boopsi_.do_method(m.cpu.a[0], msg) : 0;
+        in.free_gadget_info(info);
+        native::set_result(m, result);
+    }
+
+    // The RastPort a custom gadget draws through, its window's own.
+    static void obtain_gi_rport(void*, Machine& m) {
+        Bus b(m);
+        const u32 info = m.cpu.a[0];
+        const u32 rp = info != 0 ? b.r32(info + ndk::gi_RastPort) : 0;
+        if (b.ok()) {
+            native::set_result(m, rp);
+        }
+    }
+
+    static void release_gi_rport(void*, Machine&) {}
+
+    // The pointer relative to the gadget's box, as two WORDs at A2.
+    static void gadget_mouse(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        Bus b(m);
+        const u32 gadget = m.cpu.a[0];
+        const u32 window = m.cpu.a[1] != 0 ? b.r32(m.cpu.a[1] + ndk::gi_Window) : 0;
+        const WindowView w = load_window(b, window);
+        if (!w.ok) {
+            return;
+        }
+        const Rect box = resolve_gadget_box(b, w, gadget);
+        b.w16(m.cpu.a[2], static_cast<u32>(in.mouse_x_ - w.left - box.x0));
+        b.w16(m.cpu.a[2] + 2, static_cast<u32>(in.mouse_y_ - w.top - box.y0));
+    }
+
     static void refresh_gadgets(void* ctx, Machine& m) {
         of(ctx).refresh_glist(m.cpu.a[0], m.cpu.a[1], -1);
     }
@@ -1156,6 +1271,20 @@ struct IntuitionFunction {
 };
 
 constexpr IntuitionFunction kIntuitionFunctions[] = {
+    {intuition_lvo::NewObjectA, IntuitionNatives::new_object, "NewObjectA"},
+    {intuition_lvo::DisposeObject, IntuitionNatives::dispose_object, "DisposeObject"},
+    {intuition_lvo::SetAttrsA, IntuitionNatives::set_attrs, "SetAttrsA"},
+    {intuition_lvo::GetAttr, IntuitionNatives::get_attr, "GetAttr"},
+    {intuition_lvo::SetGadgetAttrsA, IntuitionNatives::set_gadget_attrs, "SetGadgetAttrsA"},
+    {intuition_lvo::NextObject, IntuitionNatives::next_object, "NextObject"},
+    {intuition_lvo::MakeClass, IntuitionNatives::make_class, "MakeClass"},
+    {intuition_lvo::AddClass, IntuitionNatives::add_class, "AddClass"},
+    {intuition_lvo::RemoveClass, IntuitionNatives::remove_class, "RemoveClass"},
+    {intuition_lvo::FreeClass, IntuitionNatives::free_class, "FreeClass"},
+    {intuition_lvo::DoGadgetMethodA, IntuitionNatives::do_gadget_method, "DoGadgetMethodA"},
+    {intuition_lvo::ObtainGIRPort, IntuitionNatives::obtain_gi_rport, "ObtainGIRPort"},
+    {intuition_lvo::ReleaseGIRPort, IntuitionNatives::release_gi_rport, "ReleaseGIRPort"},
+    {intuition_lvo::GadgetMouse, IntuitionNatives::gadget_mouse, "GadgetMouse"},
     {intuition_lvo::AddGadget, IntuitionNatives::add_gadget, "AddGadget"},
     {intuition_lvo::DrawImage, IntuitionNatives::draw_image, "DrawImage"},
     {intuition_lvo::EraseImage, IntuitionNatives::erase_image, "EraseImage"},
@@ -1307,6 +1436,9 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     reply_port_ = reply_port;
     exec.set_reply_handler(reply_port_, reply_message, this);
     display.damage = DamageSink{on_damage, this};
+    if (!boopsi_.init(m, exec)) {
+        return false;
+    }
     base_ = base;
     return true;
 }
@@ -2660,6 +2792,9 @@ void Intuition::close_window(u32 window) {
         return;
     }
     drop_requester(window);
+    if (custom_.window == window) {
+        drop_custom_gadget();
+    }
     if (menu_.active && menu_.window == window) {
         leave_menu_mode();
     }
@@ -3664,6 +3799,20 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         return;
     }
     Bus b(*machine_);
+    // An active BOOPSI gadget owns the pointer until it lets go.
+    if (custom_.gadget != 0) {
+        if (!window_open(custom_.window)) {
+            drop_custom_gadget();
+        } else {
+            if (moved) {
+                custom_input(b, x, y, IECODE_NOBUTTON);
+            }
+            if (custom_.gadget != 0 && (released & kMouseLeft) != 0) {
+                custom_input(b, x, y, IECODE_LBUTTON | IECODE_UP_PREFIX);
+            }
+            return;
+        }
+    }
     // A drag owns the pointer: the window follows it and gets no mouse
     // messages until the left button is released.
     const bool dragging = drag_ != Drag::None;
@@ -3697,6 +3846,8 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Depth;
                     light_bar_button(true);
+                    left_press_consumed = true;
+                } else if (!dragging && hit_custom_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
                 } else if (!dragging && hit_bool_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
@@ -4241,6 +4392,41 @@ u32 Intuition::screen_draw_info(u32 screen) {
     return rec.draw_info;
 }
 
+u32 Intuition::make_gadget_info(u32 window) {
+    const WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr || exec_ == nullptr) {
+        return 0;
+    }
+    const u32 info = exec_->alloc(ndk::GadgetInfo_SIZEOF + 2, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (info == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 screen = b.r32(window + ndk::wd_WScreen);
+    b.w32(info + ndk::gi_Screen, screen);
+    b.w32(info + ndk::gi_Window, window);
+    b.w32(info + ndk::gi_RastPort, rec->rp);
+    b.w32(info + ndk::gi_Layer, rec->layer);
+    b.w16(info + ndk::gi_Domain, 0);
+    b.w16(info + ndk::gi_Domain + 2, 0);
+    b.w16(info + ndk::gi_Domain + 4, b.r16(window + ndk::wd_Width));
+    b.w16(info + ndk::gi_Domain + 6, b.r16(window + ndk::wd_Height));
+    b.w8(info + ndk::gi_Pens, b.r8(window + ndk::wd_DetailPen));
+    b.w8(info + ndk::gi_Pens + 1, b.r8(window + ndk::wd_BlockPen));
+    b.w32(info + ndk::gi_DrInfo, screen_draw_info(screen));
+    if (!b.ok()) {
+        exec_->free(info, ndk::GadgetInfo_SIZEOF + 2);
+        return 0;
+    }
+    return info;
+}
+
+void Intuition::free_gadget_info(u32 info) {
+    if (info != 0 && exec_ != nullptr) {
+        exec_->free(info, ndk::GadgetInfo_SIZEOF + 2);
+    }
+}
+
 void Intuition::draw_image(u32 rp, u32 image, i32 left, i32 top) {
     draw_image_mode(rp, image, left, top, false);
 }
@@ -4310,6 +4496,15 @@ void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool compl
         return;
     }
     Bus b(*machine_);
+    // A BOOPSI image draws itself.
+    if (static_cast<u16>(b.r16(image + image::Depth)) == ndk::CUSTOMIMAGEDEPTH &&
+        boopsi_.is_object(image)) {
+        const u32 screen = display_ != nullptr ? display_->front_screen : 0;
+        const u32 msg[] = {ndk::IM_DRAW, rp, pack_point(left, top), complement ? 1u : 0u,
+                           screen != 0 ? screen_draw_info(screen) : 0};
+        boopsi_.send(boopsi_.class_of(image), image, msg, 5);
+        return;
+    }
     const raster::RastPortView view = raster::load_rastport(b, rp);
     if (!view.ok) {
         return;
@@ -4473,6 +4668,8 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
             draw_prop_gadget(*graphics_, b, w, gadget);
         } else if (gtype == ndk::GTYP_BOOLGADGET) {
             draw_bool_gadget(b, window, w.rp, gadget);
+        } else if (gtype == ndk::GTYP_CUSTOMGADGET) {
+            draw_custom_gadget(b, window, w.rp, gadget);
         } else {
             log_unhandled_gadget_type(gtype);
         }
@@ -4480,19 +4677,126 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
     }
 }
 
+// --- BOOPSI gadgets --------------------------------------------------------
+
+
+// GM_RENDER: the gadget draws itself whole through the window's RastPort.
+void Intuition::draw_custom_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
+    (void)b;
+    const u32 info = make_gadget_info(window);
+    if (info == 0) {
+        return;
+    }
+    const u32 msg[] = {ndk::GM_RENDER, info, rp, ndk::GREDRAW_REDRAW};
+    boopsi_.send(boopsi_.class_of(gadget), gadget, msg, 4);
+    free_gadget_info(info);
+}
+
+// A press on a BOOPSI gadget whose GM_HITTEST says it is hit: GM_GOACTIVE,
+// and the gadget keeps the input while it answers GMR_MEACTIVE.
+bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
+    const WindowView w = load_window(b, window);
+    if (!w.ok || exec_ == nullptr) {
+        return false;
+    }
+    const i32 wx = x - w.left;
+    const i32 wy = y - w.top;
+    u32 gadget = w.first_gadget;
+    for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
+        const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        const u32 gflags = b.r16(gadget + ndk::gg_Flags);
+        const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return false;
+        }
+        const Rect box = gtype == ndk::GTYP_CUSTOMGADGET && (gflags & ndk::GFLG_DISABLED) == 0
+                             ? resolve_gadget_box(b, w, gadget)
+                             : Rect{0, 0, -1, -1};
+        if (!in_rect(box, wx, wy)) {
+            gadget = next;
+            continue;
+        }
+        const u32 info = make_gadget_info(window);
+        const u32 point = pack_point(wx - box.x0, wy - box.y0);
+        const u32 test[] = {ndk::GM_HITTEST, info, point};
+        if (info == 0 ||
+            boopsi_.send(boopsi_.class_of(gadget), gadget, test, 3) != ndk::GMR_GADGETHIT) {
+            free_gadget_info(info);
+            gadget = next;
+            continue;
+        }
+        const u32 event = exec_->alloc(kEventBytes + 4, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (event == 0) {
+            free_gadget_info(info);
+            return false;
+        }
+        custom_ = ActiveCustom{window, gadget, info, event};
+        b.w8(event + ie_Class, IECLASS_RAWMOUSE);
+        b.w16(event + ie_Code, IECODE_LBUTTON);
+        b.w16(event + ie_Qualifier, IEQUALIFIER_LEFTBUTTON);
+        if ((b.r16(gadget + ndk::gg_Activation) & ndk::GACT_IMMEDIATE) != 0) {
+            post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+        }
+        const u32 go[] = {ndk::GM_GOACTIVE, info, event, event + kTermination, point};
+        custom_result(b, boopsi_.send(boopsi_.class_of(gadget), gadget, go, 5));
+        return true;
+    }
+    return false;
+}
+
+// GM_HANDLEINPUT for the active BOOPSI gadget, with the pointer relative
+// to its box.
+void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code) {
+    const ActiveCustom c = custom_;
+    const WindowView w = load_window(b, c.window);
+    if (!w.ok) {
+        drop_custom_gadget();
+        return;
+    }
+    const Rect box = resolve_gadget_box(b, w, c.gadget);
+    b.w16(c.event + ie_Code, code);
+    b.w16(c.event + ie_Qualifier, code == IECODE_LBUTTON ? IEQUALIFIER_LEFTBUTTON : 0);
+    const u32 msg[] = {ndk::GM_HANDLEINPUT, c.info, c.event, c.event + kTermination,
+                       pack_point(x - w.left - box.x0, y - w.top - box.y0)};
+    custom_result(b, boopsi_.send(boopsi_.class_of(c.gadget), c.gadget, msg, 5));
+}
+
+// What the active gadget answered: GMR_MEACTIVE keeps the input; any other
+// answer ends it, with IDCMP_GADGETUP and the termination code for
+// GMR_VERIFY on a GACT_RELVERIFY gadget, and GM_GOINACTIVE.
+void Intuition::custom_result(Bus& b, u32 result) {
+    const ActiveCustom c = custom_;
+    if (c.gadget == 0 ||
+        (result & (ndk::GMR_NOREUSE | ndk::GMR_REUSE | ndk::GMR_NEXTACTIVE |
+                   ndk::GMR_PREVACTIVE)) == 0) {
+        return;
+    }
+    if ((result & ndk::GMR_VERIFY) != 0 &&
+        (b.r16(c.gadget + ndk::gg_Activation) & ndk::GACT_RELVERIFY) != 0) {
+        const u32 code = b.r32(c.event + kTermination);
+        post_intuimessage(c.window, ndk::IDCMP_GADGETUP, static_cast<u16>(code), c.gadget);
+    }
+    const u32 msg[] = {ndk::GM_GOINACTIVE, c.info, 0};
+    boopsi_.send(boopsi_.class_of(c.gadget), c.gadget, msg, 3);
+    drop_custom_gadget();
+}
+
+void Intuition::drop_custom_gadget() {
+    if (custom_.info != 0) {
+        free_gadget_info(custom_.info);
+    }
+    if (custom_.event != 0 && exec_ != nullptr) {
+        exec_->free(custom_.event, kEventBytes + 4);
+    }
+    custom_ = ActiveCustom{};
+}
+
 // A boolean gadget as it stands: gadtools draws its own; any other shows
 // its image, the select image while selected with GFLG_GADGHIMAGE, and
 // its box complemented while selected with GFLG_GADGHCOMP.
 void Intuition::draw_bool_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
-    const u32 type = b.r16(gadget + ndk::gg_GadgetType);
     const u32 flags = b.r16(gadget + ndk::gg_Flags);
-    if (!b.ok() || rp == 0) {
-        return;
-    }
-    if ((type & ndk::GTYP_GADTOOLS) != 0) {
-        if (gadget_renderer_ != nullptr) {
-            gadget_renderer_(gadget_renderer_ctx_, window, rp, gadget);
-        }
+    if (!b.ok() || rp == 0 || gadtools_draws(b, window, rp, gadget)) {
         return;
     }
     const WindowView w = load_window(b, window);
@@ -4512,14 +4816,31 @@ void Intuition::draw_bool_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
         }
     }
     if (selected && highlight == ndk::GFLG_GADGHCOMP) {
-        // The program's pens and draw mode stay as they were.
-        const u32 fg = b.r8(rp + ndk::rp_FgPen);
-        const u32 bg = b.r8(rp + ndk::rp_BgPen);
-        const u32 mode = b.r8(rp + ndk::rp_DrawMode);
-        graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
-        graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
-        graphics_->set_pens(rp, fg, bg, mode);
+        complement_gadget(b, window, rp, gadget);
     }
+}
+
+// A gadtools gadget gadtools draws; true when it did.
+bool Intuition::gadtools_draws(Bus& b, u32 window, u32 rp, u32 gadget) {
+    const u32 type = b.r16(gadget + ndk::gg_GadgetType);
+    return b.ok() && (type & ndk::GTYP_GADTOOLS) != 0 && gadget_renderer_ != nullptr &&
+           gadget_renderer_(gadget_renderer_ctx_, window, rp, gadget);
+}
+
+// Complements the gadget's box; the program's pens and draw mode stay as
+// they were.
+void Intuition::complement_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
+    const WindowView w = load_window(b, window);
+    const Rect box = resolve_gadget_box(b, w, gadget);
+    if (!w.ok || box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
+    const u32 fg = b.r8(rp + ndk::rp_FgPen);
+    const u32 bg = b.r8(rp + ndk::rp_BgPen);
+    const u32 mode = b.r8(rp + ndk::rp_DrawMode);
+    graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
+    graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+    graphics_->set_pens(rp, fg, bg, mode);
 }
 
 bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
@@ -4573,19 +4894,27 @@ void Intuition::release_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
     if (!w.ok || !b.ok()) {
         return;
     }
-    const bool inside = window_at(x, y) == window &&
-                        in_rect(resolve_gadget_box(b, w, gadget), x - w.left, y - w.top);
-    if ((gflags & ndk::GFLG_GADGHIGHBITS) == ndk::GFLG_GADGHCOMP &&
-        (b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) == 0) {
-        // Complementing the box again puts back what was under it.
-        draw_bool_gadget(b, window, rec->rp, gadget);
-        b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
-    } else {
-        b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
-        draw_bool_gadget(b, window, rec->rp, gadget);
+    const Rect box = resolve_gadget_box(b, w, gadget);
+    const bool inside = window_at(x, y) == window && in_rect(box, x - w.left, y - w.top);
+    // A gadtools gadget takes its new state before it is drawn again.
+    u16 code = 0;
+    if (inside && (b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0 &&
+        gadget_release_ != nullptr) {
+        gadget_release_(gadget_renderer_ctx_, window, gadget, x - w.left - box.x0,
+                        y - w.top - box.y0, code);
+    }
+    b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
+    if (!gadtools_draws(b, window, rec->rp, gadget)) {
+        if ((gflags & ndk::GFLG_GADGHIGHBITS) == ndk::GFLG_GADGHCOMP &&
+            (gflags & ndk::GFLG_GADGIMAGE) == 0) {
+            // Complementing the box again puts back what was under it.
+            complement_gadget(b, window, rec->rp, gadget);
+        } else {
+            draw_bool_gadget(b, window, rec->rp, gadget);
+        }
     }
     if (inside && (activation & ndk::GACT_RELVERIFY) != 0) {
-        post_intuimessage(window, ndk::IDCMP_GADGETUP, 0, gadget);
+        post_intuimessage(window, ndk::IDCMP_GADGETUP, code, gadget);
     }
 }
 
@@ -4816,7 +5145,7 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
             return false;
         }
         if (gtype != ndk::GTYP_PROPGADGET) {
-            if (gtype != ndk::GTYP_BOOLGADGET) {
+            if (gtype != ndk::GTYP_BOOLGADGET && gtype != ndk::GTYP_CUSTOMGADGET) {
                 log_unhandled_gadget_type(gtype);
             }
             gadget = next;

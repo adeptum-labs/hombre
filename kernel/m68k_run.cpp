@@ -204,6 +204,7 @@ void open_amiga_screen(const BootInfo& info) {
     }
     intuition.set_clock(&clock_us);
     intuition.set_gadget_renderer(&GadTools::render_gadget, &gadtools);
+    intuition.set_gadget_release(&GadTools::release_gadget);
     constexpr char title[] = "Hombre Workbench";
     const u32 new_screen = exec.alloc(ndk::NewScreen_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     const u32 title_at = exec.alloc(sizeof(title), ndk::MEMF_PUBLIC);

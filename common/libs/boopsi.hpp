@@ -1,0 +1,252 @@
+/*
+ * The Hombre Operating System.
+ * Copyright © 2026 Adam Waldenberg and Adeptum AB.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.adeptum.se
+ * Contact: info@adeptum.se
+ */
+
+#pragma once
+
+#include "../m68k_cpu.hpp"
+#include "../types.hpp"
+#include "exec.hpp"
+#include "native.hpp"
+
+// BOOPSI, intuition's classes and objects, written in C++.
+//
+// A class is a struct IClass in guest memory, its dispatcher a Hook. An
+// object is the instance data of its classes behind a struct _Object, and
+// the object pointer points just past that header, as INST_DATA expects.
+// The system classes rootclass, gadgetclass and imageclass dispatch in C++
+// behind A-line stubs, so a 68000 dispatcher's DoSuperMethod reaches them
+// through cl_Super's h_Entry like any other. A method sent to a class
+// whose dispatcher is 68000 code runs that code as a nested guest call.
+
+namespace hombre {
+
+namespace ndk {
+
+// struct IClass (intuition/classes.h); its Hook comes first.
+constexpr u32 h_Entry = 8;
+constexpr u32 h_SubEntry = 12;
+constexpr u32 h_Data = 16;
+constexpr u32 cl_Super = 24;
+constexpr u32 cl_ID = 28;
+constexpr u32 cl_InstOffset = 32;
+constexpr u32 cl_InstSize = 34;
+constexpr u32 cl_UserData = 36;
+constexpr u32 cl_SubclassCount = 40;
+constexpr u32 cl_ObjectCount = 44;
+constexpr u32 cl_Flags = 48;
+constexpr u32 IClass_SIZEOF = 52;
+constexpr u32 CLF_INLIST = 1;
+
+// struct _Object: the header before an object.
+constexpr u32 o_Class = 8;
+constexpr u32 Object_SIZEOF = 12;
+
+// Methods (intuition/classusr.h, intuition/gadgetclass.h,
+// intuition/imageclass.h).
+constexpr u32 OM_NEW = 0x101;
+constexpr u32 OM_DISPOSE = 0x102;
+constexpr u32 OM_SET = 0x103;
+constexpr u32 OM_GET = 0x104;
+constexpr u32 OM_ADDTAIL = 0x105;
+constexpr u32 OM_REMOVE = 0x106;
+constexpr u32 OM_NOTIFY = 0x107;
+constexpr u32 OM_UPDATE = 0x108;
+constexpr u32 OM_ADDMEMBER = 0x109;
+constexpr u32 OM_REMMEMBER = 0x10A;
+constexpr u32 GM_HITTEST = 0;
+constexpr u32 GM_RENDER = 1;
+constexpr u32 GM_GOACTIVE = 2;
+constexpr u32 GM_HANDLEINPUT = 3;
+constexpr u32 GM_GOINACTIVE = 4;
+constexpr u32 GM_HELPTEST = 5;
+constexpr u32 GM_LAYOUT = 6;
+constexpr u32 IM_DRAW = 0x202;
+constexpr u32 IM_HITTEST = 0x203;
+constexpr u32 IM_ERASE = 0x204;
+constexpr u32 IM_MOVE = 0x205;
+constexpr u32 IM_DRAWFRAME = 0x206;
+constexpr u32 IM_FRAMEBOX = 0x207;
+constexpr u32 IM_HITFRAME = 0x208;
+constexpr u32 IM_ERASEFRAME = 0x209;
+
+// Results of GM_HITTEST and of the active gadget's methods.
+constexpr u32 GMR_GADGETHIT = 4;
+constexpr u32 GMR_MEACTIVE = 0;
+constexpr u32 GMR_NOREUSE = 2;
+constexpr u32 GMR_REUSE = 4;
+constexpr u32 GMR_VERIFY = 8;
+constexpr u32 GMR_NEXTACTIVE = 16;
+constexpr u32 GMR_PREVACTIVE = 32;
+
+// GM_RENDER's gpr_Redraw.
+constexpr u32 GREDRAW_UPDATE = 2;
+constexpr u32 GREDRAW_REDRAW = 1;
+constexpr u32 GREDRAW_TOGGLE = 0;
+
+constexpr u32 GTYP_CUSTOMGADGET = 5;
+constexpr u32 GFLG_GADGHBOX = 1;
+constexpr u32 GFLG_EXTENDED = 0x8000;
+constexpr u32 GFLG_LABELITEXT = 0;
+constexpr u32 GFLG_LABELSTRING = 0x1000;
+constexpr u32 GFLG_LABELIMAGE = 0x2000;
+constexpr u32 GACT_ENDGADGET = 0x4;
+constexpr u32 GACT_TOGGLESELECT = 0x100;
+constexpr u32 CUSTOMIMAGEDEPTH = 0xFFFF;
+
+// struct ExtGadget, the instance data of gadgetclass.
+constexpr u32 gg_MoreFlags = 44;
+constexpr u32 ExtGadget_SIZEOF = 56;
+
+// struct GadgetInfo (intuition/cghooks.h).
+constexpr u32 gi_Screen = 0;
+constexpr u32 gi_Window = 4;
+constexpr u32 gi_Requester = 8;
+constexpr u32 gi_RastPort = 12;
+constexpr u32 gi_Layer = 16;
+constexpr u32 gi_Domain = 20;
+constexpr u32 gi_Pens = 28;
+constexpr u32 gi_DrInfo = 30;
+constexpr u32 GadgetInfo_SIZEOF = 58;
+
+// Gadget and image attributes.
+constexpr u32 GA_Dummy = 0x80030000;
+constexpr u32 GA_Left = GA_Dummy + 1;
+constexpr u32 GA_RelRight = GA_Dummy + 2;
+constexpr u32 GA_Top = GA_Dummy + 3;
+constexpr u32 GA_RelBottom = GA_Dummy + 4;
+constexpr u32 GA_Width = GA_Dummy + 5;
+constexpr u32 GA_RelWidth = GA_Dummy + 6;
+constexpr u32 GA_Height = GA_Dummy + 7;
+constexpr u32 GA_RelHeight = GA_Dummy + 8;
+constexpr u32 GA_Text = GA_Dummy + 9;
+constexpr u32 GA_Image = GA_Dummy + 10;
+constexpr u32 GA_Border = GA_Dummy + 11;
+constexpr u32 GA_SelectRender = GA_Dummy + 12;
+constexpr u32 GA_Highlight = GA_Dummy + 13;
+constexpr u32 GA_Disabled = GA_Dummy + 14;
+constexpr u32 GA_GZZGadget = GA_Dummy + 15;
+constexpr u32 GA_ID = GA_Dummy + 16;
+constexpr u32 GA_UserData = GA_Dummy + 17;
+constexpr u32 GA_SpecialInfo = GA_Dummy + 18;
+constexpr u32 GA_Selected = GA_Dummy + 19;
+constexpr u32 GA_EndGadget = GA_Dummy + 20;
+constexpr u32 GA_Immediate = GA_Dummy + 21;
+constexpr u32 GA_RelVerify = GA_Dummy + 22;
+constexpr u32 GA_FollowMouse = GA_Dummy + 23;
+constexpr u32 GA_RightBorder = GA_Dummy + 24;
+constexpr u32 GA_LeftBorder = GA_Dummy + 25;
+constexpr u32 GA_TopBorder = GA_Dummy + 26;
+constexpr u32 GA_BottomBorder = GA_Dummy + 27;
+constexpr u32 GA_ToggleSelect = GA_Dummy + 28;
+constexpr u32 GA_SysGadget = GA_Dummy + 29;
+constexpr u32 GA_SysGType = GA_Dummy + 30;
+constexpr u32 GA_Previous = GA_Dummy + 31;
+constexpr u32 GA_Next = GA_Dummy + 32;
+constexpr u32 GA_DrawInfo = GA_Dummy + 33;
+constexpr u32 GA_IntuiText = GA_Dummy + 34;
+constexpr u32 GA_LabelImage = GA_Dummy + 35;
+constexpr u32 GA_TabCycle = GA_Dummy + 36;
+constexpr u32 GA_GadgetHelp = GA_Dummy + 37;
+constexpr u32 GA_Bounds = GA_Dummy + 38;
+constexpr u32 GA_RelSpecial = GA_Dummy + 39;
+
+constexpr u32 IA_Dummy = 0x80020000;
+constexpr u32 IA_Left = IA_Dummy + 1;
+constexpr u32 IA_Top = IA_Dummy + 2;
+constexpr u32 IA_Width = IA_Dummy + 3;
+constexpr u32 IA_Height = IA_Dummy + 4;
+constexpr u32 IA_FGPen = IA_Dummy + 5;
+constexpr u32 IA_BGPen = IA_Dummy + 6;
+constexpr u32 IA_Data = IA_Dummy + 7;
+
+}
+
+class Boopsi {
+public:
+    static constexpr u32 kMaxPublicClasses = 64;
+    // 68000 code one method call may run, at most.
+    static constexpr u64 kDispatchBlocks = 1ull << 24;
+
+    // Makes rootclass, gadgetclass and imageclass and lists them. exec
+    // must be initialised. False if exec runs out of memory or native ids.
+    bool init(m68k::Machine& m, Exec& exec);
+
+    // The intuition vectors.
+    u32 make_class(u32 id, u32 super_id, u32 super_class, u32 inst_size, u32 flags);
+    void add_class(u32 cl);
+    void remove_class(u32 cl);
+    bool free_class(u32 cl);
+    u32 new_object(u32 cl, u32 id, u32 tags);
+    void dispose_object(u32 object);
+    u32 set_attrs(u32 object, u32 tags, u32 ginfo);
+    u32 get_attr(u32 attr, u32 object, u32 storage);
+    u32 next_object(u32 state);
+
+    // The public class with the guest name id, or the C string name.
+    u32 find_class(u32 id) const;
+    u32 find_class_named(const char* name) const;
+
+    // The class an object was made from.
+    u32 class_of(u32 object) const;
+    bool is_object(u32 object) const;
+
+    // Sends the method message msg (in guest memory) to the object, as its
+    // own class or as cl: the dispatcher's result.
+    u32 do_method(u32 object, u32 msg);
+    u32 coerce_method(u32 cl, u32 object, u32 msg);
+
+    // A guest message of up to kMaxMessageLongs longs, made and sent: the
+    // method ID then the arguments.
+    static constexpr u32 kMaxMessageLongs = 8;
+    u32 send(u32 cl, u32 object, const u32* longs, u32 count);
+
+    u32 root_class() const { return root_; }
+    u32 gadget_class() const { return gadget_; }
+    u32 image_class() const { return image_; }
+
+private:
+    struct Natives;
+
+    u32 make_system_class(const char* name, u32 super, u32 inst_size, m68k::NativeFn entry);
+    u32 root_dispatch(u32 cl, u32 object, u32 msg);
+    u32 gadget_dispatch(u32 cl, u32 object, u32 msg);
+    u32 image_dispatch(u32 cl, u32 object, u32 msg);
+    u32 call_super(u32 cl, u32 object, u32 msg);
+    u32 set_gadget_attrs(u32 gadget, u32 tags, bool initial);
+    bool get_gadget_attr(u32 gadget, u32 attr, u32 storage);
+    u32 set_image_attrs(u32 image, u32 tags);
+    bool get_image_attr(u32 image, u32 attr, u32 storage);
+    u32 object_bytes(u32 cl) const;
+
+    m68k::Machine* machine_ = nullptr;
+    Exec* exec_ = nullptr;
+    u32 root_ = 0;
+    u32 gadget_ = 0;
+    u32 image_ = 0;
+    u32 root_entry_ = 0;
+    u32 gadget_entry_ = 0;
+    u32 image_entry_ = 0;
+    u32 public_[kMaxPublicClasses]{};
+};
+
+}
