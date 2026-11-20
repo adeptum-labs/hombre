@@ -76,6 +76,8 @@ constexpr u32 BUTTON_KIND = 1;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 CYCLE_KIND = 7;
 constexpr u32 PALETTE_KIND = 8;
+constexpr u32 SCROLLER_KIND = 9;
+constexpr u32 STRING_KIND = 12;
 constexpr u32 TEXT_KIND = 13;
 constexpr u32 kKinds = 14;
 
@@ -110,6 +112,20 @@ constexpr u32 GTPA_IndicatorWidth = 0x80080013;
 constexpr u32 GTPA_IndicatorHeight = 0x80080014;
 constexpr u32 GTPA_NumColors = 0x80080046;
 constexpr u32 GTPA_ColorTable = 0x80080052;
+constexpr u32 GTSC_Top = 0x80080015;
+constexpr u32 GTSC_Total = 0x80080016;
+constexpr u32 GTSC_Visible = 0x80080017;
+constexpr u32 GTST_String = 0x8008002D;
+constexpr u32 GTST_MaxChars = 0x8008002E;
+constexpr u32 PGA_Freedom = 0x80031001;
+constexpr u32 LORIENT_HORIZ = 1;
+// A scroller keeps its total where a palette keeps its colour table, how
+// much shows where a palette keeps its count, and its orientation where a
+// palette keeps its colour offset.
+constexpr u32 gt_Total = 72;
+constexpr u32 gt_Visible = 68;
+constexpr u32 gt_Freedom = 70;
+constexpr u32 kDefaultMaxChars = 64;
 constexpr u32 GTTX_Border = 0x80080039;
 constexpr u32 GTNM_Border = 0x8008003A;
 constexpr u32 GT_Underscore = 0x80080040;
@@ -315,14 +331,17 @@ struct GadToolsNatives {
 
     // GTTX_Text: the text the gadget shows; with GTTX_CopyText gadtools
     // keeps a copy of its own.
+    // A string gadget's copy is its buffer, at least kDefaultMaxChars long
+    // and there even for no text.
     static void set_text(GadTools& g, Bus& b, u32 gadget, u32 text, bool copy) {
         drop_text_copy(g, b, gadget);
-        if (!copy || text == 0) {
+        const bool buffer = b.r16(gadget + gt_Kind) == STRING_KIND;
+        if (!copy || (text == 0 && !buffer)) {
             b.w32(gadget + gt_Text, text);
             return;
         }
-        const u32 length = label_length(b, text);
-        const u32 bytes = length + 1;
+        const u32 length = text != 0 ? label_length(b, text) : 0;
+        const u32 bytes = buffer && length + 1 < kDefaultMaxChars ? kDefaultMaxChars : length + 1;
         const u32 at = g.exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (at == 0) {
             b.w32(gadget + gt_Text, 0);
@@ -398,6 +417,26 @@ struct GadToolsNatives {
             case GTPA_IndicatorHeight:
                 b.w16(gadget + gt_IndicatorHeight, data);
                 break;
+            case GTSC_Top:
+                b.w32(gadget + gt_Number, data);
+                break;
+            case GTSC_Total:
+                b.w32(gadget + gt_Total, data);
+                break;
+            case GTSC_Visible:
+                b.w16(gadget + gt_Visible, data > 0xFFFF ? 0xFFFF : data);
+                break;
+            case PGA_Freedom:
+                if (creating) {
+                    b.w16(gadget + gt_Freedom, data);
+                }
+                break;
+            case GTST_String:
+                // The string goes into the gadget's own buffer.
+                text = data;
+                has_text = true;
+                copy = true;
+                break;
             case GTTX_Border:
             case GTNM_Border:
                 if (creating) {
@@ -451,6 +490,9 @@ struct GadToolsNatives {
             b.w16(gadget + gt_Count, 2);
             b.w32(gadget + gt_Number, 1);
         }
+        if (kind == SCROLLER_KIND) {
+            b.w16(gadget + gt_Freedom, LORIENT_HORIZ);
+        }
         b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_GADTOOLS | ndk::GTYP_BOOLGADGET);
         b.w16(gadget + ndk::gg_GadgetID, b.r16(ng + ng_GadgetID));
         b.w32(gadget + ndk::gg_UserData, b.r32(ng + ng_UserData));
@@ -465,9 +507,13 @@ struct GadToolsNatives {
             native::set_result(m, 0);
             return;
         }
+        if (kind == STRING_KIND && b.r32(gadget + gt_Text) == 0) {
+            set_text(g, b, gadget, 0, true);
+        }
         if (kind != GENERIC_KIND && kind != BUTTON_KIND && kind != TEXT_KIND &&
             kind != NUMBER_KIND && kind != CYCLE_KIND && kind != PALETTE_KIND &&
-            kind < kKinds && !g.unhandled_kinds_[kind]) {
+            kind != SCROLLER_KIND && kind != STRING_KIND && kind < kKinds &&
+            !g.unhandled_kinds_[kind]) {
             g.unhandled_kinds_[kind] = true;
             LogLine().text("gadtools: gadget kind ").dec(kind).text(" not handled").send();
         }
@@ -516,8 +562,17 @@ struct GadToolsNatives {
             } else if (tag == GTNM_Number || tag == GTCY_Active || tag == GTPA_Color) {
                 b.w32(data, b.r32(gadget + gt_Number));
                 ++answered;
-            } else if (tag == GTCY_Labels) {
+            } else if (tag == GTCY_Labels || tag == GTST_String) {
                 b.w32(data, b.r32(gadget + gt_Text));
+                ++answered;
+            } else if (tag == GTSC_Top) {
+                b.w32(data, b.r32(gadget + gt_Number));
+                ++answered;
+            } else if (tag == GTSC_Total) {
+                b.w32(data, b.r32(gadget + gt_Total));
+                ++answered;
+            } else if (tag == GTSC_Visible) {
+                b.w32(data, b.r16(gadget + gt_Visible));
                 ++answered;
             }
             item += 8;
@@ -1038,6 +1093,46 @@ void GadTools::draw_cycle(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 rig
     gfx.text(rp, reinterpret_cast<const u8*>(text), shown);
 }
 
+// A scroller's knob, as long as the part of the total that shows and as
+// far along as its top.
+void GadTools::draw_scroller(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
+                             i32 bottom) {
+    Graphics& gfx = *graphics_;
+    const bool across = b.r16(gadget + gt_Freedom) == LORIENT_HORIZ;
+    const u64 total = b.r32(gadget + gt_Total);
+    const u64 visible = b.r16(gadget + gt_Visible);
+    const u64 first = b.r32(gadget + gt_Number);
+    const i32 x0 = left + 2;
+    const i32 y0 = top + 2;
+    const i32 x1 = right - 2;
+    const i32 y1 = bottom - 2;
+    const i32 span = across ? x1 - x0 + 1 : y1 - y0 + 1;
+    if (span <= 0 || y1 < y0 || x1 < x0) {
+        return;
+    }
+    i32 knob = span;
+    i32 at = 0;
+    if (total > visible && total != 0) {
+        knob = static_cast<i32>(static_cast<u64>(span) * visible / total);
+        knob = knob < 4 ? (span < 4 ? span : 4) : knob;
+        const u64 range = total - visible;
+        const u64 shown = first > range ? range : first;
+        at = static_cast<i32>(static_cast<u64>(span - knob) * shown / range);
+    }
+    const Rect k = across ? Rect{x0 + at, y0, x0 + at + knob - 1, y1}
+                          : Rect{x0, y0 + at, x1, y0 + at + knob - 1};
+    gfx.set_pens(rp, 0, 0, ndk::JAM1);
+    gfx.rect_fill(rp, k.x0, k.y0, k.x1, k.y1);
+    gfx.set_pens(rp, kShinePen, 0, ndk::JAM1);
+    gfx.move(rp, k.x0, k.y1);
+    gfx.draw_line(rp, k.x0, k.y0);
+    gfx.draw_line(rp, k.x1, k.y0);
+    gfx.set_pens(rp, kShadowPen, 0, ndk::JAM1);
+    gfx.move(rp, k.x1, k.y0 + 1);
+    gfx.draw_line(rp, k.x1, k.y1);
+    gfx.draw_line(rp, k.x0 + 1, k.y1);
+}
+
 void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                             i32 bottom) {
     Graphics& gfx = *graphics_;
@@ -1151,7 +1246,8 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     const bool selected = (flags & ndk::GFLG_SELECTED) != 0;
     const bool framed = kind == BUTTON_KIND || (options & kOptBorder) != 0 ||
                         (kind != TEXT_KIND && kind != NUMBER_KIND);
-    const bool recessed = kind == TEXT_KIND || kind == NUMBER_KIND || selected;
+    const bool recessed = kind == TEXT_KIND || kind == NUMBER_KIND || kind == STRING_KIND ||
+                          kind == SCROLLER_KIND || selected;
     // The inside first, then the frame around it.
     gfx.set_pens(rp, selected ? kFillPen : 0, 0, ndk::JAM1);
     if (framed && width > 2 && height > 2) {
@@ -1174,7 +1270,7 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     // What a display shows, cut to fit inside it.
     char text[256];
     u32 length = 0;
-    if (kind == TEXT_KIND) {
+    if (kind == TEXT_KIND || kind == STRING_KIND) {
         length = read_label(b, b.r32(gadget + gt_Text), 0, text, sizeof text);
     } else if (kind == NUMBER_KIND) {
         length = format_number(static_cast<i32>(b.r32(gadget + gt_Number)), text);
@@ -1182,6 +1278,8 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         draw_cycle(b, rp, gadget, left, top, right, bottom, baseline, selected);
     } else if (kind == PALETTE_KIND) {
         draw_palette(b, rp, gadget, left, top, right, bottom);
+    } else if (kind == SCROLLER_KIND) {
+        draw_scroller(b, rp, gadget, left, top, right, bottom);
     }
     if (length != 0 && room > 0) {
         const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);
@@ -1195,6 +1293,7 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     const u32 label_chars = read_label(b, b.r32(gadget + gt_Label), underscore, label,
                                        sizeof label);
     if (label_chars == 0) {
+        ghost(rp, flags, left, top, right, bottom);
         return true;
     }
     const i32 span = static_cast<i32>(label_chars * kGlyphWidth);
@@ -1215,7 +1314,23 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     gfx.set_pens(rp, inside && selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
     gfx.move(rp, x, y);
     gfx.text(rp, reinterpret_cast<const u8*>(label), label_chars);
+    ghost(rp, flags, left, top, right, bottom);
     return true;
+}
+
+// A disabled gadget is drawn over with a dot of the shadow pen at every
+// other pixel, as gadtools ghosts it.
+void GadTools::ghost(u32 rp, u32 flags, i32 left, i32 top, i32 right, i32 bottom) {
+    if ((flags & ndk::GFLG_DISABLED) == 0) {
+        return;
+    }
+    Graphics& gfx = *graphics_;
+    gfx.set_pens(rp, kShadowPen, 0, ndk::JAM1);
+    for (i32 y = top; y <= bottom; ++y) {
+        for (i32 x = left + ((y - top) & 1); x <= right; x += 2) {
+            gfx.rect_fill(rp, x, y, x, y);
+        }
+    }
 }
 
 bool GadTools::init(Machine& m, Exec& exec, Graphics& graphics) {

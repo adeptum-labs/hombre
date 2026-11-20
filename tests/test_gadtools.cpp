@@ -78,6 +78,12 @@ constexpr u32 GTPA_Depth = 0x80080010;
 constexpr u32 GTPA_Color = 0x80080011;
 constexpr u32 GTPA_ColorOffset = 0x80080012;
 constexpr u32 GTPA_NumColors = 0x80080046;
+constexpr u32 SCROLLER_KIND = 9;
+constexpr u32 STRING_KIND = 12;
+constexpr u32 GTSC_Top = 0x80080015;
+constexpr u32 GTSC_Total = 0x80080016;
+constexpr u32 GTSC_Visible = 0x80080017;
+constexpr u32 GTST_String = 0x8008002D;
 constexpr u32 GA_Disabled = 0x8003000E;
 constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTTX_CopyText = 0x8008000C;
@@ -723,7 +729,54 @@ void cycles_step_through_their_labels_and_palettes_pick_colours() {
     r.exec.free(own, Gadget_SIZEOF);
 }
 
+void strings_keep_a_buffer_and_scrollers_their_place() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 before = avail_mem(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    r.str(kText, "Work:");
+    put_new_gadget(r, 10, 20, 120, 14, 0, 1, 0, 0);
+    const u32 string = create_gadget(r, g, STRING_KIND, context,
+                                     r.tags(kTags, {{GTST_String, kText}, {TAG_DONE, 0}}));
+    CHECK(string != 0);
+    r.str(kText, "XXXXX");
+    r.cpu().a[0] = string;
+    r.cpu().a[3] = r.tags(kTags, {{GTST_String, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK(r.read_str(r.get32(kAnswer)) == "Work:");
+    // An empty string gadget still has a buffer to read.
+    put_new_gadget(r, 10, 40, 120, 14, 0, 2, 0, 0);
+    const u32 empty = create_gadget(r, g, STRING_KIND, string, 0);
+    r.cpu().a[0] = empty;
+    r.cpu().a[3] = r.tags(kTags, {{GTST_String, kAnswer}, {TAG_DONE, 0}});
+    gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA);
+    CHECK(r.get32(kAnswer) != 0);
+    CHECK(r.read_str(r.get32(kAnswer)).empty());
+
+    put_new_gadget(r, 10, 60, 16, 80, 0, 3, 0, 0);
+    const u32 scroller = create_gadget(
+        r, g, SCROLLER_KIND, empty,
+        r.tags(kTags, {{GTSC_Top, 5}, {GTSC_Total, 100}, {GTSC_Visible, 10}, {TAG_DONE, 0}}));
+    CHECK(scroller != 0);
+    r.cpu().a[0] = scroller;
+    r.cpu().a[3] = r.tags(kTags, {{GTSC_Top, kAnswer}, {GTSC_Total, kAnswer + 4},
+                                  {GTSC_Visible, kAnswer + 8}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 3u);
+    CHECK_EQ(r.get32(kAnswer), 5u);
+    CHECK_EQ(r.get32(kAnswer + 4), 100u);
+    CHECK_EQ(r.get32(kAnswer + 8), 10u);
+    CHECK(!logged("gadtools: gadget kind 12 not handled"));
+    CHECK(!logged("gadtools: gadget kind 9 not handled"));
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    CHECK_EQ(avail_mem(r), before);
+}
+
 int main() {
+    strings_keep_a_buffer_and_scrollers_their_place();
     cycles_step_through_their_labels_and_palettes_pick_colours();
     visual_info_holds_the_screen_and_is_freed();
     create_context_stores_and_frees_the_gadget();

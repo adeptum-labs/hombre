@@ -104,6 +104,9 @@ private:
                     i32 bottom, i32 baseline, bool selected);
     void draw_palette(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                       i32 bottom);
+    void ghost(u32 rp, u32 flags, i32 left, i32 top, i32 right, i32 bottom);
+    void draw_scroller(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
+                       i32 bottom);
 
     static constexpr u32 kVectors = gadtools_lvo::GT_GetGadgetAttrsA / 6;
 
