@@ -121,8 +121,15 @@ public:
     // The KeyMap of the "usa" KeyMapNode, which the library starts with.
     u32 keymap() const { return keymap_; }
 
+    // The KeyMap MapRawKey and MapANSI use when their keyMap argument is
+    // null. The library starts with keymap(); SetKeyMapDefault and
+    // console.device change it.
+    u32 default_keymap() const { return default_; }
+    void set_default_keymap(u32 keymap) { default_ = keymap; }
+
 private:
     friend struct KeymapNatives;
+    friend struct ConsoleOps;
 
     static constexpr u32 kVectors = keymap_lvo::Last / 6;
 

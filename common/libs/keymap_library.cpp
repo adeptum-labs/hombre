@@ -201,11 +201,11 @@ void set_key_bit(Bus& b, u32 table, u32 key) {
 
 struct KeymapNatives {
     static void set_default(void* ctx, Machine& m) {
-        static_cast<KeymapLibrary*>(ctx)->default_ = m.cpu.a[0];
+        static_cast<KeymapLibrary*>(ctx)->set_default_keymap(m.cpu.a[0]);
     }
 
     static void ask_default(void* ctx, Machine& m) {
-        native::set_result(m, static_cast<KeymapLibrary*>(ctx)->default_);
+        native::set_result(m, static_cast<KeymapLibrary*>(ctx)->default_keymap());
     }
 
     static void map_raw_key(void* ctx, Machine& m) {
