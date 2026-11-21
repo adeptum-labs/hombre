@@ -117,6 +117,7 @@ constexpr u32 ObtainGIRPort = 558;
 constexpr u32 IntuiTextLength = 330;
 constexpr u32 InitRequester = 138;
 constexpr u32 ActivateGadget = 462;
+constexpr u32 RefreshWindowFrame = 456;
 constexpr u32 ClearPointer = 60;
 constexpr u32 SetPointer = 270;
 constexpr u32 SetWindowPointerA = 816;
@@ -161,11 +162,13 @@ public:
     // to draw, as a GENERIC_KIND one is.
     using GadgetRenderer = bool (*)(void* ctx, u32 window, u32 rp, u32 gadget);
     // A click let go over a GTYP_GADTOOLS gadget at x, y of its box: the
-    // gadget takes its new state and sets the code of its GADGETUP.
+    // gadget takes its new state and sets the code of its GADGETUP. False
+    // when the click is to send no GADGETUP.
     using GadgetRelease = bool (*)(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code);
-    // A GTYP_GADTOOLS prop gadget moved: the gadget takes its new state
-    // from its PropInfo and gives the code its messages carry.
-    using GadgetPropCode = u16 (*)(void* ctx, u32 gadget);
+    // A GTYP_GADTOOLS prop gadget of the window moved: the gadget takes its
+    // new state from its PropInfo and gives the code its messages carry.
+    // False when the gadget keeps its messages to itself.
+    using GadgetPropCode = bool (*)(void* ctx, u32 window, u32 gadget, u16& code);
 
     // What CloseWorkBench and OpenWorkBench call of the Workbench: close
     // its windows for a screen reset, and open them again after it. A close
@@ -228,6 +231,9 @@ public:
 
     bool modify_idcmp(u32 window, u32 flags);
     void set_window_titles(u32 window, u32 title, u32 screen_title);
+    // Draws the window's border and title bar again; what is inside the
+    // border stays as it is.
+    void refresh_window_frame(u32 window);
     void window_to_front(u32 window);
     void window_to_back(u32 window);
     bool window_limits(u32 window, i32 width_min, i32 height_min, u32 width_max,
@@ -661,7 +667,7 @@ private:
     void* gadget_renderer_ctx_ = nullptr;
     GadgetRelease gadget_release_ = nullptr;
     GadgetPropCode gadget_prop_code_ = nullptr;
-    u16 prop_code(native::Bus& b, u32 gadget);
+    void post_prop_message(native::Bus& b, u32 window, u32 idcmp_class, u32 gadget);
     // The window the left button drags, and the pointer's offset from its
     // top-left corner (Move) or to its bottom-right corner (Size), or from
     // the knob's top-left corner (Prop).

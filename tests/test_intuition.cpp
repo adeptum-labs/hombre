@@ -1268,6 +1268,41 @@ void close_window_twice_and_null_ignored() {
     CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
 }
 
+// RefreshWindowFrame draws a window's border again over what a program
+// drew there, and leaves what is inside the border alone.
+void refresh_window_frame_redraws_the_border_only() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+    const i32 inside_x = r.get8(window + wd_BorderLeft) + 10;
+    const i32 inside_y = r.get8(window + wd_BorderTop) + 10;
+    const u32 left_edge = window_pixel(r, window, 0, 50);
+    const u32 bottom_edge = window_pixel(r, window, 100, 99);
+    const u32 bar = window_pixel(r, window, 100, 5);
+
+    // Paint over the whole window, border and all.
+    r.graphics.set_pens(rp, 3, 0, JAM1);
+    r.graphics.rect_fill(rp, 0, 0, 199, 99);
+    CHECK_EQ(window_pixel(r, window, 0, 50), 3u);
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshWindowFrame), ExitReason::Halt);
+    CHECK_EQ(window_pixel(r, window, 0, 50), left_edge);
+    CHECK_EQ(window_pixel(r, window, 100, 99), bottom_edge);
+    CHECK_EQ(window_pixel(r, window, 100, 5), bar);
+    CHECK_EQ(window_pixel(r, window, inside_x, inside_y), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 110), left_edge);
+
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshWindowFrame), ExitReason::Halt);
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+}
+
 void set_window_titles_redraws_title() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -7242,6 +7277,7 @@ int main() {
     close_window_repaints_and_unlinks();
     close_window_twice_and_null_ignored();
     set_window_titles_redraws_title();
+    refresh_window_frame_redraws_the_border_only();
     window_refresh_reaches_the_sink();
     open_window_reads_32_bit_flags();
     window_open_is_true_until_closed();

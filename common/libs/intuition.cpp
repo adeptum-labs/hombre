@@ -1203,6 +1203,10 @@ struct IntuitionNatives {
         of(ctx).set_window_titles(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2]);
     }
 
+    static void refresh_window_frame(void* ctx, Machine& m) {
+        of(ctx).refresh_window_frame(m.cpu.a[0]);
+    }
+
     static void window_to_back(void* ctx, Machine& m) { of(ctx).window_to_back(m.cpu.a[0]); }
 
     static void window_to_front(void* ctx, Machine& m) { of(ctx).window_to_front(m.cpu.a[0]); }
@@ -1712,6 +1716,8 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
     {intuition_lvo::ScreenToFront, IntuitionNatives::screen_to_front, "ScreenToFront"},
     {intuition_lvo::SetWindowTitles, IntuitionNatives::set_window_titles, "SetWindowTitles"},
+    {intuition_lvo::RefreshWindowFrame, IntuitionNatives::refresh_window_frame,
+     "RefreshWindowFrame"},
     {intuition_lvo::WindowToBack, IntuitionNatives::window_to_back, "WindowToBack"},
     {intuition_lvo::WindowToFront, IntuitionNatives::window_to_front, "WindowToFront"},
     {intuition_lvo::WindowLimits, IntuitionNatives::window_limits, "WindowLimits"},
@@ -4122,6 +4128,34 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
     }
 }
 
+void Intuition::refresh_window_frame(u32 window) {
+    if (window == 0 || machine_ == nullptr || graphics_ == nullptr ||
+        find_window(window) >= kMaxWindows) {
+        return;
+    }
+    const WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return;
+    }
+    const ScreenRecord* srec = find_screen_record(rec->screen);
+    Bus b(*machine_);
+    WindowView w = load_window(b, window);
+    if (srec == nullptr || !w.ok || (w.flags & ndk::WFLG_BORDERLESS) != 0) {
+        return;
+    }
+    w.rp = rec->rp;
+    const Rect inside{static_cast<i32>(w.border_left), static_cast<i32>(w.border_top),
+                      rec->width - static_cast<i32>(w.border_right) - 1,
+                      rec->height - static_cast<i32>(w.border_bottom) - 1};
+    begin_batch();
+    chrome::draw_window_chrome(*graphics_, b, rec->rp,
+                               to_chrome(w, active_window_ == window, held_bar_button(window)),
+                               &inside);
+    compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
+                                            rec->height, rec->flags));
+    end_batch();
+}
+
 u32 Intuition::last_normal_window(const ScreenRecord& srec, u32 skip_window) const {
     u32 last_normal = 0;
     u32 cur = srec.first_window;
@@ -5897,14 +5931,17 @@ void Intuition::string_key(u8 byte) {
     }
 }
 
-// The code a prop gadget's messages carry: what gadtools makes of its
-// pot for a scroller of its own, 0 for any other.
-u16 Intuition::prop_code(Bus& b, u32 gadget) {
-    if (gadget_prop_code_ == nullptr ||
-        (b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) == 0) {
-        return 0;
+// Posts a prop gadget's message. Its code is what gadtools makes of the
+// pot for a scroller of its own, 0 for any other; a prop gadget gadtools
+// keeps to itself, as a list view's scroller, posts nothing.
+void Intuition::post_prop_message(Bus& b, u32 window, u32 idcmp_class, u32 gadget) {
+    u16 code = 0;
+    if (gadget_prop_code_ != nullptr &&
+        (b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0 &&
+        !gadget_prop_code_(gadget_renderer_ctx_, window, gadget, code)) {
+        return;
     }
-    return gadget_prop_code_(gadget_renderer_ctx_, gadget);
+    post_intuimessage(window, idcmp_class, code, gadget);
 }
 
 bool Intuition::blocked(u32 window) const {
@@ -6042,11 +6079,13 @@ void Intuition::release_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
     const bool inside = window_at(x, y) == window && in_rect(box, x - w.left, y - w.top);
     const bool toggles = (type & ndk::GTYP_GADTOOLS) != 0 &&
                          (activation & ndk::GACT_TOGGLESELECT) != 0;
-    // A gadtools gadget takes its new state before it is drawn again.
+    // A gadtools gadget takes its new state before it is drawn again, and
+    // says whether the click sends a GADGETUP.
     u16 code = 0;
+    bool reports = true;
     if (inside && (type & ndk::GTYP_GADTOOLS) != 0 && gadget_release_ != nullptr) {
-        gadget_release_(gadget_renderer_ctx_, window, gadget, x - w.left - box.x0,
-                        y - w.top - box.y0, code);
+        reports = gadget_release_(gadget_renderer_ctx_, window, gadget, x - w.left - box.x0,
+                                  y - w.top - box.y0, code);
     }
     if (!toggles) {
         b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
@@ -6060,7 +6099,7 @@ void Intuition::release_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
             draw_bool_gadget(b, window, rec->rp, gadget);
         }
     }
-    if (inside && (activation & ndk::GACT_RELVERIFY) != 0) {
+    if (inside && reports && (activation & ndk::GACT_RELVERIFY) != 0) {
         post_intuimessage(window, ndk::IDCMP_GADGETUP, code, gadget);
     }
 }
@@ -6320,7 +6359,7 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
             draw_w.rp = rec->rp;
             draw_prop_gadget(*graphics_, b, draw_w, gadget);
             if ((activation & ndk::GACT_IMMEDIATE) != 0) {
-                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, prop_code(b, gadget), gadget);
+                post_prop_message(b, window, ndk::IDCMP_GADGETDOWN, gadget);
             }
             return true;
         }
@@ -6352,10 +6391,10 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
         call_gadget_hook(gadget, new_vpot);
         if (window_open(window)) {
             if ((activation & ndk::GACT_IMMEDIATE) != 0) {
-                post_intuimessage(window, ndk::IDCMP_GADGETDOWN, prop_code(b, gadget), gadget);
+                post_prop_message(b, window, ndk::IDCMP_GADGETDOWN, gadget);
             }
             if ((activation & ndk::GACT_RELVERIFY) != 0) {
-                post_intuimessage(window, ndk::IDCMP_GADGETUP, prop_code(b, gadget), gadget);
+                post_prop_message(b, window, ndk::IDCMP_GADGETUP, gadget);
             }
             pressed_gadget_window_ = window;
             pressed_gadget_ = GadgetKind::Prop;
@@ -6414,7 +6453,7 @@ void Intuition::drag_prop(i32 x, i32 y) {
         call_gadget_hook(gadget, new_vpot);
     }
     if (window_open(window) && (activation & ndk::GACT_FOLLOWMOUSE) != 0) {
-        post_intuimessage(window, ndk::IDCMP_MOUSEMOVE, prop_code(b, gadget), gadget);
+        post_prop_message(b, window, ndk::IDCMP_MOUSEMOVE, gadget);
     }
 }
 
@@ -6451,7 +6490,7 @@ void Intuition::end_prop_drag() {
         }
     }
     if ((gflags & ndk::GFLG_DISABLED) == 0 && (activation & ndk::GACT_RELVERIFY) != 0) {
-        post_intuimessage(window, ndk::IDCMP_GADGETUP, prop_code(b, gadget), gadget);
+        post_prop_message(b, window, ndk::IDCMP_GADGETUP, gadget);
     }
 }
 
