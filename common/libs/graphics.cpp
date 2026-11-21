@@ -2904,6 +2904,34 @@ u32 Graphics::text_in(u32 rp, u32 font, const u8* chars, u32 count) {
     return draw_run(b, rp, loaded, style, chars, count, true);
 }
 
+u32 Graphics::plain_text_in(u32 rp, u32 font, const u8* chars, u32 count) {
+    if (rp == 0 || chars == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    raster::Font loaded = raster::builtin_font();
+    raster::TextStyle style;
+    if (!text_font(b, 0, font, loaded, style)) {
+        return 0;
+    }
+    return draw_run(b, rp, loaded, style, chars, count, true);
+}
+
+u32 Graphics::text_on(Bus& b, const raster::Bitmap& bitmap, u32 bitmap_addr,
+                      const raster::Clip& clip, u8 pen, u32 font, i32 x, i32 baseline,
+                      const u8* chars, u32 count) {
+    raster::Font loaded = raster::builtin_font();
+    raster::TextStyle style;
+    if (chars == nullptr || !text_font(b, 0, font, loaded, style)) {
+        return 0;
+    }
+    const raster::Pens pens{pen, 0, static_cast<u8>(ndk::JAM1)};
+    u32 advance = 0;
+    raster::draw_text(b, bitmap, clip, pens, loaded, style, x, baseline, chars, count, advance,
+                      blend_for(bitmap_addr, bitmap.depth));
+    return advance;
+}
+
 u32 Graphics::draw_text(u32 rp, const u8* chars, u32 count, bool own_font) {
     if (rp == 0 || chars == nullptr) {
         return 0;
@@ -2949,6 +2977,35 @@ u32 Graphics::text_width(u32 font, const u8* chars, u32 count) {
     }
     const raster::TextSpan span = raster::measure_text(loaded, raster::TextStyle{}, chars, count);
     return static_cast<u32>(span.advance);
+}
+
+u32 Graphics::text_fit(u32 font, const u8* chars, u32 count, i32 width) {
+    if (machine_ == nullptr || chars == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    raster::Font loaded;
+    if (!raster::load_font(b, font, loaded)) {
+        loaded = raster::builtin_font();
+    }
+    i64 used = 0;
+    u32 fits = 0;
+    while (fits < count) {
+        used += raster::measure_text(loaded, raster::TextStyle{}, chars + fits, 1).advance;
+        if (used > width) {
+            break;
+        }
+        ++fits;
+    }
+    return fits;
+}
+
+void Graphics::hold_font(u32 font) {
+    if (machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    acquire_font(b, font);
 }
 
 Graphics::FontMetrics Graphics::font_metrics(u32 font) {

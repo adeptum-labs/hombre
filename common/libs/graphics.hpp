@@ -47,6 +47,7 @@ class Exec;
 struct RomFont;
 
 namespace raster {
+struct Bitmap;
 struct Clip;
 struct Font;
 struct RastPortView;
@@ -184,11 +185,26 @@ public:
     // TextLength in font, 0 for the built-in font: how far Text would move
     // the pen for the characters.
     u32 text_width(u32 font, const u8* chars, u32 count);
+    // How many of the characters, from the first on, Text in font would
+    // draw within width pixels.
+    u32 text_fit(u32 font, const u8* chars, u32 count, i32 width);
+    // One more accessor of a font that is open, as OpenFont for its own
+    // TextAttr would count it.
+    void hold_font(u32 font);
     // Draws the characters in font, 0 for the built-in one, in the
     // RastPort's pens, draw mode, spacing and styles, with the
     // antialiasing Text has, and moves its pen past them. How far the pen
     // moved.
     u32 text_in(u32 rp, u32 font, const u8* chars, u32 count);
+    // The same without the RastPort's spacing and styles: they are its
+    // program's, and the system labels its windows and gadgets plainly.
+    u32 plain_text_in(u32 rp, u32 font, const u8* chars, u32 count);
+    // Draws the characters in font, 0 for the built-in one, in pen on the
+    // BitMap at bitmap_addr, loaded as bitmap, from x with their baseline
+    // at baseline, antialiased as Text is. How far a pen would move.
+    u32 text_on(native::Bus& b, const raster::Bitmap& bitmap, u32 bitmap_addr,
+                const raster::Clip& clip, u8 pen, u32 font, i32 x, i32 baseline,
+                const u8* chars, u32 count);
 
     void init_rastport(u32 rp);
     void set_pens(u32 rp, u32 fg, u32 bg, u32 mode);

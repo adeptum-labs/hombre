@@ -1101,6 +1101,36 @@ void text_in_draws_and_measures_an_explicit_font() {
     CHECK_EQ(r.get16(s.rp + rp_cp_x), 3u + 16u);
 }
 
+// plain_text_in leaves the RastPort's spacing out, text_fit counts the
+// whole characters a width holds, and hold_font is one more accessor.
+void plain_text_fits_and_holds_a_font() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    const u32 font = open_hasklig(r, 13);
+    const u32 width = r.get16(font + tf_XSize);
+    const u8 text[] = {'H', 'g', 'H'};
+
+    r.put16(s.rp + rp_TxSpacing, 2);
+    r.graphics.set_pens(s.rp, 1, 0, JAM1);
+    move(r, s.rp, 3, 20);
+    CHECK_EQ(r.graphics.text_in(s.rp, font, text, 3), 3 * (width + 2));
+    move(r, s.rp, 3, 40);
+    CHECK_EQ(r.graphics.plain_text_in(s.rp, font, text, 3), 3 * width);
+    CHECK_EQ(r.get16(s.rp + rp_cp_x), 3u + 3 * width);
+
+    const i32 cell = static_cast<i32>(width);
+    CHECK_EQ(r.graphics.text_fit(font, text, 3, 3 * cell), 3u);
+    CHECK_EQ(r.graphics.text_fit(font, text, 3, 3 * cell - 1), 2u);
+    CHECK_EQ(r.graphics.text_fit(font, text, 3, 0), 0u);
+    CHECK_EQ(r.graphics.text_fit(0, text, 3, 17), 2u);
+
+    const u32 accessors = r.get16(font + tf_Accessors);
+    r.graphics.hold_font(font);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors + 1);
+    r.graphics.close_font(font);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors);
+}
+
 // ExtendFont hangs an extension holding the reply port and a copy of the
 // tags on tf_Extension and marks the font FSF_TAGGED; StripFont undoes it.
 void extend_font_and_strip_font() {
@@ -2772,6 +2802,7 @@ int main() {
     text_draws_hasklig_from_the_rom();
     default_font_is_topaz_until_set();
     text_in_draws_and_measures_an_explicit_font();
+    plain_text_fits_and_holds_a_font();
     rom_fonts_carry_their_coverage_plane();
     text_blends_on_an_eight_plane_palette();
     extend_font_and_strip_font();
