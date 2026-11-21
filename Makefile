@@ -340,7 +340,7 @@ check-workbench: image
 	    "intuition: window Workbench opened"
 	tools/boot_check.sh --no-startup --disk "$$DISK" --keys "l o a d w b ret" \
 	    --mouse-after "workbench: volume Ram Disk" \
-	    --mouse "mouse_move 95 -80;mouse_move 95 -80;mouse_move 95 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move -100 12;mouse_move -100 0;mouse_move -100 0;mouse_move -100 0;mouse_move -55 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move 125 40;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0" \
+	    --mouse "mouse_move 95 -80;mouse_move 95 -80;mouse_move 70 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move -75 12;mouse_move -100 0;mouse_move -100 0;mouse_move -100 0;mouse_move -55 0;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0;mouse_move 125 40;mouse_button 1;mouse_button 0;mouse_button 1;mouse_button 0" \
 	    "workbench: opened Workbench3.1" "workbench: opened Utilities" \
 	    "workbench: started Clock" "intuition: window Clock opened"
 	tools/boot_check.sh --no-startup --disk "$$DISK" \
