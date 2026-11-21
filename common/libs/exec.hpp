@@ -405,6 +405,10 @@ public:
     // left alone.
     void free(u32 addr, u32 bytes);
 
+    // AddResource: puts the resource node at node on ResourceList by its
+    // priority, as AddResource does.
+    void add_resource(u32 node);
+
     // Creates a native library and adds it to the library list. Vector n
     // (at base - 6 * n) is [0xA000 | id][0x4E75] and calls fns[n - 1].fn
     // with ctx. Where fns[n - 1].fn is null, the Open, Close, Expunge and

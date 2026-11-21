@@ -32,6 +32,7 @@
 #include "../common/libs/graphics.hpp"
 #include "../common/libs/gadtools.hpp"
 #include "../common/libs/icon.hpp"
+#include "../common/libs/keymap_library.hpp"
 #include "../common/libs/layers.hpp"
 #include "../common/libs/version_library.hpp"
 #include "../common/libs/intuition.hpp"
@@ -101,6 +102,7 @@ constinit Intuition intuition{};
 constinit GadTools gadtools{};
 constinit Layers layers{};
 constinit VersionLibrary version_library{};
+constinit KeymapLibrary keymap_library{};
 constinit Icon icon{};
 constinit Workbench workbench{};
 constinit DisplayState display{};
@@ -775,6 +777,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     }
     if (!version_library.init(machine, exec)) {
         fail("version init failed");
+        return false;
+    }
+    if (!keymap_library.init(machine, exec)) {
+        fail("keymap init failed");
         return false;
     }
     if (!dos.init(machine, exec, drives, &console_write, &consoles[0])) {

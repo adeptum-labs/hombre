@@ -3024,6 +3024,14 @@ void Exec::free(u32 addr, u32 bytes) {
     mem.write32(header_ + MH_FREE, free_bytes_);
 }
 
+void Exec::add_resource(u32 node) {
+    if (m_ == nullptr || node == 0) {
+        return;
+    }
+    Bus b(*m_);
+    enqueue(b, base_ + ResourceList, node);
+}
+
 u32 Exec::make_native_node(const char* name, u16 version, u8 node_type, u32 list_offset,
                            const NativeVector* fns, u32 count, void* ctx, u32 pos_size) {
     if (m_ == nullptr || name == nullptr || (count != 0 && fns == nullptr) || pos_size > 0xFFFF) {
