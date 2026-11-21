@@ -73,7 +73,7 @@ constexpr SysImageDimensions kSysImageDimensions[] = {
 };
 
 // The size SYSIA_Which and SYSIA_Size give an image, with a reference font
-// setting its height; false for an unknown Which.
+// setting the height of those that follow one; false for an unknown Which.
 bool sys_image_dimensions(Bus& b, u32 which, u32 size, u32 reference_font, u16& width,
                           u16& height) {
     const SysImageDimensions* found = nullptr;
@@ -91,7 +91,11 @@ bool sys_image_dimensions(Bus& b, u32 which, u32 size, u32 reference_font, u16& 
     if (size == SYSISIZE_LOWRES && which != CHECKIMAGE && which != MXIMAGE) {
         width = static_cast<u16>((width + 1) / 2);
     }
-    if (reference_font != 0) {
+    // The size gadget and the arrows fit a window's borders, which no font
+    // changes.
+    const bool border_sized = which == SIZEIMAGE || which == LEFTIMAGE || which == RIGHTIMAGE ||
+                              which == UPIMAGE || which == DOWNIMAGE;
+    if (reference_font != 0 && !border_sized) {
         const u16 y_size = b.r16(reference_font + tf_YSize);
         if (!b.ok()) {
             return false;

@@ -5708,7 +5708,7 @@ void menu_on_a_chrome_screen_highlights_ghosts_and_restores() {
     const u32 shadowed = screen_pixel(r, screen, 79, 40);
 
     menu_press(r, 10, 5);
-    // The bar keeps the screen title bar's shading and label, and the
+    menu_move(r, 10, 21);
     // The bar keeps the screen title bar's shading and label, and the
     // open title and the highlighted item get the active title bar's.
     CHECK_EQ(screen_pixel(r, screen, 300, 0), static_cast<u32>(chrome::kScreenBar0));
@@ -6751,6 +6751,27 @@ void sysiclass_sizes_and_lifecycle() {
     CHECK_EQ(r.get16(depth + img_Width), 23u);
     CHECK_EQ(r.get16(depth + img_Height), 11u);
 
+    // The size gadget and the arrows keep the size of the borders they sit
+    // in whatever the reference font.
+    r.put16(kBuffer + 20, 15);
+    struct BorderSized {
+        u32 which;
+        u32 height;
+    };
+    const BorderSized border_sized[] = {
+        {SIZEIMAGE, 10}, {UPIMAGE, 11}, {DOWNIMAGE, 11}, {LEFTIMAGE, 10}, {RIGHTIMAGE, 10}};
+    for (const BorderSized& sized : border_sized) {
+        r.cpu().a[0] = 0;
+        r.cpu().a[1] = kTitle;
+        r.cpu().a[2] = r.tags(kTagList, {{SYSIA_Which, sized.which},
+                                        {SYSIA_ReferenceFont, kBuffer}, {TAG_DONE, 0}});
+        const u32 image = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+        CHECK(image != 0);
+        CHECK_EQ(r.get16(image + img_Height), sized.height);
+        r.cpu().a[0] = image;
+        r.call(Base::Intuition, intuition_lvo::DisposeObject);
+    }
+
     r.cpu().a[0] = amiga;
     r.call(Base::Intuition, intuition_lvo::DisposeObject);
     r.cpu().a[0] = depth;
@@ -6807,6 +6828,111 @@ void draw_image_state_draws_a_sysiclass_image() {
     CHECK_EQ(r.get8(rp + rp_DrawMode), static_cast<u32>(JAM2));
 
     bo.dispose_object(image);
+}
+
+// A program that draws a window frame of its own lays the border images
+// over the frame's lines, so each image has to carry the stretch it covers:
+// light along its top and left, dark along its bottom and right.
+void border_images_carry_the_frame_lines_they_cover() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 sysi = bo.find_class_named("sysiclass");
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+    // The pens of no DrawInfo.
+    const u32 shine = 2;
+    const u32 shadow = 1;
+    const u32 fill = 3;
+    const u32 background = 0;
+    const i32 left = 40;
+    const i32 top = 30;
+    // True when every pixel from (x0, y0) to (x1, y1) of the image has pen.
+    const auto all = [&r, window, left, top](i32 x0, i32 y0, i32 x1, i32 y1, u32 pen) {
+        for (i32 y = y0; y <= y1; ++y) {
+            for (i32 x = x0; x <= x1; ++x) {
+                if (window_pixel(r, window, left + x, top + y) != pen) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    const auto draw = [&r, &bo, sysi, rp, left, top](u32 which, u32 state) {
+        const u32 image =
+            bo.new_object(sysi, 0, r.tags(kTagList, {{SYSIA_Which, which}, {TAG_DONE, 0}}));
+        CHECK(image != 0);
+        draw_image_state_at(r, rp, image, left, top, state);
+        bo.dispose_object(image);
+    };
+
+    // An arrow of the right border, 18 by 11: the sunken box's light line
+    // down its left, the window's dark edge down its right.
+    for (const u32 which : {UPIMAGE, DOWNIMAGE}) {
+        draw(which, IDS_NORMAL);
+        CHECK(all(0, 0, 0, 10, shine));
+        CHECK(all(0, 0, 16, 0, shine));
+        CHECK(all(17, 0, 17, 10, shadow));
+        CHECK(all(1, 10, 17, 10, shadow));
+        CHECK_EQ(window_pixel(r, window, left + 1, top + 1), fill);
+    }
+    // In an inactive window the lines stay and the face is the background.
+    draw(UPIMAGE, IDS_INACTIVENORMAL);
+    CHECK(all(0, 0, 0, 10, shine));
+    CHECK(all(17, 0, 17, 10, shadow));
+    CHECK_EQ(window_pixel(r, window, left + 1, top + 1), background);
+
+    // The size gadget, 18 by 10, in the window's corner: both of the
+    // window's dark edges run through it.
+    draw(SIZEIMAGE, IDS_NORMAL);
+    CHECK(all(0, 0, 0, 8, shine));
+    CHECK(all(0, 0, 16, 0, shine));
+    CHECK(all(17, 0, 17, 9, shadow));
+    CHECK(all(0, 9, 17, 9, shadow));
+
+    // An arrow of the bottom border, 16 by 10: light along its top, the
+    // window's dark edge along its bottom.
+    for (const u32 which : {LEFTIMAGE, RIGHTIMAGE}) {
+        draw(which, IDS_NORMAL);
+        CHECK(all(0, 0, 15, 0, shine));
+        CHECK(all(0, 0, 0, 8, shine));
+        CHECK(all(0, 9, 15, 9, shadow));
+        CHECK(all(15, 1, 15, 9, shadow));
+    }
+
+    // The close gadget, 20 by 11: the window's light edges along its top
+    // and left, the title bar's dark line along its bottom.
+    draw(CLOSEIMAGE, IDS_NORMAL);
+    CHECK(all(0, 0, 19, 0, shine));
+    CHECK(all(0, 0, 0, 10, shine));
+    CHECK(all(1, 10, 19, 10, shadow));
+    CHECK(all(19, 1, 19, 10, shadow));
+
+    // The depth and zoom gadgets, 23 by 11, start with the dark line that
+    // ends the gadget on their left. Only the depth gadget's right edge is
+    // the window's, dark to the top.
+    for (const u32 which : {ZOOMIMAGE, DEPTHIMAGE}) {
+        draw(which, IDS_NORMAL);
+        CHECK(all(0, 0, 21, 0, shine));
+        CHECK(all(0, 1, 0, 10, shadow));
+        CHECK(all(1, 1, 1, 9, shine));
+        CHECK(all(0, 10, 22, 10, shadow));
+        CHECK(all(22, 1, 22, 10, shadow));
+        CHECK_EQ(window_pixel(r, window, left + 22, top), which == DEPTHIMAGE ? shadow : shine);
+    }
+
+    // The screen's depth gadget takes the screen bar's pens: a line of the
+    // detail pen down its left and the bar's trim line along its bottom.
+    const u32 bar_detail = 1;
+    const u32 bar_block = 2;
+    const u32 bar_trim = 1;
+    draw(SDEPTHIMAGE, IDS_NORMAL);
+    CHECK(all(0, 0, 0, 10, bar_detail));
+    CHECK(all(0, 10, 22, 10, bar_trim));
+    CHECK(all(1, 0, 22, 0, bar_block));
 }
 
 void intuitext_borders_and_blocking_requests() {
@@ -6994,6 +7120,7 @@ int main() {
     a_boopsi_notify_chains_through_an_object_target();
     sysiclass_sizes_and_lifecycle();
     draw_image_state_draws_a_sysiclass_image();
+    border_images_carry_the_frame_lines_they_cover();
     screen_font_is_a_textattr_naming_topaz();
     open_screen_builds_struct_bitmap_and_colormap();
     open_screen_clears_and_draws_title_bar();

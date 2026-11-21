@@ -40,6 +40,7 @@ constexpr u32 FillPen = 5;
 constexpr u32 BackgroundPen = 7;
 constexpr u32 BarDetailPen = 9;
 constexpr u32 BarBlockPen = 10;
+constexpr u32 BarTrimPen = 11;
 
 constexpr u16 kDefaultPens[kPenCount] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
 
@@ -123,37 +124,30 @@ void check_mark(Graphics& graphics, u32 rp, u32 pen, const Area& area) {
     }
 }
 
-// How far in from its sides row `d` of a round-cornered box starts, `d`
-// rows from its nearest top or bottom edge.
-i32 corner_inset(i32 d) {
-    if (d == 0) {
-        return 2;
-    }
-    return d == 1 ? 1 : 0;
-}
+// The edge lines of a border gadget. A window's border is framed by two
+// boxes: a raised one around the window and a sunken one around its
+// contents. A program that draws a border of its own draws the two boxes
+// and lays the images over them, so every image carries the stretch of
+// both that it covers: light along its top and left, dark along its bottom
+// and right. A corner belongs to the line that runs on past the image:
+// dark_top_right for an image whose right edge is the window's, and
+// dark_bottom_left for one whose bottom edge is.
+struct Edges {
+    u32 light;
+    u32 dark;
+    bool dark_top_right;
+    bool dark_bottom_left;
+};
 
-// The body of a border gadget, as the window chrome draws its buttons: a
-// round-cornered box outlined in the dark pen and filled with the face.
-void button_body(Graphics& graphics, u32 rp, const Area& area, u32 face, u32 outline) {
-    if (area.width() < 5 || area.height() < 5) {
-        frame(graphics, rp, outline, area);
+void edges(Graphics& graphics, u32 rp, const Area& area, const Edges& e) {
+    if (area.width() < 2 || area.height() < 2) {
         return;
     }
-    for (i32 y = area.y0; y <= area.y1; ++y) {
-        const i32 d = y - area.y0 < area.y1 - y ? y - area.y0 : area.y1 - y;
-        const i32 in = corner_inset(d);
-        if (d == 0) {
-            line(graphics, rp, outline, area.x0 + in, y, area.x1 - in, y);
-            continue;
-        }
-        const i32 reach = corner_inset(d - 1) - 1;
-        const i32 edge = reach > in ? reach : in;
-        if (area.x0 + edge + 1 <= area.x1 - edge - 1) {
-            line(graphics, rp, face, area.x0 + edge + 1, y, area.x1 - edge - 1, y);
-        }
-        line(graphics, rp, outline, area.x0 + in, y, area.x0 + edge, y);
-        line(graphics, rp, outline, area.x1 - edge, y, area.x1 - in, y);
-    }
+    line(graphics, rp, e.light, area.x0, area.y0, area.x1, area.y0);
+    line(graphics, rp, e.light, area.x0, area.y0, area.x0, area.y1);
+    line(graphics, rp, e.dark, area.x1, area.y0 + (e.dark_top_right ? 0 : 1), area.x1, area.y1);
+    line(graphics, rp, e.dark, area.x0 + (e.dark_bottom_left ? 0 : 1), area.y1, area.x1,
+         area.y1);
 }
 
 // The middle of an area, rounded up and left as the window chrome does.
@@ -194,18 +188,34 @@ void draw_zoom(Graphics& graphics, u32 rp, const Area& area, const GlyphPens& g)
     box(graphics, rp, g.edge, g.light, Area{cx - 3, cy - 3, cx, cy});
 }
 
-// Size: a dark corner pointing to the bottom right with a small light box
-// in it, three pixels in from the image's right and bottom edges, as on the
-// window chrome.
-void draw_size(Graphics& graphics, u32 rp, const Area& area, const u16* pens) {
-    if (area.width() < 10 || area.height() < 10) {
+// The glyph of a title bar gadget in the middle of area, where it fits.
+void draw_glyph(Graphics& graphics, u32 rp, u32 which, const Area& area, const GlyphPens& g) {
+    if (area.width() < 7 || area.height() < (which == CLOSEIMAGE ? 5 : 7)) {
         return;
     }
-    const i32 right = area.x1 - 3;
-    const i32 bottom = area.y1 - 3;
+    if (which == CLOSEIMAGE) {
+        draw_close(graphics, rp, area, g);
+    } else if (which == ZOOMIMAGE) {
+        draw_zoom(graphics, rp, area, g);
+    } else {
+        draw_depth(graphics, rp, area, g);
+    }
+}
+
+// Size: a dark corner pointing to the bottom right with a small light box
+// in it, as on the window chrome, in the middle of the area and a pixel
+// clear of its sides.
+void draw_size(Graphics& graphics, u32 rp, const Area& area, const u16* pens) {
+    const i32 w = area.width() - 2 < 7 ? area.width() - 2 : 7;
+    const i32 h = area.height() - 2 < 7 ? area.height() - 2 : 7;
+    if (w < 5 || h < 5) {
+        return;
+    }
+    const i32 right = area.x0 + (area.width() - w) / 2 + w - 1;
+    const i32 bottom = area.y0 + (area.height() - h) / 2 + h - 1;
     const u32 dark = pens[ShadowPen];
-    line(graphics, rp, dark, right, bottom - 6, right, bottom);
-    line(graphics, rp, dark, right - 6, bottom, right, bottom);
+    line(graphics, rp, dark, right, bottom - h + 1, right, bottom);
+    line(graphics, rp, dark, right - w + 1, bottom, right, bottom);
     box(graphics, rp, dark, pens[ShinePen], Area{right - 3, bottom - 3, right, bottom});
 }
 
@@ -401,47 +411,61 @@ void draw(Graphics& graphics, native::Bus&, u32 rp, u32 which, const Rect& box_r
         }
         return;
     }
-    const u32 edge = down ? pens[ShinePen] : pens[ShadowPen];
+    // Held down, a gadget's edges swap their pens.
+    const u32 light = pens[down ? ShadowPen : ShinePen];
+    const u32 dark = pens[down ? ShinePen : ShadowPen];
     switch (which) {
-    case DEPTHIMAGE:
-    case SDEPTHIMAGE:
-    case ZOOMIMAGE:
-    case CLOSEIMAGE: {
-        // A button body 13 wide in the middle of the image and a row in
-        // from its top and bottom, as on the window chrome's title bar.
-        // The screen's depth gadget takes the screen bar's pens.
-        const bool screen = which == SDEPTHIMAGE;
-        const u32 body_face = screen ? pens[BarBlockPen] : face;
-        const u32 body_edge = screen ? pens[BarDetailPen] : pens[ShadowPen];
-        if (screen) {
-            fill(graphics, rp, body_face, outer);
-        }
-        const i32 cx = mid(outer.x0, outer.x1);
-        const i32 inset = outer.height() >= 11 ? 1 : 0;
-        const Area body{cx - 6 > outer.x0 ? cx - 6 : outer.x0, outer.y0 + inset,
-                        cx + 6 < outer.x1 ? cx + 6 : outer.x1, outer.y1 - inset};
-        button_body(graphics, rp, body, down ? body_edge : body_face, body_edge);
-        // Held down, the body darkens and the outlines turn light.
-        const GlyphPens g{down ? pens[ShinePen] : body_edge, pens[ShinePen],
-                          down ? body_edge : pens[BackgroundPen]};
-        if (which == CLOSEIMAGE) {
-            draw_close(graphics, rp, body, g);
-        } else if (which == ZOOMIMAGE) {
-            draw_zoom(graphics, rp, body, g);
-        } else {
-            draw_depth(graphics, rp, body, g);
-        }
+    case SDEPTHIMAGE: {
+        // The screen's depth gadget ends the screen bar: it takes the bar's
+        // pens, parts itself from the title with a line down its left edge
+        // and carries the bar's trim line along its bottom. Held down, the
+        // bar's two pens swap.
+        const u32 block = pens[down ? BarDetailPen : BarBlockPen];
+        const u32 detail = pens[down ? BarBlockPen : BarDetailPen];
+        fill(graphics, rp, block, outer);
+        line(graphics, rp, pens[BarDetailPen], outer.x0, outer.y0, outer.x0, outer.y1);
+        line(graphics, rp, pens[BarTrimPen], outer.x0, outer.y1, outer.x1, outer.y1);
+        const Area inside{outer.x0 + 1, outer.y0, outer.x1, outer.y1 - 1};
+        draw_glyph(graphics, rp, which, inside,
+                   GlyphPens{detail, down ? block : pens[ShinePen], pens[BackgroundPen]});
         break;
     }
+    case DEPTHIMAGE:
+    case ZOOMIMAGE: {
+        // The gadgets at the right of a title bar overlap by a column:
+        // each starts with the dark line that ends its neighbour on the
+        // left, and its own raised edges follow. The depth gadget's right
+        // edge is the window's.
+        const Area cell{outer.x0 + 1, outer.y0, outer.x1, outer.y1};
+        edges(graphics, rp, cell, Edges{light, dark, which == DEPTHIMAGE, true});
+        line(graphics, rp, pens[ShinePen], outer.x0, outer.y0, outer.x0, outer.y0);
+        line(graphics, rp, pens[ShadowPen], outer.x0, outer.y0 + 1, outer.x0, outer.y1);
+        draw_glyph(graphics, rp, which, shrink(cell, 1, 1),
+                   GlyphPens{pens[ShadowPen], pens[ShinePen], pens[BackgroundPen]});
+        break;
+    }
+    case CLOSEIMAGE:
+        // The close gadget's left edge is the window's.
+        edges(graphics, rp, outer, Edges{light, dark, false, false});
+        draw_glyph(graphics, rp, which, shrink(outer, 1, 1),
+                   GlyphPens{pens[ShadowPen], pens[ShinePen], pens[BackgroundPen]});
+        break;
     case SIZEIMAGE:
-        draw_size(graphics, rp, outer, pens);
+        // The size gadget fills the window's bottom right corner.
+        edges(graphics, rp, outer, Edges{light, dark, true, true});
+        draw_size(graphics, rp, shrink(outer, 1, 1), pens);
+        break;
+    case UPIMAGE:
+    case DOWNIMAGE:
+        // An arrow of the right border has the window's edge on its right.
+        edges(graphics, rp, outer, Edges{light, dark, true, false});
+        draw_arrow(graphics, rp, outer, pens[ShadowPen], which);
         break;
     case LEFTIMAGE:
     case RIGHTIMAGE:
-    case UPIMAGE:
-    case DOWNIMAGE:
-        button_body(graphics, rp, outer, down ? pens[ShadowPen] : face, pens[ShadowPen]);
-        draw_arrow(graphics, rp, outer, edge, which);
+        // An arrow of the bottom border has the window's edge below it.
+        edges(graphics, rp, outer, Edges{light, dark, false, true});
+        draw_arrow(graphics, rp, outer, pens[ShadowPen], which);
         break;
     default:
         bevel(graphics, rp, outer, pens[down ? ShadowPen : ShinePen],
