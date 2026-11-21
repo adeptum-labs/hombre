@@ -34,7 +34,8 @@
 // It hands out visual info for a screen, makes the context gadget a
 // gadget list starts with and the gadgets after it, filters and replies
 // IntuiMessages, refreshes windows and draws bevel boxes. Buttons,
-// checkboxes, text and number displays work; a gadget of another kind
+// checkboxes, cycle, palette, string, integer, scroller, slider and list
+// view gadgets and text and number displays work; a gadget of another kind
 // shows its frame and does nothing, and the first of each such kind logs
 // "gadtools: gadget kind <n> not handled". Every other vector logs
 // "gadtools: unimplemented LVO -<n>" and ends the run with Unimplemented.
@@ -93,10 +94,18 @@ public:
     static bool render_gadget(void* ctx, u32 window, u32 rp, u32 gadget) {
         return static_cast<GadTools*>(ctx)->render(window, rp, gadget);
     }
+    // A click let go over a gadget gadtools made, at x, y of its box: the
+    // gadget takes its new state and gives the code of its IDCMP_GADGETUP.
+    // False when the click sends none.
     bool release(u32 window, u32 gadget, i32 x, i32 y, u16& code);
+    // A scroller or slider takes its state from where Intuition moved its
+    // knob to, and gives the code its messages carry.
     u16 prop_code(u32 gadget);
-    static u16 prop_gadget_code(void* ctx, u32 gadget) {
-        return static_cast<GadTools*>(ctx)->prop_code(gadget);
+    // The same for a prop gadget of the window; false for a list view's
+    // scroller, which scrolls the list and sends no message.
+    bool prop_moved(u32 window, u32 gadget, u16& code);
+    static bool prop_gadget_moved(void* ctx, u32 window, u32 gadget, u16& code) {
+        return static_cast<GadTools*>(ctx)->prop_moved(window, gadget, code);
     }
     // Intuition, which draws the scrollers and string gadgets gadtools
     // makes when their attributes change.
@@ -115,6 +124,9 @@ private:
                       i32 bottom);
     void draw_list(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                    i32 bottom);
+    void draw_list_arrow(native::Bus& b, u32 rp, i32 left, i32 top, i32 width, i32 height,
+                         bool down, bool pressed);
+    void draw_list_view(native::Bus& b, u32 window, u32 gadget);
     void ghost(u32 rp, u32 flags, i32 left, i32 top, i32 right, i32 bottom);
 
     static constexpr u32 kVectors = gadtools_lvo::GT_GetGadgetAttrsA / 6;

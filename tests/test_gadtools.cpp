@@ -57,6 +57,9 @@ constexpr u32 kNewGadget = kData + 0xB00;
 constexpr u32 kLabel = kData + 0xB40;
 constexpr u32 kText = kData + 0xB60;
 constexpr u32 kAnswer = kData + 0xB80;
+constexpr u32 kNewWindow = kData + 0xC00;
+constexpr u32 kHead = kData + 0x1000;
+constexpr u32 kNodes = kData + 0x1040;
 
 // struct NewGadget, the gadget kinds and their tags.
 constexpr u32 ng_LeftEdge = 0;
@@ -95,7 +98,19 @@ constexpr u32 GTNM_Number = 0x8008000D;
 constexpr u32 GTCB_Checked = 0x80080004;
 constexpr u32 GTCB_Scaled = 0x80080044;
 constexpr u32 GTTX_Border = 0x80080039;
+constexpr u32 LISTVIEW_KIND = 4;
+constexpr u32 GTLV_Top = 0x80080005;
+constexpr u32 GTLV_Labels = 0x80080006;
+constexpr u32 GTLV_ReadOnly = 0x80080007;
+constexpr u32 GTLV_ScrollWidth = 0x80080008;
+constexpr u32 GTST_MaxChars = 0x8008002E;
+constexpr u32 GTLV_ShowSelected = 0x80080035;
+constexpr u32 GTLV_Selected = 0x80080036;
+constexpr u32 GTLV_MakeVisible = 0x8008004E;
+constexpr u32 LAYOUTA_Spacing = 0x80038002;
 constexpr u32 kFillPen = 3;
+constexpr u32 kFillTextPen = 2;
+constexpr u32 kTextPen = 1;
 
 // struct NewMenu
 constexpr u32 nm_Type = 0;
@@ -717,10 +732,13 @@ void cycles_step_through_their_labels_and_palettes_pick_colours() {
     gt_result(r, g, gadtools_lvo::GT_SetGadgetAttrsA);
     CHECK(g.release(0, palette, 30, 5, code));
     CHECK_EQ(code, 5u);
-    // A button lets go with code 0; a generic gadget is its program's.
+    // A generic gadget is its program's to draw, and lets go with a
+    // GADGETUP of code 0 as a button does.
     put_new_gadget(r, 10, 60, 40, 10, 0, 5, 0, 0);
     const u32 generic = create_gadget(r, g, 0, palette, 0);
-    CHECK(!g.release(0, generic, 1, 1, code));
+    code = 9;
+    CHECK(g.release(0, generic, 1, 1, code));
+    CHECK_EQ(code, 9u);
     CHECK(!g.render(0, kRastPort, generic));
 
     // FreeGadgets leaves a gadget of the program's own in the chain to it.
@@ -974,7 +992,367 @@ void checkboxes_toggle_and_report_their_state() {
     gt_result(r, g, gadtools_lvo::FreeGadgets);
 }
 
+// A struct List at head of count nodes from nodes on, 0x40 bytes apart,
+// each with its name after it.
+void put_list(GfxRig& r, u32 head, u32 nodes, const char* const* names, u32 count) {
+    r.put32(head, count != 0 ? nodes : head + 4);
+    r.put32(head + 4, 0);
+    r.put32(head + 8, count != 0 ? nodes + (count - 1) * 0x40 : head);
+    for (u32 i = 0; i < count; ++i) {
+        const u32 node = nodes + i * 0x40;
+        r.put32(node, i + 1 < count ? node + 0x40 : head + 4);
+        r.put32(node + 4, i > 0 ? node - 0x40 : head);
+        r.put32(node + 10, r.str(node + 0x20, names[i]));
+    }
+}
+
+constexpr const char* kEightNames[8] = {"Alpha", "Bravo", "Charlie", "Delta",
+                                        "Echo",  "Foxtrot", "Golf",  "Hotel"};
+
+u32 list_view_top(GfxRig& r, GadTools& g, u32 list) {
+    r.cpu().a[0] = list;
+    r.cpu().a[3] = r.tags(kTags, {{GTLV_Top, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    return r.get32(kAnswer);
+}
+
+void set_list_view(GfxRig& r, GadTools& g, u32 list, u32 window, u32 tags) {
+    r.cpu().a[0] = list;
+    r.cpu().a[1] = window;
+    r.cpu().a[3] = tags;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_SetGadgetAttrsA), ExitReason::Halt);
+}
+
+// A list view takes whole rows of its box, less the scroller on its right
+// and the string gadget GTLV_ShowSelected names, which it puts beneath the
+// rows and fills with the selected label. Its arrows and scroller move its
+// top and report nothing.
+void list_views_lay_out_their_parts_and_show_the_selected_label() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 before = avail_mem(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    put_list(r, kHead, kNodes, kEightNames, 8);
+
+    put_new_gadget(r, 10, 30, 120, 14, 0, 1, 0, 0);
+    const u32 string = create_gadget(r, g, STRING_KIND, context,
+                                     r.tags(kTags, {{GTST_MaxChars, 5}, {TAG_DONE, 0}}));
+    CHECK(string != 0);
+    const u32 si = r.get32(string + gg_SpecialInfo);
+    CHECK_EQ(r.get16(si + si_MaxChars), 6u);
+    put_new_gadget(r, 10, 30, 120, 60, 0, 2, 0, 0);
+    const u32 list = create_gadget(
+        r, g, LISTVIEW_KIND, string,
+        r.tags(kTags, {{GTLV_ShowSelected, string}, {GTLV_Labels, kHead},
+                       {LAYOUTA_Spacing, 1}, {TAG_DONE, 0}}));
+    CHECK(list != 0);
+    // Rows of 9 pixels in 60 less the string's 14 and a frame of 2: four.
+    CHECK_EQ(r.get16(list + gg_LeftEdge), 10u);
+    CHECK_EQ(r.get16(list + gg_TopEdge), 30u);
+    CHECK_EQ(r.get16(list + gg_Width), 104u);
+    CHECK_EQ(r.get16(list + gg_Height), 40u);
+    CHECK_EQ(r.get16(list + gg_GadgetID), 2u);
+    CHECK_EQ(r.get16(string + gg_LeftEdge), 10u);
+    CHECK_EQ(r.get16(string + gg_TopEdge), 70u);
+    CHECK_EQ(r.get16(string + gg_Width), 120u);
+    CHECK_EQ(r.get16(string + gg_Height), 14u);
+
+    // The scroller and the arrows come before the list in the chain.
+    const u32 scroller = r.get32(string + gg_NextGadget);
+    const u32 up = r.get32(scroller + gg_NextGadget);
+    const u32 down = r.get32(up + gg_NextGadget);
+    CHECK_EQ(r.get32(down + gg_NextGadget), list);
+    CHECK_EQ(r.get32(list + gg_NextGadget), 0u);
+    CHECK_EQ(r.get16(scroller + gg_GadgetType), GTYP_GADTOOLS | GTYP_PROPGADGET);
+    CHECK_EQ(r.get16(up + gg_GadgetType), GTYP_GADTOOLS | GTYP_BOOLGADGET);
+    CHECK_EQ(r.get16(down + gg_GadgetType), GTYP_GADTOOLS | GTYP_BOOLGADGET);
+    const u32 parts[3] = {scroller, up, down};
+    const u32 tops[3] = {30, 50, 60};
+    const u32 heights[3] = {20, 10, 10};
+    for (u32 i = 0; i < 3; ++i) {
+        CHECK_EQ(r.get16(parts[i] + gg_LeftEdge), 114u);
+        CHECK_EQ(r.get16(parts[i] + gg_TopEdge), tops[i]);
+        CHECK_EQ(r.get16(parts[i] + gg_Width), 16u);
+        CHECK_EQ(r.get16(parts[i] + gg_Height), heights[i]);
+    }
+    const u32 pi = r.get32(scroller + gg_SpecialInfo);
+    CHECK_EQ(r.get16(pi + pi_Flags) & FREEVERT, FREEVERT);
+    CHECK_EQ(r.get16(pi + pi_VertBody), 4u * MAXBODY / 8);
+    CHECK_EQ(r.get16(pi + pi_VertPot), 0u);
+
+    // GTLV_MakeVisible scrolls no further than it has to, and the selected
+    // label goes into the string gadget, as much as that holds.
+    set_list_view(r, g, list, 0,
+                  r.tags(kTags, {{GTLV_Labels, 0xFFFFFFFF}, {TAG_DONE, 0}}));
+    set_list_view(r, g, list, 0,
+                  r.tags(kTags, {{GTLV_Labels, kHead}, {GTLV_MakeVisible, 6},
+                                 {GTLV_Selected, 6}, {TAG_DONE, 0}}));
+    CHECK_EQ(list_view_top(r, g, list), 3u);
+    CHECK(r.read_str(r.get32(si + si_Buffer)) == "Golf");
+    CHECK_EQ(r.get16(si + si_NumChars), 4u);
+    CHECK_EQ(r.get16(pi + pi_VertPot), 3u * MAXPOT / 4);
+    set_list_view(r, g, list, 0, r.tags(kTags, {{GTLV_MakeVisible, 4}, {TAG_DONE, 0}}));
+    CHECK_EQ(list_view_top(r, g, list), 3u);
+    set_list_view(r, g, list, 0, r.tags(kTags, {{GTLV_Selected, 2}, {TAG_DONE, 0}}));
+    CHECK(r.read_str(r.get32(si + si_Buffer)) == "Charl");
+    // No selection leaves the string as it is.
+    set_list_view(r, g, list, 0, r.tags(kTags, {{GTLV_Selected, 0xFFFF}, {TAG_DONE, 0}}));
+    r.cpu().a[0] = list;
+    r.cpu().a[3] = r.tags(kTags, {{GTLV_Selected, kAnswer}, {TAG_DONE, 0}});
+    gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA);
+    CHECK_EQ(r.get32(kAnswer), 0xFFFFFFFFu);
+    CHECK(r.read_str(r.get32(si + si_Buffer)) == "Charl");
+
+    // The second row of a list whose top is 3 is ordinal 4.
+    u16 code = 0;
+    CHECK(g.release(0, list, 20, 2 + 9, code));
+    CHECK_EQ(code, 4u);
+    CHECK(r.read_str(r.get32(si + si_Buffer)) == "Echo");
+    // Below the fourth row there is none.
+    CHECK(!g.release(0, list, 20, 2 + 4 * 9, code));
+
+    // The arrows move the top a row and stop at the list's ends.
+    CHECK(!g.release(0, up, 3, 3, code));
+    CHECK_EQ(list_view_top(r, g, list), 2u);
+    for (u32 i = 0; i < 4; ++i) {
+        CHECK(!g.release(0, down, 3, 3, code));
+    }
+    CHECK_EQ(list_view_top(r, g, list), 4u);
+    CHECK_EQ(r.get16(pi + pi_VertPot), MAXPOT);
+    for (u32 i = 0; i < 6; ++i) {
+        CHECK(!g.release(0, up, 3, 3, code));
+    }
+    CHECK_EQ(list_view_top(r, g, list), 0u);
+
+    // The scroller's knob moves the top, and its messages are its own.
+    r.put16(pi + pi_VertPot, MAXPOT);
+    CHECK(!g.prop_moved(0, scroller, code));
+    CHECK_EQ(list_view_top(r, g, list), 4u);
+    r.put16(pi + pi_VertPot, MAXPOT / 2);
+    CHECK(!g.prop_moved(0, scroller, code));
+    CHECK_EQ(list_view_top(r, g, list), 2u);
+
+    // A list of fewer labels than rows stays at its top.
+    set_list_view(r, g, list, 0, r.tags(kTags, {{GTLV_Labels, 0xFFFFFFFF}, {TAG_DONE, 0}}));
+    put_list(r, kHead, kNodes, kEightNames, 2);
+    set_list_view(r, g, list, 0,
+                  r.tags(kTags, {{GTLV_Labels, kHead}, {GTLV_Top, 5}, {TAG_DONE, 0}}));
+    CHECK_EQ(list_view_top(r, g, list), 0u);
+    CHECK_EQ(r.get16(pi + pi_VertBody), MAXBODY);
+
+    // An integer gadget that shows the selection takes its number too, and
+    // GTLV_ScrollWidth sets the scroller's width.
+    put_new_gadget(r, 200, 30, 60, 14, 0, 3, 0, 0);
+    const u32 integer = create_gadget(r, g, INTEGER_KIND, list, 0);
+    constexpr const char* kSizes[2] = {"8", "11"};
+    put_list(r, kHead + 0x400, kNodes + 0x400, kSizes, 2);
+    put_new_gadget(r, 200, 30, 60, 50, 0, 4, 0, 0);
+    const u32 sizes = create_gadget(
+        r, g, LISTVIEW_KIND, integer,
+        r.tags(kTags, {{GTLV_ShowSelected, integer}, {GTLV_Labels, kHead + 0x400},
+                       {GTLV_Selected, 1}, {GTLV_ScrollWidth, 20}, {TAG_DONE, 0}}));
+    CHECK(sizes != 0);
+    CHECK_EQ(r.get16(sizes + gg_Width), 40u);
+    CHECK_EQ(r.get16(sizes + gg_Height), 36u);
+    CHECK_EQ(r.get16(integer + gg_TopEdge), 66u);
+    const u32 integer_si = r.get32(integer + gg_SpecialInfo);
+    CHECK(r.read_str(r.get32(integer_si + si_Buffer)) == "11");
+    CHECK_EQ(r.get32(integer_si + si_LongInt), 11u);
+    r.cpu().a[0] = integer;
+    r.cpu().a[3] = r.tags(kTags, {{GTIN_Number, kAnswer}, {TAG_DONE, 0}});
+    gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA);
+    CHECK_EQ(r.get32(kAnswer), 11u);
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    CHECK_EQ(avail_mem(r), before);
+}
+
+bool box_has_pen(GfxRig& r, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1, u32 pen) {
+    for (i32 y = y0; y <= y1; ++y) {
+        for (i32 x = x0; x <= x1; ++x) {
+            if (read_pixel(r, rp, x, y) == pen) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// A list view draws a raised frame around its rows, each label in its row,
+// the selected row in the fill pens when GTLV_ShowSelected was given, and
+// an arrow in each arrow's box. One only to read is recessed and takes no
+// clicks.
+void a_list_view_draws_its_rows_and_arrows() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 rp = make_surface(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    put_list(r, kHead, kNodes, kEightNames, 3);
+
+    put_new_gadget(r, 20, 20, 100, 40, 0, 1, 0, 0);
+    const u32 list = create_gadget(
+        r, g, LISTVIEW_KIND, context,
+        r.tags(kTags, {{GTLV_ShowSelected, 0}, {GTLV_Labels, kHead}, {GTLV_Selected, 1},
+                       {TAG_DONE, 0}}));
+    CHECK(list != 0);
+    CHECK_EQ(r.get16(list + gg_Width), 84u);
+    CHECK_EQ(r.get16(list + gg_Height), 36u);
+    CHECK(g.render(0, rp, list));
+    CHECK_EQ(read_pixel(r, rp, 20, 20), kShinePen);
+    CHECK_EQ(read_pixel(r, rp, 103, 55), kShadowPen);
+    // The first row holds its label, the second is the selected one.
+    CHECK(box_has_pen(r, rp, 24, 22, 70, 29, kTextPen));
+    CHECK(!box_has_pen(r, rp, 22, 22, 101, 29, kFillPen));
+    CHECK_EQ(read_pixel(r, rp, 100, 31), kFillPen);
+    CHECK(box_has_pen(r, rp, 24, 30, 70, 37, kFillTextPen));
+    CHECK(!box_has_pen(r, rp, 22, 46, 101, 53, kTextPen));
+    // Held down it looks the same: it is no button.
+    r.put16(list + gg_Flags, r.get16(list + gg_Flags) | GFLG_SELECTED);
+    CHECK(g.render(0, rp, list));
+    CHECK_EQ(read_pixel(r, rp, 100, 23), 0u);
+    CHECK_EQ(read_pixel(r, rp, 20, 20), kShinePen);
+
+    // The arrows stand below the scroller, right of the rows.
+    const u32 scroller = r.get32(context + gg_NextGadget);
+    const u32 up = r.get32(scroller + gg_NextGadget);
+    const u32 down = r.get32(up + gg_NextGadget);
+    CHECK_EQ(r.get16(up + gg_TopEdge), 36u);
+    CHECK_EQ(r.get16(down + gg_TopEdge), 46u);
+    CHECK(!box_has_pen(r, rp, 104, 36, 119, 55, kTextPen));
+    CHECK(g.render(0, rp, up));
+    CHECK(box_has_pen(r, rp, 104, 36, 119, 45, kTextPen));
+    CHECK(!box_has_pen(r, rp, 104, 46, 119, 55, kTextPen));
+    CHECK(g.render(0, rp, down));
+    CHECK(box_has_pen(r, rp, 104, 46, 119, 55, kTextPen));
+
+    // Without GTLV_ShowSelected the selected row is not marked; a list
+    // only to read is recessed.
+    put_new_gadget(r, 200, 20, 100, 40, 0, 2, 0, 0);
+    const u32 plain = create_gadget(
+        r, g, LISTVIEW_KIND, list,
+        r.tags(kTags, {{GTLV_Labels, kHead}, {GTLV_Selected, 1}, {GTLV_ReadOnly, 1},
+                       {TAG_DONE, 0}}));
+    CHECK(plain != 0);
+    CHECK_EQ(r.get16(plain + gg_Activation), 0u);
+    CHECK(g.render(0, rp, plain));
+    CHECK(!box_has_pen(r, rp, 202, 22, 281, 53, kFillPen));
+    CHECK(box_has_pen(r, rp, 204, 30, 250, 37, kTextPen));
+    CHECK_EQ(read_pixel(r, rp, 200, 20), kShadowPen);
+    CHECK_EQ(read_pixel(r, rp, 283, 55), kShinePen);
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+}
+
+u32 get_msg(GfxRig& r, u32 port) {
+    r.cpu().a[0] = port;
+    return r.result(Base::Exec, exec_lvo::GetMsg);
+}
+
+void reply_msg(GfxRig& r, u32 msg) {
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.call(Base::Exec, exec_lvo::ReplyMsg), ExitReason::Halt);
+}
+
+// In a window a click on a row sends IDCMP_GADGETUP with the row's ordinal;
+// the arrows and the scroller scroll the rows and send nothing.
+void a_list_view_in_a_window_reports_rows_and_scrolls_by_itself() {
+    constexpr u32 kLeft = 1;
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.intuition.set_gadget_renderer(&GadTools::render_gadget, &g);
+    r.intuition.set_gadget_release(&GadTools::release_gadget);
+    r.intuition.set_gadget_prop_code(&GadTools::prop_gadget_moved);
+    g.set_intuition(&r.intuition);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0);
+    CHECK(open_new_screen(r, kNewScreen) != 0);
+
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    put_list(r, kHead, kNodes, kEightNames, 8);
+    put_new_gadget(r, 20, 30, 120, 40, 0, 7, 0, 0);
+    const u32 list = create_gadget(
+        r, g, LISTVIEW_KIND, context,
+        r.tags(kTags, {{GTLV_ShowSelected, 0}, {GTLV_Labels, kHead}, {TAG_DONE, 0}}));
+    CHECK(list != 0);
+
+    for (u32 i = 0; i < NewWindow_SIZEOF; ++i) {
+        r.put8(kNewWindow + i, 0);
+    }
+    r.put16(kNewWindow + nw_LeftEdge, 50);
+    r.put16(kNewWindow + nw_TopEdge, 50);
+    r.put16(kNewWindow + nw_Width, 200);
+    r.put16(kNewWindow + nw_Height, 120);
+    r.put8(kNewWindow + nw_BlockPen, 1);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_GADGETDOWN | IDCMP_MOUSEMOVE);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE);
+    r.put32(kNewWindow + nw_FirstGadget, context);
+    r.cpu().a[0] = kNewWindow;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 wrp = r.get32(window + wd_RPort);
+    // The window opened with the rows drawn: the first label is there.
+    CHECK(box_has_pen(r, wrp, 24, 32, 70, 39, kTextPen));
+
+    // The third row, 8 pixels a row under a frame of 2.
+    r.intuition.pointer_event(50 + 30, 50 + 30 + 2 + 16 + 3, kLeft, kLeft, 0, true);
+    CHECK_EQ(get_msg(r, port), 0u);
+    r.intuition.pointer_event(50 + 30, 50 + 30 + 2 + 16 + 3, 0, 0, kLeft, false);
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    CHECK_EQ(r.get16(msg + im_Code), 2u);
+    CHECK_EQ(r.get32(msg + im_IAddress), list);
+    reply_msg(r, msg);
+    CHECK_EQ(get_msg(r, port), 0u);
+    CHECK_EQ(read_pixel(r, wrp, 100, 30 + 2 + 16 + 1), kFillPen);
+
+    // The down arrow, the lower of the two below the scroller.
+    r.intuition.pointer_event(50 + 124 + 5, 50 + 30 + 26 + 5, kLeft, kLeft, 0, true);
+    r.intuition.pointer_event(50 + 124 + 5, 50 + 30 + 26 + 5, 0, 0, kLeft, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+    CHECK_EQ(list_view_top(r, g, list), 1u);
+    // The selected label moved up a row with the rest.
+    CHECK_EQ(read_pixel(r, wrp, 100, 30 + 2 + 8 + 1), kFillPen);
+    CHECK_EQ(read_pixel(r, wrp, 100, 30 + 2 + 16 + 1), 0u);
+
+    // The knob dragged to the bottom of the scroller.
+    r.intuition.pointer_event(50 + 124 + 8, 50 + 30 + 5, kLeft, kLeft, 0, true);
+    r.intuition.pointer_event(50 + 124 + 8, 50 + 30 + 25, kLeft, 0, 0, true);
+    r.intuition.pointer_event(50 + 124 + 8, 50 + 30 + 25, 0, 0, kLeft, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+    CHECK_EQ(list_view_top(r, g, list), 4u);
+    CHECK(!box_has_pen(r, wrp, 22, 32, 101, 63, kFillPen));
+
+    // A row past the last label sends nothing.
+    set_list_view(r, g, list, window,
+                  r.tags(kTags, {{GTLV_Labels, 0xFFFFFFFF}, {TAG_DONE, 0}}));
+    put_list(r, kHead, kNodes, kEightNames, 2);
+    set_list_view(r, g, list, window, r.tags(kTags, {{GTLV_Labels, kHead}, {TAG_DONE, 0}}));
+    r.intuition.pointer_event(50 + 30, 50 + 30 + 2 + 16 + 3, kLeft, kLeft, 0, true);
+    r.intuition.pointer_event(50 + 30, 50 + 30 + 2 + 16 + 3, 0, 0, kLeft, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    r.intuition.set_gadget_renderer(nullptr, nullptr);
+    r.intuition.set_gadget_release(nullptr);
+    r.intuition.set_gadget_prop_code(nullptr);
+}
+
 int main() {
+    list_views_lay_out_their_parts_and_show_the_selected_label();
+    a_list_view_draws_its_rows_and_arrows();
+    a_list_view_in_a_window_reports_rows_and_scrolls_by_itself();
     checkboxes_toggle_and_report_their_state();
     sliders_carry_levels_and_list_views_pick_rows();
     strings_keep_a_buffer_and_scrollers_their_place();

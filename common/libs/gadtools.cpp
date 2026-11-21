@@ -23,6 +23,7 @@
 
 #include "gadtools.hpp"
 
+#include "chrome.hpp"
 #include "intuition.hpp"
 #include "sysimage.hpp"
 
@@ -62,7 +63,8 @@ constexpr u32 gt_Number = 56;
 constexpr u32 gt_Options = 60;
 constexpr u32 gt_Underscore = 62;
 constexpr u32 gt_CopyBytes = 64;
-// A cycle gadget's number of labels, a palette's number of colours.
+// A cycle gadget's number of labels, a palette's number of colours, the
+// most characters a string or integer gadget takes.
 constexpr u32 gt_Count = 68;
 constexpr u32 gt_ColorOffset = 70;
 constexpr u32 gt_ColorTable = 72;
@@ -72,7 +74,20 @@ constexpr u32 gt_IndicatorHeight = 78;
 constexpr u32 gt_StringInfo = 80;
 // A scroller's PropInfo, which Intuition moves.
 constexpr u32 gt_PropInfo = gt_StringInfo + ndk::StringInfo_SIZEOF;
-constexpr u32 kGadgetBytes = gt_PropInfo + ndk::PropInfo_SIZEOF + 2;
+// A list view is four gadgets in a row: its scroller, the arrow that moves
+// it up, the one that moves it down, and last the list itself, which is
+// the gadget CreateGadgetA returns. Each of the three parts knows the list
+// it belongs to; the list knows its scroller, the string gadget that shows
+// its selected label, an ordinal still to be scrolled into view, the height
+// of a row and the width of the scroller.
+constexpr u32 gt_Owner = gt_PropInfo + ndk::PropInfo_SIZEOF + 2;
+constexpr u32 gt_Scroller = gt_Owner + 4;
+constexpr u32 gt_Show = gt_Scroller + 4;
+constexpr u32 gt_MakeVisible = gt_Show + 4;
+constexpr u32 gt_RowHeight = gt_MakeVisible + 4;
+constexpr u32 gt_Spacing = gt_RowHeight + 2;
+constexpr u32 gt_ScrollWidth = gt_Spacing + 2;
+constexpr u32 kGadgetBytes = gt_ScrollWidth + 2;
 constexpr u32 kMaxCycleLabels = 256;
 constexpr u32 kMaxPaletteColors = 256;
 constexpr u16 kOptBorder = 0x1;
@@ -92,6 +107,10 @@ constexpr u32 SLIDER_KIND = 11;
 constexpr u32 STRING_KIND = 12;
 constexpr u32 TEXT_KIND = 13;
 constexpr u32 kKinds = 14;
+// The parts of a list view, which no program asks for.
+constexpr u32 kListScrollerKind = 0x80;
+constexpr u32 kListUpKind = 0x81;
+constexpr u32 kListDownKind = 0x82;
 
 // struct NewGadget.
 constexpr u32 ng_LeftEdge = 0;
@@ -152,16 +171,31 @@ constexpr u32 GTSL_Max = 0x80080027;
 constexpr u32 GTSL_Level = 0x80080028;
 constexpr u32 kDefaultSliderMax = 15;
 // A list view keeps its struct List where a text display keeps its text,
-// its selected ordinal, ~0 for none, where a number keeps its number, and
-// its top ordinal where a scroller keeps its total.
+// its selected ordinal, ~0 for none, where a number keeps its number, its
+// top ordinal where a scroller keeps its total, and the number of rows it
+// shows where a scroller keeps how much shows.
 constexpr u32 GTLV_Top = 0x80080005;
 constexpr u32 GTLV_Labels = 0x80080006;
 constexpr u32 GTLV_ReadOnly = 0x80080007;
+constexpr u32 GTLV_ScrollWidth = 0x80080008;
+constexpr u32 GTLV_ShowSelected = 0x80080035;
 constexpr u32 GTLV_Selected = 0x80080036;
+constexpr u32 GTLV_ItemHeight = 0x8008004D;
 constexpr u32 GTLV_MakeVisible = 0x8008004E;
+constexpr u32 LAYOUTA_Spacing = 0x80038002;
 constexpr u16 kOptReadOnly = 0x2;
+// GTLV_ShowSelected was given: the selected row shows in the fill pens.
+constexpr u16 kOptShowSelected = 0x8;
 constexpr u32 kListRowHeight = 8;  // the topaz font
 constexpr u32 kMaxListNodes = 4096;
+constexpr u32 kNoOrdinal = 0xFFFFFFFF;
+constexpr u32 kDefaultScrollWidth = 16;
+// The height of each of a list view's two arrows, and the frame around
+// its rows.
+constexpr i32 kListArrowHeight = 10;
+constexpr i32 kListFrame = 2;
+// The largest arrow, in pixels, painted in the look of the sliders' knobs.
+constexpr u32 kMaxArrowPixels = 64 * 16;
 constexpr u32 GTTX_Border = 0x80080039;
 constexpr u32 GTNM_Border = 0x8008003A;
 constexpr u32 GT_Underscore = 0x80080040;
@@ -294,6 +328,34 @@ private:
     u32 y_;
 };
 
+// The nodes of the struct List at list, at most kMaxListNodes.
+u32 list_count(Bus& b, u32 list) {
+    u32 count = 0;
+    if (list == 0) {
+        return 0;
+    }
+    for (u32 node = b.r32(list); node != 0 && b.r32(node) != 0 && count < kMaxListNodes &&
+                                 b.ok();
+         node = b.r32(node)) {
+        ++count;
+    }
+    return count;
+}
+
+// The node of the given ordinal of the struct List at list, 0 past its end.
+u32 list_node(Bus& b, u32 list, u32 ordinal) {
+    if (list == 0 || ordinal >= kMaxListNodes) {
+        return 0;
+    }
+    u32 node = b.r32(list);
+    for (u32 i = 0; node != 0 && b.r32(node) != 0 && b.ok(); node = b.r32(node), ++i) {
+        if (i == ordinal) {
+            return node;
+        }
+    }
+    return 0;
+}
+
 }  // namespace
 
 struct GadToolsNatives {
@@ -384,7 +446,12 @@ struct GadToolsNatives {
         const u32 length = text != 0 ? label_length(b, text) : 0;
         const u32 max_chars = kind == INTEGER_KIND ? b.r16(gadget + gt_Count) + 1 : 0;
         const u32 undo = kind == INTEGER_KIND ? max_chars : 0;
-        u32 bytes = buffer && length + 1 < kDefaultMaxChars ? kDefaultMaxChars : length + 1;
+        // A string gadget holds GTST_MaxChars characters and the NUL after
+        // them, 64 with it unless the tag says otherwise.
+        const u32 string_chars =
+            kind == STRING_KIND && b.r16(gadget + gt_Count) != 0 ? b.r16(gadget + gt_Count) + 1
+                                                                 : kDefaultMaxChars;
+        u32 bytes = buffer && length + 1 < string_chars ? string_chars : length + 1;
         bytes = bytes < max_chars ? max_chars : bytes;
         const u32 at = g.exec_->alloc(bytes + undo, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (at == 0) {
@@ -409,10 +476,12 @@ struct GadToolsNatives {
     }
 
     // The tags a gadget takes at CreateGadgetA and GT_SetGadgetAttrsA.
-    static void apply_tags(GadTools& g, Bus& b, u32 gadget, u32 tags, bool creating) {
+    static void apply_tags(GadTools& g, Bus& b, u32 gadget, u32 tags, bool creating,
+                           u32 window = 0) {
         bool copy = false;
         u32 text = 0;
         bool has_text = false;
+        bool selection = false;
         for (u32 item = tags, i = 0; item != 0 && i < kMaxTags && b.ok(); ++i) {
             const u32 tag = b.r32(item);
             const u32 data = b.r32(item + 4);
@@ -503,16 +572,42 @@ struct GadToolsNatives {
                 b.w32(gadget + gt_Text, data == 0xFFFFFFFF ? 0 : data);
                 break;
             case GTLV_Top:
+                b.w32(gadget + gt_Total, data & 0xFFFF);
+                break;
             case GTLV_MakeVisible:
-                b.w32(gadget + gt_Total, data);
+                // Scrolled into view once the rows and the labels are known.
+                b.w32(gadget + gt_MakeVisible, data & 0xFFFF);
                 break;
             case GTLV_Selected:
-                b.w32(gadget + gt_Number, data);
+                // An ordinal is a UWORD, and ~0 of one is no selection.
+                b.w32(gadget + gt_Number, (data & 0xFFFF) == 0xFFFF ? kNoOrdinal : data & 0xFFFF);
+                selection = true;
                 break;
             case GTLV_ReadOnly:
                 if (creating) {
                     b.w16(gadget + gt_Options,
                           data != 0 ? options | kOptReadOnly : options & ~kOptReadOnly);
+                }
+                break;
+            case GTLV_ShowSelected:
+                if (creating) {
+                    b.w32(gadget + gt_Show, data);
+                    b.w16(gadget + gt_Options, options | kOptShowSelected);
+                }
+                break;
+            case GTLV_ScrollWidth:
+                if (creating && data != 0) {
+                    b.w16(gadget + gt_ScrollWidth, data > 0x7FFF ? 0x7FFF : data);
+                }
+                break;
+            case GTLV_ItemHeight:
+                if (creating && data != 0) {
+                    b.w16(gadget + gt_RowHeight, data > 0x7FFF ? 0x7FFF : data);
+                }
+                break;
+            case LAYOUTA_Spacing:
+                if (creating) {
+                    b.w16(gadget + gt_Spacing, data > 0x7FFF ? 0x7FFF : data);
                 }
                 break;
             case GTSC_Visible:
@@ -536,6 +631,8 @@ struct GadToolsNatives {
                 }
                 break;
             case GTIN_MaxChars:
+            case GTST_MaxChars:
+                // A string and an integer gadget take either tag.
                 if (creating) {
                     b.w16(gadget + gt_Count, data < 0xFFFF ? data : 0xFFFE);
                 }
@@ -565,6 +662,173 @@ struct GadToolsNatives {
         if (kind == SCROLLER_KIND || kind == SLIDER_KIND) {
             sync_scroller(b, gadget);
         }
+        // A list view being made has no rows to scroll or show yet.
+        if (kind == LISTVIEW_KIND && !creating) {
+            sync_list(b, gadget);
+            if (selection) {
+                show_selected(g, b, window, gadget);
+            }
+        }
+    }
+
+    // The top of a list view kept where its labels and rows allow, after
+    // an ordinal asked for was scrolled into view with as little movement
+    // as that takes, and its scroller made to match.
+    static void sync_list(Bus& b, u32 gadget) {
+        const u32 count = list_count(b, b.r32(gadget + gt_Text));
+        const u32 rows = b.r16(gadget + gt_Visible);
+        u32 top = b.r32(gadget + gt_Total);
+        const u32 wanted = b.r32(gadget + gt_MakeVisible);
+        if (wanted != kNoOrdinal) {
+            if (wanted < top) {
+                top = wanted;
+            } else if (rows != 0 && wanted >= top + rows) {
+                top = wanted - rows + 1;
+            }
+            b.w32(gadget + gt_MakeVisible, kNoOrdinal);
+        }
+        const u32 last_top = count > rows ? count - rows : 0;
+        top = top > last_top ? last_top : top;
+        b.w32(gadget + gt_Total, top);
+        const u32 scroller = b.r32(gadget + gt_Scroller);
+        if (scroller != 0) {
+            b.w32(scroller + gt_Number, top);
+            b.w32(scroller + gt_Total, count);
+            b.w16(scroller + gt_Visible, rows);
+            sync_scroller(b, scroller);
+        }
+        // A disabled list view's parts are disabled with it.
+        const u32 disabled = b.r16(gadget + gg_Flags) & ndk::GFLG_DISABLED;
+        u32 part = scroller;
+        for (u32 i = 0; i < 3 && part != 0 && b.ok(); ++i) {
+            if (b.r32(part + gt_Owner) != gadget) {
+                break;
+            }
+            const u32 flags = b.r16(part + gg_Flags);
+            b.w16(part + gg_Flags, (flags & ~ndk::GFLG_DISABLED) | disabled);
+            part = b.r32(part + gg_NextGadget);
+        }
+    }
+
+    // The label of a list view's selected row put into the string gadget
+    // GTLV_ShowSelected named, as much of it as the gadget holds; an
+    // integer gadget takes the number the label spells as well.
+    static void show_selected(GadTools& g, Bus& b, u32 window, u32 gadget) {
+        const u32 show = b.r32(gadget + gt_Show);
+        const u32 node =
+            list_node(b, b.r32(gadget + gt_Text), b.r32(gadget + gt_Number));
+        if (show == 0 || node == 0 || !b.ok()) {
+            return;
+        }
+        const u32 si = b.r32(show + ndk::gg_SpecialInfo);
+        const u32 buffer = si != 0 ? b.r32(si + ndk::si_Buffer) : 0;
+        const u32 max_chars = si != 0 ? b.r16(si + ndk::si_MaxChars) : 0;
+        if (buffer == 0 || max_chars == 0 || !b.ok()) {
+            return;
+        }
+        const u32 name = b.r32(node + ndk::LN_NAME);
+        u32 length = label_length(b, name);
+        length = length < max_chars ? length : max_chars - 1;
+        for (u32 i = 0; i < length; ++i) {
+            b.w8(buffer + i, b.r8(name + i));
+        }
+        b.w8(buffer + length, 0);
+        b.w16(si + ndk::si_NumChars, length);
+        b.w16(si + ndk::si_BufferPos, length);
+        b.w16(si + ndk::si_DispPos, 0);
+        if ((b.r16(show + ndk::gg_Activation) & ndk::GACT_LONGINT) != 0) {
+            const bool negative = length != 0 && b.r8(buffer) == '-';
+            u32 magnitude = 0;
+            for (u32 at = negative ? 1 : 0; at < length; ++at) {
+                const u32 c = b.r8(buffer + at);
+                if (c < '0' || c > '9') {
+                    break;
+                }
+                magnitude = magnitude * 10 + (c - '0');
+            }
+            const u32 value = negative ? 0 - magnitude : magnitude;
+            b.w32(si + ndk::si_LongInt, value);
+            if ((b.r16(show + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0 &&
+                b.r16(show + gt_Kind) == INTEGER_KIND) {
+                b.w32(show + gt_Number, value);
+            }
+        }
+        if (window != 0 && g.intuition_ != nullptr && b.ok()) {
+            g.intuition_->refresh_glist(show, window, 1);
+        }
+    }
+
+    // Lays a list view out inside the box its NewGadget gave and makes its
+    // parts. The rows take the box's width less the scroller's and as much
+    // of its height as holds whole rows inside the frame; the string gadget
+    // that shows the selected label goes directly beneath them, as wide as
+    // the box, and its height comes out of the box's. The scroller stands
+    // to the right of the rows with the two arrows below it. The first of
+    // the parts, which the gadget before the list view links to; 0 when
+    // memory ran out.
+    static u32 make_list_parts(GadTools& g, Bus& b, u32 gadget) {
+        const i32 left = static_cast<i16>(b.r16(gadget + ndk::gg_LeftEdge));
+        const i32 top = static_cast<i16>(b.r16(gadget + ndk::gg_TopEdge));
+        const i32 width = static_cast<i16>(b.r16(gadget + ndk::gg_Width));
+        const i32 height = static_cast<i16>(b.r16(gadget + ndk::gg_Height));
+        const u32 show = b.r32(gadget + gt_Show);
+        const i32 show_h = show != 0 ? static_cast<i16>(b.r16(show + ndk::gg_Height)) : 0;
+        if (b.r16(gadget + gt_RowHeight) == 0) {
+            b.w16(gadget + gt_RowHeight, kListRowHeight + b.r16(gadget + gt_Spacing));
+        }
+        const i32 row_h = static_cast<i32>(b.r16(gadget + gt_RowHeight));
+        i32 scroll_w = static_cast<i32>(b.r16(gadget + gt_ScrollWidth));
+        scroll_w = scroll_w > width / 2 ? width / 2 : scroll_w;
+        scroll_w = scroll_w < 0 ? 0 : scroll_w;
+        i32 rows = (height - show_h - 2 * kListFrame) / row_h;
+        rows = rows < 1 ? 1 : rows;
+        const i32 list_h = rows * row_h + 2 * kListFrame;
+        b.w16(gadget + ndk::gg_Width, static_cast<u16>(width - scroll_w));
+        b.w16(gadget + ndk::gg_Height, static_cast<u16>(list_h));
+        b.w16(gadget + gt_Visible, static_cast<u16>(rows));
+        b.w16(gadget + gt_ScrollWidth, static_cast<u16>(scroll_w));
+        if (show != 0) {
+            b.w16(show + ndk::gg_LeftEdge, static_cast<u16>(left));
+            b.w16(show + ndk::gg_TopEdge, static_cast<u16>(top + list_h));
+            b.w16(show + ndk::gg_Width, static_cast<u16>(width));
+        }
+        const i32 arrow_h = list_h < 3 * kListArrowHeight ? list_h / 3 : kListArrowHeight;
+        const i32 x = left + width - scroll_w;
+        const i32 part_top[3] = {top, top + list_h - 2 * arrow_h, top + list_h - arrow_h};
+        const i32 part_h[3] = {list_h - 2 * arrow_h, arrow_h, arrow_h};
+        const u32 kinds[3] = {kListScrollerKind, kListUpKind, kListDownKind};
+        u32 parts[3] = {0, 0, 0};
+        for (u32 i = 0; i < 3; ++i) {
+            parts[i] = g.exec_->alloc(kGadgetBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+            if (parts[i] == 0) {
+                for (u32 made = 0; made < i; ++made) {
+                    g.exec_->free(parts[made], kGadgetBytes);
+                }
+                return 0;
+            }
+        }
+        for (u32 i = 0; i < 3; ++i) {
+            const u32 part = parts[i];
+            const bool prop = i == 0;
+            b.w32(part + gg_NextGadget, i + 1 < 3 ? parts[i + 1] : gadget);
+            b.w16(part + ndk::gg_LeftEdge, static_cast<u16>(x));
+            b.w16(part + ndk::gg_TopEdge, static_cast<u16>(part_top[i]));
+            b.w16(part + ndk::gg_Width, static_cast<u16>(scroll_w));
+            b.w16(part + ndk::gg_Height, static_cast<u16>(part_h[i]));
+            b.w16(part + gg_Flags, GFLG_GADGHNONE);
+            b.w16(part + ndk::gg_GadgetType,
+                  ndk::GTYP_GADTOOLS | (prop ? ndk::GTYP_PROPGADGET : ndk::GTYP_BOOLGADGET));
+            b.w16(part + ndk::gg_Activation,
+                  prop ? ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE | ndk::GACT_FOLLOWMOUSE
+                       : ndk::GACT_RELVERIFY);
+            if (prop) {
+                b.w32(part + ndk::gg_SpecialInfo, part + gt_PropInfo);
+            }
+            b.w16(part + gt_Kind, kinds[i]);
+            b.w32(part + gt_Owner, gadget);
+        }
+        b.w32(gadget + gt_Scroller, parts[0]);
+        return parts[0];
     }
 
     // A scroller's top, total and visible part; a slider's level less its
@@ -660,7 +924,9 @@ struct GadToolsNatives {
             b.w32(gadget + gt_Total, kDefaultSliderMax);
         }
         if (kind == LISTVIEW_KIND) {
-            b.w32(gadget + gt_Number, 0xFFFFFFFF);
+            b.w32(gadget + gt_Number, kNoOrdinal);
+            b.w32(gadget + gt_MakeVisible, kNoOrdinal);
+            b.w16(gadget + gt_ScrollWidth, kDefaultScrollWidth);
         }
         b.w16(gadget + ndk::gg_GadgetType,
               ndk::GTYP_GADTOOLS | (kind == STRING_KIND || kind == INTEGER_KIND
@@ -693,7 +959,20 @@ struct GadToolsNatives {
         if (kind == LISTVIEW_KIND && (b.r16(gadget + gt_Options) & kOptReadOnly) != 0) {
             b.w16(gadget + ndk::gg_Activation, 0);
         }
-        b.w32(previous + gg_NextGadget, gadget);
+        u32 first = gadget;
+        if (kind == LISTVIEW_KIND) {
+            // The parts come before the list itself, which is the gadget
+            // the next one made links to.
+            first = make_list_parts(g, b, gadget);
+            if (first == 0) {
+                g.exec_->free(gadget, kGadgetBytes);
+                native::set_result(m, 0);
+                return;
+            }
+            sync_list(b, gadget);
+            show_selected(g, b, 0, gadget);
+        }
+        b.w32(previous + gg_NextGadget, first);
         if (!b.ok()) {
             native::set_result(m, 0);
             return;
@@ -725,7 +1004,7 @@ struct GadToolsNatives {
             return;
         }
         Bus b(m);
-        apply_tags(g, b, gadget, m.cpu.a[3], false);
+        apply_tags(g, b, gadget, m.cpu.a[3], false, window);
         if (window != 0 && b.ok()) {
             const u32 kind = b.r16(gadget + gt_Kind);
             // Intuition draws a scroller's prop and a string's cursor.
@@ -733,6 +1012,8 @@ struct GadToolsNatives {
                  kind == INTEGER_KIND) &&
                 g.intuition_ != nullptr) {
                 g.intuition_->refresh_glist(gadget, window, 1);
+            } else if (kind == LISTVIEW_KIND) {
+                g.draw_list_view(b, window, gadget);
             } else {
                 g.render(window, b.r32(window + ndk::wd_RPort), gadget);
             }
@@ -1303,61 +1584,95 @@ u32 palette_pen(Bus& b, u32 gadget, i32 index) {
 
 }  // namespace
 
-namespace {
-
-// The nodes of the struct List at list, at most kMaxListNodes.
-u32 list_count(Bus& b, u32 list) {
-    u32 count = 0;
-    if (list == 0) {
-        return 0;
-    }
-    for (u32 node = b.r32(list); node != 0 && b.r32(node) != 0 && count < kMaxListNodes &&
-                                 b.ok();
-         node = b.r32(node)) {
-        ++count;
-    }
-    return count;
-}
-
-}
-
-// A list view: the names of its nodes a row each from its top ordinal on,
-// the selected one in the fill pens. TODO: the scroller beside the list.
+// A list view's rows: the names of its nodes a row each from its top
+// ordinal on, as many as it has rows for. The selected one shows in the
+// fill pens when GTLV_ShowSelected was given.
 void GadTools::draw_list(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                          i32 bottom) {
     Graphics& gfx = *graphics_;
     const u32 list = b.r32(gadget + gt_Text);
     const u32 first = b.r32(gadget + gt_Total);
-    const u32 selected = b.r32(gadget + gt_Number);
+    const bool shows = (b.r16(gadget + gt_Options) & kOptShowSelected) != 0;
+    const u32 selected = shows ? b.r32(gadget + gt_Number) : kNoOrdinal;
+    const i32 row_h = static_cast<i32>(b.r16(gadget + gt_RowHeight));
+    const u32 rows = b.r16(gadget + gt_Visible);
     const i32 columns = (right - left - 6) / static_cast<i32>(kGlyphWidth);
-    if (list == 0 || columns <= 0) {
+    if (list == 0 || columns <= 0 || row_h <= 0) {
         return;
     }
     u32 ordinal = 0;
-    i32 y = top + 2;
+    i32 y = top + kListFrame;
     for (u32 node = b.r32(list); node != 0 && b.r32(node) != 0 && ordinal < kMaxListNodes &&
                                  b.ok();
          node = b.r32(node), ++ordinal) {
         if (ordinal < first) {
             continue;
         }
-        if (y + static_cast<i32>(kListRowHeight) - 1 > bottom - 2) {
+        if (ordinal - first >= rows || y + row_h - 1 > bottom - kListFrame) {
             break;
         }
         const bool chosen = ordinal == selected;
         if (chosen) {
             gfx.set_pens(rp, kFillPen, 0, ndk::JAM1);
-            gfx.rect_fill(rp, left + 2, y, right - 2, y + static_cast<i32>(kListRowHeight) - 1);
+            gfx.rect_fill(rp, left + 2, y, right - 2, y + row_h - 1);
         }
         char name[256];
         const u32 length = read_label(b, b.r32(node + ndk::LN_NAME), 0, name, sizeof name);
         const u32 shown = length < static_cast<u32>(columns) ? length : static_cast<u32>(columns);
         if (shown > 0) {
+            // The text sits in the middle of a row higher than the font.
+            const i32 text_top = y + (row_h - static_cast<i32>(kGlyphHeight)) / 2;
             gfx.set_pens(rp, chosen ? kFillTextPen : kTextPen, 0, ndk::JAM1);
-            gfx.move(rp, left + 4, y + static_cast<i32>(kGlyphBaseline));
+            gfx.move(rp, left + 4, text_top + static_cast<i32>(kGlyphBaseline));
             gfx.text(rp, reinterpret_cast<const u8*>(name), shown);
         }
-        y += static_cast<i32>(kListRowHeight);
+        y += row_h;
+    }
+}
+
+// One of a list view's two arrows, in the look of the sliders' knobs; an
+// arrow too large for that takes the system image's.
+void GadTools::draw_list_arrow(Bus& b, u32 rp, i32 left, i32 top, i32 width, i32 height,
+                               bool down, bool pressed) {
+    Graphics& gfx = *graphics_;
+    if (static_cast<u32>(width) * static_cast<u32>(height) > kMaxArrowPixels) {
+        u16 pens[sysimage::kPenCount];
+        sysimage::read_pens(b, 0, pens);
+        sysimage::draw(gfx, b, rp, down ? ndk::DOWNIMAGE : ndk::UPIMAGE,
+                       Rect{left, top, left + width - 1, top + height - 1},
+                       pressed ? ndk::IDS_SELECTED : ndk::IDS_NORMAL, pens);
+        return;
+    }
+    const u32 bitmap = b.r32(rp + ndk::rp_BitMap);
+    const u32 depth = bitmap != 0 ? b.r8(bitmap + ndk::bm_Depth) : 0;
+    u8 pens[kMaxArrowPixels];
+    chrome::paint_arrow_button(pens, width, height, down ? chrome::Arrow::Down : chrome::Arrow::Up,
+                               pressed, depth >= 8);
+    // Row by row, each run of one pen a line.
+    for (i32 y = 0; y < height; ++y) {
+        for (i32 x = 0; x < width;) {
+            const u8 pen = pens[y * width + x];
+            i32 end = x;
+            while (end + 1 < width && pens[y * width + end + 1] == pen) {
+                ++end;
+            }
+            gfx.set_pens(rp, pen, 0, ndk::JAM1);
+            gfx.rect_fill(rp, left + x, top + y, left + end, top + y);
+            x = end + 1;
+        }
+    }
+}
+
+// A list view drawn again after its labels, top or selection changed: its
+// rows, its scroller and its arrows.
+void GadTools::draw_list_view(Bus& b, u32 window, u32 gadget) {
+    if (window == 0) {
+        return;
+    }
+    render(window, b.r32(window + ndk::wd_RPort), gadget);
+    const u32 scroller = b.r32(gadget + gt_Scroller);
+    if (scroller != 0 && intuition_ != nullptr && b.ok()) {
+        intuition_->refresh_glist(scroller, window, 3);
     }
 }
 
@@ -1458,10 +1773,6 @@ void GadTools::draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom,
                    selected ? ndk::IDS_SELECTED : ndk::IDS_NORMAL, pens);
 }
 
-// A click let go over the gadget at x, y of its box: a cycle gadget moves
-// on to its next choice, a palette takes the colour under the pointer, a
-// checkbox turns over. The code its IDCMP_GADGETUP carries; false for a
-// kind that is no gadtools gadget.
 // A scroller Intuition moved: its top from the knob's place, which its
 // messages carry.
 u16 GadTools::prop_code(u32 gadget) {
@@ -1470,7 +1781,7 @@ u16 GadTools::prop_code(u32 gadget) {
     }
     Bus b(*machine_);
     const u32 kind = b.r16(gadget + gt_Kind);
-    if (kind != SCROLLER_KIND && kind != SLIDER_KIND) {
+    if (kind != SCROLLER_KIND && kind != SLIDER_KIND && kind != kListScrollerKind) {
         return 0;
     }
     const u32 pi = gadget + gt_PropInfo;
@@ -1492,6 +1803,34 @@ u16 GadTools::prop_code(u32 gadget) {
     return static_cast<u16>(top);
 }
 
+// A prop gadget of the window Intuition moved: the code its message
+// carries. False for a list view's scroller, which moves the list's rows
+// and whose messages no program is to see.
+bool GadTools::prop_moved(u32 window, u32 gadget, u16& code) {
+    code = prop_code(gadget);
+    if (machine_ == nullptr || gadget == 0) {
+        return true;
+    }
+    Bus b(*machine_);
+    if (b.r16(gadget + gt_Kind) != kListScrollerKind) {
+        return true;
+    }
+    const u32 list = b.r32(gadget + gt_Owner);
+    if (list != 0 && b.r32(list + gt_Total) != code && b.ok()) {
+        b.w32(list + gt_Total, code);
+        if (window != 0) {
+            render(window, b.r32(window + ndk::wd_RPort), list);
+        }
+    }
+    return false;
+}
+
+// A click let go over the gadget at x, y of its box: a cycle gadget moves
+// on to its next choice, a palette takes the colour under the pointer, a
+// checkbox turns over, a list view takes the row under the pointer and one
+// of its arrows moves it a row. The code its IDCMP_GADGETUP carries; false
+// when the click is to send none, as one on a list view's arrow or below
+// its last label.
 bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
     if (machine_ == nullptr || gadget == 0) {
         return false;
@@ -1536,20 +1875,35 @@ bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
     }
     if (kind == LISTVIEW_KIND) {
         // The row under the pointer, counted from the list's top.
-        const i32 row = (y - 2) / static_cast<i32>(kListRowHeight);
+        const i32 row_h = static_cast<i32>(b.r16(gadget + gt_RowHeight));
+        const i32 row = row_h > 0 && y >= kListFrame ? (y - kListFrame) / row_h : -1;
         const u32 count = list_count(b, b.r32(gadget + gt_Text));
         const u32 ordinal = b.r32(gadget + gt_Total) + static_cast<u32>(row < 0 ? 0 : row);
-        if (row < 0 || ordinal >= count) {
+        if (row < 0 || static_cast<u32>(row) >= b.r16(gadget + gt_Visible) || ordinal >= count) {
             return false;
         }
         b.w32(gadget + gt_Number, ordinal);
         code = static_cast<u16>(ordinal);
+        GadToolsNatives::show_selected(*this, b, window, gadget);
         if (window != 0) {
             render(window, b.r32(window + ndk::wd_RPort), gadget);
         }
         return b.ok();
     }
-    return kind == BUTTON_KIND;
+    if (kind == kListUpKind || kind == kListDownKind) {
+        const u32 list = b.r32(gadget + gt_Owner);
+        const u32 top = list != 0 ? b.r32(list + gt_Total) : 0;
+        if (list != 0 && b.ok() && (kind == kListDownKind || top != 0)) {
+            // Past the last row the list stays where its labels end.
+            b.w32(list + gt_Total, kind == kListUpKind ? top - 1 : top + 1);
+            GadToolsNatives::sync_list(b, list);
+            if (b.r32(list + gt_Total) != top) {
+                draw_list_view(b, window, list);
+            }
+        }
+        return false;
+    }
+    return true;
 }
 
 bool GadTools::render(u32 window, u32 rp, u32 gadget) {
@@ -1576,16 +1930,25 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     Graphics& gfx = *graphics_;
     const i32 right = left + width - 1;
     const i32 bottom = top + height - 1;
-    const bool selected = (flags & ndk::GFLG_SELECTED) != 0;
+    if (kind == kListUpKind || kind == kListDownKind) {
+        draw_list_arrow(b, rp, left, top, width, height, kind == kListDownKind,
+                        (flags & ndk::GFLG_SELECTED) != 0);
+        ghost(rp, flags, left, top, right, bottom);
+        return true;
+    }
+    // A list view held down looks as it did: it has rows to pick, and is
+    // no button.
+    const bool selected = (flags & ndk::GFLG_SELECTED) != 0 && kind != LISTVIEW_KIND;
     const bool framed = kind == BUTTON_KIND || (options & kOptBorder) != 0 ||
                         (kind != TEXT_KIND && kind != NUMBER_KIND);
+    // A list view to pick from is raised, one only to read recessed.
     const bool recessed = kind == TEXT_KIND || kind == NUMBER_KIND ||
                           kind == STRING_KIND || kind == INTEGER_KIND ||
                           kind == SCROLLER_KIND || kind == SLIDER_KIND ||
-                          kind == LISTVIEW_KIND || selected;
+                          (kind == LISTVIEW_KIND && (options & kOptReadOnly) != 0) || selected;
     // The inside first, then the frame around it. Intuition draws a
     // scroller's or slider's box and knob, over which this would paint.
-    const bool prop = kind == SCROLLER_KIND || kind == SLIDER_KIND;
+    const bool prop = kind == SCROLLER_KIND || kind == SLIDER_KIND || kind == kListScrollerKind;
     gfx.set_pens(rp, selected ? kFillPen : 0, 0, ndk::JAM1);
     if (prop) {
         if (intuition_ != nullptr && window != 0) {
@@ -1650,18 +2013,27 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         return true;
     }
     const i32 span = static_cast<i32>(label_chars * kGlyphWidth);
+    // A list view's label is placed by the whole of it, the scroller and
+    // the gadget that shows its selected label included.
+    i32 full_width = width;
+    i32 full_bottom = bottom;
+    if (kind == LISTVIEW_KIND) {
+        const u32 show = b.r32(gadget + gt_Show);
+        full_width += static_cast<i32>(b.r16(gadget + gt_ScrollWidth));
+        full_bottom += show != 0 ? static_cast<i16>(b.r16(show + ndk::gg_Height)) : 0;
+    }
     i32 x = left - span - static_cast<i32>(kGlyphWidth);
     i32 y = baseline;
     if ((place & PLACETEXT_IN) != 0) {
         x = left + (width - span) / 2;
     } else if ((place & PLACETEXT_RIGHT) != 0) {
-        x = right + 1 + static_cast<i32>(kGlyphWidth);
+        x = left + full_width + static_cast<i32>(kGlyphWidth);
     } else if ((place & PLACETEXT_ABOVE) != 0) {
-        x = left + (width - span) / 2;
+        x = left + (full_width - span) / 2;
         y = top - 4 - static_cast<i32>(kGlyphHeight - kGlyphBaseline);
     } else if ((place & PLACETEXT_BELOW) != 0) {
-        x = left + (width - span) / 2;
-        y = bottom + 3 + static_cast<i32>(kGlyphBaseline);
+        x = left + (full_width - span) / 2;
+        y = full_bottom + 3 + static_cast<i32>(kGlyphBaseline);
     }
     const bool inside = (place & PLACETEXT_IN) != 0;
     gfx.set_pens(rp, inside && selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
