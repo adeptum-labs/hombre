@@ -5243,8 +5243,16 @@ void Intuition::draw_sys_image(void* ctx, u32 rp, u32 which, i32 left, i32 top, 
     Bus b(*in.machine_);
     u16 pens[sysimage::kPenCount];
     sysimage::read_pens(b, draw_info, pens);
+    // The caller's pens and draw mode stay as they were: programs draw their
+    // text after an image without setting them again.
+    const u32 fg = b.r8(rp + ndk::rp_FgPen);
+    const u32 bg = b.r8(rp + ndk::rp_BgPen);
+    const u32 mode = b.r8(rp + ndk::rp_DrawMode);
     sysimage::draw(*in.graphics_, b, rp, which,
                    Rect{left, top, left + width - 1, top + height - 1}, state, pens);
+    if (b.ok()) {
+        in.graphics_->set_pens(rp, fg, bg, mode);
+    }
 }
 
 void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, u32 state,

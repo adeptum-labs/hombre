@@ -6782,6 +6782,15 @@ void draw_image_state_draws_a_sysiclass_image() {
     CHECK(selected != normal);
     CHECK(changed_only_inside(before, selected, bpr, rows, left, top, right, bottom));
 
+    // The caller's pens and draw mode survive the image.
+    r.put8(rp + rp_FgPen, 3);
+    r.put8(rp + rp_BgPen, 2);
+    r.put8(rp + rp_DrawMode, JAM2);
+    draw_image_state_at(r, rp, image, left, top, IDS_NORMAL);
+    CHECK_EQ(r.get8(rp + rp_FgPen), 3u);
+    CHECK_EQ(r.get8(rp + rp_BgPen), 2u);
+    CHECK_EQ(r.get8(rp + rp_DrawMode), static_cast<u32>(JAM2));
+
     bo.dispose_object(image);
 }
 
