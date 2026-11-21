@@ -7687,6 +7687,72 @@ void intuitext_borders_and_blocking_requests() {
     reply_msg(r, msg);
 }
 
+// A string gadget places its cursor by the widths of its font: the one of
+// its StringExtend, or the font its window's titles are in. Here both are
+// hasklig 13, whose cells are 7 wide where topaz's are 8.
+void a_string_gadget_measures_its_own_font() {
+    GfxRig r;
+    const u32 hasklig13 = font_address(r, 13);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 si = r.exec.alloc(StringInfo_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 extend = r.exec.alloc(StringExtend_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 buffer = r.exec.alloc(40, MEMF_PUBLIC | MEMF_CLEAR);
+    r.str(buffer, "abcdef");
+    r.put32(extend + sex_Font, hasklig13);
+    r.put32(si + si_Buffer, buffer);
+    r.put16(si + si_MaxChars, 40);
+    r.put16(si + si_NumChars, 6);
+    r.put32(si + si_Extension, extend);
+    put_gadget(r, gad, 0, 20, 20, 120, 14, GFLG_GADGHCOMP | GFLG_STRINGEXTEND, GACT_RELVERIFY,
+               GTYP_STRGADGET, 0);
+    r.put32(gad + gg_SpecialInfo, si);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    // Two pixels into the fourth cell of seven, which is the third of eight.
+    r.intuition.pointer_event(50 + 20 + 3 * 7 + 2, 50 + 24, 1, 1, 0, true);
+    r.intuition.pointer_event(50 + 20 + 3 * 7 + 2, 50 + 24, 0, 0, 1, false);
+    CHECK(r.intuition.string_active());
+    CHECK_EQ(r.get16(si + si_BufferPos), 3u);
+    // The cursor is that cell complemented, the font high.
+    CHECK_EQ(window_pixel(r, window, 20 + 3 * 7, 20), 3u);
+    CHECK_EQ(window_pixel(r, window, 20 + 3 * 7 + 6, 32), 3u);
+    CHECK_EQ(window_pixel(r, window, 20 + 4 * 7, 20), 0u);
+    r.intuition.string_key(0x1B);
+
+    // In a box four cells wide the cursor after the text leaves room for
+    // the last three characters.
+    r.put16(gad + gg_Width, 28);
+    r.put16(si + si_BufferPos, 6);
+    r.cpu().a[0] = gad;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ActivateGadget), 1u);
+    CHECK_EQ(r.get16(si + si_DispPos), 3u);
+    r.intuition.string_key(0x1B);
+    r.intuition.close_window(window);
+
+    // Without a StringExtend the font is the one of the window's titles.
+    r.put16(gad + gg_Flags, GFLG_GADGHCOMP);
+    r.put16(gad + gg_Width, 120);
+    r.put16(si + si_DispPos, 0);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    r.put32(kNewScreen + ns_Font, kBuffer);
+    CHECK(open_new(r, kNewScreen) != 0);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 other = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(other != 0);
+    r.intuition.pointer_event(50 + 20 + 3 * 7 + 2, 50 + 24, 1, 1, 0, true);
+    r.intuition.pointer_event(50 + 20 + 3 * 7 + 2, 50 + 24, 0, 0, 1, false);
+    CHECK_EQ(r.get16(si + si_BufferPos), 3u);
+}
+
 void a_string_gadget_is_edited_from_the_keyboard() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -7858,6 +7924,7 @@ void remember_lists_allocate_and_free() {
 }
 
 int main() {
+    a_string_gadget_measures_its_own_font();
     a_string_gadget_is_edited_from_the_keyboard();
     a_long_int_gadget_takes_only_numbers_and_keeps_the_value();
     intuitext_borders_and_blocking_requests();

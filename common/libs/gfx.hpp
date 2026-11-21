@@ -385,6 +385,13 @@ constexpr u32 si_UndoPos = 14;
 constexpr u32 si_NumChars = 16;
 constexpr u32 si_DispCount = 18;
 constexpr u32 si_Extension = 24;
+// struct StringExtend, which a gadget with GFLG_STRINGEXTEND has at
+// si_Extension: the open font of its text comes first.
+constexpr u32 sex_Font = 0;
+constexpr u32 sex_Pens = 4;
+constexpr u32 sex_ActivePens = 6;
+constexpr u32 StringExtend_SIZEOF = 36;
+constexpr u32 GFLG_STRINGEXTEND = 0x0400;
 constexpr u32 si_LongInt = 28;
 constexpr u32 StringInfo_SIZEOF = 36;
 constexpr u32 GTYP_GADTOOLS = 0x100;  // a gadget gadtools.library made and draws

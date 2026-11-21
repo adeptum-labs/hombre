@@ -6135,18 +6135,25 @@ void Intuition::custom_result(Bus& b, u32 result) {
 
 // --- string gadgets -------------------------------------------------------
 
-// The part of a string gadget's box its text shows in, and how many
-// characters of the topaz font fit there; gadtools frames its own.
-Rect Intuition::string_text_box(Bus& b, u32 window, u32 gadget, u32& columns) {
+// The part of a string gadget's box its text shows in; gadtools frames
+// its own.
+Rect Intuition::string_text_box(Bus& b, u32 window, u32 gadget) {
     const WindowView w = load_window(b, window);
     Rect box = resolve_gadget_box(b, w, gadget);
     if ((b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0) {
         box.x0 += 4;
         box.x1 -= 4;
     }
-    const i32 width = box.x1 - box.x0 + 1;
-    columns = width > 0 ? static_cast<u32>(width) / 8 : 0;
     return box;
+}
+
+u32 Intuition::string_font(Bus& b, u32 window, u32 gadget) const {
+    const u32 si = b.r32(gadget + ndk::gg_SpecialInfo);
+    const u32 extend = (b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_STRINGEXTEND) != 0 && si != 0
+                           ? b.r32(si + ndk::si_Extension)
+                           : 0;
+    const u32 own = extend != 0 ? b.r32(extend + ndk::sex_Font) : 0;
+    return own != 0 && b.ok() ? own : window_metrics(window).font;
 }
 
 // The text from the display position on, and while it is being edited the
@@ -6158,18 +6165,49 @@ void Intuition::draw_string_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
         return;
     }
     const bool framed = gadtools_draws(b, window, rp, gadget);
-    u32 columns = 0;
-    const Rect box = string_text_box(b, window, gadget, columns);
+    const Rect box = string_text_box(b, window, gadget);
     if (box.x1 < box.x0 || box.y1 < box.y0) {
         return;
     }
+    const u32 font = string_font(b, window, gadget);
+    const Graphics::FontMetrics cell = graphics_->font_metrics(font);
+    const i32 width = box.x1 - box.x0 + 1;
     const u32 buffer = b.r32(si + ndk::si_Buffer);
     const u32 count = b.r16(si + ndk::si_NumChars);
     const u32 pos = b.r16(si + ndk::si_BufferPos);
     u32 disp = b.r16(si + ndk::si_DispPos);
+    // The text from the display position on, at most a buffer full, and
+    // the cell the cursor has past its end.
+    u8 text[256];
+    const auto load = [&]() {
+        u32 length = 0;
+        for (u32 i = disp; i < count && length < sizeof text && buffer != 0; ++i) {
+            text[length++] = static_cast<u8>(b.r8(buffer + i));
+        }
+        return length;
+    };
+    const auto span = [&](u32 chars) {
+        return static_cast<i32>(graphics_->text_width(font, text, chars));
+    };
+    const auto cursor_width = [&](u32 at, u32 length) {
+        return at < length ? span(at + 1) - span(at) : cell.x_size;
+    };
+    u32 length = load();
     const bool editing = string_.gadget == gadget;
-    if (editing && columns != 0) {
-        disp = pos < disp ? pos : (pos >= disp + columns ? pos - columns + 1 : disp);
+    if (editing && width >= cell.x_size) {
+        // The display position moves until the cursor's cell is in view.
+        if (pos < disp) {
+            disp = pos;
+            length = load();
+        }
+        if (pos - disp > sizeof text) {
+            disp = pos - sizeof text;
+            length = load();
+        }
+        while (pos > disp && span(pos - disp) + cursor_width(pos - disp, length) > width) {
+            ++disp;
+            length = load();
+        }
         b.w16(si + ndk::si_DispPos, disp);
     }
     const u32 fg = b.r8(rp + ndk::rp_FgPen);
@@ -6177,25 +6215,25 @@ void Intuition::draw_string_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
     const u32 mode = b.r8(rp + ndk::rp_DrawMode);
     const u32 cx = b.r16(rp + ndk::rp_cp_x);
     const u32 cy = b.r16(rp + ndk::rp_cp_y);
-    const i32 top = box.y0 + (box.y1 - box.y0 + 1 - 8) / 2;
+    const i32 top = box.y0 + (box.y1 - box.y0 + 1 - cell.y_size) / 2;
     if (!framed) {
         graphics_->set_pens(rp, 0, 0, ndk::JAM1);
         graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
     }
-    u8 text[256];
-    u32 shown = 0;
-    for (u32 i = disp; i < count && shown < columns && shown < sizeof text && buffer != 0; ++i) {
-        text[shown++] = static_cast<u8>(b.r8(buffer + i));
-    }
+    const u32 shown = graphics_->text_fit(font, text, length, width);
     if (shown != 0 && b.ok()) {
         graphics_->set_pens(rp, 1, 0, ndk::JAM1);
-        graphics_->move(rp, box.x0, top + 6);
-        graphics_->text(rp, text, shown);
+        graphics_->move(rp, box.x0, top + cell.baseline);
+        graphics_->plain_text_in(rp, font, text, shown);
     }
-    if (editing && pos >= disp && pos - disp < columns) {
-        const i32 x = box.x0 + static_cast<i32>((pos - disp) * 8);
-        graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
-        graphics_->rect_fill(rp, x, top, x + 7, top + 7);
+    if (editing && pos >= disp && pos - disp <= length) {
+        const u32 at = pos - disp;
+        const i32 x = box.x0 + span(at);
+        const i32 cursor = cursor_width(at, length);
+        if (x + cursor - 1 <= box.x1) {
+            graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
+            graphics_->rect_fill(rp, x, top, x + cursor - 1, top + cell.y_size - 1);
+        }
     }
     graphics_->set_pens(rp, fg, bg, mode);
     b.w16(rp + ndk::rp_cp_x, cx);
@@ -6241,11 +6279,19 @@ bool Intuition::hit_string_gadget(Bus& b, u32 window, i32 x, i32 y) {
         if (type == ndk::GTYP_STRGADGET &&
             in_rect(resolve_gadget_box(b, w, gadget), x - w.left, y - w.top)) {
             const u32 si = b.r32(gadget + ndk::gg_SpecialInfo);
-            u32 columns = 0;
-            const Rect text = string_text_box(b, window, gadget, columns);
-            const i32 col = (x - w.left - text.x0) / 8;
+            const Rect text = string_text_box(b, window, gadget);
             const u32 count = b.r16(si + ndk::si_NumChars);
-            const u32 at = b.r16(si + ndk::si_DispPos) + static_cast<u32>(col > 0 ? col : 0);
+            const u32 disp = b.r16(si + ndk::si_DispPos);
+            const u32 buffer = b.r32(si + ndk::si_Buffer);
+            // The character under the pointer: as many whole ones as lie
+            // to its left.
+            u8 chars[256];
+            u32 length = 0;
+            for (u32 i = disp; i < count && length < sizeof chars && buffer != 0; ++i) {
+                chars[length++] = static_cast<u8>(b.r8(buffer + i));
+            }
+            const u32 at = disp + graphics_->text_fit(string_font(b, window, gadget), chars,
+                                                      length, x - w.left - text.x0);
             b.w16(si + ndk::si_BufferPos, at < count ? at : count);
             if (!activate_string(gadget, window)) {
                 return false;

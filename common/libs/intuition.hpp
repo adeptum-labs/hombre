@@ -661,7 +661,10 @@ private:
     void draw_string_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
     bool hit_string_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void end_string(bool verify, u16 code);
-    Rect string_text_box(native::Bus& b, u32 window, u32 gadget, u32& columns);
+    Rect string_text_box(native::Bus& b, u32 window, u32 gadget);
+    // The font of a string gadget's text: its StringExtend's, else the one
+    // its window's titles are in.
+    u32 string_font(native::Bus& b, u32 window, u32 gadget) const;
     bool hit_custom_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void custom_input(native::Bus& b, i32 x, i32 y, u32 code, u32 qualifier);
     void custom_result(native::Bus& b, u32 result);
