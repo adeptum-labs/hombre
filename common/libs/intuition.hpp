@@ -96,6 +96,8 @@ constexpr u32 RemoveGList = 444;
 constexpr u32 NewModifyProp = 468;
 constexpr u32 LockPubScreen = 510;
 constexpr u32 UnlockPubScreen = 516;
+constexpr u32 LockPubScreenList = 522;
+constexpr u32 UnlockPubScreenList = 528;
 constexpr u32 GetDefaultPubScreen = 582;
 constexpr u32 EasyRequestArgs = 588;
 constexpr u32 BuildEasyRequestArgs = 594;
@@ -544,6 +546,7 @@ private:
     u32 base_ = 0;
     u32 front_ = 0;
     u32 default_screen_ = 0;
+    u32 pub_screen_list_ = 0;  // LockPubScreenList's List and its one node
     u32 reply_port_ = 0;
     u32 active_window_ = 0;
     u32 pressed_gadget_window_ = 0;

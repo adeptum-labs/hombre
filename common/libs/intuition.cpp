@@ -967,6 +967,48 @@ struct IntuitionNatives {
 
     static void unlock_pub_screen(void*, Machine&) {}
 
+    // LockPubScreenList: a List of the public screens, which is the one
+    // PubScreenNode named "Workbench" for the default screen. The list
+    // lives as long as intuition; 0 when there is no screen.
+    static void lock_pub_screen_list(void* ctx, Machine& m) {
+        Intuition& g = of(ctx);
+        Bus b(m);
+        constexpr u32 kListBytes = 14;
+        constexpr u32 kNodeBytes = 30;
+        constexpr char kName[] = "Workbench";
+        const u32 screen = g.default_screen_ != 0 ? g.default_screen_ : g.front_;
+        if (screen == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        if (g.pub_screen_list_ == 0) {
+            const u32 list = g.exec_->alloc(kListBytes + kNodeBytes + sizeof kName,
+                                            ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+            if (list == 0) {
+                native::set_result(m, 0);
+                return;
+            }
+            const u32 node = list + kListBytes;
+            const u32 name = node + kNodeBytes;
+            for (u32 i = 0; i < sizeof kName; ++i) {
+                b.w8(name + i, static_cast<u8>(kName[i]));
+            }
+            // lh_Head, lh_Tail, lh_TailPred around the one node.
+            b.w32(list + 0, node);
+            b.w32(list + 4, 0);
+            b.w32(list + 8, node);
+            b.w32(node + 0, list + 4);
+            b.w32(node + 4, list);
+            b.w32(node + 10, name);
+            g.pub_screen_list_ = list;
+        }
+        // psn_Screen
+        b.w32(g.pub_screen_list_ + kListBytes + 14, screen);
+        native::set_result(m, b.ok() ? g.pub_screen_list_ : 0);
+    }
+
+    static void unlock_pub_screen_list(void*, Machine&) {}
+
     static void get_screen_draw_info(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).screen_draw_info(m.cpu.a[0]));
     }
@@ -1599,6 +1641,10 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::FreeScreenDrawInfo, IntuitionNatives::free_screen_draw_info,
      "FreeScreenDrawInfo"},
     {intuition_lvo::UnlockPubScreen, IntuitionNatives::unlock_pub_screen, "UnlockPubScreen"},
+    {intuition_lvo::LockPubScreenList, IntuitionNatives::lock_pub_screen_list,
+     "LockPubScreenList"},
+    {intuition_lvo::UnlockPubScreenList, IntuitionNatives::unlock_pub_screen_list,
+     "UnlockPubScreenList"},
     {intuition_lvo::GetDefaultPubScreen, IntuitionNatives::get_default_pub_screen,
      "GetDefaultPubScreen"},
     {intuition_lvo::OpenWindowTagList, IntuitionNatives::open_window_tag_list,
@@ -1635,6 +1681,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     base_ = 0;
     front_ = 0;
     default_screen_ = 0;
+    pub_screen_list_ = 0;
     reply_port_ = 0;
     active_window_ = 0;
     pressed_gadget_window_ = 0;
