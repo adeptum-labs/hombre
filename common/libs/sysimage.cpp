@@ -24,6 +24,7 @@
 #include "sysimage.hpp"
 
 #include "boopsi.hpp"
+#include "chrome.hpp"
 #include "graphics.hpp"
 
 namespace hombre::sysimage {
@@ -122,106 +123,195 @@ void check_mark(Graphics& graphics, u32 rp, u32 pen, const Area& area) {
     }
 }
 
-// Close: a small white square outlined in the dark pen, in the middle.
-void draw_close(Graphics& graphics, u32 rp, const Area& area, const u16* pens) {
-    const i32 h = area.height() * 3 / 5;
-    const i32 w = h + 2;
-    if (w < 3 || h < 3) {
-        return;
+// How far in from its sides row `d` of a round-cornered box starts, `d`
+// rows from its nearest top or bottom edge.
+i32 corner_inset(i32 d) {
+    if (d == 0) {
+        return 2;
     }
-    const i32 x0 = area.x0 + (area.width() - w) / 2;
-    const i32 y0 = area.y0 + (area.height() - h) / 2;
-    box(graphics, rp, pens[ShadowPen], pens[ShinePen], Area{x0, y0, x0 + w - 1, y0 + h - 1});
+    return d == 1 ? 1 : 0;
 }
 
-// Depth: an outlined window at the back, a white one overlapping it in
-// front, lower and to the right.
-void draw_depth(Graphics& graphics, u32 rp, const Area& area, const u16* pens, u32 face) {
-    const Area inner = shrink(area, 2, 1);
-    const i32 w = inner.width() * 3 / 5;
-    const i32 h = inner.height() * 3 / 5;
-    if (w < 3 || h < 3) {
+// The body of a border gadget, as the window chrome draws its buttons: a
+// round-cornered box outlined in the dark pen and filled with the face.
+void button_body(Graphics& graphics, u32 rp, const Area& area, u32 face, u32 outline) {
+    if (area.width() < 5 || area.height() < 5) {
+        frame(graphics, rp, outline, area);
         return;
     }
-    box(graphics, rp, pens[ShadowPen], face,
-        Area{inner.x0, inner.y0, inner.x0 + w - 1, inner.y0 + h - 1});
-    box(graphics, rp, pens[ShadowPen], pens[ShinePen],
-        Area{inner.x1 - w + 1, inner.y1 - h + 1, inner.x1, inner.y1});
-}
-
-// Zoom: an outlined window with a small white one in its top left corner.
-void draw_zoom(Graphics& graphics, u32 rp, const Area& area, const u16* pens, u32 face) {
-    const Area outer = shrink(area, 3, 1);
-    if (outer.width() < 5 || outer.height() < 4) {
-        return;
+    for (i32 y = area.y0; y <= area.y1; ++y) {
+        const i32 d = y - area.y0 < area.y1 - y ? y - area.y0 : area.y1 - y;
+        const i32 in = corner_inset(d);
+        if (d == 0) {
+            line(graphics, rp, outline, area.x0 + in, y, area.x1 - in, y);
+            continue;
+        }
+        const i32 reach = corner_inset(d - 1) - 1;
+        const i32 edge = reach > in ? reach : in;
+        if (area.x0 + edge + 1 <= area.x1 - edge - 1) {
+            line(graphics, rp, face, area.x0 + edge + 1, y, area.x1 - edge - 1, y);
+        }
+        line(graphics, rp, outline, area.x0 + in, y, area.x0 + edge, y);
+        line(graphics, rp, outline, area.x1 - edge, y, area.x1 - in, y);
     }
-    box(graphics, rp, pens[ShadowPen], face, outer);
-    const i32 w = outer.width() / 2;
-    const i32 h = outer.height() / 2 + 1;
-    box(graphics, rp, pens[ShadowPen], pens[ShinePen],
-        Area{outer.x0, outer.y0, outer.x0 + w - 1, outer.y0 + h - 1});
 }
 
-// Size: two corners, one inside the other, pointing to the bottom right.
+// The middle of an area, rounded up and left as the window chrome does.
+i32 mid(i32 a, i32 b) {
+    return (a + b) / 2;
+}
+
+// The pens of a title bar button's glyph: its outlines, its light sheets
+// and the sheet behind on a depth button.
+struct GlyphPens {
+    u32 edge;
+    u32 light;
+    u32 back;
+};
+
+// Close: a light square outlined in the dark pen, 7 by 5 as on the window
+// chrome.
+void draw_close(Graphics& graphics, u32 rp, const Area& area, const GlyphPens& g) {
+    const i32 cx = mid(area.x0, area.x1);
+    const i32 cy = mid(area.y0, area.y1);
+    box(graphics, rp, g.edge, g.light, Area{cx - 3, cy - 2, cx + 3, cy + 2});
+}
+
+// Depth: a sheet at the back and a light one in front, lower and to the
+// right, each 5 by 5.
+void draw_depth(Graphics& graphics, u32 rp, const Area& area, const GlyphPens& g) {
+    const i32 cx = mid(area.x0, area.x1);
+    const i32 cy = mid(area.y0, area.y1);
+    box(graphics, rp, g.edge, g.back, Area{cx - 3, cy - 3, cx + 1, cy + 1});
+    box(graphics, rp, g.edge, g.light, Area{cx - 1, cy - 1, cx + 3, cy + 3});
+}
+
+// Zoom: a 7 by 7 sheet with a light one in its top left corner.
+void draw_zoom(Graphics& graphics, u32 rp, const Area& area, const GlyphPens& g) {
+    const i32 cx = mid(area.x0, area.x1);
+    const i32 cy = mid(area.y0, area.y1);
+    box(graphics, rp, g.edge, g.back, Area{cx - 3, cy - 3, cx + 3, cy + 3});
+    box(graphics, rp, g.edge, g.light, Area{cx - 3, cy - 3, cx, cy});
+}
+
+// Size: a dark corner pointing to the bottom right with a small light box
+// in it, three pixels in from the image's right and bottom edges, as on the
+// window chrome.
 void draw_size(Graphics& graphics, u32 rp, const Area& area, const u16* pens) {
-    const Area outer = shrink(area, 2, 1);
-    if (outer.width() < 4 || outer.height() < 4) {
+    if (area.width() < 10 || area.height() < 10) {
         return;
     }
-    line(graphics, rp, pens[ShadowPen], outer.x1, outer.y0, outer.x1, outer.y1);
-    line(graphics, rp, pens[ShadowPen], outer.x1, outer.y1, outer.x0, outer.y1);
-    const i32 mx = (outer.x0 + outer.x1) / 2;
-    const i32 my = (outer.y0 + outer.y1) / 2;
-    box(graphics, rp, pens[ShadowPen], pens[ShinePen], Area{mx, my, outer.x1, outer.y1});
+    const i32 right = area.x1 - 3;
+    const i32 bottom = area.y1 - 3;
+    const u32 dark = pens[ShadowPen];
+    line(graphics, rp, dark, right, bottom - 6, right, bottom);
+    line(graphics, rp, dark, right - 6, bottom, right, bottom);
+    box(graphics, rp, dark, pens[ShinePen], Area{right - 3, bottom - 3, right, bottom});
 }
 
-// A solid triangle in the dark pen pointing the way of which.
-void draw_arrow(Graphics& graphics, u32 rp, const Area& area, const u16* pens, u32 which) {
-    const bool horizontal = which == LEFTIMAGE || which == RIGHTIMAGE;
-    // Along the arrow's axis it takes half the room, across it all of it.
-    const i32 across = horizontal ? area.height() - 2 : area.width() - 4;
-    i32 half = across / 2;
-    if (half < 1) {
-        return;
-    }
-    const i32 cx = (area.x0 + area.x1) / 2;
-    const i32 cy = (area.y0 + area.y1) / 2;
-    const u32 pen = pens[ShadowPen];
-    if (horizontal) {
-        const i32 depth = half;
-        for (i32 d = 0; d <= depth; ++d) {
-            const i32 reach = half * d / depth;
-            const i32 x = which == LEFTIMAGE ? cx - depth / 2 + d : cx + depth / 2 - d;
-            line(graphics, rp, pen, x, cy - reach, x, cy + reach);
-        }
-    } else {
-        const i32 depth = half / 2 > 1 ? half / 2 : 1;
-        for (i32 d = 0; d <= depth; ++d) {
-            const i32 reach = half * d / depth;
-            const i32 y = which == UPIMAGE ? cy - depth / 2 + d : cy + depth / 2 - d;
-            line(graphics, rp, pen, cx - reach, y, cx + reach, y);
+// A triangle pointing the way of which, centred, as on the window
+// chrome's arrow buttons: three rows, two to six pixels across, on a small
+// image, more on a larger one.
+void draw_arrow(Graphics& graphics, u32 rp, const Area& area, u32 pen, u32 which) {
+    const i32 w = area.width();
+    const i32 h = area.height();
+    const bool vertical = which == UPIMAGE || which == DOWNIMAGE;
+    const i32 rows = chrome::arrow_rows(vertical ? w : h, vertical ? h : w);
+    const i32 mid_x0 = area.x0 + (w - 1) / 2;
+    const i32 mid_x1 = area.x0 + w / 2;
+    const i32 mid_y0 = area.y0 + (h - 1) / 2;
+    const i32 mid_y1 = area.y0 + h / 2;
+    const i32 top = area.y0 + (h - rows) / 2;
+    const i32 left = area.x0 + (w - rows) / 2;
+    for (i32 i = 0; i < rows; ++i) {
+        if (vertical) {
+            const i32 y = which == UPIMAGE ? top + i : top + rows - 1 - i;
+            line(graphics, rp, pen, mid_x0 - i, y, mid_x1 + i, y);
+        } else {
+            const i32 x = which == LEFTIMAGE ? left + i : left + rows - 1 - i;
+            line(graphics, rp, pen, x, mid_y0 - i, x, mid_y1 + i);
         }
     }
 }
 
-// A mutual exclude button: a sunken round-cornered well, filled when it is
-// the one chosen.
-void draw_mx(Graphics& graphics, u32 rp, const Area& area, const u16* pens, bool down) {
-    if (area.width() < 6 || area.height() < 5) {
+// A mutual exclude button: a round well, an oval on the tall pixels of a
+// high resolution screen. Its rim is a row thick and two columns wide, dark
+// along the top and left, light along the bottom and right, and the well
+// inside it takes the background. The one chosen holds a dot in the fill
+// pen: the same oval again, a row and two columns in from the rim. Nothing
+// outside the oval is touched.
+void draw_mx(Graphics& graphics, u32 rp, const Area& full, const u16* pens, bool down) {
+    // A taller image, as a large reference font gives, keeps the oval about
+    // twice as wide as it is high, in the middle.
+    const i32 most = full.width() / 2 + 1;
+    const i32 tall = full.height() < most ? full.height() : most;
+    const i32 top = full.y0 + (full.height() - tall) / 2;
+    const Area area{full.x0, top, full.x1, top + tall - 1};
+    const i32 w = area.width();
+    const i32 h = area.height();
+    if (w < 6 || h < 5) {
         return;
     }
     const u32 dark = pens[ShadowPen];
     const u32 light = pens[ShinePen];
-    line(graphics, rp, dark, area.x0 + 2, area.y0, area.x1 - 2, area.y0);
-    line(graphics, rp, dark, area.x0, area.y0 + 2, area.x0, area.y1 - 2);
-    line(graphics, rp, dark, area.x0 + 1, area.y0 + 1, area.x0 + 1, area.y1 - 1);
-    line(graphics, rp, light, area.x0 + 2, area.y1, area.x1 - 2, area.y1);
-    line(graphics, rp, light, area.x1, area.y0 + 2, area.x1, area.y1 - 2);
-    line(graphics, rp, light, area.x1 - 1, area.y0 + 1, area.x1 - 1, area.y1 - 1);
-    const Area well = shrink(area, 3, 2);
-    fill(graphics, rp, down ? pens[FillPen] : pens[BackgroundPen], well);
-    if (down) {
-        line(graphics, rp, dark, well.x0, well.y0, well.x1, well.y0);
+    // How far in from either side the oval starts on a row: the first
+    // column whose middle lies inside the ellipse that fills the area. The
+    // row is measured a quarter of a row nearer the centre, which keeps the
+    // top and bottom rows flat. A row outside the area has no oval.
+    const auto edge = [w, h](i32 row) {
+        if (row < 0 || row >= h) {
+            return w;
+        }
+        i32 dy = 4 * row - 2 * (h - 1);
+        dy = (dy < 0 ? -dy : dy) - 1;
+        if (dy < 0) {
+            dy = 0;
+        }
+        const i64 tall = 4 * static_cast<i64>(h) * h;
+        const i64 room = (tall - static_cast<i64>(dy) * dy) * w * w;
+        i32 column = 0;
+        while (column < (w - 1) / 2) {
+            const i64 dx = w - 2 * column - 1;
+            if (dx * dx * tall <= room) {
+                break;
+            }
+            ++column;
+        }
+        return column;
+    };
+    // The same for the oval drawn inside itself depth times over, each step
+    // taking a row off the top and bottom and two columns off either side.
+    const auto inset = [&edge](i32 row, i32 depth) {
+        i32 most = 0;
+        for (i32 k = -depth; k <= depth; ++k) {
+            const i32 at = edge(row + k) + 2 * (depth - (k < 0 ? -k : k));
+            if (at > most) {
+                most = at;
+            }
+        }
+        return most;
+    };
+    const auto run = [&graphics, rp](u32 pen, i32 y, i32 left, i32 right) {
+        fill(graphics, rp, pen, Area{left, y, right, y});
+    };
+    // A dot too narrow to see gives way to filling the whole well.
+    const i32 dot_depth = w - 2 * inset(h / 2, 2) >= 3 ? 2 : 1;
+    for (i32 row = 0; row < h; ++row) {
+        const i32 y = area.y0 + row;
+        const i32 rim = inset(row, 0);
+        const i32 well = inset(row, 1);
+        if (2 * well >= w) {
+            // The top and bottom of the oval are rim from end to end.
+            run(row < h / 2 ? dark : light, y, area.x0 + rim, area.x1 - rim);
+            continue;
+        }
+        run(dark, y, area.x0 + rim, area.x0 + well - 1);
+        run(light, y, area.x1 - well + 1, area.x1 - rim);
+        run(pens[BackgroundPen], y, area.x0 + well, area.x1 - well);
+        if (down) {
+            const i32 dot = inset(row, dot_depth);
+            run(pens[FillPen], y, area.x0 + dot, area.x1 - dot);
+        }
     }
 }
 
@@ -311,30 +401,51 @@ void draw(Graphics& graphics, native::Bus&, u32 rp, u32 which, const Rect& box_r
         }
         return;
     }
-    bevel(graphics, rp, outer, pens[down ? ShadowPen : ShinePen],
-          pens[down ? ShinePen : ShadowPen]);
-    const Area glyph = shrink(outer, 1, 1);
+    const u32 edge = down ? pens[ShinePen] : pens[ShadowPen];
     switch (which) {
     case DEPTHIMAGE:
     case SDEPTHIMAGE:
-        draw_depth(graphics, rp, glyph, pens, face);
-        break;
     case ZOOMIMAGE:
-        draw_zoom(graphics, rp, glyph, pens, face);
+    case CLOSEIMAGE: {
+        // A button body 13 wide in the middle of the image and a row in
+        // from its top and bottom, as on the window chrome's title bar.
+        // The screen's depth gadget takes the screen bar's pens.
+        const bool screen = which == SDEPTHIMAGE;
+        const u32 body_face = screen ? pens[BarBlockPen] : face;
+        const u32 body_edge = screen ? pens[BarDetailPen] : pens[ShadowPen];
+        if (screen) {
+            fill(graphics, rp, body_face, outer);
+        }
+        const i32 cx = mid(outer.x0, outer.x1);
+        const i32 inset = outer.height() >= 11 ? 1 : 0;
+        const Area body{cx - 6 > outer.x0 ? cx - 6 : outer.x0, outer.y0 + inset,
+                        cx + 6 < outer.x1 ? cx + 6 : outer.x1, outer.y1 - inset};
+        button_body(graphics, rp, body, down ? body_edge : body_face, body_edge);
+        // Held down, the body darkens and the outlines turn light.
+        const GlyphPens g{down ? pens[ShinePen] : body_edge, pens[ShinePen],
+                          down ? body_edge : pens[BackgroundPen]};
+        if (which == CLOSEIMAGE) {
+            draw_close(graphics, rp, body, g);
+        } else if (which == ZOOMIMAGE) {
+            draw_zoom(graphics, rp, body, g);
+        } else {
+            draw_depth(graphics, rp, body, g);
+        }
         break;
-    case CLOSEIMAGE:
-        draw_close(graphics, rp, glyph, pens);
-        break;
+    }
     case SIZEIMAGE:
-        draw_size(graphics, rp, glyph, pens);
+        draw_size(graphics, rp, outer, pens);
         break;
     case LEFTIMAGE:
     case RIGHTIMAGE:
     case UPIMAGE:
     case DOWNIMAGE:
-        draw_arrow(graphics, rp, glyph, pens, which);
+        button_body(graphics, rp, outer, down ? pens[ShadowPen] : face, pens[ShadowPen]);
+        draw_arrow(graphics, rp, outer, edge, which);
         break;
     default:
+        bevel(graphics, rp, outer, pens[down ? ShadowPen : ShinePen],
+              pens[down ? ShinePen : ShadowPen]);
         break;
     }
 }
