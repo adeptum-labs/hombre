@@ -6935,6 +6935,28 @@ void a_string_gadget_is_edited_from_the_keyboard() {
     r.cpu().d[2] = 11;
     r.cpu().d[3] = 1;
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 0u);
+
+    // The double-click time follows SetPrefs: 0.3 seconds makes half a
+    // second too long.
+    constexpr u32 kPrefsAt = kData + 0x3800;
+    for (u32 i = 0; i < 232; ++i) {
+        r.put8(kPrefsAt + i, 0);
+    }
+    r.put32(kPrefsAt + 20, 0);
+    r.put32(kPrefsAt + 24, 300000);
+    r.cpu().a[0] = kPrefsAt;
+    r.cpu().d[0] = 232;
+    r.call(Base::Intuition, intuition_lvo::SetPrefs);
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = 0;
+    r.cpu().d[2] = 10;
+    r.cpu().d[3] = 500000;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 0u);
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = 0;
+    r.cpu().d[2] = 10;
+    r.cpu().d[3] = 250000;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 1u);
 }
 
 int main() {

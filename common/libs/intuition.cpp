@@ -1345,10 +1345,22 @@ struct IntuitionNatives {
     // DoubleClick(seconds D0, micros D1, seconds D2, micros D3): whether
     // the second click came within a second of the first, the Workbench's
     // double-click time.
-    static void double_click(void*, Machine& m) {
+    // DoubleClick: whether the two times lie no further apart than the
+    // double-click time of the current Preferences.
+    static void double_click(void* ctx, Machine& m) {
+        const Intuition& in = of(ctx);
+        constexpr u32 kDoubleClick = 20;  // struct timeval: seconds, micros
+        u32 seconds = 0;
+        u32 micros = 0;
+        for (u32 i = 0; i < 4; ++i) {
+            seconds = (seconds << 8) | in.prefs_[kDoubleClick + i];
+            micros = (micros << 8) | in.prefs_[kDoubleClick + 4 + i];
+        }
+        const u64 limit =
+            in.prefs_set_ ? static_cast<u64>(seconds) * 1000000 + micros : kDoubleClickUs;
         const u64 first = static_cast<u64>(m.cpu.d[0]) * 1000000 + m.cpu.d[1];
         const u64 second = static_cast<u64>(m.cpu.d[2]) * 1000000 + m.cpu.d[3];
-        native::set_result(m, second >= first && second - first <= kDoubleClickUs ? 1 : 0);
+        native::set_result(m, second >= first && second - first <= limit ? 1 : 0);
     }
 
     // The default struct Preferences: topaz 8 and the double-click time;
