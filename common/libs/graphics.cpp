@@ -39,6 +39,14 @@ namespace {
 
 constexpr char kGraphicsName[] = "graphics.library";
 constexpr char kTopazName[] = "topaz.font";
+// struct GfxBase (graphics/gfxbase.h): its size as of V40, and the list
+// of the fonts in memory, which diskfont.library's AvailFonts walks.
+constexpr u32 kGfxBaseSize = 0x228;
+constexpr u32 gb_TextFonts = 140;
+constexpr u32 kNtFont = 12;
+constexpr u32 kFpfRomFont = 0x01;
+constexpr u32 kFpfDesigned = 0x40;
+constexpr u32 tf_Flags = 23;
 constexpr u32 kMaxTextChars = 65536;
 constexpr u32 kTextChunk = 64;
 
@@ -510,6 +518,36 @@ void add_rect(RectSet& set, const Rect& r) {
 }  // namespace
 
 namespace {
+}
+
+namespace {
+
+// struct TextFontExtension (graphics/text.h), which ExtendFont hangs on a
+// font's tf_Extension.
+constexpr u32 kTfeMatchWord = 0;
+constexpr u32 kTfeBackPtr = 4;
+constexpr u32 kTfeOrigReplyPort = 8;
+constexpr u32 kTfeTags = 12;
+constexpr u32 kTfeSize = 24;
+constexpr u32 kTeMatchWord = 0xF100;
+constexpr u32 kFsfTagged = 0x40;
+constexpr u32 kMaxFontTags = 64;
+constexpr u32 kSoftStyles = 0x07;  // FSF_UNDERLINED, FSF_BOLD and FSF_ITALIC
+
+// The font's extension, 0 when it has none: FSF_TAGGED set and an
+// extension that points back at the font.
+u32 font_extension(Bus& b, u32 font) {
+    if ((b.r8(font + ndk::tf_Style) & kFsfTagged) == 0) {
+        return 0;
+    }
+    const u32 tfe = b.r32(font + ndk::mn_ReplyPort);
+    if (tfe == 0 || (tfe & 1) != 0 || b.r16(tfe + kTfeMatchWord) != kTeMatchWord ||
+        b.r32(tfe + kTfeBackPtr) != font || !b.ok()) {
+        return 0;
+    }
+    return tfe;
+}
+
 }
 
 struct GraphicsNatives {
@@ -1950,6 +1988,168 @@ struct GraphicsNatives {
     // ModeNotAvailable(modeID D0): 0, every mode is there to ask for.
     static void mode_not_available(void*, Machine& m) { native::set_result(m, 0); }
 
+    // A copy of a tag list as one block, TAG_MORE followed and TAG_IGNORE
+    // and TAG_SKIP left out, at most kMaxFontTags items; the block's size
+    // sits in the long before the list. 0 for no tags.
+    static u32 copy_tags(Graphics& g, Bus& b, u32 tags) {
+        if (tags == 0) {
+            return 0;
+        }
+        u32 items[kMaxFontTags][2];
+        u32 count = 0;
+        u32 at = tags;
+        for (u32 step = 0; at != 0 && step < 4 * kMaxFontTags && count < kMaxFontTags; ++step) {
+            const u32 tag = b.r32(at);
+            const u32 data = b.r32(at + 4);
+            if (!b.ok() || tag == 0) {
+                break;
+            }
+            if (tag == 2) {  // TAG_MORE
+                at = data;
+                continue;
+            }
+            if (tag == 3) {  // TAG_SKIP
+                at += 8 * (data + 1);
+                continue;
+            }
+            if (tag != 1) {  // TAG_IGNORE
+                items[count][0] = tag;
+                items[count][1] = data;
+                ++count;
+            }
+            at += 8;
+        }
+        const u32 bytes = 4 + (count + 1) * 8;
+        const u32 block = g.exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (block == 0) {
+            return 0;
+        }
+        b.w32(block, bytes);
+        for (u32 i = 0; i < count; ++i) {
+            b.w32(block + 4 + i * 8, items[i][0]);
+            b.w32(block + 8 + i * 8, items[i][1]);
+        }
+        return block + 4;
+    }
+
+    static void free_tags(Graphics& g, Bus& b, u32 list) {
+        if (list != 0) {
+            g.exec_->free(list - 4, b.r32(list - 4));
+        }
+    }
+
+    // ExtendFont(font A0, fontTags A1): gives the font a TextFontExtension
+    // in tf_Extension, the field that otherwise holds its message's reply
+    // port, keeping the port in the extension, and marks the font
+    // FSF_TAGGED. The extension holds a copy of the tags. A font extended
+    // already stays as it is. TRUE when the font has its extension.
+    static void extend_font(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 font = m.cpu.a[0];
+        if (font == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        if (font_extension(b, font) != 0) {
+            native::set_result(m, 1);
+            return;
+        }
+        const u32 tfe = g.exec_->alloc(kTfeSize, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (tfe == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        b.w16(tfe + kTfeMatchWord, kTeMatchWord);
+        b.w32(tfe + kTfeBackPtr, font);
+        b.w32(tfe + kTfeOrigReplyPort, b.r32(font + ndk::mn_ReplyPort));
+        b.w32(tfe + kTfeTags, copy_tags(g, b, m.cpu.a[1]));
+        b.w32(font + ndk::mn_ReplyPort, tfe);
+        b.w8(font + ndk::tf_Style, b.r8(font + ndk::tf_Style) | kFsfTagged);
+        native::set_result(m, b.ok() ? 1 : 0);
+    }
+
+    // StripFont(font A0): takes an ExtendFont extension off again, with
+    // the reply port back in its place.
+    static void strip_font(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 font = m.cpu.a[0];
+        const u32 tfe = font != 0 ? font_extension(b, font) : 0;
+        if (tfe == 0) {
+            return;
+        }
+        b.w32(font + ndk::mn_ReplyPort, b.r32(tfe + kTfeOrigReplyPort));
+        b.w8(font + ndk::tf_Style, b.r8(font + ndk::tf_Style) & ~kFsfTagged & 0xFF);
+        free_tags(g, b, b.r32(tfe + kTfeTags));
+        g.exec_->free(tfe, kTfeSize);
+    }
+
+    // AskSoftStyle(rp A1): the styles that can be made for the
+    // RastPort's font by drawing: bold, italic and underlined, less those
+    // the font has of its own.
+    static u32 soft_styles(Bus& b, u32 rp) {
+        const u32 font = rp != 0 ? b.r32(rp + ndk::rp_Font) : 0;
+        const u32 own = font != 0 ? b.r8(font + ndk::tf_Style) : 0;
+        return kSoftStyles & ~own;
+    }
+
+    static void ask_soft_style(void*, Machine& m) {
+        Bus b(m);
+        native::set_result(m, soft_styles(b, m.cpu.a[1]));
+    }
+
+    // SetSoftStyle(rp A1, style D0, enable D1): sets the drawn styles that
+    // enable lets through and AskSoftStyle offers; the answer is the style
+    // the text now has, the font's own included. Text draws the font as
+    // it is: the drawn styles are kept for programs that ask.
+    static void set_soft_style(void*, Machine& m) {
+        Bus b(m);
+        const u32 rp = m.cpu.a[1];
+        if (rp == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 enable = m.cpu.d[1] & soft_styles(b, rp);
+        const u32 algo = (b.r8(rp + ndk::rp_AlgoStyle) & ~enable) | (m.cpu.d[0] & enable);
+        b.w8(rp + ndk::rp_AlgoStyle, algo & 0xFF);
+        const u32 font = b.r32(rp + ndk::rp_Font);
+        const u32 own = font != 0 ? b.r8(font + ndk::tf_Style) : 0;
+        native::set_result(m, (algo | own) & 0xFF);
+    }
+
+    // WeighTAMatch(reqTextAttr A0, targetTextAttr A1, targetTags A2): how
+    // well the target font answers the request, MAXFONTMATCHWEIGHT for one
+    // of the same height, style and flags, less for each way it differs,
+    // the height most. The names are not compared.
+    static void weigh_ta_match(void*, Machine& m) {
+        Bus b(m);
+        const u32 want = m.cpu.a[0];
+        const u32 have = m.cpu.a[1];
+        if (want == 0 || have == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const i32 dy = static_cast<i32>(b.r16(want + ndk::ta_YSize)) -
+                       static_cast<i32>(b.r16(have + ndk::ta_YSize));
+        const u32 style = b.r8(want + ndk::ta_Style) ^ b.r8(have + ndk::ta_Style);
+        const u32 flags = b.r8(want + ndk::ta_Flags) ^ b.r8(have + ndk::ta_Flags);
+        if (!b.ok()) {
+            native::set_result(m, 0);
+            return;
+        }
+        constexpr i32 kExact = 32767;  // MAXFONTMATCHWEIGHT
+        i32 weight = kExact;
+        if (dy != 0) {
+            weight -= 1024 + (dy < 0 ? -dy : dy) * 512;
+        }
+        for (u32 bit = 0; bit < 8; ++bit) {
+            weight -= (style >> bit) & 1 ? 256 : 0;
+            weight -= (flags >> bit) & 1 ? 64 : 0;
+        }
+        native::set_result(m, static_cast<u32>(weight < 1 ? 1 : weight));
+    }
+
     static void set_rgb32_cm(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
@@ -2046,6 +2246,11 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::GetDisplayInfoData, GraphicsNatives::get_display_info_data,
      "GetDisplayInfoData"},
     {graphics_lvo::ModeNotAvailable, GraphicsNatives::mode_not_available, "ModeNotAvailable"},
+    {graphics_lvo::WeighTAMatch, GraphicsNatives::weigh_ta_match, "WeighTAMatch"},
+    {graphics_lvo::AskSoftStyle, GraphicsNatives::ask_soft_style, "AskSoftStyle"},
+    {graphics_lvo::SetSoftStyle, GraphicsNatives::set_soft_style, "SetSoftStyle"},
+    {graphics_lvo::ExtendFont, GraphicsNatives::extend_font, "ExtendFont"},
+    {graphics_lvo::StripFont, GraphicsNatives::strip_font, "StripFont"},
     {graphics_lvo::ReleasePen, GraphicsNatives::release_pen, "ReleasePen"},
     {graphics_lvo::ObtainBestPenA, GraphicsNatives::obtain_best_pen, "ObtainBestPenA"},
     {graphics_lvo::FindColor, GraphicsNatives::find_color, "FindColor"},
@@ -2102,13 +2307,24 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     }
 
     const u32 base = exec.make_native_library(kGraphicsName, kHombreLibVersion, vectors_, kVectors,
-                                              this);
+                                              this, kGfxBaseSize);
     if (base == 0) {
         exec.free(font, ndk::TextFont_SIZEOF);
         exec.free(name, sizeof kTopazName);
         exec.free(attr, ndk::TextAttr_SIZEOF);
         return false;
     }
+    // The memory fonts: topaz 8, the ROM's own.
+    const u32 fonts = base + gb_TextFonts;
+    b.w32(fonts + ndk::LH_HEAD, font);
+    b.w32(fonts + ndk::LH_TAIL, 0);
+    b.w32(fonts + ndk::LH_TAILPRED, font);
+    b.w8(fonts + ndk::LH_TYPE, kNtFont);
+    b.w32(font + ndk::LN_SUCC, fonts + ndk::LH_TAIL);
+    b.w32(font + ndk::LN_PRED, fonts + ndk::LH_HEAD);
+    b.w8(font + ndk::LN_TYPE, kNtFont);
+    b.w32(font + ndk::LN_NAME, name);
+    b.w8(font + tf_Flags, kFpfRomFont | kFpfDesigned);
     topaz_attr_ = attr;
     topaz_ = font;
     topaz_name_ = name;

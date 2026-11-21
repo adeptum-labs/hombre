@@ -446,6 +446,110 @@ void set_rgb4_and_load_rgb4_write_the_colour_table() {
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetRGB4), 0xFFFFFFFFu);
 }
 
+// WeighTAMatch rates the target by height, style and flags, never by name.
+void weigh_ta_match_rates_by_size_style_and_flags() {
+    GfxRig r;
+    const u32 want = r.exec.alloc(16, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 have = r.exec.alloc(16, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(want != 0 && have != 0);
+    r.put16(want + ta_YSize, 8);
+    r.put16(have + ta_YSize, 8);
+    const auto weigh = [&] {
+        r.cpu().a[0] = want;
+        r.cpu().a[1] = have;
+        r.cpu().a[2] = 0;
+        return r.result(Base::Graphics, graphics_lvo::WeighTAMatch);
+    };
+    CHECK_EQ(weigh(), 32767u);
+    r.put8(have + ta_Style, 0x02);  // FSF_BOLD
+    const u32 bold = weigh();
+    CHECK(bold < 32767u && bold > 0u);
+    r.put8(have + ta_Style, 0);
+    r.put16(have + ta_YSize, 11);
+    const u32 taller = weigh();
+    CHECK(taller < bold && taller > 0u);
+    r.put16(have + ta_YSize, 9);
+    CHECK(weigh() > taller);
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = have;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::WeighTAMatch), 0u);
+}
+
+// SetSoftStyle sets the drawn styles enable lets through, never one the
+// font has of its own.
+void set_soft_style_keeps_the_drawn_styles() {
+    GfxRig r;
+    const u32 rp = r.exec.alloc(RastPort_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 font = r.exec.alloc(64, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(rp != 0 && font != 0);
+    r.put32(rp + rp_Font, font);
+    r.put8(font + tf_Style, 0x02);  // a bold font
+    r.cpu().a[1] = rp;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::AskSoftStyle), 0x05u);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 0x07;
+    r.cpu().d[1] = 0x01;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::SetSoftStyle), 0x03u);
+    CHECK_EQ(r.get8(rp + rp_AlgoStyle), 0x01u);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = 0x00;
+    r.cpu().d[1] = 0xFF;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::SetSoftStyle), 0x02u);
+    CHECK_EQ(r.get8(rp + rp_AlgoStyle), 0x00u);
+}
+
+// GfxBase holds the list of the fonts in memory, topaz 8 from the ROM.
+void gfx_base_lists_the_memory_fonts() {
+    GfxRig r;
+    const u32 list = r.base(Base::Graphics) + 140;  // gb_TextFonts
+    const u32 font = r.get32(list);
+    CHECK(font != 0 && (font & 1) == 0);
+    CHECK_EQ(r.get32(font), list + 4);
+    CHECK_EQ(r.get32(list + 8), font);
+    CHECK_EQ(r.get8(font + 8), 12u);  // NT_FONT
+    CHECK_EQ(r.get16(font + tf_YSize), 8u);
+    CHECK_EQ(r.get8(font + 23) & 0x01, 0x01u);  // FPF_ROMFONT
+    const u32 name = r.get32(font + 10);
+    CHECK_EQ(r.get8(name), u32{'t'});
+    CHECK_EQ(r.get8(name + 5), u32{'.'});
+}
+
+// ExtendFont hangs an extension holding the reply port and a copy of the
+// tags on tf_Extension and marks the font FSF_TAGGED; StripFont undoes it.
+void extend_font_and_strip_font() {
+    GfxRig r;
+    const u32 font = r.exec.alloc(64, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 tags = r.exec.alloc(32, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(font != 0 && tags != 0);
+    r.put32(font + 14, 0x1234);  // mn_ReplyPort
+    r.put8(font + tf_Style, 0x02);
+    r.put32(tags, 0x80001234);
+    r.put32(tags + 4, 7);
+    r.cpu().a[0] = font;
+    r.cpu().a[1] = tags;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::ExtendFont), 1u);
+    const u32 tfe = r.get32(font + 14);
+    CHECK(tfe != 0 && tfe != 0x1234);
+    CHECK_EQ(r.get16(tfe), 0xF100u);
+    CHECK_EQ(r.get32(tfe + 4), font);
+    CHECK_EQ(r.get32(tfe + 8), 0x1234u);
+    const u32 copy = r.get32(tfe + 12);
+    CHECK(copy != 0 && copy != tags);
+    CHECK_EQ(r.get32(copy), 0x80001234u);
+    CHECK_EQ(r.get32(copy + 4), 7u);
+    CHECK_EQ(r.get32(copy + 8), 0u);
+    CHECK_EQ(r.get8(font + tf_Style), 0x42u);
+    // A second ExtendFont keeps the one extension.
+    r.cpu().a[0] = font;
+    r.cpu().a[1] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::ExtendFont), 1u);
+    CHECK_EQ(r.get32(font + 14), tfe);
+    r.cpu().a[0] = font;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::StripFont), ExitReason::Halt);
+    CHECK_EQ(r.get32(font + 14), 0x1234u);
+    CHECK_EQ(r.get8(font + tf_Style), 0x02u);
+}
+
 void set_rgb32_get_rgb32_and_load_rgb32_v39_palette() {
     GfxRig r;
     const u32 color_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
@@ -1877,6 +1981,10 @@ void text_fit_pens_and_bitmaps_of_v39() {
 }
 
 int main() {
+    set_soft_style_keeps_the_drawn_styles();
+    gfx_base_lists_the_memory_fonts();
+    extend_font_and_strip_font();
+    weigh_ta_match_rates_by_size_style_and_flags();
     text_fit_pens_and_bitmaps_of_v39();
     blt_bitmap_copies_through_the_minterm_and_mask();
     blt_bitmap_rastport_draws_inside_the_rastport();
