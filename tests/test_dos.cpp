@@ -7138,6 +7138,173 @@ void file_helpers_follow_the_volume_rules() {
     CHECK(g_dos.examine("RAM:Note").kind == Dos::TargetKind::Missing);
 }
 
+void clear_bytes(Rig& r, u32 at, u32 count) {
+    for (u32 i = 0; i < count; ++i) {
+        r.put8(at + i, 0);
+    }
+}
+
+// A file written and closed through the LVOs, which is what tells a
+// notification request that its path changed.
+void write_and_close(Rig& r, const char* name) {
+    const u32 path = kData + 0x480;
+    const u32 buf = kData + 0x500;
+    r.str(path, name);
+    const u32 fh = r.call(dos_lvo::Open, path, MODE_NEWFILE);
+    CHECK(fh != 0);
+    r.str(buf, "x");
+    CHECK_EQ(r.call(dos_lvo::Write, fh, buf, 1), 1u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+}
+
+void start_notify_signals_the_watching_task() {
+    Rig r;
+    const u32 req = kData + 0x300;
+    clear_bytes(r, req, NotifyRequest_SIZEOF);
+    r.str(kData + 0x400, "RAM:watched");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Task, r.proc());
+    r.put8(req + nr_SignalNum, 10);
+    r.put32(req + nr_Flags, NRF_SEND_SIGNAL);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+    CHECK(r.get32(req + nr_FullName) != 0);
+
+    r.put32(r.proc() + TC_SIGRECVD, 0);
+    write_and_close(r, "RAM:watched");
+    CHECK_EQ(r.get32(r.proc() + TC_SIGRECVD), 1u << 10);
+    r.call(dos_lvo::EndNotify, req);
+}
+
+void start_notify_messages_a_port() {
+    Rig r;
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+    const u32 req = kData + 0x300;
+    clear_bytes(r, req, NotifyRequest_SIZEOF);
+    r.str(kData + 0x400, "RAM:messages");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Port, port);
+    r.put32(req + nr_Flags, NRF_SEND_MESSAGE);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+    write_and_close(r, "RAM:messages");
+    CHECK_EQ(r.get32(req + nr_MsgCount), 1u);
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    const u32 msg = r.cpu().d[0];
+    CHECK(msg != 0);
+    CHECK_EQ(r.get8(msg + LN_TYPE), NT_MESSAGE);
+    CHECK_EQ(r.get16(msg + mn_Length), NotifyMessage_SIZEOF);
+    CHECK_EQ(r.get32(msg + nm_Class), NOTIFY_CLASS);
+    CHECK_EQ(r.get16(msg + nm_Code), NOTIFY_CODE);
+    CHECK_EQ(r.get32(msg + nm_NReq), req);
+
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::Halt);
+    CHECK_EQ(r.get32(req + nr_MsgCount), 0u);
+    r.call(dos_lvo::EndNotify, req);
+}
+
+void notify_wait_reply_sends_one_message() {
+    Rig r;
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+    const u32 req = kData + 0x300;
+    clear_bytes(r, req, NotifyRequest_SIZEOF);
+    r.str(kData + 0x400, "RAM:waited");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Port, port);
+    r.put32(req + nr_Flags, NRF_SEND_MESSAGE | NRF_WAIT_REPLY);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+    write_and_close(r, "RAM:waited");
+    write_and_close(r, "RAM:waited");
+    CHECK_EQ(r.get32(req + nr_MsgCount), 1u);
+
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    const u32 msg = r.cpu().d[0];
+    CHECK(msg != 0);
+    r.cpu().a[0] = port;
+    CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::Halt);
+    CHECK_EQ(r.get32(req + nr_MsgCount), 0u);
+    r.call(dos_lvo::EndNotify, req);
+}
+
+void notify_on_a_directory_hears_new_files() {
+    Rig r;
+    const u32 req = kData + 0x300;
+    clear_bytes(r, req, NotifyRequest_SIZEOF);
+    r.str(kData + 0x400, "RAM:");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Task, r.proc());
+    r.put8(req + nr_SignalNum, 11);
+    r.put32(req + nr_Flags, NRF_SEND_SIGNAL);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+
+    r.put32(r.proc() + TC_SIGRECVD, 0);
+    write_and_close(r, "RAM:inside");
+    CHECK_EQ(r.get32(r.proc() + TC_SIGRECVD), 1u << 11);
+    r.call(dos_lvo::EndNotify, req);
+}
+
+void end_notify_stops_notifications() {
+    Rig r;
+    const u32 req = kData + 0x300;
+    clear_bytes(r, req, NotifyRequest_SIZEOF);
+    r.str(kData + 0x400, "RAM:gone");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Task, r.proc());
+    r.put8(req + nr_SignalNum, 12);
+    r.put32(req + nr_Flags, NRF_SEND_SIGNAL);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+    r.call(dos_lvo::EndNotify, req);
+
+    r.put32(r.proc() + TC_SIGRECVD, 0);
+    write_and_close(r, "RAM:gone");
+    CHECK_EQ(r.get32(r.proc() + TC_SIGRECVD), 0u);
+}
+
+void notify_initial_sends_at_start() {
+    Rig r;
+    const u32 req = kData + 0x300;
+    clear_bytes(r, req, NotifyRequest_SIZEOF);
+    r.str(kData + 0x400, "RAM:initial");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Task, r.proc());
+    r.put8(req + nr_SignalNum, 13);
+    r.put32(req + nr_Flags, NRF_SEND_SIGNAL | NRF_NOTIFY_INITIAL);
+    r.put32(r.proc() + TC_SIGRECVD, 0);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+    CHECK_EQ(r.get32(r.proc() + TC_SIGRECVD), 1u << 13);
+    r.call(dos_lvo::EndNotify, req);
+}
+
+void notify_delete_file_of_the_watched_file() {
+    Rig r;
+    write_and_close(r, "RAM:doomed");
+    const u32 req = kData + 0x300;
+    clear_bytes(r, req, NotifyRequest_SIZEOF);
+    r.str(kData + 0x400, "RAM:doomed");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Task, r.proc());
+    r.put8(req + nr_SignalNum, 14);
+    r.put32(req + nr_Flags, NRF_SEND_SIGNAL);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+
+    r.put32(r.proc() + TC_SIGRECVD, 0);
+    const u32 path = kData + 0x480;
+    r.str(path, "RAM:doomed");
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, path), DOSTRUE);
+    CHECK_EQ(r.get32(r.proc() + TC_SIGRECVD), 1u << 14);
+    r.call(dos_lvo::EndNotify, req);
+}
+
 void paths_belong_to_each_process() {
     Rig r;
     u32 err = 0;
@@ -7306,6 +7473,13 @@ int main() {
     system_uses_the_shell_process_directory();
     console_star_follows_the_process_console();
     paths_belong_to_each_process();
+    start_notify_signals_the_watching_task();
+    start_notify_messages_a_port();
+    notify_wait_reply_sends_one_message();
+    notify_on_a_directory_hears_new_files();
+    end_notify_stops_notifications();
+    notify_initial_sends_at_start();
+    notify_delete_file_of_the_watched_file();
     file_helpers_follow_the_volume_rules();
     return check::finish("test_dos");
 }

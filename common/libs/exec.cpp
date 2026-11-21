@@ -1332,10 +1332,12 @@ struct ExecOps {
             b.w8(message + LN_TYPE, NT_FREEMSG);
             return b.ok();
         }
-        if (e.reply_handler_ != nullptr && e.reply_port_ != 0 &&
-            native::guest_address(m, reply_port) == native::guest_address(m, e.reply_port_)) {
-            e.reply_handler_(e.reply_ctx_, message);
-            return true;
+        for (const auto& h : e.reply_handlers_) {
+            if (h.handler != nullptr && h.port != 0 &&
+                native::guest_address(m, reply_port) == native::guest_address(m, h.port)) {
+                h.handler(h.ctx, message);
+                return true;
+            }
         }
         return queue_message(e, b, reply_port, message, NT_REPLYMSG);
     }
@@ -2777,9 +2779,9 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     unknown_signal_addr_ = 0;
     every_task_waits_logged_ = false;
     abort_to_boot_task_ = false;
-    reply_port_ = 0;
-    reply_handler_ = nullptr;
-    reply_ctx_ = nullptr;
+    for (ReplyHandler& h : reply_handlers_) {
+        h = ReplyHandler{};
+    }
     task_end_hook_ = nullptr;
     task_end_ctx_ = nullptr;
     timer_hook_ = TimerHook{};
@@ -3636,9 +3638,21 @@ void Exec::reset_task_signals() {
 }
 
 void Exec::set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx) {
-    reply_port_ = port;
-    reply_handler_ = handler;
-    reply_ctx_ = ctx;
+    ReplyHandler* free_slot = nullptr;
+    for (ReplyHandler& h : reply_handlers_) {
+        if (h.port == port) {
+            h = ReplyHandler{port, handler, ctx};
+            return;
+        }
+        if (free_slot == nullptr && h.port == 0) {
+            free_slot = &h;
+        }
+    }
+    if (free_slot != nullptr) {
+        *free_slot = ReplyHandler{port, handler, ctx};
+    } else {
+        LogLine().text("exec: no room for the reply handler of port ").hex(port).send();
+    }
 }
 
 bool Exec::forbidden() const {

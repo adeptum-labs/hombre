@@ -538,6 +538,32 @@ constexpr u32 eac_MatchString = 8;
 constexpr u32 eac_MatchFunc = 12;
 constexpr u32 eac_SIZEOF = 16;
 
+// struct NotifyRequest and its flags (dos/notify.h)
+constexpr u32 nr_Name = 0;
+constexpr u32 nr_FullName = 4;
+constexpr u32 nr_UserData = 8;
+constexpr u32 nr_Flags = 12;
+constexpr u32 nr_Port = 16;
+constexpr u32 nr_Task = 16;
+constexpr u32 nr_SignalNum = 20;
+constexpr u32 nr_MsgCount = 40;
+constexpr u32 nr_Handler = 44;
+constexpr u32 NotifyRequest_SIZEOF = 48;
+constexpr u32 NRF_SEND_MESSAGE = 1;
+constexpr u32 NRF_SEND_SIGNAL = 2;
+constexpr u32 NRF_WAIT_REPLY = 8;
+constexpr u32 NRF_NOTIFY_INITIAL = 16;
+
+// struct NotifyMessage, a Message with the notification fields after it
+constexpr u32 nm_Class = 20;
+constexpr u32 nm_Code = 24;
+constexpr u32 nm_NReq = 26;
+constexpr u32 nm_DoNotTouch = 30;
+constexpr u32 nm_DoNotTouch2 = 34;
+constexpr u32 NotifyMessage_SIZEOF = 38;
+constexpr u32 NOTIFY_CLASS = 0x40000000;
+constexpr u32 NOTIFY_CODE = 0x1234;
+
 // struct DosPacket, struct StandardPacket and packet action numbers
 constexpr u32 dp_Link = 0;
 constexpr u32 dp_Port = 4;
@@ -699,6 +725,7 @@ public:
     static constexpr u32 kMaxAnchorDepth = 8;
     static constexpr u32 kMaxLoggedActions = 32;
     static constexpr u32 kMaxProcs = 8;  // processes and their CLI numbers
+    static constexpr u32 kMaxNotifies = 64;  // active StartNotify requests
 
     // Makes dos.library over the volumes in the drives, which must stay
     // mounted, with its structures and the shell Process, registers the
@@ -1082,6 +1109,16 @@ private:
         bool owns_rdargs;
     };
 
+    // A StartNotify request that has not been ended yet, with the name it
+    // watches resolved to a volume and a path from that volume's root.
+    struct NotifySlot {
+        bool used;
+        u32 request;
+        u8 vol;
+        u32 full_name_bytes;
+        char path[kMaxPath];
+    };
+
     struct AnchorLevel {
         u32 chain_addr;
         u32 chain_bytes;
@@ -1146,6 +1183,8 @@ private:
     FileSlot files_[kHandles]{};
     FileClosed file_closed_ = nullptr;
     void* file_closed_ctx_ = nullptr;
+    NotifySlot notifies_[kMaxNotifies]{};
+    u32 notify_reply_port_ = 0;  // dos's reply port for notification messages
     LockSlot lock_slots_[kMaxLocks]{};
     LockSlot assign_lock_slots_[kMaxAssignLocks]{};
     AssignEntry assigns_[kMaxAssigns]{};

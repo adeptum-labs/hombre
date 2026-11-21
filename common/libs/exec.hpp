@@ -566,7 +566,9 @@ public:
     void reset_task_signals();
 
     // Registers a reply port whose replies go to handler instead of being
-    // queued on the port. A second call replaces the first.
+    // queued on the port. A second call for the same port replaces its
+    // handler; up to kMaxReplyHandlers ports have one.
+    static constexpr u32 kMaxReplyHandlers = 4;
     void set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx);
 
 private:
@@ -654,9 +656,12 @@ private:
     u32 unknown_signal_addr_ = 0;  // the last logged unknown Signal target
     bool every_task_waits_logged_ = false;
     bool abort_to_boot_task_ = false;
-    u32 reply_port_ = 0;
-    void (*reply_handler_)(void* ctx, u32 message) = nullptr;
-    void* reply_ctx_ = nullptr;
+    struct ReplyHandler {
+        u32 port = 0;
+        void (*handler)(void* ctx, u32 message) = nullptr;
+        void* ctx = nullptr;
+    };
+    ReplyHandler reply_handlers_[kMaxReplyHandlers]{};
     void (*task_end_hook_)(void* ctx, u32 task, bool self) = nullptr;
     void* task_end_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};

@@ -2371,12 +2371,16 @@ struct DosOps {
         const i64 slot = handle_slot(d, bptr);
         if (slot > static_cast<i64>(kConsoleOut)) {
             const Dos::FileSlot& f = d.files_[slot];
-            if (f.written && f.stream == Dos::Stream::File && d.file_closed_ != nullptr) {
+            if (f.written && f.stream == Dos::Stream::File) {
                 char path[Dos::kMaxPath];
                 copy_cstr(path, f.path, Dos::kMaxPath);
+                const u8 vol = f.entry.volume;
                 release_entry(d, f.entry);
                 close_slot(d, static_cast<u32>(slot));
-                d.file_closed_(d.file_closed_ctx_, path);
+                notify_changed(d, vol, path);
+                if (d.file_closed_ != nullptr) {
+                    d.file_closed_(d.file_closed_ctx_, path);
+                }
                 return;
             }
             release_entry(d, f.entry);
@@ -2384,12 +2388,211 @@ struct DosOps {
         }
     }
 
-    // StartNotify(request D1): accepted, but no notification is sent yet.
-    // TODO: send the signal or message when the file changes.
-    static void start_notify(void*, Machine& m) { native::set_result(m, DOSTRUE); }
+    // True when a request on request hears about a change at changed: the
+    // same path, or a directory directly holding it.
+    static bool notify_path_matches(const char* request, const char* changed) {
+        u32 at = 0;
+        for (; request[at] != '\0' && changed[at] != '\0'; ++at) {
+            if (upper(request[at]) != upper(changed[at])) {
+                return false;
+            }
+        }
+        if (request[at] == '\0' && changed[at] == '\0') {
+            return true;
+        }
+        if (request[at] != '\0') {
+            return false;
+        }
+        if (at != 0) {
+            if (changed[at] != '/') {
+                return false;
+            }
+            ++at;
+        }
+        if (changed[at] == '\0') {
+            return false;
+        }
+        for (; changed[at] != '\0'; ++at) {
+            if (changed[at] == '/') {
+                return false;
+            }
+        }
+        return true;
+    }
 
-    // EndNotify(request D1): nothing to undo.
-    static void end_notify(void*, Machine&) {}
+    // Sends the notification a request asks for.
+    static void send_notification(Dos& d, Dos::NotifySlot& slot) {
+        Bus b(*d.m_);
+        const u32 request = slot.request;
+        const u32 flags = b.r32(request + nr_Flags);
+        if (!b.ok()) {
+            return;
+        }
+        if ((flags & NRF_SEND_MESSAGE) != 0) {
+            const u32 count = b.r32(request + nr_MsgCount);
+            const u32 port = b.r32(request + nr_Port);
+            if (!b.ok() || port == 0) {
+                return;
+            }
+            if ((flags & NRF_WAIT_REPLY) != 0 && count > 0) {
+                return;
+            }
+            const u32 message =
+                d.exec_->alloc(NotifyMessage_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+            if (message == 0) {
+                return;
+            }
+            b.w8(message + LN_TYPE, NT_MESSAGE);
+            b.w16(message + mn_Length, NotifyMessage_SIZEOF);
+            b.w32(message + mn_ReplyPort, d.notify_reply_port_);
+            b.w32(message + nm_Class, NOTIFY_CLASS);
+            b.w16(message + nm_Code, NOTIFY_CODE);
+            b.w32(message + nm_NReq, request);
+            if (!b.ok() || !d.exec_->post_message(port, message)) {
+                d.exec_->free(message, NotifyMessage_SIZEOF);
+                return;
+            }
+            b.w32(request + nr_MsgCount, count + 1);
+            return;
+        }
+        if ((flags & NRF_SEND_SIGNAL) != 0) {
+            const u32 task = b.r32(request + nr_Task);
+            const u32 bit = b.r8(request + nr_SignalNum);
+            if (b.ok() && bit < 32) {
+                d.exec_->signal_task(task, 1u << bit);
+            }
+        }
+    }
+
+    // Tells every request that watches the changed path.
+    static void notify_changed(Dos& d, u8 vol, const char* path) {
+        for (Dos::NotifySlot& slot : d.notifies_) {
+            if (slot.used && slot.vol == vol && notify_path_matches(slot.path, path)) {
+                send_notification(d, slot);
+            }
+        }
+    }
+
+    // The reply port's handler: a sent message came back, so the request may
+    // send another if it waits for replies.
+    static void notify_reply(void* ctx, u32 message) {
+        Dos& d = of(ctx);
+        if (d.m_ == nullptr) {
+            return;
+        }
+        Bus b(*d.m_);
+        const u32 request = b.r32(message + nm_NReq);
+        if (!b.ok()) {
+            return;
+        }
+        for (Dos::NotifySlot& slot : d.notifies_) {
+            if (slot.used && slot.request == request) {
+                const u32 count = b.r32(request + nr_MsgCount);
+                if (b.ok() && count > 0) {
+                    b.w32(request + nr_MsgCount, count - 1);
+                }
+                break;
+            }
+        }
+        d.exec_->free(message, NotifyMessage_SIZEOF);
+    }
+
+    // StartNotify(request D1): remembers the request for the path it names
+    // and sends the notification it asks for when that path changes.
+    static void start_notify(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 request = native::guest_address(m, m.cpu.d[1]);
+        if (request == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        const u32 name = b.r32(request + nr_Name);
+        if (!b.ok()) {
+            return;
+        }
+        char path[kMaxName];
+        if (name == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        if (!read_name(d, b, name, path)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        u8 vol = Dos::kVolDf0;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve(d, b, path, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return;
+        }
+        Dos::NotifySlot* slot = nullptr;
+        for (Dos::NotifySlot& candidate : d.notifies_) {
+            if (!candidate.used) {
+                slot = &candidate;
+                break;
+            }
+        }
+        if (slot == nullptr) {
+            fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+            return;
+        }
+        char full[Dos::kMaxPath + 32];
+        if (!format_volume_path(volume_name(d, vol), resolved, full, sizeof full)) {
+            fail(d, b, ERROR_INVALID_COMPONENT_NAME, DOSFALSE);
+            return;
+        }
+        const u32 bytes = length_of(full) + 1;
+        const u32 full_name = d.exec_->alloc(bytes, MEMF_PUBLIC);
+        if (full_name == 0) {
+            fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+            return;
+        }
+        for (u32 i = 0; i < bytes; ++i) {
+            b.w8(full_name + i, static_cast<u8>(full[i]));
+        }
+        slot->used = true;
+        slot->request = request;
+        slot->vol = vol;
+        slot->full_name_bytes = bytes;
+        copy_cstr(slot->path, resolved, Dos::kMaxPath);
+        b.w32(request + nr_FullName, full_name);
+        b.w32(request + nr_MsgCount, 0);
+        if (!b.ok()) {
+            slot->used = false;
+            d.exec_->free(full_name, bytes);
+            return;
+        }
+        if ((b.r32(request + nr_Flags) & NRF_NOTIFY_INITIAL) != 0) {
+            send_notification(d, *slot);
+        }
+        native::set_result(m, DOSTRUE);
+    }
+
+    // EndNotify(request D1): forgets the request. Messages already sent are
+    // freed when they come back.
+    static void end_notify(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 request = native::guest_address(m, m.cpu.d[1]);
+        for (Dos::NotifySlot& slot : d.notifies_) {
+            if (!slot.used || slot.request != request) {
+                continue;
+            }
+            slot.used = false;
+            const u32 full_name = b.r32(request + nr_FullName);
+            if (b.ok() && full_name != 0) {
+                d.exec_->free(full_name, slot.full_name_bytes);
+            }
+            b.w32(request + nr_FullName, 0);
+            return;
+        }
+    }
 
     // Close(0) does nothing; the console streams stay open whatever is
     // closed.
@@ -6467,6 +6670,7 @@ struct DosOps {
             fail(d, b, err, DOSFALSE);
             return false;
         }
+        notify_changed(d, Dos::kVolRam, resolved);
         native::set_result(b.machine(), DOSTRUE);
         return true;
     }
@@ -6560,6 +6764,8 @@ struct DosOps {
         }
         update_renamed_paths(d, b, old_node);
         if (b.ok()) {
+            notify_changed(d, old_vol, old_resolved);
+            notify_changed(d, new_vol, new_resolved);
             native::set_result(b.machine(), DOSTRUE);
             return true;
         }
@@ -6642,6 +6848,7 @@ struct DosOps {
         if (!alloc_user_lock(d, b, canonical, entry, EXCLUSIVE_LOCK, bptr)) {
             return false;
         }
+        notify_changed(d, vol, canonical);
         native::set_result(b.machine(), bptr);
         return true;
     }
@@ -8929,6 +9136,10 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
         act = 0;
     }
     unknown_pkt_count_ = 0;
+    for (NotifySlot& n : notifies_) {
+        n = NotifySlot{};
+    }
+    notify_reply_port_ = 0;
     now_ticks_ = nullptr;
     deferred_count_ = 0;
     if (m.jit == nullptr || m.mem.base == nullptr || !drives_[0].has_disk) {
@@ -9195,6 +9406,12 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     exec.set_this_task(proc.process);
     exec.set_segment_loader(SegmentLoader{DosOps::load_segment, this});
     exec.set_task_end_hook(DosOps::task_ended, this);
+    notify_reply_port_ = exec.create_port();
+    if (notify_reply_port_ == 0) {
+        m_ = nullptr;
+        return false;
+    }
+    exec.set_reply_handler(notify_reply_port_, DosOps::notify_reply, this);
     return true;
 }
 
