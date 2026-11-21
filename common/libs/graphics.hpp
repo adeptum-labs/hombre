@@ -222,9 +222,8 @@ public:
     bool color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue);
     void draw_line(u32 rp, i32 x1, i32 y1);
     // Draws the characters in the built-in font, whatever font the
-    // RastPort has, and moves its pen past them: the system's own windows,
-    // gadgets and console lay their text out in that font's cells. How
-    // far the pen moved.
+    // RastPort has, and moves its pen past them, for text laid out in
+    // that font's cells. How far the pen moved.
     u32 text(u32 rp, const u8* chars, u32 count);
     void scroll(u32 rp, i32 dx, i32 dy, i32 x0, i32 y0, i32 x1, i32 y1);
     void set_font(u32 rp, u32 font);
