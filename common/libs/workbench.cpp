@@ -133,7 +133,7 @@ constexpr u32 kMaxWindowTitle = 64;
 constexpr u32 kClipBytes = ndk::Region_SIZEOF + ndk::RegionRectangle_SIZEOF;
 
 // The scroll gadgets in the borders WFLG_SIZEBRIGHT and WFLG_SIZEBBOTTOM
-// make (12 pixels on the right, 10 at the bottom), around the size gadget
+// make (14 pixels on the right and at the bottom), around the size gadget
 // in the corner. Their boxes follow the window's size: a RELRIGHT edge
 // counts from the right edge, a RELWIDTH size from the window's width.
 // A slider's thickness is set when it is made, from the screen's aspect.
@@ -160,23 +160,23 @@ constexpr u8 kRight = static_cast<u8>(chrome::Arrow::Right);
 // The sliders come first, so their PropInfos and knobs pair with the
 // first two gadgets.
 constexpr ScrollGadgetSpec kScrollSpecs[Workbench::kScrollGadgets] = {
-    {Workbench::kScrollVert, -10, 16, 10, -46, ndk::GFLG_RELRIGHT | ndk::GFLG_RELHEIGHT,
+    {Workbench::kScrollVert, -12, 16, 12, -50, ndk::GFLG_RELRIGHT | ndk::GFLG_RELHEIGHT,
      kSliderActivation | ndk::GACT_RIGHTBORDER, kNoArrow},
-    {Workbench::kScrollHoriz, 3, -8, -39, 8, ndk::GFLG_RELBOTTOM | ndk::GFLG_RELWIDTH,
+    {Workbench::kScrollHoriz, 3, -12, -45, 12, ndk::GFLG_RELBOTTOM | ndk::GFLG_RELWIDTH,
      kSliderActivation | ndk::GACT_BOTTOMBORDER, kNoArrow},
-    {Workbench::kScrollUp, -11, -29, 12, 10, kArrowFlags,
+    {Workbench::kScrollUp, -13, -33, 14, 10, kArrowFlags,
      kArrowActivation | ndk::GACT_RIGHTBORDER, kUp},
-    {Workbench::kScrollDown, -11, -19, 12, 10, kArrowFlags,
+    {Workbench::kScrollDown, -13, -23, 14, 10, kArrowFlags,
      kArrowActivation | ndk::GACT_RIGHTBORDER, kDown},
-    {Workbench::kScrollLeft, -35, -9, 12, 10, kArrowFlags,
+    {Workbench::kScrollLeft, -41, -13, 14, 14, kArrowFlags,
      kArrowActivation | ndk::GACT_BOTTOMBORDER, kLeft},
-    {Workbench::kScrollRight, -23, -9, 12, 10, kArrowFlags,
+    {Workbench::kScrollRight, -27, -13, 14, 14, kArrowFlags,
      kArrowActivation | ndk::GACT_BOTTOMBORDER, kRight},
 };
-// The room for a slider across its border: ten pixels in the right one,
-// eight in the bottom one, a pixel clear of each edge.
-constexpr i32 kVertSliderRoom = 10;
-constexpr i32 kHorizSliderRoom = 8;
+// The room for a slider across its border: twelve pixels in each, a
+// pixel clear of each edge.
+constexpr i32 kVertSliderRoom = 12;
+constexpr i32 kHorizSliderRoom = 12;
 constexpr i32 kMinSlider = 4;
 constexpr u32 kSliders = 2;
 constexpr u16 kVertSliderFlags = ndk::AUTOKNOB | ndk::FREEVERT | ndk::PROPBORDERLESS |
@@ -189,9 +189,12 @@ constexpr u32 kScrollBlockBytes = kKnobAt + kSliders * Image_SIZEOF;
 
 // The arrow images, each plain and pressed, as deep as the screen.
 constexpr u32 kArrowImages = 8;
-constexpr i32 kArrowWidth = 12;
-constexpr i32 kArrowHeight = 10;
-constexpr u32 kArrowPlaneBytes = kArrowHeight * 2;  // one word a row
+// The up and down arrows are 14 by 10, the left and right ones 14 by 14;
+// every image keeps room for the larger, a word a row.
+constexpr i32 kArrowWidth = 14;
+constexpr i32 kArrowMaxHeight = 14;
+constexpr u32 kArrowRowBytes = 2;
+constexpr u32 kArrowPlaneBytes = kArrowMaxHeight * kArrowRowBytes;
 constexpr u32 kMaxArrowDepth = 8;
 
 // struct DrawInfo (intuition/screens.h): the screen's depth and the
@@ -1489,27 +1492,30 @@ bool Workbench::build_arrow_images() {
         return false;
     }
     const u32 data_at = block + kArrowImages * Image_SIZEOF;
-    u8 pens[kArrowWidth * kArrowHeight];
+    u8 pens[kArrowWidth * kArrowMaxHeight];
     for (u32 i = 0; i < kArrowImages; ++i) {
         const chrome::Arrow arrow = static_cast<chrome::Arrow>(i / 2);
         const bool pressed = (i & 1) != 0;
-        chrome::paint_arrow_button(pens, kArrowWidth, kArrowHeight, arrow, pressed, depth >= 8);
+        const bool vertical = arrow == chrome::Arrow::Up || arrow == chrome::Arrow::Down;
+        const i32 height = vertical ? 10 : kArrowMaxHeight;
+        chrome::paint_arrow_button(pens, kArrowWidth, height, arrow, pressed, depth >= 8);
         const u32 image = block + i * Image_SIZEOF;
         const u32 data = data_at + i * data_bytes;
         b.w16(image + im_Width, static_cast<u32>(kArrowWidth));
-        b.w16(image + im_Height, static_cast<u32>(kArrowHeight));
+        b.w16(image + im_Height, static_cast<u32>(height));
         b.w16(image + im_Depth, depth);
         b.w32(image + im_ImageData, data);
         b.w8(image + im_PlanePick, (1u << depth) - 1);
+        const u32 plane_bytes = static_cast<u32>(height) * kArrowRowBytes;
         for (u32 plane = 0; plane < depth; ++plane) {
-            for (i32 y = 0; y < kArrowHeight; ++y) {
-                u32 word = 0;
+            for (i32 y = 0; y < height; ++y) {
+                u32 bits = 0;
                 for (i32 x = 0; x < kArrowWidth; ++x) {
                     if ((pens[y * kArrowWidth + x] & (1u << plane)) != 0) {
-                        word |= 0x8000u >> x;
+                        bits |= 0x8000u >> x;
                     }
                 }
-                b.w16(data + plane * kArrowPlaneBytes + static_cast<u32>(y) * 2, word);
+                b.w16(data + plane * plane_bytes + static_cast<u32>(y) * kArrowRowBytes, bits);
             }
         }
     }

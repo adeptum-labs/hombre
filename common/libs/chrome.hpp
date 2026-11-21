@@ -45,8 +45,8 @@ constexpr u32 kWBorTop = kBorderTop - kTitleFontHeight - 1;
 constexpr u32 kBorderLeft = 2;
 constexpr u32 kBorderRight = 2;
 constexpr u32 kBorderBottom = 2;
-constexpr u32 kSizeBorderRight = 12;
-constexpr u32 kSizeBorderBottom = 10;
+constexpr u32 kSizeBorderRight = 14;
+constexpr u32 kSizeBorderBottom = 14;
 
 // The close and depth buttons of a window's title bar: both the same size,
 // the same distance in from the window's left and right edges, and centred
@@ -126,6 +126,15 @@ void draw_menu(native::Bus& b, const raster::Bitmap& bitmap, const Rect& clip,
                const MenuChrome& menu);
 
 enum class Arrow : u8 { Up = 0, Down = 1, Left = 2, Right = 3 };
+
+// The rows of an arrow button's triangle, from the button's size across
+// and along the arrow: three on a small button, more on a larger one.
+constexpr i32 arrow_rows(i32 across, i32 along) {
+    const i32 by_across = across / 4;
+    const i32 by_along = along / 3;
+    const i32 rows = by_across < by_along ? by_across : by_along;
+    return rows > 3 ? rows : 3;
+}
 
 // A scroll arrow button as width x height pens, row by row, in the look of
 // the sliders' knobs: rounded, shaded and outlined, with a triangle

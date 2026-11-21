@@ -137,8 +137,9 @@ void draw_size_gadget(Graphics& graphics, u32 rp, i32 width, i32 height, bool hi
     }
     const u8 dark = high_color ? kFrameDark : 1;
     const u8 light = high_color ? kFrameLight : 2;
-    const i32 right = width - 4;
-    const i32 bottom = height - 4;
+    // The glyph sits in the middle of the corner the two borders share.
+    const i32 right = width - 1 - (static_cast<i32>(kSizeBorderRight) - 7) / 2;
+    const i32 bottom = height - 1 - (static_cast<i32>(kSizeBorderBottom) - 7) / 2;
     graphics.set_pens(rp, dark, 0, ndk::JAM2);
     graphics.rect_fill(rp, right, bottom - 6, right, bottom);
     graphics.rect_fill(rp, right - 6, bottom, right, bottom);
@@ -1019,22 +1020,25 @@ void paint_arrow_button(u8* pens, i32 width, i32 height, Arrow arrow, bool press
             put(width - 1 - x, y, line);
         }
     }
-    // The triangle: three rows, two to six pixels across, centred.
+    // The triangle, centred: three rows, two to six pixels across, on a
+    // small button, more on a larger one.
     const u8 mark = high_color ? (pressed ? kFrameLight : kFrameDark) : (pressed ? 2 : 1);
+    const bool vertical = arrow == Arrow::Up || arrow == Arrow::Down;
+    const i32 rows = arrow_rows(vertical ? width : height, vertical ? height : width);
     const i32 mid_x0 = (width - 1) / 2;
     const i32 mid_x1 = width / 2;
     const i32 mid_y0 = (height - 1) / 2;
     const i32 mid_y1 = height / 2;
-    const i32 top = (height - 3) / 2;
-    const i32 left = (width - 3) / 2;
-    for (i32 i = 0; i < 3; ++i) {
-        if (arrow == Arrow::Up || arrow == Arrow::Down) {
-            const i32 y = arrow == Arrow::Up ? top + i : top + 2 - i;
+    const i32 top = (height - rows) / 2;
+    const i32 left = (width - rows) / 2;
+    for (i32 i = 0; i < rows; ++i) {
+        if (vertical) {
+            const i32 y = arrow == Arrow::Up ? top + i : top + rows - 1 - i;
             for (i32 x = mid_x0 - i; x <= mid_x1 + i; ++x) {
                 put(x, y, mark);
             }
         } else {
-            const i32 x = arrow == Arrow::Left ? left + i : left + 2 - i;
+            const i32 x = arrow == Arrow::Left ? left + i : left + rows - 1 - i;
             for (i32 y = mid_y0 - i; y <= mid_y1 + i; ++y) {
                 put(x, y, mark);
             }

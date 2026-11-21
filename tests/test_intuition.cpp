@@ -3001,15 +3001,15 @@ void size_gadget_sets_right_border() {
     put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_SIZEGADGET, 0, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
-    CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 14u);
     CHECK_EQ(r.get8(window + wd_BorderBottom), 2u);
     // The size gadget: the dark corner and the light box inside it.
     CHECK_EQ(window_pixel(r, window, 196, 96), 1u);
     CHECK_EQ(window_pixel(r, window, 196, 90), 1u);
     CHECK_EQ(window_pixel(r, window, 190, 96), 1u);
     CHECK_EQ(window_pixel(r, window, 195, 95), 2u);
-    CHECK_EQ(window_pixel(r, window, 188, 50), 1u);
-    CHECK_EQ(window_pixel(r, window, 187, 50), 0u);
+    CHECK_EQ(window_pixel(r, window, 186, 50), 1u);
+    CHECK_EQ(window_pixel(r, window, 185, 50), 0u);
     CHECK_EQ(screen_pixel(r, screen, 246, 156), 1u);
     CHECK_EQ(screen_pixel(r, screen, 245, 155), 2u);
 }
@@ -3022,10 +3022,10 @@ void size_bbottom_sets_bottom_border() {
     put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM, 0, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
-    CHECK_EQ(r.get8(window + wd_BorderBottom), 10u);
+    CHECK_EQ(r.get8(window + wd_BorderBottom), 14u);
     CHECK_EQ(r.get8(window + wd_BorderRight), 2u);
-    CHECK_EQ(window_pixel(r, window, 100, 90), 1u);
-    CHECK_EQ(window_pixel(r, window, 100, 89), 0u);
+    CHECK_EQ(window_pixel(r, window, 100, 86), 1u);
+    CHECK_EQ(window_pixel(r, window, 100, 85), 0u);
 }
 
 void limits_zero_mean_initial() {
@@ -4191,26 +4191,26 @@ void border_sizes_with_without_size_gadget_and_borderless() {
     CHECK(sizable != 0);
     CHECK_EQ(r.get8(sizable + wd_BorderLeft), 2u);
     CHECK_EQ(r.get8(sizable + wd_BorderTop), 15u);
-    CHECK_EQ(r.get8(sizable + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(sizable + wd_BorderRight), 14u);
     CHECK_EQ(r.get8(sizable + wd_BorderBottom), 2u);
 
     put_new_window(r, kNewWindow, 20, 120, 160, 80, WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM, 0, 0, 0);
     const u32 sbottom = open_win(r, kNewWindow);
     CHECK(sbottom != 0);
     CHECK_EQ(r.get8(sbottom + wd_BorderRight), 2u);
-    CHECK_EQ(r.get8(sbottom + wd_BorderBottom), 10u);
+    CHECK_EQ(r.get8(sbottom + wd_BorderBottom), 14u);
 
     put_new_window(r, kNewWindow, 200, 120, 160, 80,
                    WFLG_SIZEGADGET | WFLG_SIZEBRIGHT | WFLG_SIZEBBOTTOM, 0, 0, 0);
     const u32 sboth = open_win(r, kNewWindow);
     CHECK(sboth != 0);
-    CHECK_EQ(r.get8(sboth + wd_BorderRight), 12u);
-    CHECK_EQ(r.get8(sboth + wd_BorderBottom), 10u);
+    CHECK_EQ(r.get8(sboth + wd_BorderRight), 14u);
+    CHECK_EQ(r.get8(sboth + wd_BorderBottom), 14u);
 
     put_new_window(r, kNewWindow, 380, 120, 160, 80, WFLG_SIZEGADGET | WFLG_SIZEBRIGHT, 0, 0, 0);
     const u32 sright = open_win(r, kNewWindow);
     CHECK(sright != 0);
-    CHECK_EQ(r.get8(sright + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(sright + wd_BorderRight), 14u);
     CHECK_EQ(r.get8(sright + wd_BorderBottom), 2u);
 
     put_new_window(r, kNewWindow, 380, 20, 160, 80, WFLG_BORDERLESS, 0, 0, 0);
