@@ -1088,6 +1088,70 @@ void open_window_alloc_failure_gives_zero_and_frees() {
     }
 }
 
+// ClipBlit to and from a window reads and writes the window's own bitmap at
+// window coordinates, wherever the window sits on the screen: a gadget's
+// saved background comes back as it was.
+void clip_blit_uses_window_coordinates() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 100, 60, 200, 100, WFLG_BORDERLESS, 0, screen, CUSTOMSCREEN);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 wrp = r.get32(window + wd_RPort);
+    const auto plot = [&](u32 rp, i32 x, i32 y, u32 pen) {
+        r.cpu().a[1] = rp;
+        r.cpu().d[0] = pen;
+        r.call(Base::Graphics, graphics_lvo::SetAPen);
+        r.cpu().a[1] = rp;
+        r.cpu().d[0] = static_cast<u32>(x);
+        r.cpu().d[1] = static_cast<u32>(y);
+        r.call(Base::Graphics, graphics_lvo::WritePixel);
+    };
+    const auto pixel = [&](u32 rp, i32 x, i32 y) {
+        r.cpu().a[1] = rp;
+        r.cpu().d[0] = static_cast<u32>(x);
+        r.cpu().d[1] = static_cast<u32>(y);
+        return r.result(Base::Graphics, graphics_lvo::ReadPixel);
+    };
+    const auto clip_blit = [&](u32 src, i32 sx, i32 sy, u32 dst, i32 dx, i32 dy, u32 w, u32 h) {
+        r.cpu().a[0] = src;
+        r.cpu().d[0] = static_cast<u32>(sx);
+        r.cpu().d[1] = static_cast<u32>(sy);
+        r.cpu().a[1] = dst;
+        r.cpu().d[2] = static_cast<u32>(dx);
+        r.cpu().d[3] = static_cast<u32>(dy);
+        r.cpu().d[4] = w;
+        r.cpu().d[5] = h;
+        r.cpu().d[6] = 0xC0;
+        r.call(Base::Graphics, graphics_lvo::ClipBlit);
+    };
+    plot(wrp, 20, 30, 5);
+    plot(wrp, 21, 30, 6);
+
+    // An off-screen RastPort over a bitmap of the screen's depth.
+    r.cpu().d[0] = 16;
+    r.cpu().d[1] = 8;
+    r.cpu().d[2] = 8;
+    r.cpu().d[3] = 0;
+    r.cpu().a[0] = 0;
+    const u32 bitmap = r.result(Base::Graphics, graphics_lvo::AllocBitMap);
+    CHECK(bitmap != 0);
+    const u32 save = kData + 0x3000;
+    r.cpu().a[1] = save;
+    r.call(Base::Graphics, graphics_lvo::InitRastPort);
+    r.put32(save + rp_BitMap, bitmap);
+
+    clip_blit(wrp, 20, 30, save, 0, 0, 2, 1);
+    CHECK_EQ(pixel(save, 0, 0), 5u);
+    CHECK_EQ(pixel(save, 1, 0), 6u);
+
+    clip_blit(save, 0, 0, wrp, 50, 40, 2, 1);
+    CHECK_EQ(pixel(wrp, 50, 40), 5u);
+    CHECK_EQ(pixel(wrp, 51, 40), 6u);
+}
+
 void open_window_limit_gives_zero() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -6749,6 +6813,7 @@ int main() {
     windows_open_below_the_screen_bar();
     open_window_taglist_reads_wa_tags();
     open_window_on_unknown_screen_gives_zero();
+    clip_blit_uses_window_coordinates();
     open_window_null_newwindow_gives_zero_and_faults();
     open_window_alloc_failure_gives_zero_and_frees();
     open_window_limit_gives_zero();

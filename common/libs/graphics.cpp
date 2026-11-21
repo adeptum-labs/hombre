@@ -734,7 +734,9 @@ struct GraphicsNatives {
         const u32 layer = b.r32(src + ndk::rp_Layer);
         i32 x = word(m.cpu.d[0]);
         i32 y = word(m.cpu.d[1]);
-        if (layer != 0) {
+        // A layer over a bitmap of its own, as a window's is, starts at that
+        // bitmap's corner; any other sits at its place on the screen.
+        if (layer != 0 && b.r32(layer + ndk::ly_SuperBitMap) != bitmap) {
             x += static_cast<i16>(b.r16(layer + ndk::ly_MinX));
             y += static_cast<i16>(b.r16(layer + ndk::ly_MinY));
         }
