@@ -7642,6 +7642,67 @@ void border_images_carry_the_frame_lines_they_cover() {
     CHECK(all(1, 0, 22, 0, bar_block));
 }
 
+// An IntuiText is measured and printed in the font its ITextFont names:
+// hasklig 13, with cells of 7. Without one IntuiTextLength measures the
+// default font and PrintIText draws in the RastPort's.
+void intuitext_is_measured_and_printed_in_its_font() {
+    GfxRig r;
+    const u32 hasklig13 = font_address(r, 13);
+    const u32 baseline = r.get16(hasklig13 + tf_Baseline);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 it = kBuffer + 0x100;
+    r.str(kTitle, "Hello");
+    r.put8(it, 1);
+    r.put8(it + 1, 0);
+    r.put8(it + 2, JAM1);
+    r.put16(it + 4, 0);
+    r.put16(it + 6, 0);
+    r.put32(it + 8, kBuffer);
+    r.put32(it + 12, kTitle);
+    r.put32(it + 16, 0);
+    r.cpu().a[0] = it;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::IntuiTextLength), 35u);
+
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const auto inked = [&](i32 x0, i32 y0, i32 x1, i32 y1) {
+        u32 count = 0;
+        for (i32 y = y0; y <= y1; ++y) {
+            for (i32 x = x0; x <= x1; ++x) {
+                count += window_pixel(r, window, x, y) == 1 ? 1 : 0;
+            }
+        }
+        return count;
+    };
+    const auto print = [&](i32 left, i32 top) {
+        r.cpu().a[0] = r.get32(window + wd_RPort);
+        r.cpu().a[1] = it;
+        r.cpu().d[0] = static_cast<u32>(left);
+        r.cpu().d[1] = static_cast<u32>(top);
+        CHECK_EQ(r.call(Base::Intuition, intuition_lvo::PrintIText), ExitReason::Halt);
+    };
+    // The letters stand on the font's baseline, below topaz's eight rows.
+    print(10, 30);
+    CHECK(inked(10, 30 + static_cast<i32>(baseline), 44, 30 + static_cast<i32>(baseline)) != 0);
+    CHECK_EQ(inked(45, 30, 60, 42), 0u);
+    CHECK(baseline > 7);
+
+    // No font of its own: the RastPort's topaz, and the default font's
+    // width.
+    r.put32(it + 8, 0);
+    print(10, 60);
+    CHECK(inked(10, 60, 49, 67) != 0);
+    CHECK_EQ(inked(10, 68, 60, 72), 0u);
+    r.cpu().a[0] = it;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::IntuiTextLength), 40u);
+    const u32 size = put_font_prefs(r, kIPrefs, "hasklig.font", 13, 0);
+    set_iprefs(r, kIPrefs, size, 2);
+    r.cpu().a[0] = it;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::IntuiTextLength), 35u);
+}
+
 void intuitext_borders_and_blocking_requests() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -7955,6 +8016,7 @@ int main() {
     a_string_gadget_measures_its_own_font();
     a_string_gadget_is_edited_from_the_keyboard();
     a_long_int_gadget_takes_only_numbers_and_keeps_the_value();
+    intuitext_is_measured_and_printed_in_its_font();
     intuitext_borders_and_blocking_requests();
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();

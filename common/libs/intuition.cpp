@@ -1365,18 +1365,43 @@ struct IntuitionNatives {
     static constexpr u32 kItTopEdge = 6;
     static constexpr u32 kItChain = 64;
 
-    // IntuiTextLength: the width in pixels of the IntuiText at A0.
-    static void intui_text_length(void*, Machine& m) {
+    // The characters of an IntuiText's string, at most kItMaxChars.
+    static u32 read_itext(Bus& b, u32 it, u8* out) {
+        const u32 text = it != 0 ? b.r32(it + kItText) : 0;
+        const u32 chars = itext_chars(b, text);
+        for (u32 i = 0; i < chars; ++i) {
+            out[i] = static_cast<u8>(b.r8(text + i));
+        }
+        return b.ok() ? chars : 0;
+    }
+
+    // The font the IntuiText's ITextFont names when it is in memory, for
+    // the caller to close; 0 when it names none.
+    static u32 open_itext_font(Intuition& in, Bus& b, u32 it) {
+        const u32 attr = it != 0 ? b.r32(it + kItTextFont) : 0;
+        return attr != 0 && b.ok() ? in.graphics_->open_font(attr) : 0;
+    }
+
+    // IntuiTextLength: the width in pixels of the IntuiText at A0, in its
+    // own font or else, having no RastPort to ask, in the default font.
+    static void intui_text_length(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
         Bus b(m);
         const u32 it = m.cpu.a[0];
-        const u32 chars = it != 0 ? itext_chars(b, b.r32(it + kItText)) : 0;
+        u8 buffer[kItMaxChars];
+        const u32 chars = read_itext(b, it, buffer);
+        const u32 own = open_itext_font(in, b, it);
+        const u32 width = in.graphics_->text_width(
+            own != 0 ? own : in.graphics_->default_font(), buffer, chars);
+        in.graphics_->close_font(own);
         if (b.ok()) {
-            native::set_result(m, chars * 8);
+            native::set_result(m, width);
         }
     }
 
     // PrintIText(rp A0, itext A1, left D0, top D1): each IntuiText of the
-    // chain at its place from left, top, the top of its text at that line.
+    // chain at its place from left, top, the top of its text at that line,
+    // in its own font or else in the RastPort's.
     static void print_itext(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         Bus b(m);
@@ -1385,8 +1410,8 @@ struct IntuitionNatives {
         const i32 top = static_cast<i16>(m.cpu.d[1] & 0xFFFF);
         u32 it = m.cpu.a[1];
         for (u32 step = 0; rp != 0 && it != 0 && step < kItChain; ++step) {
-            const u32 text = b.r32(it + kItText);
-            const u32 chars = itext_chars(b, text);
+            u8 buffer[kItMaxChars];
+            const u32 chars = read_itext(b, it, buffer);
             const i32 x = left + static_cast<i16>(b.r16(it + kItLeftEdge));
             const i32 y = top + static_cast<i16>(b.r16(it + kItTopEdge));
             const u32 front = b.r8(it + kItFrontPen);
@@ -1397,13 +1422,12 @@ struct IntuitionNatives {
                 return;
             }
             if (chars != 0) {
-                u8 buffer[kItMaxChars];
-                for (u32 i = 0; i < chars; ++i) {
-                    buffer[i] = static_cast<u8>(b.r8(text + i));
-                }
+                const u32 own = open_itext_font(in, b, it);
+                const u32 font = own != 0 ? own : b.r32(rp + ndk::rp_Font);
                 in.graphics_->set_pens(rp, front, back, mode);
-                in.graphics_->move(rp, x, y + 6);
-                in.graphics_->text(rp, buffer, chars);
+                in.graphics_->move(rp, x, y + in.graphics_->font_metrics(font).baseline);
+                in.graphics_->plain_text_in(rp, font, buffer, chars);
+                in.graphics_->close_font(own);
             }
             it = next;
         }
