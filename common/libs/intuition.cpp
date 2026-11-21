@@ -5852,7 +5852,8 @@ bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
     for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
         const u32 gflags = b.r16(gadget + ndk::gg_Flags);
         const u32 activation = b.r16(gadget + ndk::gg_Activation);
-        const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        const u32 type = b.r16(gadget + ndk::gg_GadgetType);
+        const u32 gtype = type & ndk::GTYP_GTYPEMASK;
         const u32 next = b.r32(gadget + ndk::gg_NextGadget);
         if (!b.ok()) {
             return false;
@@ -5863,8 +5864,14 @@ bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
             gadget = next;
             continue;
         }
-        b.w16(gadget + ndk::gg_Flags, gflags | ndk::GFLG_SELECTED);
-        draw_bool_gadget(b, window, rec->rp, gadget);
+        // A gadget that toggles its own state takes it when let go; its
+        // release callback turns GFLG_SELECTED over.
+        const bool toggles = (type & ndk::GTYP_GADTOOLS) != 0 &&
+                             (activation & ndk::GACT_TOGGLESELECT) != 0;
+        if (!toggles) {
+            b.w16(gadget + ndk::gg_Flags, gflags | ndk::GFLG_SELECTED);
+            draw_bool_gadget(b, window, rec->rp, gadget);
+        }
         pressed_gadget_window_ = window;
         pressed_gadget_ = GadgetKind::Bool;
         pressed_bool_gadget_ = gadget;
@@ -5876,8 +5883,9 @@ bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
     return false;
 }
 
-// The left button let go of the boolean gadget it held: the gadget shows
-// unselected, and a release over it reports GADGETUP.
+// The left button let go of the boolean gadget it held: the gadget is
+// drawn as it now stands, a release over it reports GADGETUP, and one that
+// does not toggle its own state shows unselected.
 void Intuition::release_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
     const u32 gadget = pressed_bool_gadget_;
     pressed_bool_gadget_ = 0;
@@ -5888,19 +5896,23 @@ void Intuition::release_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
     const WindowView w = load_window(b, window);
     const u32 gflags = b.r16(gadget + ndk::gg_Flags);
     const u32 activation = b.r16(gadget + ndk::gg_Activation);
+    const u32 type = b.r16(gadget + ndk::gg_GadgetType);
     if (!w.ok || !b.ok()) {
         return;
     }
     const Rect box = resolve_gadget_box(b, w, gadget);
     const bool inside = window_at(x, y) == window && in_rect(box, x - w.left, y - w.top);
+    const bool toggles = (type & ndk::GTYP_GADTOOLS) != 0 &&
+                         (activation & ndk::GACT_TOGGLESELECT) != 0;
     // A gadtools gadget takes its new state before it is drawn again.
     u16 code = 0;
-    if (inside && (b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0 &&
-        gadget_release_ != nullptr) {
+    if (inside && (type & ndk::GTYP_GADTOOLS) != 0 && gadget_release_ != nullptr) {
         gadget_release_(gadget_renderer_ctx_, window, gadget, x - w.left - box.x0,
                         y - w.top - box.y0, code);
     }
-    b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
+    if (!toggles) {
+        b.w16(gadget + ndk::gg_Flags, gflags & ~ndk::GFLG_SELECTED);
+    }
     if (!gadtools_draws(b, window, rec->rp, gadget)) {
         if ((gflags & ndk::GFLG_GADGHIGHBITS) == ndk::GFLG_GADGHCOMP &&
             (gflags & ndk::GFLG_GADGIMAGE) == 0) {

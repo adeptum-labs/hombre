@@ -68,6 +68,7 @@ constexpr u32 ng_GadgetID = 16;
 constexpr u32 ng_Flags = 18;
 constexpr u32 ng_UserData = 26;
 constexpr u32 BUTTON_KIND = 1;
+constexpr u32 CHECKBOX_KIND = 2;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 TEXT_KIND = 13;
 constexpr u32 CYCLE_KIND = 7;
@@ -88,6 +89,8 @@ constexpr u32 GA_Disabled = 0x8003000E;
 constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTTX_CopyText = 0x8008000C;
 constexpr u32 GTNM_Number = 0x8008000D;
+constexpr u32 GTCB_Checked = 0x80080004;
+constexpr u32 GTCB_Scaled = 0x80080044;
 constexpr u32 GTTX_Border = 0x80080039;
 constexpr u32 kFillPen = 3;
 
@@ -861,7 +864,58 @@ void sliders_carry_levels_and_list_views_pick_rows() {
     gt_result(r, g, gadtools_lvo::FreeGadgets);
 }
 
+// A checkbox is its own 26 by 11 box unless scaled, turns over when let
+// go, and reports its state through GTCB_Checked.
+void checkboxes_toggle_and_report_their_state() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+
+    put_new_gadget(r, 10, 20, 60, 14, 0, 1, 0, 0);
+    const u32 checkbox = create_gadget(
+        r, g, CHECKBOX_KIND, context, r.tags(kTags, {{GTCB_Checked, 0}, {TAG_DONE, 0}}));
+    CHECK(checkbox != 0);
+    CHECK_EQ(r.get16(checkbox + gg_Width), 26u);
+    CHECK_EQ(r.get16(checkbox + gg_Height), 11u);
+    CHECK_EQ(r.get16(checkbox + gg_Flags) & GFLG_SELECTED, 0u);
+    CHECK_EQ(r.get16(checkbox + gg_Activation), GACT_RELVERIFY | GACT_TOGGLESELECT);
+
+    u16 code = 0;
+    CHECK(g.release(0, checkbox, 5, 5, code));
+    CHECK_EQ(code, 1u);
+    CHECK_EQ(r.get16(checkbox + gg_Flags) & GFLG_SELECTED, GFLG_SELECTED);
+    CHECK(g.release(0, checkbox, 5, 5, code));
+    CHECK_EQ(code, 0u);
+    CHECK_EQ(r.get16(checkbox + gg_Flags) & GFLG_SELECTED, 0u);
+
+    r.cpu().a[0] = checkbox;
+    r.cpu().a[1] = 0;
+    r.cpu().a[3] = r.tags(kTags, {{GTCB_Checked, 1}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_SetGadgetAttrsA), ExitReason::Halt);
+    CHECK_EQ(r.get16(checkbox + gg_Flags) & GFLG_SELECTED, GFLG_SELECTED);
+    r.cpu().a[0] = checkbox;
+    r.cpu().a[3] = r.tags(kTags, {{GTCB_Checked, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), 1u);
+
+    // GTCB_Scaled keeps the NewGadget's size.
+    put_new_gadget(r, 10, 40, 60, 14, 0, 2, 0, 0);
+    const u32 scaled = create_gadget(
+        r, g, CHECKBOX_KIND, checkbox, r.tags(kTags, {{GTCB_Scaled, 1}, {TAG_DONE, 0}}));
+    CHECK(scaled != 0);
+    CHECK_EQ(r.get16(scaled + gg_Width), 60u);
+    CHECK_EQ(r.get16(scaled + gg_Height), 14u);
+
+    CHECK(!logged("gadtools: gadget kind 2 not handled"));
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+}
+
 int main() {
+    checkboxes_toggle_and_report_their_state();
     sliders_carry_levels_and_list_views_pick_rows();
     strings_keep_a_buffer_and_scrollers_their_place();
     cycles_step_through_their_labels_and_palettes_pick_colours();

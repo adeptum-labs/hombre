@@ -33,11 +33,11 @@
 //
 // It hands out visual info for a screen, makes the context gadget a
 // gadget list starts with and the gadgets after it, filters and replies
-// IntuiMessages, refreshes windows and draws bevel boxes. Buttons, text
-// and number displays work; a gadget of another kind shows its frame and
-// does nothing, and the first of each such kind logs "gadtools: gadget
-// kind <n> not handled". Every other vector logs "gadtools: unimplemented
-// LVO -<n>" and ends the run with Unimplemented.
+// IntuiMessages, refreshes windows and draws bevel boxes. Buttons,
+// checkboxes, text and number displays work; a gadget of another kind
+// shows its frame and does nothing, and the first of each such kind logs
+// "gadtools: gadget kind <n> not handled". Every other vector logs
+// "gadtools: unimplemented LVO -<n>" and ends the run with Unimplemented.
 
 namespace hombre {
 
@@ -110,6 +110,7 @@ private:
 
     void draw_cycle(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                     i32 bottom, i32 baseline, bool selected);
+    void draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom, bool selected);
     void draw_palette(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                       i32 bottom);
     void draw_list(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,

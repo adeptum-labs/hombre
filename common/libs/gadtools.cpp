@@ -75,10 +75,12 @@ constexpr u32 kGadgetBytes = gt_PropInfo + ndk::PropInfo_SIZEOF + 2;
 constexpr u32 kMaxCycleLabels = 256;
 constexpr u32 kMaxPaletteColors = 256;
 constexpr u16 kOptBorder = 0x1;
+constexpr u16 kOptScaled = 0x4;
 
 // Gadget kinds (libraries/gadtools.h).
 constexpr u32 GENERIC_KIND = 0;
 constexpr u32 BUTTON_KIND = 1;
+constexpr u32 CHECKBOX_KIND = 2;
 constexpr u32 LISTVIEW_KIND = 4;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 CYCLE_KIND = 7;
@@ -111,6 +113,8 @@ constexpr u32 GA_Disabled = 0x8003000E;
 constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTTX_CopyText = 0x8008000C;
 constexpr u32 GTNM_Number = 0x8008000D;
+constexpr u32 GTCB_Checked = 0x80080004;
+constexpr u32 GTCB_Scaled = 0x80080044;
 constexpr u32 GTCY_Labels = 0x8008000E;
 constexpr u32 GTCY_Active = 0x8008000F;
 constexpr u32 GTPA_Depth = 0x80080010;
@@ -164,6 +168,8 @@ constexpr u32 kTextPen = 1;
 constexpr u32 kGlyphWidth = 8;   // the topaz font
 constexpr u32 kGlyphHeight = 8;
 constexpr u32 kGlyphBaseline = 6;
+constexpr u32 kCheckBoxWidth = 26;
+constexpr u32 kCheckBoxHeight = 11;
 
 // The 3.1 default pens of a bevel box: SHINEPEN and SHADOWPEN.
 constexpr u32 kShinePen = 2;
@@ -420,6 +426,18 @@ struct GadToolsNatives {
             case GTTX_CopyText:
                 copy = creating && data != 0;
                 break;
+            case GTCB_Checked: {
+                const u32 flags = b.r16(gadget + gg_Flags);
+                b.w16(gadget + gg_Flags,
+                      data != 0 ? flags | ndk::GFLG_SELECTED : flags & ~ndk::GFLG_SELECTED);
+                break;
+            }
+            case GTCB_Scaled:
+                if (creating) {
+                    b.w16(gadget + gt_Options,
+                          data != 0 ? options | kOptScaled : options & ~kOptScaled);
+                }
+                break;
             case GTNM_Number:
             case GTCY_Active:
             case GTPA_Color:
@@ -591,9 +609,14 @@ struct GadToolsNatives {
         b.w16(gadget + ndk::gg_Width, b.r16(ng + ng_Width));
         b.w16(gadget + ndk::gg_Height, b.r16(ng + ng_Height));
         b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
-        const bool clicks = kind == BUTTON_KIND || kind == CYCLE_KIND || kind == PALETTE_KIND ||
+        const bool clicks = kind == BUTTON_KIND || kind == CHECKBOX_KIND ||
+                            kind == CYCLE_KIND || kind == PALETTE_KIND ||
                             kind == STRING_KIND || kind == LISTVIEW_KIND;
-        b.w16(gadget + ndk::gg_Activation, clicks ? ndk::GACT_RELVERIFY : 0);
+        // A checkbox turns its own state over when it is let go.
+        b.w16(gadget + ndk::gg_Activation,
+              kind == CHECKBOX_KIND
+                  ? ndk::GACT_RELVERIFY | ndk::GACT_TOGGLESELECT
+                  : clicks ? ndk::GACT_RELVERIFY : 0);
         if (kind == PALETTE_KIND) {
             // One plane and colour 1, unless the tags say otherwise.
             b.w16(gadget + gt_Count, 2);
@@ -630,6 +653,12 @@ struct GadToolsNatives {
         b.w16(gadget + gt_Place, (place & 0x1F) != 0 ? place & 0x1F : default_place);
         b.w32(gadget + gt_Label, b.r32(ng + ng_GadgetText));
         apply_tags(g, b, gadget, m.cpu.a[2], true);
+        // A checkbox is its own size unless GTCB_Scaled takes the
+        // NewGadget's.
+        if (kind == CHECKBOX_KIND && (b.r16(gadget + gt_Options) & kOptScaled) == 0) {
+            b.w16(gadget + ndk::gg_Width, kCheckBoxWidth);
+            b.w16(gadget + ndk::gg_Height, kCheckBoxHeight);
+        }
         if (kind == LISTVIEW_KIND && (b.r16(gadget + gt_Options) & kOptReadOnly) != 0) {
             b.w16(gadget + ndk::gg_Activation, 0);
         }
@@ -641,8 +670,9 @@ struct GadToolsNatives {
         if (kind == STRING_KIND && b.r32(gadget + gt_Text) == 0) {
             set_text(g, b, gadget, 0, true);
         }
-        if (kind != GENERIC_KIND && kind != BUTTON_KIND && kind != TEXT_KIND &&
-            kind != NUMBER_KIND && kind != CYCLE_KIND && kind != PALETTE_KIND &&
+        if (kind != GENERIC_KIND && kind != BUTTON_KIND && kind != CHECKBOX_KIND &&
+            kind != TEXT_KIND && kind != NUMBER_KIND && kind != CYCLE_KIND &&
+            kind != PALETTE_KIND &&
             kind != SCROLLER_KIND && kind != STRING_KIND && kind != SLIDER_KIND &&
             kind != LISTVIEW_KIND && kind < kKinds &&
             !g.unhandled_kinds_[kind]) {
@@ -703,6 +733,9 @@ struct GadToolsNatives {
                 ++answered;
             } else if (tag == GTCY_Labels || tag == GTST_String) {
                 b.w32(data, b.r32(gadget + gt_Text));
+                ++answered;
+            } else if (tag == GTCB_Checked) {
+                b.w32(data, (b.r16(gadget + gg_Flags) & ndk::GFLG_SELECTED) != 0 ? 1 : 0);
                 ++answered;
             } else if (tag == GTSC_Top || tag == GTSL_Level || tag == GTLV_Selected) {
                 b.w32(data, b.r32(gadget + gt_Number));
@@ -1346,10 +1379,43 @@ void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 r
     }
 }
 
+// A checkbox: a raised box filled with the background, and a check mark
+// in the text pen when selected.
+void GadTools::draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom,
+                             bool selected) {
+    Graphics& gfx = *graphics_;
+    gfx.set_pens(rp, 0, 0, ndk::JAM1);
+    if (right - left > 2 && bottom - top > 2) {
+        gfx.rect_fill(rp, left + 1, top + 1, right - 1, bottom - 1);
+    }
+    gfx.set_pens(rp, kShinePen, 0, ndk::JAM1);
+    gfx.move(rp, left, bottom);
+    gfx.draw_line(rp, left, top);
+    gfx.draw_line(rp, right, top);
+    gfx.set_pens(rp, kShadowPen, 0, ndk::JAM1);
+    gfx.move(rp, right, top + 1);
+    gfx.draw_line(rp, right, bottom);
+    gfx.draw_line(rp, left + 1, bottom);
+    if (!selected) {
+        return;
+    }
+    const i32 x0 = left + 1;
+    const i32 y0 = top + 1;
+    const i32 x1 = right - 1;
+    const i32 y1 = bottom - 1;
+    if (x1 - x0 + 1 < 6 || y1 - y0 + 1 < 4) {
+        return;
+    }
+    gfx.set_pens(rp, kTextPen, 0, ndk::JAM1);
+    gfx.move(rp, x0 + 1, (y0 + y1) / 2);
+    gfx.draw_line(rp, (x0 + x1) / 2 - 1, y1 - 1);
+    gfx.draw_line(rp, x1 - 1, y0 + 1);
+}
+
 // A click let go over the gadget at x, y of its box: a cycle gadget moves
-// on to its next choice, a palette takes the colour under the pointer.
-// The code its IDCMP_GADGETUP carries; false for a kind that is no
-// gadtools gadget.
+// on to its next choice, a palette takes the colour under the pointer, a
+// checkbox turns over. The code its IDCMP_GADGETUP carries; false for a
+// kind that is no gadtools gadget.
 // A scroller Intuition moved: its top from the knob's place, which its
 // messages carry.
 u16 GadTools::prop_code(u32 gadget) {
@@ -1386,6 +1452,17 @@ bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
     }
     Bus b(*machine_);
     const u32 kind = b.r16(gadget + gt_Kind);
+    if (kind == CHECKBOX_KIND) {
+        const u32 flags = b.r16(gadget + gg_Flags);
+        const bool selected = (flags & ndk::GFLG_SELECTED) == 0;
+        b.w16(gadget + gg_Flags,
+              selected ? flags | ndk::GFLG_SELECTED : flags & ~ndk::GFLG_SELECTED);
+        code = selected ? 1 : 0;
+        if (window != 0) {
+            render(window, b.r32(window + ndk::wd_RPort), gadget);
+        }
+        return b.ok();
+    }
     if (kind == CYCLE_KIND) {
         const u32 count = b.r16(gadget + gt_Count);
         const u32 active = b.r32(gadget + gt_Number);
@@ -1467,6 +1544,8 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         if (intuition_ != nullptr && window != 0) {
             intuition_->refresh_glist(gadget, window, 1);
         }
+    } else if (kind == CHECKBOX_KIND) {
+        draw_checkbox(rp, left, top, right, bottom, selected);
     } else if (framed && width > 2 && height > 2) {
         gfx.rect_fill(rp, left + 1, top + 1, right - 1, bottom - 1);
         gfx.set_pens(rp, recessed ? kShadowPen : kShinePen, 0, ndk::JAM1);
