@@ -175,17 +175,20 @@ if [[ -n $keys || -n $mouse || $no_startup == true ]]; then
     monitor_args=(-monitor "unix:$monitor_socket,server,nowait")
 fi
 : > "$serial_log"
-cp "$ovmf_dir/OVMF_VARS_4M.fd" "$build_dir/OVMF_VARS.fd"
+# Firmware variables of this boot's own, and the boot image as a snapshot,
+# so that make run can boot beside it.
+ovmf_vars=$build_dir/OVMF_VARS.$$.fd
+cp "$ovmf_dir/OVMF_VARS_4M.fd" "$ovmf_vars"
 
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
 # error while the firmware is still in 32-bit mode.
 qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
     "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
-    -drive if=pflash,format=raw,file="$build_dir/OVMF_VARS.fd" \
-    -drive format=raw,file="$image" "${disk_args[@]}" "${usb_args[@]}" "${monitor_args[@]}" &
+    -drive if=pflash,format=raw,file="$ovmf_vars" \
+    -drive format=raw,snapshot=on,file="$image" "${disk_args[@]}" "${usb_args[@]}" "${monitor_args[@]}" &
 qemu_pid=$!
-trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; rm -f "$monitor_socket"' EXIT
+trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; rm -f "$monitor_socket" "$ovmf_vars"' EXIT
 
 # Sends one HMP command, then waits 0.25 s. Every command goes over one
 # connection to the monitor, opened by the first: a connection per command

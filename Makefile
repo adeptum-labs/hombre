@@ -164,8 +164,10 @@ $(foreach n,$(FAULT_TESTS),$(eval $(call FAULT_VARIANT,$(n))))
 
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
 # error while the firmware is still in 32-bit mode.
+# The boot image opens as a snapshot and the firmware variables are run's
+# own, so a boot check can run beside it.
 run: image disk-image
-	cp $(OVMF)/OVMF_VARS_4M.fd $(BUILD)/OVMF_VARS.fd
+	cp $(OVMF)/OVMF_VARS_4M.fd $(BUILD)/OVMF_VARS-run.fd
 	extra=; \
 	for n in 1 2 3; do \
 	    if [ -f $(BUILD)/disk$$n.img ]; then \
@@ -176,8 +178,8 @@ run: image disk-image
 	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M -no-reboot \
 	    -serial stdio \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF)/OVMF_CODE_4M.fd \
-	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS.fd \
-	    -drive format=raw,file=$(IMAGE) \
+	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS-run.fd \
+	    -drive format=raw,snapshot=on,file=$(IMAGE) \
 	    -drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG) \
 	    -device virtio-blk-pci,disable-legacy=on,drive=disk0,addr=0x10 \
 	    $$extra \
