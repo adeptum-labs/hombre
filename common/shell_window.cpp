@@ -37,12 +37,15 @@ namespace {
 
 constexpr char kTitle[] = "HombreShell";
 constexpr u32 kMaxWrite = 65536;
-constexpr u32 kCell = 8;
-constexpr u32 kBaseline = 6;
+constexpr u32 kFallbackCellWidth = 8;
+constexpr u32 kFallbackCellHeight = 8;
+constexpr u32 kFallbackBaseline = 6;
+constexpr u32 kTabColumns = 8;
+constexpr u32 kMinCellHeight = 6;
 constexpr u32 kMinWidth = 160;
 constexpr u32 kMinHeight = 50;
 constexpr u32 kMaxSize = 0xFFFF;
-constexpr u32 kMaxRows = 4096 / kCell;
+constexpr u32 kMaxRows = 4096 / kMinCellHeight;
 constexpr i32 kScrollWidth = 8;
 constexpr u32 kPropFlags = ndk::AUTOKNOB | ndk::FREEVERT | ndk::PROPNEWLOOK;
 constexpr u32 kGadgetFlags = ndk::GFLG_RELRIGHT | ndk::GFLG_RELHEIGHT;
@@ -165,14 +168,21 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     graphics_ = &gfx;
     window_ = window;
     rp_ = rp;
+    // The window keeps the font it opened with: a later change of the
+    // system default only lays out the windows opened after it.
+    font_ = gfx.default_font();
+    const Graphics::FontMetrics metrics = gfx.font_metrics(font_);
+    cell_w_ = metrics.x_size > 0 ? static_cast<u32>(metrics.x_size) : kFallbackCellWidth;
+    cell_h_ = metrics.y_size > 0 ? static_cast<u32>(metrics.y_size) : kFallbackCellHeight;
+    baseline_ = metrics.baseline > 0 ? static_cast<u32>(metrics.baseline) : kFallbackBaseline;
     gadget_ = gadget;
     prop_info_ = prop;
     origin_x_ = border_left;
     origin_y_ = border_top;
     inner_w_ = width;
     inner_h_ = height;
-    columns_ = static_cast<u32>(width) / kCell;
-    rows_ = static_cast<u32>(height) / kCell;
+    columns_ = static_cast<u32>(width) / cell_w_;
+    rows_ = static_cast<u32>(height) / cell_h_;
     col_ = 0;
     row_ = 0;
     view_ = 0;
@@ -530,8 +540,8 @@ void ShellWindow::on_size(void* ctx, u32 window) {
     self.origin_y_ = border_top;
     self.inner_w_ = width > 0 ? width : 0;
     self.inner_h_ = height > 0 ? height : 0;
-    self.columns_ = static_cast<u32>(self.inner_w_) / kCell;
-    self.rows_ = static_cast<u32>(self.inner_h_) / kCell;
+    self.columns_ = static_cast<u32>(self.inner_w_) / self.cell_w_;
+    self.rows_ = static_cast<u32>(self.inner_h_) / self.cell_h_;
 
     if (!had_top || self.columns_ == 0 || self.rows_ == 0) {
         self.view_ = 0;
@@ -624,7 +634,8 @@ void ShellWindow::redraw_viewport() {
     }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
     const u32 max_rows = rows_ < kMaxRows ? rows_ : kMaxRows;
-    // Static: 8 KiB is too much for the kernel stack, and there is one shell.
+    // Static: the row list is too much for the kernel stack, and there is
+    // one shell.
     static ShellText::Row visible[kMaxRows];
     u32 filled = 0;
     if (columns_ != 0 && max_rows != 0) {
@@ -639,8 +650,8 @@ void ShellWindow::redraw_viewport() {
         if (visible[r].length != 0) {
             graphics_->move(
                 rp_, origin_x_,
-                origin_y_ + static_cast<i32>(r * kCell + kBaseline));
-            graphics_->text(rp_, visible[r].text, visible[r].length);
+                origin_y_ + static_cast<i32>(r * cell_h_ + baseline_));
+            graphics_->text_in(rp_, font_, visible[r].text, visible[r].length);
         }
     }
     if (view_ == 0) {
@@ -696,7 +707,7 @@ void ShellWindow::put_byte(u8 c, bool draw) {
         return;
     }
     if (c == '\t') {
-        const u32 next = (col_ / kCell + 1) * kCell;
+        const u32 next = (col_ / kTabColumns + 1) * kTabColumns;
         const u32 end = next < columns_ ? next : columns_;
         for (u32 i = col_; i < end; ++i) {
             text_.put(' ');
@@ -736,14 +747,15 @@ void ShellWindow::advance_row() {
         return;
     }
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
-    graphics_->scroll(rp_, 0, static_cast<i32>(kCell), origin_x_, origin_y_,
+    graphics_->scroll(rp_, 0, static_cast<i32>(cell_h_), origin_x_, origin_y_,
                       origin_x_ + inner_w_ - 1, origin_y_ + inner_h_ - 1);
 }
 
 void ShellWindow::draw_cell(u8 c) {
-    graphics_->move(rp_, origin_x_ + static_cast<i32>(col_ * kCell),
-                    origin_y_ + static_cast<i32>(row_ * kCell) + static_cast<i32>(kBaseline));
-    graphics_->text(rp_, &c, 1);
+    graphics_->move(rp_, origin_x_ + static_cast<i32>(col_ * cell_w_),
+                    origin_y_ + static_cast<i32>(row_ * cell_h_) +
+                        static_cast<i32>(baseline_));
+    graphics_->text_in(rp_, font_, &c, 1);
 }
 
 void ShellWindow::mark_line_start() {
@@ -790,9 +802,10 @@ bool ShellWindow::cursor_cell(u32& row, u32& column) const {
 }
 
 void ShellWindow::draw_cell_at(u32 row, u32 column, u8 c) {
-    graphics_->move(rp_, origin_x_ + static_cast<i32>(column * kCell),
-                    origin_y_ + static_cast<i32>(row * kCell) + static_cast<i32>(kBaseline));
-    graphics_->text(rp_, &c, 1);
+    graphics_->move(rp_, origin_x_ + static_cast<i32>(column * cell_w_),
+                    origin_y_ + static_cast<i32>(row * cell_h_) +
+                        static_cast<i32>(baseline_));
+    graphics_->text_in(rp_, font_, &c, 1);
 }
 
 // Draws the cell under the cursor as plain text again.
@@ -829,10 +842,10 @@ void ShellWindow::draw_cursor() {
         return;
     }
     graphics_->set_pens(rp_, 1, 1, ndk::JAM2);
-    const i32 x = origin_x_ + static_cast<i32>(col_ * kCell);
-    const i32 y = origin_y_ + static_cast<i32>(row_ * kCell);
-    graphics_->rect_fill(rp_, x, y, x + static_cast<i32>(kCell) - 1,
-                         y + static_cast<i32>(kCell) - 1);
+    const i32 x = origin_x_ + static_cast<i32>(col_ * cell_w_);
+    const i32 y = origin_y_ + static_cast<i32>(row_ * cell_h_);
+    graphics_->rect_fill(rp_, x, y, x + static_cast<i32>(cell_w_) - 1,
+                         y + static_cast<i32>(cell_h_) - 1);
     graphics_->set_pens(rp_, 1, 0, ndk::JAM2);
 }
 

@@ -124,6 +124,10 @@ private:
     Graphics* graphics_ = nullptr;
     u32 window_ = 0;
     u32 rp_ = 0;
+    u32 font_ = 0;
+    u32 cell_w_ = 8;
+    u32 cell_h_ = 8;
+    u32 baseline_ = 6;
     u32 gadget_ = 0;
     u32 prop_info_ = 0;
     i32 origin_x_ = 0;

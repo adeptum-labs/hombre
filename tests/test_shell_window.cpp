@@ -70,6 +70,19 @@ bool open_shell(GfxRig& r, ShellWindow& shell) {
     return shell.open(r.machine, r.exec, r.graphics, r.intuition);
 }
 
+// The TextAttr naming hasklig 13, opened and made the system default font
+// before windows lay out their cells.
+u32 use_hasklig_13(GfxRig& r) {
+    const u32 attr = kData + 0x800;
+    r.put32(attr + ta_Name, r.str(kData + 0xA00, "hasklig.font"));
+    r.put16(attr + ta_YSize, 13);
+    r.put8(attr + ta_Style, 0);
+    r.put8(attr + ta_Flags, 0);
+    const u32 font = r.graphics.open_font(attr);
+    r.graphics.set_default_font(font);
+    return font;
+}
+
 u32 shell_window(GfxRig& r, u32 screen) { return r.get32(screen + sc_FirstWindow); }
 
 u32 layer_of(GfxRig& r, u32 window) { return r.get32(window + wd_WLayer); }
@@ -84,13 +97,13 @@ i32 inner_y(GfxRig& r, u32 window) {
            static_cast<i32>(r.get8(window + wd_BorderTop));
 }
 
-u32 columns(GfxRig& r, u32 window) {
+u32 columns(GfxRig& r, u32 window, u32 cell = 8) {
     const u32 layer = layer_of(r, window);
     const i32 min = static_cast<i16>(r.get16(layer + ly_MinX));
     const i32 max = static_cast<i16>(r.get16(layer + ly_MaxX));
     const i32 borders = static_cast<i32>(r.get8(window + wd_BorderLeft)) +
                         static_cast<i32>(r.get8(window + wd_BorderRight));
-    return static_cast<u32>(max - min + 1 - borders) / 8;
+    return static_cast<u32>(max - min + 1 - borders) / cell;
 }
 
 u32 rows(GfxRig& r, u32 window) {
@@ -162,12 +175,33 @@ bool cell_is_inverse(GfxRig& r, const raster::Bitmap& bm, i32 ix, i32 iy, u32 co
     return true;
 }
 
-bool cell_all(GfxRig& r, const raster::Bitmap& bm, i32 ix, i32 iy, u32 column, u32 row, u32 pen) {
-    for (u32 y = 0; y < 8; ++y) {
-        for (u32 x = 0; x < 8; ++x) {
-            const i32 px = ix + static_cast<i32>(column) * 8 + static_cast<i32>(x);
-            const i32 py = iy + static_cast<i32>(row) * 8 + static_cast<i32>(y);
+bool cell_all(GfxRig& r, const raster::Bitmap& bm, i32 ix, i32 iy, u32 column, u32 row, u32 pen,
+              u32 cell_w = 8, u32 cell_h = 8) {
+    for (u32 y = 0; y < cell_h; ++y) {
+        for (u32 x = 0; x < cell_w; ++x) {
+            const i32 px = ix + static_cast<i32>(column * cell_w + x);
+            const i32 py = iy + static_cast<i32>(row * cell_h + y);
             if (pixel(r, bm, px, py) != pen) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+// Whether the glyph of ch fills the cell at x, y as the font's own bitmap
+// has it, the cell being the font's x_size by y_size with its top row at y.
+bool rom_cell_is(GfxRig& r, const raster::Bitmap& bm, u32 font, i32 x, i32 y, char ch) {
+    const u32 width = r.get16(font + tf_XSize);
+    const u32 height = r.get16(font + tf_YSize);
+    const u32 lo = r.get8(font + tf_LoChar);
+    const u32 data = r.get32(font + tf_CharData);
+    const u32 modulo = r.get16(font + tf_Modulo);
+    for (u32 row = 0; row < height; ++row) {
+        for (u32 col = 0; col < width; ++col) {
+            const u32 bit = (static_cast<u8>(ch) - lo) * width + col;
+            const u32 set = (r.get8(data + row * modulo + bit / 8) >> (7 - bit % 8)) & 1u;
+            if (pixel(r, bm, x + static_cast<i32>(col), y + static_cast<i32>(row)) != set) {
                 return false;
             }
         }
@@ -210,6 +244,52 @@ void open_without_a_screen_returns_false() {
     CHECK(!shell.open(r.machine, r.exec, r.graphics, r.intuition));
     CHECK(!shell.is_open());
     CHECK_EQ(r.display.front_screen, 0u);
+}
+
+void hasklig_13_default_font_lays_out_its_cells() {
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    const u32 font = use_hasklig_13(r);
+    CHECK(font != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell_window(r, screen);
+    const i32 ix = inner_x(r, window);
+    const i32 iy = inner_y(r, window);
+    const raster::Bitmap bm = screen_bitmap(r, screen);
+    const u32 cell_w = r.get16(font + tf_XSize);
+    const u32 cell_h = r.get16(font + tf_YSize);
+    CHECK_EQ(cell_w, 7u);
+    CHECK_EQ(cell_h, 13u);
+
+    // On the 640x400 test screen the window has 624 px inside its left
+    // and right borders and 368 between its top and bottom ones.
+    const u32 cells = columns(r, window, cell_w);
+    CHECK(cells < 200);
+    CHECK_EQ(cells, 624u / cell_w);
+    CHECK_EQ(shell.rows(), 368u / cell_h);
+
+    // A line of exactly the column count wraps; its next character lands
+    // one cell height down, on the cell's top row.
+    u8 text[200];
+    for (u32 i = 0; i < cells; ++i) {
+        text[i] = 'A';
+    }
+    text[cells] = 'B';
+    shell.write(text, cells + 1);
+    CHECK(rom_cell_is(r, bm, font, ix, iy, 'A'));
+    CHECK(rom_cell_is(r, bm, font, ix, iy + static_cast<i32>(cell_h), 'B'));
+
+    // echo draws the byte and the block cursor one cell after it.
+    shell.echo('C');
+    CHECK(rom_cell_is(r, bm, font, ix + static_cast<i32>(cell_w),
+                      iy + static_cast<i32>(cell_h), 'C'));
+    CHECK(cell_all(r, bm, ix, iy, 2, 1, 1, cell_w, cell_h));
+    CHECK_EQ(pixel(r, bm, ix + static_cast<i32>(3 * cell_w),
+                   iy + static_cast<i32>(cell_h)), 0u);
+    CHECK_EQ(pixel(r, bm, ix + static_cast<i32>(2 * cell_w),
+                   iy + static_cast<i32>(2 * cell_h)), 0u);
 }
 
 void text_lands_in_cell_0_0_of_the_inner_area() {
@@ -1381,6 +1461,7 @@ int main() {
     cursor_back_crosses_a_wrapped_row();
     open_gives_a_window_on_the_front_screen();
     open_without_a_screen_returns_false();
+    hasklig_13_default_font_lays_out_its_cells();
     shell_opens_on_the_default_screen_not_the_front_one();
     text_lands_in_cell_0_0_of_the_inner_area();
     newline_cr_and_tab_move_the_cursor();
