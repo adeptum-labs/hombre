@@ -115,6 +115,12 @@ constexpr i32 kVolumeTop = 16;
 constexpr i32 kLabelBaseline = 9;  // from the bottom of the image to the label's
 constexpr u32 kLabelWidth = 8;     // the topaz font's character width
 constexpr u32 kLabelRows = 8;
+// The raised frame round an icon's image, as on 3.1: how far its lines sit
+// out from the image on either side and above and below it.
+constexpr i32 kFrameOutX = 3;
+constexpr i32 kFrameOutY = 2;
+constexpr u32 kFrameShinePen = 2;
+constexpr u32 kFrameShadowPen = 1;
 constexpr i32 kIconGapX = 16;
 constexpr i32 kIconGapY = 12;
 constexpr i32 kCellGapX = 16;
@@ -1215,6 +1221,20 @@ void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, boo
     const i32 left = origin_x + icon.left;
     const i32 top = origin_y + icon.top;
     if (art.render != 0) {
+        // The frame: light along the top and left and dark along the bottom
+        // and right, the other way round while the icon is selected.
+        const i32 x0 = left + art.left - kFrameOutX;
+        const i32 y0 = top + art.top - kFrameOutY;
+        const i32 x1 = left + art.left + art.width - 1 + kFrameOutX;
+        const i32 y1 = top + art.top + art.height - 1 + kFrameOutY;
+        const u32 light = selected ? kFrameShadowPen : kFrameShinePen;
+        const u32 dark = selected ? kFrameShinePen : kFrameShadowPen;
+        graphics_->set_pens(drawer.rp, light, 0, ndk::JAM1);
+        graphics_->rect_fill(drawer.rp, x0, y0, x1 - 1, y0);
+        graphics_->rect_fill(drawer.rp, x0, y0, x0, y1 - 1);
+        graphics_->set_pens(drawer.rp, dark, 0, ndk::JAM1);
+        graphics_->rect_fill(drawer.rp, x0 + 1, y1, x1, y1);
+        graphics_->rect_fill(drawer.rp, x1, y0 + 1, x1, y1);
         if (selected && art.select != 0) {
             intuition_->draw_image(drawer.rp, art.select, left, top);
         } else if (selected) {
