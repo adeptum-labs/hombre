@@ -276,6 +276,21 @@ u32 put_pen_prefs(GfxRig& r, u32 kind, u32 bar_block) {
     return 8 + 13 * 2;
 }
 
+// What the Workbench hooks of CloseWorkBench and OpenWorkBench did.
+struct WorkbenchHookState {
+    u32 closes = 0;
+    u32 opens = 0;
+};
+
+bool close_workbench_hook(void* ctx) {
+    ++static_cast<WorkbenchHookState*>(ctx)->closes;
+    return true;
+}
+
+void open_workbench_hook(void* ctx) {
+    ++static_cast<WorkbenchHookState*>(ctx)->opens;
+}
+
 u32 screen_pixel(GfxRig& r, u32 screen, i32 x, i32 y) {
     r.cpu().a[1] = screen + sc_RastPort;
     r.cpu().d[0] = static_cast<u32>(x);
@@ -5157,6 +5172,57 @@ void set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info() {
     CHECK_EQ(r.get16(pens + 10 * 2), 7u);
 }
 
+void close_and_open_workbench_follow_the_windows_and_the_pens() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+
+    // A window that is not the Workbench's keeps CloseWorkBench from
+    // resetting the screen.
+    put_new_window(r, kNewWindow, 80, 60, 200, 100, 0, 0, screen, CUSTOMSCREEN);
+    const u32 plain = open_win(r, kNewWindow);
+    CHECK(plain != 0);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseWorkBench), 0u);
+    r.cpu().a[0] = plain;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+
+    put_new_window(r, kNewWindow, 80, 60, 200, 100, WFLG_WBENCHWINDOW, 0, screen,
+                   CUSTOMSCREEN);
+    const u32 workbench = open_win(r, kNewWindow);
+    CHECK(workbench != 0);
+    CHECK_EQ(r.get32(workbench + wd_Flags) & WFLG_WBENCHWINDOW, WFLG_WBENCHWINDOW);
+
+    WorkbenchHookState hooks;
+    r.intuition.set_workbench_hooks(
+        Intuition::WorkbenchHooks{close_workbench_hook, open_workbench_hook, &hooks});
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseWorkBench), 1u);
+    CHECK_EQ(hooks.closes, 1u);
+    CHECK(logged("intuition: Workbench closed"));
+
+    const u32 size = put_pen_prefs(r, 1, 5);
+    set_iprefs(r, kIPrefs, size, 9);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::OpenWorkBench), screen);
+    CHECK_EQ(hooks.opens, 1u);
+    CHECK(logged("intuition: Workbench opened"));
+
+    r.cpu().a[0] = screen;
+    const u32 info = r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo);
+    CHECK(info != 0);
+    const u32 pens = r.get32(info + dri_Pens);
+    CHECK_EQ(r.get16(pens + 10 * 2), 5u);
+
+    // A second OpenWorkBench without a close resets the screen but opens
+    // no Workbench windows.
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::OpenWorkBench), screen);
+    CHECK_EQ(hooks.opens, 1u);
+}
+
 void chrome_palette_follows_the_default_screen_pens() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
@@ -6805,6 +6871,7 @@ int main() {
     get_screen_draw_info_has_the_default_pens_and_topaz();
     set_iprefs_type8_writes_the_palette_into_the_default_screen();
     set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info();
+    close_and_open_workbench_follow_the_windows_and_the_pens();
     chrome_palette_follows_the_default_screen_pens();
     menu_strip_vectors_write_the_window_field();
     item_address_follows_the_menu_numbers();

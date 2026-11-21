@@ -325,6 +325,7 @@ constexpr u32 WFLG_REPORTMOUSE = 0x200;
 constexpr u32 WFLG_BORDERLESS = 0x800;
 constexpr u32 WFLG_ACTIVATE = 0x1000;
 constexpr u32 WFLG_RMBTRAP = 0x10000;
+constexpr u32 WFLG_WBENCHWINDOW = 0x02000000;
 
 // Gadget flags, activation, types and PropInfo constants
 constexpr u32 GFLG_RELBOTTOM = 0x8;

@@ -2037,6 +2037,45 @@ void the_backdrop_shows_a_wbpattern_picture() {
     CHECK_EQ(r.window_pixel(root.window, root.inner_left + 36, root.inner_top + 301), 2u);
 }
 
+void a_reset_closes_and_reopens_the_windows() {
+    Rig r;
+    r.workbench.open_desktop();
+    CHECK(r.workbench.window(0).used);
+    CHECK_EQ(r.get32(r.workbench.window(0).window + wd_Flags) & WFLG_WBENCHWINDOW,
+             WFLG_WBENCHWINDOW);
+
+    const u32 volume = r.find_icon("HombreTest");
+    CHECK(volume != Workbench::kNoIcon);
+    r.workbench.open_icon(0, volume);
+    const u32 drawer = r.find_window("HombreTest:");
+    CHECK(drawer != Workbench::kMaxWindows);
+    const u32 window = r.workbench.window(drawer).window;
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_WBENCHWINDOW, WFLG_WBENCHWINDOW);
+    const u32 left = r.get16(window + wd_LeftEdge);
+    const u32 top = r.get16(window + wd_TopEdge);
+    const u32 width = r.get16(window + wd_Width);
+    const u32 height = r.get16(window + wd_Height);
+
+    CHECK(r.workbench.close_for_reset());
+    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
+        CHECK(!r.workbench.window(i).used);
+    }
+    CHECK_EQ(r.find_window("HombreTest:"), Workbench::kMaxWindows);
+
+    r.workbench.open_after_reset();
+    CHECK(r.workbench.window(0).used);
+    CHECK_EQ(r.get32(r.workbench.window(0).window + wd_Flags) & WFLG_WBENCHWINDOW,
+             WFLG_WBENCHWINDOW);
+    const u32 reopened = r.find_window("HombreTest:");
+    CHECK(reopened != Workbench::kMaxWindows);
+    const u32 again = r.workbench.window(reopened).window;
+    CHECK_EQ(r.get16(again + wd_LeftEdge), left);
+    CHECK_EQ(r.get16(again + wd_TopEdge), top);
+    CHECK_EQ(r.get16(again + wd_Width), width);
+    CHECK_EQ(r.get16(again + wd_Height), height);
+    CHECK_EQ(r.get32(again + wd_Flags) & WFLG_WBENCHWINDOW, WFLG_WBENCHWINDOW);
+}
+
 int main() {
     the_backdrop_shows_a_wbpattern_picture();
     the_backdrop_shows_the_wbpattern_pattern();
@@ -2073,5 +2112,6 @@ int main() {
     every_disk_in_a_drive_gets_an_icon();
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();
+    a_reset_closes_and_reopens_the_windows();
     return check::finish("test_workbench");
 }

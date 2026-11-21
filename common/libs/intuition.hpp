@@ -68,6 +68,7 @@ constexpr u32 SetIPrefs = 576;
 constexpr u32 PubScreenStatus = 552;
 constexpr u32 DrawImage = 114;
 constexpr u32 CloseScreen = 66;
+constexpr u32 CloseWorkBench = 78;
 constexpr u32 ClearMenuStrip = 54;
 constexpr u32 CloseWindow = 72;
 constexpr u32 ItemAddress = 144;
@@ -77,6 +78,7 @@ constexpr u32 OffGadget = 174;
 constexpr u32 OnGadget = 186;
 constexpr u32 OpenScreen = 198;
 constexpr u32 OpenWindow = 204;
+constexpr u32 OpenWorkBench = 210;
 constexpr u32 RefreshGadgets = 222;
 constexpr u32 RemoveGadget = 228;
 constexpr u32 ScreenToBack = 246;
@@ -155,6 +157,15 @@ public:
     // A GTYP_GADTOOLS prop gadget moved: the gadget takes its new state
     // from its PropInfo and gives the code its messages carry.
     using GadgetPropCode = u16 (*)(void* ctx, u32 gadget);
+
+    // What CloseWorkBench and OpenWorkBench call of the Workbench: close
+    // its windows for a screen reset, and open them again after it. A close
+    // that returns false leaves the Workbench as it is.
+    struct WorkbenchHooks {
+        bool (*close)(void* ctx);
+        void (*open)(void* ctx);
+        void* ctx;
+    };
 
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
@@ -312,6 +323,10 @@ public:
     // colours are worked out again from them.
     void set_default_screen(u32 screen);
     u32 default_screen() const { return default_screen_; }
+
+    // The Workbench's side of CloseWorkBench and OpenWorkBench. The task
+    // that sets them is the one the Workbench windows belong to.
+    void set_workbench_hooks(const WorkbenchHooks& hooks);
 
     // Rewrites the pens of the screen's existing DrawInfo from the set
     // IPrefs sent that fits its depth, when that set has arrived.
@@ -484,6 +499,9 @@ private:
     // Works the menu and chrome colours out of the screen's DrawInfo pens
     // and writes them into its ColorMap, then recomposes.
     void update_chrome_palette(u32 screen);
+    // Clears the screen to its BACKGROUNDPEN, draws its title bar again and
+    // recomposes every pixel, as OpenWorkBench starts the screen over.
+    void reset_screen(u32 screen);
     void compose(u32 screen, Rect r);
     u32 find_screen(u32 screen) const;
     ScreenRecord* find_screen_record(u32 screen);
@@ -575,6 +593,12 @@ private:
     u32 base_ = 0;
     u32 front_ = 0;
     u32 default_screen_ = 0;
+    WorkbenchHooks workbench_hooks_{};
+    bool workbench_closed_ = false;
+    // The Workbench's task, and the task its open hook's windows belong to
+    // while the hook runs.
+    u32 workbench_task_ = 0;
+    u32 workbench_hook_task_ = 0;
     u32 pub_screen_list_ = 0;  // LockPubScreenList's List and its one node
     u32 reply_port_ = 0;
     u32 active_window_ = 0;

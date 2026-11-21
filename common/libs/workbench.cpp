@@ -685,7 +685,8 @@ void Workbench::open_root() {
         b.w32(new_window + ndk::nw_IDCMPFlags,
               ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | kIdcmpMenuPick |
                   kIdcmpRefreshWindow);
-        b.w32(new_window + ndk::nw_Flags, ndk::WFLG_BACKDROP | ndk::WFLG_BORDERLESS);
+        b.w32(new_window + ndk::nw_Flags, ndk::WFLG_BACKDROP | ndk::WFLG_BORDERLESS |
+                                               ndk::WFLG_WBENCHWINDOW);
     } else {
         b.w8(new_window + ndk::nw_DetailPen, 0);
         b.w8(new_window + ndk::nw_BlockPen, 1);
@@ -696,7 +697,8 @@ void Workbench::open_root() {
         b.w32(new_window + ndk::nw_FirstGadget, gadgets);
         b.w32(new_window + ndk::nw_Flags,
               ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_SIZEGADGET |
-                  ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM | ndk::WFLG_ACTIVATE);
+                  ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM | ndk::WFLG_ACTIVATE |
+                  ndk::WFLG_WBENCHWINDOW);
         b.w16(new_window + ndk::nw_MinWidth, kMinDrawerWidth);
         b.w16(new_window + ndk::nw_MinHeight, kMinDrawerHeight);
         b.w16(new_window + ndk::nw_MaxWidth, 0xFFFF);
@@ -1060,7 +1062,8 @@ bool Workbench::icon_path(u32 window_index, const IconEntry& icon,
     return join_path(windows_[window_index].path, icon.file, out);
 }
 
-void Workbench::open_drawer_window(const char* path, const char* name, u32 object) {
+void Workbench::open_drawer_window(const char* path, const char* name, u32 object,
+                                   const DrawerBox* box) {
     for (u32 i = 1; i < kMaxWindows; ++i) {
         if (windows_[i].used && same_ci(windows_[i].path, path)) {
             intuition_->window_to_front(windows_[i].window);
@@ -1079,14 +1082,21 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     i32 height = 0;
     i32 scroll_x = 0;
     i32 scroll_y = 0;
-    const u32 drawer_data = object != 0 ? b.r32(object + do_DrawerData) : 0;
-    if (drawer_data != 0) {
-        left = static_cast<i16>(b.r16(drawer_data + ndk::nw_LeftEdge));
-        top = static_cast<i16>(b.r16(drawer_data + ndk::nw_TopEdge));
-        width = static_cast<i16>(b.r16(drawer_data + ndk::nw_Width));
-        height = static_cast<i16>(b.r16(drawer_data + ndk::nw_Height));
-        scroll_x = static_cast<i32>(b.r32(drawer_data + dd_CurrentX));
-        scroll_y = static_cast<i32>(b.r32(drawer_data + dd_CurrentY));
+    if (box != nullptr) {
+        left = box->left;
+        top = box->top;
+        width = box->width;
+        height = box->height;
+    } else {
+        const u32 drawer_data = object != 0 ? b.r32(object + do_DrawerData) : 0;
+        if (drawer_data != 0) {
+            left = static_cast<i16>(b.r16(drawer_data + ndk::nw_LeftEdge));
+            top = static_cast<i16>(b.r16(drawer_data + ndk::nw_TopEdge));
+            width = static_cast<i16>(b.r16(drawer_data + ndk::nw_Width));
+            height = static_cast<i16>(b.r16(drawer_data + ndk::nw_Height));
+            scroll_x = static_cast<i32>(b.r32(drawer_data + dd_CurrentX));
+            scroll_y = static_cast<i32>(b.r32(drawer_data + dd_CurrentY));
+        }
     }
     if (width <= 0) {
         width = kDefaultDrawerWidth;
@@ -1097,7 +1107,7 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     // A box at the screen's corner is the place of an icon that was never
     // snapshot, as a default drawer icon's is: such a window cascades as
     // one without a box does.
-    if (left == 0 && top == 0) {
+    if (box == nullptr && left == 0 && top == 0) {
         left = -1;
         top = -1;
     }
@@ -1147,7 +1157,7 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     b.w32(new_window + ndk::nw_Flags,
           ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
               ndk::WFLG_SIZEGADGET | ndk::WFLG_SIZEBRIGHT | ndk::WFLG_SIZEBBOTTOM |
-              ndk::WFLG_ACTIVATE);
+              ndk::WFLG_ACTIVATE | ndk::WFLG_WBENCHWINDOW);
     b.w32(new_window + ndk::nw_Title, title);
     b.w32(new_window + ndk::nw_Screen, screen_);
     b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
@@ -1168,6 +1178,7 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
         return;
     }
     attach_window(slot, window, name, path, gadgets);
+    windows_[slot].order = ++open_count_;
     // The view a snapshot kept; drawing keeps it inside the icons.
     windows_[slot].scroll_x = scroll_x;
     windows_[slot].scroll_y = scroll_y;
@@ -3093,12 +3104,78 @@ void Workbench::open_desktop() {
     add_volume_icons();
     load_patterns();
     dos_->set_file_closed(&Workbench::file_closed, this);
+    intuition_->set_workbench_hooks(
+        Intuition::WorkbenchHooks{&Workbench::hook_close, &Workbench::hook_open, this});
     draw_window(0);
     start_wbstartup();
     desktop_open_ = true;
     refresh_title();
     next_refresh_us_ = exec_->now_us() + kRefreshUs;
 }
+
+bool Workbench::close_for_reset() {
+    if (!desktop_open_ || !windows_[0].used) {
+        return false;
+    }
+    cancel_drag();
+    for (Clicks& clicks : clicks_) {
+        clicks.clear();
+    }
+    remembered_count_ = 0;
+    Bus b(*machine_);
+    for (u32 i = 1; i < kMaxWindows; ++i) {
+        if (!windows_[i].used) {
+            continue;
+        }
+        RememberedDrawer& drawer = remembered_[remembered_count_++];
+        copy_text(drawer.path, sizeof drawer.path, windows_[i].path);
+        copy_text(drawer.name, sizeof drawer.name, windows_[i].name);
+        drawer.left = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_LeftEdge));
+        drawer.top = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_TopEdge));
+        drawer.width = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_Width));
+        drawer.height = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_Height));
+        drawer.order = windows_[i].order;
+    }
+    for (u32 i = 1; i < remembered_count_; ++i) {
+        const RememberedDrawer drawer = remembered_[i];
+        u32 j = i;
+        for (; j > 0 && remembered_[j - 1].order > drawer.order; --j) {
+            remembered_[j] = remembered_[j - 1];
+        }
+        remembered_[j] = drawer;
+    }
+    for (u32 i = 1; i < kMaxWindows; ++i) {
+        close_drawer(i);
+    }
+    intuition_->clear_menu_strip(windows_[0].window);
+    intuition_->close_window(windows_[0].window);
+    release_window(0);
+    return true;
+}
+
+void Workbench::open_after_reset() {
+    if (!desktop_open_ || machine_ == nullptr || windows_[0].used) {
+        return;
+    }
+    open_root();
+    if (!windows_[0].used) {
+        remembered_count_ = 0;
+        return;
+    }
+    place_root_icons();
+    draw_window(0);
+    refresh_title();
+    for (u32 i = 0; i < remembered_count_; ++i) {
+        const RememberedDrawer& drawer = remembered_[i];
+        const DrawerBox box{drawer.left, drawer.top, drawer.width, drawer.height};
+        open_drawer_window(drawer.path, drawer.name, 0, &box);
+    }
+    remembered_count_ = 0;
+}
+
+bool Workbench::hook_close(void* ctx) { return static_cast<Workbench*>(ctx)->close_for_reset(); }
+
+void Workbench::hook_open(void* ctx) { static_cast<Workbench*>(ctx)->open_after_reset(); }
 
 u32 Workbench::start(u32 flags, u32 path) {
     (void)flags;
@@ -3359,6 +3436,7 @@ bool Workbench::init(Machine& m, Exec& exec, Dos& dos, Graphics& graphics, Intui
     intuition_ = &intuition;
     gadtools_ = &gadtools;
     icon_ = &icon;
+    intuition.set_workbench_hooks(Intuition::WorkbenchHooks{nullptr, nullptr, nullptr});
     base_ = 0;
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};

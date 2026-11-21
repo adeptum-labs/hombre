@@ -872,6 +872,7 @@ constexpr u32 kIdcmpMenuPick = 0x00000100;
 constexpr u32 kDriNewLook = 1;
 constexpr u32 kDriPenCount = chrome::kDrawInfoPens;
 constexpr u16 kDefaultDriPens[kDriPenCount] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
+constexpr u32 kDriBackgroundPen = 7;  // BACKGROUNDPEN in that order
 constexpr u32 kDrawInfoPensAt = 52;
 constexpr u32 kDrawInfoBytes = kDrawInfoPensAt + (kDriPenCount + 1) * 2;
 
@@ -1113,6 +1114,59 @@ struct IntuitionNatives {
     }
 
     static void close_window(void* ctx, Machine& m) { of(ctx).close_window(m.cpu.a[0]); }
+
+    // CloseWorkBench: the Workbench leaves the default screen so IPrefs can
+    // reset it. Every window still open on it must be the Workbench's own.
+    static void close_workbench(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        if (in.default_screen_ == 0) {
+            native::set_result(m, 1);
+            return;
+        }
+        for (const Intuition::WindowRecord& window : in.window_records_) {
+            if (window.addr != 0 && window.screen == in.default_screen_ &&
+                (window.flags & ndk::WFLG_WBENCHWINDOW) == 0) {
+                native::set_result(m, 0);
+                return;
+            }
+        }
+        if (in.workbench_hooks_.close != nullptr &&
+            !in.workbench_hooks_.close(in.workbench_hooks_.ctx)) {
+            native::set_result(m, 0);
+            return;
+        }
+        in.workbench_closed_ = true;
+        LogLine().text("intuition: Workbench closed").send();
+        native::set_result(m, 1);
+    }
+
+    // OpenWorkBench: the default screen takes the palette and pens IPrefs
+    // sent, starts over, and the Workbench opens its windows again.
+    static void open_workbench(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        const u32 screen = in.default_screen_;
+        if (screen == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        Intuition::ScreenRecord* rec = in.find_screen_record(screen);
+        if (rec != nullptr) {
+            in.apply_palette_prefs(*rec);
+            in.apply_pen_prefs(screen);
+            in.update_chrome_palette(screen);
+            in.reset_screen(screen);
+        }
+        if (in.workbench_closed_) {
+            in.workbench_closed_ = false;
+            if (in.workbench_hooks_.open != nullptr) {
+                in.workbench_hook_task_ = in.workbench_task_;
+                in.workbench_hooks_.open(in.workbench_hooks_.ctx);
+                in.workbench_hook_task_ = 0;
+            }
+        }
+        LogLine().text("intuition: Workbench opened").send();
+        native::set_result(m, screen);
+    }
 
     static void free_sys_request(void* ctx, Machine& m) {
         of(ctx).free_sys_request(m.cpu.a[0]);
@@ -1624,6 +1678,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::EraseImage, IntuitionNatives::erase_image, "EraseImage"},
     {intuition_lvo::DrawImageState, IntuitionNatives::draw_image_state, "DrawImageState"},
     {intuition_lvo::CloseScreen, IntuitionNatives::close_screen, "CloseScreen"},
+    {intuition_lvo::CloseWorkBench, IntuitionNatives::close_workbench, "CloseWorkBench"},
     {intuition_lvo::CloseWindow, IntuitionNatives::close_window, "CloseWindow"},
     {intuition_lvo::ModifyIDCMP, IntuitionNatives::modify_idcmp, "ModifyIDCMP"},
     {intuition_lvo::ModifyProp, IntuitionNatives::modify_prop, "ModifyProp"},
@@ -1631,6 +1686,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::OnGadget, IntuitionNatives::on_gadget, "OnGadget"},
     {intuition_lvo::OpenScreen, IntuitionNatives::open_screen, "OpenScreen"},
     {intuition_lvo::OpenWindow, IntuitionNatives::open_window, "OpenWindow"},
+    {intuition_lvo::OpenWorkBench, IntuitionNatives::open_workbench, "OpenWorkBench"},
     {intuition_lvo::RefreshGadgets, IntuitionNatives::refresh_gadgets, "RefreshGadgets"},
     {intuition_lvo::RemoveGadget, IntuitionNatives::remove_gadget, "RemoveGadget"},
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
@@ -1702,6 +1758,10 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     base_ = 0;
     front_ = 0;
     default_screen_ = 0;
+    workbench_hooks_ = WorkbenchHooks{};
+    workbench_closed_ = false;
+    workbench_task_ = 0;
+    workbench_hook_task_ = 0;
     pub_screen_list_ = 0;
     reply_port_ = 0;
     active_window_ = 0;
@@ -1821,6 +1881,11 @@ void Intuition::flush_palette() {
     if (b.ok() && width > 0 && height > 0) {
         refresh_full(*display_, *machine_, screen, width, height);
     }
+}
+
+void Intuition::set_workbench_hooks(const WorkbenchHooks& hooks) {
+    workbench_hooks_ = hooks;
+    workbench_task_ = exec_ != nullptr ? exec_->this_task() : 0;
 }
 
 void Intuition::set_default_screen(u32 screen) {
@@ -2008,6 +2073,31 @@ void Intuition::update_chrome_palette(u32 screen) {
         }
     }
     flush_palette();
+}
+
+void Intuition::reset_screen(u32 screen) {
+    ScreenRecord* rec = find_screen_record(screen);
+    if (rec == nullptr || machine_ == nullptr || graphics_ == nullptr) {
+        return;
+    }
+    u32 background = 0;
+    const u32 info = screen_draw_info(screen);
+    if (info != 0) {
+        Bus b(*machine_);
+        const u32 pens = b.r32(info + kDriPens);
+        if (b.ok() && pens != 0) {
+            background = b.r16(pens + kDriBackgroundPen * 2) & 0xFF;
+        }
+    }
+    Bus b(*machine_);
+    const i32 right = static_cast<i32>(rec->width) - 1;
+    const i32 bottom = static_cast<i32>(rec->height) - 1;
+    begin_batch();
+    graphics_->set_pens(rec->backdrop_rp, background, background, ndk::JAM2);
+    graphics_->rect_fill(rec->backdrop_rp, 0, 0, right, bottom);
+    chrome::draw_screen_bar(*graphics_, b, rec->backdrop_rp, rec->width, rec->title);
+    compose(screen, Rect{0, 0, right, bottom});
+    end_batch();
 }
 
 void Intuition::end_batch() {
@@ -3252,7 +3342,9 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w32(layer + ndk::ly_Window, window);
 
     rec->addr = window;
-    rec->owner = exec_->this_task();
+    // The Workbench's windows stay the Workbench's even when IPrefs' task
+    // runs the hook that opens them.
+    rec->owner = workbench_hook_task_ != 0 ? workbench_hook_task_ : exec_->this_task();
     rec->window_bytes = ndk::Window_SIZEOF;
     rec->screen = screen;
     rec->next_window = 0;

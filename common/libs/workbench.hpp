@@ -143,6 +143,9 @@ public:
         // The block of its scroll gadgets, the window's gadget list; 0 for
         // a backdrop, which has none.
         u32 gadgets = 0;
+        // Its place in the order the desktop opened the windows, so a
+        // reset reopens it in its turn.
+        u32 order = 0;
     };
 
     // The scroll gadgets of a window, by their GadgetID: the two sliders
@@ -276,6 +279,16 @@ public:
     // open window matches.
     bool update_workbench(u32 name);
 
+    // CloseWorkBench: remembers every drawer's place and closes the
+    // drawers and the root window, dropping the drag and the selection.
+    // False when no desktop is open.
+    bool close_for_reset();
+
+    // OpenWorkBench: opens the root window again and the drawers
+    // close_for_reset remembered, at their boxes and in the order they
+    // were opened.
+    void open_after_reset();
+
     // The application registration vectors. Every Add hands out a handle
     // the matching Remove takes back; a Remove is false for a handle no
     // Add of its kind handed out.
@@ -361,8 +374,31 @@ private:
     static constexpr u32 kVectors = workbench_lvo::Last / 6;
     static constexpr u32 kTaskStackBytes = 8192;
 
+    // A drawer close_for_reset closed: how to find it again and where its
+    // window stood.
+    struct RememberedDrawer {
+        char path[Dos::kMaxPath]{};
+        char name[32]{};
+        i32 left = 0;
+        i32 top = 0;
+        i32 width = 0;
+        i32 height = 0;
+        u32 order = 0;
+    };
+
+    // The box open_drawer_window opens a drawer at instead of the one its
+    // icon keeps.
+    struct DrawerBox {
+        i32 left = 0;
+        i32 top = 0;
+        i32 width = 0;
+        i32 height = 0;
+    };
+
     static void task_entry(void* ctx);
     static void file_closed(void* ctx, const char* path);
+    static bool hook_close(void* ctx);
+    static void hook_open(void* ctx);
     void run();
     void handle_message(u32 window_index, u32 message);
     void show_about();
@@ -372,7 +408,8 @@ private:
     void attach_window(u32 index, u32 window, const char* name, const char* path, u32 gadgets);
     void measure_window(u32 index);
     void release_window(u32 index);
-    void open_drawer_window(const char* path, const char* name, u32 object);
+    void open_drawer_window(const char* path, const char* name, u32 object,
+                            const DrawerBox* box = nullptr);
     void release_tool(RunningTool& tool);
     void open_root();
     void place_root_icon(IconEntry& icon);
@@ -469,6 +506,9 @@ private:
     bool backdrop_ = true;
     IconEntry icons_[kMaxIcons]{};
     DrawerWindow windows_[kMaxWindows]{};
+    RememberedDrawer remembered_[kMaxWindows - 1]{};
+    u32 remembered_count_ = 0;
+    u32 open_count_ = 0;
     RunningTool tools_[kMaxTools]{};
     App apps_[kMaxApps]{};
     Clicks clicks_[kMaxWindows]{};
