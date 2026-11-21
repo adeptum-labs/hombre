@@ -238,6 +238,22 @@ void raw_keys_type_their_characters() {
     CHECK_EQ(r.map_raw(0x4C, 0, 1), 0xFFFFFFFFu);
 }
 
+void vanilla_mapping_copies_the_characters_out() {
+    Rig r;
+    u8 out[4] = {};
+    CHECK_EQ(g_keymap.map_vanilla(0x20, 0, out, 1), 1u);
+    CHECK_EQ(out[0], 'a');
+    CHECK_EQ(g_keymap.map_vanilla(0x20, IEQUALIFIER_LSHIFT, out, 1), 1u);
+    CHECK_EQ(out[0], 'A');
+    CHECK_EQ(g_keymap.map_vanilla(0x4C, 0, out, 4), 2u);
+    CHECK_EQ(out[0], 0x9B);
+    CHECK_EQ(out[1], 'A');
+    CHECK_EQ(g_keymap.map_vanilla(0x4C, 0, out, 1), 0u);     // too small
+    CHECK_EQ(g_keymap.map_vanilla(0xA0, 0, out, 1), 0u);     // a release
+    CHECK_EQ(g_keymap.map_vanilla(0x60, 0, out, 1), 0u);     // a qualifier key
+    CHECK_EQ(g_keymap.map_vanilla(0x20, 0, out, 99), 0u);    // beyond the scratch buffer
+}
+
 void ansi_maps_back_to_raw_keys() {
     Rig r;
     CHECK_EQ(r.map_ansi("A"), 1u);
@@ -264,6 +280,7 @@ int main() {
     resource_holds_the_usa_keymap();
     keymap_library_opens_and_answers_its_default();
     raw_keys_type_their_characters();
+    vanilla_mapping_copies_the_characters_out();
     ansi_maps_back_to_raw_keys();
     set_default_changes_the_asked_keymap();
     return check::finish("test_keymap");

@@ -247,6 +247,10 @@ bool KeymapLibrary::init(Machine& m, Exec& exec) {
     keymap_node_ = 0;
     keymap_ = 0;
     default_ = 0;
+    scratch_ = exec.alloc(kScratchBytes, kBlockFlags);
+    if (scratch_ == 0) {
+        return false;
+    }
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -379,16 +383,39 @@ u32 KeymapLibrary::alloc_string(const char* text) {
     return b.ok() ? at : 0;
 }
 
-u32 KeymapLibrary::map_raw(Bus& b, u32 event, u32 buffer, u32 length, u32 keymap) {
-    if (keymap == 0) {
-        keymap = default_;
+u32 KeymapLibrary::map_vanilla(u16 code, u16 qualifier, u8* out, u32 max) {
+    if (scratch_ == 0 || max > kScratchBytes) {
+        return 0;
     }
-    if (event == 0 || keymap == 0) {
+    Bus b(*machine_);
+    const u32 count = map_code(b, code, qualifier, scratch_, max, default_);
+    if (!b.ok() || count == 0 || count > max) {
+        return 0;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        out[i] = static_cast<u8>(b.r8(scratch_ + i));
+    }
+    return b.ok() ? count : 0;
+}
+
+u32 KeymapLibrary::map_raw(Bus& b, u32 event, u32 buffer, u32 length, u32 keymap) {
+    if (event == 0) {
         return 0;
     }
     const u32 qualifier = b.r16(event + ie_Qualifier);
     const u32 code = b.r16(event + ie_Code) & 0xFF;
-    if (!b.ok() || (code & kKeyUp) != 0 || code > 0x77) {
+    return b.ok() ? map_code(b, code, qualifier, buffer, length, keymap) : 0;
+}
+
+u32 KeymapLibrary::map_code(Bus& b, u32 code, u32 qualifier, u32 buffer, u32 length,
+                            u32 keymap) {
+    if (keymap == 0) {
+        keymap = default_;
+    }
+    if (keymap == 0) {
+        return 0;
+    }
+    if ((code & kKeyUp) != 0 || code > 0x77) {
         return 0;  // a key-up code, or no raw key, types nothing
     }
     const bool hi = code >= 0x40;

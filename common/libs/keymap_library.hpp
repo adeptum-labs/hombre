@@ -127,14 +127,23 @@ public:
     u32 default_keymap() const { return default_; }
     void set_default_keymap(u32 keymap) { default_ = keymap; }
 
+    // The characters the raw key code types under the qualifier in the
+    // default keymap, as MapRawKey would give them, copied to out. 0 for a
+    // key that types nothing, a key-up code, or more than max characters;
+    // max is at most kScratchBytes.
+    u32 map_vanilla(u16 code, u16 qualifier, u8* out, u32 max);
+
 private:
     friend struct KeymapNatives;
     friend struct ConsoleOps;
 
     static constexpr u32 kVectors = keymap_lvo::Last / 6;
+    // The guest buffer map_vanilla has map_code write the characters to.
+    static constexpr u32 kScratchBytes = 8;
 
     u32 alloc_string(const char* text);
     u32 map_raw(native::Bus& b, u32 event, u32 buffer, u32 length, u32 keymap);
+    u32 map_code(native::Bus& b, u32 code, u32 qualifier, u32 buffer, u32 length, u32 keymap);
     u32 map_ansi(native::Bus& b, u32 string, u32 count, u32 buffer, u32 length, u32 keymap);
     bool find_ansi(native::Bus& b, u32 keymap, u32 ch, u32& code, u32& qualifier);
 
@@ -145,6 +154,7 @@ private:
     u32 keymap_node_ = 0;
     u32 keymap_ = 0;
     u32 default_ = 0;
+    u32 scratch_ = 0;
     NativeVector vectors_[kVectors]{};
 };
 
