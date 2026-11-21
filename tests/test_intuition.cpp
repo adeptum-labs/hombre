@@ -789,8 +789,10 @@ void open_screen_depth8_sets_default_and_chrome_palettes() {
     CHECK_EQ(colormap_rgb24(r, map, 8 + 5 * 36 + 3 * 6 + 1), 0xFF9933u);
     CHECK_EQ(colormap_rgb24(r, map, 223), 0xFFFFFFu);
 
-    CHECK_EQ(colormap_rgb24(r, map, 224), 0x101010u);
-    CHECK_EQ(colormap_rgb24(r, map, 227), 0x707070u);
+    // The screen bar shades white down to a light grey.
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kScreenBar0), 0xFFFFFFu);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kScreenBar3), chrome::screen_bar_rgb(0xFFFFFF, 3));
+    CHECK(colormap_rgb24(r, map, chrome::kScreenBar3) < 0xE0E0E0u);
 
     for (u32 i = 0; i < 4; ++i) {
         CHECK_EQ(colormap_rgb24(r, map, chrome::kMenuPaperPen + i), chrome::kMenuPalette[i]);
@@ -4275,10 +4277,16 @@ void depth8_chrome_pixel_spot_checks() {
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
 
-    // The screen bar is the menu paper, over its label pen's line.
+    // The screen bar is shaded from top to bottom, over the label pen's
+    // line.
+    u32 prev_screen_bar = chrome::kScreenBar0;
     for (i32 y = 0; y <= 13; ++y) {
-        CHECK_EQ(screen_pixel(r, screen, 100, y), static_cast<u32>(chrome::kMenuPaperPen));
+        const u32 p = screen_pixel(r, screen, 100, y);
+        CHECK(p >= prev_screen_bar && p <= chrome::kScreenBar3);
+        prev_screen_bar = p;
     }
+    CHECK_EQ(screen_pixel(r, screen, 100, 0), static_cast<u32>(chrome::kScreenBar0));
+    CHECK_EQ(prev_screen_bar, static_cast<u32>(chrome::kScreenBar3));
     CHECK_EQ(screen_pixel(r, screen, 100, 14), static_cast<u32>(chrome::kMenuLabelPen));
 
     r.str(kWinTitle, "H");
@@ -5316,6 +5324,7 @@ void chrome_palette_follows_the_default_screen_pens() {
     u32 size = put_palette_pref(r, 2, 0xFFFF, 0, 0);
     set_iprefs(r, kIPrefs, size, 8);
     CHECK_EQ(colormap_rgb24(r, map, chrome::kMenuPaperPen), 0xFF0000u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kScreenBar3), chrome::screen_bar_rgb(0xFF0000, 3));
 
     // Pen 3 is the default FILLPEN, the active title bar.
     size = put_palette_pref(r, 3, 0, 0, 0xFFFF);
@@ -5699,10 +5708,10 @@ void menu_on_a_chrome_screen_highlights_ghosts_and_restores() {
     const u32 shadowed = screen_pixel(r, screen, 79, 40);
 
     menu_press(r, 10, 5);
-    menu_move(r, 10, 21);
-    // The bar keeps the screen title bar's menu paper and label, and the
+    // The bar keeps the screen title bar's shading and label, and the
+    // The bar keeps the screen title bar's shading and label, and the
     // open title and the highlighted item get the active title bar's.
-    CHECK_EQ(screen_pixel(r, screen, 300, 0), static_cast<u32>(chrome::kMenuPaperPen));
+    CHECK_EQ(screen_pixel(r, screen, 300, 0), static_cast<u32>(chrome::kScreenBar0));
     CHECK_EQ(screen_pixel(r, screen, 300, 14), static_cast<u32>(chrome::kMenuLabelPen));
     const u32 title = screen_pixel(r, screen, 6, 7);
     CHECK(title >= chrome::kActiveBar0 && title <= chrome::kActiveBar7);

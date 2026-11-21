@@ -71,6 +71,9 @@ void palette_from_pens(const u32* pen_rgb, u32* out) {
     out[kTrack - kDerivedBase] = darken(background, 25);
     out[kTitleActive - kDerivedBase] = pen_rgb[kFillText];
     out[kTitleInactive - kDerivedBase] = pen_rgb[kText];
+    for (u32 i = 0; i < kScreenBarSteps; ++i) {
+        out[kScreenBar0 - kDerivedBase + i] = screen_bar_rgb(pen_rgb[kBarBlock], i);
+    }
     out[kMenuPaperPen - kDerivedBase] = pen_rgb[kBarBlock];
     out[kMenuLabelPen - kDerivedBase] = pen_rgb[kBarDetail];
     out[kMenuLitPen - kDerivedBase] = pen_rgb[kFillText];

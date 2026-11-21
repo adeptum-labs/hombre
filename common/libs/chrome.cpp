@@ -740,6 +740,12 @@ void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w
 
 }
 
+// The pen of row y of the screen title bar, shaded from top to bottom.
+u8 screen_bar_pen(i32 y) {
+    return static_cast<u8>(kScreenBar0 + (y * static_cast<i32>(kScreenBarSteps)) /
+                                             static_cast<i32>(kBarHeight));
+}
+
 void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
     if (rp == 0 || width == 0) {
         return;
@@ -750,8 +756,10 @@ void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
     const i32 line = static_cast<i32>(kBarHeight);
 
     if (high_color) {
-        graphics.set_pens(rp, kMenuPaperPen, 0, ndk::JAM2);
-        graphics.rect_fill(rp, 0, 0, right, line - 1);
+        for (i32 y = 0; y < line; ++y) {
+            graphics.set_pens(rp, screen_bar_pen(y), 0, ndk::JAM2);
+            graphics.rect_fill(rp, 0, y, right, y);
+        }
         graphics.set_pens(rp, kMenuLabelPen, 0, ndk::JAM2);
         graphics.rect_fill(rp, 0, line, right, line);
     } else {
@@ -910,7 +918,9 @@ void draw_menu(Bus& b, const raster::Bitmap& bitmap, const Rect& area, const Men
 
     // The bar is drawn in the same pens as the screen title bar it replaces.
     if (pens.high_color) {
-        fill(b, bitmap, clip, 0, 0, right, line - 1, kMenuPaperPen);
+        for (i32 y = 0; y < line; ++y) {
+            fill(b, bitmap, clip, 0, y, right, y, screen_bar_pen(y));
+        }
         fill(b, bitmap, clip, 0, line, right, line, kMenuLabelPen);
     } else {
         fill(b, bitmap, clip, 0, 0, right, line - 1, kFlatPaper);

@@ -105,8 +105,7 @@ constexpr u32 default_palette_rgb24(u32 pen) {
         return (kCubeLevels[r] << 16) | (kCubeLevels[g] << 8) | kCubeLevels[b];
     }
     if (pen < chrome::kMenuPaperPen) {
-        const u32 v = 0x10u + (pen - 224u) * 0x20u;
-        return (v << 16) | (v << 8) | v;
+        return chrome::screen_bar_rgb(kBasePalette[2], pen - chrome::kScreenBar0);
     }
     if (pen < chrome::kChromeBase) {
         return chrome::kMenuPalette[pen - chrome::kMenuPaperPen];

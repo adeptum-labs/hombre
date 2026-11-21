@@ -27,8 +27,14 @@
 
 namespace hombre::chrome {
 
-// The menu pens take the top of the grey ramp, above the four shades left
-// at 224..227.
+// The screen title bar's shading, from light at its top to dark at its
+// bottom, round the BARBLOCKPEN colour.
+constexpr u8 kScreenBar0 = 224;
+constexpr u8 kScreenBar1 = 225;
+constexpr u8 kScreenBar2 = 226;
+constexpr u8 kScreenBar3 = 227;
+constexpr u32 kScreenBarSteps = 4;
+
 constexpr u8 kMenuPaperPen = 228;
 constexpr u8 kMenuLabelPen = 229;
 constexpr u8 kMenuLitPen = 230;
@@ -84,6 +90,19 @@ constexpr u32 lerp_rgb(u32 a, u32 b, u32 step, u32 steps) {
 
 }
 
+// How far the screen bar's shading reaches above and below the BARBLOCKPEN
+// colour, in percent towards white and black.
+constexpr u32 kScreenBarLighten = 20;
+constexpr u32 kScreenBarDarken = 18;
+
+// The screen bar's colours while a screen still has the 3.1 default pens,
+// round BARBLOCKPEN, pen 2 of the base palette.
+constexpr u32 screen_bar_rgb(u32 block, u32 step) {
+    const u32 top = detail::lerp_rgb(block, 0xFFFFFF, kScreenBarLighten, 100);
+    const u32 bottom = detail::lerp_rgb(block, 0x000000, kScreenBarDarken, 100);
+    return detail::lerp_rgb(top, bottom, step, kScreenBarSteps - 1);
+}
+
 // The menu pens' colours while a screen still has the 3.1 default pens:
 // BARBLOCKPEN and BARDETAILPEN are pens 2 and 1 of the base palette, and
 // the ghost is half of each.
@@ -121,9 +140,9 @@ constexpr u32 kChromePalette[kChromeCount] = {
     0x4A4F57,
 };
 
-// The colours palette_from_pens computes: the menu pens through the window
-// chrome, pens kDerivedBase to 255.
-constexpr u32 kDerivedBase = kMenuPaperPen;
+// The colours palette_from_pens computes: the screen bar and menu pens
+// through the window chrome, pens kDerivedBase to 255.
+constexpr u32 kDerivedBase = kScreenBar0;
 constexpr u32 kDerivedCount = 256 - kDerivedBase;
 
 static_assert(kChromePalette[kActiveBar0 - kChromeBase] == 0x6D9BE0u);
@@ -135,7 +154,7 @@ static_assert(kChromePalette[kTitleInactive - kChromeBase] == 0x4A4F57u);
 // Computes the colours of pens kDerivedBase..255 from the colours of a
 // screen's DrawInfo pens, in DrawInfo's order in pen_rgb: the bars shade
 // the FILLPEN and BACKGROUNDPEN colours, the frames take SHADOWPEN and
-// SHINEPEN, and the menu takes BARBLOCKPEN and BARDETAILPEN.
+// SHINEPEN, and the screen bar and menu take BARBLOCKPEN and BARDETAILPEN.
 void palette_from_pens(const u32* pen_rgb, u32* out);
 
 }
