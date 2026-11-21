@@ -46,7 +46,11 @@ constexpr u32 gb_TextFonts = 140;
 constexpr u32 kNtFont = 12;
 constexpr u32 kFpfRomFont = 0x01;
 constexpr u32 kFpfDesigned = 0x40;
+constexpr u32 kFpfRemoved = 0x80;
 constexpr u32 tf_Flags = 23;
+constexpr u32 tf_Accessors = 30;
+constexpr u32 kMaxFonts = 1024;
+constexpr i32 kExactFontMatch = 32767;  // MAXFONTMATCHWEIGHT
 constexpr u32 kMaxTextChars = 65536;
 constexpr u32 kTextChunk = 64;
 
@@ -181,24 +185,6 @@ u32 raster_bytes(u32 width, u32 height) {
     const u64 row = (static_cast<u64>(width) + 15) / 16 * 2;
     const u64 total = row * height;
     return total <= 0xFFFFFFFF ? static_cast<u32>(total) : 0;
-}
-
-bool equals_ci(Bus& b, u32 addr, const char* host) {
-    for (u32 i = 0;; ++i) {
-        u32 c = b.r8(addr + i);
-        if (!b.ok()) {
-            return false;
-        }
-        if (c >= 'A' && c <= 'Z') {
-            c += 'a' - 'A';
-        }
-        if (c != static_cast<u8>(host[i])) {
-            return false;
-        }
-        if (c == 0) {
-            return true;
-        }
-    }
 }
 
 }
@@ -548,6 +534,51 @@ u32 font_extension(Bus& b, u32 font) {
     return tfe;
 }
 
+// Two names of the guest's alike, letter case aside.
+bool names_equal_ci(Bus& b, u32 one, u32 other) {
+    if (one == 0 || other == 0) {
+        return false;
+    }
+    for (u32 i = 0; i < 256; ++i) {
+        u32 c = b.r8(one + i);
+        u32 d = b.r8(other + i);
+        if (!b.ok()) {
+            return false;
+        }
+        c = c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c;
+        d = d >= 'A' && d <= 'Z' ? d + ('a' - 'A') : d;
+        if (c != d) {
+            return false;
+        }
+        if (c == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// How well a font answers a request: dy is how far their heights are
+// apart, style and flags the bits their styles and flags differ in.
+// kExactFontMatch when they are the same, less for each way they differ,
+// the height most. Only the styles a font is drawn in and the flags that
+// tell its shape count: where a font came from, and whether it carries an
+// extension, makes it no worse a match.
+i32 font_match_weight(i32 dy, u32 style, u32 flags) {
+    constexpr u32 kDrawnStyles = 0x0F;  // underlined, bold, italic, extended
+    constexpr u32 kShapeFlags = 0x3C;   // REVPATH, TALLDOT, WIDEDOT, PROPORTIONAL
+    style &= kDrawnStyles;
+    flags &= kShapeFlags;
+    i32 weight = kExactFontMatch;
+    if (dy != 0) {
+        weight -= 1024 + (dy < 0 ? -dy : dy) * 512;
+    }
+    for (u32 bit = 0; bit < 8; ++bit) {
+        weight -= (style >> bit) & 1 ? 256 : 0;
+        weight -= (flags >> bit) & 1 ? 64 : 0;
+    }
+    return weight < 1 ? 1 : weight;
+}
+
 }
 
 struct GraphicsNatives {
@@ -669,21 +700,92 @@ struct GraphicsNatives {
 
     static void set_font(void* ctx, Machine& m) { of(ctx).set_font(m.cpu.a[1], m.cpu.a[0]); }
 
+    // OpenFont(textAttr A0): the font in memory of the name asked for
+    // that comes nearest the height, style and flags asked for, with one
+    // more accessor; 0 when no font in memory has the name.
     static void open_font(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
         const u32 attr = m.cpu.a[0];
+        const u32 name = attr != 0 ? b.r32(attr + ndk::ta_Name) : 0;
         u32 result = 0;
-        if (attr != 0 && b.r16(attr + ndk::ta_YSize) == 8 &&
-            equals_ci(b, b.r32(attr + ndk::ta_Name), kTopazName)) {
-            result = g.topaz_font();
+        i32 best = 0;
+        u32 font = name != 0 ? b.r32(g.base_ + gb_TextFonts + ndk::LH_HEAD) : 0;
+        for (u32 i = 0; font != 0 && i < kMaxFonts && b.ok(); ++i) {
+            const u32 next = b.r32(font + ndk::LN_SUCC);
+            if (next == 0) {
+                break;
+            }
+            if ((b.r8(font + tf_Flags) & kFpfRemoved) == 0 &&
+                names_equal_ci(b, name, b.r32(font + ndk::LN_NAME))) {
+                const i32 weight = font_match_weight(
+                    static_cast<i32>(b.r16(attr + ndk::ta_YSize)) -
+                        static_cast<i32>(b.r16(font + ndk::tf_YSize)),
+                    b.r8(attr + ndk::ta_Style) ^ b.r8(font + ndk::tf_Style),
+                    b.r8(attr + ndk::ta_Flags) ^ b.r8(font + tf_Flags));
+                if (weight > best) {
+                    best = weight;
+                    result = font;
+                }
+            }
+            font = next;
         }
-        if (b.ok()) {
-            native::set_result(m, result);
+        if (result != 0) {
+            b.w16(result + tf_Accessors, b.r16(result + tf_Accessors) + 1);
+        }
+        native::set_result(m, b.ok() ? result : 0);
+    }
+
+    // CloseFont(textFont A1): one accessor fewer. The font stays in memory.
+    static void close_font(void*, Machine& m) {
+        Bus b(m);
+        const u32 font = m.cpu.a[1];
+        if (font != 0 && b.r16(font + tf_Accessors) != 0) {
+            b.w16(font + tf_Accessors, b.r16(font + tf_Accessors) - 1);
         }
     }
 
-    static void close_font(void*, Machine&) {}
+    // AddFont(textFont A1): the font, which its program loaded and keeps
+    // in memory, joins the fonts OpenFont finds, extended as ExtendFont
+    // extends one.
+    static void add_font(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 font = m.cpu.a[1];
+        if (font == 0) {
+            return;
+        }
+        const u32 fonts = g.base_ + gb_TextFonts;
+        const u32 head = b.r32(fonts + ndk::LH_HEAD);
+        b.w8(font + ndk::LN_TYPE, kNtFont);
+        b.w8(font + tf_Flags, b.r8(font + tf_Flags) & ~kFpfRemoved & 0xFF);
+        b.w16(font + tf_Accessors, 0);
+        b.w32(font + ndk::LN_SUCC, head);
+        b.w32(font + ndk::LN_PRED, fonts + ndk::LH_HEAD);
+        b.w32(head + ndk::LN_PRED, font);
+        b.w32(fonts + ndk::LH_HEAD, font);
+        if (b.ok()) {
+            extend(g, b, font, 0);
+        }
+    }
+
+    // RemFont(textFont A1): the font leaves the fonts OpenFont finds and
+    // is marked FPF_REMOVED; those that have it open keep using it.
+    static void rem_font(void*, Machine& m) {
+        Bus b(m);
+        const u32 font = m.cpu.a[1];
+        if (font == 0 || (b.r8(font + tf_Flags) & kFpfRemoved) != 0) {
+            return;
+        }
+        const u32 next = b.r32(font + ndk::LN_SUCC);
+        const u32 previous = b.r32(font + ndk::LN_PRED);
+        if (next == 0 || previous == 0 || !b.ok()) {
+            return;
+        }
+        b.w32(previous + ndk::LN_SUCC, next);
+        b.w32(next + ndk::LN_PRED, previous);
+        b.w8(font + tf_Flags, b.r8(font + tf_Flags) | kFpfRemoved);
+    }
 
     static void load_rgb4(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
@@ -1469,10 +1571,17 @@ struct GraphicsNatives {
         }
         Bus b(m);
         const u32 font = b.r32(rp + ndk::rp_Font);
-        b.w32(attr + ndk::ta_Name, font == g.topaz_ ? g.topaz_name_ : 0);
-        b.w16(attr + ndk::ta_YSize, 8);
-        b.w16(attr + ndk::ta_Style, 0);
-        b.w8(attr + ndk::ta_Flags, 0);
+        if (font == 0) {
+            b.w32(attr + ndk::ta_Name, g.topaz_name_);
+            b.w16(attr + ndk::ta_YSize, 8);
+            b.w8(attr + ndk::ta_Style, 0);
+            b.w8(attr + ndk::ta_Flags, 0);
+            return;
+        }
+        b.w32(attr + ndk::ta_Name, b.r32(font + ndk::LN_NAME));
+        b.w16(attr + ndk::ta_YSize, b.r16(font + ndk::tf_YSize));
+        b.w8(attr + ndk::ta_Style, b.r8(font + ndk::tf_Style));
+        b.w8(attr + ndk::ta_Flags, b.r8(font + tf_Flags));
     }
 
     static void alloc_raster(void* ctx, Machine& m) {
@@ -2046,27 +2155,27 @@ struct GraphicsNatives {
     static void extend_font(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
-        const u32 font = m.cpu.a[0];
+        native::set_result(m, extend(g, b, m.cpu.a[0], m.cpu.a[1]) ? 1 : 0);
+    }
+
+    static bool extend(Graphics& g, Bus& b, u32 font, u32 tags) {
         if (font == 0) {
-            native::set_result(m, 0);
-            return;
+            return false;
         }
         if (font_extension(b, font) != 0) {
-            native::set_result(m, 1);
-            return;
+            return true;
         }
         const u32 tfe = g.exec_->alloc(kTfeSize, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (tfe == 0) {
-            native::set_result(m, 0);
-            return;
+            return false;
         }
         b.w16(tfe + kTfeMatchWord, kTeMatchWord);
         b.w32(tfe + kTfeBackPtr, font);
         b.w32(tfe + kTfeOrigReplyPort, b.r32(font + ndk::mn_ReplyPort));
-        b.w32(tfe + kTfeTags, copy_tags(g, b, m.cpu.a[1]));
+        b.w32(tfe + kTfeTags, copy_tags(g, b, tags));
         b.w32(font + ndk::mn_ReplyPort, tfe);
         b.w8(font + ndk::tf_Style, b.r8(font + ndk::tf_Style) | kFsfTagged);
-        native::set_result(m, b.ok() ? 1 : 0);
+        return b.ok();
     }
 
     // StripFont(font A0): takes an ExtendFont extension off again, with
@@ -2138,16 +2247,7 @@ struct GraphicsNatives {
             native::set_result(m, 0);
             return;
         }
-        constexpr i32 kExact = 32767;  // MAXFONTMATCHWEIGHT
-        i32 weight = kExact;
-        if (dy != 0) {
-            weight -= 1024 + (dy < 0 ? -dy : dy) * 512;
-        }
-        for (u32 bit = 0; bit < 8; ++bit) {
-            weight -= (style >> bit) & 1 ? 256 : 0;
-            weight -= (flags >> bit) & 1 ? 64 : 0;
-        }
-        native::set_result(m, static_cast<u32>(weight < 1 ? 1 : weight));
+        native::set_result(m, static_cast<u32>(font_match_weight(dy, style, flags)));
     }
 
     static void set_rgb32_cm(void* ctx, Machine& m) {
@@ -2228,6 +2328,8 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::InitBitMap, GraphicsNatives::init_bitmap, "InitBitMap"},
     {graphics_lvo::ScrollRaster, GraphicsNatives::scroll_raster, "ScrollRaster"},
     {graphics_lvo::AskFont, GraphicsNatives::ask_font, "AskFont"},
+    {graphics_lvo::AddFont, GraphicsNatives::add_font, "AddFont"},
+    {graphics_lvo::RemFont, GraphicsNatives::rem_font, "RemFont"},
     {graphics_lvo::AllocRaster, GraphicsNatives::alloc_raster, "AllocRaster"},
     {graphics_lvo::FreeRaster, GraphicsNatives::free_raster, "FreeRaster"},
     {graphics_lvo::GetRGB4, GraphicsNatives::get_rgb4, "GetRGB4"},

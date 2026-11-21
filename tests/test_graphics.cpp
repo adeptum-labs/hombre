@@ -355,7 +355,10 @@ void set_font_updates_txheight_txbaseline() {
     CHECK_EQ(r.get16(kRastPort + rp_TxBaseline), 7u);
 }
 
-void open_font_topaz_8_returns_the_builtin_font_and_other_names_give_0() {
+// OpenFont finds a font in memory by its name, whatever the letter case,
+// and gives the one nearest the height asked for; a name no font in
+// memory has gives 0.
+void open_font_finds_the_nearest_font_of_the_name() {
     GfxRig r;
     r.str(kStrings, "topaz.font");
     r.put32(kTextAttr + ta_Name, kStrings);
@@ -369,12 +372,114 @@ void open_font_topaz_8_returns_the_builtin_font_and_other_names_give_0() {
 
     r.put16(kTextAttr + ta_YSize, 9);
     r.cpu().a[0] = kTextAttr;
-    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), 0u);
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), r.graphics.topaz_font());
 
     r.put16(kTextAttr + ta_YSize, 8);
     r.str(kStrings, "chargen.font");
     r.cpu().a[0] = kTextAttr;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), 0u);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), 0u);
+}
+
+// AddFont puts a font a program loaded among the fonts in memory, with an
+// extension; OpenFont then finds it and counts who has it open, AskFont
+// tells what a RastPort's font is, and RemFont takes it out again.
+void add_font_and_rem_font_keep_the_fonts_in_memory() {
+    constexpr u32 tf_Flags = 23;
+    constexpr u32 tf_Accessors = 30;
+    constexpr u32 kFpfRemoved = 0x80;
+    constexpr u32 kFsfTagged = 0x40;
+    GfxRig r;
+    const u32 small = r.exec.alloc(TextFont_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 large = r.exec.alloc(TextFont_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(small != 0 && large != 0);
+    r.str(kStrings, "ruby.font");
+    r.str(kStrings + 0x20, "Ruby.font");
+    r.put32(small + LN_NAME, kStrings);
+    r.put16(small + tf_YSize, 8);
+    r.put16(small + tf_Accessors, 7);
+    r.put8(small + tf_Flags, 0x02 | kFpfRemoved);  // FPF_DISKFONT
+    r.put32(large + LN_NAME, kStrings);
+    r.put16(large + tf_YSize, 12);
+    r.put8(large + tf_Flags, 0x02);
+
+    r.put32(kTextAttr + ta_Name, kStrings + 0x20);
+    r.put16(kTextAttr + ta_YSize, 12);
+    r.put8(kTextAttr + ta_Style, 0);
+    r.put8(kTextAttr + ta_Flags, 0);
+    r.cpu().a[0] = kTextAttr;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), 0u);
+
+    r.cpu().a[1] = small;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::AddFont), ExitReason::Halt);
+    r.cpu().a[1] = large;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::AddFont), ExitReason::Halt);
+    CHECK_EQ(r.get16(small + tf_Accessors), 0u);
+    CHECK_EQ(r.get8(small + tf_Flags), 0x02u);
+    CHECK_EQ(r.get8(small + LN_TYPE), 12u);  // NT_FONT
+    // Extended: FSF_TAGGED, and an extension that points back at the font.
+    CHECK_EQ(r.get8(small + tf_Style) & kFsfTagged, kFsfTagged);
+    const u32 extension = r.get32(small + mn_ReplyPort);
+    CHECK(extension != 0);
+    CHECK_EQ(r.get16(extension), 0xF100u);
+    CHECK_EQ(r.get32(extension + 4), small);
+
+    // The fonts in memory: the two new ones before topaz.
+    const u32 fonts = r.graphics.graphics_base() + 140;
+    CHECK_EQ(r.get32(fonts + LH_HEAD), large);
+    CHECK_EQ(r.get32(large + LN_SUCC), small);
+    CHECK_EQ(r.get32(small + LN_SUCC), r.graphics.topaz_font());
+    CHECK_EQ(r.get32(r.graphics.topaz_font() + LN_PRED), small);
+
+    r.cpu().a[0] = kTextAttr;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), large);
+    CHECK_EQ(r.get16(large + tf_Accessors), 1u);
+    r.put16(kTextAttr + ta_YSize, 9);
+    r.cpu().a[0] = kTextAttr;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), small);
+    CHECK_EQ(r.get16(small + tf_Accessors), 1u);
+
+    // A font the size asked for is an exact match, extended or not.
+    r.put16(kTextAttr + ta_YSize, 8);
+    r.cpu().a[0] = kTextAttr;
+    r.cpu().a[1] = small + tf_YSize - ta_YSize;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::WeighTAMatch), 32767u);
+
+    const u32 rp = r.exec.alloc(RastPort_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(rp != 0);
+    r.graphics.set_font(rp, large);
+    r.put32(kTextAttr + ta_Name, 0);
+    r.cpu().a[1] = rp;
+    r.cpu().a[0] = kTextAttr;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::AskFont), ExitReason::Halt);
+    CHECK_EQ(r.get32(kTextAttr + ta_Name), kStrings);
+    CHECK_EQ(r.get16(kTextAttr + ta_YSize), 12u);
+    CHECK_EQ(r.get8(kTextAttr + ta_Flags), 0x02u);
+
+    r.cpu().a[1] = large;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::CloseFont), ExitReason::Halt);
+    CHECK_EQ(r.get16(large + tf_Accessors), 0u);
+    r.cpu().a[1] = large;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::CloseFont), ExitReason::Halt);
+    CHECK_EQ(r.get16(large + tf_Accessors), 0u);
+
+    // Removed, the large font is found no more and the small one answers.
+    r.cpu().a[1] = large;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RemFont), ExitReason::Halt);
+    CHECK_EQ(r.get8(large + tf_Flags) & kFpfRemoved, kFpfRemoved);
+    CHECK_EQ(r.get32(fonts + LH_HEAD), small);
+    CHECK_EQ(r.get32(small + LN_PRED), fonts + LH_HEAD);
+    r.put32(kTextAttr + ta_Name, kStrings + 0x20);
+    r.put16(kTextAttr + ta_YSize, 12);
+    r.put8(kTextAttr + ta_Flags, 0);
+    r.cpu().a[0] = kTextAttr;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenFont), small);
+    // A second RemFont leaves the list alone.
+    r.cpu().a[1] = large;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RemFont), ExitReason::Halt);
+    CHECK_EQ(r.get32(fonts + LH_HEAD), small);
 }
 
 void scroll_raster_moves_pixels() {
@@ -1999,7 +2104,8 @@ int main() {
     text_draws_glyphs_advances_cp_and_returns_nothing_unsafe();
     text_length_is_8_per_char();
     set_font_updates_txheight_txbaseline();
-    open_font_topaz_8_returns_the_builtin_font_and_other_names_give_0();
+    open_font_finds_the_nearest_font_of_the_name();
+    add_font_and_rem_font_keep_the_fonts_in_memory();
     scroll_raster_moves_pixels();
     set_rgb4_and_load_rgb4_write_the_colour_table();
     set_rgb32_get_rgb32_and_load_rgb32_v39_palette();
