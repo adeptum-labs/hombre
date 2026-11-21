@@ -22,6 +22,7 @@
  */
 
 #include "m68k_run.hpp"
+#include "splash.hpp"
 
 #include "../common/console_keys.hpp"
 #include "../common/dos_date.hpp"
@@ -214,6 +215,7 @@ void open_amiga_screen(const BootInfo& info) {
         return;
     }
     intuition.set_clock(&clock_us);
+    splash_progress(8, kSplashKernelSteps);
     intuition.set_gadget_renderer(&GadTools::render_gadget, &gadtools);
     intuition.set_gadget_release(&GadTools::release_gadget);
     intuition.set_gadget_prop_code(&GadTools::prop_gadget_code);
@@ -243,12 +245,16 @@ void open_amiga_screen(const BootInfo& info) {
     }
     intuition.set_default_screen(amiga_screen);
     serial::write("intuition: screen opened 640x400\n");
+    splash_progress(9, kSplashKernelSteps);
 }
 
 // Hands the framebuffer to the Amiga screen: the kernel's text console stops
 // and the screen is painted in full.
 void show_amiga_screen(const BootInfo& info) {
     serial::mirror = nullptr;
+    // The splash ends: the Amiga screen takes the framebuffer.
+    splash_progress(kSplashKernelSteps, kSplashKernelSteps);
+    splash_end();
     amiga_display.init(make_framebuffer(info));
     pointer.init(640, 400, 320, 200);
     amiga_display.move_pointer(machine, amiga_screen, pointer.x(), pointer.y());
@@ -775,6 +781,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         fail("dos init failed");
         return false;
     }
+    splash_progress(7, kSplashKernelSteps);
     if (!icon.init(machine, exec, dos)) {
         fail("icon init failed");
         return false;

@@ -34,8 +34,8 @@
 #include "mmio.hpp"
 #include "page_alloc.hpp"
 #include "percpu.hpp"
+#include "splash.hpp"
 #include "task_switch.hpp"
-#include "text_console.hpp"
 
 using namespace hombre;
 
@@ -46,7 +46,6 @@ PerCpu bsp_cpu;
 // Constant initialised, so they sit in .bss without a constructor run.
 constinit PhysAllocator phys_pages;
 constinit MmioMapper mmio;
-constinit TextConsole console;
 
 [[noreturn]] void halt() {
     for (;;) {
@@ -76,18 +75,6 @@ void unmap_lower_half(u64 direct_map_base) {
         pml4[i] = 0;
     }
     asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
-}
-
-void draw_banner(Framebuffer& fb) {
-    constexpr const char* text = "Hombre";
-    constexpr u32 scale = 4;
-    constexpr u32 text_width = 6 * 8 * scale;
-    const u32 x = fb.width() > text_width ? (fb.width() - text_width) / 2 : 0;
-    fb.draw_text(x, 16, text, 0xE0E0FF, scale);
-}
-
-void console_put(char c) {
-    console.put(c);
 }
 
 #if defined(HOMBRE_FAULT_TEST) && HOMBRE_FAULT_TEST != 4
@@ -153,10 +140,9 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
 
     if (info->fb.phys != 0) {
         Framebuffer fb = make_framebuffer(*info);
-        fb.fill(0x000040);
-        draw_banner(fb);
-        console.init(fb, 16 + 32 + 16, 2, 0xE0E0FF, 0x000040);
-        serial::mirror = &console_put;
+        if (!splash_show(fb)) {
+            fb.fill(0x000000);
+        }
     }
 
     // The firmware's IDT gates use selectors outside the new GDT, so no
@@ -219,10 +205,12 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
 #if defined(HOMBRE_FAULT_TEST) && HOMBRE_FAULT_TEST == 4
         guard_fault_test(phys_pages);
 #endif
+        splash_progress(1, kSplashKernelSteps);
         pic_mask_all();
         clock_init();
         if (apic_init(mmio)) {
             irq_enable();
+            splash_progress(2, kSplashKernelSteps);
         }
         boot_disk_run(*info, phys_pages, mmio);
     }

@@ -110,6 +110,9 @@ $(filter-out %/mem.o,$(KERNEL_OBJ)): $(BUILD)/%.o: %.cpp
 	@mkdir -p $(@D)
 	$(KCXX) $(KCXXFLAGS) -c $< -o $@
 
+# The splash image is read with .incbin, a dependency make cannot see.
+$(BUILD)/kernel/splash.o: assets/splash.rle
+
 # The mem* routines are built once per target, without builtins (see
 # KMEMFLAGS for the kernel).
 $(BUILD)/loader/mem.o: common/mem.cpp
@@ -146,6 +149,8 @@ image-fault$(1): $(BUILD)/hombre-fault$(1).img
 $$(filter-out %/mem.o $$(COMMON_KOBJ),$$(FAULT$(1)_OBJ)): $$(FAULT$(1)_DIR)/%.o: %.cpp
 	@mkdir -p $$(@D)
 	$$(KCXX) $$(KCXXFLAGS) -DHOMBRE_FAULT_TEST=$(1) -c $$< -o $$@
+
+$$(FAULT$(1)_DIR)/kernel/splash.o: assets/splash.rle
 
 $$(FAULT$(1)_DIR)/kernel/mem.o: common/mem.cpp
 	@mkdir -p $$(@D)

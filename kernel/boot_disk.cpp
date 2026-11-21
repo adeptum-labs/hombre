@@ -32,6 +32,7 @@
 #include "mmio.hpp"
 #include "page_alloc.hpp"
 #include "pci.hpp"
+#include "splash.hpp"
 #include "virtio_blk.hpp"
 
 namespace hombre {
@@ -358,6 +359,7 @@ constinit AdfVolume drive_volumes[kFloppyDrives]{};
 
 void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& mmio) {
     pci_scan(&log_pci_function, nullptr);
+    splash_progress(3, kSplashKernelSteps);
 
     // Each drive by its slot; a single device elsewhere is DF0: as before
     // drives had slots.
@@ -395,10 +397,13 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
     if (!load_disk(phys_pages, mmio, drive_devices[0], addresses[0], "", boot)) {
         return;
     }
+    splash_progress(4, kSplashKernelSteps);
     usb_keyboard_start(mmio, phys_pages);
+    splash_progress(5, kSplashKernelSteps);
     if (!mount_disk(boot, "", drive_volumes[0])) {
         return;
     }
+    splash_progress(6, kSplashKernelSteps);
     print_root(drive_volumes[0]);
     print_startup_sequence(drive_volumes[0]);
 
