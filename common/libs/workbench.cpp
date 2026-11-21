@@ -2701,6 +2701,11 @@ void Workbench::run() {
     for (;;) {
         const bool more = pump();
         const u64 now = exec_->now_us();
+        if (reopen_pending_) {
+            // OpenWorkBench after a reset: the windows come back.
+            reopen_pending_ = false;
+            open_after_reset();
+        }
         if (patterns_changed_) {
             // WBPattern's Test and Use show at once.
             patterns_changed_ = false;
@@ -3175,7 +3180,20 @@ void Workbench::open_after_reset() {
 
 bool Workbench::hook_close(void* ctx) { return static_cast<Workbench*>(ctx)->close_for_reset(); }
 
-void Workbench::hook_open(void* ctx) { static_cast<Workbench*>(ctx)->open_after_reset(); }
+// The windows reopen in the Workbench's own task, so their ports signal it
+// and not the task that called OpenWorkBench; without a task of its own
+// they reopen at once.
+void Workbench::hook_open(void* ctx) {
+    Workbench& wb = *static_cast<Workbench*>(ctx);
+    Bus b(*wb.machine_);
+    const u32 bit = wb.reply_port_ != 0 ? b.r8(wb.reply_port_ + ndk::mp_SigBit) : 32;
+    if (!b.ok() || bit >= 32 || wb.process_ == 0) {
+        wb.open_after_reset();
+        return;
+    }
+    wb.reopen_pending_ = true;
+    wb.exec_->signal_task(wb.process_, 1u << bit);
+}
 
 u32 Workbench::start(u32 flags, u32 path) {
     (void)flags;

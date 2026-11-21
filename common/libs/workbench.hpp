@@ -501,6 +501,7 @@ private:
     i32 volume_top_ = 0;
     u64 next_refresh_us_ = 0;
     bool patterns_changed_ = false;  // WBPattern's prefs were written
+    bool reopen_pending_ = false;  // OpenWorkBench asked for the windows back
     bool running_ = false;
     bool desktop_open_ = false;
     bool backdrop_ = true;
