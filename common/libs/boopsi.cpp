@@ -48,6 +48,59 @@ constexpr u32 ig_PlanePick = 14;
 constexpr u32 ig_PlaneOnOff = 15;
 constexpr u32 Image_SIZEOF = 20;
 
+// struct sysiClass's instance data after imageclass's Image.
+constexpr u32 si_Which = Image_SIZEOF;
+constexpr u32 si_Size = Image_SIZEOF + 2;
+constexpr u32 si_DrawInfo = Image_SIZEOF + 4;
+constexpr u32 SysImage_SIZEOF = 8;
+
+// struct TextFont
+constexpr u32 tf_YSize = 20;
+
+struct SysImageDimensions {
+    u32 which;
+    u16 width;
+    u16 height;
+};
+
+// The MEDRES size of every sysiclass image; HIRES uses it too.
+constexpr SysImageDimensions kSysImageDimensions[] = {
+    {DEPTHIMAGE, 23, 11}, {ZOOMIMAGE, 23, 11},  {SDEPTHIMAGE, 23, 11},
+    {CLOSEIMAGE, 20, 11}, {SIZEIMAGE, 18, 10},  {LEFTIMAGE, 16, 10},
+    {RIGHTIMAGE, 16, 10}, {UPIMAGE, 18, 11},    {DOWNIMAGE, 18, 11},
+    {CHECKIMAGE, 26, 11}, {MXIMAGE, 17, 9},     {MENUCHECK, 15, 8},
+    {AMIGAKEY, 23, 8},
+};
+
+// The size SYSIA_Which and SYSIA_Size give an image, with a reference font
+// setting its height; false for an unknown Which.
+bool sys_image_dimensions(Bus& b, u32 which, u32 size, u32 reference_font, u16& width,
+                          u16& height) {
+    const SysImageDimensions* found = nullptr;
+    for (const SysImageDimensions& dimensions : kSysImageDimensions) {
+        if (dimensions.which == which) {
+            found = &dimensions;
+            break;
+        }
+    }
+    if (found == nullptr) {
+        return false;
+    }
+    width = found->width;
+    height = found->height;
+    if (size == SYSISIZE_LOWRES && which != CHECKIMAGE && which != MXIMAGE) {
+        width = static_cast<u16>((width + 1) / 2);
+    }
+    if (reference_font != 0) {
+        const u16 y_size = b.r16(reference_font + tf_YSize);
+        if (!b.ok()) {
+            return false;
+        }
+        height = static_cast<u16>(which == MENUCHECK || which == AMIGAKEY ? y_size : y_size + 3);
+    }
+    return true;
+}
+
 constexpr u32 GTYP_GZZGADGET = 0x2000;
 
 // The block a class lives in: the IClass and its name. cl_Reserved holds
@@ -96,6 +149,9 @@ struct Boopsi::Natives {
     static void image(void* ctx, Machine& m) {
         native::set_result(m, of(ctx).image_dispatch(m.cpu.a[0], m.cpu.a[2], m.cpu.a[1]));
     }
+    static void sysi(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).sysi_dispatch(m.cpu.a[0], m.cpu.a[2], m.cpu.a[1]));
+    }
 };
 
 bool Boopsi::init(Machine& m, Exec& exec) {
@@ -113,7 +169,11 @@ bool Boopsi::init(Machine& m, Exec& exec) {
     image_ = root_ != 0 ? make_system_class("imageclass", root_, Image_SIZEOF, Natives::image)
                         : 0;
     image_entry_ = image_ != 0 ? Bus(m).r32(image_ + h_Entry) : 0;
-    return root_ != 0 && gadget_ != 0 && image_ != 0;
+    sysi_ = image_ != 0
+                ? make_system_class("sysiclass", image_, SysImage_SIZEOF, Natives::sysi)
+                : 0;
+    sysi_entry_ = sysi_ != 0 ? Bus(m).r32(sysi_ + h_Entry) : 0;
+    return root_ != 0 && gadget_ != 0 && image_ != 0 && sysi_ != 0;
 }
 
 // A public class whose dispatcher is the native entry, behind an A-line
@@ -235,7 +295,7 @@ void Boopsi::remove_class(u32 cl) {
 // FreeClass: false while the class has objects or subclasses. The system
 // classes stay.
 bool Boopsi::free_class(u32 cl) {
-    if (cl == 0 || cl == root_ || cl == gadget_ || cl == image_) {
+    if (cl == 0 || cl == root_ || cl == gadget_ || cl == image_ || cl == sysi_) {
         return false;
     }
     Bus b(*machine_);
@@ -322,6 +382,9 @@ u32 Boopsi::coerce_method(u32 cl, u32 object, u32 msg) {
     }
     if (entry == image_entry_) {
         return image_dispatch(cl, object, msg);
+    }
+    if (entry == sysi_entry_) {
+        return sysi_dispatch(cl, object, msg);
     }
     Machine& m = *machine_;
     if (!exec_->enter_nested_run()) {
@@ -738,6 +801,98 @@ u32 Boopsi::image_dispatch(u32 cl, u32 object, u32 msg) {
     case IM_ERASEFRAME:
     case IM_MOVE:
         return 0;
+    default:
+        return call_super(cl, object, msg);
+    }
+}
+
+// sysiclass: a system image of imageclass. SYSIA_Which and SYSIA_Size give
+// its size, SYSIA_ReferenceFont its height; IM_DRAW hands it to the
+// renderer, since BOOPSI has no drawing of its own.
+u32 Boopsi::sysi_dispatch(u32 cl, u32 object, u32 msg) {
+    Bus b(*machine_);
+    const u32 method = b.r32(msg);
+    if (!b.ok()) {
+        return 0;
+    }
+    switch (method) {
+    case OM_NEW: {
+        const u32 image = call_super(cl, object, msg);
+        if (image == 0) {
+            return 0;
+        }
+        u32 which = DEPTHIMAGE;
+        u32 size = SYSISIZE_MEDRES;
+        u32 draw_info = 0;
+        u32 reference_font = 0;
+        u32 budget = tags::kMaxTagItems;
+        u32 at = b.r32(msg + 4);
+        for (;;) {
+            const u32 item = tags::next(b, at, budget);
+            if (item == 0) {
+                break;
+            }
+            const u32 data = b.r32(item + 4);
+            switch (b.r32(item)) {
+            case SYSIA_Which:
+                which = data;
+                break;
+            case SYSIA_Size:
+                size = data;
+                break;
+            case SYSIA_DrawInfo:
+                draw_info = data;
+                break;
+            case SYSIA_ReferenceFont:
+                reference_font = data;
+                break;
+            default:
+                break;
+            }
+        }
+        u16 width = 0;
+        u16 height = 0;
+        if (!b.ok() ||
+            !sys_image_dimensions(b, which, size, reference_font, width, height)) {
+            const u32 dispose[] = {OM_DISPOSE};
+            send(class_of(image), image, dispose, 1);
+            return 0;
+        }
+        b.w16(image + si_Which, which);
+        b.w16(image + si_Size, size);
+        b.w32(image + si_DrawInfo, draw_info);
+        // IA_Width and IA_Height do not size a system image.
+        b.w16(image + ig_Width, width);
+        b.w16(image + ig_Height, height);
+        return b.ok() ? image : 0;
+    }
+    case IM_DRAW:
+    case IM_DRAWFRAME: {
+        const u32 rp = b.r32(msg + 4);
+        const i32 left = static_cast<i16>(b.r16(msg + 8)) +
+                         static_cast<i16>(b.r16(object + ig_LeftEdge));
+        const i32 top = static_cast<i16>(b.r16(msg + 10)) +
+                        static_cast<i16>(b.r16(object + ig_TopEdge));
+        i32 width = static_cast<i16>(b.r16(object + ig_Width));
+        i32 height = static_cast<i16>(b.r16(object + ig_Height));
+        if (method == IM_DRAWFRAME) {
+            const i32 frame_width = static_cast<i16>(b.r16(msg + 20));
+            const i32 frame_height = static_cast<i16>(b.r16(msg + 22));
+            if (frame_width > 0 && frame_height > 0) {
+                width = frame_width;
+                height = frame_height;
+            }
+        }
+        const u32 which = b.r16(object + si_Which);
+        const u32 state = b.r32(msg + 12);
+        const u32 called_info = b.r32(msg + 16);
+        const u32 draw_info = called_info != 0 ? called_info : b.r32(object + si_DrawInfo);
+        if (b.ok() && sys_image_renderer_ != nullptr) {
+            sys_image_renderer_(sys_image_renderer_ctx_, rp, which, left, top, width, height,
+                                state, draw_info);
+        }
+        return 0;
+    }
     default:
         return call_super(cl, object, msg);
     }

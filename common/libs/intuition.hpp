@@ -106,6 +106,7 @@ constexpr u32 ResetMenuStrip = 702;
 constexpr u32 OpenWindowTagList = 606;
 constexpr u32 OpenScreenTagList = 612;
 constexpr u32 EraseImage = 630;
+constexpr u32 DrawImageState = 618;
 constexpr u32 ObtainGIRPort = 558;
 constexpr u32 IntuiTextLength = 330;
 constexpr u32 InitRequester = 138;
@@ -256,6 +257,10 @@ public:
     // complement highlight over the drawn image leaves it: the look of a
     // selected icon without a SelectRender image.
     void draw_image_complemented(u32 rp, u32 image, i32 left, i32 top);
+
+    // DrawImageState: the image as its state shows it, with draw_info over
+    // the screen's DrawInfo when it is 0. A BOOPSI image gets IM_DRAW.
+    void draw_image_state(u32 rp, u32 image, i32 left, i32 top, u32 state, u32 draw_info);
 
     // SetMenuStrip and ClearMenuStrip for code that is not the guest's:
     // the strip the window's right button opens.
@@ -515,7 +520,9 @@ private:
     void end_prop_drag();
     void call_gadget_hook(u32 gadget, u32 vert_pot);
     void report_image_damage(const raster::RastPortView& view, const Rect& rect);
-    void draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool complement);
+    void draw_image_mode(u32 rp, u32 image, i32 left, i32 top, u32 state, u32 draw_info);
+    static void draw_sys_image(void* ctx, u32 rp, u32 which, i32 left, i32 top, i32 width,
+                               i32 height, u32 state, u32 draw_info);
     void draw_image_view(native::Bus& b, const raster::RastPortView& view, u32 image, i32 left,
                          i32 top, bool complement, bool damage);
     Rect icon_drag_rect(native::Bus& b) const;

@@ -207,6 +207,17 @@ void erase_image_at(GfxRig& r, u32 rp, u32 image, i32 left, i32 top) {
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::EraseImage), ExitReason::Halt);
 }
 
+void draw_image_state_at(GfxRig& r, u32 rp, u32 image, i32 left, i32 top, u32 state,
+                         u32 draw_info = 0) {
+    r.cpu().a[0] = rp;
+    r.cpu().a[1] = image;
+    r.cpu().d[0] = static_cast<u32>(left);
+    r.cpu().d[1] = static_cast<u32>(top);
+    r.cpu().d[2] = state;
+    r.cpu().a[2] = draw_info;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DrawImageState), ExitReason::Halt);
+}
+
 void put_new_screen(GfxRig& r, u32 at, u32 width, u32 height, u32 depth, u32 detail,
                     u32 block, u32 title) {
     r.put16(at + ns_LeftEdge, 0);
@@ -318,6 +329,22 @@ std::vector<u8> screen_planes(GfxRig& r, u32 screen) {
     for (u32 i = 0; i < bytes; ++i) {
         out[i] = static_cast<u8>(r.get8(plane0 + i));
         out[bytes + i] = static_cast<u8>(r.get8(plane1 + i));
+    }
+    return out;
+}
+
+std::vector<u8> window_planes(GfxRig& r, u32 window) {
+    const u32 rp = r.get32(window + wd_RPort);
+    const u32 bitmap = r.get32(rp + rp_BitMap);
+    const u32 bpr = r.get16(bitmap + bm_BytesPerRow);
+    const u32 rows = r.get16(bitmap + bm_Rows);
+    const u32 bytes = bpr * rows;
+    std::vector<u8> out(bytes * 2);
+    for (u32 plane = 0; plane < 2; ++plane) {
+        const u32 base = r.get32(bitmap + bm_Planes + plane * 4);
+        for (u32 i = 0; i < bytes; ++i) {
+            out[plane * bytes + i] = static_cast<u8>(r.get8(base + i));
+        }
     }
     return out;
 }
@@ -6280,6 +6307,97 @@ void a_boopsi_gadget_draws_itself_and_takes_the_click() {
     CHECK(bo.free_class(cl));
 }
 
+void sysiclass_sizes_and_lifecycle() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 sysi = bo.find_class_named("sysiclass");
+    const u32 image_class = bo.find_class_named("imageclass");
+    CHECK(sysi != 0 && image_class != 0);
+    CHECK_EQ(r.get32(sysi + cl_Super), image_class);
+    const u32 before = r.exec.free_bytes();
+    r.str(kTitle, "sysiclass");
+
+    // CLOSEIMAGE at the default MEDRES size.
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kTitle;
+    r.cpu().a[2] = r.tags(kTagList, {{SYSIA_Which, CLOSEIMAGE}, {TAG_DONE, 0}});
+    const u32 close = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(close != 0);
+    CHECK_EQ(r.get16(close + img_Width), 20u);
+    CHECK_EQ(r.get16(close + img_Height), 11u);
+    r.cpu().a[0] = close;
+    r.call(Base::Intuition, intuition_lvo::DisposeObject);
+
+    // A reference font of 8 sets the height of AMIGAKEY to 8 and of the
+    // others to 11.
+    r.put16(kBuffer + 20, 8);
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kTitle;
+    r.cpu().a[2] = r.tags(kTagList, {{SYSIA_Which, AMIGAKEY},
+                                    {SYSIA_ReferenceFont, kBuffer}, {TAG_DONE, 0}});
+    const u32 amiga = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(amiga != 0);
+    CHECK_EQ(r.get16(amiga + img_Width), 23u);
+    CHECK_EQ(r.get16(amiga + img_Height), 8u);
+
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kTitle;
+    r.cpu().a[2] = r.tags(kTagList, {{SYSIA_Which, DEPTHIMAGE},
+                                    {SYSIA_ReferenceFont, kBuffer}, {TAG_DONE, 0}});
+    const u32 depth = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(depth != 0);
+    CHECK_EQ(r.get16(depth + img_Width), 23u);
+    CHECK_EQ(r.get16(depth + img_Height), 11u);
+
+    r.cpu().a[0] = amiga;
+    r.call(Base::Intuition, intuition_lvo::DisposeObject);
+    r.cpu().a[0] = depth;
+    r.call(Base::Intuition, intuition_lvo::DisposeObject);
+
+    // An unknown Which makes no object and leaves none behind.
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kTitle;
+    r.cpu().a[2] = r.tags(kTagList, {{SYSIA_Which, 0x7FFF}, {TAG_DONE, 0}});
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::NewObjectA), 0u);
+    CHECK_EQ(r.get32(sysi + cl_ObjectCount), 0u);
+    CHECK_EQ(r.exec.free_bytes(), before);
+}
+
+void draw_image_state_draws_a_sysiclass_image() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 sysi = bo.find_class_named("sysiclass");
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+    const u32 image = bo.new_object(
+        sysi, 0, r.tags(kTagList, {{SYSIA_Which, CLOSEIMAGE}, {TAG_DONE, 0}}));
+    CHECK(image != 0);
+    const i32 left = 30;
+    const i32 top = 20;
+    const i32 right = left + 19;
+    const i32 bottom = top + 10;
+    const u32 bitmap = r.get32(rp + rp_BitMap);
+    const u32 bpr = r.get16(bitmap + bm_BytesPerRow);
+    const u32 rows = r.get16(bitmap + bm_Rows);
+
+    const std::vector<u8> before = window_planes(r, window);
+    draw_image_state_at(r, rp, image, left, top, IDS_NORMAL);
+    const std::vector<u8> normal = window_planes(r, window);
+    CHECK(normal != before);
+    CHECK(changed_only_inside(before, normal, bpr, rows, left, top, right, bottom));
+
+    draw_image_state_at(r, rp, image, left, top, IDS_SELECTED);
+    const std::vector<u8> selected = window_planes(r, window);
+    CHECK(selected != normal);
+    CHECK(changed_only_inside(before, selected, bpr, rows, left, top, right, bottom));
+
+    bo.dispose_object(image);
+}
+
 void intuitext_borders_and_blocking_requests() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -6438,6 +6556,8 @@ int main() {
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();
     a_boopsi_gadget_draws_itself_and_takes_the_click();
+    sysiclass_sizes_and_lifecycle();
+    draw_image_state_draws_a_sysiclass_image();
     screen_font_is_a_textattr_naming_topaz();
     open_screen_builds_struct_bitmap_and_colormap();
     open_screen_clears_and_draws_title_bar();

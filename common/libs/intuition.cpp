@@ -29,6 +29,7 @@
 #include "exec.hpp"
 #include "graphics.hpp"
 #include "raster.hpp"
+#include "sysimage.hpp"
 #include "utility.hpp"
 #include "version.hpp"
 
@@ -1485,6 +1486,11 @@ struct IntuitionNatives {
                             static_cast<i16>(m.cpu.d[1] & 0xFFFF));
     }
 
+    static void draw_image_state(void* ctx, Machine& m) {
+        of(ctx).draw_image_state(m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF),
+                                 static_cast<i16>(m.cpu.d[1] & 0xFFFF), m.cpu.d[2], m.cpu.a[2]);
+    }
+
     static void refresh_glist(void* ctx, Machine& m) {
         of(ctx).refresh_glist(m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF));
     }
@@ -1553,6 +1559,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::AddGadget, IntuitionNatives::add_gadget, "AddGadget"},
     {intuition_lvo::DrawImage, IntuitionNatives::draw_image, "DrawImage"},
     {intuition_lvo::EraseImage, IntuitionNatives::erase_image, "EraseImage"},
+    {intuition_lvo::DrawImageState, IntuitionNatives::draw_image_state, "DrawImageState"},
     {intuition_lvo::CloseScreen, IntuitionNatives::close_screen, "CloseScreen"},
     {intuition_lvo::CloseWindow, IntuitionNatives::close_window, "CloseWindow"},
     {intuition_lvo::ModifyIDCMP, IntuitionNatives::modify_idcmp, "ModifyIDCMP"},
@@ -1704,6 +1711,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     if (!boopsi_.init(m, exec)) {
         return false;
     }
+    boopsi_.set_sys_image_renderer(draw_sys_image, this);
     base_ = base;
     return true;
 }
@@ -4714,11 +4722,16 @@ void Intuition::free_gadget_info(u32 info) {
 }
 
 void Intuition::draw_image(u32 rp, u32 image, i32 left, i32 top) {
-    draw_image_mode(rp, image, left, top, false);
+    draw_image_mode(rp, image, left, top, ndk::IDS_NORMAL, 0);
 }
 
 void Intuition::draw_image_complemented(u32 rp, u32 image, i32 left, i32 top) {
-    draw_image_mode(rp, image, left, top, true);
+    draw_image_mode(rp, image, left, top, ndk::IDS_SELECTED, 0);
+}
+
+void Intuition::draw_image_state(u32 rp, u32 image, i32 left, i32 top, u32 state,
+                                 u32 draw_info) {
+    draw_image_mode(rp, image, left, top, state, draw_info);
 }
 
 void Intuition::report_mouse(u32 window, bool on) {
@@ -4777,17 +4790,34 @@ void Intuition::clear_drag_image() {
     compose(screen, rect);
 }
 
-void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, bool complement) {
+void Intuition::draw_sys_image(void* ctx, u32 rp, u32 which, i32 left, i32 top, i32 width,
+                               i32 height, u32 state, u32 draw_info) {
+    Intuition& in = *static_cast<Intuition*>(ctx);
+    if (in.machine_ == nullptr || in.graphics_ == nullptr) {
+        return;
+    }
+    Bus b(*in.machine_);
+    u16 pens[sysimage::kPenCount];
+    sysimage::read_pens(b, draw_info, pens);
+    sysimage::draw(*in.graphics_, b, rp, which,
+                   Rect{left, top, left + width - 1, top + height - 1}, state, pens);
+}
+
+void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, u32 state,
+                                u32 draw_info) {
     if (machine_ == nullptr || rp == 0 || image == 0) {
         return;
     }
     Bus b(*machine_);
+    const bool complement = state == ndk::IDS_SELECTED || state == ndk::IDS_INACTIVESELECTED;
     // A BOOPSI image draws itself.
     if (static_cast<u16>(b.r16(image + image::Depth)) == ndk::CUSTOMIMAGEDEPTH &&
         boopsi_.is_object(image)) {
         const u32 screen = display_ != nullptr ? display_->front_screen : 0;
-        const u32 msg[] = {ndk::IM_DRAW, rp, pack_point(left, top), complement ? 1u : 0u,
-                           screen != 0 ? screen_draw_info(screen) : 0};
+        const u32 info = draw_info != 0
+                             ? draw_info
+                             : (screen != 0 ? screen_draw_info(screen) : 0);
+        const u32 msg[] = {ndk::IM_DRAW, rp, pack_point(left, top), state, info};
         boopsi_.send(boopsi_.class_of(image), image, msg, 5);
         return;
     }

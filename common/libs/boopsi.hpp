@@ -179,6 +179,38 @@ constexpr u32 IA_FGPen = IA_Dummy + 5;
 constexpr u32 IA_BGPen = IA_Dummy + 6;
 constexpr u32 IA_Data = IA_Dummy + 7;
 
+// sysiclass attributes and values (intuition/imageclass.h).
+constexpr u32 SYSIA_Size = IA_Dummy + 0x0B;
+constexpr u32 SYSIA_Depth = IA_Dummy + 0x0C;
+constexpr u32 SYSIA_Which = IA_Dummy + 0x0D;
+constexpr u32 SYSIA_DrawInfo = IA_Dummy + 0x18;
+constexpr u32 SYSIA_ReferenceFont = IA_Dummy + 0x19;
+
+constexpr u32 DEPTHIMAGE = 0;
+constexpr u32 ZOOMIMAGE = 1;
+constexpr u32 SIZEIMAGE = 2;
+constexpr u32 CLOSEIMAGE = 3;
+constexpr u32 SDEPTHIMAGE = 5;
+constexpr u32 LEFTIMAGE = 0x0A;
+constexpr u32 UPIMAGE = 0x0B;
+constexpr u32 RIGHTIMAGE = 0x0C;
+constexpr u32 DOWNIMAGE = 0x0D;
+constexpr u32 CHECKIMAGE = 0x0E;
+constexpr u32 MXIMAGE = 0x0F;
+constexpr u32 MENUCHECK = 0x10;
+constexpr u32 AMIGAKEY = 0x11;
+
+constexpr u32 SYSISIZE_MEDRES = 0;
+constexpr u32 SYSISIZE_LOWRES = 1;
+constexpr u32 SYSISIZE_HIRES = 2;
+
+// The imp_State of IM_DRAW.
+constexpr u32 IDS_NORMAL = 0;
+constexpr u32 IDS_SELECTED = 1;
+constexpr u32 IDS_DISABLED = 2;
+constexpr u32 IDS_INACTIVENORMAL = 5;
+constexpr u32 IDS_INACTIVESELECTED = 6;
+
 }
 
 class Boopsi {
@@ -186,6 +218,10 @@ public:
     static constexpr u32 kMaxPublicClasses = 64;
     // 68000 code one method call may run, at most.
     static constexpr u64 kDispatchBlocks = 1ull << 24;
+
+    // How intuition draws a sysiclass image, which needs graphics.library.
+    using SysImageRenderer = void (*)(void* ctx, u32 rp, u32 which, i32 left, i32 top,
+                                      i32 width, i32 height, u32 state, u32 draw_info);
 
     // Makes rootclass, gadgetclass and imageclass and lists them. exec
     // must be initialised. False if exec runs out of memory or native ids.
@@ -223,6 +259,12 @@ public:
     u32 root_class() const { return root_; }
     u32 gadget_class() const { return gadget_; }
     u32 image_class() const { return image_; }
+    u32 sysi_class() const { return sysi_; }
+
+    void set_sys_image_renderer(SysImageRenderer renderer, void* ctx) {
+        sys_image_renderer_ = renderer;
+        sys_image_renderer_ctx_ = ctx;
+    }
 
 private:
     struct Natives;
@@ -231,6 +273,7 @@ private:
     u32 root_dispatch(u32 cl, u32 object, u32 msg);
     u32 gadget_dispatch(u32 cl, u32 object, u32 msg);
     u32 image_dispatch(u32 cl, u32 object, u32 msg);
+    u32 sysi_dispatch(u32 cl, u32 object, u32 msg);
     u32 call_super(u32 cl, u32 object, u32 msg);
     u32 set_gadget_attrs(u32 gadget, u32 tags, bool initial);
     bool get_gadget_attr(u32 gadget, u32 attr, u32 storage);
@@ -243,9 +286,13 @@ private:
     u32 root_ = 0;
     u32 gadget_ = 0;
     u32 image_ = 0;
+    u32 sysi_ = 0;
     u32 root_entry_ = 0;
     u32 gadget_entry_ = 0;
     u32 image_entry_ = 0;
+    u32 sysi_entry_ = 0;
+    SysImageRenderer sys_image_renderer_ = nullptr;
+    void* sys_image_renderer_ctx_ = nullptr;
     u32 public_[kMaxPublicClasses]{};
 };
 
