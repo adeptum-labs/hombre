@@ -154,6 +154,10 @@ constexpr u32 Last = 1056;
 
 class Graphics {
 public:
+    // The pen from which a screen's ColorMap is the system's own: the grey
+    // ramp and the window chrome. A program may not take these pens.
+    static constexpr u32 kHighSystemPen = 220;
+
     // Makes graphics.library with its vectors and its list of the fonts in
     // memory: topaz 8, then the fonts of rom_fonts.hpp. exec must be
     // initialised. False if exec runs out of memory or native ids.
@@ -247,7 +251,6 @@ private:
     // kHighSystemPen up, are the system's and stay shared.
     static constexpr u32 kPens = 256;
     static constexpr u32 kSystemPens = 8;
-    static constexpr u32 kHighSystemPen = 224;
     u16 pen_users_[kPens]{};
     bool pen_exclusive_[kPens]{};
     bool pens_ready_ = false;

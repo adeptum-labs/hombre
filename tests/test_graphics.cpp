@@ -1895,7 +1895,7 @@ void obtain_pen_shares_and_reserves_pens() {
     };
     constexpr u32 kExclusive = 1;
     const u32 pen = obtain(0xFFFFFFFF, kExclusive);
-    CHECK(pen >= 8 && pen < 224);
+    CHECK(pen >= 8 && pen < Graphics::kHighSystemPen);
     CHECK_EQ(r.get16(color_table + pen * 2), 0x0F00u);
     CHECK_EQ(obtain(pen, 0), 0xFFFFFFFFu);
     CHECK_EQ(obtain(1, kExclusive), 0xFFFFFFFFu);

@@ -29,18 +29,18 @@ namespace hombre::chrome {
 
 // The screen title bar's shading, from light at its top to dark at its
 // bottom, round the BARBLOCKPEN colour.
-constexpr u8 kScreenBar0 = 224;
-constexpr u8 kScreenBar1 = 225;
-constexpr u8 kScreenBar2 = 226;
-constexpr u8 kScreenBar3 = 227;
+constexpr u8 kScreenBar0 = 220;
+constexpr u8 kScreenBar1 = 221;
+constexpr u8 kScreenBar2 = 222;
+constexpr u8 kScreenBar3 = 223;
 constexpr u32 kScreenBarSteps = 4;
 
-constexpr u8 kMenuPaperPen = 228;
-constexpr u8 kMenuLabelPen = 229;
-constexpr u8 kMenuLitPen = 230;
-constexpr u8 kMenuGhostPen = 231;
+constexpr u8 kMenuPaperPen = 224;
+constexpr u8 kMenuLabelPen = 225;
+constexpr u8 kMenuLitPen = 226;
+constexpr u8 kMenuGhostPen = 227;
 
-constexpr u8 kChromeBase = 232;
+constexpr u8 kChromeBase = 228;
 constexpr u32 kChromeCount = 24;
 
 // The pens of a DrawInfo, in its order: DETAILPEN, BLOCKPEN, TEXTPEN,
@@ -48,32 +48,44 @@ constexpr u32 kChromeCount = 24;
 // HIGHLIGHTTEXTPEN, BARDETAILPEN, BARBLOCKPEN and BARTRIMPEN.
 constexpr u32 kDrawInfoPens = 12;
 
-constexpr u8 kActiveBar0 = 232;
-constexpr u8 kActiveBar1 = 233;
-constexpr u8 kActiveBar2 = 234;
-constexpr u8 kActiveBar3 = 235;
-constexpr u8 kActiveBar4 = 236;
-constexpr u8 kActiveBar5 = 237;
-constexpr u8 kActiveBar6 = 238;
-constexpr u8 kActiveBar7 = 239;
+constexpr u8 kActiveBar0 = 228;
+constexpr u8 kActiveBar1 = 229;
+constexpr u8 kActiveBar2 = 230;
+constexpr u8 kActiveBar3 = 231;
+constexpr u8 kActiveBar4 = 232;
+constexpr u8 kActiveBar5 = 233;
+constexpr u8 kActiveBar6 = 234;
+constexpr u8 kActiveBar7 = 235;
 
-constexpr u8 kInactiveBar0 = 240;
-constexpr u8 kInactiveBar1 = 241;
-constexpr u8 kInactiveBar2 = 242;
-constexpr u8 kInactiveBar3 = 243;
-constexpr u8 kInactiveBar4 = 244;
-constexpr u8 kInactiveBar5 = 245;
+constexpr u8 kInactiveBar0 = 236;
+constexpr u8 kInactiveBar1 = 237;
+constexpr u8 kInactiveBar2 = 238;
+constexpr u8 kInactiveBar3 = 239;
+constexpr u8 kInactiveBar4 = 240;
+constexpr u8 kInactiveBar5 = 241;
 
-constexpr u8 kFrameDark = 246;
-constexpr u8 kFrameLight = 247;
-constexpr u8 kCloseFill = 248;
-constexpr u8 kCloseRing = 249;
-constexpr u8 kKnob0 = 250;
-constexpr u8 kKnob1 = 251;
-constexpr u8 kKnob2 = 252;
-constexpr u8 kTrack = 253;
-constexpr u8 kTitleActive = 254;
-constexpr u8 kTitleInactive = 255;
+constexpr u8 kFrameDark = 242;
+constexpr u8 kFrameLight = 243;
+constexpr u8 kCloseFill = 244;
+constexpr u8 kCloseRing = 245;
+constexpr u8 kKnob0 = 246;
+constexpr u8 kKnob1 = 247;
+constexpr u8 kKnob2 = 248;
+constexpr u8 kTrack = 249;
+constexpr u8 kTitleActive = 250;
+constexpr u8 kTitleInactive = 251;
+
+// COMPLEMENT inverts every bit of an eight-plane pixel, so pen n draws in
+// pen 0xFF - n. Pens 252..255 take the colours of 0..3, so pen 0 turns the
+// colour of 3 and pen 1 that of 2, as a complemented four-colour image
+// does on two planes, where 0 and 3 swap and 1 and 2 swap.
+constexpr u8 kComplementMirrorBase = 252;
+constexpr u32 kComplementMirrorPens = 4;
+
+// The top pen that keeps the colour of pen, one of 0..3.
+constexpr u8 mirror_pen(u8 pen) {
+    return static_cast<u8>(kComplementMirrorBase + pen);
+}
 
 namespace detail {
 
@@ -141,9 +153,9 @@ constexpr u32 kChromePalette[kChromeCount] = {
 };
 
 // The colours palette_from_pens computes: the screen bar and menu pens
-// through the window chrome, pens kDerivedBase to 255.
+// through the window chrome, pens kDerivedBase to kComplementMirrorBase - 1.
 constexpr u32 kDerivedBase = kScreenBar0;
-constexpr u32 kDerivedCount = 256 - kDerivedBase;
+constexpr u32 kDerivedCount = kComplementMirrorBase - kDerivedBase;
 
 static_assert(kChromePalette[kActiveBar0 - kChromeBase] == 0x6D9BE0u);
 static_assert(kChromePalette[kActiveBar7 - kChromeBase] == 0x2F5DA6u);
@@ -151,10 +163,11 @@ static_assert(kChromePalette[kInactiveBar0 - kChromeBase] == 0xE6E8ECu);
 static_assert(kChromePalette[kInactiveBar5 - kChromeBase] == 0xBFC3CAu);
 static_assert(kChromePalette[kTitleInactive - kChromeBase] == 0x4A4F57u);
 
-// Computes the colours of pens kDerivedBase..255 from the colours of a
-// screen's DrawInfo pens, in DrawInfo's order in pen_rgb: the bars shade
-// the FILLPEN and BACKGROUNDPEN colours, the frames take SHADOWPEN and
-// SHINEPEN, and the screen bar and menu take BARBLOCKPEN and BARDETAILPEN.
+// Computes the colours of pens kDerivedBase..kComplementMirrorBase - 1 from
+// the colours of a screen's DrawInfo pens, in DrawInfo's order in pen_rgb:
+// the bars shade the FILLPEN and BACKGROUNDPEN colours, the frames take
+// SHADOWPEN and SHINEPEN, and the screen bar and menu take BARBLOCKPEN and
+// BARDETAILPEN.
 void palette_from_pens(const u32* pen_rgb, u32* out);
 
 }

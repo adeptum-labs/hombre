@@ -828,7 +828,7 @@ void open_screen_depth8_sets_default_and_chrome_palettes() {
     CHECK_EQ(colormap_rgb24(r, map, 8), 0x000000u);
     CHECK_EQ(colormap_rgb24(r, map, 8 + 1 * 36 + 2 * 6 + 3), 0x336699u);
     CHECK_EQ(colormap_rgb24(r, map, 8 + 5 * 36 + 3 * 6 + 1), 0xFF9933u);
-    CHECK_EQ(colormap_rgb24(r, map, 223), 0xFFFFFFu);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kScreenBar0 - 1), 0xFFFF33u);
 
     // The screen bar shades white down to a light grey.
     CHECK_EQ(colormap_rgb24(r, map, chrome::kScreenBar0), 0xFFFFFFu);
@@ -5617,6 +5617,33 @@ void chrome_palette_follows_the_default_screen_pens() {
     CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar7), 0x0000B3u);
 }
 
+void complement_mirrors_follow_the_low_pens_on_eight_planes() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+
+    const auto mirrors_match = [&] {
+        for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
+            CHECK_EQ(colormap_rgb24(r, map, chrome::mirror_pen(static_cast<u8>(pen))),
+                     colormap_rgb24(r, map, pen));
+        }
+    };
+    mirrors_match();
+
+    const u32 colours[chrome::kComplementMirrorPens] = {0x112233, 0x445566, 0x778899,
+                                                        0xAABBCC};
+    for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
+        const u32 size = put_palette_pref(r, pen, (colours[pen] >> 8) & 0xFF00,
+                                         colours[pen] & 0xFF00,
+                                         (colours[pen] << 8) & 0xFF00);
+        set_iprefs(r, kIPrefs, size, 8);
+        mirrors_match();
+    }
+}
+
 void menu_strip_vectors_write_the_window_field() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -8187,6 +8214,7 @@ int main() {
     menu_bar_and_boxes_follow_the_screen_font();
     close_and_open_workbench_follow_the_windows_and_the_pens();
     chrome_palette_follows_the_default_screen_pens();
+    complement_mirrors_follow_the_low_pens_on_eight_planes();
     menu_strip_vectors_write_the_window_field();
     item_address_follows_the_menu_numbers();
     menu_right_press_opens_the_bar_and_the_second_item_picks();

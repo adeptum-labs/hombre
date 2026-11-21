@@ -109,7 +109,7 @@ constexpr u32 default_palette_rgb24(u32 pen) {
     if (pen < 8) {
         return kBasePalette[pen];
     }
-    if (pen < 224) {
+    if (pen < Graphics::kHighSystemPen) {
         const u32 idx = pen - 8;
         const u32 r = idx / 36;
         const u32 g = (idx / 6) % 6;
@@ -122,10 +122,28 @@ constexpr u32 default_palette_rgb24(u32 pen) {
     if (pen < chrome::kChromeBase) {
         return chrome::kMenuPalette[pen - chrome::kMenuPaperPen];
     }
-    if (pen < 256) {
+    if (pen < chrome::kComplementMirrorBase) {
         return chrome::kChromePalette[pen - chrome::kChromeBase];
     }
+    if (pen < 256) {
+        return kBasePalette[pen - chrome::kComplementMirrorBase];
+    }
     return 0;
+}
+
+// Keeps the top four pens the colours of 0..3. Only eight planes complement
+// through 0xFF; a shallower screen keeps whatever its top pens held.
+void write_complement_mirrors(Bus& b, u32 depth, u32 colors, u32 low_colors) {
+    if (depth != 8 || colors == 0) {
+        return;
+    }
+    for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
+        const u32 mirror = chrome::mirror_pen(static_cast<u8>(pen));
+        b.w16(colors + mirror * 2, b.r16(colors + pen * 2));
+        if (low_colors != 0) {
+            b.w16(low_colors + mirror * 2, b.r16(low_colors + pen * 2));
+        }
+    }
 }
 
 // The fields of a NewScreen as the SA_ tags can override them.
@@ -2138,6 +2156,14 @@ void Intuition::store_palette_prefs(u32 prefs, u32 size) {
         used += 8;
         ++entries;
     }
+    for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
+        if (!palette_prefs_set_[pen]) {
+            continue;
+        }
+        const u32 mirror = chrome::mirror_pen(static_cast<u8>(pen));
+        palette_prefs_[mirror] = palette_prefs_[pen];
+        palette_prefs_set_[mirror] = true;
+    }
 }
 
 // Type 9: a count, a kind (0 for screens of four colours or fewer, 1 for
@@ -2389,7 +2415,14 @@ void Intuition::apply_palette_prefs(ScreenRecord& rec) {
         write_colormap_rgb(rec, pen, palette_prefs_[pen]);
         changed = true;
     }
-    if (!changed || display_ == nullptr) {
+    if (!changed) {
+        return;
+    }
+    if (machine_ != nullptr) {
+        Bus b(*machine_);
+        write_complement_mirrors(b, rec.depth, rec.colors, rec.low_colors);
+    }
+    if (display_ == nullptr) {
         return;
     }
     ++display_->palette_gen;
@@ -2436,6 +2469,7 @@ void Intuition::update_chrome_palette(u32 screen) {
     for (u32 i = 0; i < chrome::kDerivedCount; ++i) {
         write_colormap_rgb(*rec, chrome::kDerivedBase + i, palette[i]);
     }
+    write_complement_mirrors(b, rec->depth, rec->colors, rec->low_colors);
     if (display_ != nullptr) {
         ++display_->palette_gen;
         if (display_->front_screen == rec->addr) {
@@ -3025,6 +3059,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
         b.w16(colors + i * 2, hi);
         b.w16(low_colors + i * 2, lo);
     }
+    write_complement_mirrors(b, a.depth, colors, low_colors);
 
     for (u32 i = kMaxScreens - 1; i > 0; --i) {
         screens_[i] = screens_[i - 1];
