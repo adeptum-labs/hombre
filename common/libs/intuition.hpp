@@ -143,6 +143,14 @@ constexpr u32 Last = 828;
 
 }
 
+namespace ndk {
+
+// IDCMP_IDCMPUPDATE (intuition/intuition.h): a notification for a window,
+// its IAddress an attribute list.
+constexpr u32 IDCMP_IDCMPUPDATE = 0x00800000;
+
+}
+
 class Intuition {
 public:
     using WindowHook = void (*)(void* ctx, u32 window);
@@ -528,7 +536,12 @@ private:
     // Shows the held title-bar button pressed or released, redrawing its
     // window's bar when that changes.
     void light_bar_button(bool lit);
-    bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0);
+    bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0,
+                           u32 iaddress_bytes = 0);
+    static void notify_idcmp_update(void* ctx, u32 window, const u32* tags, u32 count,
+                                    u32 flags);
+    void post_idcmp_update(u32 window, const u32* tags, u32 count);
+    void free_message_update(u32 index);
     void post_newsize(WindowRecord& rec);
     void route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
     bool menu_strip_ready(native::Bus& b) const;
@@ -558,7 +571,7 @@ private:
     void end_string(bool verify, u16 code);
     Rect string_text_box(native::Bus& b, u32 window, u32 gadget, u32& columns);
     bool hit_custom_gadget(native::Bus& b, u32 window, i32 x, i32 y);
-    void custom_input(native::Bus& b, i32 x, i32 y, u32 code);
+    void custom_input(native::Bus& b, i32 x, i32 y, u32 code, u32 qualifier);
     void custom_result(native::Bus& b, u32 result);
     void drop_custom_gadget();
     void release_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
@@ -672,6 +685,10 @@ private:
     u32 windows_[kMaxWindows]{};
     u32 messages_[kMaxMessages]{};
     u32 message_owners_[kMaxMessages]{};
+    // The attribute list an IDCMP_IDCMPUPDATE's IAddress points at, and its
+    // size, freed with the message.
+    u32 message_updates_[kMaxMessages]{};
+    u32 message_update_bytes_[kMaxMessages]{};
     ScreenRecord screen_records_[kMaxScreens]{};
     WindowRecord window_records_[kMaxWindows]{};
     Requester requesters_[kMaxRequesters]{};

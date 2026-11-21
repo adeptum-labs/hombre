@@ -6552,6 +6552,148 @@ void a_boopsi_gadget_draws_itself_and_takes_the_click() {
     CHECK(bo.free_class(cl));
 }
 
+void a_boopsi_notify_posts_idcmpupdate() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_IDCMPUPDATE);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    const u32 source = GA_Dummy + 0x200;
+    const u32 renamed = GA_Dummy + 0x201;
+    const u32 map = r.tags(kTagList, {{source, renamed}, {TAG_DONE, 0}});
+    const u32 cl = bo.find_class_named("gadgetclass");
+    const u32 g = bo.new_object(cl, 0,
+                                r.tags(kTagList + 0x40,
+                                       {{GA_ID, 42}, {ICA_TARGET, ICTARGET_IDCMP},
+                                        {ICA_MAP, map}, {TAG_DONE, 0}}));
+    CHECK(g != 0);
+    CHECK_EQ(r.get16(g + gg_GadgetID), 42u);
+
+    // OM_GET answers the notification attributes.
+    CHECK(bo.get_attr(ICA_TARGET, g, kBuffer) != 0);
+    CHECK_EQ(r.get32(kBuffer), ICTARGET_IDCMP);
+    CHECK(bo.get_attr(ICA_MAP, g, kBuffer) != 0);
+    CHECK_EQ(r.get32(kBuffer), map);
+
+    // The screen's DrawInfo, made on its first use, stays: count from after.
+    const u32 info = r.intuition.make_gadget_info(window);
+    CHECK(info != 0);
+    const u32 before = r.exec.free_bytes();
+    const u32 attrs = r.tags(kTagList + 0x80, {{source, 7}, {TAG_DONE, 0}});
+    const u32 notify[] = {OM_NOTIFY, attrs, info, 0};
+    bo.send(bo.class_of(g), g, notify, 4);
+
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_IDCMPUPDATE);
+    CHECK_EQ(r.get16(msg + im_Code), 0u);
+    const u32 list = r.get32(msg + im_IAddress);
+    CHECK(list != 0);
+    CHECK_EQ(r.get32(list), renamed);
+    CHECK_EQ(r.get32(list + 4), 7u);
+    CHECK_EQ(r.get32(list + 8), GA_ID);
+    CHECK_EQ(r.get32(list + 12), 42u);
+    CHECK_EQ(r.get32(list + 16), TAG_DONE);
+    reply_msg(r, msg);
+    CHECK_EQ(r.exec.free_bytes(), before);
+    r.intuition.free_gadget_info(info);
+
+    bo.dispose_object(g);
+}
+
+void a_boopsi_notify_without_idcmpupdate_is_dropped() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    const u32 cl = bo.find_class_named("gadgetclass");
+    const u32 g = bo.new_object(
+        cl, 0, r.tags(kTagList, {{ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}}));
+    CHECK(g != 0);
+
+    // The screen's DrawInfo, made on its first use, stays: make it first.
+    r.cpu().a[0] = r.get32(window + wd_WScreen);
+    CHECK(r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo) != 0);
+    const u32 before = r.exec.free_bytes();
+    const u32 info = r.intuition.make_gadget_info(window);
+    CHECK(info != 0);
+    const u32 attrs = r.tags(kTagList + 0x40, {{GA_Width, 9}, {TAG_DONE, 0}});
+    const u32 notify[] = {OM_NOTIFY, attrs, info, 0};
+    bo.send(bo.class_of(g), g, notify, 4);
+    r.intuition.free_gadget_info(info);
+
+    CHECK_EQ(get_msg(r, port), 0u);
+    CHECK_EQ(r.exec.free_bytes(), before);
+
+    bo.dispose_object(g);
+}
+
+void a_boopsi_notify_chains_through_an_object_target() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_IDCMPUPDATE);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    const u32 cl = bo.find_class_named("gadgetclass");
+    const u32 target = bo.new_object(
+        cl, 0, r.tags(kTagList, {{ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}}));
+    CHECK(target != 0);
+    const u32 source = GA_Dummy + 0x200;
+    const u32 map = r.tags(kTagList + 0x40, {{source, GA_Width}, {TAG_DONE, 0}});
+    const u32 changed = bo.new_object(
+        cl, 0, r.tags(kTagList + 0x80,
+                      {{GA_ID, 42}, {ICA_TARGET, target}, {ICA_MAP, map}, {TAG_DONE, 0}}));
+    CHECK(changed != 0);
+    CHECK_EQ(r.get16(target + gg_Width), 0u);
+
+    // The screen's DrawInfo, made on its first use, stays: make it first.
+    r.cpu().a[0] = r.get32(window + wd_WScreen);
+    CHECK(r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo) != 0);
+    const u32 before = r.exec.free_bytes();
+    const u32 info = r.intuition.make_gadget_info(window);
+    CHECK(info != 0);
+    const u32 attrs = r.tags(kTagList + 0xC0, {{source, 7}, {TAG_DONE, 0}});
+    const u32 notify[] = {OM_NOTIFY, attrs, info, 0};
+    bo.send(bo.class_of(changed), changed, notify, 4);
+    r.intuition.free_gadget_info(info);
+
+    // The target took the OM_UPDATE as an attribute change.
+    CHECK_EQ(r.get16(target + gg_Width), 7u);
+
+    // And passed it on to the window as an IDCMPUPDATE.
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_IDCMPUPDATE);
+    const u32 list = r.get32(msg + im_IAddress);
+    CHECK(list != 0);
+    CHECK_EQ(r.get32(list), GA_Width);
+    CHECK_EQ(r.get32(list + 4), 7u);
+    CHECK_EQ(r.get32(list + 8), GA_ID);
+    CHECK_EQ(r.get32(list + 12), 42u);
+    CHECK_EQ(r.get32(list + 16), TAG_DONE);
+    reply_msg(r, msg);
+    CHECK_EQ(r.exec.free_bytes(), before);
+
+    bo.dispose_object(changed);
+    bo.dispose_object(target);
+}
+
 void sysiclass_sizes_and_lifecycle() {
     GfxRig r;
     Boopsi& bo = r.intuition.boopsi();
@@ -6801,6 +6943,9 @@ int main() {
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();
     a_boopsi_gadget_draws_itself_and_takes_the_click();
+    a_boopsi_notify_posts_idcmpupdate();
+    a_boopsi_notify_without_idcmpupdate_is_dropped();
+    a_boopsi_notify_chains_through_an_object_target();
     sysiclass_sizes_and_lifecycle();
     draw_image_state_draws_a_sysiclass_image();
     screen_font_is_a_textattr_naming_topaz();

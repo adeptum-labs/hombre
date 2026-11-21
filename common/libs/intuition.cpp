@@ -1802,6 +1802,12 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     for (u32& owner : message_owners_) {
         owner = 0;
     }
+    for (u32& update : message_updates_) {
+        update = 0;
+    }
+    for (u32& bytes : message_update_bytes_) {
+        bytes = 0;
+    }
     for (ScreenRecord& rec : screen_records_) {
         rec = ScreenRecord{};
     }
@@ -1848,6 +1854,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     if (!boopsi_.init(m, exec)) {
         return false;
     }
+    boopsi_.set_idcmp_update_hook(notify_idcmp_update, this);
     boopsi_.set_sys_image_renderer(draw_sys_image, this);
     base_ = base;
     return true;
@@ -2858,6 +2865,7 @@ void Intuition::free_tracked_message(u32 message) {
         if (messages_[i] == addr) {
             messages_[i] = 0;
             message_owners_[i] = 0;
+            free_message_update(i);
             Bus b(*machine_);
             const u32 idcmp_class = b.r32(addr + ndk::im_Class);
             const u32 window = b.r32(addr + ndk::im_IDCMPWindow);
@@ -2875,6 +2883,43 @@ void Intuition::free_tracked_message(u32 message) {
             exec_->free(addr, ndk::IntuiMessage_SIZEOF);
             return;
         }
+    }
+}
+
+void Intuition::free_message_update(u32 index) {
+    if (message_updates_[index] != 0) {
+        exec_->free(message_updates_[index], message_update_bytes_[index]);
+        message_updates_[index] = 0;
+        message_update_bytes_[index] = 0;
+    }
+}
+
+void Intuition::notify_idcmp_update(void* ctx, u32 window, const u32* tags, u32 count,
+                                    u32 flags) {
+    (void)flags;
+    static_cast<Intuition*>(ctx)->post_idcmp_update(window, tags, count);
+}
+
+// Puts a copy of the notification's attributes in guest memory as the
+// IAddress of the window's IDCMP_IDCMPUPDATE, which frees it with the
+// message; a message the window asks for but cannot get frees it at once.
+void Intuition::post_idcmp_update(u32 window, const u32* tags, u32 count) {
+    if (exec_ == nullptr || machine_ == nullptr) {
+        return;
+    }
+    const u32 bytes = (count + 1) * ndk::ti_SIZEOF;
+    const u32 list = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (list == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    for (u32 i = 0; i < count; ++i) {
+        b.w32(list + i * ndk::ti_SIZEOF, tags[i * 2]);
+        b.w32(list + i * ndk::ti_SIZEOF + ndk::ti_Data, tags[i * 2 + 1]);
+    }
+    b.w32(list + count * ndk::ti_SIZEOF, ndk::TAG_DONE);
+    if (!b.ok() || !post_intuimessage(window, ndk::IDCMP_IDCMPUPDATE, 0, list, bytes)) {
+        exec_->free(list, bytes);
     }
 }
 
@@ -2919,7 +2964,8 @@ void Intuition::remove_window_messages(u32 port, u32 window) {
     }
 }
 
-bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress) {
+bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress,
+                                  u32 iaddress_bytes) {
     if (window == 0 || find_window(window) >= kMaxWindows) {
         return false;
     }
@@ -2970,6 +3016,10 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     }
     messages_[slot] = msg;
     message_owners_[slot] = rec->owner;
+    if (iaddress_bytes != 0) {
+        message_updates_[slot] = iaddress;
+        message_update_bytes_[slot] = iaddress_bytes;
+    }
     return true;
 }
 
@@ -4444,7 +4494,6 @@ void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
 }
 
 void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
-    (void)buttons;
     mouse_x_ = x;
     mouse_y_ = y;
     if (front_ == 0) {
@@ -4456,11 +4505,14 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         if (!window_open(custom_.window)) {
             drop_custom_gadget();
         } else {
+            // A move while the left button is down, or in the report that
+            // lets it go, carries the button in its qualifier.
             if (moved) {
-                custom_input(b, x, y, IECODE_NOBUTTON);
+                const bool held = ((buttons | released) & kMouseLeft) != 0;
+                custom_input(b, x, y, IECODE_NOBUTTON, held ? IEQUALIFIER_LEFTBUTTON : 0);
             }
             if (custom_.gadget != 0 && (released & kMouseLeft) != 0) {
-                custom_input(b, x, y, IECODE_LBUTTON | IECODE_UP_PREFIX);
+                custom_input(b, x, y, IECODE_LBUTTON | IECODE_UP_PREFIX, 0);
             }
             return;
         }
@@ -4866,6 +4918,7 @@ void Intuition::reclaim_owned_by(u32 task, const u32* keep_windows, u32 count,
             messages_[i] = 0;
             message_owners_[i] = 0;
             if (exec_ != nullptr) {
+                free_message_update(i);
                 exec_->free(msg, ndk::IntuiMessage_SIZEOF);
             }
         }
@@ -5443,7 +5496,7 @@ bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
 
 // GM_HANDLEINPUT for the active BOOPSI gadget, with the pointer relative
 // to its box.
-void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code) {
+void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code, u32 qualifier) {
     const ActiveCustom c = custom_;
     const WindowView w = load_window(b, c.window);
     if (!w.ok) {
@@ -5452,7 +5505,7 @@ void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code) {
     }
     const Rect box = resolve_gadget_box(b, w, c.gadget);
     b.w16(c.event + ie_Code, code);
-    b.w16(c.event + ie_Qualifier, code == IECODE_LBUTTON ? IEQUALIFIER_LEFTBUTTON : 0);
+    b.w16(c.event + ie_Qualifier, qualifier);
     const u32 msg[] = {ndk::GM_HANDLEINPUT, c.info, c.event, c.event + kTermination,
                        pack_point(x - w.left - box.x0, y - w.top - box.y0)};
     custom_result(b, boopsi_.send(boopsi_.class_of(c.gadget), c.gadget, msg, 5));

@@ -128,6 +128,18 @@ constexpr u32 gi_Pens = 28;
 constexpr u32 gi_DrInfo = 30;
 constexpr u32 GadgetInfo_SIZEOF = 58;
 
+// The ICA_ tags (intuition/icclass.h): an object's notification target and
+// the map its attributes are renamed through.
+constexpr u32 ICA_Dummy = 0x80040000;
+constexpr u32 ICA_TARGET = ICA_Dummy + 1;
+constexpr u32 ICA_MAP = ICA_Dummy + 2;
+constexpr u32 ICTARGET_IDCMP = 0xFFFFFFFF;
+
+// struct opUpdate, the message OM_NOTIFY and OM_UPDATE carry.
+constexpr u32 opu_AttrList = 4;
+constexpr u32 opu_GInfo = 8;
+constexpr u32 opu_Flags = 12;
+
 // Gadget and image attributes.
 constexpr u32 GA_Dummy = 0x80030000;
 constexpr u32 GA_Left = GA_Dummy + 1;
@@ -223,6 +235,12 @@ public:
     using SysImageRenderer = void (*)(void* ctx, u32 rp, u32 which, i32 left, i32 top,
                                       i32 width, i32 height, u32 state, u32 draw_info);
 
+    // How intuition turns a gadget's notification for ICTARGET_IDCMP into
+    // an IDCMP_IDCMPUPDATE: the window from the GadgetInfo, the mapped
+    // attribute pairs and the notification's flags.
+    using IdcmpUpdateHook = void (*)(void* ctx, u32 window, const u32* tags, u32 count,
+                                     u32 flags);
+
     // Makes rootclass, gadgetclass and imageclass and lists them. exec
     // must be initialised. False if exec runs out of memory or native ids.
     bool init(m68k::Machine& m, Exec& exec);
@@ -266,8 +284,25 @@ public:
         sys_image_renderer_ctx_ = ctx;
     }
 
+    void set_idcmp_update_hook(IdcmpUpdateHook hook, void* ctx) {
+        idcmp_update_hook_ = hook;
+        idcmp_update_hook_ctx_ = ctx;
+    }
+
 private:
     struct Natives;
+
+    // The notification target and map of a gadgetclass object, kept beside
+    // the object so its instance data stays as its class sized it.
+    struct IcaEntry {
+        u32 object = 0;
+        u32 target = 0;
+        u32 map = 0;
+    };
+
+    static constexpr u32 kMaxIcaEntries = 128;
+    static constexpr u32 kMaxNotifyTags = 32;
+    static constexpr u32 kMaxNotifyDepth = 8;
 
     u32 make_system_class(const char* name, u32 super, u32 inst_size, m68k::NativeFn entry);
     u32 root_dispatch(u32 cl, u32 object, u32 msg);
@@ -275,6 +310,12 @@ private:
     u32 image_dispatch(u32 cl, u32 object, u32 msg);
     u32 sysi_dispatch(u32 cl, u32 object, u32 msg);
     u32 call_super(u32 cl, u32 object, u32 msg);
+    IcaEntry* find_ica(u32 object);
+    IcaEntry* ica_slot(u32 object);
+    void drop_ica(u32 object);
+    u32 map_tag(native::Bus& b, u32 map, u32 tag);
+    u32 notify(u32 gadget, u32 msg);
+    void send_update(u32 target, const u32* pairs, u32 count, u32 ginfo, u32 flags);
     u32 set_gadget_attrs(u32 gadget, u32 tags, bool initial);
     bool get_gadget_attr(u32 gadget, u32 attr, u32 storage);
     u32 set_image_attrs(u32 image, u32 tags);
@@ -293,6 +334,10 @@ private:
     u32 sysi_entry_ = 0;
     SysImageRenderer sys_image_renderer_ = nullptr;
     void* sys_image_renderer_ctx_ = nullptr;
+    IdcmpUpdateHook idcmp_update_hook_ = nullptr;
+    void* idcmp_update_hook_ctx_ = nullptr;
+    IcaEntry ica_[kMaxIcaEntries]{};
+    u32 notify_depth_ = 0;
     u32 public_[kMaxPublicClasses]{};
 };
 

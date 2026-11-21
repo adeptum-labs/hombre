@@ -160,6 +160,10 @@ bool Boopsi::init(Machine& m, Exec& exec) {
     for (u32& slot : public_) {
         slot = 0;
     }
+    for (IcaEntry& entry : ica_) {
+        entry = IcaEntry{};
+    }
+    notify_depth_ = 0;
     root_ = make_system_class("rootclass", 0, 0, Natives::root);
     root_entry_ = root_ != 0 ? Bus(m).r32(root_ + h_Entry) : 0;
     gadget_ = root_ != 0 ? make_system_class("gadgetclass", root_, ExtGadget_SIZEOF,
@@ -558,9 +562,20 @@ u32 Boopsi::gadget_dispatch(u32 cl, u32 object, u32 msg) {
         set_gadget_attrs(gadget, b.r32(msg + 4), true);
         return gadget;
     }
+    case OM_DISPOSE:
+        drop_ica(object);
+        return call_super(cl, object, msg);
     case OM_SET:
-    case OM_UPDATE:
         return call_super(cl, object, msg) + set_gadget_attrs(object, b.r32(msg + 4), false);
+    case OM_UPDATE: {
+        // OM_UPDATE is OM_SET that also passes the change on to the target.
+        const u32 result = call_super(cl, object, msg) +
+                           set_gadget_attrs(object, b.r32(msg + 4), false);
+        notify(object, msg);
+        return result;
+    }
+    case OM_NOTIFY:
+        return notify(object, msg);
     case OM_GET:
         return get_gadget_attr(object, b.r32(msg + 4), b.r32(msg + 8))
                    ? 1
@@ -599,6 +614,21 @@ u32 Boopsi::set_gadget_attrs(u32 gadget, u32 tags, bool initial) {
         const u32 tag = b.r32(item);
         const u32 data = b.r32(item + 4);
         switch (tag) {
+        case ICA_TARGET:
+        case ICA_MAP: {
+            IcaEntry* entry = ica_slot(gadget);
+            if (entry != nullptr) {
+                if (tag == ICA_TARGET) {
+                    entry->target = data;
+                } else {
+                    entry->map = data;
+                }
+                if (entry->target == 0 && entry->map == 0) {
+                    drop_ica(gadget);
+                }
+            }
+            break;
+        }
         case GA_Left:
         case GA_RelRight:
             b.w16(gadget + gg_LeftEdge, data);
@@ -715,6 +745,12 @@ bool Boopsi::get_gadget_attr(u32 gadget, u32 attr, u32 storage) {
     Bus b(*machine_);
     u32 value = 0;
     switch (attr) {
+    case ICA_TARGET:
+    case ICA_MAP: {
+        const IcaEntry* entry = find_ica(gadget);
+        value = entry == nullptr ? 0 : (attr == ICA_TARGET ? entry->target : entry->map);
+        break;
+    }
     case GA_Left:
     case GA_RelRight:
         value = static_cast<u32>(static_cast<i32>(static_cast<i16>(b.r16(gadget + gg_LeftEdge))));
@@ -751,6 +787,152 @@ bool Boopsi::get_gadget_attr(u32 gadget, u32 attr, u32 storage) {
     }
     b.w32(storage, value);
     return b.ok();
+}
+
+Boopsi::IcaEntry* Boopsi::find_ica(u32 object) {
+    if (object == 0) {
+        return nullptr;
+    }
+    for (IcaEntry& entry : ica_) {
+        if (entry.object == object) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
+Boopsi::IcaEntry* Boopsi::ica_slot(u32 object) {
+    if (object == 0) {
+        return nullptr;
+    }
+    if (IcaEntry* entry = find_ica(object); entry != nullptr) {
+        return entry;
+    }
+    for (IcaEntry& entry : ica_) {
+        if (entry.object == 0) {
+            entry.object = object;
+            return &entry;
+        }
+    }
+    LogLine().text("intuition: notification table full").send();
+    return nullptr;
+}
+
+void Boopsi::drop_ica(u32 object) {
+    if (IcaEntry* entry = find_ica(object); entry != nullptr) {
+        *entry = IcaEntry{};
+    }
+}
+
+// The tag a map list renames the tag to: its first occurrence as a source,
+// TAG_IGNORE to drop it, or the tag itself when the list does not name it.
+u32 Boopsi::map_tag(Bus& b, u32 map, u32 tag) {
+    u32 budget = tags::kMaxTagItems;
+    for (;;) {
+        const u32 item = tags::next(b, map, budget);
+        if (item == 0) {
+            return tag;
+        }
+        if (b.r32(item) == tag) {
+            return b.r32(item + 4);
+        }
+    }
+}
+
+// Passes the gadget's changed attributes on to its ICA_TARGET: renamed
+// through ICA_MAP, with GA_ID naming the gadget when the list has none.
+// The target either gets an IDCMP_IDCMPUPDATE for its window or, when it
+// is another object, an OM_UPDATE carrying the same GadgetInfo and flags.
+u32 Boopsi::notify(u32 gadget, u32 msg) {
+    const IcaEntry* entry = find_ica(gadget);
+    if (entry == nullptr || entry->target == 0) {
+        return 0;
+    }
+    if (notify_depth_ >= kMaxNotifyDepth) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 attr_list = b.r32(msg + opu_AttrList);
+    const u32 ginfo = b.r32(msg + opu_GInfo);
+    const u32 flags = b.r32(msg + opu_Flags);
+    if (!b.ok()) {
+        return 0;
+    }
+    u32 pairs[kMaxNotifyTags * 2];
+    u32 count = 0;
+    bool has_id = false;
+    u32 budget = tags::kMaxTagItems;
+    u32 at = attr_list;
+    for (;;) {
+        const u32 item = tags::next(b, at, budget);
+        if (item == 0) {
+            break;
+        }
+        const u32 mapped = map_tag(b, entry->map, b.r32(item));
+        const u32 data = b.r32(item + 4);
+        if (!b.ok()) {
+            return 0;
+        }
+        if (mapped == tags::kTagIgnore) {
+            continue;
+        }
+        has_id = has_id || mapped == GA_ID;
+        if (count < kMaxNotifyTags) {
+            pairs[count * 2] = mapped;
+            pairs[count * 2 + 1] = data;
+            ++count;
+        }
+    }
+    if (!has_id && count < kMaxNotifyTags) {
+        pairs[count * 2] = GA_ID;
+        pairs[count * 2 + 1] = b.r16(gadget + gg_GadgetID);
+        ++count;
+    }
+    if (!b.ok()) {
+        return 0;
+    }
+    if (entry->target == ICTARGET_IDCMP) {
+        const u32 window = ginfo != 0 ? b.r32(ginfo + gi_Window) : 0;
+        if (!b.ok() || window == 0 || idcmp_update_hook_ == nullptr) {
+            return 0;
+        }
+        idcmp_update_hook_(idcmp_update_hook_ctx_, window, pairs, count, flags);
+        return 0;
+    }
+    send_update(entry->target, pairs, count, ginfo, flags);
+    return 0;
+}
+
+// A guest copy of the notification for an object target: OM_UPDATE with
+// the mapped attributes, made for the call and freed after it.
+void Boopsi::send_update(u32 target, const u32* pairs, u32 count, u32 ginfo, u32 flags) {
+    const u32 bytes = (count + 1) * tags::kItemBytes;
+    const u32 list = exec_->alloc(bytes, MEMF_PUBLIC | MEMF_CLEAR);
+    if (list == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    for (u32 i = 0; i < count; ++i) {
+        b.w32(list + i * tags::kItemBytes, pairs[i * 2]);
+        b.w32(list + i * tags::kItemBytes + 4, pairs[i * 2 + 1]);
+    }
+    b.w32(list + count * tags::kItemBytes, tags::kTagDone);
+    const u32 msg = b.ok() ? exec_->alloc(4 * 4, MEMF_PUBLIC) : 0;
+    if (msg == 0) {
+        exec_->free(list, bytes);
+        return;
+    }
+    b.w32(msg, OM_UPDATE);
+    b.w32(msg + 4, list);
+    b.w32(msg + 8, ginfo);
+    b.w32(msg + 12, flags);
+    if (b.ok()) {
+        ++notify_depth_;
+        do_method(target, msg);
+        --notify_depth_;
+    }
+    exec_->free(msg, 4 * 4);
+    exec_->free(list, bytes);
 }
 
 // imageclass: an Image with CUSTOMIMAGEDEPTH, which Intuition draws by
