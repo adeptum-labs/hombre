@@ -40,10 +40,12 @@ namespace {
 
 constexpr char kGraphicsName[] = "graphics.library";
 constexpr char kTopazName[] = "topaz.font";
-// struct GfxBase (graphics/gfxbase.h): its size as of V40, and the list
-// of the fonts in memory, which diskfont.library's AvailFonts walks.
+// struct GfxBase (graphics/gfxbase.h): its size as of V40, the list of the
+// fonts in memory, which diskfont.library's AvailFonts walks, and the font
+// InitRastPort gives a RastPort.
 constexpr u32 kGfxBaseSize = 0x228;
 constexpr u32 gb_TextFonts = 140;
+constexpr u32 gb_DefaultFont = 154;
 constexpr u32 kNtFont = 12;
 constexpr u32 kMaxFonts = 1024;
 constexpr i32 kExactFontMatch = 32767;  // MAXFONTMATCHWEIGHT
@@ -766,46 +768,11 @@ struct GraphicsNatives {
     // that comes nearest the height, style and flags asked for, with one
     // more accessor; 0 when no font in memory has the name.
     static void open_font(void* ctx, Machine& m) {
-        Graphics& g = of(ctx);
-        Bus b(m);
-        const u32 attr = m.cpu.a[0];
-        const u32 name = attr != 0 ? b.r32(attr + ndk::ta_Name) : 0;
-        u32 result = 0;
-        i32 best = 0;
-        u32 font = name != 0 ? b.r32(g.base_ + gb_TextFonts + ndk::LH_HEAD) : 0;
-        for (u32 i = 0; font != 0 && i < kMaxFonts && b.ok(); ++i) {
-            const u32 next = b.r32(font + ndk::LN_SUCC);
-            if (next == 0) {
-                break;
-            }
-            if ((b.r8(font + ndk::tf_Flags) & ndk::FPF_REMOVED) == 0 &&
-                names_equal_ci(b, name, b.r32(font + ndk::LN_NAME))) {
-                const i32 weight = font_match_weight(
-                    static_cast<i32>(b.r16(attr + ndk::ta_YSize)) -
-                        static_cast<i32>(b.r16(font + ndk::tf_YSize)),
-                    b.r8(attr + ndk::ta_Style) ^ b.r8(font + ndk::tf_Style),
-                    b.r8(attr + ndk::ta_Flags) ^ b.r8(font + ndk::tf_Flags));
-                if (weight > best) {
-                    best = weight;
-                    result = font;
-                }
-            }
-            font = next;
-        }
-        if (result != 0) {
-            b.w16(result + ndk::tf_Accessors, b.r16(result + ndk::tf_Accessors) + 1);
-        }
-        native::set_result(m, b.ok() ? result : 0);
+        native::set_result(m, of(ctx).open_font(m.cpu.a[0]));
     }
 
     // CloseFont(textFont A1): one accessor fewer. The font stays in memory.
-    static void close_font(void*, Machine& m) {
-        Bus b(m);
-        const u32 font = m.cpu.a[1];
-        if (font != 0 && b.r16(font + ndk::tf_Accessors) != 0) {
-            b.w16(font + ndk::tf_Accessors, b.r16(font + ndk::tf_Accessors) - 1);
-        }
-    }
+    static void close_font(void* ctx, Machine& m) { of(ctx).close_font(m.cpu.a[1]); }
 
     // AddFont(textFont A1): the font, which its program loaded and keeps
     // in memory, joins the fonts OpenFont finds, extended as ExtendFont
@@ -2471,6 +2438,10 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     b.w32(attr + ndk::ta_Name, topaz_name_);
     b.w16(attr + ndk::ta_YSize, raster::kBuiltinSize);
     topaz_attr_ = attr;
+    // The default font holds a reference of its own, given back when
+    // another font takes its place.
+    b.w32(base + gb_DefaultFont, topaz_);
+    acquire_font(b, topaz_);
 
     const char* named = nullptr;
     u32 name = 0;
@@ -2555,7 +2526,11 @@ u32 Graphics::add_rom_font(Bus& b, const RomFont& font, u32 name) {
 }
 
 bool Graphics::text_font(Bus& b, u32 rp, raster::Font& font, raster::TextStyle& style) {
-    const u32 own = rp != 0 ? b.r32(rp + ndk::rp_Font) : 0;
+    return text_font(b, rp, rp != 0 ? b.r32(rp + ndk::rp_Font) : 0, font, style);
+}
+
+bool Graphics::text_font(Bus& b, u32 rp, u32 own, raster::Font& font,
+                         raster::TextStyle& style) {
     if (!raster::load_font(b, own, font)) {
         font = raster::builtin_font();
     } else if (own != 0) {
@@ -2592,10 +2567,11 @@ void Graphics::init_rastport(u32 rp) {
     b.w8(rp + ndk::rp_BgPen, 0);
     b.w8(rp + ndk::rp_AOlPen, 1);
     b.w8(rp + ndk::rp_DrawMode, ndk::JAM2);
-    b.w32(rp + ndk::rp_Font, topaz_);
-    b.w16(rp + ndk::rp_TxHeight, raster::kBuiltinSize);
-    b.w16(rp + ndk::rp_TxWidth, raster::kBuiltinSize);
-    b.w16(rp + ndk::rp_TxBaseline, raster::kBuiltinBaseline);
+    const u32 font = default_font();
+    b.w32(rp + ndk::rp_Font, font);
+    b.w16(rp + ndk::rp_TxHeight, b.r16(font + ndk::tf_YSize));
+    b.w16(rp + ndk::rp_TxWidth, b.r16(font + ndk::tf_XSize));
+    b.w16(rp + ndk::rp_TxBaseline, b.r16(font + ndk::tf_Baseline));
 }
 
 void Graphics::set_pens(u32 rp, u32 fg, u32 bg, u32 mode) {
@@ -2831,8 +2807,101 @@ void Graphics::draw_line(u32 rp, i32 x1, i32 y1) {
     }
 }
 
+u32 Graphics::default_font() const {
+    if (machine_ == nullptr || base_ == 0) {
+        return topaz_;
+    }
+    Bus b(*machine_);
+    const u32 font = b.r32(base_ + gb_DefaultFont);
+    return font != 0 ? font : topaz_;
+}
+
+void Graphics::set_default_font(u32 font) {
+    if (machine_ == nullptr || base_ == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 previous = b.r32(base_ + gb_DefaultFont);
+    if (font == 0) {
+        font = topaz_;
+    }
+    if (font == previous || font == 0) {
+        return;
+    }
+    acquire_font(b, font);
+    release_font(b, previous);
+    b.w32(base_ + gb_DefaultFont, font);
+}
+
+u32 Graphics::open_font(u32 text_attr) {
+    if (machine_ == nullptr || base_ == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 name = text_attr != 0 ? b.r32(text_attr + ndk::ta_Name) : 0;
+    u32 result = 0;
+    i32 best = 0;
+    u32 font = name != 0 ? b.r32(base_ + gb_TextFonts + ndk::LH_HEAD) : 0;
+    for (u32 i = 0; font != 0 && i < kMaxFonts && b.ok(); ++i) {
+        const u32 next = b.r32(font + ndk::LN_SUCC);
+        if (next == 0) {
+            break;
+        }
+        if ((b.r8(font + ndk::tf_Flags) & ndk::FPF_REMOVED) == 0 &&
+            names_equal_ci(b, name, b.r32(font + ndk::LN_NAME))) {
+            const i32 weight = font_match_weight(
+                static_cast<i32>(b.r16(text_attr + ndk::ta_YSize)) -
+                    static_cast<i32>(b.r16(font + ndk::tf_YSize)),
+                b.r8(text_attr + ndk::ta_Style) ^ b.r8(font + ndk::tf_Style),
+                b.r8(text_attr + ndk::ta_Flags) ^ b.r8(font + ndk::tf_Flags));
+            if (weight > best) {
+                best = weight;
+                result = font;
+            }
+        }
+        font = next;
+    }
+    if (result != 0) {
+        acquire_font(b, result);
+    }
+    return b.ok() ? result : 0;
+}
+
+void Graphics::close_font(u32 font) {
+    if (machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    release_font(b, font);
+}
+
+void Graphics::acquire_font(Bus& b, u32 font) {
+    if (font != 0) {
+        b.w16(font + ndk::tf_Accessors, b.r16(font + ndk::tf_Accessors) + 1);
+    }
+}
+
+void Graphics::release_font(Bus& b, u32 font) {
+    if (font != 0 && b.r16(font + ndk::tf_Accessors) != 0) {
+        b.w16(font + ndk::tf_Accessors, b.r16(font + ndk::tf_Accessors) - 1);
+    }
+}
+
 u32 Graphics::text(u32 rp, const u8* chars, u32 count) {
     return draw_text(rp, chars, count, false);
+}
+
+u32 Graphics::text_in(u32 rp, u32 font, const u8* chars, u32 count) {
+    if (rp == 0 || chars == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    raster::Font loaded = raster::builtin_font();
+    raster::TextStyle style;
+    if (!text_font(b, rp, font, loaded, style)) {
+        return 0;
+    }
+    return draw_run(b, rp, loaded, style, chars, count, true);
 }
 
 u32 Graphics::draw_text(u32 rp, const u8* chars, u32 count, bool own_font) {
@@ -2840,28 +2909,59 @@ u32 Graphics::draw_text(u32 rp, const u8* chars, u32 count, bool own_font) {
         return 0;
     }
     Bus b(*machine_);
-    const View v = raster::load_rastport(b, rp);
-    if (!v.ok) {
-        return 0;
-    }
     raster::Font font = raster::builtin_font();
     raster::TextStyle style;
     if (own_font && !text_font(b, rp, font, style)) {
         return 0;
     }
+    return draw_run(b, rp, font, style, chars, count, own_font);
+}
+
+u32 Graphics::draw_run(Bus& b, u32 rp, const raster::Font& font,
+                       const raster::TextStyle& style, const u8* chars, u32 count,
+                       bool blend) {
+    const View v = raster::load_rastport(b, rp);
+    if (!v.ok) {
+        return 0;
+    }
     const i32 cursor_x = cp_x(b, rp);
     const i32 cursor_y = cp_y(b, rp);
-    text_blend::Cache* blend =
-        own_font ? blend_for(v.bitmap_addr, v.bitmap.depth) : nullptr;
+    text_blend::Cache* cache = blend ? blend_for(v.bitmap_addr, v.bitmap.depth) : nullptr;
     u32 advance = 0;
     const Rect dirty =
         raster::draw_text(b, v.bitmap, v.clip, pens(b, rp), font, style, cursor_x + v.origin_x,
-                          cursor_y + v.origin_y, chars, count, advance, blend);
+                          cursor_y + v.origin_y, chars, count, advance, cache);
     b.w16(rp + ndk::rp_cp_x, static_cast<u32>(cursor_x) + advance);
     if (b.ok()) {
         report(display_, *machine_, v, dirty);
     }
     return advance;
+}
+
+u32 Graphics::text_width(u32 font, const u8* chars, u32 count) {
+    if (machine_ == nullptr || chars == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    raster::Font loaded;
+    if (!raster::load_font(b, font, loaded)) {
+        loaded = raster::builtin_font();
+    }
+    const raster::TextSpan span = raster::measure_text(loaded, raster::TextStyle{}, chars, count);
+    return static_cast<u32>(span.advance);
+}
+
+Graphics::FontMetrics Graphics::font_metrics(u32 font) {
+    raster::Font loaded;
+    if (machine_ != nullptr) {
+        Bus b(*machine_);
+        if (!raster::load_font(b, font, loaded)) {
+            loaded = raster::builtin_font();
+        }
+    } else {
+        loaded = raster::builtin_font();
+    }
+    return FontMetrics{loaded.y_size, loaded.baseline, loaded.x_size};
 }
 
 void Graphics::scroll(u32 rp, i32 dx, i32 dy, i32 x0, i32 y0, i32 x1, i32 y1) {

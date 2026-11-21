@@ -771,6 +771,20 @@ void draw_text(GfxRig& r, u32 rp, const char* text) {
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Text), ExitReason::Halt);
 }
 
+// The hasklig size y_size opened through the OpenFont vector, one accessor
+// the caller holds.
+u32 open_hasklig(GfxRig& r, u32 y_size) {
+    r.str(kStrings + 0x40, "hasklig.font");
+    r.put32(kTextAttr + ta_Name, kStrings + 0x40);
+    r.put16(kTextAttr + ta_YSize, y_size);
+    r.put8(kTextAttr + ta_Style, 0);
+    r.put8(kTextAttr + ta_Flags, 0);
+    r.cpu().a[0] = kTextAttr;
+    const u32 font = r.result(Base::Graphics, graphics_lvo::OpenFont);
+    CHECK(font != 0);
+    return font;
+}
+
 // Text draws each glyph from the font's own tables, the pen moving by the
 // glyph's kerning before it and its space after it, and draws the glyph
 // past tf_HiChar for a character the font has none for.
@@ -998,6 +1012,93 @@ void text_draws_hasklig_from_the_rom() {
     r.cpu().a[0] = kStrings;
     r.cpu().d[0] = 3;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::TextLength), 3 * width);
+}
+
+// GfxBase holds the font InitRastPort gives a RastPort: topaz until
+// set_default_font names another, with the accessors OpenFont and
+// CloseFont count.
+void default_font_is_topaz_until_set() {
+    GfxRig r;
+    const u32 topaz = r.graphics.topaz_font();
+    CHECK_EQ(r.get32(r.graphics.graphics_base() + 154), topaz);
+    CHECK_EQ(r.graphics.default_font(), topaz);
+
+    const u32 font = open_hasklig(r, 13);
+    r.graphics.set_default_font(font);
+    CHECK_EQ(r.graphics.default_font(), font);
+    CHECK_EQ(r.get32(r.graphics.graphics_base() + 154), font);
+    CHECK_EQ(r.get16(font + tf_Accessors), 2u);  // the open and the default
+
+    r.cpu().a[1] = kRastPort;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitRastPort), ExitReason::Halt);
+    CHECK_EQ(r.get32(kRastPort + rp_Font), font);
+    CHECK_EQ(r.get16(kRastPort + rp_TxHeight), 13u);
+    CHECK_EQ(r.get16(kRastPort + rp_TxBaseline), r.get16(font + tf_Baseline));
+
+    r.graphics.set_default_font(0);
+    CHECK_EQ(r.graphics.default_font(), topaz);
+    CHECK_EQ(r.get32(r.graphics.graphics_base() + 154), topaz);
+    CHECK_EQ(r.get16(font + tf_Accessors), 1u);
+}
+
+// text_in draws in the font it is given rather than the RastPort's, in
+// the RastPort's pens, and text_width and font_metrics measure that font.
+void text_in_draws_and_measures_an_explicit_font() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    const u32 font = open_hasklig(r, 13);
+    const u32 width = r.get16(font + tf_XSize);
+    const u32 y_size = r.get16(font + tf_YSize);
+    const u32 baseline = r.get16(font + tf_Baseline);
+    CHECK_EQ(r.graphics.default_font(), r.graphics.topaz_font());
+
+    const Graphics::FontMetrics metrics = r.graphics.font_metrics(font);
+    CHECK_EQ(metrics.y_size, static_cast<i32>(y_size));
+    CHECK_EQ(metrics.baseline, static_cast<i32>(baseline));
+    CHECK_EQ(metrics.x_size, static_cast<i32>(width));
+    const Graphics::FontMetrics built_in = r.graphics.font_metrics(0);
+    CHECK_EQ(built_in.y_size, 8);
+    CHECK_EQ(built_in.baseline, 6);
+    CHECK_EQ(built_in.x_size, 8);
+
+    const u8 text[] = {'H', 'g'};
+    CHECK_EQ(r.graphics.text_width(font, text, 2), 2 * width);
+    CHECK_EQ(r.graphics.text_width(0, text, 2), 16u);
+
+    // TextLength with the RastPort in the font agrees.
+    r.str(kStrings, "Hg");
+    r.graphics.set_font(s.rp, font);
+    r.cpu().a[1] = s.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 2;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::TextLength), 2 * width);
+    r.graphics.set_font(s.rp, r.graphics.topaz_font());
+
+    // Drawn through text_in, its glyphs differ from the built-in font's
+    // for the same text.
+    r.graphics.set_pens(s.rp, 1, 2, JAM2);
+    move(r, s.rp, 3, 20);
+    CHECK_EQ(r.graphics.text_in(s.rp, font, text, 2), 2 * width);
+    const i32 left = 3;
+    const i32 top = 20 - static_cast<i32>(baseline);
+    const i32 right = 3 + static_cast<i32>(2 * width);
+    std::vector<u32> drawn;
+    for (i32 y = top; y < top + static_cast<i32>(y_size); ++y) {
+        for (i32 x = left; x < right; ++x) {
+            drawn.push_back(read_pixel(r, s.rp, x, y));
+        }
+    }
+    move(r, s.rp, 3, 20);
+    CHECK_EQ(r.graphics.text(s.rp, text, 2), 16u);
+    u32 different = 0;
+    u32 at = 0;
+    for (i32 y = top; y < top + static_cast<i32>(y_size); ++y) {
+        for (i32 x = left; x < right; ++x) {
+            different += drawn[at++] != read_pixel(r, s.rp, x, y) ? 1 : 0;
+        }
+    }
+    CHECK(different > 0);
+    CHECK_EQ(r.get16(s.rp + rp_cp_x), 3u + 16u);
 }
 
 // ExtendFont hangs an extension holding the reply port and a copy of the
@@ -2669,6 +2770,8 @@ int main() {
     text_is_measured_with_the_fonts_own_widths();
     text_draws_the_algorithmic_styles();
     text_draws_hasklig_from_the_rom();
+    default_font_is_topaz_until_set();
+    text_in_draws_and_measures_an_explicit_font();
     rom_fonts_carry_their_coverage_plane();
     text_blends_on_an_eight_plane_palette();
     extend_font_and_strip_font();

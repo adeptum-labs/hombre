@@ -163,6 +163,33 @@ public:
     // The TextAttr that names the built-in font, as Screen.Font points to one.
     u32 topaz_attr() const { return topaz_attr_; }
 
+    // The font InitRastPort gives a RastPort: topaz until set_default_font
+    // names another.
+    u32 default_font() const;
+    // Makes font the default font, topaz for 0, opening it and closing the
+    // default it replaces as OpenFont and CloseFont count accessors.
+    void set_default_font(u32 font);
+    // OpenFont(textAttr) and CloseFont(textFont) for code that is not the
+    // guest's: the font in memory nearest the TextAttr at text_attr, with
+    // one more accessor or none, and one accessor fewer.
+    u32 open_font(u32 text_attr);
+    void close_font(u32 font);
+    // The height, baseline and width of a font, for laying text out in it.
+    struct FontMetrics {
+        i32 y_size;
+        i32 baseline;
+        i32 x_size;
+    };
+    FontMetrics font_metrics(u32 font);
+    // TextLength in font, 0 for the built-in font: how far Text would move
+    // the pen for the characters.
+    u32 text_width(u32 font, const u8* chars, u32 count);
+    // Draws the characters in font, 0 for the built-in one, in the
+    // RastPort's pens, draw mode, spacing and styles, with the
+    // antialiasing Text has, and moves its pen past them. How far the pen
+    // moved.
+    u32 text_in(u32 rp, u32 font, const u8* chars, u32 count);
+
     void init_rastport(u32 rp);
     void set_pens(u32 rp, u32 fg, u32 bg, u32 mode);
     void move(u32 rp, i32 x, i32 y);
@@ -226,13 +253,23 @@ private:
     // name. 0 if exec has no memory for it.
     u32 add_rom_font(native::Bus& b, const RomFont& font, u32 name);
     // The glyph tables and the styles rp draws text with: those of its
-    // font, or of the built-in font for a RastPort without a font or with
-    // one that has no glyph tables. False if the RastPort cannot be read.
+    // font, or of the font at own, or of the built-in font for one without
+    // glyph tables. False if the RastPort cannot be read.
     bool text_font(native::Bus& b, u32 rp, raster::Font& font, raster::TextStyle& style);
+    bool text_font(native::Bus& b, u32 rp, u32 own, raster::Font& font,
+                   raster::TextStyle& style);
     // Draws the characters in the RastPort's draw mode and moves its pen
     // past them; in its font and styles for own_font, else in the
     // built-in font. How far the pen moved.
     u32 draw_text(u32 rp, const u8* chars, u32 count, bool own_font);
+    // Draws the characters in font through the RastPort's pens, draw mode
+    // and style, with blend for the antialiasing Text has, and moves its
+    // pen past them. How far the pen moved.
+    u32 draw_run(native::Bus& b, u32 rp, const raster::Font& font,
+                 const raster::TextStyle& style, const u8* chars, u32 count, bool blend);
+    // One tf_Accessor more or fewer, as OpenFont and CloseFont count them.
+    void acquire_font(native::Bus& b, u32 font);
+    void release_font(native::Bus& b, u32 font);
     // The ramp cache of an eight-plane bitmap's palette, or nullptr when
     // Intuition knows no ColorMap for it.
     text_blend::Cache* blend_for(u32 bitmap_addr, u32 depth);
