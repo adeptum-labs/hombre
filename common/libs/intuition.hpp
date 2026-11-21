@@ -341,6 +341,12 @@ public:
     void set_default_screen(u32 screen);
     u32 default_screen() const { return default_screen_; }
 
+    // The screen font IPrefs sent and the TextAttr that names it: topaz
+    // and topaz's until IPrefs sends one. A later step opens the Workbench
+    // screen in it.
+    u32 screen_font() const;
+    u32 screen_font_attr() const;
+
     // The Workbench's side of CloseWorkBench and OpenWorkBench. The task
     // that sets them is the one the Workbench windows belong to.
     void set_workbench_hooks(const WorkbenchHooks& hooks);
@@ -509,6 +515,7 @@ private:
     const u16* pen_prefs_for(u32 depth) const;
     void store_palette_prefs(u32 prefs, u32 size);
     void store_pen_prefs(u32 prefs, u32 size);
+    void store_font_prefs(u32 prefs, u32 size);
     void write_colormap_rgb(ScreenRecord& srec, u32 pen, u32 rgb);
     // Writes the stored palette into the screen's ColorMap over its default
     // palette and marks the palette changed.
@@ -651,6 +658,10 @@ private:
     static constexpr u32 kPrefsBytes = 232;
     u8 prefs_[kPrefsBytes]{};
     bool prefs_set_ = false;
+    // The screen font IPrefs sent, still OpenFont'ed, and its TextAttr in
+    // guest memory.
+    u32 screen_font_ = 0;
+    u32 screen_font_attr_ = 0;
     // The palette colours IPrefs sent, by pen, with those it set.
     bool palette_prefs_set_[256]{};
     u32 palette_prefs_[256]{};

@@ -67,6 +67,14 @@ namespace {
 
 constexpr char kIntuitionName[] = "intuition.library";
 
+// struct IFontPrefs, as IPrefs sends it: a TextAttr whose name pointer
+// follows it, the 36 bytes of the name, then a UWORD, 0 for the system
+// font and 1 for the screen font.
+constexpr u32 kIFontNameBytes = 36;
+constexpr u32 kIFontTypeOffset = ndk::TextAttr_SIZEOF + kIFontNameBytes;
+constexpr u32 kIFontPrefsBytes = kIFontTypeOffset + 2;
+constexpr u32 kIFontAttrBytes = ndk::TextAttr_SIZEOF + kIFontNameBytes;
+
 // struct Screen's sc_NextScreen, the pointer before sc_FirstWindow.
 constexpr u32 kScNextScreen = 0;
 constexpr u32 kWBENCHSCREEN = 1;
@@ -1436,14 +1444,17 @@ struct IntuitionNatives {
         native::set_result(m, from);
     }
 
-    // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: type 8 is
-    // the palette and type 9 the two DrawInfo pen sets. Other types are
-    // preferences this does not use yet. 0 back.
+    // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: type 2 is
+    // the system and screen fonts, type 8 the palette and type 9 the two
+    // DrawInfo pen sets. Other types are preferences this does not use
+    // yet. 0 back.
     static void set_iprefs(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         const u32 prefs = m.cpu.a[0];
         const u32 size = m.cpu.d[0];
-        if (m.cpu.d[1] == 8) {
+        if (m.cpu.d[1] == 2) {
+            in.store_font_prefs(prefs, size);
+        } else if (m.cpu.d[1] == 8) {
             in.store_palette_prefs(prefs, size);
             if (in.default_screen_ != 0) {
                 auto* rec = in.find_screen_record(in.default_screen_);
@@ -1789,6 +1800,8 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     base_ = 0;
     front_ = 0;
     default_screen_ = 0;
+    screen_font_ = 0;
+    screen_font_attr_ = 0;
     workbench_hooks_ = WorkbenchHooks{};
     workbench_closed_ = false;
     workbench_task_ = 0;
@@ -2038,6 +2051,70 @@ void Intuition::store_pen_prefs(u32 prefs, u32 size) {
         }
     }
     stored.set = true;
+}
+
+u32 Intuition::screen_font() const {
+    if (screen_font_ != 0 || graphics_ == nullptr) {
+        return screen_font_;
+    }
+    return graphics_->topaz_font();
+}
+
+u32 Intuition::screen_font_attr() const {
+    if (screen_font_attr_ != 0 || graphics_ == nullptr) {
+        return screen_font_attr_;
+    }
+    return graphics_->topaz_attr();
+}
+
+// Type 2: a struct IFontPrefs, the font's TextAttr, its name and what it
+// is. IPrefs closes the font when SetIPrefs returns, so the one Intuition
+// keeps is opened here. A TextAttr is copied into Intuition's own guest
+// memory, the name within it, and the previous one freed.
+void Intuition::store_font_prefs(u32 prefs, u32 size) {
+    if (prefs == 0 || size < kIFontPrefsBytes || machine_ == nullptr || graphics_ == nullptr ||
+        exec_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    u8 ifont[kIFontPrefsBytes];
+    for (u32 i = 0; i < kIFontPrefsBytes; ++i) {
+        ifont[i] = static_cast<u8>(b.r8(prefs + i));
+    }
+    if (!b.ok()) {
+        return;
+    }
+    const u32 type = (ifont[kIFontTypeOffset] << 8) | ifont[kIFontTypeOffset + 1];
+    if (type > 1) {
+        return;
+    }
+    const u32 attr = exec_->alloc(kIFontAttrBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (attr == 0) {
+        return;
+    }
+    const u32 name = attr + ndk::TextAttr_SIZEOF;
+    for (u32 i = 0; i < kIFontNameBytes - 1; ++i) {
+        b.w8(name + i, ifont[ndk::TextAttr_SIZEOF + i]);
+    }
+    b.w32(attr + ndk::ta_Name, name);
+    b.w16(attr + ndk::ta_YSize, (ifont[ndk::ta_YSize] << 8) | ifont[ndk::ta_YSize + 1]);
+    b.w8(attr + ndk::ta_Style, ifont[ndk::ta_Style]);
+    b.w8(attr + ndk::ta_Flags, ifont[ndk::ta_Flags]);
+    const u32 font = b.ok() ? graphics_->open_font(attr) : 0;
+    if (font == 0) {
+        exec_->free(attr, kIFontAttrBytes);
+        return;
+    }
+    if (type == 0) {
+        graphics_->set_default_font(font);
+        graphics_->close_font(font);
+        exec_->free(attr, kIFontAttrBytes);
+        return;
+    }
+    graphics_->close_font(screen_font_);
+    exec_->free(screen_font_attr_, kIFontAttrBytes);
+    screen_font_ = font;
+    screen_font_attr_ = attr;
 }
 
 void Intuition::write_colormap_rgb(ScreenRecord& rec, u32 pen, u32 rgb) {

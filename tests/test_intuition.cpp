@@ -276,6 +276,35 @@ u32 put_pen_prefs(GfxRig& r, u32 kind, u32 bar_block) {
     return 8 + 13 * 2;
 }
 
+// A struct IFontPrefs at prefs: the TextAttr, the name it points to and
+// the word for what the font is.
+u32 put_font_prefs(GfxRig& r, u32 prefs, const char* name, u32 y_size, u32 type) {
+    r.put32(prefs + ta_Name, prefs + TextAttr_SIZEOF);
+    r.put16(prefs + ta_YSize, y_size);
+    r.put8(prefs + ta_Style, 0);
+    r.put8(prefs + ta_Flags, 0);
+    r.str(prefs + TextAttr_SIZEOF, name);
+    r.put16(prefs + 44, type);
+    return 46;
+}
+
+// The hasklig font of y_size, opened through the OpenFont vector and
+// closed again: the TextFont address whose accessors the test reads.
+u32 font_address(GfxRig& r, u32 y_size) {
+    r.str(kBuffer + 0x40, "hasklig.font");
+    r.put32(kBuffer + ta_Name, kBuffer + 0x40);
+    r.put16(kBuffer + ta_YSize, y_size);
+    r.put8(kBuffer + ta_Style, 0);
+    r.put8(kBuffer + ta_Flags, 0);
+    r.cpu().a[0] = kBuffer;
+    const u32 font = r.result(Base::Graphics, graphics_lvo::OpenFont);
+    CHECK(font != 0);
+    r.cpu().a[1] = font;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::CloseFont), ExitReason::Halt);
+    CHECK_EQ(r.get16(font + tf_Accessors), 0u);
+    return font;
+}
+
 // What the Workbench hooks of CloseWorkBench and OpenWorkBench did.
 struct WorkbenchHookState {
     u32 closes = 0;
@@ -5344,6 +5373,56 @@ void set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info() {
     CHECK_EQ(r.get16(pens + 10 * 2), 7u);
 }
 
+// SetIPrefs type 2 opens the font it names and keeps it: type 0 as the
+// default font InitRastPort gives a RastPort, type 1 as the screen font.
+// The TextAttr is copied out of IPrefs' stack, and a font the screen font
+// replaces is closed.
+void set_iprefs_type2_sets_the_system_and_screen_fonts() {
+    GfxRig r;
+    const u32 topaz = r.graphics.topaz_font();
+    const u32 hasklig13 = font_address(r, 13);
+    const u32 hasklig11 = font_address(r, 11);
+    CHECK(hasklig13 != hasklig11);
+
+    const u32 size = put_font_prefs(r, kIPrefs, "hasklig.font", 13, 0);
+    set_iprefs(r, kIPrefs, size, 2);
+    // Whatever IPrefs' stack held is gone, the font is not.
+    for (u32 i = 0; i < size; ++i) {
+        r.put8(kIPrefs + i, 0xAA);
+    }
+    CHECK_EQ(r.graphics.default_font(), hasklig13);
+    CHECK_EQ(r.get32(r.graphics.graphics_base() + 154), hasklig13);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 1u);  // the default's
+    CHECK_EQ(r.intuition.screen_font(), topaz);
+    CHECK_EQ(r.intuition.screen_font_attr(), r.graphics.topaz_attr());
+
+    // Type 1 moves only the screen font.
+    put_font_prefs(r, kIPrefs, "hasklig.font", 13, 1);
+    set_iprefs(r, kIPrefs, size, 2);
+    for (u32 i = 0; i < size; ++i) {
+        r.put8(kIPrefs + i, 0xAA);
+    }
+    CHECK_EQ(r.graphics.default_font(), hasklig13);
+    CHECK_EQ(r.intuition.screen_font(), hasklig13);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 2u);  // the default and the screen's
+    const u32 attr = r.intuition.screen_font_attr();
+    CHECK(attr != 0);
+    CHECK(r.read_str(r.get32(attr + ta_Name)) == "hasklig.font");
+    CHECK_EQ(r.get16(attr + ta_YSize), 13u);
+
+    // Another screen font closes the one it replaces, and the same one
+    // again leaves the accessor where it was.
+    put_font_prefs(r, kIPrefs, "hasklig.font", 11, 1);
+    set_iprefs(r, kIPrefs, size, 2);
+    CHECK_EQ(r.intuition.screen_font(), hasklig11);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 1u);
+    CHECK_EQ(r.get16(hasklig11 + tf_Accessors), 1u);
+    CHECK_EQ(r.get16(r.intuition.screen_font_attr() + ta_YSize), 11u);
+    set_iprefs(r, kIPrefs, size, 2);
+    CHECK_EQ(r.intuition.screen_font(), hasklig11);
+    CHECK_EQ(r.get16(hasklig11 + tf_Accessors), 1u);
+}
+
 void close_and_open_workbench_follow_the_windows_and_the_pens() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
@@ -7393,6 +7472,7 @@ int main() {
     get_screen_draw_info_has_the_default_pens_and_topaz();
     set_iprefs_type8_writes_the_palette_into_the_default_screen();
     set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info();
+    set_iprefs_type2_sets_the_system_and_screen_fonts();
     close_and_open_workbench_follow_the_windows_and_the_pens();
     chrome_palette_follows_the_default_screen_pens();
     menu_strip_vectors_write_the_window_field();
