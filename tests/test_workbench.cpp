@@ -593,9 +593,22 @@ void layout_matches_the_ndk() {
     CHECK_EQ(workbench_lvo::RemoveAppIcon, 66u);
     CHECK_EQ(workbench_lvo::AddAppMenuItemA, 72u);
     CHECK_EQ(workbench_lvo::RemoveAppMenuItem, 78u);
+    CHECK_EQ(workbench_lvo::WBConfig, 84u);
     CHECK_EQ(workbench_lvo::WBInfo, 90u);
     CHECK_EQ(sm_Process, 20u);
     CHECK_EQ(WBStartup_SIZEOF, 40u);
+}
+
+// IPrefs hands its backdrops and other settings over through WBConfig,
+// which takes every kind and answers 0.
+void wb_config_takes_the_iprefs_settings() {
+    Rig r;
+    for (u32 kind = 1; kind <= 5; ++kind) {
+        r.m.cpu.d[0] = kind;
+        r.m.cpu.d[1] = 0;
+        CHECK_EQ(r.result(r.workbench.base(), workbench_lvo::WBConfig), 0u);
+    }
+    CHECK(!logged("workbench: unimplemented LVO -84"));
 }
 
 void start_starts_the_workbench_once() {
@@ -2080,6 +2093,7 @@ int main() {
     the_backdrop_shows_a_wbpattern_picture();
     the_backdrop_shows_the_wbpattern_pattern();
     layout_matches_the_ndk();
+    wb_config_takes_the_iprefs_settings();
     start_starts_the_workbench_once();
     desktop_shows_the_volumes_and_their_menus();
     drawer_icons_keep_their_positions_and_use_the_grid();

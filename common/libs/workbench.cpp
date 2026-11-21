@@ -2784,11 +2784,25 @@ void Workbench::file_closed(void* ctx, const char* path) {
             return;
         }
     }
-    wb.patterns_changed_ = true;
-    Bus b(*wb.machine_);
-    const u32 bit = wb.reply_port_ != 0 ? b.r8(wb.reply_port_ + ndk::mp_SigBit) : 32;
-    if (b.ok() && bit < 32 && wb.process_ != 0) {
-        wb.exec_->signal_task(wb.process_, 1u << bit);
+    wb.wake_for_patterns();
+}
+
+// The Workbench wakes to read the pattern prefs again.
+void Workbench::wake_for_patterns() {
+    patterns_changed_ = true;
+    Bus b(*machine_);
+    const u32 bit = reply_port_ != 0 ? b.r8(reply_port_ + ndk::mp_SigBit) : 32;
+    if (b.ok() && bit < 32 && process_ != 0) {
+        exec_->signal_task(process_, 1u << bit);
+    }
+}
+
+// WBConfig: IPrefs passes the desktop's and the windows' backdrop, kinds 1
+// and 2, as it applies WBPattern's prefs. The Workbench reads those prefs
+// itself, so a backdrop only wakes it; every other kind is taken and left.
+void Workbench::wb_config(u32 kind) {
+    if (kind == 1 || kind == 2) {
+        wake_for_patterns();
     }
 }
 
@@ -3455,6 +3469,11 @@ struct WorkbenchNatives {
         native::set_result(m, of(ctx).remove_app_menu_item(m.cpu.a[0]) ? 1 : 0);
     }
 
+    static void wb_config(void* ctx, Machine& m) {
+        of(ctx).wb_config(m.cpu.d[0]);
+        native::set_result(m, 0);
+    }
+
     static void wb_info(void*, Machine& m) { native::set_result(m, 0); }
 };
 
@@ -3471,6 +3490,7 @@ constexpr Function kFunctions[] = {
     {workbench_lvo::AddAppMenuItemA, WorkbenchNatives::add_app_menu_item, "AddAppMenuItemA"},
     {workbench_lvo::RemoveAppMenuItem, WorkbenchNatives::remove_app_menu_item,
      "RemoveAppMenuItem"},
+    {workbench_lvo::WBConfig, WorkbenchNatives::wb_config, "WBConfig"},
     {workbench_lvo::WBInfo, WorkbenchNatives::wb_info, "WBInfo"},
 };
 

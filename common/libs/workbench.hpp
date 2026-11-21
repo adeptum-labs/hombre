@@ -49,8 +49,8 @@
 // and bottom borders. Snapshot keeps an icon's place, or a drawer window's
 // box and scroll, in the .info. The other
 // vectors register application windows, icons and menu items, or rescan a
-// drawer. The vector gap at LVO -84 logs "workbench: unimplemented LVO
-// -<n>" and ends the run with Unimplemented.
+// drawer. WBConfig, IPrefs' private call, makes the Workbench read the
+// backdrop pattern prefs again.
 
 namespace hombre {
 
@@ -67,6 +67,9 @@ constexpr u32 AddAppIconA = 60;
 constexpr u32 RemoveAppIcon = 66;
 constexpr u32 AddAppMenuItemA = 72;
 constexpr u32 RemoveAppMenuItem = 78;
+// Private: IPrefs hands the Workbench its settings, a kind in D0 and its
+// data in D1.
+constexpr u32 WBConfig = 84;
 constexpr u32 WBInfo = 90;
 // The last vector of the library; the table reaches down to it.
 constexpr u32 Last = 90;
@@ -298,6 +301,9 @@ public:
     bool remove_app_icon(u32 handle);
     u32 add_app_menu_item(u32 id, u32 user, u32 text, u32 msg_port, u32 tags);
     bool remove_app_menu_item(u32 handle);
+    // WBConfig of the kind in D0: the backdrop kinds wake the Workbench to
+    // read the pattern prefs again.
+    void wb_config(u32 kind);
 
     // Builds the WBStartup message posted to a started process: its
     // ReplyPort is the Workbench's port, and each argument gets the lock of
@@ -397,6 +403,7 @@ private:
 
     static void task_entry(void* ctx);
     static void file_closed(void* ctx, const char* path);
+    void wake_for_patterns();
     static bool hook_close(void* ctx);
     static void hook_open(void* ctx);
     void run();
