@@ -247,9 +247,11 @@ void draw_amigakey(Graphics& graphics, u32 rp, const Area& area, const u16* pens
     line(graphics, rp, pen, left + (apex - left) / 2 + 1, bar, right - (right - apex) / 2, bar);
 }
 
-bool title_gadget(u32 which) {
+// The images that sit in a window's border, which take its colour.
+bool border_gadget(u32 which) {
     return which == DEPTHIMAGE || which == ZOOMIMAGE || which == SDEPTHIMAGE ||
-           which == CLOSEIMAGE || which == SIZEIMAGE;
+           which == CLOSEIMAGE || which == SIZEIMAGE || which == LEFTIMAGE ||
+           which == RIGHTIMAGE || which == UPIMAGE || which == DOWNIMAGE;
 }
 
 }
@@ -296,11 +298,11 @@ void draw(Graphics& graphics, native::Bus&, u32 rp, u32 which, const Rect& box_r
         draw_mx(graphics, rp, outer, pens, down);
         return;
     }
-    // The border gadgets take the colour of the border they sit in: the fill
-    // pen of an active window, the background of an inactive one. Buttons
-    // of their own, the arrows and the checkbox, are background coloured.
-    const u32 face = title_gadget(which) && !inactive(state) ? pens[FillPen]
-                                                             : pens[BackgroundPen];
+    // The border gadgets, the arrows among them, take the colour of the
+    // border they sit in: the fill pen of an active window, the background
+    // of an inactive one. The checkbox is background coloured.
+    const u32 face = border_gadget(which) && !inactive(state) ? pens[FillPen]
+                                                              : pens[BackgroundPen];
     fill(graphics, rp, face, outer);
     if (which == CHECKIMAGE) {
         bevel(graphics, rp, outer, pens[ShinePen], pens[ShadowPen]);
