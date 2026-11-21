@@ -34,6 +34,8 @@ namespace hombre {
 // One size of a font. Its glyphs are cells x_size bits wide, side by side
 // in the one bit plane at data, modulo bytes a row: a cell for every
 // character from lo_char to hi_char, then the one drawn for all others.
+// Beside it the same cells of coverage, four bits a pixel, the left pixel
+// in the high nibble of a byte, coverage_modulo bytes a row at coverage.
 struct RomFont {
     const char* name;
     u32 y_size;
@@ -43,7 +45,9 @@ struct RomFont {
     u32 lo_char;
     u32 hi_char;
     u32 modulo;
+    u32 coverage_modulo;
     const u8* data;
+    const u8* coverage;
 };
 
 u32 rom_font_count();
