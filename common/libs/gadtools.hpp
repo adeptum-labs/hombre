@@ -82,9 +82,10 @@ public:
 
     // CreateMenusA and LayoutMenusA for code that is not the guest's: the
     // strip made from the NewMenu array at array, and the layout of the
-    // strip starting at menu. False for an empty or faulty array.
+    // strip starting at menu for the TextFont at font, which is the
+    // default screen's for 0. False for an empty or faulty array.
     u32 create_menus(u32 array);
-    bool layout_menus(u32 menu);
+    bool layout_menus(u32 menu, u32 font = 0);
 
     // Draws a gadget gadtools made, through rp of the window, as it stands:
     // Intuition calls it when a button is pressed or let go. False for a
@@ -117,6 +118,18 @@ public:
 private:
     friend struct GadToolsNatives;
 
+    // The font a menu strip is laid out for, with the height and width of
+    // its cells, and the TextAttr its items' IntuiTexts are to name, 0 for
+    // none.
+    struct MenuFont {
+        u32 font;
+        u32 text_attr;
+        u32 height;
+        u32 cell;
+    };
+    MenuFont menu_font(u32 font, u32 text_attr) const;
+    bool layout_strip(u32 menu, const MenuFont& font);
+
     void draw_cycle(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                     i32 bottom, i32 baseline, bool selected);
     void draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom, bool selected);
@@ -128,6 +141,9 @@ private:
                          bool down, bool pressed);
     void draw_list_view(native::Bus& b, u32 window, u32 gadget);
     void ghost(u32 rp, u32 flags, i32 left, i32 top, i32 right, i32 bottom);
+    // The font of the VisualInfo at vi; the default screen's for 0 or for
+    // what is no VisualInfo, and 0, the built-in font, without one.
+    u32 visual_font(native::Bus& b, u32 vi) const;
 
     static constexpr u32 kVectors = gadtools_lvo::GT_GetGadgetAttrsA / 6;
 

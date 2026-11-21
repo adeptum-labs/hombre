@@ -42,10 +42,14 @@ namespace {
 constexpr char kGadToolsName[] = "gadtools.library";
 constexpr char kIdString[] = "gadtools 60.0 (Hombre)\r\n";
 
-// The private VisualInfo: the screen and its font.
+// The private VisualInfo: the screen, the TextAttr of its font, that font
+// held open, and a mark that tells one from any other pointer.
 constexpr u32 vi_Screen = 0;
 constexpr u32 vi_TextAttr = 4;
+constexpr u32 vi_Font = 8;
+constexpr u32 vi_Magic = 12;
 constexpr u32 kVisualInfoBytes = 16;
+constexpr u32 kVisualInfoMagic = 0x47545649;  // "GTVI"
 
 // struct Gadget
 constexpr u32 gg_NextGadget = 0;
@@ -275,6 +279,7 @@ constexpr u32 it_FrontPen = 0;
 constexpr u32 it_DrawMode = 2;
 constexpr u32 it_LeftEdge = 4;
 constexpr u32 it_TopEdge = 6;
+constexpr u32 it_ITextFont = 8;
 constexpr u32 it_IText = 12;
 constexpr u32 IntuiText_SIZEOF = 20;
 constexpr u32 im_Width = 4;
@@ -286,10 +291,14 @@ constexpr u32 Image_SIZEOF = 20;
 constexpr u32 kMenuBlockHeader = 8;
 constexpr u32 kMenuBlockMagic = 0x474D4E55;  // "GMNU"
 constexpr u32 kMaxNewMenus = 512;
-constexpr u32 kMenuText = 8;  // pixels per character of the 8x8 font
-constexpr u32 kItemHeight = 10;  // a text item: the font and a row of space above and below
+constexpr u32 kItemLeading = 2;  // a text item: the font and a row of space above and below
 constexpr u32 kBarItemHeight = 6;  // a separator bar
 constexpr u32 kItemPadding = 8;  // columns around an item's label
+constexpr u32 kTitlePadding = 8;  // columns on either side of a title's name
+// Beside the two cells a shortcut takes: its key glyph and the gaps.
+constexpr u32 kShortcutSpace = 16;
+constexpr u32 kCheckSpace = 16;  // the column of the check marks
+constexpr u32 GTMN_TextAttr = 0x80080031;
 
 }
 
@@ -359,6 +368,8 @@ u32 list_node(Bus& b, u32 list, u32 ordinal) {
 }  // namespace
 
 struct GadToolsNatives {
+    using MenuFont = GadTools::MenuFont;
+
     static GadTools& of(void* ctx) { return *static_cast<GadTools*>(ctx); }
 
     static void set_integer_number(GadTools& g, Bus& b, u32 gadget, i32 value);
@@ -376,15 +387,24 @@ struct GadToolsNatives {
             return;
         }
         Bus b(m);
+        const u32 attr = b.r32(screen + ndk::sc_Font);
         b.w32(vi + vi_Screen, screen);
-        b.w32(vi + vi_TextAttr, b.r32(screen + ndk::sc_Font));
+        b.w32(vi + vi_TextAttr, attr);
+        b.w32(vi + vi_Font, attr != 0 && b.ok() ? g.graphics_->open_font(attr) : 0);
+        b.w32(vi + vi_Magic, kVisualInfoMagic);
         native::set_result(m, b.ok() ? vi : 0);
     }
 
     static void free_visual_info(void* ctx, Machine& m) {
-        if (m.cpu.a[0] != 0) {
-            of(ctx).exec_->free(m.cpu.a[0], kVisualInfoBytes);
+        GadTools& g = of(ctx);
+        const u32 vi = m.cpu.a[0];
+        if (vi == 0) {
+            return;
         }
+        Bus b(m);
+        g.graphics_->close_font(b.r32(vi + vi_Font));
+        b.w32(vi + vi_Magic, 0);
+        g.exec_->free(vi, kVisualInfoBytes);
     }
 
     // The context gadget: an inert, empty gadget at the head of the list.
@@ -1107,9 +1127,21 @@ struct GadToolsNatives {
         g.exec_->free(block, b.r32(block + 4));
     }
 
+    // The width in pixels of the guest string at label in the font.
+    static u32 label_width(GadTools& g, Bus& b, u32 label, u32 font) {
+        u8 chars[255];
+        const u32 length = label_length(b, label);
+        for (u32 i = 0; i < length; ++i) {
+            chars[i] = static_cast<u8>(b.r8(label + i));
+        }
+        return b.ok() ? g.graphics_->text_width(font, chars, length) : 0;
+    }
+
     // Lays out items (and their subitems) in a column below their title,
-    // as wide as their widest label, and titles side by side.
-    static u32 layout_items(Bus& b, u32 first, i32 left, i32 top) {
+    // as wide as their widest label in the font and two rows higher than
+    // it. An item's IntuiText names the font's TextAttr when it has one.
+    static u32 layout_items(GadTools& g, Bus& b, u32 first, i32 left, i32 top,
+                            const MenuFont& font) {
         u32 widest = 0;
         u32 count = 0;
         bool checks = false;
@@ -1118,14 +1150,17 @@ struct GadToolsNatives {
             const u16 flags = static_cast<u16>(b.r16(it + mi_Flags));
             u32 w = 0;
             if ((flags & ITEMTEXT) != 0) {
-                w = label_length(b, b.r32(b.r32(it + mi_ItemFill) + it_IText)) * kMenuText +
-                    kItemPadding;
+                const u32 fill = b.r32(it + mi_ItemFill);
+                w = label_width(g, b, b.r32(fill + it_IText), font.font) + kItemPadding;
+                if (font.text_attr != 0) {
+                    b.w32(fill + it_ITextFont, font.text_attr);
+                }
             }
             if ((flags & COMMSEQ) != 0) {
-                w += 4 * kMenuText;
+                w += 2 * font.cell + kShortcutSpace;
             }
             if (b.r32(it + mi_SubItem) != 0) {
-                w += 2 * kMenuText;
+                w += 2 * font.cell;
             }
             checks = checks || (flags & CHECKIT) != 0;
             widest = w > widest ? w : widest;
@@ -1133,15 +1168,15 @@ struct GadToolsNatives {
         // One CHECKIT item gives every item of the column room for a check
         // mark, so the labels line up.
         if (checks) {
-            widest += 2 * kMenuText;
+            widest += kCheckSpace;
         }
-        widest = widest < 4 * kMenuText ? 4 * kMenuText : widest;
+        widest = widest < 4 * font.cell ? 4 * font.cell : widest;
         i32 y = top;
         count = 0;
         for (u32 it = first; it != 0 && count < kMaxNewMenus && b.ok();
              it = b.r32(it + mi_NextItem), ++count) {
             const u16 flags = static_cast<u16>(b.r16(it + mi_Flags));
-            const u32 h = (flags & ITEMTEXT) != 0 ? kItemHeight : kBarItemHeight;
+            const u32 h = (flags & ITEMTEXT) != 0 ? font.height + kItemLeading : kBarItemHeight;
             b.w16(it + mi_LeftEdge, static_cast<u16>(left));
             b.w16(it + mi_TopEdge, static_cast<u16>(y));
             b.w16(it + mi_Width, static_cast<u16>(widest));
@@ -1153,22 +1188,56 @@ struct GadToolsNatives {
             }
             const u32 sub = b.r32(it + mi_SubItem);
             if (sub != 0) {
-                layout_items(b, sub, static_cast<i32>(widest) - 2 * static_cast<i32>(kMenuText), 0);
+                layout_items(g, b, sub, static_cast<i32>(widest) - 2 * static_cast<i32>(font.cell),
+                             0, font);
             }
             y += static_cast<i32>(h);
         }
         return widest;
     }
 
-    static void layout_menus(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).layout_menus(m.cpu.a[0]) ? 1 : 0);
+    // The font a strip is laid out for: the one GTMN_TextAttr names when
+    // it is in memory, which the caller closes, else the VisualInfo's.
+    static MenuFont menu_font(GadTools& g, Bus& b, u32 vi, u32 tags, u32& opened) {
+        u32 attr = 0;
+        for (u32 item = tags, i = 0; item != 0 && i < kMaxTags && b.ok(); ++i) {
+            const u32 tag = b.r32(item);
+            const u32 data = b.r32(item + 4);
+            if (tag == ndk::TAG_DONE) {
+                break;
+            }
+            if (tag == ndk::TAG_MORE) {
+                item = data;
+                continue;
+            }
+            item += tag == ndk::TAG_SKIP ? (data + 1) * 8 : 8;
+            attr = tag == GTMN_TextAttr ? data : attr;
+        }
+        opened = attr != 0 && b.ok() ? g.graphics_->open_font(attr) : 0;
+        return g.menu_font(opened != 0 ? opened : g.visual_font(b, vi),
+                           opened != 0 ? attr : 0);
     }
 
-    static void layout_menu_items(void*, Machine& m) {
+    // LayoutMenusA(menu A0, vi A1, tags A2).
+    static void layout_menus(void* ctx, Machine& m) {
+        GadTools& g = of(ctx);
         Bus b(m);
+        u32 opened = 0;
+        const MenuFont font = menu_font(g, b, m.cpu.a[1], m.cpu.a[2], opened);
+        native::set_result(m, g.layout_strip(m.cpu.a[0], font) ? 1 : 0);
+        g.graphics_->close_font(opened);
+    }
+
+    // LayoutMenuItemsA(first item A0, vi A1, tags A2).
+    static void layout_menu_items(void* ctx, Machine& m) {
+        GadTools& g = of(ctx);
+        Bus b(m);
+        u32 opened = 0;
+        const MenuFont font = menu_font(g, b, m.cpu.a[1], m.cpu.a[2], opened);
         if (m.cpu.a[0] != 0) {
-            layout_items(b, m.cpu.a[0], 0, 0);
+            layout_items(g, b, m.cpu.a[0], 0, 0, font);
         }
+        g.graphics_->close_font(opened);
         native::set_result(m, b.ok() ? 1 : 0);
     }
 
@@ -1374,9 +1443,31 @@ u32 GadTools::create_menus(u32 array) {
     return first_menu;
 }
 
-// Lays the titles of the strip out side by side and every item column
-// below its title.
-bool GadTools::layout_menus(u32 menu) {
+u32 GadTools::visual_font(Bus& b, u32 vi) const {
+    if (vi != 0 && (vi & 1) == 0 && b.r32(vi + vi_Magic) == kVisualInfoMagic && b.ok()) {
+        return b.r32(vi + vi_Font);
+    }
+    return intuition_ != nullptr ? intuition_->font_of_screen(intuition_->default_screen()) : 0;
+}
+
+GadTools::MenuFont GadTools::menu_font(u32 font, u32 text_attr) const {
+    const Graphics::FontMetrics cell = graphics_->font_metrics(font);
+    return MenuFont{font, text_attr, static_cast<u32>(cell.y_size),
+                    static_cast<u32>(cell.x_size)};
+}
+
+bool GadTools::layout_menus(u32 menu, u32 font) {
+    if (machine_ == nullptr) {
+        return false;
+    }
+    Bus b(*machine_);
+    return layout_strip(menu, menu_font(font != 0 ? font : visual_font(b, 0), 0));
+}
+
+// Lays the titles of the strip out side by side, a title's name with
+// kTitlePadding columns on either side, and every item column below its
+// title.
+bool GadTools::layout_strip(u32 menu, const MenuFont& font) {
     if (machine_ == nullptr) {
         return false;
     }
@@ -1386,12 +1477,13 @@ bool GadTools::layout_menus(u32 menu) {
     for (u32 mu = menu; mu != 0 && count < kMaxNewMenus && b.ok();
          mu = b.r32(mu + mu_NextMenu), ++count) {
         const u32 width =
-            (GadToolsNatives::label_length(b, b.r32(mu + mu_MenuName)) + 2) * kMenuText;
+            GadToolsNatives::label_width(*this, b, b.r32(mu + mu_MenuName), font.font) +
+            2 * kTitlePadding;
         b.w16(mu + mu_LeftEdge, static_cast<u16>(left));
         b.w16(mu + mu_TopEdge, 0);
         b.w16(mu + mu_Width, static_cast<u16>(width));
-        b.w16(mu + mu_Height, static_cast<u16>(kItemHeight));
-        GadToolsNatives::layout_items(b, b.r32(mu + mu_FirstItem), 0, 0);
+        b.w16(mu + mu_Height, static_cast<u16>(font.height + kItemLeading));
+        GadToolsNatives::layout_items(*this, b, b.r32(mu + mu_FirstItem), 0, 0, font);
         left += static_cast<i32>(width);
     }
     return b.ok();

@@ -49,6 +49,7 @@ constexpr u32 kQuitLabel = kData + 0x6A0;
 constexpr u32 kPasteLabel = kData + 0x6C0;
 constexpr u32 kOpenKey = kData + 0x6E0;
 constexpr u32 kTags = kData + 0x780;
+constexpr u32 kFontAttr = kData + 0x7C0;
 constexpr u32 kList = kData + 0x800;
 constexpr u32 kMessage = kData + 0x880;
 constexpr u32 kBitmap = kData + 0x900;
@@ -208,6 +209,32 @@ u32 open_new_screen(GfxRig& r, u32 new_screen) {
     return r.result(Base::Intuition, intuition_lvo::OpenScreen);
 }
 
+// A TextAttr at kFontAttr naming the font, and a screen opened in it.
+u32 put_font_attr(GfxRig& r, const char* name, u32 y_size) {
+    r.str(kFontAttr + TextAttr_SIZEOF, name);
+    r.put32(kFontAttr + ta_Name, kFontAttr + TextAttr_SIZEOF);
+    r.put16(kFontAttr + ta_YSize, y_size);
+    r.put8(kFontAttr + ta_Style, 0);
+    r.put8(kFontAttr + ta_Flags, 0);
+    return kFontAttr;
+}
+
+u32 open_screen_in(GfxRig& r, const char* font, u32 y_size, u32 depth) {
+    put_new_screen(r, kNewScreen, 640, 400, depth, 0);
+    r.put32(kNewScreen + ns_Font, put_font_attr(r, font, y_size));
+    const u32 screen = open_new_screen(r, kNewScreen);
+    CHECK(screen != 0);
+    return screen;
+}
+
+u32 visual_info(GfxRig& r, GadTools& g, u32 screen) {
+    r.cpu().a[0] = screen;
+    r.cpu().a[1] = 0;
+    const u32 vi = gt_result(r, g, gadtools_lvo::GetVisualInfoA);
+    CHECK(vi != 0);
+    return vi;
+}
+
 u32 make_surface(GfxRig& r) {
     constexpr u32 kWidth = 640;
     constexpr u32 kHeight = 400;
@@ -295,6 +322,24 @@ void visual_info_holds_the_screen_and_is_freed() {
     CHECK_EQ(avail_mem(r), before);
 }
 
+// A VisualInfo holds its screen's font open until it is freed.
+void visual_info_holds_the_font_of_its_screen() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 screen = open_screen_in(r, "hasklig.font", 13, 2);
+    const u32 font = r.intuition.font_of_screen(screen);
+    CHECK_EQ(r.get16(font + tf_YSize), 13u);
+    const u32 accessors = r.get16(font + tf_Accessors);
+
+    const u32 vi = visual_info(r, g, screen);
+    CHECK_EQ(r.get32(vi + 8), font);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors + 1);
+    r.cpu().a[0] = vi;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::FreeVisualInfo), ExitReason::Halt);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors);
+}
+
 void create_context_stores_and_frees_the_gadget() {
     GfxRig r;
     GadTools g;
@@ -369,6 +414,56 @@ void create_menus_builds_the_chain_and_flags() {
     CHECK_EQ(gt_result(r, g, gadtools_lvo::CreateMenusA), 0u);
     r.cpu().a[0] = 0;
     CHECK_EQ(gt_result(r, g, gadtools_lvo::CreateMenusA), 0u);
+}
+
+// A strip laid out for the VisualInfo of a screen in hasklig 13, whose
+// cells are 7 wide: the labels are measured in it and a text item is the
+// font and two rows high. GTMN_TextAttr names another font, which the
+// items' IntuiTexts then carry.
+void layout_menus_measures_the_font_of_the_screen() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 screen = open_screen_in(r, "hasklig.font", 13, 2);
+    const u32 vi = visual_info(r, g, screen);
+    CHECK_EQ(r.get16(r.intuition.font_of_screen(screen) + tf_XSize), 7u);
+
+    const u32 file = create_menu_strip(r, g);
+    CHECK(file != 0);
+    const u32 edit = r.get32(file + mu_NextMenu);
+    const u32 open = r.get32(file + mu_FirstItem);
+    const u32 bar = r.get32(open + mi_NextItem);
+    const u32 wrap = r.get32(bar + mi_NextItem);
+    const u32 recent = r.get32(open + mi_SubItem);
+
+    r.cpu().a[0] = file;
+    r.cpu().a[1] = vi;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::LayoutMenusA), 1u);
+    CHECK_EQ(r.get16(file + mu_Width), 4u * 7 + 16);
+    CHECK_EQ(r.get16(file + mu_Height), 15u);
+    CHECK_EQ(r.get16(edit + mu_LeftEdge), 4u * 7 + 16);
+    // Open: four characters and the padding, a shortcut, a submenu arrow
+    // and the column of check marks.
+    CHECK_EQ(r.get16(open + mi_Width), 4u * 7 + 8 + (2 * 7 + 16) + 2 * 7 + 16);
+    CHECK_EQ(r.get16(open + mi_Height), 15u);
+    CHECK_EQ(r.get16(bar + mi_TopEdge), 15u);
+    CHECK_EQ(r.get16(bar + mi_Height), 6u);
+    CHECK_EQ(r.get16(wrap + mi_TopEdge), 21u);
+    CHECK_EQ(r.get16(wrap + mi_Height), 15u);
+    CHECK_EQ(r.get16(recent + mi_Height), 15u);
+    CHECK_EQ(r.get32(r.get32(open + mi_ItemFill) + 8), 0u);
+
+    r.cpu().a[0] = file;
+    r.cpu().a[1] = vi;
+    r.cpu().a[2] = r.tags(kTags, {{0x80080031, put_font_attr(r, "topaz.font", 8)},
+                                  {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::LayoutMenusA), 1u);
+    CHECK_EQ(r.get16(file + mu_Width), 48u);
+    CHECK_EQ(r.get16(open + mi_Width), 104u);
+    CHECK_EQ(r.get16(open + mi_Height), 10u);
+    CHECK_EQ(r.get32(r.get32(open + mi_ItemFill) + 8), kFontAttr);
+    CHECK_EQ(r.get32(r.get32(recent + mi_ItemFill) + 8), kFontAttr);
 }
 
 void layout_menus_places_titles_and_items() {
@@ -1359,9 +1454,11 @@ int main() {
     integer_gadgets_hold_their_number_as_text();
     cycles_step_through_their_labels_and_palettes_pick_colours();
     visual_info_holds_the_screen_and_is_freed();
+    visual_info_holds_the_font_of_its_screen();
     create_context_stores_and_frees_the_gadget();
     create_menus_builds_the_chain_and_flags();
     layout_menus_places_titles_and_items();
+    layout_menus_measures_the_font_of_the_screen();
     free_menus_returns_memory_and_rejects_foreign_strips();
     imsg_vectors_go_through_the_port();
     filter_vectors_return_a1();
