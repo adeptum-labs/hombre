@@ -90,6 +90,7 @@ constexpr u32 AREAOUTLINE = 0x0008;
 constexpr u32 rp_cp_x = 36;
 constexpr u32 rp_cp_y = 38;
 constexpr u32 rp_Font = 52;
+constexpr u32 rp_AlgoStyle = 56;
 constexpr u32 rp_TxHeight = 58;
 constexpr u32 rp_TxWidth = 60;
 constexpr u32 rp_TxBaseline = 62;
@@ -297,6 +298,7 @@ constexpr u32 TextAttr_SIZEOF = 8;
 static_assert(TextAttr_SIZEOF == 8);
 
 constexpr u32 tf_YSize = 20;
+constexpr u32 tf_Style = 22;
 constexpr u32 tf_XSize = 24;
 constexpr u32 tf_Baseline = 26;
 constexpr u32 tf_LoChar = 32;
@@ -342,6 +344,7 @@ constexpr u32 GACT_RIGHTBORDER = 0x10;
 constexpr u32 GACT_LEFTBORDER = 0x20;
 constexpr u32 GACT_TOPBORDER = 0x40;
 constexpr u32 GACT_BOTTOMBORDER = 0x80;
+constexpr u32 GACT_LONGINT = 0x800;
 
 constexpr u32 GTYP_PROPGADGET = 3;
 constexpr u32 GTYP_GTYPEMASK = 7;
@@ -357,6 +360,8 @@ constexpr u32 si_DispPos = 12;
 constexpr u32 si_UndoPos = 14;
 constexpr u32 si_NumChars = 16;
 constexpr u32 si_DispCount = 18;
+constexpr u32 si_Extension = 24;
+constexpr u32 si_LongInt = 28;
 constexpr u32 StringInfo_SIZEOF = 36;
 constexpr u32 GTYP_GADTOOLS = 0x100;  // a gadget gadtools.library made and draws
 

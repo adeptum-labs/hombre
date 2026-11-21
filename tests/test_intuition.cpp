@@ -3250,6 +3250,54 @@ void resize_clamps_to_limits() {
     CHECK_EQ(r.get16(window + wd_Height), 300u);
 }
 
+void window_limits_set_and_report_limits() {
+    GfxRig r;
+    const u32 window = open_drag_window(r, WFLG_SIZEGADGET, 0, 0, 0, 0xFFFF, 0xFFFF);
+    r.cpu().a[0] = window;
+    r.cpu().d[0] = 100;
+    r.cpu().d[1] = 50;
+    r.cpu().d[2] = 300;
+    r.cpu().d[3] = 200;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::WindowLimits), 1u);
+    CHECK_EQ(r.get16(window + wd_MinWidth), 100u);
+    CHECK_EQ(r.get16(window + wd_MinHeight), 50u);
+    CHECK_EQ(r.get16(window + wd_MaxWidth), 300u);
+    CHECK_EQ(r.get16(window + wd_MaxHeight), 200u);
+
+    // Zero leaves that limit as it was.
+    r.cpu().d[0] = 0;
+    r.cpu().d[1] = 0;
+    r.cpu().d[2] = 0;
+    r.cpu().d[3] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::WindowLimits), 1u);
+    CHECK_EQ(r.get16(window + wd_MinWidth), 100u);
+    CHECK_EQ(r.get16(window + wd_MinHeight), 50u);
+    CHECK_EQ(r.get16(window + wd_MaxWidth), 300u);
+    CHECK_EQ(r.get16(window + wd_MaxHeight), 200u);
+
+    // A minimum over the window's width and a maximum under its height are
+    // left out; the minimum height asked for with them is still set.
+    r.cpu().d[0] = 400;
+    r.cpu().d[1] = 60;
+    r.cpu().d[2] = 0;
+    r.cpu().d[3] = 100;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::WindowLimits), 0u);
+    CHECK_EQ(r.get16(window + wd_MinWidth), 100u);
+    CHECK_EQ(r.get16(window + wd_MinHeight), 60u);
+    CHECK_EQ(r.get16(window + wd_MaxWidth), 300u);
+    CHECK_EQ(r.get16(window + wd_MaxHeight), 200u);
+
+    // A resize drag afterwards stops at the new limits.
+    press(r, 435, 255);
+    move_to(r, 200, 100);
+    CHECK_EQ(r.get16(window + wd_Width), 100u);
+    CHECK_EQ(r.get16(window + wd_Height), 60u);
+    move_to(r, 900, 900);
+    release(r, 900, 900);
+    CHECK_EQ(r.get16(window + wd_Width), 300u);
+    CHECK_EQ(r.get16(window + wd_Height), 200u);
+}
+
 void newsize_coalesced_and_final_on_release() {
     GfxRig r;
     const u32 window = open_drag_window(r, WFLG_SIZEGADGET, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW,
@@ -7109,8 +7157,51 @@ void a_string_gadget_is_edited_from_the_keyboard() {
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 1u);
 }
 
+void a_long_int_gadget_takes_only_numbers_and_keeps_the_value() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 si = r.exec.alloc(StringInfo_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 buffer = r.exec.alloc(16, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(si + si_Buffer, buffer);
+    r.put16(si + si_MaxChars, 10);
+    put_gadget(r, gad, 0, 20, 20, 120, 10, GFLG_GADGHCOMP, GACT_RELVERIFY | GACT_LONGINT,
+               GTYP_STRGADGET, 0);
+    r.put32(gad + gg_SpecialInfo, si);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    r.cpu().a[0] = gad;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::ActivateGadget), 1u);
+    // The letter is not taken; the number is read and written back as its
+    // canonical decimal.
+    for (const u8 key : {u8('0'), u8('4'), u8('x'), u8('2')}) {
+        r.intuition.string_key(key);
+    }
+    CHECK(r.read_str(buffer) == "042");
+    r.intuition.string_key('\n');
+    CHECK(!r.intuition.string_active());
+    CHECK_EQ(r.get32(si + si_LongInt), 42u);
+    CHECK_EQ(r.get16(si + si_NumChars), 2u);
+    CHECK_EQ(r.get16(si + si_BufferPos), 2u);
+    CHECK(r.read_str(buffer) == "42");
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    CHECK_EQ(r.get32(msg + im_IAddress), gad);
+    reply_msg(r, msg);
+}
+
 int main() {
     a_string_gadget_is_edited_from_the_keyboard();
+    a_long_int_gadget_takes_only_numbers_and_keeps_the_value();
     intuitext_borders_and_blocking_requests();
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();
@@ -7217,6 +7308,7 @@ int main() {
     drag_under_other_window_keeps_order();
     resize_grows_and_clears();
     resize_clamps_to_limits();
+    window_limits_set_and_report_limits();
     newsize_coalesced_and_final_on_release();
     unreplied_resizes_do_not_exhaust_messages();
     move_posts_changewindow_only();

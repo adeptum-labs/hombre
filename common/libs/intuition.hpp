@@ -87,6 +87,7 @@ constexpr u32 SetMenuStrip = 264;
 constexpr u32 SetWindowTitles = 276;
 constexpr u32 WindowToBack = 306;
 constexpr u32 WindowToFront = 312;
+constexpr u32 WindowLimits = 318;
 constexpr u32 BeginRefresh = 354;
 constexpr u32 EndRefresh = 366;
 constexpr u32 FreeSysRequest = 372;
@@ -229,6 +230,8 @@ public:
     void set_window_titles(u32 window, u32 title, u32 screen_title);
     void window_to_front(u32 window);
     void window_to_back(u32 window);
+    bool window_limits(u32 window, i32 width_min, i32 height_min, u32 width_max,
+                       u32 height_max);
     bool window_open(u32 window) const;
     void set_size_hook(u32 window, WindowHook hook, void* ctx);
     u32 add_glist(u32 window, u32 gadget, i32 position, i32 count);

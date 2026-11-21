@@ -1207,6 +1207,15 @@ struct IntuitionNatives {
 
     static void window_to_front(void* ctx, Machine& m) { of(ctx).window_to_front(m.cpu.a[0]); }
 
+    static void window_limits(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).window_limits(
+                                  m.cpu.a[0], static_cast<i16>(m.cpu.d[0] & 0xFFFF),
+                                  static_cast<i16>(m.cpu.d[1] & 0xFFFF), m.cpu.d[2] & 0xFFFF,
+                                  m.cpu.d[3] & 0xFFFF)
+                                  ? 1
+                                  : 0);
+    }
+
     static void add_gadget(void* ctx, Machine& m) {
         native::set_result(
             m, of(ctx).add_glist(m.cpu.a[0], m.cpu.a[1],
@@ -1705,6 +1714,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::SetWindowTitles, IntuitionNatives::set_window_titles, "SetWindowTitles"},
     {intuition_lvo::WindowToBack, IntuitionNatives::window_to_back, "WindowToBack"},
     {intuition_lvo::WindowToFront, IntuitionNatives::window_to_front, "WindowToFront"},
+    {intuition_lvo::WindowLimits, IntuitionNatives::window_limits, "WindowLimits"},
     {intuition_lvo::LockIBase, IntuitionNatives::lock_i_base, "LockIBase"},
     {intuition_lvo::UnlockIBase, IntuitionNatives::unlock_i_base, "UnlockIBase"},
     {intuition_lvo::GetScreenData, IntuitionNatives::get_screen_data, "GetScreenData"},
@@ -4242,6 +4252,59 @@ void Intuition::window_to_back(u32 window) {
                                             rec->height, rec->flags));
 }
 
+// WindowLimits: 0 leaves a limit alone, a limit the window already breaks
+// is left out, and the ones set are kept inside the screen.
+bool Intuition::window_limits(u32 window, i32 width_min, i32 height_min, u32 width_max,
+                              u32 height_max) {
+    const u32 index = find_window(window);
+    WindowRecord* rec = index < kMaxWindows ? find_window_record(window) : nullptr;
+    const ScreenRecord* srec = rec != nullptr ? find_screen_record(rec->screen) : nullptr;
+    if (srec == nullptr) {
+        return false;
+    }
+    const i32 screen_w = static_cast<i32>(srec->width);
+    const i32 screen_h = static_cast<i32>(srec->height);
+    bool applied = true;
+    if (width_min != 0) {
+        if (width_min > rec->width) {
+            applied = false;
+        } else {
+            rec->min_w = width_min < 0 ? 0 : width_min > screen_w ? screen_w : width_min;
+        }
+    }
+    if (height_min != 0) {
+        if (height_min > rec->height) {
+            applied = false;
+        } else {
+            rec->min_h = height_min < 0 ? 0 : height_min > screen_h ? screen_h : height_min;
+        }
+    }
+    if (width_max != 0) {
+        if (static_cast<i32>(width_max) < rec->width) {
+            applied = false;
+        } else {
+            rec->lim_w = width_max >= 0xFFFF ? screen_w
+                         : static_cast<i32>(width_max) > screen_w ? screen_w
+                                                                  : static_cast<i32>(width_max);
+        }
+    }
+    if (height_max != 0) {
+        if (static_cast<i32>(height_max) < rec->height) {
+            applied = false;
+        } else {
+            rec->lim_h = height_max >= 0xFFFF ? screen_h
+                         : static_cast<i32>(height_max) > screen_h ? screen_h
+                                                                   : static_cast<i32>(height_max);
+        }
+    }
+    Bus b(*machine_);
+    b.w16(window + ndk::wd_MinWidth, static_cast<u32>(rec->min_w));
+    b.w16(window + ndk::wd_MinHeight, static_cast<u32>(rec->min_h));
+    b.w16(window + ndk::wd_MaxWidth, static_cast<u32>(rec->lim_w));
+    b.w16(window + ndk::wd_MaxHeight, static_cast<u32>(rec->lim_h));
+    return applied;
+}
+
 void Intuition::set_size_hook(u32 window, WindowHook hook, void* ctx) {
     if (find_window(window) >= kMaxWindows) {
         return;
@@ -5677,6 +5740,69 @@ bool Intuition::hit_string_gadget(Bus& b, u32 window, i32 x, i32 y) {
     return false;
 }
 
+namespace {
+
+// A LONGINT string gadget's text becomes the number of its leading digits,
+// written back as that number's canonical decimal, which can be shorter
+// than the text that was typed.
+void normalize_long_int(Bus& b, u32 gadget) {
+    const u32 si = b.r32(gadget + ndk::gg_SpecialInfo);
+    if (!b.ok() || si == 0) {
+        return;
+    }
+    const u32 buffer = b.r32(si + ndk::si_Buffer);
+    const u32 count = b.r16(si + ndk::si_NumChars);
+    if (!b.ok() || buffer == 0) {
+        return;
+    }
+    u32 at = 0;
+    bool negative = false;
+    if (count != 0 && b.r8(buffer) == '-') {
+        negative = true;
+        at = 1;
+    }
+    i64 number = 0;
+    for (; at < count; ++at) {
+        const u8 c = static_cast<u8>(b.r8(buffer + at));
+        if (c < '0' || c > '9') {
+            break;
+        }
+        if (number <= 2147483647LL) {
+            number = number * 10 + (c - '0');
+        }
+    }
+    i64 signed_number = negative ? -number : number;
+    signed_number = signed_number > 2147483647LL ? 2147483647LL
+                    : signed_number < -2147483648LL ? -2147483647LL - 1
+                                                    : signed_number;
+    const i32 value = static_cast<i32>(signed_number);
+    char text[12];
+    u32 length = 0;
+    u64 magnitude =
+        value < 0 ? static_cast<u64>(-static_cast<i64>(value)) : static_cast<u64>(value);
+    do {
+        text[length++] = static_cast<char>('0' + magnitude % 10);
+        magnitude /= 10;
+    } while (magnitude != 0);
+    if (value < 0) {
+        text[length++] = '-';
+    }
+    const u32 max = b.r16(si + ndk::si_MaxChars);
+    const u32 room = max > 0 ? max - 1 : 0;
+    const u32 written = length < room ? length : room;
+    for (u32 i = 0; i < written; ++i) {
+        b.w8(buffer + i, static_cast<u8>(text[length - 1 - i]));
+    }
+    b.w8(buffer + written, 0);
+    b.w16(si + ndk::si_NumChars, written);
+    const u32 pos = b.r16(si + ndk::si_BufferPos);
+    b.w16(si + ndk::si_BufferPos, pos < written ? pos : written);
+    b.w16(si + ndk::si_DispPos, 0);
+    b.w32(si + ndk::si_LongInt, static_cast<u32>(value));
+}
+
+}
+
 // Ends the editing; Return or Tab on a GACT_RELVERIFY gadget reports
 // GADGETUP with the key that ended it.
 void Intuition::end_string(bool verify, u16 code) {
@@ -5686,6 +5812,9 @@ void Intuition::end_string(bool verify, u16 code) {
         return;
     }
     Bus b(*machine_);
+    if ((b.r16(s.gadget + ndk::gg_Activation) & ndk::GACT_LONGINT) != 0) {
+        normalize_long_int(b, s.gadget);
+    }
     const WindowRecord* rec = find_window_record(s.window);
     if (rec != nullptr) {
         draw_string_gadget(b, s.window, rec->rp, s.gadget);
@@ -5711,6 +5840,7 @@ void Intuition::string_key(u8 byte) {
     const u32 si = b.r32(gadget + ndk::gg_SpecialInfo);
     const u32 buffer = b.r32(si + ndk::si_Buffer);
     const u32 max = b.r16(si + ndk::si_MaxChars);
+    const bool long_int = (b.r16(gadget + ndk::gg_Activation) & ndk::GACT_LONGINT) != 0;
     u32 count = b.r16(si + ndk::si_NumChars);
     u32 pos = b.r16(si + ndk::si_BufferPos);
     if (!b.ok() || buffer == 0) {
@@ -5749,7 +5879,8 @@ void Intuition::string_key(u8 byte) {
             --count;
             pos = at;
         }
-    } else if (byte >= 0x20 && (byte < 0x7F || byte >= 0xA0) && count + 1 < max) {
+    } else if (byte >= 0x20 && (byte < 0x7F || byte >= 0xA0) && count + 1 < max &&
+               (!long_int || byte == '-' || (byte >= '0' && byte <= '9'))) {
         for (u32 i = count; i > pos; --i) {
             b.w8(buffer + i, b.r8(buffer + i - 1));
         }
