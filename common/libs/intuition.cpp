@@ -104,9 +104,12 @@ constexpr u32 default_palette_rgb24(u32 pen) {
         const u32 b = idx % 6;
         return (kCubeLevels[r] << 16) | (kCubeLevels[g] << 8) | kCubeLevels[b];
     }
-    if (pen < chrome::kChromeBase) {
+    if (pen < chrome::kMenuPaperPen) {
         const u32 v = 0x10u + (pen - 224u) * 0x20u;
         return (v << 16) | (v << 8) | v;
+    }
+    if (pen < chrome::kChromeBase) {
+        return chrome::kMenuPalette[pen - chrome::kMenuPaperPen];
     }
     if (pen < 256) {
         return chrome::kChromePalette[pen - chrome::kChromeBase];
@@ -867,7 +870,7 @@ constexpr u32 kItText = 12;
 constexpr u16 kMenuNull = 0xFFFF;
 constexpr u32 kIdcmpMenuPick = 0x00000100;
 constexpr u32 kDriNewLook = 1;
-constexpr u32 kDriPenCount = 12;
+constexpr u32 kDriPenCount = chrome::kDrawInfoPens;
 constexpr u16 kDefaultDriPens[kDriPenCount] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
 constexpr u32 kDrawInfoPensAt = 52;
 constexpr u32 kDrawInfoBytes = kDrawInfoPensAt + (kDriPenCount + 1) * 2;
@@ -1355,10 +1358,28 @@ struct IntuitionNatives {
         native::set_result(m, from);
     }
 
-    // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: the
-    // preferences it reads from ENV: are taken and not applied yet; 0
-    // back. TODO: apply the screen mode, font and pointer prefs.
-    static void set_iprefs(void*, Machine& m) { native::set_result(m, 0); }
+    // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: type 8 is
+    // the palette and type 9 the two DrawInfo pen sets. Other types are
+    // preferences this does not use yet. 0 back.
+    static void set_iprefs(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        const u32 prefs = m.cpu.a[0];
+        const u32 size = m.cpu.d[0];
+        if (m.cpu.d[1] == 8) {
+            in.store_palette_prefs(prefs, size);
+            if (in.default_screen_ != 0) {
+                auto* rec = in.find_screen_record(in.default_screen_);
+                if (rec != nullptr) {
+                    in.apply_palette_prefs(*rec);
+                }
+                in.update_chrome_palette(in.default_screen_);
+                in.flush_palette();
+            }
+        } else if (m.cpu.d[1] == 9) {
+            in.store_pen_prefs(prefs, size);
+        }
+        native::set_result(m, 0);
+    }
 
     // PubScreenStatus(screen A0, flags D0): public screens are not tracked
     // yet, so no visitor ever holds one up; 0 back.
@@ -1733,6 +1754,15 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     for (GadgetHookEntry& entry : gadget_hooks_) {
         entry = GadgetHookEntry{};
     }
+    for (bool& set : palette_prefs_set_) {
+        set = false;
+    }
+    for (u32& rgb : palette_prefs_) {
+        rgb = 0;
+    }
+    for (PenPrefs& prefs : pen_prefs_) {
+        prefs = PenPrefs{};
+    }
     for (bool& seen : unhandled_gadget_types_) {
         seen = false;
     }
@@ -1791,6 +1821,193 @@ void Intuition::flush_palette() {
     if (b.ok() && width > 0 && height > 0) {
         refresh_full(*display_, *machine_, screen, width, height);
     }
+}
+
+void Intuition::set_default_screen(u32 screen) {
+    default_screen_ = screen;
+    if (screen == 0) {
+        return;
+    }
+    ScreenRecord* rec = find_screen_record(screen);
+    if (rec == nullptr) {
+        return;
+    }
+    apply_palette_prefs(*rec);
+    apply_pen_prefs(screen);
+    update_chrome_palette(screen);
+    flush_palette();
+}
+
+void Intuition::apply_pen_prefs(u32 screen) {
+    ScreenRecord* rec = find_screen_record(screen);
+    if (rec == nullptr || rec->draw_info == 0 || machine_ == nullptr) {
+        return;
+    }
+    const u16* pens = pen_prefs_for(rec->depth);
+    if (pens == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    for (u32 i = 0; i < kDriPenCount; ++i) {
+        b.w16(rec->draw_info + kDrawInfoPensAt + i * 2, pens[i]);
+    }
+    if (default_candidate(screen)) {
+        update_chrome_palette(screen);
+    }
+}
+
+bool Intuition::default_candidate(u32 screen) const {
+    return screen == default_screen_ || (default_screen_ == 0 && screen == front_);
+}
+
+const u16* Intuition::pen_prefs_for(u32 depth) const {
+    const PenPrefs& prefs = pen_prefs_[depth > 2 ? 1 : 0];
+    return prefs.set ? prefs.pen : nullptr;
+}
+
+// Type 8: records of pen, red, green and blue, each 16 bits, ended by
+// 0xFFFF. The high byte of a colour is its 8 bits.
+void Intuition::store_palette_prefs(u32 prefs, u32 size) {
+    if (prefs == 0 || machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    u32 at = prefs;
+    u32 used = 0;
+    u32 entries = 0;
+    while (used + 2 <= size && entries < 256 && b.ok()) {
+        const u32 pen = b.r16(at);
+        if (!b.ok() || pen == 0xFFFF) {
+            break;
+        }
+        if (used + 8 > size) {
+            break;
+        }
+        const u32 rgb = ((b.r16(at + 2) >> 8) << 16) | ((b.r16(at + 4) >> 8) << 8) |
+                        (b.r16(at + 6) >> 8);
+        if (!b.ok()) {
+            break;
+        }
+        if (pen < 256) {
+            palette_prefs_[pen] = rgb;
+            palette_prefs_set_[pen] = true;
+        }
+        at += 8;
+        used += 8;
+        ++entries;
+    }
+}
+
+// Type 9: a count, a kind (0 for screens of four colours or fewer, 1 for
+// the rest), four unused bytes and the pens, ended by 0xFFFF.
+void Intuition::store_pen_prefs(u32 prefs, u32 size) {
+    if (prefs == 0 || machine_ == nullptr || size < 8) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 count = b.r16(prefs);
+    const u32 kind = b.r16(prefs + 2);
+    if (!b.ok() || kind > 1) {
+        return;
+    }
+    u32 n = count < kDriPenCount ? count : kDriPenCount;
+    const u32 fit = (size - 8) / 2;
+    if (n > fit) {
+        n = fit;
+    }
+    PenPrefs& stored = pen_prefs_[kind];
+    for (u32 i = 0; i < kDriPenCount; ++i) {
+        stored.pen[i] = kDefaultDriPens[i];
+    }
+    for (u32 i = 0; i < n; ++i) {
+        const u32 pen = b.r16(prefs + 8 + i * 2);
+        if (!b.ok() || pen == 0xFFFF) {
+            break;
+        }
+        stored.pen[i] = static_cast<u16>(pen);
+    }
+    stored.set = true;
+}
+
+void Intuition::write_colormap_rgb(ScreenRecord& rec, u32 pen, u32 rgb) {
+    if (machine_ == nullptr || rec.colors == 0 || rec.depth == 0 ||
+        pen >= (1u << rec.depth)) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 red = (rgb >> 16) & 0xFF;
+    const u32 green = (rgb >> 8) & 0xFF;
+    const u32 blue = rgb & 0xFF;
+    b.w16(rec.colors + pen * 2, ((red >> 4) << 8) | ((green >> 4) << 4) | (blue >> 4));
+    if (rec.low_colors != 0) {
+        b.w16(rec.low_colors + pen * 2,
+              ((red & 0xF) << 8) | ((green & 0xF) << 4) | (blue & 0xF));
+    }
+}
+
+void Intuition::apply_palette_prefs(ScreenRecord& rec) {
+    bool changed = false;
+    for (u32 pen = 0; pen < 256; ++pen) {
+        if (!palette_prefs_set_[pen]) {
+            continue;
+        }
+        write_colormap_rgb(rec, pen, palette_prefs_[pen]);
+        changed = true;
+    }
+    if (!changed || display_ == nullptr) {
+        return;
+    }
+    ++display_->palette_gen;
+    if (display_->front_screen == rec.addr) {
+        display_->palette_dirty = true;
+    }
+}
+
+void Intuition::update_chrome_palette(u32 screen) {
+    ScreenRecord* rec = find_screen_record(screen);
+    if (rec == nullptr || rec->depth < 8 || machine_ == nullptr || graphics_ == nullptr) {
+        return;
+    }
+    const u32 info = screen_draw_info(screen);
+    if (info == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 pens = b.r32(info + kDriPens);
+    if (!b.ok() || pens == 0) {
+        return;
+    }
+    u32 pen_rgb[kDriPenCount]{};
+    for (u32 i = 0; i < kDriPenCount; ++i) {
+        // A pen the ColorMap does not have keeps the colour of the default
+        // pen in its place.
+        u32 pen = b.r16(pens + i * 2);
+        u8 red = 0;
+        u8 green = 0;
+        u8 blue = 0;
+        if (!b.ok()) {
+            return;
+        }
+        if (!graphics_->color_of(rec->colormap, pen, red, green, blue)) {
+            pen = kDefaultDriPens[i];
+            if (!graphics_->color_of(rec->colormap, pen, red, green, blue)) {
+                continue;
+            }
+        }
+        pen_rgb[i] = (static_cast<u32>(red) << 16) | (static_cast<u32>(green) << 8) | blue;
+    }
+    u32 palette[chrome::kDerivedCount]{};
+    chrome::palette_from_pens(pen_rgb, palette);
+    for (u32 i = 0; i < chrome::kDerivedCount; ++i) {
+        write_colormap_rgb(*rec, chrome::kDerivedBase + i, palette[i]);
+    }
+    if (display_ != nullptr) {
+        ++display_->palette_gen;
+        if (display_->front_screen == rec->addr) {
+            display_->palette_dirty = true;
+        }
+    }
+    flush_palette();
 }
 
 void Intuition::end_batch() {
@@ -2312,8 +2529,12 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w32(map + ndk::cm_ColorTable, colors);
     b.w32(map + ndk::cm_LowColorBits, low_colors);
     b.w32(map + ndk::cm_vp, vp);
+    // The first screen is the one that becomes the default, so it takes the
+    // palette IPrefs sent before it opened; other screens keep the default.
+    const bool becomes_default = default_screen_ == 0;
     for (u32 i = 0; i < color_count; ++i) {
-        const u32 rgb = default_palette_rgb24(i);
+        const u32 rgb = becomes_default && palette_prefs_set_[i] ? palette_prefs_[i]
+                                                                 : default_palette_rgb24(i);
         const u32 r8 = (rgb >> 16) & 0xFF;
         const u32 g8 = (rgb >> 8) & 0xFF;
         const u32 b8 = rgb & 0xFF;
@@ -2367,6 +2588,9 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     chrome::draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title);
     compose(screen, Rect{0, 0, right, bottom});
     end_batch();
+    if (becomes_default && a.depth >= 8) {
+        update_chrome_palette(screen);
+    }
     return screen;
 }
 
@@ -4696,24 +4920,32 @@ void Intuition::report_image_damage(const raster::RastPortView& view, const Rect
     }
 }
 
-// A DrawInfo per screen, made on first use and freed with the screen:
-// the 3.1 default pens, the screen's font, its depth and a 1:1
-// resolution. FreeScreenDrawInfo leaves it in place.
+// A DrawInfo per screen, made on first use and freed with the screen: the
+// pens IPrefs sent for the default screen (the 3.1 default pens before
+// they arrive or on another screen), the screen's font, its depth and a
+// 1:1 resolution. FreeScreenDrawInfo leaves it in place.
 u32 Intuition::screen_draw_info(u32 screen) {
-    const u32 index = find_screen(screen);
-    if (screen == 0 || index >= kMaxScreens) {
+    ScreenRecord* found = screen != 0 ? find_screen_record(screen) : nullptr;
+    if (found == nullptr) {
         return 0;
     }
-    ScreenRecord& rec = screen_records_[index];
+    ScreenRecord& rec = *found;
     if (rec.draw_info == 0) {
         const u32 di = exec_->alloc(kDrawInfoBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (di == 0) {
             return 0;
         }
         Bus b(*machine_);
+        const u16* source = kDefaultDriPens;
+        if (default_candidate(screen)) {
+            const u16* prefs = pen_prefs_for(rec.depth);
+            if (prefs != nullptr) {
+                source = prefs;
+            }
+        }
         const u32 pens = di + kDrawInfoPensAt;
         for (u32 i = 0; i < kDriPenCount; ++i) {
-            b.w16(pens + i * 2, kDefaultDriPens[i]);
+            b.w16(pens + i * 2, source[i]);
         }
         b.w16(pens + kDriPenCount * 2, 0xFFFF);
         b.w16(di + kDriVersion, 2);

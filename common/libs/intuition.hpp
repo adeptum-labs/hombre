@@ -25,6 +25,7 @@
 
 #include "../types.hpp"
 #include "boopsi.hpp"
+#include "chrome_palette.hpp"
 #include "gfx.hpp"
 #include "menu_layout.hpp"
 #include "native.hpp"
@@ -306,9 +307,15 @@ public:
     // The task that opened the window, 0 when it is not open.
     u32 window_owner(u32 window) const;
 
-    // The screen shells open their windows on.
-    void set_default_screen(u32 screen) { default_screen_ = screen; }
+    // The screen shells open their windows on. A screen made the default
+    // takes the palette and DrawInfo pens IPrefs has sent, and its chrome
+    // colours are worked out again from them.
+    void set_default_screen(u32 screen);
     u32 default_screen() const { return default_screen_; }
+
+    // Rewrites the pens of the screen's existing DrawInfo from the set
+    // IPrefs sent that fits its depth, when that set has arrived.
+    void apply_pen_prefs(u32 screen);
     // Returns pointers to the screen's native 256-entry strong/light shade
     // tables, rebuilding them if the palette changed. False for unknown or
     // shallow (< 8 plane) screens.
@@ -333,6 +340,13 @@ private:
     static constexpr i32 kRequesterButtonHeight = 14;
     static constexpr i32 kRequesterButtonPad = 12;
     static constexpr i32 kRequesterButtonGap = 8;
+
+    // One of the two DrawInfo pen sets IPrefs sends: kind 0 for screens of
+    // four colours or fewer, kind 1 for the rest.
+    struct PenPrefs {
+        bool set = false;
+        u16 pen[chrome::kDrawInfoPens]{};
+    };
 
     // What a screen owns in guest memory, so that closing it never has to
     // believe a guest field.
@@ -455,6 +469,21 @@ private:
     static void on_damage(void* ctx, m68k::Machine& m, u32 bitmap, const Rect& rect);
 
     void rebuild_shade_tables(ScreenRecord& srec);
+    // The screen is the default one, or the front one while none has been
+    // made default yet.
+    bool default_candidate(u32 screen) const;
+    // The stored pens that fit a screen of depth, or null when that set has
+    // not arrived.
+    const u16* pen_prefs_for(u32 depth) const;
+    void store_palette_prefs(u32 prefs, u32 size);
+    void store_pen_prefs(u32 prefs, u32 size);
+    void write_colormap_rgb(ScreenRecord& srec, u32 pen, u32 rgb);
+    // Writes the stored palette into the screen's ColorMap over its default
+    // palette and marks the palette changed.
+    void apply_palette_prefs(ScreenRecord& srec);
+    // Works the menu and chrome colours out of the screen's DrawInfo pens
+    // and writes them into its ColorMap, then recomposes.
+    void update_chrome_palette(u32 screen);
     void compose(u32 screen, Rect r);
     u32 find_screen(u32 screen) const;
     ScreenRecord* find_screen_record(u32 screen);
@@ -573,6 +602,10 @@ private:
     static constexpr u32 kPrefsBytes = 232;
     u8 prefs_[kPrefsBytes]{};
     bool prefs_set_ = false;
+    // The palette colours IPrefs sent, by pen, with those it set.
+    bool palette_prefs_set_[256]{};
+    u32 palette_prefs_[256]{};
+    PenPrefs pen_prefs_[2];
     // The windows a Request() blocks, with its Requester, until EndRequest:
     // a press in one reaches none of its gadgets.
     struct Block {

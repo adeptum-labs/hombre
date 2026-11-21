@@ -27,8 +27,20 @@
 
 namespace hombre::chrome {
 
+// The menu pens take the top of the grey ramp, above the four shades left
+// at 224..227.
+constexpr u8 kMenuPaperPen = 228;
+constexpr u8 kMenuLabelPen = 229;
+constexpr u8 kMenuLitPen = 230;
+constexpr u8 kMenuGhostPen = 231;
+
 constexpr u8 kChromeBase = 232;
 constexpr u32 kChromeCount = 24;
+
+// The pens of a DrawInfo, in its order: DETAILPEN, BLOCKPEN, TEXTPEN,
+// SHINEPEN, SHADOWPEN, FILLPEN, FILLTEXTPEN, BACKGROUNDPEN,
+// HIGHLIGHTTEXTPEN, BARDETAILPEN, BARBLOCKPEN and BARTRIMPEN.
+constexpr u32 kDrawInfoPens = 12;
 
 constexpr u8 kActiveBar0 = 232;
 constexpr u8 kActiveBar1 = 233;
@@ -72,6 +84,16 @@ constexpr u32 lerp_rgb(u32 a, u32 b, u32 step, u32 steps) {
 
 }
 
+// The menu pens' colours while a screen still has the 3.1 default pens:
+// BARBLOCKPEN and BARDETAILPEN are pens 2 and 1 of the base palette, and
+// the ghost is half of each.
+constexpr u32 kMenuPalette[4] = {
+    0xFFFFFF,
+    0x1C1E22,
+    0x1C1E22,
+    detail::lerp_rgb(0xFFFFFF, 0x1C1E22, 50, 100),
+};
+
 constexpr u32 kChromePalette[kChromeCount] = {
     detail::lerp_rgb(0x6D9BE0, 0x2F5DA6, 0, 7),
     detail::lerp_rgb(0x6D9BE0, 0x2F5DA6, 1, 7),
@@ -99,10 +121,21 @@ constexpr u32 kChromePalette[kChromeCount] = {
     0x4A4F57,
 };
 
+// The colours palette_from_pens computes: the menu pens through the window
+// chrome, pens kDerivedBase to 255.
+constexpr u32 kDerivedBase = kMenuPaperPen;
+constexpr u32 kDerivedCount = 256 - kDerivedBase;
+
 static_assert(kChromePalette[kActiveBar0 - kChromeBase] == 0x6D9BE0u);
 static_assert(kChromePalette[kActiveBar7 - kChromeBase] == 0x2F5DA6u);
 static_assert(kChromePalette[kInactiveBar0 - kChromeBase] == 0xE6E8ECu);
 static_assert(kChromePalette[kInactiveBar5 - kChromeBase] == 0xBFC3CAu);
 static_assert(kChromePalette[kTitleInactive - kChromeBase] == 0x4A4F57u);
+
+// Computes the colours of pens kDerivedBase..255 from the colours of a
+// screen's DrawInfo pens, in DrawInfo's order in pen_rgb: the bars shade
+// the FILLPEN and BACKGROUNDPEN colours, the frames take SHADOWPEN and
+// SHINEPEN, and the menu takes BARBLOCKPEN and BARDETAILPEN.
+void palette_from_pens(const u32* pen_rgb, u32* out);
 
 }

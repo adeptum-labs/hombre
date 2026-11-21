@@ -127,6 +127,7 @@ constexpr u32 kEasyArg2 = kData + 0x21C0;
 constexpr u32 kIdcmpOut = kData + 0x2200;
 constexpr u32 kEasyMessage = kData + 0x2240;
 constexpr u32 kEasyTask = kData + 0x2280;
+constexpr u32 kIPrefs = kData + 0x2300;
 
 // struct Menu, struct MenuItem and struct IntuiText
 constexpr u32 mu_NextMenu = 0;
@@ -243,6 +244,36 @@ u32 open_tags(GfxRig& r, u32 new_screen, u32 tags) {
     r.cpu().a[0] = new_screen;
     r.cpu().a[1] = tags;
     return r.result(Base::Intuition, intuition_lvo::OpenScreenTagList);
+}
+
+void set_iprefs(GfxRig& r, u32 prefs, u32 size, u32 type) {
+    r.cpu().a[0] = prefs;
+    r.cpu().d[0] = size;
+    r.cpu().d[1] = type;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetIPrefs), 0u);
+}
+
+// One type 8 palette record, then the terminator.
+u32 put_palette_pref(GfxRig& r, u32 pen, u32 red, u32 green, u32 blue) {
+    r.put16(kIPrefs, pen);
+    r.put16(kIPrefs + 2, red);
+    r.put16(kIPrefs + 4, green);
+    r.put16(kIPrefs + 6, blue);
+    r.put16(kIPrefs + 8, 0xFFFF);
+    return 10;
+}
+
+// A type 9 header and the 13 words of the 3.1 pens, with bar_block in
+// BARBLOCKPEN's place.
+u32 put_pen_prefs(GfxRig& r, u32 kind, u32 bar_block) {
+    const u32 pens[13] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, bar_block, 1, 0xFFFF};
+    r.put16(kIPrefs, 13);
+    r.put16(kIPrefs + 2, kind);
+    r.put32(kIPrefs + 4, 0);
+    for (u32 i = 0; i < 13; ++i) {
+        r.put16(kIPrefs + 8 + i * 2, pens[i]);
+    }
+    return 8 + 13 * 2;
 }
 
 u32 screen_pixel(GfxRig& r, u32 screen, i32 x, i32 y) {
@@ -745,25 +776,33 @@ void open_screen_depth8_sets_default_and_chrome_palettes() {
 
     CHECK_EQ(colormap_rgb24(r, map, 224), 0x101010u);
     CHECK_EQ(colormap_rgb24(r, map, 227), 0x707070u);
-    CHECK_EQ(colormap_rgb24(r, map, 231), 0xF0F0F0u);
 
-    for (u32 i = 0; i < chrome::kChromeCount; ++i) {
-        CHECK_EQ(colormap_rgb24(r, map, chrome::kChromeBase + i), chrome::kChromePalette[i]);
+    for (u32 i = 0; i < 4; ++i) {
+        CHECK_EQ(colormap_rgb24(r, map, chrome::kMenuPaperPen + i), chrome::kMenuPalette[i]);
     }
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar0), 0x6D9BE0u);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar7), 0x2F5DA6u);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kInactiveBar0), 0xE6E8ECu);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kInactiveBar5), 0xBFC3CAu);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kFrameDark), 0x2A2D33u);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kFrameLight), 0xF4F5F7u);
+
+    // The chrome colours are worked out from the default DrawInfo pens: the
+    // bars shade FILLPEN (3) and BACKGROUNDPEN (0), the frame takes
+    // SHADOWPEN (1) and SHINEPEN (2), and the close stud keeps its red.
+    const u32 active[8] = {0x779ACC, 0x6C8FC1, 0x6184B6, 0x5679AB,
+                           0x4C6FA0, 0x416495, 0x36598A, 0x2B4E7F};
+    for (u32 i = 0; i < 8; ++i) {
+        CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar0 + i), active[i]);
+    }
+    const u32 inactive[6] = {0xAEB3BC, 0xA8ADB6, 0xA2A7B0, 0x9CA1AA, 0x969BA4, 0x90959E};
+    for (u32 i = 0; i < 6; ++i) {
+        CHECK_EQ(colormap_rgb24(r, map, chrome::kInactiveBar0 + i), inactive[i]);
+    }
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kFrameDark), 0x1C1E22u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kFrameLight), 0xFFFFFFu);
     CHECK_EQ(colormap_rgb24(r, map, chrome::kCloseFill), 0xE0605Au);
     CHECK_EQ(colormap_rgb24(r, map, chrome::kCloseRing), 0x9A3330u);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob0), 0xF2F4F7u);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob1), 0xD7DBE1u);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob2), 0xB8BEC7u);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kTrack), 0x8E949Du);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kTitleActive), 0xFFFFFFu);
-    CHECK_EQ(colormap_rgb24(r, map, chrome::kTitleInactive), 0x4A4F57u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob0), 0xC6CAD0u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob1), 0xB3B8C0u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kKnob2), 0xA0A6B0u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kTrack), 0x787D84u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kTitleActive), 0x1C1E22u);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kTitleInactive), 0x1C1E22u);
 
     r.cpu().a[0] = screen;
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseScreen), 1u);
@@ -4153,16 +4192,11 @@ void depth8_chrome_pixel_spot_checks() {
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
 
-    u32 prev_sbar = screen_pixel(r, screen, 100, 0);
-    CHECK_EQ(prev_sbar, static_cast<u32>(chrome::kInactiveBar0));
-    for (i32 y = 1; y <= 13; ++y) {
-        const u32 p = screen_pixel(r, screen, 100, y);
-        CHECK(p >= chrome::kInactiveBar0 && p <= chrome::kInactiveBar5);
-        CHECK(p >= prev_sbar);
-        prev_sbar = p;
+    // The screen bar is the menu paper, over its label pen's line.
+    for (i32 y = 0; y <= 13; ++y) {
+        CHECK_EQ(screen_pixel(r, screen, 100, y), static_cast<u32>(chrome::kMenuPaperPen));
     }
-    CHECK_EQ(prev_sbar, static_cast<u32>(chrome::kInactiveBar5));
-    CHECK_EQ(screen_pixel(r, screen, 100, 14), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 100, 14), static_cast<u32>(chrome::kMenuLabelPen));
 
     r.str(kWinTitle, "H");
     put_new_window(r, kNewWindow, 40, 30, 220, 120,
@@ -5073,6 +5107,76 @@ void get_screen_draw_info_has_the_default_pens_and_topaz() {
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::FreeScreenDrawInfo), ExitReason::Halt);
 }
 
+void set_iprefs_type8_writes_the_palette_into_the_default_screen() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+
+    const u32 size = put_palette_pref(r, 0, 0x4444, 0x5555, 0x6666);
+    set_iprefs(r, kIPrefs, size, 8);
+    const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+    CHECK_EQ(colormap_rgb24(r, map, 0), 0x445566u);
+
+    // A screen opened after the default closed takes the same palette.
+    r.cpu().a[0] = screen;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseScreen), 1u);
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 again = open_new(r, kNewScreen);
+    CHECK(again != 0);
+    const u32 next_map = r.get32(again + sc_ViewPort + vp_ColorMap);
+    CHECK_EQ(colormap_rgb24(r, next_map, 0), 0x445566u);
+}
+
+void set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 first = open_new(r, kNewScreen);
+    CHECK(first != 0);
+    r.intuition.set_default_screen(first);
+
+    const u32 size = put_pen_prefs(r, 1, 5);
+    set_iprefs(r, kIPrefs, size, 9);
+
+    // A fresh screen made default takes kind 1's pens.
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    r.cpu().a[0] = screen;
+    const u32 info = r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo);
+    CHECK(info != 0);
+    const u32 pens = r.get32(info + dri_Pens);
+    CHECK_EQ(r.get16(pens + 10 * 2), 5u);
+
+    // The same set rewrites a DrawInfo that already exists.
+    put_pen_prefs(r, 1, 7);
+    set_iprefs(r, kIPrefs, size, 9);
+    r.intuition.apply_pen_prefs(screen);
+    CHECK_EQ(r.get16(pens + 10 * 2), 7u);
+}
+
+void chrome_palette_follows_the_default_screen_pens() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+
+    // Pen 2 is the default BARBLOCKPEN, the menu paper.
+    u32 size = put_palette_pref(r, 2, 0xFFFF, 0, 0);
+    set_iprefs(r, kIPrefs, size, 8);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kMenuPaperPen), 0xFF0000u);
+
+    // Pen 3 is the default FILLPEN, the active title bar.
+    size = put_palette_pref(r, 3, 0, 0, 0xFFFF);
+    set_iprefs(r, kIPrefs, size, 8);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar0), 0x4D4DFFu);
+    CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar7), 0x0000B3u);
+}
+
 void menu_strip_vectors_write_the_window_field() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -5449,24 +5553,24 @@ void menu_on_a_chrome_screen_highlights_ghosts_and_restores() {
 
     menu_press(r, 10, 5);
     menu_move(r, 10, 21);
-    // The bar keeps the screen title bar's gradient and the open title and
-    // the highlighted item get the active title bar's.
-    CHECK_EQ(screen_pixel(r, screen, 300, 0), static_cast<u32>(chrome::kInactiveBar0));
-    CHECK_EQ(screen_pixel(r, screen, 300, 14), static_cast<u32>(chrome::kFrameDark));
+    // The bar keeps the screen title bar's menu paper and label, and the
+    // open title and the highlighted item get the active title bar's.
+    CHECK_EQ(screen_pixel(r, screen, 300, 0), static_cast<u32>(chrome::kMenuPaperPen));
+    CHECK_EQ(screen_pixel(r, screen, 300, 14), static_cast<u32>(chrome::kMenuLabelPen));
     const u32 title = screen_pixel(r, screen, 6, 7);
     CHECK(title >= chrome::kActiveBar0 && title <= chrome::kActiveBar7);
     const u32 lit = screen_pixel(r, screen, 9, 21);
     CHECK(lit >= chrome::kActiveBar0 && lit <= chrome::kActiveBar7);
-    CHECK_EQ(screen_pixel(r, screen, 5, 30), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 5, 30), static_cast<u32>(chrome::kMenuPaperPen));
     CHECK_EQ(screen_pixel(r, screen, 4, 30), static_cast<u32>(chrome::kFrameDark));
-    // The disabled item's label is grey, never the label pen.
+    // The disabled item's label is the ghost pen, never the label pen.
     u32 grey = 0;
     u32 dark = 0;
     for (i32 y = 26; y <= 34; ++y) {
         for (i32 x = 8; x <= 72; ++x) {
             const u32 pen = screen_pixel(r, screen, x, y);
-            grey += pen == chrome::kTrack ? 1 : 0;
-            dark += pen == chrome::kFrameDark ? 1 : 0;
+            grey += pen == chrome::kMenuGhostPen ? 1 : 0;
+            dark += pen == chrome::kMenuLabelPen ? 1 : 0;
         }
     }
     CHECK(grey > 0);
@@ -6699,6 +6803,9 @@ int main() {
     lock_pub_screen_returns_the_default_screen();
     get_default_pub_screen_writes_workbench();
     get_screen_draw_info_has_the_default_pens_and_topaz();
+    set_iprefs_type8_writes_the_palette_into_the_default_screen();
+    set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info();
+    chrome_palette_follows_the_default_screen_pens();
     menu_strip_vectors_write_the_window_field();
     item_address_follows_the_menu_numbers();
     menu_right_press_opens_the_bar_and_the_second_item_picks();

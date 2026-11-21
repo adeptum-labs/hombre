@@ -355,14 +355,8 @@ void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gfl
     }
 }
 
-// Menu pens on screens of eight planes: near-white paper, dark labels,
-// grey ghosted labels and softer grey shortcuts, the active title bar
-// gradient behind the open title and the highlighted item.
-constexpr u8 kMenuPaper = kFrameLight;
-constexpr u8 kMenuLabel = kFrameDark;
-constexpr u8 kMenuShortcut = kTitleInactive;
-constexpr u8 kMenuGhost = kTrack;
-constexpr u8 kMenuLit = kTitleActive;
+// The menu separator on screens of eight planes: a dark line over a light
+// one, as the window frames use.
 constexpr u8 kMenuBarDark = kKnob2;
 constexpr u8 kMenuBarLight = kTitleActive;
 
@@ -577,7 +571,8 @@ struct MenuPens {
 
 MenuPens menu_pens(bool high_color) {
     if (high_color) {
-        return MenuPens{true, kMenuPaper, kMenuLabel, kMenuShortcut, kMenuLit, kFrameDark};
+        return MenuPens{true, kMenuPaperPen, kMenuLabelPen, kMenuLabelPen, kMenuLitPen,
+                        kFrameDark};
     }
     return MenuPens{false, kFlatPaper, kFlatLabel, kFlatLabel, kFlatLit, kFlatLabel};
 }
@@ -635,8 +630,8 @@ void draw_menu_items(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& c
             label = pens.lit;
             shortcut = pens.lit;
         } else if (ghosted && pens.high_color) {
-            label = kMenuGhost;
-            shortcut = kMenuGhost;
+            label = kMenuGhostPen;
+            shortcut = kMenuGhostPen;
         }
         const i32 height = row.y1 - row.y0 + 1;
         const i32 baseline = row.y0 + max_i32(0, (height - 8) / 2) + 6;
@@ -762,12 +757,9 @@ void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
     const i32 line = static_cast<i32>(kBarHeight);
 
     if (high_color) {
-        for (i32 y = 0; y < line; ++y) {
-            const i32 step = (y * 6) / line;
-            graphics.set_pens(rp, kInactiveBar0 + static_cast<u8>(step), 0, ndk::JAM2);
-            graphics.rect_fill(rp, 0, y, right, y);
-        }
-        graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+        graphics.set_pens(rp, kMenuPaperPen, 0, ndk::JAM2);
+        graphics.rect_fill(rp, 0, 0, right, line - 1);
+        graphics.set_pens(rp, kMenuLabelPen, 0, ndk::JAM2);
         graphics.rect_fill(rp, 0, line, right, line);
     } else {
         graphics.set_pens(rp, 0, 0, ndk::JAM2);
@@ -777,7 +769,7 @@ void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
     }
 
     if (title != 0) {
-        graphics.set_pens(rp, 1, 0, ndk::JAM1);
+        graphics.set_pens(rp, high_color ? kMenuLabelPen : 1, 0, ndk::JAM1);
         draw_title(graphics, b, rp, title, 1, kTitleBaseline, right);
     }
     restore_rp(b, rp, saved);
@@ -923,12 +915,10 @@ void draw_menu(Bus& b, const raster::Bitmap& bitmap, const Rect& area, const Men
     const i32 right = menu.width - 1;
     const i32 line = static_cast<i32>(kBarHeight);
 
-    // The bar keeps the look of the screen title bar it replaces.
+    // The bar is drawn in the same pens as the screen title bar it replaces.
     if (pens.high_color) {
-        for (i32 y = 0; y < line; ++y) {
-            fill(b, bitmap, clip, 0, y, right, y, static_cast<u8>(kInactiveBar0 + (y * 6) / line));
-        }
-        fill(b, bitmap, clip, 0, line, right, line, kFrameDark);
+        fill(b, bitmap, clip, 0, 0, right, line - 1, kMenuPaperPen);
+        fill(b, bitmap, clip, 0, line, right, line, kMenuLabelPen);
     } else {
         fill(b, bitmap, clip, 0, 0, right, line - 1, kFlatPaper);
         fill(b, bitmap, clip, 0, line, right, line, kFlatLabel);
@@ -946,7 +936,7 @@ void draw_menu(Bus& b, const raster::Bitmap& bitmap, const Rect& area, const Men
             draw_highlight(b, bitmap, clip, Rect{title.x0, 2, title.x1, line - 2}, pens);
             pen = pens.lit;
         } else if (!enabled && pens.high_color) {
-            pen = kMenuGhost;
+            pen = kMenuGhostPen;
         }
         draw_guest_text(b, bitmap, clip, pen, title.x0 + 8, kTitleBaseline, menu.titles[i].name,
                         title.x1 - 4);
