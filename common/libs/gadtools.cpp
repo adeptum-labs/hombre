@@ -24,6 +24,7 @@
 #include "gadtools.hpp"
 
 #include "intuition.hpp"
+#include "sysimage.hpp"
 
 #include "gfx.hpp"
 #include "graphics.hpp"
@@ -1383,33 +1384,12 @@ void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 r
 // in the text pen when selected.
 void GadTools::draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom,
                              bool selected) {
-    Graphics& gfx = *graphics_;
-    gfx.set_pens(rp, 0, 0, ndk::JAM1);
-    if (right - left > 2 && bottom - top > 2) {
-        gfx.rect_fill(rp, left + 1, top + 1, right - 1, bottom - 1);
-    }
-    gfx.set_pens(rp, kShinePen, 0, ndk::JAM1);
-    gfx.move(rp, left, bottom);
-    gfx.draw_line(rp, left, top);
-    gfx.draw_line(rp, right, top);
-    gfx.set_pens(rp, kShadowPen, 0, ndk::JAM1);
-    gfx.move(rp, right, top + 1);
-    gfx.draw_line(rp, right, bottom);
-    gfx.draw_line(rp, left + 1, bottom);
-    if (!selected) {
-        return;
-    }
-    const i32 x0 = left + 1;
-    const i32 y0 = top + 1;
-    const i32 x1 = right - 1;
-    const i32 y1 = bottom - 1;
-    if (x1 - x0 + 1 < 6 || y1 - y0 + 1 < 4) {
-        return;
-    }
-    gfx.set_pens(rp, kTextPen, 0, ndk::JAM1);
-    gfx.move(rp, x0 + 1, (y0 + y1) / 2);
-    gfx.draw_line(rp, (x0 + x1) / 2 - 1, y1 - 1);
-    gfx.draw_line(rp, x1 - 1, y0 + 1);
+    // The checkbox looks as sysiclass's CHECKIMAGE, in the default pens.
+    Bus b(*machine_);
+    u16 pens[sysimage::kPenCount];
+    sysimage::read_pens(b, 0, pens);
+    sysimage::draw(*graphics_, b, rp, ndk::CHECKIMAGE, Rect{left, top, right, bottom},
+                   selected ? ndk::IDS_SELECTED : ndk::IDS_NORMAL, pens);
 }
 
 // A click let go over the gadget at x, y of its box: a cycle gadget moves

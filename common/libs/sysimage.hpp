@@ -37,8 +37,8 @@ class Graphics;
 
 namespace sysimage {
 
-// DETAILPEN through BACKGROUNDPEN, and HIGHLIGHTTEXTPEN.
-constexpr u32 kPenCount = 9;
+// DETAILPEN through BARTRIMPEN.
+constexpr u32 kPenCount = 12;
 
 // The pens of the DrawInfo at draw_info, or the 3.1 defaults for no
 // DrawInfo.
