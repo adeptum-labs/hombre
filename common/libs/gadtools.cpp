@@ -622,7 +622,11 @@ struct GadToolsNatives {
         b.w32(gadget + ndk::gg_UserData, b.r32(ng + ng_UserData));
         b.w16(gadget + gt_Kind, kind);
         const u32 place = b.r32(ng + ng_Flags);
-        const u32 default_place = kind == BUTTON_KIND ? PLACETEXT_IN : PLACETEXT_LEFT;
+        // A button's label goes inside it, a list view's above it, any
+        // other's to its left.
+        const u32 default_place = kind == BUTTON_KIND     ? PLACETEXT_IN
+                                  : kind == LISTVIEW_KIND ? PLACETEXT_ABOVE
+                                                          : PLACETEXT_LEFT;
         b.w16(gadget + gt_Place, (place & 0x1F) != 0 ? place & 0x1F : default_place);
         b.w32(gadget + gt_Label, b.r32(ng + ng_GadgetText));
         apply_tags(g, b, gadget, m.cpu.a[2], true);
