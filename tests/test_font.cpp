@@ -69,10 +69,20 @@ void a_ring_differs_from_a_diaeresis() {
     CHECK(!same_bitmap(glyph_of(0xC4), glyph('A')));
 }
 
-void unlisted_high_codes_are_question_marks() {
+void control_codes_are_question_marks() {
     CHECK(glyph_of(0x80) == glyph('?'));
-    CHECK(glyph_of(0xA0) == glyph('?'));
-    CHECK(glyph_of(0xFF) == glyph('?'));
+    CHECK(glyph_of(0x9F) == glyph('?'));
+}
+
+void every_latin1_code_has_its_own_glyph() {
+    for (u32 code = 0xA1; code <= 0xFF; ++code) {
+        if (code == 0xAD) {
+            continue;
+        }
+        CHECK(!same_bitmap(glyph_of(static_cast<u8>(code)), glyph('?')));
+    }
+    CHECK(glyph_of(0xB9) == kFont8x8ExtLatin1[0xB9 - 0xA0]);
+    CHECK(glyph_of(0xE4) == kFont8x8Latin1[3]);
 }
 
 void ascii_unchanged() {
@@ -87,7 +97,8 @@ int main() {
     latin1_letters_are_not_question_marks();
     latin1_glyphs_are_distinct_from_each_other();
     a_ring_differs_from_a_diaeresis();
-    unlisted_high_codes_are_question_marks();
+    control_codes_are_question_marks();
+    every_latin1_code_has_its_own_glyph();
     ascii_unchanged();
     return check::finish("test_font");
 }
