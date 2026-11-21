@@ -26,6 +26,7 @@
 #include "../types.hpp"
 #include "gfx.hpp"
 #include "native.hpp"
+#include "text_blend.hpp"
 
 // graphics.library written in C++ for code run by the 68000 translator.
 //
@@ -51,6 +52,11 @@ struct Font;
 struct RastPortView;
 struct TextStyle;
 }
+
+// Hombre's own tags of a TextFontExtension, beside those ExtendFont takes:
+// the guest address of a font's 4-bit coverage plane and its bytes a row.
+constexpr u32 kTagCoverage = 0x80484D01;
+constexpr u32 kTagCoverageModulo = 0x80484D02;
 
 // Library vector offsets of graphics.library, n of LVO -n, as the 3.1
 // function description numbers them.
@@ -203,6 +209,18 @@ private:
     u16 pen_users_[kPens]{};
     bool pen_exclusive_[kPens]{};
     bool pens_ready_ = false;
+    // The palettes text has blended through lately: four ColorMaps by
+    // their guest address, each with the palette_gen its cache holds, the
+    // least recently used one reused first.
+    static constexpr u32 kBlendCaches = 4;
+    struct BlendCache {
+        text_blend::Cache cache;
+        u32 map = 0;
+        u32 palette_gen = 0;
+        u32 used = 0;
+    };
+    BlendCache blend_caches_[kBlendCaches]{};
+    u32 blend_clock_ = 0;
     // A TextFont with its glyph tables, in one block of exec's memory and
     // at the end of the fonts in memory, named by the guest string at
     // name. 0 if exec has no memory for it.
@@ -215,6 +233,9 @@ private:
     // past them; in its font and styles for own_font, else in the
     // built-in font. How far the pen moved.
     u32 draw_text(u32 rp, const u8* chars, u32 count, bool own_font);
+    // The ramp cache of an eight-plane bitmap's palette, or nullptr when
+    // Intuition knows no ColorMap for it.
+    text_blend::Cache* blend_for(u32 bitmap_addr, u32 depth);
     u32 blit(native::Bus& b, u32 src, i32 sx, i32 sy, const raster::RastPortView& v,
              const raster::Clip* clip, i32 dx, i32 dy, i32 width, i32 height, u32 minterm,
              u32 mask);

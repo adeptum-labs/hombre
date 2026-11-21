@@ -521,6 +521,9 @@ private:
     void reset_screen(u32 screen);
     void compose(u32 screen, Rect r);
     u32 find_screen(u32 screen) const;
+    // The ColorMap of the screen a BitMap is shown on: the screen's own,
+    // its backdrop's or one of its windows'. 0 for any other BitMap.
+    u32 colormap_of_bitmap(u32 bitmap) const;
     ScreenRecord* find_screen_record(u32 screen);
     ScreenRecord* free_screen_record();
     void remove_at(u32 index);

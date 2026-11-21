@@ -551,6 +551,34 @@ u32 font_extension(Bus& b, u32 font) {
     return tfe;
 }
 
+// The data of tag in the font's extension, 0 when the font has no
+// extension or no such tag. The tag list is walked the way ExtendFont
+// copies it, TAG_MORE and TAG_SKIP included.
+u32 extension_tag(Bus& b, u32 font, u32 wanted) {
+    const u32 tfe = font_extension(b, font);
+    u32 tags = tfe != 0 ? b.r32(tfe + kTfeTags) : 0;
+    for (u32 step = 0; tags != 0 && step < 4 * kMaxFontTags; ++step) {
+        const u32 tag = b.r32(tags);
+        const u32 data = b.r32(tags + 4);
+        if (!b.ok() || tag == 0) {
+            break;
+        }
+        if (tag == 2) {  // TAG_MORE
+            tags = data;
+            continue;
+        }
+        if (tag == 3) {  // TAG_SKIP
+            tags += 8 * (data + 1);
+            continue;
+        }
+        if (tag == wanted) {
+            return data;
+        }
+        tags += 8;
+    }
+    return 0;
+}
+
 // Two names of the guest's alike, letter case aside.
 bool names_equal_ci(Bus& b, u32 one, u32 other) {
     if (one == 0 || other == 0) {
@@ -2463,21 +2491,29 @@ u32 Graphics::add_rom_font(Bus& b, const RomFont& font, u32 name) {
     const u32 glyphs = font.hi_char - font.lo_char + 2;
     const u32 loc_bytes = glyphs * 4;
     const u32 data_bytes = font.modulo * font.y_size;
-    const u32 tf = exec_->alloc(ndk::TextFont_SIZEOF + loc_bytes + data_bytes,
-                                ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    const u32 coverage_bytes = font.coverage != nullptr ? font.coverage_modulo * font.y_size : 0;
+    const u32 tf = exec_->alloc(
+        ndk::TextFont_SIZEOF + loc_bytes + data_bytes + coverage_bytes,
+        ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (tf == 0) {
         return 0;
     }
     const u32 loc = tf + ndk::TextFont_SIZEOF;
     const u32 data = loc + loc_bytes;
+    const u32 coverage = data + data_bytes;
     u8* loc_at = b.bytes_at(loc, loc_bytes);
     u8* data_at = b.bytes_at(data, data_bytes);
-    if (loc_at == nullptr || data_at == nullptr) {
+    u8* coverage_at = coverage_bytes != 0 ? b.bytes_at(coverage, coverage_bytes) : nullptr;
+    if (loc_at == nullptr || data_at == nullptr ||
+        (coverage_bytes != 0 && coverage_at == nullptr)) {
         return 0;
     }
     raster::build_cell_loc(loc_at, glyphs, font.x_size);
     for (u32 i = 0; i < data_bytes; ++i) {
         data_at[i] = font.data[i];
+    }
+    for (u32 i = 0; i < coverage_bytes; ++i) {
+        coverage_at[i] = font.coverage[i];
     }
     b.w8(tf + ndk::LN_TYPE, kNtFont);
     b.w32(tf + ndk::LN_NAME, name);
@@ -2491,6 +2527,24 @@ u32 Graphics::add_rom_font(Bus& b, const RomFont& font, u32 name) {
     b.w32(tf + ndk::tf_CharData, data);
     b.w16(tf + ndk::tf_Modulo, font.modulo);
     b.w32(tf + ndk::tf_CharLoc, loc);
+    if (coverage_bytes != 0) {
+        // The tag list ExtendFont copies onto the font holds Hombre's two
+        // coverage tags and their terminator.
+        constexpr u32 kTagItems = 3;
+        const u32 tags = exec_->alloc(kTagItems * 8, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (tags == 0) {
+            return 0;
+        }
+        b.w32(tags, kTagCoverage);
+        b.w32(tags + 4, coverage);
+        b.w32(tags + 8, kTagCoverageModulo);
+        b.w32(tags + 12, font.coverage_modulo);
+        const bool extended = GraphicsNatives::extend(*this, b, tf, tags);
+        exec_->free(tags, kTagItems * 8);
+        if (!extended) {
+            return 0;
+        }
+    }
     const u32 fonts = base_ + gb_TextFonts;
     const u32 last = b.r32(fonts + ndk::LH_TAILPRED);
     b.w32(tf + ndk::LN_SUCC, fonts + ndk::LH_TAIL);
@@ -2504,6 +2558,21 @@ bool Graphics::text_font(Bus& b, u32 rp, raster::Font& font, raster::TextStyle& 
     const u32 own = rp != 0 ? b.r32(rp + ndk::rp_Font) : 0;
     if (!raster::load_font(b, own, font)) {
         font = raster::builtin_font();
+    } else if (own != 0) {
+        const u32 plane = extension_tag(b, own, kTagCoverage);
+        const u32 modulo = extension_tag(b, own, kTagCoverageModulo);
+        const u64 coverage_bytes = static_cast<u64>(modulo) * static_cast<u32>(font.y_size);
+        const u64 cell_pixels =
+            static_cast<u64>(font.glyphs) * static_cast<u32>(font.x_size);
+        if (plane != 0 && modulo != 0 && coverage_bytes <= 0xFFFFFFFF &&
+            static_cast<u64>(modulo) * 2 >= cell_pixels) {
+            const u8* coverage =
+                b.bytes_at(plane, static_cast<u32>(coverage_bytes));
+            if (coverage != nullptr) {
+                font.coverage = coverage;
+                font.coverage_modulo = modulo;
+            }
+        }
     }
     style.spacing = rp != 0 ? static_cast<i16>(b.r16(rp + ndk::rp_TxSpacing)) : 0;
     style.algo = rp != 0 ? b.r8(rp + ndk::rp_AlgoStyle) : 0;
@@ -2674,6 +2743,53 @@ bool Graphics::color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue) {
     return b.ok();
 }
 
+text_blend::Cache* Graphics::blend_for(u32 bitmap_addr, u32 depth) {
+    if (depth != 8 || bitmap_addr == 0 || machine_ == nullptr || display_ == nullptr ||
+        display_->palette.colormap_of == nullptr) {
+        return nullptr;
+    }
+    const u32 map = display_->palette.colormap_of(display_->palette.ctx, bitmap_addr);
+    if (map == 0) {
+        return nullptr;
+    }
+    BlendCache* entry = nullptr;
+    for (u32 i = 0; i < kBlendCaches; ++i) {
+        if (blend_caches_[i].map == map) {
+            entry = &blend_caches_[i];
+            break;
+        }
+    }
+    if (entry == nullptr) {
+        entry = &blend_caches_[0];
+        for (u32 i = 1; i < kBlendCaches; ++i) {
+            const BlendCache& other = blend_caches_[i];
+            if (other.map == 0 || (entry->map != 0 && other.used < entry->used)) {
+                entry = &blend_caches_[i];
+            }
+        }
+    }
+    entry->used = ++blend_clock_;
+    if (entry->map == map && entry->palette_gen == display_->palette_gen) {
+        return &entry->cache;
+    }
+    Bus b(*machine_);
+    const ColorMapTables t = colormap_tables(b, map);
+    if (!t.ok || t.limit == 0) {
+        return nullptr;
+    }
+    const u32 count = t.limit < 256 ? t.limit : 256;
+    u8 rgb[256][3]{};
+    for (u32 pen = 0; pen < count; ++pen) {
+        if (!color_of(map, pen, rgb[pen][0], rgb[pen][1], rgb[pen][2])) {
+            return nullptr;
+        }
+    }
+    entry->cache.set_palette(rgb, count);
+    entry->map = map;
+    entry->palette_gen = display_->palette_gen;
+    return &entry->cache;
+}
+
 void Graphics::rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
     if (rp == 0) {
         return;
@@ -2735,10 +2851,12 @@ u32 Graphics::draw_text(u32 rp, const u8* chars, u32 count, bool own_font) {
     }
     const i32 cursor_x = cp_x(b, rp);
     const i32 cursor_y = cp_y(b, rp);
+    text_blend::Cache* blend =
+        own_font ? blend_for(v.bitmap_addr, v.bitmap.depth) : nullptr;
     u32 advance = 0;
     const Rect dirty =
         raster::draw_text(b, v.bitmap, v.clip, pens(b, rp), font, style, cursor_x + v.origin_x,
-                          cursor_y + v.origin_y, chars, count, advance);
+                          cursor_y + v.origin_y, chars, count, advance, blend);
     b.w16(rp + ndk::rp_cp_x, static_cast<u32>(cursor_x) + advance);
     if (b.ok()) {
         report(display_, *machine_, v, dirty);

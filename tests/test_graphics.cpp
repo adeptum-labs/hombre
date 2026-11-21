@@ -23,6 +23,8 @@
 
 #include "../common/font.hpp"
 #include "gfx_rig.hpp"
+#include "libs/rom_fonts.hpp"
+#include "libs/text_blend.hpp"
 
 #include <cstring>
 #include <vector>
@@ -2464,6 +2466,199 @@ void text_fit_pens_and_bitmaps_of_v39() {
     CHECK_EQ(r.exec.free_bytes(), before);
 }
 
+struct MapHook {
+    u32 bitmap;
+    u32 map;
+};
+
+u32 map_of(void* ctx, u32 bitmap) {
+    const MapHook* hook = static_cast<const MapHook*>(ctx);
+    return bitmap == hook->bitmap ? hook->map : 0;
+}
+
+void clear_planes(GfxRig& r, const u32 (&planes)[8], u32 plane_bytes) {
+    for (u32 plane = 0; plane < 8; ++plane) {
+        for (u32 i = 0; i < plane_bytes; ++i) {
+            r.put8(planes[plane] + i, 0);
+        }
+    }
+}
+
+// Every ROM font with a coverage plane carries it in Hombre's two
+// TextFontExtension tags, its bytes the same as rom_font()'s. Topaz, which
+// has no coverage, has no extension either.
+void rom_fonts_carry_their_coverage_plane() {
+    GfxRig r;
+    r.str(kStrings + 0x40, "hasklig.font");
+    r.put32(kTextAttr + ta_Name, kStrings + 0x40);
+    RomFont rom{};
+    u32 checked = 0;
+    for (u32 i = 0; rom_font(i, rom); ++i) {
+        if (std::strcmp(rom.name, "hasklig.font") != 0) {
+            continue;
+        }
+        r.put16(kTextAttr + ta_YSize, rom.y_size);
+        r.cpu().a[0] = kTextAttr;
+        const u32 font = r.result(Base::Graphics, graphics_lvo::OpenFont);
+        CHECK(font != 0);
+        CHECK_EQ(r.get16(font + tf_YSize), rom.y_size);
+        const u32 tfe = r.get32(font + mn_ReplyPort);
+        CHECK(tfe != 0 && (tfe & 1) == 0);
+        CHECK((r.get8(font + tf_Style) & 0x40) != 0);
+        const u32 tags = r.get32(tfe + 12);
+        CHECK_EQ(r.get32(tags), kTagCoverage);
+        const u32 plane = r.get32(tags + 4);
+        CHECK(plane != 0);
+        CHECK_EQ(r.get32(tags + 8), kTagCoverageModulo);
+        const u32 modulo = r.get32(tags + 12);
+        CHECK_EQ(r.get32(tags + 16), 0u);
+        CHECK(rom.coverage != nullptr);
+        CHECK_EQ(modulo, rom.coverage_modulo);
+        for (u32 row = 0; row < rom.y_size; ++row) {
+            for (u32 byte = 0; byte < rom.coverage_modulo; ++byte) {
+                CHECK_EQ(r.get8(plane + row * modulo + byte),
+                         static_cast<u32>(rom.coverage[row * rom.coverage_modulo + byte]));
+            }
+        }
+        ++checked;
+    }
+    CHECK_EQ(checked, 3u);
+    const u32 topaz = r.graphics.topaz_font();
+    CHECK_EQ(r.get32(topaz + mn_ReplyPort), 0u);
+    CHECK_EQ(r.get8(topaz + tf_Style) & 0x40, 0u);
+}
+
+// Text in a font with coverage on an eight-plane bitmap draws through the
+// palette the hook names, level 0 as bg and level 15 as fg; without the
+// hook it keeps the 1-bit glyphs, and a palette change refreshes the
+// cached ramp.
+void text_blends_on_an_eight_plane_palette() {
+    GfxRig r;
+    constexpr u32 kWidth8 = 64;
+    constexpr u32 kHeight8 = 32;
+    const u32 row_bytes = (kWidth8 + 15) / 16 * 2;
+    const u32 plane_bytes = row_bytes * kHeight8;
+    u32 planes[8]{};
+    for (u32 plane = 0; plane < 8; ++plane) {
+        planes[plane] = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
+        CHECK(planes[plane] != 0);
+    }
+    r.cpu().a[0] = kBitmap;
+    r.cpu().d[0] = 8;
+    r.cpu().d[1] = kWidth8;
+    r.cpu().d[2] = kHeight8;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitBitMap), ExitReason::Halt);
+    for (u32 plane = 0; plane < 8; ++plane) {
+        r.put32(kBitmap + bm_Planes + plane * 4, planes[plane]);
+    }
+    r.cpu().a[1] = kRastPort;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitRastPort), ExitReason::Halt);
+    r.put32(kRastPort + rp_BitMap, kBitmap);
+
+    const u32 color_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    const u32 low_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+    CHECK(color_table != 0 && low_table != 0);
+    for (u32 pen = 0; pen < 256; ++pen) {
+        r.put16(color_table + pen * 2,
+                ((pen >> 4) << 8) | ((pen >> 4) << 4) | (pen >> 4));
+        r.put16(low_table + pen * 2,
+                ((pen & 0xF) << 8) | ((pen & 0xF) << 4) | (pen & 0xF));
+    }
+    r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+    r.put16(kColorMap + cm_Count, 256);
+    r.put32(kColorMap + cm_ColorTable, color_table);
+    r.put32(kColorMap + cm_LowColorBits, low_table);
+
+    MapHook hook{kBitmap, kColorMap};
+    r.display.palette = DisplayState::PaletteSource{map_of, &hook};
+
+    r.str(kStrings + 0x40, "hasklig.font");
+    r.put32(kTextAttr + ta_Name, kStrings + 0x40);
+    r.put16(kTextAttr + ta_YSize, 13);
+    r.cpu().a[0] = kTextAttr;
+    const u32 font = r.result(Base::Graphics, graphics_lvo::OpenFont);
+    CHECK(font != 0);
+    set_font(r, kRastPort, font);
+    const u32 width = r.get16(font + tf_XSize);
+    const u32 baseline = r.get16(font + tf_Baseline);
+    const u32 height = r.get16(font + tf_YSize);
+    const u8 fg = 200;
+    const u8 bg = 40;
+    r.graphics.set_pens(kRastPort, fg, bg, JAM2);
+    move(r, kRastPort, 3, 20);
+    draw_text(r, kRastPort, "H");
+
+    u8 palette[256][3];
+    for (u32 pen = 0; pen < 256; ++pen) {
+        palette[pen][0] = static_cast<u8>(pen);
+        palette[pen][1] = static_cast<u8>(pen);
+        palette[pen][2] = static_cast<u8>(pen);
+    }
+    text_blend::Cache expected;
+    expected.set_palette(palette, 256);
+    const u8* ramp = expected.ramp(fg, bg);
+
+    const i32 left = 3;
+    const i32 top = 20 - static_cast<i32>(baseline);
+    std::vector<u32> blended;
+    u32 intermediate = 0;
+    for (u32 row = 0; row < height; ++row) {
+        for (u32 col = 0; col < width; ++col) {
+            const u32 pen = read_pixel(r, kRastPort, left + static_cast<i32>(col),
+                                       top + static_cast<i32>(row));
+            bool known = false;
+            for (u32 level = 0; level < text_blend::kLevels; ++level) {
+                known = known || pen == static_cast<u32>(ramp[level]);
+            }
+            CHECK(known);
+            blended.push_back(pen);
+            if (pen != static_cast<u32>(fg) && pen != static_cast<u32>(bg)) {
+                ++intermediate;
+            }
+        }
+    }
+    CHECK(intermediate > 0);
+
+    clear_planes(r, planes, plane_bytes);
+    r.display.palette = DisplayState::PaletteSource{nullptr, nullptr};
+    move(r, kRastPort, 3, 20);
+    draw_text(r, kRastPort, "H");
+    for (u32 row = 0; row < height; ++row) {
+        for (u32 col = 0; col < width; ++col) {
+            const u32 pen = read_pixel(r, kRastPort, left + static_cast<i32>(col),
+                                       top + static_cast<i32>(row));
+            CHECK(pen == static_cast<u32>(fg) || pen == static_cast<u32>(bg));
+        }
+    }
+
+    clear_planes(r, planes, plane_bytes);
+    r.display.palette = DisplayState::PaletteSource{map_of, &hook};
+    const u32 gen = r.display.palette_gen;
+    r.put32(kViewPort + vp_ColorMap, kColorMap);
+    r.cpu().a[0] = kViewPort;
+    r.cpu().d[0] = fg;
+    r.cpu().d[1] = 0xFF000000u;
+    r.cpu().d[2] = 0;
+    r.cpu().d[3] = 0;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB32), ExitReason::Halt);
+    CHECK(r.display.palette_gen != gen);
+    move(r, kRastPort, 3, 20);
+    draw_text(r, kRastPort, "H");
+    u32 changed = 0;
+    u32 at = 0;
+    for (u32 row = 0; row < height; ++row) {
+        for (u32 col = 0; col < width; ++col) {
+            const u32 pen = read_pixel(r, kRastPort, left + static_cast<i32>(col),
+                                       top + static_cast<i32>(row));
+            if (pen != blended[at]) {
+                ++changed;
+            }
+            ++at;
+        }
+    }
+    CHECK(changed > 0);
+}
+
 int main() {
     set_soft_style_keeps_the_drawn_styles();
     gfx_base_lists_the_memory_fonts();
@@ -2474,6 +2669,8 @@ int main() {
     text_is_measured_with_the_fonts_own_widths();
     text_draws_the_algorithmic_styles();
     text_draws_hasklig_from_the_rom();
+    rom_fonts_carry_their_coverage_plane();
+    text_blends_on_an_eight_plane_palette();
     extend_font_and_strip_font();
     weigh_ta_match_rates_by_size_style_and_flags();
     text_fit_pens_and_bitmaps_of_v39();

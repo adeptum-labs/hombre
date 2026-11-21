@@ -53,10 +53,18 @@ struct DamageSink {
 };
 
 struct DisplayState {
+    // The ColorMap a bitmap draws in, for the bitmaps whose palette only
+    // Intuition knows: a screen's, a window's or a backdrop's. 0 when it
+    // does not know the bitmap.
+    struct PaletteSource {
+        u32 (*colormap_of)(void* ctx, u32 bitmap);
+        void* ctx;
+    };
     DisplaySink sink{nullptr, nullptr};
     u32 front_screen = 0;
     // Changes drawn into any bitmap other than the front screen's go here.
     DamageSink damage{nullptr, nullptr};
+    PaletteSource palette{nullptr, nullptr};
     // Incremented whenever a ColorMap is modified through graphics.library.
     u32 palette_gen = 0;
     bool palette_dirty = false;

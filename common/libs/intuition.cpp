@@ -1781,6 +1781,10 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     exec_ = &exec;
     graphics_ = &graphics;
     display_ = &display;
+    display.palette.ctx = this;
+    display.palette.colormap_of = [](void* ctx, u32 bitmap) {
+        return static_cast<const Intuition*>(ctx)->colormap_of_bitmap(bitmap);
+    };
     clock_ = nullptr;
     base_ = 0;
     front_ = 0;
@@ -2427,6 +2431,29 @@ void Intuition::remove_at(u32 index) {
         screens_[i] = screens_[i + 1];
     }
     screens_[kMaxScreens - 1] = 0;
+}
+
+u32 Intuition::colormap_of_bitmap(u32 bitmap) const {
+    if (bitmap == 0) {
+        return 0;
+    }
+    u32 screen = 0;
+    for (const WindowRecord& rec : window_records_) {
+        if (rec.addr != 0 && rec.bitmap == bitmap) {
+            screen = rec.screen;
+            break;
+        }
+    }
+    for (const ScreenRecord& rec : screen_records_) {
+        if (rec.addr == 0) {
+            continue;
+        }
+        if (rec.addr == screen || rec.addr + ndk::sc_BitMap == bitmap ||
+            rec.backdrop_bitmap == bitmap) {
+            return rec.colormap;
+        }
+    }
+    return 0;
 }
 
 Intuition::ScreenRecord* Intuition::find_screen_record(u32 screen) {
