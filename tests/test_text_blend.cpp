@@ -147,6 +147,20 @@ void invalidate_keeps_the_palette() {
     CHECK_EQ(ramp[kLevels - 1], kGreyCount - 1);
 }
 
+// The Workbench palette case: between dark text and a grey background the
+// nearest colour to a mid blend is a teal, but the ramp keeps to greys.
+void ramp_keeps_the_hue_of_its_pens() {
+    const u8 palette[4][3] = {
+        {160, 166, 176}, {28, 30, 34}, {51, 102, 102}, {102, 102, 102}};
+    Cache cache;
+    cache.set_palette(palette, 4);
+    const u8* ramp = cache.ramp(1, 0);
+    for (u32 level = 1; level + 1 < kLevels; ++level) {
+        CHECK(ramp[level] != 2);
+    }
+    CHECK_EQ(ramp[12], 3);
+}
+
 void nearest_breaks_ties_towards_the_lower_pen() {
     const u8 palette[3][3] = {{0, 0, 0}, {4, 0, 0}, {8, 0, 0}};
     CHECK_EQ(text_blend::nearest(palette, 3, 2, 0, 0), 0);
@@ -167,6 +181,7 @@ int main() {
     colliding_ramps_are_recomputed();
     changed_palette_colour_changes_the_ramp();
     invalidate_keeps_the_palette();
+    ramp_keeps_the_hue_of_its_pens();
     nearest_breaks_ties_towards_the_lower_pen();
     return check::finish("test_text_blend");
 }

@@ -67,6 +67,43 @@ constexpr u32 slot_of(u16 key) {
     return (static_cast<u32>(key) * 2654435761u) >> 24;
 }
 
+// The pen for one level of a ramp: the nearest to the blend, counting a
+// pen's distance off the line from bg to fg four times over, so that a
+// palette without the shade in between gives a lighter or darker shade of
+// the same hue rather than a near colour of another.
+u8 nearest_on_ramp(const u8 (*rgb)[3], u32 count, const u32 (&target)[3], const u8* fg,
+                   const u8* bg) {
+    constexpr i64 kOffLineWeight = 4;
+    i64 line[3];
+    i64 line_length = 0;
+    for (u32 c = 0; c < 3; ++c) {
+        line[c] = static_cast<i64>(fg[c]) - static_cast<i64>(bg[c]);
+        line_length += line[c] * line[c];
+    }
+    u8 best = 0;
+    i64 best_score = -1;
+    for (u32 pen = 0; pen < count; ++pen) {
+        i64 distance = 0;
+        i64 along = 0;
+        i64 from_bg = 0;
+        for (u32 c = 0; c < 3; ++c) {
+            const i64 d = static_cast<i64>(rgb[pen][c]) - static_cast<i64>(target[c]);
+            const i64 v = static_cast<i64>(rgb[pen][c]) - static_cast<i64>(bg[c]);
+            distance += d * d;
+            along += v * line[c];
+            from_bg += v * v;
+        }
+        const i64 off_line =
+            line_length != 0 ? from_bg - along * along / line_length : from_bg;
+        const i64 score = distance + kOffLineWeight * off_line;
+        if (best_score < 0 || score < best_score) {
+            best_score = score;
+            best = static_cast<u8>(pen);
+        }
+    }
+    return best;
+}
+
 }
 
 u8 nearest(const u8 (*rgb)[3], u32 count, u32 r, u32 g, u32 b) {
@@ -118,10 +155,16 @@ const u8* Cache::ramp(u8 fg, u8 bg) {
     const u8* fg_rgb = palette_[fg];
     const u8* bg_rgb = palette_[bg];
     for (u32 level = 0; level < kLevels; ++level) {
-        const u32 r = blend(fg_rgb[0], bg_rgb[0], level);
-        const u32 g = blend(fg_rgb[1], bg_rgb[1], level);
-        const u32 b = blend(fg_rgb[2], bg_rgb[2], level);
-        slot.pens[level] = nearest(palette_, count_, r, g, b);
+        const u32 target[3] = {blend(fg_rgb[0], bg_rgb[0], level),
+                               blend(fg_rgb[1], bg_rgb[1], level),
+                               blend(fg_rgb[2], bg_rgb[2], level)};
+        if (level == 0) {
+            slot.pens[level] = bg;
+        } else if (level == kLevels - 1) {
+            slot.pens[level] = fg;
+        } else {
+            slot.pens[level] = nearest_on_ramp(palette_, count_, target, fg_rgb, bg_rgb);
+        }
     }
     slot.key = key;
     slot.filled = true;
