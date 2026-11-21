@@ -75,6 +75,9 @@ constexpr u32 kIFontNameBytes = 36;
 constexpr u32 kIFontTypeOffset = ndk::TextAttr_SIZEOF + kIFontNameBytes;
 constexpr u32 kIFontPrefsBytes = kIFontTypeOffset + 2;
 constexpr u32 kIFontAttrBytes = ndk::TextAttr_SIZEOF + kIFontNameBytes;
+// A screen's own TextAttr, with the name of its font after it.
+constexpr u32 kScreenFontNameBytes = 64;
+constexpr u32 kScreenFontAttrBytes = ndk::TextAttr_SIZEOF + kScreenFontNameBytes;
 
 // struct Screen's sc_NextScreen, the pointer before sc_FirstWindow.
 constexpr u32 kScNextScreen = 0;
@@ -135,6 +138,10 @@ struct OpenArgs {
     u32 detail = 0;
     u32 block = 1;
     u32 title = 0;
+    // NewScreen.Font or SA_Font, and SA_SysFont when it was given.
+    u32 font = 0;
+    bool sys_font_given = false;
+    u32 sys_font = 0;
 };
 
 void read_new_screen(Bus& b, u32 ns, OpenArgs& a) {
@@ -148,6 +155,7 @@ void read_new_screen(Bus& b, u32 ns, OpenArgs& a) {
     a.depth = b.r16(ns + ndk::ns_Depth);
     a.detail = b.r8(ns + ndk::ns_DetailPen);
     a.block = b.r8(ns + ndk::ns_BlockPen);
+    a.font = b.r32(ns + ndk::ns_Font);
     a.title = b.r32(ns + ndk::ns_DefaultTitle);
 }
 
@@ -176,6 +184,13 @@ void apply_tag(OpenArgs& a, u32 tag, u32 data) {
         break;
     case ndk::SA_Title:
         a.title = data;
+        break;
+    case ndk::SA_Font:
+        a.font = data;
+        break;
+    case ndk::SA_SysFont:
+        a.sys_font_given = true;
+        a.sys_font = data;
         break;
     default:
         break;
@@ -810,7 +825,8 @@ PropGeometry load_prop_geometry(Bus& b, const WindowView& w, u32 gadget) {
     return g;
 }
 
-chrome::WindowChrome to_chrome(const WindowView& w, bool active, chrome::BarButton pressed) {
+chrome::WindowChrome to_chrome(const WindowView& w, bool active, chrome::BarButton pressed,
+                               const chrome::Metrics& metrics) {
     return chrome::WindowChrome{
         w.width,
         w.height,
@@ -822,6 +838,7 @@ chrome::WindowChrome to_chrome(const WindowView& w, bool active, chrome::BarButt
         w.border_bottom,
         active,
         pressed,
+        metrics,
     };
 }
 
@@ -876,6 +893,7 @@ constexpr u32 kMiSubItem = 28;
 constexpr u32 kMiNextSelect = 32;
 constexpr u32 kItLeftEdge = 4;
 constexpr u32 kItTopEdge = 6;
+constexpr u32 kItTextFont = 8;
 constexpr u32 kItText = 12;
 constexpr u32 kItNextText = 16;
 constexpr u32 kItMaxChars = 255;
@@ -927,7 +945,9 @@ u32 read_menu_items(Bus& b, u32 first, menu_layout::Item* items, u32 max) {
         item.sub = b.r32(at + kMiSubItem);
         item.addr = at;
         const u32 fill = b.r32(at + kMiItemFill);
+        const bool text = fill != 0 && item.text();
         item.label = fill != 0 ? b.r32(fill + kItText) : 0;
+        item.font = text ? b.r32(fill + kItTextFont) : 0;
         at = b.r32(at + kMiNextItem);
         ++count;
     }
@@ -1172,6 +1192,7 @@ struct IntuitionNatives {
         }
         Intuition::ScreenRecord* rec = in.find_screen_record(screen);
         if (rec != nullptr) {
+            in.apply_font_prefs(screen);
             in.apply_palette_prefs(*rec);
             in.apply_pen_prefs(screen);
             in.update_chrome_palette(screen);
@@ -1849,13 +1870,13 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
 
 }
 
-Rect Intuition::close_box_rect(i32 left, i32 top) {
-    const Rect box = chrome::close_button_box();
+Rect Intuition::close_box_rect(i32 left, i32 top, const chrome::Metrics& metrics) {
+    const Rect box = chrome::close_button_box(metrics);
     return Rect{left + box.x0, top + box.y0, left + box.x1, top + box.y1};
 }
 
-Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width) {
-    const Rect box = chrome::depth_button_box(width);
+Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width, const chrome::Metrics& metrics) {
+    const Rect box = chrome::depth_button_box(width, metrics);
     return Rect{left + box.x0, top + box.y0, left + box.x1, top + box.y1};
 }
 
@@ -2027,6 +2048,7 @@ void Intuition::set_default_screen(u32 screen) {
     if (rec == nullptr) {
         return;
     }
+    apply_font_prefs(screen);
     apply_palette_prefs(*rec);
     apply_pen_prefs(screen);
     update_chrome_palette(screen);
@@ -2146,6 +2168,126 @@ u32 Intuition::screen_font_attr() const {
     return graphics_->topaz_attr();
 }
 
+u32 Intuition::font_of_screen(u32 screen) const {
+    for (const ScreenRecord& rec : screen_records_) {
+        if (rec.addr == screen && screen != 0) {
+            return rec.font;
+        }
+    }
+    return 0;
+}
+
+chrome::Metrics Intuition::font_chrome(u32 font) const {
+    chrome::Metrics metrics;
+    if (font == 0 || graphics_ == nullptr) {
+        return metrics;
+    }
+    const Graphics::FontMetrics cell = graphics_->font_metrics(font);
+    metrics.font = font;
+    metrics.font_height = cell.y_size;
+    metrics.font_baseline = cell.baseline;
+    metrics.font_width = cell.x_size > 0 ? cell.x_size : metrics.font_width;
+    return metrics;
+}
+
+const chrome::Metrics& Intuition::window_metrics(u32 window) const {
+    static constexpr chrome::Metrics kBuiltIn{};
+    const WindowRecord* rec = find_window_record(window);
+    return rec != nullptr ? rec->metrics : kBuiltIn;
+}
+
+void Intuition::set_screen_font(ScreenRecord& rec, u32 text_attr, bool windows_inherit) {
+    if (machine_ == nullptr || graphics_ == nullptr || rec.font_attr == 0) {
+        return;
+    }
+    const auto fits_a_bar = [&](u32 font) {
+        return graphics_->font_metrics(font).y_size <= chrome::kMaxTitleFontHeight;
+    };
+    u32 font = text_attr != 0 ? graphics_->open_font(text_attr) : 0;
+    if (font != 0 && !fits_a_bar(font)) {
+        graphics_->close_font(font);
+        font = 0;
+    }
+    if (font == 0) {
+        font = graphics_->default_font();
+        font = fits_a_bar(font) ? font : graphics_->topaz_font();
+        graphics_->hold_font(font);
+    }
+    graphics_->close_font(rec.font);
+    rec.font = font;
+    rec.windows_inherit_font = windows_inherit;
+    rec.metrics = font_chrome(font);
+
+    // The screen's own TextAttr names the font it got, so that a program
+    // opening sc_Font gets the same one.
+    Bus b(*machine_);
+    const u32 name = rec.font_attr + ndk::TextAttr_SIZEOF;
+    const u32 font_name = b.r32(font + ndk::LN_NAME);
+    for (u32 i = 0; i + 1 < kScreenFontNameBytes; ++i) {
+        const u32 c = font_name != 0 ? b.r8(font_name + i) : 0;
+        b.w8(name + i, c);
+        if (c == 0) {
+            break;
+        }
+    }
+    b.w8(name + kScreenFontNameBytes - 1, 0);
+    b.w32(rec.font_attr + ndk::ta_Name, name);
+    b.w16(rec.font_attr + ndk::ta_YSize, b.r16(font + ndk::tf_YSize));
+    b.w8(rec.font_attr + ndk::ta_Style, b.r8(font + ndk::tf_Style));
+    b.w8(rec.font_attr + ndk::ta_Flags, b.r8(font + ndk::tf_Flags) & ~ndk::FPF_REMOVED);
+    b.w32(rec.addr + ndk::sc_Font, rec.font_attr);
+    b.w8(rec.addr + ndk::sc_BarHeight, static_cast<u32>(rec.metrics.bar_height()));
+    graphics_->set_font(rec.addr + ndk::sc_RastPort, font);
+    if (rec.draw_info != 0) {
+        b.w32(rec.draw_info + kDriFont, font);
+    }
+}
+
+void Intuition::apply_font_prefs(u32 screen) {
+    ScreenRecord* rec = find_screen_record(screen);
+    if (rec == nullptr || screen != default_screen_ || machine_ == nullptr ||
+        graphics_ == nullptr || (rec->font == screen_font() && !rec->windows_inherit_font)) {
+        return;
+    }
+    for (const WindowRecord& window : window_records_) {
+        if (window.addr != 0 && window.screen == screen &&
+            (window.flags & ndk::WFLG_WBENCHWINDOW) != 0) {
+            return;
+        }
+    }
+    const i32 old_bar = rec->metrics.bar_height();
+    set_screen_font(*rec, screen_font_attr(), false);
+    const i32 bar = rec->metrics.bar_height();
+    const i32 right = static_cast<i32>(rec->width) - 1;
+    const i32 bottom = old_bar > bar ? old_bar : bar;
+    const u32 background = background_pen(screen);
+    Bus b(*machine_);
+    begin_batch();
+    graphics_->set_pens(rec->backdrop_rp, background, background, ndk::JAM2);
+    graphics_->rect_fill(rec->backdrop_rp, 0, 0, right, bottom);
+    chrome::draw_screen_bar(*graphics_, b, rec->backdrop_rp, rec->width, rec->title,
+                            rec->metrics);
+    compose(screen, Rect{0, 0, right, bottom});
+    // A window the higher bar would reach under moves down below it.
+    for (const WindowRecord& window : window_records_) {
+        if (window.addr != 0 && window.screen == screen && window.top < bar &&
+            (window.flags & ndk::WFLG_BACKDROP) == 0) {
+            move_window_to(window.addr, window.left, bar);
+        }
+    }
+    end_batch();
+}
+
+u32 Intuition::background_pen(u32 screen) {
+    const u32 info = screen_draw_info(screen);
+    if (info == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 pens = b.r32(info + kDriPens);
+    return b.ok() && pens != 0 ? b.r16(pens + kDriBackgroundPen * 2) & 0xFF : 0;
+}
+
 // Type 2: a struct IFontPrefs, the font's TextAttr, its name and what it
 // is. IPrefs closes the font when SetIPrefs returns, so the one Intuition
 // keeps is opened here. A TextAttr is copied into Intuition's own guest
@@ -2194,6 +2336,7 @@ void Intuition::store_font_prefs(u32 prefs, u32 size) {
     exec_->free(screen_font_attr_, kIFontAttrBytes);
     screen_font_ = font;
     screen_font_attr_ = attr;
+    apply_font_prefs(default_screen_);
 }
 
 void Intuition::write_colormap_rgb(ScreenRecord& rec, u32 pen, u32 rgb) {
@@ -2282,22 +2425,15 @@ void Intuition::reset_screen(u32 screen) {
     if (rec == nullptr || machine_ == nullptr || graphics_ == nullptr) {
         return;
     }
-    u32 background = 0;
-    const u32 info = screen_draw_info(screen);
-    if (info != 0) {
-        Bus b(*machine_);
-        const u32 pens = b.r32(info + kDriPens);
-        if (b.ok() && pens != 0) {
-            background = b.r16(pens + kDriBackgroundPen * 2) & 0xFF;
-        }
-    }
+    const u32 background = background_pen(screen);
     Bus b(*machine_);
     const i32 right = static_cast<i32>(rec->width) - 1;
     const i32 bottom = static_cast<i32>(rec->height) - 1;
     begin_batch();
     graphics_->set_pens(rec->backdrop_rp, background, background, ndk::JAM2);
     graphics_->rect_fill(rec->backdrop_rp, 0, 0, right, bottom);
-    chrome::draw_screen_bar(*graphics_, b, rec->backdrop_rp, rec->width, rec->title);
+    chrome::draw_screen_bar(*graphics_, b, rec->backdrop_rp, rec->width, rec->title,
+                            rec->metrics);
     compose(screen, Rect{0, 0, right, bottom});
     end_batch();
 }
@@ -2737,7 +2873,11 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     u32 low_colors = 0;
     u32 title = 0;
     u32 title_bytes = 0;
+    u32 font_attr = 0;
     auto fail = [&]() -> u32 {
+        if (font_attr != 0) {
+            exec_->free(font_attr, kScreenFontAttrBytes);
+        }
         if (title != 0) {
             exec_->free(title, title_bytes);
         }
@@ -2807,6 +2947,10 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
             return fail();
         }
     }
+    font_attr = exec_->alloc(kScreenFontAttrBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (font_attr == 0) {
+        return fail();
+    }
 
     const u32 bitmap = screen + ndk::sc_BitMap;
     const u32 rp = screen + ndk::sc_RastPort;
@@ -2815,7 +2959,6 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w16(screen + ndk::sc_TopEdge, a.top);
     b.w16(screen + ndk::sc_Width, a.width);
     b.w16(screen + ndk::sc_Height, a.height);
-    b.w8(screen + ndk::sc_BarHeight, chrome::kBarHeight);
     b.w8(screen + ndk::sc_WBorTop, chrome::kWBorTop);
     b.w8(screen + ndk::sc_WBorLeft, chrome::kBorderLeft);
     b.w8(screen + ndk::sc_WBorRight, chrome::kBorderRight);
@@ -2824,7 +2967,6 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w8(screen + ndk::sc_BlockPen, a.block);
     b.w32(screen + ndk::sc_Title, title);
     b.w32(screen + ndk::sc_DefaultTitle, title);
-    b.w32(screen + ndk::sc_Font, graphics_->topaz_attr());
     b.w32(screen + kScNextScreen, 0);
 
     init_planar_bitmap(b, bitmap, bpr, a.height, a.depth, planes);
@@ -2886,6 +3028,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     rec->low_colors_bytes = color_bytes;
     rec->title = title;
     rec->title_bytes = title_bytes;
+    rec->font_attr = font_attr;
     rec->width = a.width;
     rec->height = a.height;
     rec->depth = a.depth;
@@ -2894,13 +3037,19 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     if (a.depth >= 8) {
         rebuild_shade_tables(*rec);
     }
+    // SA_SysFont 1 asks for the screen font of the preferences, which the
+    // windows do not take into their RastPorts; SA_SysFont 0 and a screen
+    // that names no font get the default font, any other its own.
+    const bool preferred = a.sys_font_given && a.sys_font == 1;
+    set_screen_font(*rec, preferred ? screen_font_attr() : a.sys_font_given ? 0 : a.font,
+                    !preferred);
 
     const i32 right = static_cast<i32>(a.width) - 1;
     const i32 bottom = static_cast<i32>(a.height) - 1;
     begin_batch();
     graphics_->set_pens(backdrop_rp, 0, 0, ndk::JAM2);
     graphics_->rect_fill(backdrop_rp, 0, 0, right, bottom);
-    chrome::draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title);
+    chrome::draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title, rec->metrics);
     compose(screen, Rect{0, 0, right, bottom});
     end_batch();
     if (becomes_default && a.depth >= 8) {
@@ -2952,6 +3101,10 @@ bool Intuition::close_screen(u32 screen) {
     }
     if (rec->title != 0) {
         exec_->free(rec->title, rec->title_bytes);
+    }
+    graphics_->close_font(rec->font);
+    if (rec->font_attr != 0) {
+        exec_->free(rec->font_attr, kScreenFontAttrBytes);
     }
     if (rec->draw_info != 0) {
         exec_->free(rec->draw_info, kDrawInfoBytes);
@@ -3253,8 +3406,9 @@ void Intuition::redraw_window_bar(u32 window) {
     }
     w.rp = rec->rp;
     chrome::draw_window_bar(*graphics_, b, rec->rp,
-                            to_chrome(w, active_window_ == window, held_bar_button(window)));
-    const i32 bar_bottom = static_cast<i32>(chrome::kBarHeight);
+                            to_chrome(w, active_window_ == window, held_bar_button(window),
+                                         window_metrics(window)));
+    const i32 bar_bottom = rec->metrics.bar_height();
     const i32 y1 = rec->height - 1 < bar_bottom ? rec->height - 1 : bar_bottom;
     if (rec->width > 0 && y1 >= 0) {
         compose(rec->screen,
@@ -3402,7 +3556,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     const bool size_bottom = has_size && (a.flags & ndk::WFLG_SIZEBBOTTOM) != 0;
     const bool size_right = has_size && (!size_bottom || (a.flags & ndk::WFLG_SIZEBRIGHT) != 0);
     const u32 border_left = borderless ? 1 : chrome::kBorderLeft;
-    const u32 border_top = borderless ? 1 : chrome::kBorderTop;
+    const u32 border_top = borderless ? 1 : static_cast<u32>(srec->metrics.border_top());
     const u32 border_right =
         borderless ? 1 : (size_right ? chrome::kSizeBorderRight : chrome::kBorderRight);
     const u32 border_bottom =
@@ -3590,7 +3744,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w8(window + ndk::wd_DetailPen, a.detail);
     b.w8(window + ndk::wd_BlockPen, a.block);
     b.w32(window + ndk::wd_WLayer, layer);
-    b.w32(window + ndk::wd_IFont, graphics_->topaz_font());
+    b.w32(window + ndk::wd_IFont, srec->font);
     b.w32(window + ndk::wd_FirstGadget, a.gadgets);
     b.w32(window + ndk::wd_NextWindow, 0);
 
@@ -3602,6 +3756,9 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w8(rp + ndk::rp_DrawMode, ndk::JAM2);
     b.w16(rp + ndk::rp_cp_x, 0);
     b.w16(rp + ndk::rp_cp_y, 6);
+    if (srec->windows_inherit_font) {
+        graphics_->set_font(rp, srec->font);
+    }
 
     const i32 right = left + width - 1;
     const i32 bottom = top + height - 1;
@@ -3641,6 +3798,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->planes_bytes = planes_bytes;
     rec->title = title;
     rec->title_bytes = title_bytes;
+    rec->metrics = srec->metrics;
+    graphics_->hold_font(rec->metrics.font);
     rec->user_port = user_port;
     rec->user_port_owned = user_port_owned;
     rec->size_hook = nullptr;
@@ -3672,7 +3831,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     WindowView w = load_window(b, window);
     w.rp = rp;
     chrome::draw_window_chrome(*graphics_, b, rp,
-                               to_chrome(w, active_window_ == window, held_bar_button(window)));
+                               to_chrome(w, active_window_ == window, held_bar_button(window),
+                                         window_metrics(window)));
     if (a.gadgets != 0) {
         draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
     }
@@ -3775,6 +3935,7 @@ void Intuition::close_window(u32 window) {
     if (rec->title != 0) {
         exec_->free(rec->title, rec->title_bytes);
     }
+    graphics_->close_font(rec->metrics.font);
     if (rec->planes != 0) {
         exec_->free(rec->planes, rec->planes_bytes);
     }
@@ -3902,7 +4063,8 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     const i32 content_h = text_box_h + kRequesterGap + kRequesterButtonHeight;
     i32 width = content_w + 2 * kRequesterMargin + static_cast<i32>(chrome::kBorderLeft) +
                 static_cast<i32>(chrome::kBorderRight);
-    i32 height = content_h + 2 * kRequesterMargin + static_cast<i32>(chrome::kBorderTop) +
+    const i32 border_top = find_screen_record(screen)->metrics.border_top();
+    i32 height = content_h + 2 * kRequesterMargin + border_top +
                  static_cast<i32>(chrome::kBorderBottom);
     width = larger(width, min_width);
     height = larger(height, min_height);
@@ -3956,7 +4118,7 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     const i32 inner_x0 = static_cast<i32>(chrome::kBorderLeft) + kRequesterMargin;
     const i32 inner_x1 =
         req_w - static_cast<i32>(chrome::kBorderRight) - 1 - kRequesterMargin;
-    const i32 inner_y0 = static_cast<i32>(chrome::kBorderTop) + kRequesterMargin;
+    const i32 inner_y0 = border_top + kRequesterMargin;
     const i32 inner_y1 =
         req_h - static_cast<i32>(chrome::kBorderBottom) - 1 - kRequesterMargin;
     const i32 button_y1 = inner_y1;
@@ -4423,7 +4585,8 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
             b.w32(rec->screen + ndk::sc_Title, copy);
             b.w32(rec->screen + ndk::sc_DefaultTitle, copy);
             begin_batch();
-            chrome::draw_screen_bar(*graphics_, b, srec->backdrop_rp, srec->width, srec->title);
+            chrome::draw_screen_bar(*graphics_, b, srec->backdrop_rp, srec->width, srec->title,
+                                    srec->metrics);
             end_batch();
         }
     }
@@ -4434,7 +4597,8 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
             begin_batch();
             chrome::draw_window_bar(
                 *graphics_, b, rec->rp,
-                to_chrome(w, active_window_ == window, held_bar_button(window)));
+                to_chrome(w, active_window_ == window, held_bar_button(window),
+                                         window_metrics(window)));
             end_batch();
         }
     }
@@ -4461,7 +4625,8 @@ void Intuition::refresh_window_frame(u32 window) {
                       rec->height - static_cast<i32>(w.border_bottom) - 1};
     begin_batch();
     chrome::draw_window_chrome(*graphics_, b, rec->rp,
-                               to_chrome(w, active_window_ == window, held_bar_button(window)),
+                               to_chrome(w, active_window_ == window, held_bar_button(window),
+                                         window_metrics(window)),
                                &inside);
     compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
                                             rec->height, rec->flags));
@@ -4699,13 +4864,15 @@ void Intuition::reload_menu(Bus& b) {
     }
     const ScreenRecord* srec = find_screen_record(m.screen);
     const i32 screen_width = srec != nullptr ? static_cast<i32>(srec->width) : 0;
+    const i32 bar_height =
+        srec != nullptr ? srec->metrics.bar_height() : chrome::Metrics{}.bar_height();
     m.geometry = menu_layout::compute(
-        m.titles, m.title_count, m.items, m.item_count, m.subs, m.sub_count,
-        static_cast<i32>(chrome::kBarHeight) + 1, m.title, m.item, screen_width);
+        m.titles, m.title_count, m.items, m.item_count, m.subs, m.sub_count, bar_height + 1,
+        m.title, m.item, screen_width);
 }
 
 Rect Intuition::menu_overlay(const ScreenRecord& srec) const {
-    Rect r{0, 0, static_cast<i32>(srec.width) - 1, static_cast<i32>(chrome::kBarHeight)};
+    Rect r{0, 0, static_cast<i32>(srec.width) - 1, srec.metrics.bar_height()};
     Rect box = menu_.item_count != 0 ? menu_.geometry.box : menu_layout::empty_rect();
     Rect sub = menu_.sub_count != 0 ? menu_.geometry.sub_box : menu_layout::empty_rect();
     if (srec.depth >= 8) {
@@ -4904,7 +5071,10 @@ void Intuition::draw_menu_overlay(Bus& b, raster::Bitmap& bitmap, const Rect& cl
         m.strong_shade = srec->strong_shade;
         m.light_shade = srec->light_shade;
     }
-    chrome::draw_menu(b, bitmap, clip, m);
+    m.bar_height = srec->metrics.bar_height();
+    m.metrics = window_metrics(menu_.window);
+    m.bitmap_addr = srec->addr + ndk::sc_BitMap;
+    chrome::draw_menu(*graphics_, b, bitmap, clip, m);
 }
 
 void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
@@ -4968,14 +5138,15 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
             const WindowView w = load_window(b, hit);
             if (w.ok) {
                 const bool bordered = (w.flags & ndk::WFLG_BORDERLESS) == 0;
+                const chrome::Metrics& bar = window_metrics(hit);
                 if (bordered && (w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
-                    in_rect(close_box_rect(w.left, w.top), x, y)) {
+                    in_rect(close_box_rect(w.left, w.top, bar), x, y)) {
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Close;
                     light_bar_button(true);
                     left_press_consumed = true;
                 } else if (bordered && (w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
-                           in_rect(depth_box_rect(w.left, w.top, w.width), x, y)) {
+                           in_rect(depth_box_rect(w.left, w.top, w.width, bar), x, y)) {
                     pressed_gadget_window_ = hit;
                     pressed_gadget_ = GadgetKind::Depth;
                     light_bar_button(true);
@@ -5006,9 +5177,10 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         bool over = false;
         if (hit == pressed_gadget_window_) {
             const WindowView w = load_window(b, hit);
+            const chrome::Metrics& bar = window_metrics(hit);
             const Rect box = pressed_gadget_ == GadgetKind::Close
-                                 ? close_box_rect(w.left, w.top)
-                                 : depth_box_rect(w.left, w.top, w.width);
+                                 ? close_box_rect(w.left, w.top, bar)
+                                 : depth_box_rect(w.left, w.top, w.width, bar);
             over = w.ok && in_rect(box, x, y);
         }
         light_bar_button(over && (released & kMouseLeft) == 0);
@@ -5025,12 +5197,13 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         } else if (gad_window != 0 && hit == gad_window && gad_kind != GadgetKind::Prop) {
             const WindowView w = load_window(b, gad_window);
             if (w.ok && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
+                const chrome::Metrics& bar = window_metrics(gad_window);
                 if (gad_kind == GadgetKind::Close && (w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
-                    in_rect(close_box_rect(w.left, w.top), x, y)) {
+                    in_rect(close_box_rect(w.left, w.top, bar), x, y)) {
                     post_intuimessage(gad_window, ndk::IDCMP_CLOSEWINDOW, 0);
                 } else if (gad_kind == GadgetKind::Depth &&
                            (w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
-                           in_rect(depth_box_rect(w.left, w.top, w.width), x, y)) {
+                           in_rect(depth_box_rect(w.left, w.top, w.width, bar), x, y)) {
                     const ScreenRecord* srec = find_screen_record(front_);
                     if (srec != nullptr && srec->first_window == gad_window) {
                         window_to_back(gad_window);
@@ -5174,7 +5347,8 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     w.rp = rec->rp;
     chrome::draw_window_chrome(
         *graphics_, b, rec->rp,
-        to_chrome(w, active_window_ == window, held_bar_button(window)), &keep);
+        to_chrome(w, active_window_ == window, held_bar_button(window),
+                                         window_metrics(window)), &keep);
     if (w.first_gadget != 0) {
         draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
     }
@@ -5225,7 +5399,7 @@ bool Intuition::start_drag(u32 window, i32 x, i32 y) {
         grab_x_ = right - x;
         grab_y_ = bottom - y;
     } else if ((flags & ndk::WFLG_DRAGBAR) != 0 && x >= rec->left && x <= right &&
-               y >= rec->top && y <= rec->top + static_cast<i32>(chrome::kBarHeight)) {
+               y >= rec->top && y <= rec->top + rec->metrics.bar_height()) {
         drag_ = Drag::Move;
         grab_x_ = x - rec->left;
         grab_y_ = y - rec->top;
@@ -5524,7 +5698,7 @@ u32 Intuition::screen_draw_info(u32 screen) {
         b.w16(di + kDriVersion, 2);
         b.w16(di + kDriNumPens, kDriPenCount);
         b.w32(di + kDriPens, pens);
-        b.w32(di + kDriFont, graphics_ != nullptr ? graphics_->topaz_font() : 0);
+        b.w32(di + kDriFont, rec.font);
         b.w16(di + kDriDepth, static_cast<u16>(rec.depth));
         b.w16(di + kDriResolutionX, 44);
         b.w16(di + kDriResolutionY, 44);

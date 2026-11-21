@@ -26,7 +26,6 @@
 #include "chrome_palette.hpp"
 #include "graphics.hpp"
 #include "intuition.hpp"
-#include "raster_text.hpp"
 
 namespace hombre::chrome {
 
@@ -34,9 +33,7 @@ using native::Bus;
 
 namespace {
 
-constexpr u32 kTitleChunk = 64;
 constexpr u32 kMaxTitleChars = 255;
-constexpr i32 kTitleBaseline = 9;
 constexpr i32 kBarButtonRadius = 2;
 // The gaps between a bar button and the first and last pixel of the title.
 constexpr i32 kTitleGapLeft = 4;
@@ -81,37 +78,27 @@ constexpr i32 min_i32(i32 a, i32 b) { return a < b ? a : b; }
 
 constexpr i32 max_i32(i32 a, i32 b) { return a > b ? a : b; }
 
-void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title, i32 x, i32 baseline, i32 x1) {
-    if (title == 0 || x1 < x) {
-        return;
+// The guest string at text, at most kMaxTitleChars of it, cut to the whole
+// characters that fit in room pixels in font. How many there are.
+u32 read_fitting(Graphics& graphics, Bus& b, u32 font, u32 text, i32 room, u8* out) {
+    u32 length = 0;
+    while (text != 0 && length < kMaxTitleChars) {
+        const u8 c = static_cast<u8>(b.r8(text + length));
+        if (!b.ok() || c == 0) {
+            break;
+        }
+        out[length++] = c;
     }
-    u32 chars = static_cast<u32>((x1 - x + 1) / 8);
-    if (chars > kMaxTitleChars) {
-        chars = kMaxTitleChars;
-    }
-    graphics.move(rp, x, baseline);
-    u8 buffer[kTitleChunk];
-    for (u32 at = 0; at < chars; at += kTitleChunk) {
-        u32 n = chars - at;
-        if (n > kTitleChunk) {
-            n = kTitleChunk;
-        }
-        for (u32 i = 0; i < n; ++i) {
-            buffer[i] = static_cast<u8>(b.r8(title + at + i));
-        }
-        if (!b.ok()) {
-            return;
-        }
-        u32 length = 0;
-        while (length < n && buffer[length] != 0) {
-            ++length;
-        }
-        if (length != 0) {
-            graphics.text(rp, buffer, length);
-        }
-        if (length < n) {
-            return;
-        }
+    return b.ok() && room > 0 ? graphics.text_fit(font, out, length, room) : 0;
+}
+
+void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title, i32 x, i32 x1,
+                const Metrics& metrics) {
+    u8 chars[kMaxTitleChars];
+    const u32 length = read_fitting(graphics, b, metrics.font, title, x1 - x + 1, chars);
+    if (length != 0) {
+        graphics.move(rp, x, metrics.title_baseline());
+        graphics.plain_text_in(rp, metrics.font, chars, length);
     }
 }
 
@@ -209,8 +196,9 @@ void draw_bar_button_body(Graphics& graphics, u32 rp, const Rect& box, bool pres
 
 // The close button: as on 3.1, a small light square outlined in the dark
 // pen in the middle of the body. Held down, the two swap.
-void draw_close_button(Graphics& graphics, u32 rp, bool active, bool pressed, bool high_color) {
-    const Rect box = close_button_box();
+void draw_close_button(Graphics& graphics, u32 rp, const Metrics& metrics, bool active,
+                       bool pressed, bool high_color) {
+    const Rect box = close_button_box(metrics);
     draw_bar_button_body(graphics, rp, box, pressed, high_color);
     u8 line = 1;
     u8 face = 2;
@@ -230,9 +218,9 @@ void draw_close_button(Graphics& graphics, u32 rp, bool active, bool pressed, bo
 
 // The depth button: two overlapping sheets, the light one in front of the
 // shaded one.
-void draw_depth_button(Graphics& graphics, u32 rp, i32 width, bool active, bool pressed,
-                       bool high_color) {
-    const Rect box = depth_button_box(width);
+void draw_depth_button(Graphics& graphics, u32 rp, i32 width, const Metrics& metrics,
+                       bool active, bool pressed, bool high_color) {
+    const Rect box = depth_button_box(width, metrics);
     draw_bar_button_body(graphics, rp, box, pressed, high_color);
     u8 line = pressed ? 2 : 1;
     u8 back = 0;
@@ -363,6 +351,8 @@ constexpr u8 kFlatLit = 2;
 constexpr u8 kFlatFill = 3;
 
 constexpr i32 kMenuTextInset = 4;
+// How far a title's name starts in from the left of its box.
+constexpr i32 kMenuTitleInset = 8;
 constexpr i32 kMenuCheckColumn = 16;
 constexpr i32 kMenuCornerRadius = 2;
 
@@ -444,42 +434,25 @@ void ghost(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip, const
     }
 }
 
-// The guest string at text, cut to the whole characters that fit before
-// right, with its baseline at baseline.
-void draw_guest_text(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip, u8 pen,
-                     i32 x, i32 baseline, u32 text, i32 right) {
-    if (text == 0 || right < x) {
-        return;
-    }
-    u32 chars = static_cast<u32>((right - x + 1) / 8);
-    if (chars > kMaxTitleChars) {
-        chars = kMaxTitleChars;
-    }
-    const raster::Pens pens{pen, 0, static_cast<u8>(ndk::JAM1)};
-    u8 buffer[kTitleChunk];
-    for (u32 at = 0; at < chars; at += kTitleChunk) {
-        u32 n = chars - at;
-        if (n > kTitleChunk) {
-            n = kTitleChunk;
-        }
-        for (u32 i = 0; i < n; ++i) {
-            buffer[i] = static_cast<u8>(b.r8(text + at + i));
-        }
-        if (!b.ok()) {
-            return;
-        }
-        u32 length = 0;
-        while (length < n && buffer[length] != 0) {
-            ++length;
-        }
-        if (length != 0) {
-            u32 advance = 0;
-            raster::draw_text(b, bitmap, clip, pens, raster::builtin_font(), raster::TextStyle{},
-                              x + static_cast<i32>(at) * 8, baseline, buffer, length, advance);
-        }
-        if (length < n) {
-            return;
-        }
+// Where menus are drawn: the bitmap, its address for the palette text
+// blends with, and the clip.
+struct MenuTarget {
+    Graphics& graphics;
+    Bus& b;
+    const raster::Bitmap& bitmap;
+    u32 bitmap_addr;
+    const raster::Clip& clip;
+};
+
+// The guest string at text in font, cut to the whole characters that fit
+// before right, with its baseline at baseline.
+void draw_guest_text(const MenuTarget& t, u8 pen, u32 font, i32 x, i32 baseline, u32 text,
+                     i32 right) {
+    u8 chars[kMaxTitleChars];
+    const u32 length = read_fitting(t.graphics, t.b, font, text, right - x + 1, chars);
+    if (length != 0) {
+        t.graphics.text_on(t.b, t.bitmap, t.bitmap_addr, t.clip, pen, font, x, baseline, chars,
+                           length);
     }
 }
 
@@ -595,9 +568,15 @@ void draw_separator(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& cl
     }
 }
 
-void draw_menu_items(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
-                     const menu_layout::Item* items, const Rect* rects, u32 count, i32 selected,
-                     const MenuPens& pens) {
+// Where a glyph of the given height starts to sit in the middle of a text
+// cell that starts at top.
+constexpr i32 centred(i32 top, i32 cell, i32 glyph) { return top + ((cell - glyph) >> 1); }
+
+void draw_menu_items(const MenuTarget& t, const menu_layout::Item* items, const Rect* rects,
+                     u32 count, i32 selected, const MenuPens& pens, const Metrics& metrics) {
+    Bus& b = t.b;
+    const raster::Bitmap& bitmap = t.bitmap;
+    const raster::Clip& clip = t.clip;
     bool checks = false;
     for (u32 i = 0; i < count; ++i) {
         checks = checks || items[i].checkit();
@@ -627,48 +606,60 @@ void draw_menu_items(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& c
             label = kMenuGhostPen;
             shortcut = kMenuGhostPen;
         }
+        // An item whose IntuiText names a font in memory is drawn in it.
+        const u32 own = item.font != 0 ? t.graphics.open_font(item.font) : 0;
+        const u32 font = own != 0 ? own : metrics.font;
+        Graphics::FontMetrics cell{metrics.font_height, metrics.font_baseline,
+                                   metrics.font_width};
+        if (own != 0) {
+            cell = t.graphics.font_metrics(own);
+        }
         const i32 height = row.y1 - row.y0 + 1;
-        const i32 baseline = row.y0 + max_i32(0, (height - 8) / 2) + 6;
+        const i32 text_top = row.y0 + max_i32(0, (height - cell.y_size) / 2);
+        const i32 baseline = text_top + cell.baseline;
         if (item.checkit() && item.checked()) {
             draw_glyph(b, bitmap, clip, kCheckGlyph, kCheckGlyphWidth, kCheckGlyphHeight,
-                       lit.x0 + kMenuTextInset, baseline - 6, label);
+                       lit.x0 + kMenuTextInset, centred(text_top, cell.y_size, kCheckGlyphHeight),
+                       label);
         }
         const i32 text_x = lit.x0 + kMenuTextInset + (checks ? kMenuCheckColumn : 0);
         i32 text_right = lit.x1 - kMenuTextInset;
         if (item.commseq()) {
-            const i32 letter_x = lit.x1 - kMenuTextInset - 8 + 1;
+            const i32 letter_x = lit.x1 - kMenuTextInset - cell.x_size + 1;
             const i32 key_x = letter_x - 2 - kAmigaKeyGlyphWidth;
             draw_glyph(b, bitmap, clip, kAmigaKeyGlyph, kAmigaKeyGlyphWidth, kAmigaKeyGlyphHeight,
-                       key_x, baseline - 7, shortcut);
+                       key_x, centred(text_top, cell.y_size, kAmigaKeyGlyphHeight), shortcut);
             if (item.command != 0) {
-                const raster::Pens text_pens{shortcut, 0, static_cast<u8>(ndk::JAM1)};
-                u32 advance = 0;
-                raster::draw_text(b, bitmap, clip, text_pens, raster::builtin_font(),
-                                  raster::TextStyle{}, letter_x, baseline, &item.command, 1,
-                                  advance);
+                t.graphics.text_on(b, bitmap, t.bitmap_addr, clip, shortcut, font, letter_x,
+                                   baseline, &item.command, 1);
             }
             text_right = key_x - 4;
         } else if (item.sub != 0) {
             const i32 arrow_x = lit.x1 - kMenuTextInset - kSubmenuGlyphWidth + 1;
             draw_glyph(b, bitmap, clip, kSubmenuGlyph, kSubmenuGlyphWidth, kSubmenuGlyphHeight,
-                       arrow_x, baseline - 6, shortcut);
+                       arrow_x, centred(text_top, cell.y_size, kSubmenuGlyphHeight), shortcut);
             text_right = arrow_x - 4;
         }
-        draw_guest_text(b, bitmap, clip, label, text_x, baseline, item.label, text_right);
+        draw_guest_text(t, label, font, text_x, baseline, item.label, text_right);
+        if (own != 0) {
+            t.graphics.close_font(own);
+        }
         if (ghosted && !pens.high_color) {
             ghost(b, bitmap, clip, lit, pens.paper);
         }
     }
 }
 
-void draw_menu_box(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
-                   const Rect& box, bool hangs, const menu_layout::Item* items, const Rect* rects,
-                   u32 count, i32 selected, const MenuPens& pens, const u8* strong,
-                   const u8* light) {
+void draw_menu_box(const MenuTarget& t, const Rect& box, bool hangs,
+                   const menu_layout::Item* items, const Rect* rects, u32 count, i32 selected,
+                   const MenuPens& pens, const MenuChrome& menu) {
     if (count == 0 || !menu_layout::valid(box)) {
         return;
     }
-    draw_menu_shadow(b, bitmap, clip, box, strong, light);
+    Bus& b = t.b;
+    const raster::Bitmap& bitmap = t.bitmap;
+    const raster::Clip& clip = t.clip;
+    draw_menu_shadow(b, bitmap, clip, box, menu.strong_shade, menu.light_shade);
     const i32 r = pens.high_color ? kMenuCornerRadius : 0;
     for (i32 y = box.y0; y <= box.y1; ++y) {
         const i32 from_bottom = box.y1 - y;
@@ -676,14 +667,15 @@ void draw_menu_box(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& cli
         const i32 ins = rounded_inset(min_i32(from_top, from_bottom), r);
         fill(b, bitmap, clip, box.x0 + ins, y, box.x1 - ins, y, pens.paper);
     }
-    draw_menu_items(b, bitmap, clip, items, rects, count, selected, pens);
+    draw_menu_items(t, items, rects, count, selected, pens, menu.metrics);
     draw_box_frame(b, bitmap, clip, box, hangs, pens.high_color, pens.frame);
 }
 
 void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, bool high_color) {
     const i32 left = 1;
     const i32 right = w.width - 2;
-    const i32 line = static_cast<i32>(kBarHeight);
+    const Metrics& metrics = w.metrics;
+    const i32 line = metrics.bar_height();
 
     if (high_color) {
         const bool rounded =
@@ -722,44 +714,46 @@ void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w
     }
 
     if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        draw_close_button(graphics, rp, w.active, w.pressed == BarButton::Close, high_color);
+        draw_close_button(graphics, rp, metrics, w.active, w.pressed == BarButton::Close,
+                          high_color);
     }
     if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
-        draw_depth_button(graphics, rp, w.width, w.active, w.pressed == BarButton::Depth,
-                          high_color);
+        draw_depth_button(graphics, rp, w.width, metrics, w.active,
+                          w.pressed == BarButton::Depth, high_color);
     }
 
     const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0
-                           ? close_button_box().x1 + kTitleGapLeft
+                           ? close_button_box(metrics).x1 + kTitleGapLeft
                            : 4;
     const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0
-                            ? depth_button_box(w.width).x0 - kTitleGapRight
+                            ? depth_button_box(w.width, metrics).x0 - kTitleGapRight
                             : w.width - 4;
     const u8 text_pen = high_color ? (w.active ? kTitleActive : kTitleInactive) : (w.active ? 2 : 1);
     graphics.set_pens(rp, text_pen, 0, ndk::JAM1);
-    draw_title(graphics, b, rp, w.title, text_x, kTitleBaseline, text_x1);
+    draw_title(graphics, b, rp, w.title, text_x, text_x1, metrics);
 }
 
 }
 
-// The pen of row y of the screen title bar, shaded from top to bottom.
-u8 screen_bar_pen(i32 y) {
-    return static_cast<u8>(kScreenBar0 + (y * static_cast<i32>(kScreenBarSteps)) /
-                                             static_cast<i32>(kBarHeight));
+// The pen of row y of a screen title bar of bar_height rows, shaded from
+// top to bottom.
+u8 screen_bar_pen(i32 y, i32 bar_height) {
+    return static_cast<u8>(kScreenBar0 + (y * static_cast<i32>(kScreenBarSteps)) / bar_height);
 }
 
-void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
+void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title,
+                     const Metrics& metrics) {
     if (rp == 0 || width == 0) {
         return;
     }
     const RpState saved = save_rp(b, rp);
     const bool high_color = rastport_depth(b, rp) >= 8;
     const i32 right = static_cast<i32>(width) - 1;
-    const i32 line = static_cast<i32>(kBarHeight);
+    const i32 line = metrics.bar_height();
 
     if (high_color) {
         for (i32 y = 0; y < line; ++y) {
-            graphics.set_pens(rp, screen_bar_pen(y), 0, ndk::JAM2);
+            graphics.set_pens(rp, screen_bar_pen(y, line), 0, ndk::JAM2);
             graphics.rect_fill(rp, 0, y, right, y);
         }
         graphics.set_pens(rp, kMenuLabelPen, 0, ndk::JAM2);
@@ -773,13 +767,13 @@ void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title) {
 
     if (title != 0) {
         graphics.set_pens(rp, high_color ? kMenuLabelPen : 1, 0, ndk::JAM1);
-        draw_title(graphics, b, rp, title, 1, kTitleBaseline, right);
+        draw_title(graphics, b, rp, title, 1, right, metrics);
     }
     restore_rp(b, rp, saved);
 }
 
 void draw_window_bar(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) {
-    if (rp == 0 || w.width < 2 || w.height <= static_cast<i32>(kBarHeight)) {
+    if (rp == 0 || w.width < 2 || w.height <= w.metrics.bar_height()) {
         return;
     }
     const RpState saved = save_rp(b, rp);
@@ -909,19 +903,21 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
     restore_rp(b, rp, saved);
 }
 
-void draw_menu(Bus& b, const raster::Bitmap& bitmap, const Rect& area, const MenuChrome& menu) {
+void draw_menu(Graphics& graphics, Bus& b, const raster::Bitmap& bitmap, const Rect& area,
+               const MenuChrome& menu) {
     if (menu.width <= 0 || !menu_layout::valid(area)) {
         return;
     }
     const raster::Clip clip{area.x0, area.y0, area.x1, area.y1};
+    const MenuTarget target{graphics, b, bitmap, menu.bitmap_addr, clip};
     const MenuPens pens = menu_pens(menu.depth >= 8);
     const i32 right = menu.width - 1;
-    const i32 line = static_cast<i32>(kBarHeight);
+    const i32 line = menu.bar_height;
 
     // The bar is drawn in the same pens as the screen title bar it replaces.
     if (pens.high_color) {
         for (i32 y = 0; y < line; ++y) {
-            fill(b, bitmap, clip, 0, y, right, y, screen_bar_pen(y));
+            fill(b, bitmap, clip, 0, y, right, y, screen_bar_pen(y, line));
         }
         fill(b, bitmap, clip, 0, line, right, line, kMenuLabelPen);
     } else {
@@ -929,6 +925,9 @@ void draw_menu(Bus& b, const raster::Bitmap& bitmap, const Rect& area, const Men
         fill(b, bitmap, clip, 0, line, right, line, kFlatLabel);
     }
 
+    // The titles sit in the middle of a bar higher than their own font's.
+    const i32 baseline =
+        menu.metrics.title_baseline() + (line - menu.metrics.bar_height()) / 2;
     for (u32 i = 0; i < menu.title_count && i < menu_layout::kMaxTitles; ++i) {
         const Rect& title = menu.title_rects[i];
         if (!menu_layout::valid(title)) {
@@ -943,18 +942,17 @@ void draw_menu(Bus& b, const raster::Bitmap& bitmap, const Rect& area, const Men
         } else if (!enabled && pens.high_color) {
             pen = kMenuGhostPen;
         }
-        draw_guest_text(b, bitmap, clip, pen, title.x0 + 8, kTitleBaseline, menu.titles[i].name,
-                        title.x1 - 4);
+        draw_guest_text(target, pen, menu.metrics.font, title.x0 + kMenuTitleInset, baseline,
+                        menu.titles[i].name, title.x1 - 4);
         if (!enabled && !pens.high_color) {
             ghost(b, bitmap, clip, Rect{title.x0, 0, title.x1, line - 1}, kFlatPaper);
         }
     }
 
-    draw_menu_box(b, bitmap, clip, menu.box, true, menu.items, menu.item_rects, menu.item_count,
-                  menu.selected_item, pens, menu.strong_shade, menu.light_shade);
-    draw_menu_box(b, bitmap, clip, menu.sub_box, false, menu.sub_items, menu.sub_item_rects,
-                  menu.sub_item_count, menu.selected_sub, pens, menu.strong_shade,
-                  menu.light_shade);
+    draw_menu_box(target, menu.box, true, menu.items, menu.item_rects, menu.item_count,
+                  menu.selected_item, pens, menu);
+    draw_menu_box(target, menu.sub_box, false, menu.sub_items, menu.sub_item_rects,
+                  menu.sub_item_count, menu.selected_sub, pens, menu);
 }
 
 void draw_prop_gadget(Graphics& graphics, Bus& b, u32 rp, const PropChrome& g) {

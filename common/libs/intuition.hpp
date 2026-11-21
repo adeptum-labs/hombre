@@ -25,6 +25,7 @@
 
 #include "../types.hpp"
 #include "boopsi.hpp"
+#include "chrome.hpp"
 #include "chrome_palette.hpp"
 #include "gfx.hpp"
 #include "menu_layout.hpp"
@@ -46,10 +47,6 @@ namespace hombre {
 
 class Exec;
 class Graphics;
-
-namespace chrome {
-enum class BarButton : u8;
-}
 
 namespace raster {
 struct Bitmap;
@@ -193,8 +190,11 @@ public:
     static constexpr u32 kMaxGadgets = 64;
     static constexpr u32 kMaxGadgetHooks = 8;
 
-    static Rect close_box_rect(i32 left, i32 top);
-    static Rect depth_box_rect(i32 left, i32 top, i32 width);
+    // The close and depth buttons of a window at left, top whose title
+    // bar has the metrics, topaz 8's unless given.
+    static Rect close_box_rect(i32 left, i32 top, const chrome::Metrics& metrics = {});
+    static Rect depth_box_rect(i32 left, i32 top, i32 width,
+                               const chrome::Metrics& metrics = {});
     static Rect size_box_rect(i32 left, i32 top, i32 width, i32 height, u32 flags = 0);
 
     // Makes intuition.library over graphics, which must be initialised.
@@ -369,10 +369,13 @@ public:
     u32 default_screen() const { return default_screen_; }
 
     // The screen font IPrefs sent and the TextAttr that names it: topaz
-    // and topaz's until IPrefs sends one. A later step opens the Workbench
-    // screen in it.
+    // and topaz's until IPrefs sends one. The default screen is in it, and
+    // so is a screen opened with SA_SysFont 1.
     u32 screen_font() const;
     u32 screen_font_attr() const;
+    // The font the screen's titles and menus are in, 0 for an unknown
+    // screen.
+    u32 font_of_screen(u32 screen) const;
 
     // The Workbench's side of CloseWorkBench and OpenWorkBench. The task
     // that sets them is the one the Workbench windows belong to.
@@ -435,6 +438,15 @@ private:
         u32 low_colors_bytes = 0;
         u32 title = 0;
         u32 title_bytes = 0;
+        // The font of the screen's titles and menus, OpenFont'ed, the
+        // TextAttr sc_Font points to, which names it, and what its height
+        // makes of the title bars. Windows opened on the screen take the
+        // font into their RastPorts too, unless it is the screen font of
+        // the preferences.
+        u32 font = 0;
+        u32 font_attr = 0;
+        bool windows_inherit_font = true;
+        chrome::Metrics metrics{};
         u32 draw_info = 0;  // the DrawInfo GetScreenDrawInfo hands out, made on first use
         u32 width = 0;
         u32 height = 0;
@@ -474,6 +486,9 @@ private:
         u32 planes_bytes = 0;
         u32 title = 0;
         u32 title_bytes = 0;
+        // The title bar the window opened with: its screen's of that time,
+        // whose font the window holds open until it closes.
+        chrome::Metrics metrics{};
         u32 user_port = 0;
         bool user_port_owned = false;
         WindowHook size_hook = nullptr;
@@ -558,6 +573,19 @@ private:
     void store_palette_prefs(u32 prefs, u32 size);
     void store_pen_prefs(u32 prefs, u32 size);
     void store_font_prefs(u32 prefs, u32 size);
+    // What the height of a TextFont makes of a title bar.
+    chrome::Metrics font_chrome(u32 font) const;
+    const chrome::Metrics& window_metrics(u32 window) const;
+    // Gives the screen the font the TextAttr names, or the default font
+    // for 0 and for a font not in memory or too tall for a title bar: its
+    // own TextAttr, its RastPort, its bar height and its DrawInfo follow.
+    void set_screen_font(ScreenRecord& rec, u32 text_attr, bool windows_inherit);
+    // Puts the default screen in the screen font of the preferences and
+    // draws its bar again. A Workbench with windows open keeps the font it
+    // has until OpenWorkBench starts the screen over.
+    void apply_font_prefs(u32 screen);
+    // The screen's BACKGROUNDPEN, 0 without a DrawInfo.
+    u32 background_pen(u32 screen);
     void write_colormap_rgb(ScreenRecord& srec, u32 pen, u32 rgb);
     // Writes the stored palette into the screen's ColorMap over its default
     // palette and marks the palette changed.

@@ -66,6 +66,7 @@ struct Item {
     u32 addr = 0;
     u32 label = 0;
     u32 sub = 0;
+    u32 font = 0;  // the TextAttr its IntuiText names, 0 for the menu's own font
     u16 flags = 0;
     u8 command = 0;
 

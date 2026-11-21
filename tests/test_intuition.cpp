@@ -4714,13 +4714,14 @@ void activation_switch_redraws_both_bars() {
 void bar_buttons_are_centred_and_mirror_each_other() {
     const Rect close_box = chrome::close_button_box();
     const Rect depth_box = chrome::depth_button_box(200);
-    CHECK_EQ(close_box.x1 - close_box.x0 + 1, chrome::kBarButtonWidth);
-    CHECK_EQ(close_box.y1 - close_box.y0 + 1, chrome::kBarButtonHeight);
-    CHECK_EQ(depth_box.x1 - depth_box.x0 + 1, chrome::kBarButtonWidth);
+    const chrome::Metrics topaz{};
+    CHECK_EQ(close_box.x1 - close_box.x0 + 1, topaz.button_width());
+    CHECK_EQ(close_box.y1 - close_box.y0 + 1, topaz.button_height());
+    CHECK_EQ(depth_box.x1 - depth_box.x0 + 1, topaz.button_width());
     CHECK_EQ(depth_box.y0, close_box.y0);
     CHECK_EQ(depth_box.y1, close_box.y1);
-    // Row 0 is the frame and row kBarHeight the line under the bar.
-    CHECK_EQ(close_box.y0 - 1, static_cast<i32>(chrome::kBarHeight) - 1 - close_box.y1);
+    // Row 0 is the frame and row bar_height() the line under the bar.
+    CHECK_EQ(close_box.y0 - 1, topaz.bar_height() - 1 - close_box.y1);
     CHECK_EQ(close_box.x0, 199 - depth_box.x1);
 
     const Rect close_hit = Intuition::close_box_rect(50, 60);
@@ -5765,6 +5766,205 @@ void menu_release(GfxRig& r, i32 x, i32 y) {
 
 u32 window_message(GfxRig& r, u32 window) {
     return get_msg(r, r.get32(window + wd_UserPort));
+}
+
+// A screen opened in a font of its own is laid out by it: the bar is
+// WBorTop and the font high, sc_Font, the RastPort and the DrawInfo name
+// the font, and a window on it gets a title bar of WBorTop + YSize + 1
+// with buttons that fill it.
+void screen_with_sa_font_sizes_its_bars_by_the_font() {
+    GfxRig r;
+    const u32 hasklig13 = font_address(r, 13);
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 tags = r.tags(kTagList, {{SA_Font, kBuffer}, {TAG_DONE, 0}});
+    const u32 screen = open_tags(r, kNewScreen, tags);
+    CHECK(screen != 0);
+    CHECK_EQ(r.get8(screen + sc_WBorTop), 6u);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 19u);
+    const u32 attr = r.get32(screen + sc_Font);
+    CHECK(attr != 0 && attr != kBuffer);
+    CHECK(r.read_str(r.get32(attr + ta_Name)) == "hasklig.font");
+    CHECK_EQ(r.get16(attr + ta_YSize), 13u);
+    CHECK_EQ(r.get32(screen + sc_RastPort + rp_Font), hasklig13);
+    CHECK_EQ(r.get16(screen + sc_RastPort + rp_TxHeight), 13u);
+    CHECK_EQ(r.intuition.font_of_screen(screen), hasklig13);
+    CHECK_EQ(r.get32(r.intuition.screen_draw_info(screen) + dri_Font), hasklig13);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 19), static_cast<u32>(chrome::kMenuLabelPen));
+    CHECK(screen_pixel(r, screen, 300, 18) != static_cast<u32>(chrome::kMenuLabelPen));
+
+    put_new_window(r, kNewWindow, 40, 60, 200, 100, WFLG_CLOSEGADGET | WFLG_DEPTHGADGET, 0,
+                   screen, CUSTOMSCREEN);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_CLOSEWINDOW);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get8(window + wd_BorderTop), 20u);
+    CHECK_EQ(r.get32(window + wd_IFont), hasklig13);
+    CHECK_EQ(r.get32(r.get32(window + wd_RPort) + rp_Font), hasklig13);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 2u);
+    CHECK_EQ(window_pixel(r, window, 100, 19), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(window_pixel(r, window, 100, 20), 0u);
+
+    chrome::Metrics bar;
+    bar.font_height = 13;
+    const Rect close_box = chrome::close_button_box(bar);
+    CHECK_EQ(close_box.y1 - close_box.y0 + 1, 16);
+    CHECK_EQ(close_box.x1 - close_box.x0 + 1, 18);
+    CHECK_EQ(close_box.y0 - 1, bar.bar_height() - 1 - close_box.y1);
+    // The corner of the button a topaz bar's would not reach.
+    const i32 x = 40 + close_box.x1 - 1;
+    const i32 y = 60 + close_box.y1 - 1;
+    r.intuition.pointer_event(x, y, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(x, y, 0, 0, kMouseLeft, false);
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_CLOSEWINDOW);
+    reply_msg(r, msg);
+
+    r.intuition.close_window(window);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 1u);
+    CHECK(r.intuition.close_screen(screen));
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 0u);
+}
+
+// NewScreen.Font names the font as SA_Font does; a font not in memory
+// leaves the screen in the default font.
+void screen_takes_the_font_of_its_newscreen() {
+    GfxRig r;
+    const u32 hasklig11 = font_address(r, 11);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    r.put32(kNewScreen + ns_Font, kBuffer);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 17u);
+    CHECK_EQ(r.intuition.font_of_screen(screen), hasklig11);
+
+    r.str(kBuffer + 0x40, "nowhere.font");
+    const u32 other = open_new(r, kNewScreen);
+    CHECK(other != 0);
+    CHECK_EQ(r.get8(other + sc_BarHeight), 14u);
+    CHECK_EQ(r.intuition.font_of_screen(other), r.graphics.topaz_font());
+    CHECK(r.read_str(r.get32(r.get32(other + sc_Font) + ta_Name)) == "topaz.font");
+}
+
+// SA_SysFont 1 is the screen font of the preferences, which the windows
+// use for their title bars but not in their RastPorts; SA_SysFont 0 is
+// the default font.
+void sa_sysfont_picks_the_screen_font_or_the_default_font() {
+    GfxRig r;
+    const u32 topaz = r.graphics.topaz_font();
+    const u32 hasklig13 = font_address(r, 13);
+    const u32 size = put_font_prefs(r, kIPrefs, "hasklig.font", 13, 1);
+    set_iprefs(r, kIPrefs, size, 2);
+
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 preferred =
+        open_tags(r, kNewScreen, r.tags(kTagList, {{SA_SysFont, 1}, {TAG_DONE, 0}}));
+    CHECK(preferred != 0);
+    CHECK_EQ(r.get8(preferred + sc_BarHeight), 19u);
+    CHECK_EQ(r.intuition.font_of_screen(preferred), hasklig13);
+    put_new_window(r, kNewWindow, 40, 60, 200, 100, 0, 0, preferred, CUSTOMSCREEN);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get8(window + wd_BorderTop), 20u);
+    CHECK_EQ(r.get32(window + wd_IFont), hasklig13);
+    CHECK_EQ(r.get32(r.get32(window + wd_RPort) + rp_Font), topaz);
+
+    const u32 fixed =
+        open_tags(r, kNewScreen, r.tags(kTagList, {{SA_SysFont, 0}, {TAG_DONE, 0}}));
+    CHECK(fixed != 0);
+    CHECK_EQ(r.get8(fixed + sc_BarHeight), 14u);
+    CHECK_EQ(r.intuition.font_of_screen(fixed), topaz);
+}
+
+// The default screen is in the screen font of the preferences: it takes a
+// new one at once while the Workbench has no windows, moving a window out
+// from under its higher bar, and otherwise when OpenWorkBench starts it
+// over. A window keeps the title bar it opened with.
+void default_screen_follows_the_screen_font_of_the_prefs() {
+    GfxRig r;
+    const u32 topaz = r.graphics.topaz_font();
+    const u32 hasklig13 = font_address(r, 13);
+    const u32 hasklig11 = font_address(r, 11);
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 14u);
+    const u32 attr = r.get32(screen + sc_Font);
+
+    put_new_window(r, kNewWindow, 0, 15, 300, 100, 0, 0, screen, CUSTOMSCREEN);
+    const u32 early = open_win(r, kNewWindow);
+    CHECK(early != 0);
+    CHECK_EQ(r.get16(early + wd_TopEdge), 15u);
+
+    const u32 size = put_font_prefs(r, kIPrefs, "hasklig.font", 13, 1);
+    set_iprefs(r, kIPrefs, size, 2);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 19u);
+    CHECK_EQ(r.get32(screen + sc_Font), attr);
+    CHECK(r.read_str(r.get32(attr + ta_Name)) == "hasklig.font");
+    CHECK_EQ(r.get16(attr + ta_YSize), 13u);
+    CHECK_EQ(r.get32(r.intuition.screen_draw_info(screen) + dri_Font), hasklig13);
+    CHECK_EQ(screen_pixel(r, screen, 400, 19), static_cast<u32>(chrome::kMenuLabelPen));
+    CHECK_EQ(r.get16(early + wd_TopEdge), 19u);
+    CHECK_EQ(r.get8(early + wd_BorderTop), 15u);
+    CHECK_EQ(r.get32(early + wd_IFont), topaz);
+
+    put_new_window(r, kNewWindow, 320, 60, 200, 100, WFLG_WBENCHWINDOW, 0, screen,
+                   CUSTOMSCREEN);
+    const u32 drawer = open_win(r, kNewWindow);
+    CHECK(drawer != 0);
+    CHECK_EQ(r.get8(drawer + wd_BorderTop), 20u);
+    CHECK_EQ(r.get32(drawer + wd_IFont), hasklig13);
+    CHECK_EQ(r.get32(r.get32(drawer + wd_RPort) + rp_Font), topaz);
+
+    put_font_prefs(r, kIPrefs, "hasklig.font", 11, 1);
+    set_iprefs(r, kIPrefs, size, 2);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 19u);
+    r.intuition.close_window(drawer);
+    r.intuition.close_window(early);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::OpenWorkBench), screen);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 17u);
+    CHECK_EQ(r.intuition.font_of_screen(screen), hasklig11);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 400, 17), static_cast<u32>(chrome::kMenuLabelPen));
+    CHECK(screen_pixel(r, screen, 400, 19) != static_cast<u32>(chrome::kMenuLabelPen));
+}
+
+// The menu bar is as high as the screen's, the titles are drawn in the
+// screen's font and the box of a title hangs below the higher bar.
+void menu_bar_and_boxes_follow_the_screen_font() {
+    GfxRig r;
+    font_address(r, 13);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen =
+        open_tags(r, kNewScreen, r.tags(kTagList, {{SA_Font, kBuffer}, {TAG_DONE, 0}}));
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, kMenuIdcmp);
+    set_strip(r, window, kMenuA);
+
+    menu_press(r, 300, 50);
+    CHECK_EQ(screen_pixel(r, screen, 300, 18), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 19), 1u);
+    // "File" stands on a baseline lower than topaz reaches.
+    u32 inked = 0;
+    for (i32 x = 12; x < 40; ++x) {
+        inked += screen_pixel(r, screen, x, 12) == 1 ? 1 : 0;
+    }
+    CHECK(inked != 0);
+
+    // The first item starts two rows into the box under the bar, so row
+    // 35 is the second item's here and the third's under a topaz bar.
+    menu_move(r, 60, 5);
+    menu_move(r, 60, 35);
+    menu_release(r, 60, 35);
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_MENUPICK);
+    CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(1 | (1 << 5) | (31 << 11)));
+    reply_msg(r, msg);
 }
 
 void menu_right_press_opens_the_bar_and_the_second_item_picks() {
@@ -7823,6 +8023,11 @@ int main() {
     set_iprefs_type8_writes_the_palette_into_the_default_screen();
     set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info();
     set_iprefs_type2_sets_the_system_and_screen_fonts();
+    screen_with_sa_font_sizes_its_bars_by_the_font();
+    screen_takes_the_font_of_its_newscreen();
+    sa_sysfont_picks_the_screen_font_or_the_default_font();
+    default_screen_follows_the_screen_font_of_the_prefs();
+    menu_bar_and_boxes_follow_the_screen_font();
     close_and_open_workbench_follow_the_windows_and_the_pens();
     chrome_palette_follows_the_default_screen_pens();
     menu_strip_vectors_write_the_window_field();

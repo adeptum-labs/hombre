@@ -35,41 +35,60 @@ class Graphics;
 
 namespace chrome {
 
-constexpr u32 kBarHeight = 14;
-constexpr u32 kBorderTop = 15;
 // The screen's WBorTop: programs size a title bar as WBorTop plus the
-// screen font's height (topaz 8) plus one, and that has to come to
-// kBorderTop.
-constexpr u32 kTitleFontHeight = 8;
-constexpr u32 kWBorTop = kBorderTop - kTitleFontHeight - 1;
+// height of the screen's font plus one.
+constexpr u32 kWBorTop = 6;
 constexpr u32 kBorderLeft = 2;
 constexpr u32 kBorderRight = 2;
 constexpr u32 kBorderBottom = 2;
 constexpr u32 kSizeBorderRight = 14;
 constexpr u32 kSizeBorderBottom = 14;
 
-// The close and depth buttons of a window's title bar: both the same size,
-// the same distance in from the window's left and right edges, and centred
-// in the bar.
-constexpr i32 kBarButtonWidth = 13;
-constexpr i32 kBarButtonHeight = 11;
+// The tallest font a title bar is made for: sc_BarHeight and wd_BorderTop
+// are bytes.
+constexpr i32 kMaxTitleFontHeight = 100;
+
+// What the font of a screen or window makes of its title bar: the font
+// the title is drawn in, 0 for the built-in one, and the sizes that follow
+// from its height. The built-in topaz 8 gives a bar of 14 rows over its
+// line, with buttons of 13 by 11.
+struct Metrics {
+    u32 font = 0;
+    i32 font_height = 8;
+    i32 font_baseline = 6;
+    i32 font_width = 8;
+
+    // The row of the line under the bar, which is the screen's
+    // sc_BarHeight, and the first row below it, a window's BorderTop.
+    constexpr i32 bar_height() const { return static_cast<i32>(kWBorTop) + font_height; }
+    constexpr i32 border_top() const { return bar_height() + 1; }
+    // The title's first row and its baseline.
+    constexpr i32 title_top() const { return 3; }
+    constexpr i32 title_baseline() const { return title_top() + font_baseline; }
+    // The close and depth buttons: both the same size and centred in the
+    // bar, a row clear of its frame and its line.
+    constexpr i32 button_top() const { return 2; }
+    constexpr i32 button_height() const { return bar_height() - 3; }
+    constexpr i32 button_width() const { return button_height() + 2; }
+};
+
+// How far in from the window's left and right edges the two buttons are.
 constexpr i32 kBarButtonInset = 3;
-constexpr i32 kBarButtonTop = 2;
 
 enum class BarButton : u8 { None = 0, Close = 1, Depth = 2 };
 
 // The box of the close button, in window coordinates.
-constexpr Rect close_button_box() {
-    return Rect{kBarButtonInset, kBarButtonTop, kBarButtonInset + kBarButtonWidth - 1,
-                kBarButtonTop + kBarButtonHeight - 1};
+constexpr Rect close_button_box(const Metrics& m = {}) {
+    return Rect{kBarButtonInset, m.button_top(), kBarButtonInset + m.button_width() - 1,
+                m.button_top() + m.button_height() - 1};
 }
 
 // The box of the depth button of a window `width` pixels wide, in window
 // coordinates.
-constexpr Rect depth_button_box(i32 width) {
+constexpr Rect depth_button_box(i32 width, const Metrics& m = {}) {
     const i32 x1 = width - 1 - kBarButtonInset;
-    return Rect{x1 - kBarButtonWidth + 1, kBarButtonTop, x1,
-                kBarButtonTop + kBarButtonHeight - 1};
+    return Rect{x1 - m.button_width() + 1, m.button_top(), x1,
+                m.button_top() + m.button_height() - 1};
 }
 
 struct WindowChrome {
@@ -83,6 +102,7 @@ struct WindowChrome {
     u32 border_bottom = 0;
     bool active = false;
     BarButton pressed = BarButton::None;  // the bar button the pointer holds down
+    Metrics metrics{};
 };
 
 struct PropChrome {
@@ -115,15 +135,22 @@ struct MenuChrome {
     u32 depth = 0;
     const u8* strong_shade = nullptr;
     const u8* light_shade = nullptr;
+    // The bar is as high as the screen's, the titles and items are drawn
+    // in the font of the window the strip belongs to. bitmap_addr is the
+    // BitMap menus are drawn on, whose palette the text blends with.
+    i32 bar_height = Metrics{}.bar_height();
+    Metrics metrics{};
+    u32 bitmap_addr = 0;
 };
 
-void draw_screen_bar(Graphics& graphics, native::Bus& b, u32 rp, u32 width, u32 title);
+void draw_screen_bar(Graphics& graphics, native::Bus& b, u32 rp, u32 width, u32 title,
+                     const Metrics& metrics = {});
 void draw_window_bar(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w);
 void draw_window_chrome(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w,
                         const Rect* keep = nullptr);
 void draw_prop_gadget(Graphics& graphics, native::Bus& b, u32 rp, const PropChrome& g);
-void draw_menu(native::Bus& b, const raster::Bitmap& bitmap, const Rect& clip,
-               const MenuChrome& menu);
+void draw_menu(Graphics& graphics, native::Bus& b, const raster::Bitmap& bitmap,
+               const Rect& clip, const MenuChrome& menu);
 
 enum class Arrow : u8 { Up = 0, Down = 1, Left = 2, Right = 3 };
 
