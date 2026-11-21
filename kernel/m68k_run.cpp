@@ -46,6 +46,7 @@
 #include "../common/printable.hpp"
 #include "../common/hid_keyboard.hpp"
 #include "../common/hid_mouse.hpp"
+#include "../common/hid_rawkey.hpp"
 #include "../common/serial.hpp"
 #include "../common/shell.hpp"
 #include "../common/shell_commands.hpp"
@@ -116,6 +117,8 @@ constinit u32 amiga_screen = 0;
 constinit u8 prev_key_slots[KeyDecoder::kKeySlots]{};
 // The one keyboard's decoder.
 constinit KeyDecoder typed_decoder{};
+// The same reports as Amiga raw key events, for windows that read keys.
+constinit RawKeyTracker raw_tracker{};
 
 struct Console;
 
@@ -219,6 +222,7 @@ void open_amiga_screen(const BootInfo& info) {
         return;
     }
     intuition.set_clock(&clock_us);
+    intuition.set_keymap_library(&keymap_library);
     splash_progress(8, kSplashKernelSteps);
     intuition.set_gadget_renderer(&GadTools::render_gadget, &gadtools);
     intuition.set_gadget_release(&GadTools::release_gadget);
@@ -547,9 +551,23 @@ bool slots_have_key(const u8* slots, u8 usage) {
     return false;
 }
 
+// True when the active window reads its keys as IDCMP messages: it asks for
+// them and is not the window of a shell, whose keys go to its console.
+bool active_window_reads_keys() {
+    const u32 window = intuition.active_window();
+    for (const Console& c : consoles) {
+        if (c.open && c.shell.window() == window) {
+            return false;
+        }
+    }
+    return intuition.wants_keys(window);
+}
+
 // Reads the keyboard and routes each decoded byte to the active console:
 // Ctrl+C signals that console's shell process, Ctrl+\ ends its console
 // input, and every other byte waits for the console's reader or line editor.
+// A window that reads keys as IDCMP messages gets raw key events instead of
+// the bytes.
 void poll_keys() {
     if (usb_keyboard_status() != UsbStatus::Ready) {
         return;
@@ -562,6 +580,10 @@ void poll_keys() {
         const u8* slots = report + 2;
         u8 chars[KeyDecoder::kKeySlots * KeyDecoder::kMaxBytesPerKey];
         const usize count = typed_decoder.feed(report, chars, sizeof(chars));
+        RawKeyEvent events[RawKeyTracker::kMaxEvents];
+        const usize event_count = raw_tracker.feed(report, events, RawKeyTracker::kMaxEvents);
+        intuition.set_qualifier(raw_tracker.qualifier());
+        const bool window_reads_keys = active_window_reads_keys();
         if (ctrl) {
             for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
                 const u8 usage = slots[s];
@@ -588,9 +610,14 @@ void poll_keys() {
             for (usize k = 0; k < count; ++k) {
                 intuition.string_key(chars[k]);
             }
-        } else {
+        } else if (!window_reads_keys) {
             for (usize k = 0; k < count; ++k) {
                 handle_decoded_byte(c, chars[k]);
+            }
+        }
+        if (window_reads_keys && !intuition.string_active()) {
+            for (usize k = 0; k < event_count; ++k) {
+                intuition.raw_key(events[k].code, events[k].qualifier);
             }
         }
         for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {

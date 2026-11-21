@@ -25,6 +25,7 @@
 #include "hid_mouse.hpp"
 #include "libs/chrome.hpp"
 #include "libs/chrome_palette.hpp"
+#include "libs/keymap_library.hpp"
 #include "libs/utility.hpp"
 
 #include <string>
@@ -4132,6 +4133,115 @@ void wheel_event_posts_newmouse_rawkey() {
     CHECK_EQ(get_msg(r, r.get32(no_raw + wd_UserPort)), 0u);
 }
 
+constexpr u16 kQualLShift = 0x0001;
+constexpr u16 kKeyUp = 0x80;
+
+// An active window of 200x100 at left, 50 with the IDCMP flags.
+u32 open_key_window(GfxRig& r, i32 left, u32 idcmp) {
+    put_new_window(r, kNewWindow, left, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, idcmp);
+    return open_win(r, kNewWindow);
+}
+
+// Takes the next message off the window's port, checks its class, code and
+// qualifier, and replies to it.
+void expect_key_message(GfxRig& r, u32 window, u32 idcmp_class, u32 code, u32 qualifier) {
+    const u32 msg = get_msg(r, r.get32(window + wd_UserPort));
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), idcmp_class);
+    CHECK_EQ(r.get16(msg + im_Code), code);
+    CHECK_EQ(r.get16(msg + im_Qualifier), qualifier);
+    CHECK_EQ(r.get32(msg + im_IAddress), 0u);
+    reply_msg(r, msg);
+}
+
+void raw_key_posts_rawkey_with_code_and_qualifier() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    r.intuition.raw_key(0x20, 0);  // no active window: nothing happens
+
+    const u32 window = open_key_window(r, 50, IDCMP_RAWKEY);
+    CHECK(window != 0);
+    r.intuition.raw_key(0x20, kQualLShift);
+    r.intuition.raw_key(0x20 | kKeyUp, 0);
+    r.intuition.raw_key(0x50, 0x0100);
+    expect_key_message(r, window, IDCMP_RAWKEY, 0x20, kQualLShift);
+    expect_key_message(r, window, IDCMP_RAWKEY, 0xA0, 0);
+    expect_key_message(r, window, IDCMP_RAWKEY, 0x50, 0x0100);
+    CHECK_EQ(get_msg(r, r.get32(window + wd_UserPort)), 0u);
+}
+
+void raw_key_posts_vanillakey_characters() {
+    GfxRig r;
+    KeymapLibrary keymaps;
+    CHECK(keymaps.init(r.machine, r.exec));
+    r.intuition.set_keymap_library(&keymaps);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    const u32 window = open_key_window(r, 50, IDCMP_VANILLAKEY);
+    CHECK(window != 0);
+    r.intuition.raw_key(0x20, 0);
+    r.intuition.raw_key(0x20, kQualLShift);
+    r.intuition.raw_key(0x20 | kKeyUp, 0);  // a release types nothing
+    r.intuition.raw_key(0x50, 0);           // F1 types a string
+    r.intuition.raw_key(0x60, kQualLShift);  // a qualifier key types nothing
+    expect_key_message(r, window, IDCMP_VANILLAKEY, 'a', 0);
+    expect_key_message(r, window, IDCMP_VANILLAKEY, 'A', kQualLShift);
+    CHECK_EQ(get_msg(r, r.get32(window + wd_UserPort)), 0u);
+}
+
+void a_window_with_both_key_flags_gets_rawkey() {
+    GfxRig r;
+    KeymapLibrary keymaps;
+    CHECK(keymaps.init(r.machine, r.exec));
+    r.intuition.set_keymap_library(&keymaps);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    const u32 window = open_key_window(r, 50, IDCMP_RAWKEY | IDCMP_VANILLAKEY);
+    r.intuition.raw_key(0x20, 0);
+    expect_key_message(r, window, IDCMP_RAWKEY, 0x20, 0);
+    CHECK_EQ(get_msg(r, r.get32(window + wd_UserPort)), 0u);
+}
+
+void a_window_without_key_flags_gets_no_keys() {
+    GfxRig r;
+    KeymapLibrary keymaps;
+    CHECK(keymaps.init(r.machine, r.exec));
+    r.intuition.set_keymap_library(&keymaps);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+
+    const u32 plain = open_key_window(r, 50, IDCMP_MOUSEBUTTONS);
+    CHECK(!r.intuition.wants_keys(plain));
+    r.intuition.raw_key(0x20, 0);
+    CHECK_EQ(get_msg(r, r.get32(plain + wd_UserPort)), 0u);
+
+    const u32 raw = open_key_window(r, 300, IDCMP_RAWKEY);
+    const u32 vanilla = open_key_window(r, 300, IDCMP_VANILLAKEY);
+    CHECK(r.intuition.wants_keys(raw));
+    CHECK(r.intuition.wants_keys(vanilla));
+    CHECK(!r.intuition.wants_keys(0));
+    CHECK(!r.intuition.wants_keys(kData));
+}
+
+void mouse_buttons_carry_the_keyboard_qualifier() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 window = open_key_window(r, 50, IDCMP_MOUSEBUTTONS);
+    CHECK(window != 0);
+
+    r.intuition.set_qualifier(kQualLShift);
+    r.intuition.pointer_event(125, 115, kMouseLeft, kMouseLeft, 0, false);
+    const u32 msg = get_msg(r, r.get32(window + wd_UserPort));
+    CHECK(msg != 0);
+    CHECK_EQ(r.get16(msg + im_Code), SELECTDOWN);
+    CHECK_EQ(r.get16(msg + im_Qualifier), kQualLShift);
+}
+
 void gadget_lvos_from_guest_calls() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -7681,6 +7791,11 @@ int main() {
     gadget_list_cycle_is_bounded();
     close_during_knob_drag();
     wheel_event_posts_newmouse_rawkey();
+    raw_key_posts_rawkey_with_code_and_qualifier();
+    raw_key_posts_vanillakey_characters();
+    a_window_with_both_key_flags_gets_rawkey();
+    a_window_without_key_flags_gets_no_keys();
+    mouse_buttons_carry_the_keyboard_qualifier();
     gadget_lvos_from_guest_calls();
     modify_prop_ignores_non_prop_gadget();
     modify_prop_keeps_knobhit_during_drag();

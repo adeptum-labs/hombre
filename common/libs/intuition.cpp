@@ -28,6 +28,7 @@
 #include "chrome_palette.hpp"
 #include "exec.hpp"
 #include "graphics.hpp"
+#include "keymap_library.hpp"
 #include "raster.hpp"
 #include "sysimage.hpp"
 #include "utility.hpp"
@@ -3174,7 +3175,7 @@ void Intuition::remove_window_messages(u32 port, u32 window) {
 }
 
 bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress,
-                                  u32 iaddress_bytes) {
+                                  u32 iaddress_bytes, u16 qualifier) {
     if (window == 0 || find_window(window) >= kMaxWindows) {
         return false;
     }
@@ -3211,7 +3212,7 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     b.w16(msg + ndk::mn_Length, ndk::IntuiMessage_SIZEOF);
     b.w32(msg + ndk::im_Class, idcmp_class);
     b.w16(msg + ndk::im_Code, code);
-    b.w16(msg + ndk::im_Qualifier, 0);
+    b.w16(msg + ndk::im_Qualifier, qualifier);
     b.w32(msg + ndk::im_IAddress, iaddress);
     b.w16(msg + ndk::im_MouseX, static_cast<u16>(rel_x));
     b.w16(msg + ndk::im_MouseY, static_cast<u16>(rel_y));
@@ -3230,6 +3231,10 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
         message_update_bytes_[slot] = iaddress_bytes;
     }
     return true;
+}
+
+void Intuition::post_mouse_button(u16 code) {
+    post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, code, 0, 0, qualifier_);
 }
 
 void Intuition::redraw_window_bar(u32 window) {
@@ -5052,22 +5057,22 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
 
     if (active_window_ != 0) {
         if ((pressed & kMouseLeft) != 0 && !left_press_consumed) {
-            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTDOWN);
+            post_mouse_button(ndk::SELECTDOWN);
         }
         if ((released & kMouseLeft) != 0 && !left_release_consumed) {
-            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::SELECTUP);
+            post_mouse_button(ndk::SELECTUP);
         }
         if ((pressed & kMouseRight) != 0 && !menu_right) {
-            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUDOWN);
+            post_mouse_button(ndk::MENUDOWN);
         }
         if ((released & kMouseRight) != 0 && !menu_right) {
-            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MENUUP);
+            post_mouse_button(ndk::MENUUP);
         }
         if ((pressed & kMouseMiddle) != 0) {
-            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEDOWN);
+            post_mouse_button(ndk::MIDDLEDOWN);
         }
         if ((released & kMouseMiddle) != 0) {
-            post_intuimessage(active_window_, ndk::IDCMP_MOUSEBUTTONS, ndk::MIDDLEUP);
+            post_mouse_button(ndk::MIDDLEUP);
         }
     }
 
@@ -6614,6 +6619,33 @@ void Intuition::wheel_event(i32 steps) {
         if (!post_intuimessage(active_window_, ndk::IDCMP_RAWKEY, code)) {
             break;
         }
+    }
+}
+
+u32 Intuition::window_idcmp(u32 window) const {
+    if (find_window(window) >= kMaxWindows) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 idcmp = b.r32(window + ndk::wd_IDCMPFlags);
+    return b.ok() ? idcmp : 0;
+}
+
+bool Intuition::wants_keys(u32 window) const {
+    return (window_idcmp(window) & (ndk::IDCMP_RAWKEY | ndk::IDCMP_VANILLAKEY)) != 0;
+}
+
+void Intuition::raw_key(u16 code, u16 qualifier) {
+    const u32 idcmp = window_idcmp(active_window_);
+    if ((idcmp & ndk::IDCMP_RAWKEY) != 0) {
+        post_intuimessage(active_window_, ndk::IDCMP_RAWKEY, code, 0, 0, qualifier);
+        return;
+    }
+    const bool key_down = (code & IECODE_UP_PREFIX) == 0;
+    u8 character = 0;
+    if ((idcmp & ndk::IDCMP_VANILLAKEY) != 0 && key_down && keymaps_ != nullptr &&
+        keymaps_->map_vanilla(code, qualifier, &character, 1) == 1) {
+        post_intuimessage(active_window_, ndk::IDCMP_VANILLAKEY, character, 0, 0, qualifier);
     }
 }
 

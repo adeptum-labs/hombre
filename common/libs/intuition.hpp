@@ -153,8 +153,12 @@ namespace ndk {
 // IDCMP_IDCMPUPDATE (intuition/intuition.h): a notification for a window,
 // its IAddress an attribute list.
 constexpr u32 IDCMP_IDCMPUPDATE = 0x00800000;
+// IDCMP_VANILLAKEY: a key that types one character, the character its code.
+constexpr u32 IDCMP_VANILLAKEY = 0x00200000;
 
 }
+
+class KeymapLibrary;
 
 class Intuition {
 public:
@@ -198,6 +202,10 @@ public:
     bool init(m68k::Machine& m, Exec& exec, Graphics& graphics, DisplayState& display);
 
     void set_clock(u64 (*now_us)()) { clock_ = now_us; }
+
+    // The keymap IDCMP_VANILLAKEY characters come from. Without one a
+    // window gets no VANILLAKEY messages.
+    void set_keymap_library(KeymapLibrary* keymaps) { keymaps_ = keymaps; }
 
     u32 intuition_base() const { return base_; }
 
@@ -272,6 +280,17 @@ public:
     // Makes the string gadget of the window the one being edited.
     bool activate_string(u32 gadget, u32 window);
     void wheel_event(i32 steps);
+
+    // Whether the window asks for key messages: IDCMP_RAWKEY or
+    // IDCMP_VANILLAKEY.
+    bool wants_keys(u32 window) const;
+    // A key event of the keyboard for the active window: code is the Amiga
+    // raw key code, with 0x80 set for a release. A window with IDCMP_RAWKEY
+    // gets every event as it is. One with only IDCMP_VANILLAKEY gets a press
+    // that types a single character, with the character as the code.
+    void raw_key(u16 code, u16 qualifier);
+    // The keyboard qualifier the mouse button messages carry.
+    void set_qualifier(u16 qualifier) { qualifier_ = qualifier; }
     u32 window_under(i32 x, i32 y) const { return window_at(x, y); }
     void begin_batch();
     void end_batch();
@@ -579,7 +598,10 @@ private:
     // window's bar when that changes.
     void light_bar_button(bool lit);
     bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0,
-                           u32 iaddress_bytes = 0);
+                           u32 iaddress_bytes = 0, u16 qualifier = 0);
+    void post_mouse_button(u16 code);
+    // The IDCMPFlags of an open window, 0 for any other.
+    u32 window_idcmp(u32 window) const;
     static void notify_idcmp_update(void* ctx, u32 window, const u32* tags, u32 count,
                                     u32 flags);
     void post_idcmp_update(u32 window, const u32* tags, u32 count);
@@ -653,6 +675,8 @@ private:
     Graphics* graphics_ = nullptr;
     DisplayState* display_ = nullptr;
     u64 (*clock_)() = nullptr;
+    KeymapLibrary* keymaps_ = nullptr;
+    u16 qualifier_ = 0;
     u32 base_ = 0;
     u32 front_ = 0;
     u32 default_screen_ = 0;
