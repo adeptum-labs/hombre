@@ -683,7 +683,7 @@ void shell_has_size_gadget() {
     CHECK(open_shell(r, shell));
     const u32 window = shell_window(r, screen);
     CHECK(window != 0);
-    CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
+    CHECK_EQ(r.get8(window + wd_BorderRight), 14u);
     CHECK_EQ(r.get8(window + wd_BorderBottom), 2u);
     CHECK_EQ(rows(r, window), 46u);
     CHECK_EQ(r.get16(window + wd_MinWidth), 160u);
@@ -856,9 +856,9 @@ void shell_has_scroll_gadget() {
     CHECK(box_y1 < size_box.y0);
     CHECK_EQ(box_y1, size_box.y0 - 2);
 
-    // The size gadget shows its engraved diagonal grip on screen, and dragging it resizes.
+    // The size gadget shows its 3.1 corner and light box, and dragging it resizes.
     CHECK_EQ(pixel(r, bm, wl + ww - 4, wt + wh - 4), 1u);
-    CHECK_EQ(pixel(r, bm, wl + ww - 3, wt + wh - 3), 2u);
+    CHECK_EQ(pixel(r, bm, wl + ww - 5, wt + wh - 5), 2u);
     press(r, wl + ww - 5, wt + wh - 5);
     move_to(r, wl + ww - 45, wt + wh - 25);
     release(r, wl + ww - 45, wt + wh - 25);
