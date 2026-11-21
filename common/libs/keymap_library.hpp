@@ -97,9 +97,18 @@ constexpr u8 KCF_DEAD = 0x20;
 constexpr u8 KCF_STRING = 0x40;
 constexpr u8 KCF_NOP = 0x80;
 
-// struct InputEvent, and the qualifier bits it carries.
+// The flags of a dead-key descriptor entry, and the part of its value that
+// numbers the dead key.
+constexpr u8 DPF_MOD = 0x01;
+constexpr u8 DPF_DEAD = 0x08;
+constexpr u8 DP_2DINDEXMASK = 0x0F;
+
+// struct InputEvent, and the qualifier bits it carries. The previous key
+// down codes and qualifiers sit in the ie_position union.
 constexpr u32 ie_Code = 6;
 constexpr u32 ie_Qualifier = 8;
+constexpr u32 ie_Prev1DownCode = 14;
+constexpr u32 ie_Prev1DownQual = 15;
 constexpr u16 IEQUALIFIER_LSHIFT = 0x0001;
 constexpr u16 IEQUALIFIER_RSHIFT = 0x0002;
 constexpr u16 IEQUALIFIER_CAPSLOCK = 0x0004;
@@ -130,7 +139,8 @@ public:
     // The characters the raw key code types under the qualifier in the
     // default keymap, as MapRawKey would give them, copied to out. 0 for a
     // key that types nothing, a key-up code, or more than max characters;
-    // max is at most kScratchBytes.
+    // max is at most kScratchBytes. The library keeps the key that went down
+    // before, so a dead key followed by a letter types the accented letter.
     u32 map_vanilla(u16 code, u16 qualifier, u8* out, u32 max);
 
 private:
@@ -141,9 +151,16 @@ private:
     // The guest buffer map_vanilla has map_code write the characters to.
     static constexpr u32 kScratchBytes = 8;
 
+    // A raw key code and the qualifier it went down with.
+    struct KeyDown {
+        u32 code = 0;
+        u32 qualifier = 0;
+    };
+
     u32 alloc_string(const char* text);
     u32 map_raw(native::Bus& b, u32 event, u32 buffer, u32 length, u32 keymap);
-    u32 map_code(native::Bus& b, u32 code, u32 qualifier, u32 buffer, u32 length, u32 keymap);
+    u32 map_code(native::Bus& b, KeyDown key, KeyDown previous, u32 buffer, u32 length,
+                 u32 keymap);
     u32 map_ansi(native::Bus& b, u32 string, u32 count, u32 buffer, u32 length, u32 keymap);
     bool find_ansi(native::Bus& b, u32 keymap, u32 ch, u32& code, u32& qualifier);
 
@@ -155,6 +172,7 @@ private:
     u32 keymap_ = 0;
     u32 default_ = 0;
     u32 scratch_ = 0;
+    KeyDown last_down_{};
     NativeVector vectors_[kVectors]{};
 };
 

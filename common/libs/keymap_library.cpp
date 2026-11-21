@@ -44,64 +44,90 @@ constexpr u32 kControlMask = ~0x60u;   // Control clears bits 5 and 6
 constexpr u32 kLoKeys = 64;
 constexpr u32 kHiKeys = 56;
 constexpr u8 kKeyUp = 0x80;
+constexpr u32 kFirstQualifierKey = 0x60;  // the shift, caps, control and alt keys
+constexpr u32 kLastQualifierKey = 0x67;
+constexpr u8 kShiftAlt = KCF_SHIFT | KCF_ALT;
+constexpr u8 kDeadVanilla = KCF_DEAD | KC_VANILLA;
 
-// A vanilla entry, normal in the low byte and alt+shift in the high one.
-// Alt types the unshifted character, as the letters do without a dead key.
-constexpr u32 vanilla(u8 normal, u8 shift) {
+// A map entry holds the byte of each qualifier state, plain in the low byte,
+// then shift, alt and alt+shift.
+constexpr u32 mapped(u8 normal, u8 shift, u8 alt, u8 alt_shift) {
     return static_cast<u32>(normal) | (static_cast<u32>(shift) << 8) |
-           (static_cast<u32>(normal) << 16) | (static_cast<u32>(shift) << 24);
+           (static_cast<u32>(alt) << 16) | (static_cast<u32>(alt_shift) << 24);
 }
 
-constexpr u32 letter(u8 lower) { return vanilla(lower, lower - 0x20); }
+// Alt types the unshifted character, as the punctuation keys do.
+constexpr u32 vanilla(u8 normal, u8 shift) { return mapped(normal, shift, normal, shift); }
+
+constexpr u32 letter(u8 lower, u8 alt, u8 alt_shift) {
+    return mapped(lower, lower - 0x20, alt, alt_shift);
+}
 
 constexpr u32 plain(u8 c) { return c; }
 
+// The entry of a key with one qualifier bit: plain, then qualified.
+constexpr u32 qualified(u8 normal, u8 with_qualifier) {
+    return mapped(normal, with_qualifier, 0, 0);
+}
+
 // The USA keymap's raw keys 0x00-0x3F: the top row, the letter rows, and
-// the numeric pad. A zero entry belongs to a key that maps nothing.
+// the numeric pad. A zero entry belongs to a key that maps nothing, or to a
+// dead-capable key, whose entry init points at its descriptor table.
 constexpr u32 kUsaLoMap[kLoKeys] = {
-    vanilla('`', '~'), vanilla('1', '!'), vanilla('2', '@'), vanilla('3', '#'),
-    vanilla('4', '$'), vanilla('5', '%'), vanilla('6', '^'), vanilla('7', '&'),
-    vanilla('8', '*'), vanilla('9', '('), vanilla('0', ')'), vanilla('-', '_'),
+    vanilla('`', '~'), mapped('1', '!', 0xB9, '!'), mapped('2', '@', 0xB2, '@'),
+    mapped('3', '#', 0xB3, '#'),
+    mapped('4', '$', 0xA2, '$'), mapped('5', '%', 0xBC, '%'), mapped('6', '^', 0xBD, '^'),
+    mapped('7', '&', 0xBE, '&'),
+    mapped('8', '*', 0xB7, '*'), mapped('9', '(', 0xAB, '('), mapped('0', ')', 0xBB, ')'),
+    vanilla('-', '_'),
     vanilla('=', '+'), vanilla('\\', '|'), 0, plain('0'),
-    letter('q'), letter('w'), letter('e'), letter('r'),
-    letter('t'), letter('y'), letter('u'), letter('i'),
-    letter('o'), letter('p'), vanilla('[', '{'), vanilla(']', '}'),
+    letter('q', 0xE5, 0xC5), letter('w', 0xB0, 0xB0), 0, letter('r', 0xAE, 0xAE),
+    letter('t', 0xFE, 0xDE), 0, 0, 0,
+    0, letter('p', 0xB6, 0xB6), vanilla('[', '{'), vanilla(']', '}'),
     0, plain('1'), plain('2'), plain('3'),
-    letter('a'), letter('s'), letter('d'), letter('f'),
-    letter('g'), letter('h'), letter('j'), letter('k'),
-    letter('l'), vanilla(';', ':'), vanilla('\'', '"'), 0,
+    0, letter('s', 0xDF, 0xA7), letter('d', 0xF0, 0xD0), 0,
+    0, 0, 0, 0,
+    letter('l', 0xA3, 0xA3), vanilla(';', ':'), vanilla('\'', '"'), 0,
     0, plain('4'), plain('5'), plain('6'),
-    0, letter('z'), letter('x'), letter('c'),
-    letter('v'), letter('b'), letter('n'), letter('m'),
+    mapped('<', '>', 0xAB, 0xBB), letter('z', 0xB1, 0xAC), letter('x', 0xD7, 0xF7),
+    letter('c', 0xE7, 0xC7),
+    letter('v', 0xAA, 0xAA), letter('b', 0xBA, 0xBA), 0, letter('m', 0xB8, 0xBF),
     vanilla(',', '<'), vanilla('.', '>'), vanilla('/', '?'), 0,
     plain('.'), plain('7'), plain('8'), plain('9'),
 };
 
 constexpr u8 kUsaLoTypes[kLoKeys] = {
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // ` 1 2 3
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // 4 5 6 7
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // 8 9 0 -
-    KC_VANILLA, KC_VANILLA, KCF_NOP, KC_NOQUAL,      // = \ 0x0E pad 0
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // q w e r
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // t y u i
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // o p [ ]
-    KCF_NOP, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,        // 0x1C pad 1 2 3
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // a s d f
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // g h j k
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KCF_NOP,     // l ; ' 0x2B
-    KCF_NOP, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,        // 0x2C pad 4 5 6
-    KCF_NOP, KC_VANILLA, KC_VANILLA, KC_VANILLA,     // 0x30 z x c
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KC_VANILLA,  // v b n m
-    KC_VANILLA, KC_VANILLA, KC_VANILLA, KCF_NOP,     // , . / 0x3B
-    KC_NOQUAL, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,      // pad . 7 8 9
+    KC_VANILLA, kShiftAlt, KC_VANILLA, kShiftAlt,        // ` 1 2 3
+    kShiftAlt, kShiftAlt, KC_VANILLA, kShiftAlt,         // 4 5 6 7
+    kShiftAlt, kShiftAlt, kShiftAlt, KC_VANILLA,         // 8 9 0 -
+    KCF_SHIFT, KC_VANILLA, KCF_NOP, KC_NOQUAL,           // = \ 0x0E pad 0
+    KC_VANILLA, KC_VANILLA, kDeadVanilla, KC_VANILLA,    // q w e r
+    KC_VANILLA, kDeadVanilla, kDeadVanilla, kDeadVanilla,  // t y u i
+    kDeadVanilla, KC_VANILLA, KC_VANILLA, KC_VANILLA,    // o p [ ]
+    KCF_NOP, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,            // 0x1C pad 1 2 3
+    kDeadVanilla, KC_VANILLA, KC_VANILLA, kDeadVanilla,  // a s d f
+    kDeadVanilla, kDeadVanilla, kDeadVanilla, kDeadVanilla,  // g h j k
+    KC_VANILLA, KCF_SHIFT, KCF_SHIFT, KCF_NOP,           // l ; ' 0x2B
+    KCF_NOP, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,            // 0x2C pad 4 5 6
+    kShiftAlt, KC_VANILLA, KC_VANILLA, KC_VANILLA,       // < z x c
+    KC_VANILLA, KC_VANILLA, kDeadVanilla, KC_VANILLA,    // v b n m
+    KCF_SHIFT, KCF_SHIFT, KCF_SHIFT, KCF_NOP,            // , . / 0x3B
+    KC_NOQUAL, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,          // pad . 7 8 9
 };
+
+// Which keys repeat and which Caps Lock shifts, one bit per key, key 0 in
+// the low bit of the first byte.
+constexpr u8 kUsaLoCapsable[kLoKeys / 8] = {0x00, 0x00, 0xFF, 0x03, 0xFF, 0x01, 0xFE, 0x00};
+constexpr u8 kUsaLoRepeatable[kLoKeys / 8] = {0xFF, 0xBF, 0xFF, 0xEF, 0xFF, 0xEF, 0xFF, 0xF7};
+constexpr u8 kUsaHiRepeatable[kHiKeys / 8] = {0x47, 0xFF, 0xFF, 0x7F, 0x00, 0x80, 0x00};
 
 // The USA keymap's raw keys 0x40-0x77: Space, the editing keys, the
 // cursor keys, the function keys and the rest of the numeric pad. The
-// strings and the map entries of the string keys are filled in by init.
+// strings and the map entries of the string keys and of Space, a dead-capable
+// key, are filled in by init.
 constexpr u32 kUsaHiMap[kHiKeys] = {
-    plain(' '), plain(0x08), plain(0x09), plain(0x0D),       // space bs tab pad enter
-    plain(0x0D), plain(0x1B), plain(0x7F), 0,                // return esc del
+    0, plain(0x08), plain(0x09), plain(0x0D),                // space bs tab pad enter
+    qualified(0x0D, 0x0A), qualified(0x1B, 0x9B), plain(0x7F), 0,  // return esc del
     0, 0, plain('-'), 0,                                     // 0x48 0x49 pad - 0x4B
     0, 0, 0, 0,                                              // cursor strings
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,                            // F1-F10 strings
@@ -112,8 +138,8 @@ constexpr u32 kUsaHiMap[kHiKeys] = {
 };
 
 constexpr u8 kUsaHiTypes[kHiKeys] = {
-    KC_NOQUAL, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,              // space bs tab pad enter
-    KC_NOQUAL, KC_NOQUAL, KC_NOQUAL, KCF_NOP,                // return esc del 0x47
+    KCF_DEAD | KCF_ALT, KC_NOQUAL, KC_NOQUAL, KC_NOQUAL,     // space bs tab pad enter
+    KCF_CONTROL, KCF_ALT, KC_NOQUAL, KCF_NOP,                // return esc del 0x47
     KCF_NOP, KCF_NOP, KC_NOQUAL, KCF_NOP,                    // 0x48 0x49 pad - 0x4B
     KCF_STRING | KCF_SHIFT, KCF_STRING | KCF_SHIFT,          // up down
     KCF_STRING | KCF_SHIFT, KCF_STRING | KCF_SHIFT,          // right left
@@ -158,12 +184,82 @@ constexpr UsaString kUsaStrings[] = {
     {0x5F, "\x9B" "?~", nullptr},       // help
 };
 
-// The letter keys, whose Caps Lock state swaps their normal and shifted
-// characters.
-constexpr bool usa_capsable(u32 code) {
-    return (code >= 0x10 && code <= 0x19) || (code >= 0x20 && code <= 0x28) ||
-           (code >= 0x31 && code <= 0x37);
-}
+// The descriptor tables of the dead-capable keys: a (flag, value) pair for
+// each combination of the shift, alt and control bits of the key's type, in
+// the order none, shift, alt, shift+alt, ctrl and so on. A plain pair has
+// flag 0 and the character as value. A DPF_MOD pair has the offset of its
+// translation table, which follows the pairs and holds the character
+// typed after no dead key, then after dead key 1 to 5. A DPF_DEAD pair has
+// the dead key number as value and types nothing. Alt-f, g, h, j and k are
+// the dead keys acute, grave, circumflex, tilde and diaeresis.
+constexpr u8 kDeadE[] = {
+    DPF_MOD, 16, DPF_MOD, 22, 0, 0xA9, 0, 0xA9, 0, 0x05, 0, 0x05, 0, 0x85, 0, 0x85,
+    'e', 0xE9, 0xE8, 0xEA, 'e', 0xEB,
+    'E', 0xC9, 0xC8, 0xCA, 'E', 0xCB,
+};
+constexpr u8 kDeadY[] = {
+    DPF_MOD, 16, DPF_MOD, 22, 0, 0xA4, 0, 0xA5, 0, 0x19, 0, 0x19, 0, 0x99, 0, 0x99,
+    'y', 0xFD, 'y', 'y', 'y', 0xFF,
+    'Y', 0xDD, 'Y', 'Y', 'Y', 'Y',
+};
+constexpr u8 kDeadU[] = {
+    DPF_MOD, 16, DPF_MOD, 22, 0, 0xB5, 0, 0xB5, 0, 0x15, 0, 0x15, 0, 0x95, 0, 0x95,
+    'u', 0xFA, 0xF9, 0xFB, 'u', 0xFC,
+    'U', 0xDA, 0xD9, 0xDB, 'U', 0xDC,
+};
+constexpr u8 kDeadI[] = {
+    DPF_MOD, 16, DPF_MOD, 22, 0, 0xA1, 0, 0xA6, 0, 0x09, 0, 0x09, 0, 0x89, 0, 0x89,
+    'i', 0xED, 0xEC, 0xEE, 'i', 0xEF,
+    'I', 0xCD, 0xCC, 0xCE, 'I', 0xCF,
+};
+constexpr u8 kDeadO[] = {
+    DPF_MOD, 16, DPF_MOD, 22, 0, 0xF8, 0, 0xD8, 0, 0x0F, 0, 0x0F, 0, 0x8F, 0, 0x8F,
+    'o', 0xF3, 0xF2, 0xF4, 0xF5, 0xF6,
+    'O', 0xD3, 0xD2, 0xD4, 0xD5, 0xD6,
+};
+constexpr u8 kDeadA[] = {
+    DPF_MOD, 16, DPF_MOD, 22, 0, 0xE6, 0, 0xC6, 0, 0x01, 0, 0x01, 0, 0x81, 0, 0x81,
+    'a', 0xE1, 0xE0, 0xE2, 0xE3, 0xE4,
+    'A', 0xC1, 0xC0, 0xC2, 0xC3, 0xC4,
+};
+constexpr u8 kDeadN[] = {
+    DPF_MOD, 16, DPF_MOD, 22, 0, 0xAD, 0, 0xAF, 0, 0x0E, 0, 0x0E, 0, 0x8E, 0, 0x8E,
+    'n', 'n', 'n', 'n', 0xF1, 'n',
+    'N', 'N', 'N', 'N', 0xD1, 'N',
+};
+constexpr u8 kDeadF[] = {
+    0, 'f', 0, 'F', DPF_DEAD, 1, DPF_DEAD, 1, 0, 0x06, 0, 0x06, 0, 0x86, 0, 0x86,
+};
+constexpr u8 kDeadG[] = {
+    0, 'g', 0, 'G', DPF_DEAD, 2, DPF_DEAD, 2, 0, 0x07, 0, 0x07, 0, 0x87, 0, 0x87,
+};
+constexpr u8 kDeadH[] = {
+    0, 'h', 0, 'H', DPF_DEAD, 3, DPF_DEAD, 3, 0, 0x08, 0, 0x08, 0, 0x88, 0, 0x88,
+};
+constexpr u8 kDeadJ[] = {
+    0, 'j', 0, 'J', DPF_DEAD, 4, DPF_DEAD, 4, 0, 0x0A, 0, 0x0A, 0, 0x8A, 0, 0x8A,
+};
+constexpr u8 kDeadK[] = {
+    0, 'k', 0, 'K', DPF_DEAD, 5, DPF_DEAD, 5, 0, 0x0B, 0, 0x0B, 0, 0x8B, 0, 0x8B,
+};
+// Space has only the none and alt combinations; alt types a no-break space.
+constexpr u8 kDeadSpace[] = {DPF_MOD, 4, 0, 0xA0, ' ', 0xB4, '`', '^', '~', 0xA8};
+
+struct UsaDead {
+    u8 code;
+    const u8* bytes;
+    u32 size;
+};
+
+constexpr UsaDead kUsaDeadKeys[] = {
+    {0x12, kDeadE, sizeof kDeadE},   {0x15, kDeadY, sizeof kDeadY},
+    {0x16, kDeadU, sizeof kDeadU},   {0x17, kDeadI, sizeof kDeadI},
+    {0x18, kDeadO, sizeof kDeadO},   {0x20, kDeadA, sizeof kDeadA},
+    {0x23, kDeadF, sizeof kDeadF},   {0x24, kDeadG, sizeof kDeadG},
+    {0x25, kDeadH, sizeof kDeadH},   {0x26, kDeadJ, sizeof kDeadJ},
+    {0x27, kDeadK, sizeof kDeadK},   {0x36, kDeadN, sizeof kDeadN},
+    {0x40, kDeadSpace, sizeof kDeadSpace},
+};
 
 u32 length_of(const char* text) {
     u32 n = 0;
@@ -191,10 +287,107 @@ void put_bytes(Bus& b, u32 at, const u8* bytes, u32 count) {
     }
 }
 
-// Sets the bit of key in a capsable or repeatable table.
-void set_key_bit(Bus& b, u32 table, u32 key) {
-    const u32 at = table + key / 8;
-    b.w8(at, b.r8(at) | (1u << (key % 8)));
+// Where a raw key sits in a keymap. The type is KCF_NOP for a key that has
+// no entry: a key-up code, a code past the last key, or a bad keymap.
+struct KeyRef {
+    u32 type = KCF_NOP;
+    u32 entry = 0;
+    bool capsable = false;
+};
+
+KeyRef locate_key(Bus& b, u32 keymap, u32 code) {
+    if ((code & kKeyUp) != 0 || code >= kLoKeys + kHiKeys) {
+        return {};
+    }
+    const bool hi = code >= kLoKeys;
+    const u32 index = hi ? code - kLoKeys : code;
+    const u32 types = b.r32(keymap + (hi ? km_HiKeyMapTypes : km_LoKeyMapTypes));
+    const u32 map = b.r32(keymap + (hi ? km_HiKeyMap : km_LoKeyMap));
+    const u32 caps_table = b.r32(keymap + (hi ? km_HiCapsable : km_LoCapsable));
+    if (!b.ok() || types == 0 || map == 0) {
+        return {};
+    }
+    KeyRef key;
+    key.type = b.r8(types + index);
+    key.entry = b.r32(map + index * 4);
+    key.capsable = caps_table != 0 && (b.r8(caps_table + index / 8) & (1u << (index % 8))) != 0;
+    return b.ok() ? key : KeyRef{};
+}
+
+// The position of the entry a key of the type has for the qualifier: one per
+// combination of the shift, alt and control bits the type has, in that
+// order. Caps Lock swaps the shift state of a capsable key.
+u32 pair_index(u32 type, u32 qualifier, bool capsable) {
+    const bool shift = (qualifier & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT)) != 0;
+    const bool caps = capsable && (qualifier & IEQUALIFIER_CAPSLOCK) != 0;
+    const bool states[] = {shift != caps, (qualifier & (IEQUALIFIER_LALT | IEQUALIFIER_RALT)) != 0,
+                           (qualifier & IEQUALIFIER_CONTROL) != 0};
+    const u32 bits[] = {KCF_SHIFT, KCF_ALT, KCF_CONTROL};
+    u32 index = 0;
+    u32 weight = 1;
+    for (u32 i = 0; i < 3; ++i) {
+        if ((type & bits[i]) != 0) {
+            if (states[i]) {
+                index |= weight;
+            }
+            weight <<= 1;
+        }
+    }
+    return index;
+}
+
+// The number of the dead key the key down makes, 0 if it makes none.
+u32 dead_number(Bus& b, u32 keymap, u32 code, u32 qualifier) {
+    const KeyRef key = locate_key(b, keymap, code);
+    if ((key.type & KCF_DEAD) == 0 || key.entry == 0) {
+        return 0;
+    }
+    const u32 at = key.entry + pair_index(key.type, qualifier, key.capsable) * 2;
+    return (b.r8(at) & DPF_DEAD) != 0 ? b.r8(at + 1) & DP_2DINDEXMASK : 0;
+}
+
+constexpr u32 kNoCharacter = 0xFFFFFFFF;  // a dead key types nothing
+constexpr u32 kDeadKeyCount = 5;
+
+// The character a dead-capable key types, after the key down before it.
+u32 dead_capable_character(Bus& b, u32 keymap, const KeyRef& key, u32 qualifier,
+                           u32 previous_code, u32 previous_qualifier) {
+    if (key.entry == 0) {
+        return kNoCharacter;
+    }
+    const u32 at = key.entry + pair_index(key.type, qualifier, key.capsable) * 2;
+    const u32 flag = b.r8(at);
+    const u32 value = b.r8(at + 1);
+    if ((flag & DPF_DEAD) != 0) {
+        return kNoCharacter;
+    }
+    if ((flag & DPF_MOD) == 0) {
+        return value;
+    }
+    // TODO: a dead key typed after a dead key (DP_2DFACMASK) is not combined.
+    const u32 dead = dead_number(b, keymap, previous_code, previous_qualifier);
+    return b.r8(key.entry + value + (dead <= kDeadKeyCount ? dead : 0));
+}
+
+// The character a key types plain or shifted with no dead key before it, or
+// kNoCharacter if the key has no such state or makes a dead key.
+u32 ansi_character(Bus& b, u32 type, u32 entry, bool shifted) {
+    if (shifted && (type & KCF_SHIFT) == 0) {
+        return kNoCharacter;
+    }
+    if ((type & KCF_DEAD) == 0) {
+        return (entry >> (shifted ? 8 : 0)) & 0xFF;
+    }
+    if (entry == 0) {
+        return kNoCharacter;
+    }
+    const u32 at = entry + (shifted ? 2 : 0);
+    const u32 flag = b.r8(at);
+    const u32 value = b.r8(at + 1);
+    if ((flag & DPF_DEAD) != 0) {
+        return kNoCharacter;
+    }
+    return (flag & DPF_MOD) != 0 ? b.r8(entry + value) : value;
 }
 
 }
@@ -247,6 +440,7 @@ bool KeymapLibrary::init(Machine& m, Exec& exec) {
     keymap_node_ = 0;
     keymap_ = 0;
     default_ = 0;
+    last_down_ = KeyDown{};
     scratch_ = exec.alloc(kScratchBytes, kBlockFlags);
     if (scratch_ == 0) {
         return false;
@@ -280,14 +474,17 @@ bool KeymapLibrary::init(Machine& m, Exec& exec) {
     put_u32s(b, lo_map, kUsaLoMap, kLoKeys);
     put_bytes(b, hi_types, kUsaHiTypes, sizeof kUsaHiTypes);
     put_u32s(b, hi_map, kUsaHiMap, kHiKeys);
-    for (u32 code = 0; code < kLoKeys; ++code) {
-        if (usa_capsable(code)) {
-            set_key_bit(b, lo_caps, code);
+    put_bytes(b, lo_caps, kUsaLoCapsable, sizeof kUsaLoCapsable);
+    put_bytes(b, lo_repeat, kUsaLoRepeatable, sizeof kUsaLoRepeatable);
+    put_bytes(b, hi_repeat, kUsaHiRepeatable, sizeof kUsaHiRepeatable);
+    // No high key is capsable: hi_caps stays as MEMF_CLEAR left it.
+    for (const UsaDead& d : kUsaDeadKeys) {
+        const u32 table = exec.alloc(d.size, kBlockFlags);
+        if (table == 0) {
+            return false;
         }
-        set_key_bit(b, lo_repeat, code);  // every key below 0x4B repeats
-    }
-    for (u32 key = 0x40; key <= 0x4A; ++key) {
-        set_key_bit(b, hi_repeat, key - 0x40);
+        put_bytes(b, table, d.bytes, d.size);
+        b.w32(d.code < kLoKeys ? lo_map + d.code * 4 : hi_map + (d.code - kLoKeys) * 4, table);
     }
     for (const UsaString& s : kUsaStrings) {
         const bool shifted = s.shifted != nullptr;
@@ -388,7 +585,12 @@ u32 KeymapLibrary::map_vanilla(u16 code, u16 qualifier, u8* out, u32 max) {
         return 0;
     }
     Bus b(*machine_);
-    const u32 count = map_code(b, code, qualifier, scratch_, max, default_);
+    const KeyDown key{code, qualifier};
+    const u32 count = map_code(b, key, last_down_, scratch_, max, default_);
+    // A qualifier key between a dead key and its letter does not break the pair.
+    if ((code & kKeyUp) == 0 && (code < kFirstQualifierKey || code > kLastQualifierKey)) {
+        last_down_ = key;
+    }
     if (!b.ok() || count == 0 || count > max) {
         return 0;
     }
@@ -404,10 +606,11 @@ u32 KeymapLibrary::map_raw(Bus& b, u32 event, u32 buffer, u32 length, u32 keymap
     }
     const u32 qualifier = b.r16(event + ie_Qualifier);
     const u32 code = b.r16(event + ie_Code) & 0xFF;
-    return b.ok() ? map_code(b, code, qualifier, buffer, length, keymap) : 0;
+    const KeyDown previous{b.r8(event + ie_Prev1DownCode), b.r8(event + ie_Prev1DownQual)};
+    return b.ok() ? map_code(b, {code, qualifier}, previous, buffer, length, keymap) : 0;
 }
 
-u32 KeymapLibrary::map_code(Bus& b, u32 code, u32 qualifier, u32 buffer, u32 length,
+u32 KeymapLibrary::map_code(Bus& b, KeyDown key, KeyDown previous, u32 buffer, u32 length,
                             u32 keymap) {
     if (keymap == 0) {
         keymap = default_;
@@ -415,46 +618,18 @@ u32 KeymapLibrary::map_code(Bus& b, u32 code, u32 qualifier, u32 buffer, u32 len
     if (keymap == 0) {
         return 0;
     }
-    if ((code & kKeyUp) != 0 || code > 0x77) {
-        return 0;  // a key-up code, or no raw key, types nothing
-    }
-    const bool hi = code >= 0x40;
-    const u32 index = hi ? code - 0x40 : code;
-    const u32 types = b.r32(keymap + (hi ? km_HiKeyMapTypes : km_LoKeyMapTypes));
-    const u32 map = b.r32(keymap + (hi ? km_HiKeyMap : km_LoKeyMap));
-    if (!b.ok() || types == 0 || map == 0) {
-        return 0;
-    }
-    const u32 type = b.r8(types + index);
-    const bool shift = (qualifier & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT)) != 0;
-    const bool caps = (qualifier & IEQUALIFIER_CAPSLOCK) != 0;
-    const bool control = (qualifier & IEQUALIFIER_CONTROL) != 0;
-    const bool alt = (qualifier & (IEQUALIFIER_LALT | IEQUALIFIER_RALT)) != 0;
+    const u32 qualifier = key.qualifier;
+    const KeyRef ref = locate_key(b, keymap, key.code);
+    const u32 type = ref.type;
     if (!b.ok() || (type & KCF_NOP) != 0) {
         return 0;
     }
     if ((type & KCF_STRING) != 0) {
-        const u32 table = b.r32(map + index * 4);
-        if (!b.ok() || table == 0) {
+        const u32 table = ref.entry;
+        if (table == 0) {
             return 0;
         }
-        u32 pair = 0;
-        u32 bit = 1;
-        if ((type & KCF_SHIFT) != 0) {
-            if (shift) {
-                pair |= bit;
-            }
-            bit <<= 1;
-        }
-        if ((type & KCF_ALT) != 0) {
-            if (alt) {
-                pair |= bit;
-            }
-            bit <<= 1;
-        }
-        if ((type & KCF_CONTROL) != 0 && control) {
-            pair |= bit;
-        }
+        const u32 pair = pair_index(type, qualifier, false);
         const u32 chars = b.r8(table + pair * 2);
         const u32 offset = b.r8(table + pair * 2 + 1);
         if (!b.ok()) {
@@ -468,29 +643,24 @@ u32 KeymapLibrary::map_code(Bus& b, u32 code, u32 qualifier, u32 buffer, u32 len
         }
         return b.ok() ? chars : 0;
     }
-    const u32 entry = b.r32(map + index * 4);
-    const u32 caps_table = b.r32(keymap + (hi ? km_HiCapsable : km_LoCapsable));
-    const bool capsable =
-        caps_table != 0 && (b.r8(caps_table + index / 8) & (1u << (index % 8))) != 0;
-    if (!b.ok()) {
-        return 0;
-    }
-    bool use_shift = shift && (type & KCF_SHIFT) != 0;
-    const bool use_alt = alt && (type & KCF_ALT) != 0;
-    if (caps && capsable && (type & KCF_SHIFT) != 0) {
-        use_shift = !use_shift;
-    }
-    u32 character = entry;
-    if (use_alt && use_shift) {
-        character = entry >> 24;
-    } else if (use_alt) {
-        character = entry >> 16;
-    } else if (use_shift) {
-        character = entry >> 8;
-    }
-    character &= 0xFF;
-    if (control && (type & KCF_CONTROL) != 0) {
-        character &= kControlMask;
+    u32 character;
+    if ((type & KCF_DEAD) != 0) {
+        character = dead_capable_character(b, keymap, ref, qualifier, previous.code,
+                                           previous.qualifier);
+        if (!b.ok() || character == kNoCharacter) {
+            return 0;
+        }
+    } else {
+        // A vanilla key has four characters, and Control strips the character
+        // of the state instead of choosing one; the other types have an
+        // entry for each combination of their bits, as the string keys do.
+        const bool vanilla_type = (type & KC_VANILLA) == KC_VANILLA;
+        const u32 state = pair_index(vanilla_type ? type & ~KCF_CONTROL : type, qualifier,
+                                     ref.capsable);
+        character = (ref.entry >> (state * 8)) & 0xFF;
+        if (vanilla_type && (qualifier & IEQUALIFIER_CONTROL) != 0) {
+            character &= kControlMask;
+        }
     }
     if (length == 0) {
         return kTooSmall;
@@ -514,22 +684,19 @@ bool KeymapLibrary::find_ansi(Bus& b, u32 keymap, u32 ch, u32& code, u32& qualif
         }
         for (u32 i = 0; i < count; ++i) {
             const u32 type = b.r8(types + i);
-            if ((type & (KCF_NOP | KCF_STRING | KCF_DEAD)) != 0) {
+            if ((type & (KCF_NOP | KCF_STRING)) != 0) {
                 continue;
             }
             const u32 entry = b.r32(map + i * 4);
             if (!b.ok()) {
                 return false;
             }
-            if ((entry & 0xFF) == ch) {
-                code = first + i;
-                qualifier = 0;
-                return true;
-            }
-            if ((type & KCF_SHIFT) != 0 && ((entry >> 8) & 0xFF) == ch) {
-                code = first + i;
-                qualifier = IEQUALIFIER_LSHIFT;
-                return true;
+            for (u32 shifted = 0; shifted < 2; ++shifted) {
+                if (ansi_character(b, type, entry, shifted != 0) == ch) {
+                    code = first + i;
+                    qualifier = shifted != 0 ? IEQUALIFIER_LSHIFT : 0;
+                    return true;
+                }
             }
         }
     }

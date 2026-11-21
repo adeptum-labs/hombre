@@ -143,10 +143,14 @@ public:
         return m.cpu.d[0];
     }
 
-    // MapRawKey of the raw key with the qualifier, into kOut.
-    u32 map_raw(u32 code, u32 qualifier, u32 length = 8) {
+    // MapRawKey of the raw key with the qualifier, into kOut. The previous key
+    // down is the one the InputEvent carries, none by default.
+    u32 map_raw(u32 code, u32 qualifier, u32 length = 8, u32 prev_code = 0xFF,
+                u32 prev_qualifier = 0) {
         put16(kEvent + ie_Code, code);
         put16(kEvent + ie_Qualifier, qualifier);
+        put8(kEvent + ie_Prev1DownCode, prev_code);
+        put8(kEvent + ie_Prev1DownQual, prev_qualifier);
         m.cpu.a[0] = kEvent;
         m.cpu.a[1] = kOut;
         m.cpu.d[1] = length;
@@ -238,6 +242,83 @@ void raw_keys_type_their_characters() {
     CHECK_EQ(r.map_raw(0x4C, 0, 1), 0xFFFFFFFFu);
 }
 
+void alt_characters_match_the_rom_map() {
+    Rig r;
+    const struct {
+        u32 code;
+        u32 qualifier;
+        u32 expected;
+    } cases[] = {
+        {0x01, IEQUALIFIER_LALT, 0xB9},
+        {0x20, IEQUALIFIER_LALT, 0xE6},
+        {0x20, IEQUALIFIER_LALT | IEQUALIFIER_LSHIFT, 0xC6},
+        {0x21, IEQUALIFIER_LALT, 0xDF},
+        {0x12, IEQUALIFIER_CONTROL | IEQUALIFIER_LALT, 0x85},
+        {0x12, IEQUALIFIER_RALT, 0xA9},
+        {0x20, IEQUALIFIER_CONTROL, 0x01},
+        {0x44, IEQUALIFIER_CONTROL, 0x0A},
+        {0x45, 0, 0x1B},
+        {0x45, IEQUALIFIER_LALT, 0x9B},
+        {0x40, IEQUALIFIER_LALT, 0xA0},
+    };
+    for (const auto& c : cases) {
+        CHECK_EQ(r.map_raw(c.code, c.qualifier), 1u);
+        CHECK_EQ(r.get8(kOut), c.expected);
+    }
+}
+
+void dead_keys_make_nothing_and_accent_the_next_key() {
+    Rig r;
+    const u32 acute = 0x23;
+    const u32 circumflex = 0x25;
+    const u32 diaeresis = 0x27;
+    CHECK_EQ(r.map_raw(acute, IEQUALIFIER_LALT), 0u);
+    CHECK_EQ(r.map_raw(0x12, 0, 8, acute, IEQUALIFIER_LALT), 1u);
+    CHECK_EQ(r.get8(kOut), 0xE9u);
+    CHECK_EQ(r.map_raw(0x12, IEQUALIFIER_LSHIFT, 8, acute, IEQUALIFIER_LALT), 1u);
+    CHECK_EQ(r.get8(kOut), 0xC9u);
+    CHECK_EQ(r.map_raw(0x12, IEQUALIFIER_CAPSLOCK, 8, 0x24, IEQUALIFIER_LALT), 1u);
+    CHECK_EQ(r.get8(kOut), 0xC8u);  // grave, capital by Caps Lock
+    CHECK_EQ(r.map_raw(0x16, 0, 8, diaeresis, IEQUALIFIER_LALT), 1u);
+    CHECK_EQ(r.get8(kOut), 0xFCu);
+    CHECK_EQ(r.map_raw(0x40, 0, 8, circumflex, IEQUALIFIER_LALT), 1u);
+    CHECK_EQ(r.get8(kOut), u32{'^'});
+    CHECK_EQ(r.map_raw(0x36, 0, 8, 0x26, IEQUALIFIER_LALT), 1u);
+    CHECK_EQ(r.get8(kOut), 0xF1u);  // tilde
+    CHECK_EQ(r.map_raw(0x12, 0, 1, acute, IEQUALIFIER_LALT), 1u);
+    CHECK_EQ(r.map_raw(0x12, 0, 0, acute, IEQUALIFIER_LALT), 0xFFFFFFFFu);
+}
+
+void keys_without_a_dead_key_before_them_type_themselves() {
+    Rig r;
+    CHECK_EQ(r.map_raw(0x12, 0), 1u);
+    CHECK_EQ(r.get8(kOut), u32{'e'});
+    CHECK_EQ(r.map_raw(0x12, 0, 8, 0x20, 0), 1u);  // after a plain a
+    CHECK_EQ(r.get8(kOut), u32{'e'});
+    CHECK_EQ(r.map_raw(0x12, 0, 8, 0x23, 0), 1u);  // f without Alt is no dead key
+    CHECK_EQ(r.get8(kOut), u32{'e'});
+    CHECK_EQ(r.map_raw(0x40, 0), 1u);
+    CHECK_EQ(r.get8(kOut), u32{' '});
+    CHECK_EQ(r.map_raw(0x23, 0), 1u);
+    CHECK_EQ(r.get8(kOut), u32{'f'});
+}
+
+void usa_capsable_and_repeatable_bits_match_the_rom() {
+    Rig r;
+    const u8 lo_caps[] = {0x00, 0x00, 0xFF, 0x03, 0xFF, 0x01, 0xFE, 0x00};
+    const u8 lo_repeat[] = {0xFF, 0xBF, 0xFF, 0xEF, 0xFF, 0xEF, 0xFF, 0xF7};
+    const u8 hi_repeat[] = {0x47, 0xFF, 0xFF, 0x7F, 0x00, 0x80, 0x00};
+    const u32 keymap = g_keymap.keymap();
+    for (u32 i = 0; i < sizeof lo_caps; ++i) {
+        CHECK_EQ(r.get8(r.get32(keymap + km_LoCapsable) + i), lo_caps[i]);
+        CHECK_EQ(r.get8(r.get32(keymap + km_LoRepeatable) + i), lo_repeat[i]);
+    }
+    for (u32 i = 0; i < sizeof hi_repeat; ++i) {
+        CHECK_EQ(r.get8(r.get32(keymap + km_HiCapsable) + i), 0u);
+        CHECK_EQ(r.get8(r.get32(keymap + km_HiRepeatable) + i), hi_repeat[i]);
+    }
+}
+
 void vanilla_mapping_copies_the_characters_out() {
     Rig r;
     u8 out[4] = {};
@@ -254,6 +335,20 @@ void vanilla_mapping_copies_the_characters_out() {
     CHECK_EQ(g_keymap.map_vanilla(0x20, 0, out, 99), 0u);    // beyond the scratch buffer
 }
 
+void vanilla_mapping_remembers_the_dead_key() {
+    Rig r;
+    u8 out[4] = {};
+    CHECK_EQ(g_keymap.map_vanilla(0x23, IEQUALIFIER_LALT, out, 1), 0u);  // acute
+    CHECK_EQ(g_keymap.map_vanilla(0x12, 0, out, 1), 1u);
+    CHECK_EQ(out[0], 0xE9);
+    CHECK_EQ(g_keymap.map_vanilla(0x12, 0, out, 1), 1u);  // the pair is used up
+    CHECK_EQ(out[0], 'e');
+    CHECK_EQ(g_keymap.map_vanilla(0x27, IEQUALIFIER_LALT, out, 1), 0u);  // diaeresis
+    CHECK_EQ(g_keymap.map_vanilla(0x64, 0, out, 1), 0u);  // Alt going down in between
+    CHECK_EQ(g_keymap.map_vanilla(0x16, 0, out, 1), 1u);
+    CHECK_EQ(out[0], 0xFC);
+}
+
 void ansi_maps_back_to_raw_keys() {
     Rig r;
     CHECK_EQ(r.map_ansi("A"), 1u);
@@ -262,6 +357,12 @@ void ansi_maps_back_to_raw_keys() {
     CHECK_EQ(r.map_ansi("a"), 1u);
     CHECK_EQ(r.get8(kOut), 0x20u);
     CHECK_EQ(r.get8(kOut + 1), 0u);
+    CHECK_EQ(r.map_ansi("e"), 1u);  // a dead-capable key types its plain letter
+    CHECK_EQ(r.get8(kOut), 0x12u);
+    CHECK_EQ(r.get8(kOut + 1), 0u);
+    CHECK_EQ(r.map_ansi("E"), 1u);
+    CHECK_EQ(r.get8(kOut), 0x12u);
+    CHECK_EQ(r.get8(kOut + 1), IEQUALIFIER_LSHIFT);
 }
 
 void set_default_changes_the_asked_keymap() {
@@ -280,7 +381,12 @@ int main() {
     resource_holds_the_usa_keymap();
     keymap_library_opens_and_answers_its_default();
     raw_keys_type_their_characters();
+    alt_characters_match_the_rom_map();
+    dead_keys_make_nothing_and_accent_the_next_key();
+    keys_without_a_dead_key_before_them_type_themselves();
+    usa_capsable_and_repeatable_bits_match_the_rom();
     vanilla_mapping_copies_the_characters_out();
+    vanilla_mapping_remembers_the_dead_key();
     ansi_maps_back_to_raw_keys();
     set_default_changes_the_asked_keymap();
     return check::finish("test_keymap");
