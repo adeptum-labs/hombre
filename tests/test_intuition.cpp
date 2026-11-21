@@ -905,10 +905,11 @@ void open_window_draws_chrome() {
     CHECK_EQ(screen_pixel(r, screen, 100, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 100, 74), 1u);
     CHECK_EQ(screen_pixel(r, screen, 100, 75), 0u);
-    // The close button: its outline, its body and the stud in the middle.
+    // The close button: its outline, its body and the outlined square in
+    // the middle.
     CHECK_EQ(screen_pixel(r, screen, 59, 62), 1u);
     CHECK_EQ(screen_pixel(r, screen, 55, 67), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 57, 67), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 56, 67), 1u);
     CHECK_EQ(screen_pixel(r, screen, 59, 67), 2u);
     // The depth button: its outline, the sheet behind and the one in front.
     CHECK_EQ(screen_pixel(r, screen, 240, 62), 1u);
@@ -3002,12 +3003,15 @@ void size_gadget_sets_right_border() {
     CHECK(window != 0);
     CHECK_EQ(r.get8(window + wd_BorderRight), 12u);
     CHECK_EQ(r.get8(window + wd_BorderBottom), 2u);
+    // The size gadget: the dark corner and the light box inside it.
     CHECK_EQ(window_pixel(r, window, 196, 96), 1u);
-    CHECK_EQ(window_pixel(r, window, 197, 97), 2u);
+    CHECK_EQ(window_pixel(r, window, 196, 90), 1u);
+    CHECK_EQ(window_pixel(r, window, 190, 96), 1u);
+    CHECK_EQ(window_pixel(r, window, 195, 95), 2u);
     CHECK_EQ(window_pixel(r, window, 188, 50), 1u);
     CHECK_EQ(window_pixel(r, window, 187, 50), 0u);
     CHECK_EQ(screen_pixel(r, screen, 246, 156), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 247, 157), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 245, 155), 2u);
 }
 
 void size_bbottom_sets_bottom_border() {
@@ -3225,7 +3229,7 @@ void resize_grows_and_clears() {
     CHECK_EQ(window_pixel(r, window, 100, 155), 0u);
     // The size gadget at the new corner, in the window and on screen.
     CHECK_EQ(window_pixel(r, window, 276, 186), 1u);
-    CHECK_EQ(window_pixel(r, window, 277, 187), 2u);
+    CHECK_EQ(window_pixel(r, window, 275, 185), 2u);
     CHECK_EQ(screen_pixel(r, screen, 476, 286), 1u);
     // The old gadget position is interior now.
     CHECK_EQ(screen_pixel(r, screen, 435, 255), 0u);
@@ -4307,12 +4311,13 @@ void depth8_chrome_pixel_spot_checks() {
     CHECK_EQ(prev_bar, static_cast<u32>(chrome::kActiveBar7));
     CHECK_EQ(screen_pixel(r, screen, 120, 44), static_cast<u32>(chrome::kFrameDark));
 
-    // The close button: outline, shaded body and the red stud with its rim.
+    // The close button: outline, shaded body and the light square with its
+    // dark outline.
     CHECK_EQ(screen_pixel(r, screen, 49, 32), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, 45, 33), static_cast<u32>(chrome::kKnob0));
     CHECK_EQ(screen_pixel(r, screen, 45, 41), static_cast<u32>(chrome::kKnob2));
-    CHECK_EQ(screen_pixel(r, screen, 49, 37), static_cast<u32>(chrome::kCloseFill));
-    CHECK_EQ(screen_pixel(r, screen, 47, 37), static_cast<u32>(chrome::kCloseRing));
+    CHECK_EQ(screen_pixel(r, screen, 49, 37), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 46, 37), static_cast<u32>(chrome::kFrameDark));
     // The depth button: outline, the shaded sheet behind and the light one
     // in front, each with its dark edge.
     CHECK_EQ(screen_pixel(r, screen, 250, 32), static_cast<u32>(chrome::kFrameDark));
@@ -4322,7 +4327,7 @@ void depth8_chrome_pixel_spot_checks() {
     CHECK_EQ(screen_pixel(r, screen, 250, 37), static_cast<u32>(chrome::kFrameLight));
     CHECK_EQ(screen_pixel(r, screen, 59, 33), static_cast<u32>(chrome::kTitleActive));
     CHECK_EQ(screen_pixel(r, screen, 256, 146), static_cast<u32>(chrome::kFrameDark));
-    CHECK_EQ(screen_pixel(r, screen, 257, 147), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 255, 145), static_cast<u32>(chrome::kFrameLight));
 
     put_new_window(r, kNewWindow, 300, 30, 200, 100,
                    WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET, kWinTitle, 0, 0);
@@ -4341,8 +4346,8 @@ void depth8_chrome_pixel_spot_checks() {
     // An inactive window keeps the buttons' bodies and greys their symbols.
     CHECK_EQ(screen_pixel(r, screen, 49, 32), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, 45, 33), static_cast<u32>(chrome::kKnob0));
-    CHECK_EQ(screen_pixel(r, screen, 49, 37), static_cast<u32>(chrome::kTrack));
-    CHECK_EQ(screen_pixel(r, screen, 47, 37), static_cast<u32>(chrome::kTitleInactive));
+    CHECK_EQ(screen_pixel(r, screen, 49, 37), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 46, 37), static_cast<u32>(chrome::kTitleInactive));
     CHECK_EQ(screen_pixel(r, screen, 250, 32), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, 249, 36), static_cast<u32>(chrome::kTitleInactive));
     CHECK_EQ(screen_pixel(r, screen, 250, 37), static_cast<u32>(chrome::kFrameLight));
@@ -4518,8 +4523,9 @@ void held_bar_button_shows_pressed_while_the_pointer_is_over_it() {
 
     press(r, close_cx, cy);
     CHECK(held_shade(screen_pixel(r, screen, close_body, cy)));
-    CHECK_EQ(screen_pixel(r, screen, close_cx - 2, cy), static_cast<u32>(chrome::kFrameLight));
-    CHECK_EQ(screen_pixel(r, screen, close_cx, cy), static_cast<u32>(chrome::kCloseFill));
+    // Held, the square's outline turns light and its face dark.
+    CHECK_EQ(screen_pixel(r, screen, close_cx - 3, cy), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, close_cx, cy), static_cast<u32>(chrome::kFrameDark));
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0),
              static_cast<u32>(chrome::kFrameDark));
     CHECK(knob_shade(screen_pixel(r, screen, depth_body, cy)));
@@ -4527,7 +4533,7 @@ void held_bar_button_shows_pressed_while_the_pointer_is_over_it() {
     // Off the button it rises again, and back over it it goes down again.
     move_to(r, close_box.x1 + 10, cy);
     CHECK(knob_shade(screen_pixel(r, screen, close_body, cy)));
-    CHECK_EQ(screen_pixel(r, screen, close_cx - 2, cy), static_cast<u32>(chrome::kCloseRing));
+    CHECK_EQ(screen_pixel(r, screen, close_cx - 3, cy), static_cast<u32>(chrome::kFrameDark));
     move_to(r, close_cx, cy);
     CHECK(held_shade(screen_pixel(r, screen, close_body, cy)));
     release(r, close_cx, cy);

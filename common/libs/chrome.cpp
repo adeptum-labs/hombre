@@ -128,6 +128,8 @@ void draw_frame_box(Graphics& graphics, u32 rp, const Rect& box, u8 fill_pen, u8
     draw_outline_box(graphics, rp, box.x0, box.y0, box.x1, box.y1, border_pen);
 }
 
+// The size gadget, as on 3.1: a corner pointing to the bottom right with a
+// small light box inside it.
 void draw_size_gadget(Graphics& graphics, u32 rp, i32 width, i32 height, bool high_color) {
     if (width < static_cast<i32>(kSizeBorderRight) ||
         height < static_cast<i32>(kSizeBorderBottom)) {
@@ -135,23 +137,12 @@ void draw_size_gadget(Graphics& graphics, u32 rp, i32 width, i32 height, bool hi
     }
     const u8 dark = high_color ? kFrameDark : 1;
     const u8 light = high_color ? kFrameLight : 2;
-    struct Offset {
-        i32 dx;
-        i32 dy;
-    };
-    static constexpr Offset kDots[6] = {
-        {-8, -4}, {-6, -6}, {-4, -8},
-        {-6, -4}, {-4, -6},
-        {-4, -4},
-    };
-    for (const Offset& o : kDots) {
-        const i32 px = width + o.dx;
-        const i32 py = height + o.dy;
-        graphics.set_pens(rp, dark, 0, ndk::JAM2);
-        graphics.rect_fill(rp, px, py, px, py);
-        graphics.set_pens(rp, light, 0, ndk::JAM2);
-        graphics.rect_fill(rp, px + 1, py + 1, px + 1, py + 1);
-    }
+    const i32 right = width - 4;
+    const i32 bottom = height - 4;
+    graphics.set_pens(rp, dark, 0, ndk::JAM2);
+    graphics.rect_fill(rp, right, bottom - 6, right, bottom);
+    graphics.rect_fill(rp, right - 6, bottom, right, bottom);
+    draw_frame_box(graphics, rp, Rect{right - 3, bottom - 3, right, bottom}, light, dark);
 }
 
 i32 rounded_inset(i32 d, i32 radius) {
@@ -214,24 +205,25 @@ void draw_bar_button_body(Graphics& graphics, u32 rp, const Rect& box, bool pres
     draw_rounded_outline(graphics, rp, box, kBarButtonRadius, high_color ? kFrameDark : 1);
 }
 
-// The close button: a round stud in the middle of the body, red in the
-// active window and grey in the others.
+// The close button: as on 3.1, a small light square outlined in the dark
+// pen in the middle of the body. Held down, the two swap.
 void draw_close_button(Graphics& graphics, u32 rp, bool active, bool pressed, bool high_color) {
     const Rect box = close_button_box();
     draw_bar_button_body(graphics, rp, box, pressed, high_color);
-    u8 rim = pressed ? 2 : 1;
-    u8 core = 2;
+    u8 line = 1;
+    u8 face = 2;
     if (high_color) {
-        rim = pressed ? kFrameLight : (active ? kCloseRing : kTitleInactive);
-        core = active ? kCloseFill : kTrack;
+        line = active ? kFrameDark : kTitleInactive;
+        face = kFrameLight;
+    }
+    if (pressed) {
+        const u8 swap = line;
+        line = face;
+        face = swap;
     }
     const i32 cx = (box.x0 + box.x1) / 2;
     const i32 cy = (box.y0 + box.y1) / 2;
-    graphics.set_pens(rp, rim, 0, ndk::JAM2);
-    graphics.rect_fill(rp, cx - 1, cy - 2, cx + 1, cy + 2);
-    graphics.rect_fill(rp, cx - 2, cy - 1, cx + 2, cy + 1);
-    graphics.set_pens(rp, core, 0, ndk::JAM2);
-    graphics.rect_fill(rp, cx - 1, cy - 1, cx + 1, cy + 1);
+    draw_frame_box(graphics, rp, Rect{cx - 3, cy - 2, cx + 3, cy + 2}, face, line);
 }
 
 // The depth button: two overlapping sheets, the light one in front of the
