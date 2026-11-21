@@ -672,6 +672,8 @@ void Workbench::attach_window(u32 index, u32 window, const char* name, const cha
     copy_text(w.name, sizeof w.name, name);
     copy_text(w.path, sizeof w.path, path);
     if (menu_ != 0) {
+        // The screen may have taken another font since the strip was made.
+        gadtools_->layout_menus(menu_);
         intuition_->set_menu_strip(window, menu_);
     }
 }
