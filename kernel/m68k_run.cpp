@@ -27,6 +27,7 @@
 #include "../common/console_keys.hpp"
 #include "../common/dos_date.hpp"
 #include "../common/format.hpp"
+#include "../common/libs/console_device.hpp"
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
 #include "../common/libs/graphics.hpp"
@@ -103,6 +104,7 @@ constinit GadTools gadtools{};
 constinit Layers layers{};
 constinit VersionLibrary version_library{};
 constinit KeymapLibrary keymap_library{};
+constinit ConsoleDevice console_device{};
 constinit Icon icon{};
 constinit Workbench workbench{};
 constinit DisplayState display{};
@@ -781,6 +783,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     }
     if (!keymap_library.init(machine, exec)) {
         fail("keymap init failed");
+        return false;
+    }
+    if (!console_device.init(machine, exec, keymap_library)) {
+        fail("console device init failed");
         return false;
     }
     if (!dos.init(machine, exec, drives, &console_write, &consoles[0])) {
