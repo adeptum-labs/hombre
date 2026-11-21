@@ -23,7 +23,6 @@
 
 #pragma once
 
-#include "../font.hpp"
 #include "../types.hpp"
 #include "gfx.hpp"
 #include "native.hpp"
@@ -89,11 +88,6 @@ bool visible(const Bitmap& bitmap, const Clip& clip, i64 x, i64 y) {
     }
     return x >= 0 && y >= 0 && (static_cast<u64>(x) >> 3) < bitmap.bytes_per_row &&
            static_cast<u64>(y) < bitmap.rows;
-}
-
-bool column_visible(const Bitmap& bitmap, const Clip& clip, i64 x) {
-    return x >= clip.x0 && x <= clip.x1 && x >= 0 &&
-           (static_cast<u64>(x) >> 3) < bitmap.bytes_per_row;
 }
 
 u32 plane_address(const Bitmap& bitmap, u32 plane, u32 x, u32 y) {
@@ -216,17 +210,6 @@ void copy_span(u8* dst, const u8* src, u32 span, u8 lmask, u8 rmask) {
         dst[i] = src[i];
     }
     dst[span - 1] = merge(dst[span - 1], src[span - 1], rmask);
-}
-
-// The glyph row with its leftmost pixel in bit 7, as in a plane byte.
-u8 plane_bits(u8 glyph_row) {
-    u8 out = 0;
-    for (u32 col = 0; col < 8; ++col) {
-        if (((glyph_row >> col) & 1) != 0) {
-            out |= static_cast<u8>(0x80u >> col);
-        }
-    }
-    return out;
 }
 
 }
@@ -419,69 +402,6 @@ Rect draw_line_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i3
     return dirty;
 }
 
-Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
-                    i32 x, i32 baseline_y, const u8* chars, u32 count, u32& advance) {
-    advance = 8 * count;
-    Rect dirty = empty_rect();
-    const bool inverse = (pens.mode & ndk::INVERSVID) != 0;
-    const u32 fg = inverse ? pens.bg : pens.fg;
-    const u32 bg = inverse ? pens.fg : pens.bg;
-    const u32 mode = pens.mode & ~ndk::INVERSVID;
-    for (u32 i = 0; i < count; ++i) {
-        const u8* rows = glyph(static_cast<char>(chars[i]));
-        const i64 left = static_cast<i64>(x) + 8 * static_cast<i64>(i);
-        // A JAM2 cell on a byte boundary, all its columns visible: one plane
-        // byte per glyph row and plane.
-        if (mode == ndk::JAM2 && (left & 7) == 0 && column_visible(bitmap, clip, left) &&
-            column_visible(bitmap, clip, left + 7)) {
-            for (u32 row = 0; row < 8; ++row) {
-                const i64 py = static_cast<i64>(baseline_y) - 6 + static_cast<i64>(row);
-                if (!visible(bitmap, clip, left, py)) {
-                    continue;
-                }
-                const u8 bits = plane_bits(rows[row]);
-                for (u32 plane = 0; plane < bitmap.depth && plane < 8; ++plane) {
-                    const u8 value =
-                        static_cast<u8>((((fg >> plane) & 1) != 0 ? bits : 0) |
-                                        (((bg >> plane) & 1) != 0 ? static_cast<u8>(~bits) : 0));
-                    bus.w8(plane_address(bitmap, plane, static_cast<u32>(left),
-                                         static_cast<u32>(py)),
-                           value);
-                }
-                grow(dirty, static_cast<i32>(left), static_cast<i32>(py));
-                grow(dirty, static_cast<i32>(left + 7), static_cast<i32>(py));
-            }
-            continue;
-        }
-        for (u32 row = 0; row < 8; ++row) {
-            const i64 py = static_cast<i64>(baseline_y) - 6 + static_cast<i64>(row);
-            for (u32 col = 0; col < 8; ++col) {
-                const i64 px = left + static_cast<i64>(col);
-                if (!visible(bitmap, clip, px, py)) {
-                    continue;
-                }
-                const i32 pixel_x = static_cast<i32>(px);
-                const i32 pixel_y = static_cast<i32>(py);
-                const bool set = ((rows[row] >> col) & 1) != 0;
-                if (mode == ndk::COMPLEMENT) {
-                    if (set) {
-                        const u32 pixel = read_pixel(bus, bitmap, pixel_x, pixel_y);
-                        write_pixel(bus, bitmap, pixel_x, pixel_y, pixel ^ fg);
-                        grow(dirty, pixel_x, pixel_y);
-                    }
-                } else if (mode == ndk::JAM2) {
-                    write_pixel(bus, bitmap, pixel_x, pixel_y, set ? fg : bg);
-                    grow(dirty, pixel_x, pixel_y);
-                } else if (set) {
-                    write_pixel(bus, bitmap, pixel_x, pixel_y, fg);
-                    grow(dirty, pixel_x, pixel_y);
-                }
-            }
-        }
-    }
-    return dirty;
-}
-
 Rect scroll_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 dx, i32 dy,
                       Rect area, u32 bg_pen) {
     const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
@@ -612,18 +532,6 @@ inline Rect draw_line(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     Rect dirty = empty_rect();
     walk_clip(bus, clip, [&](const Clip& part) {
         dirty = unite_rects(dirty, draw_line_part(bus, bitmap, part, x0, y0, x1, y1, pen));
-        return true;
-    });
-    return dirty;
-}
-
-inline Rect draw_text(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
-                      i32 x, i32 baseline_y, const u8* chars, u32 count, u32& advance) {
-    advance = 8 * count;
-    Rect dirty = empty_rect();
-    walk_clip(bus, clip, [&](const Clip& part) {
-        dirty = unite_rects(dirty, draw_text_part(bus, bitmap, part, pens, x, baseline_y, chars,
-                                                  count, advance));
         return true;
     });
     return dirty;

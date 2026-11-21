@@ -21,7 +21,7 @@
  * Contact: info@adeptum.se
  */
 
-#include "libs/raster.hpp"
+#include "libs/raster_text.hpp"
 #include "check.hpp"
 
 #include <algorithm>
@@ -244,7 +244,8 @@ void draw_text_jam1_sets_only_fg() {
     const raster::Pens pens{1, 2, ndk::JAM1};
     const u8 text[] = {'H'};
     u32 advance = 0;
-    const Rect dirty = raster::draw_text(b, bm, kFullClip, pens, 8, 8, text, 1, advance);
+    const Rect dirty = raster::draw_text(b, bm, kFullClip, pens, raster::builtin_font(),
+                                         raster::TextStyle{}, 8, 8, text, 1, advance);
     CHECK(b.ok());
     CHECK_EQ(advance, 8u);
     const u8* rows = glyph('H');
@@ -270,7 +271,8 @@ void draw_text_jam2_fills_bg() {
     const raster::Pens pens{1, 2, ndk::JAM2};
     const u8 text[] = {'H'};
     u32 advance = 0;
-    const Rect dirty = raster::draw_text(b, bm, kFullClip, pens, 8, 8, text, 1, advance);
+    const Rect dirty = raster::draw_text(b, bm, kFullClip, pens, raster::builtin_font(),
+                                         raster::TextStyle{}, 8, 8, text, 1, advance);
     CHECK(b.ok());
     CHECK_EQ(advance, 8u);
     const u8* rows = glyph('H');
@@ -300,13 +302,15 @@ void draw_text_complement_twice_restores() {
     const raster::Pens pens{1, 2, ndk::COMPLEMENT};
     const u8 text[] = {'H'};
     u32 advance = 0;
-    raster::draw_text(b, bm, kFullClip, pens, 8, 8, text, 1, advance);
+    raster::draw_text(b, bm, kFullClip, pens, raster::builtin_font(), raster::TextStyle{}, 8, 8,
+                      text, 1, advance);
     CHECK(b.ok());
     CHECK_EQ(advance, 8u);
     CHECK(r.snapshot() != before);
     CHECK_EQ(raster::read_pixel(b, bm, 10, 2), 2u);
     CHECK_EQ(raster::read_pixel(b, bm, 8, 2), 3u);
-    raster::draw_text(b, bm, kFullClip, pens, 8, 8, text, 1, advance);
+    raster::draw_text(b, bm, kFullClip, pens, raster::builtin_font(), raster::TextStyle{}, 8, 8,
+                      text, 1, advance);
     CHECK(r.snapshot() == before);
 }
 
@@ -319,7 +323,8 @@ void draw_text_clips_at_clip_edge() {
     const raster::Pens pens{1, 0, ndk::JAM1};
     const u8 text[] = {'H', 'H'};
     u32 advance = 0;
-    const Rect dirty = raster::draw_text(b, bm, clip, pens, 8, 8, text, 2, advance);
+    const Rect dirty = raster::draw_text(b, bm, clip, pens, raster::builtin_font(),
+                                         raster::TextStyle{}, 8, 8, text, 2, advance);
     CHECK(b.ok());
     CHECK_EQ(advance, 16u);
     CHECK(dirty.x1 <= 11);
@@ -924,7 +929,9 @@ void jam2_text_matches_pixel_reference() {
         native::Bus fb = fast.bus();
         u32 advance = 0;
         const Rect fast_dirty = raster::draw_text(fb, fast.bitmap_at(kPlaneBase, depth), clip,
-                                                  pens, x, baseline, text, length, advance);
+                                                  pens, raster::builtin_font(),
+                                                  raster::TextStyle{}, x, baseline, text, length,
+                                                  advance);
         native::Bus sb = slow.bus();
         const raster::Bitmap bm = slow.bitmap_at(kPlaneBase, depth);
         const u32 fg = inverse != 0 ? pens.bg : pens.fg;

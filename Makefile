@@ -113,6 +113,10 @@ $(filter-out %/mem.o,$(KERNEL_OBJ)): $(BUILD)/%.o: %.cpp
 # The splash image is read with .incbin, a dependency make cannot see.
 $(BUILD)/kernel/splash.o: assets/splash.rle
 
+# So are the ROM fonts, by the kernel and by the host programs.
+$(BUILD)/common/libs/rom_fonts.o $(BUILD)/host/common/libs/rom_fonts.o: \
+    assets/fonts/hasklig/hasklig.romfont
+
 # The mem* routines are built once per target, without builtins (see
 # KMEMFLAGS for the kernel).
 $(BUILD)/loader/mem.o: common/mem.cpp

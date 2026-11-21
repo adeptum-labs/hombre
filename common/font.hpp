@@ -166,7 +166,7 @@ inline constexpr u8 kFont8x8Latin1Codes[20] = {
 
 // The bitmap for c, or the one for '?' when c is not printable ASCII and not
 // one of the Latin-1 codes above.
-inline const u8* glyph(char c) {
+constexpr const u8* glyph(char c) {
     const u8 code = static_cast<u8>(c);
     if (code >= 0x20 && code <= 0x7E) {
         return kFont8x8[code - 0x20];

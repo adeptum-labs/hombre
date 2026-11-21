@@ -386,9 +386,7 @@ void open_font_finds_the_nearest_font_of_the_name() {
 // extension; OpenFont then finds it and counts who has it open, AskFont
 // tells what a RastPort's font is, and RemFont takes it out again.
 void add_font_and_rem_font_keep_the_fonts_in_memory() {
-    constexpr u32 tf_Flags = 23;
-    constexpr u32 tf_Accessors = 30;
-    constexpr u32 kFpfRemoved = 0x80;
+    constexpr u32 kFpfRemoved = FPF_REMOVED;
     constexpr u32 kFsfTagged = 0x40;
     GfxRig r;
     const u32 small = r.exec.alloc(TextFont_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
@@ -603,20 +601,401 @@ void set_soft_style_keeps_the_drawn_styles() {
     CHECK_EQ(r.get8(rp + rp_AlgoStyle), 0x00u);
 }
 
-// GfxBase holds the list of the fonts in memory, topaz 8 from the ROM.
+// GfxBase holds the list of the fonts in memory: topaz 8 and hasklig in
+// three sizes, all from the ROM and each with its glyph tables.
 void gfx_base_lists_the_memory_fonts() {
     GfxRig r;
     const u32 list = r.base(Base::Graphics) + 140;  // gb_TextFonts
-    const u32 font = r.get32(list);
-    CHECK(font != 0 && (font & 1) == 0);
-    CHECK_EQ(r.get32(font), list + 4);
-    CHECK_EQ(r.get32(list + 8), font);
-    CHECK_EQ(r.get8(font + 8), 12u);  // NT_FONT
-    CHECK_EQ(r.get16(font + tf_YSize), 8u);
-    CHECK_EQ(r.get8(font + 23) & 0x01, 0x01u);  // FPF_ROMFONT
-    const u32 name = r.get32(font + 10);
-    CHECK_EQ(r.get8(name), u32{'t'});
-    CHECK_EQ(r.get8(name + 5), u32{'.'});
+    struct Expected {
+        const char* name;
+        u32 y_size;
+        u32 x_size;
+    };
+    const Expected expected[] = {
+        {"topaz.font", 8, 8}, {"hasklig.font", 8, 6}, {"hasklig.font", 11, 6},
+        {"hasklig.font", 13, 7}};
+    u32 font = r.get32(list);
+    u32 previous = list;
+    for (const Expected& e : expected) {
+        CHECK(font != 0 && (font & 1) == 0);
+        CHECK_EQ(r.get32(font + LN_PRED), previous);
+        CHECK_EQ(r.get8(font + LN_TYPE), 12u);  // NT_FONT
+        CHECK(r.read_str(r.get32(font + LN_NAME)) == e.name);
+        CHECK_EQ(r.get16(font + tf_YSize), e.y_size);
+        CHECK_EQ(r.get16(font + tf_XSize), e.x_size);
+        CHECK_EQ(r.get8(font + tf_Flags), FPF_ROMFONT | FPF_DESIGNED);
+        CHECK_EQ(r.get8(font + tf_LoChar), 32u);
+        CHECK_EQ(r.get8(font + tf_HiChar), 255u);
+        CHECK(r.get16(font + tf_Baseline) < e.y_size);
+        CHECK(r.get16(font + tf_Modulo) * 8u >= 225 * e.x_size);
+        CHECK(r.get32(font + tf_CharData) != 0);
+        CHECK_EQ(r.get32(font + tf_CharSpace), 0u);
+        // Every glyph is a cell of the font's width, the cells side by side.
+        const u32 loc = r.get32(font + tf_CharLoc);
+        CHECK_EQ(r.get16(loc + 4 * 224), 224 * e.x_size);
+        CHECK_EQ(r.get16(loc + 4 * 224 + 2), e.x_size);
+        previous = font;
+        font = r.get32(font + LN_SUCC);
+    }
+    CHECK_EQ(font, list + 4);
+    CHECK_EQ(r.get32(list + 8), previous);
+}
+
+// The topaz TextFont holds the built-in glyphs in its own tables, the
+// question mark standing in for the characters it has none for.
+void topaz_font_holds_the_built_in_glyphs() {
+    GfxRig r;
+    const u32 font = r.graphics.topaz_font();
+    const u32 data = r.get32(font + tf_CharData);
+    const u32 modulo = r.get16(font + tf_Modulo);
+    const u32 loc = r.get32(font + tf_CharLoc);
+    const auto holds = [&](u32 index, const u8* rows) {
+        CHECK_EQ(r.get16(loc + index * 4), index * 8);
+        for (u32 row = 0; row < 8; ++row) {
+            for (u32 col = 0; col < 8; ++col) {
+                const u32 bit = (r.get8(data + row * modulo + index) >> (7 - col)) & 1;
+                CHECK_EQ(bit, static_cast<u32>((rows[row] >> col) & 1));
+            }
+        }
+    };
+    holds('H' - 32, glyph('H'));
+    holds(0xE5 - 32, glyph(static_cast<char>(0xE5)));
+    holds(0x80 - 32, glyph('?'));
+    holds(224, glyph('?'));
+}
+
+// A proportional font of five rows with the glyphs A, B and C and a box
+// for every other character. Each glyph has its own width, space and
+// kerning, so nothing about it is a multiple of eight.
+struct TinyGlyph {
+    const char* rows[5];
+    i32 space;
+    i32 kern;
+};
+
+constexpr TinyGlyph kTinyGlyphs[4] = {
+    {{"###", "#.#", "###", "#.#", "#.#"}, 4, 0},
+    {{"####.", "#...#", "####.", "#...#", "####."}, 6, 1},
+    {{"##", "#.", "#.", "#.", "##"}, 3, 0},
+    {{"####", "#..#", "#..#", "#..#", "####"}, 5, 0},
+};
+constexpr u32 kTinyRows = 5;
+constexpr u32 kTinyBaseline = 3;
+constexpr u32 kTinyModulo = 2;
+
+u32 tiny_width(const TinyGlyph& g) { return static_cast<u32>(std::strlen(g.rows[0])); }
+
+const TinyGlyph& tiny_glyph(u8 c) { return kTinyGlyphs[c >= 'A' && c <= 'C' ? c - 'A' : 3]; }
+
+u32 make_tiny_font(GfxRig& r) {
+    const u32 font = r.exec.alloc(TextFont_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 data = r.exec.alloc(kTinyModulo * kTinyRows, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 loc = r.exec.alloc(4 * 4, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 space = r.exec.alloc(4 * 2, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 kern = r.exec.alloc(4 * 2, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(font != 0 && data != 0 && loc != 0 && space != 0 && kern != 0);
+    u32 offset = 0;
+    for (u32 i = 0; i < 4; ++i) {
+        const TinyGlyph& g = kTinyGlyphs[i];
+        for (u32 row = 0; row < kTinyRows; ++row) {
+            for (u32 col = 0; col < tiny_width(g); ++col) {
+                if (g.rows[row][col] == '#') {
+                    const u32 at = data + row * kTinyModulo + (offset + col) / 8;
+                    r.put8(at, r.get8(at) | (0x80u >> ((offset + col) % 8)));
+                }
+            }
+        }
+        r.put16(loc + i * 4, offset);
+        r.put16(loc + i * 4 + 2, tiny_width(g));
+        r.put16(space + i * 2, static_cast<u16>(g.space));
+        r.put16(kern + i * 2, static_cast<u16>(g.kern));
+        offset += tiny_width(g);
+    }
+    r.put16(font + tf_YSize, kTinyRows);
+    r.put8(font + tf_Flags, 0x20);  // FPF_PROPORTIONAL
+    r.put16(font + tf_XSize, 5);
+    r.put16(font + tf_Baseline, kTinyBaseline);
+    r.put16(font + tf_BoldSmear, 1);
+    r.put8(font + tf_LoChar, 'A');
+    r.put8(font + tf_HiChar, 'C');
+    r.put32(font + tf_CharData, data);
+    r.put16(font + tf_Modulo, kTinyModulo);
+    r.put32(font + tf_CharLoc, loc);
+    r.put32(font + tf_CharSpace, space);
+    r.put32(font + tf_CharKern, kern);
+    return font;
+}
+
+// The pixels the tiny font sets for the text, row by row from the top of
+// the font, column 0 where the pen starts; spacing is rp_TxSpacing.
+struct TinyText {
+    std::vector<std::vector<bool>> rows;
+    i32 advance = 0;
+
+    bool set(i32 x, i32 row) const {
+        return row >= 0 && row < static_cast<i32>(kTinyRows) && x >= 0 && x < 64 &&
+               rows[static_cast<u32>(row)][static_cast<u32>(x)];
+    }
+};
+
+TinyText tiny_text(const char* text, i32 spacing) {
+    TinyText t;
+    t.rows.assign(kTinyRows, std::vector<bool>(64, false));
+    for (const char* c = text; *c != 0; ++c) {
+        const TinyGlyph& g = tiny_glyph(static_cast<u8>(*c));
+        for (u32 row = 0; row < kTinyRows; ++row) {
+            for (u32 col = 0; col < tiny_width(g); ++col) {
+                if (g.rows[row][col] == '#') {
+                    t.rows[row][static_cast<u32>(t.advance + g.kern) + col] = true;
+                }
+            }
+        }
+        t.advance += g.kern + g.space + spacing;
+    }
+    return t;
+}
+
+void set_font(GfxRig& r, u32 rp, u32 font) {
+    r.cpu().a[1] = rp;
+    r.cpu().a[0] = font;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetFont), ExitReason::Halt);
+}
+
+void draw_text(GfxRig& r, u32 rp, const char* text) {
+    r.str(kStrings, text);
+    r.cpu().a[1] = rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = static_cast<u32>(std::strlen(text));
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Text), ExitReason::Halt);
+}
+
+// Text draws each glyph from the font's own tables, the pen moving by the
+// glyph's kerning before it and its space after it, and draws the glyph
+// past tf_HiChar for a character the font has none for.
+void text_draws_a_proportional_font_from_its_tables() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    set_font(r, s.rp, make_tiny_font(r));
+    CHECK_EQ(r.get16(s.rp + rp_TxHeight), kTinyRows);
+    CHECK_EQ(r.get16(s.rp + rp_TxBaseline), kTinyBaseline);
+    rect_fill(r, s.rp, 0, 0, 79, 19);  // pen 1 under the text
+    r.graphics.set_pens(s.rp, 2, 0, JAM1);
+    move(r, s.rp, 13, 10);
+    draw_text(r, s.rp, "ABxCA");
+    const TinyText t = tiny_text("ABxCA", 0);
+    CHECK_EQ(t.advance, 4 + 7 + 5 + 3 + 4);
+    CHECK_EQ(r.get16(s.rp + rp_cp_x), static_cast<u32>(13 + t.advance));
+    CHECK_EQ(r.get16(s.rp + rp_cp_y), 10u);
+    for (i32 y = 0; y < 20; ++y) {
+        for (i32 x = 0; x < 80; ++x) {
+            const bool set = t.set(x - 13, y - (10 - static_cast<i32>(kTinyBaseline)));
+            CHECK_EQ(read_pixel(r, s.rp, x, y), set ? 2u : 1u);
+        }
+    }
+}
+
+// The system's own text keeps to the built-in font and its 8 pixel cells
+// in a RastPort a program gave another font.
+void system_text_keeps_the_built_in_font() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    set_font(r, s.rp, make_tiny_font(r));
+    r.put8(s.rp + rp_AlgoStyle, FSF_BOLD);
+    r.graphics.set_pens(s.rp, 1, 0, JAM2);
+    move(r, s.rp, 8, 8);
+    CHECK_EQ(r.graphics.text(s.rp, reinterpret_cast<const u8*>("H"), 1), 8u);
+    CHECK_EQ(r.get16(s.rp + rp_cp_x), 16u);
+    const u8* rows = glyph('H');
+    for (u32 row = 0; row < 8; ++row) {
+        for (u32 col = 0; col < 8; ++col) {
+            CHECK_EQ(read_pixel(r, s.rp, 8 + static_cast<i32>(col), 2 + static_cast<i32>(row)),
+                     static_cast<u32>((rows[row] >> col) & 1));
+        }
+    }
+}
+
+// JAM2 fills the rest of the text's rectangle with the background pen,
+// INVERSVID swaps the two, COMPLEMENT turns the set bits over, and
+// rp_TxSpacing widens every character.
+void text_draw_modes_and_spacing_with_a_proportional_font() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    set_font(r, s.rp, make_tiny_font(r));
+    r.put16(s.rp + rp_TxSpacing, 2);
+    const TinyText t = tiny_text("CBA", 2);
+    CHECK_EQ(t.advance, 5 + 9 + 6);
+    const auto set_at = [&](i32 x, i32 y) {
+        return t.set(x - 21, y - (10 - static_cast<i32>(kTinyBaseline)));
+    };
+    const auto in_box = [&](i32 x, i32 y) {
+        return x >= 21 && x < 21 + t.advance && y >= 7 && y <= 11;
+    };
+    for (const u32 mode : {JAM2, JAM2 | INVERSVID, JAM1 | INVERSVID, COMPLEMENT}) {
+        r.graphics.set_pens(s.rp, 1, 0, JAM1);
+        rect_fill(r, s.rp, 0, 0, 79, 19);
+        r.graphics.set_pens(s.rp, 2, 3, mode);
+        move(r, s.rp, 21, 10);
+        draw_text(r, s.rp, "CBA");
+        CHECK_EQ(r.get16(s.rp + rp_cp_x), static_cast<u32>(21 + t.advance));
+        for (i32 y = 0; y < 20; ++y) {
+            for (i32 x = 0; x < 80; ++x) {
+                u32 expected = 1;
+                if (mode == JAM2 && in_box(x, y)) {
+                    expected = set_at(x, y) ? 2 : 3;
+                } else if (mode == (JAM2 | INVERSVID) && in_box(x, y)) {
+                    expected = set_at(x, y) ? 3 : 2;
+                } else if (mode == (JAM1 | INVERSVID) && in_box(x, y)) {
+                    expected = set_at(x, y) ? 1 : 2;
+                } else if (mode == COMPLEMENT && set_at(x, y)) {
+                    expected = 1 ^ 2;
+                }
+                CHECK_EQ(read_pixel(r, s.rp, x, y), expected);
+            }
+        }
+    }
+}
+
+// TextLength, TextExtent and TextFit measure with the font's own widths.
+void text_is_measured_with_the_fonts_own_widths() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    set_font(r, s.rp, make_tiny_font(r));
+    r.str(kStrings, "BACx");
+    r.cpu().a[1] = s.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 4;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::TextLength), 7u + 4 + 3 + 5);
+    r.cpu().a[1] = s.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 3;
+    r.cpu().a[2] = kExtent;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::TextExtent), ExitReason::Halt);
+    CHECK_EQ(r.get16(kExtent), 14u);
+    CHECK_EQ(r.get16(kExtent + 2), kTinyRows);
+    CHECK_EQ(r.get16(kExtent + 4), 0u);
+    CHECK_EQ(r.get16(kExtent + 6), 0xFFFDu);  // three rows above the baseline
+    CHECK_EQ(r.get16(kExtent + 8), 13u);
+    CHECK_EQ(r.get16(kExtent + 10), 1u);
+    // The bold style smears a pixel past the last column.
+    r.put8(s.rp + rp_AlgoStyle, FSF_BOLD);
+    r.cpu().a[1] = s.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 3;
+    r.cpu().a[2] = kExtent;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::TextExtent), ExitReason::Halt);
+    CHECK_EQ(r.get16(kExtent), 14u);
+    CHECK_EQ(r.get16(kExtent + 8), 14u);
+    r.put8(s.rp + rp_AlgoStyle, 0);
+
+    // "BA" is 11 pixels and "BAC" 14: 13 pixels hold two characters.
+    const auto fit = [&](u32 width, u32 height, i32 direction) {
+        r.cpu().a[1] = s.rp;
+        r.cpu().a[0] = kStrings;
+        r.cpu().d[0] = 4;
+        r.cpu().a[2] = kExtent;
+        r.cpu().a[3] = 0;
+        r.cpu().d[1] = static_cast<u32>(direction);
+        r.cpu().d[2] = width;
+        r.cpu().d[3] = height;
+        return r.result(Base::Graphics, graphics_lvo::TextFit);
+    };
+    CHECK_EQ(fit(13, 5, 1), 2u);
+    CHECK_EQ(r.get16(kExtent), 11u);
+    CHECK_EQ(fit(14, 5, 1), 3u);
+    CHECK_EQ(fit(100, 5, 1), 4u);
+    CHECK_EQ(fit(100, 4, 1), 0u);
+    // From the end: "x" is 5 pixels, "Cx" 8, "ACx" 12.
+    CHECK_EQ(fit(11, 5, -1), 2u);
+    CHECK_EQ(r.get16(kExtent), 8u);
+    CHECK_EQ(fit(12, 5, -1), 3u);
+}
+
+// The drawn styles: bold ORs the text over itself a pixel to the right,
+// underlined fills the row below the baseline as wide as the pen moves,
+// italic moves the rows above the baseline to the right.
+void text_draws_the_algorithmic_styles() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    set_font(r, s.rp, make_tiny_font(r));
+    const TinyText t = tiny_text("AC", 0);
+    const auto draw_styled = [&](u32 style) {
+        r.graphics.set_pens(s.rp, 0, 0, JAM1);
+        rect_fill(r, s.rp, 0, 0, 79, 19);
+        r.graphics.set_pens(s.rp, 1, 0, JAM1);
+        r.put8(s.rp + rp_AlgoStyle, style);
+        move(r, s.rp, 30, 10);
+        draw_text(r, s.rp, "AC");
+        CHECK_EQ(r.get16(s.rp + rp_cp_x), 37u);
+    };
+    const auto plain = [&](i32 x, i32 row) { return t.set(x, row); };
+    draw_styled(FSF_BOLD);
+    for (i32 row = 0; row < 5; ++row) {
+        for (i32 x = -2; x < 12; ++x) {
+            CHECK_EQ(read_pixel(r, s.rp, 30 + x, 7 + row),
+                     plain(x, row) || plain(x - 1, row) ? 1u : 0u);
+        }
+    }
+    draw_styled(FSF_UNDERLINED);
+    for (i32 row = 0; row < 5; ++row) {
+        for (i32 x = -2; x < 12; ++x) {
+            const bool line = row == 4 && x >= 0 && x < 7;
+            CHECK_EQ(read_pixel(r, s.rp, 30 + x, 7 + row), plain(x, row) || line ? 1u : 0u);
+        }
+    }
+    // Baseline 3: the top two rows move one pixel right, the rest stay.
+    draw_styled(FSF_ITALIC);
+    for (i32 row = 0; row < 5; ++row) {
+        for (i32 x = -2; x < 12; ++x) {
+            const i32 shift = row < 2 ? 1 : 0;
+            CHECK_EQ(read_pixel(r, s.rp, 30 + x, 7 + row), plain(x - shift, row) ? 1u : 0u);
+        }
+    }
+}
+
+// A font of the ROM opened by name draws its own glyphs at its own cell
+// width, and clips like any other text.
+void text_draws_hasklig_from_the_rom() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    r.str(kStrings + 0x40, "hasklig.font");
+    r.put32(kTextAttr + ta_Name, kStrings + 0x40);
+    r.put16(kTextAttr + ta_YSize, 13);
+    r.put8(kTextAttr + ta_Style, 0);
+    r.put8(kTextAttr + ta_Flags, 0);
+    r.cpu().a[0] = kTextAttr;
+    const u32 font = r.result(Base::Graphics, graphics_lvo::OpenFont);
+    CHECK(font != 0);
+    CHECK_EQ(r.get16(font + tf_YSize), 13u);
+    const u32 width = r.get16(font + tf_XSize);
+    const u32 baseline = r.get16(font + tf_Baseline);
+    const u32 data = r.get32(font + tf_CharData);
+    const u32 modulo = r.get16(font + tf_Modulo);
+    set_font(r, s.rp, font);
+    r.graphics.set_pens(s.rp, 1, 2, JAM2);
+    move(r, s.rp, 3, 20);
+    draw_text(r, s.rp, "Hg\xE5");
+    CHECK_EQ(r.get16(s.rp + rp_cp_x), 3 + 3 * width);
+    const u8 text[] = {'H', 'g', 0xE5};
+    u32 set_pixels = 0;
+    for (u32 i = 0; i < 3; ++i) {
+        for (u32 row = 0; row < 13; ++row) {
+            for (u32 col = 0; col < width; ++col) {
+                const u32 bit = (text[i] - 32u) * width + col;
+                const u32 set = (r.get8(data + row * modulo + bit / 8) >> (7 - bit % 8)) & 1;
+                set_pixels += set;
+                CHECK_EQ(read_pixel(r, s.rp, static_cast<i32>(3 + i * width + col),
+                                    static_cast<i32>(20 - baseline + row)),
+                         set != 0 ? 1u : 2u);
+            }
+        }
+    }
+    CHECK(set_pixels > 40);
+    CHECK_EQ(read_pixel(r, s.rp, 2, 20), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, static_cast<i32>(3 + 3 * width), 20), 0u);
+    r.cpu().a[1] = s.rp;
+    r.cpu().a[0] = kStrings;
+    r.cpu().d[0] = 3;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::TextLength), 3 * width);
 }
 
 // ExtendFont hangs an extension holding the reply port and a copy of the
@@ -2088,6 +2467,13 @@ void text_fit_pens_and_bitmaps_of_v39() {
 int main() {
     set_soft_style_keeps_the_drawn_styles();
     gfx_base_lists_the_memory_fonts();
+    topaz_font_holds_the_built_in_glyphs();
+    text_draws_a_proportional_font_from_its_tables();
+    system_text_keeps_the_built_in_font();
+    text_draw_modes_and_spacing_with_a_proportional_font();
+    text_is_measured_with_the_fonts_own_widths();
+    text_draws_the_algorithmic_styles();
+    text_draws_hasklig_from_the_rom();
     extend_font_and_strip_font();
     weigh_ta_match_rates_by_size_style_and_flags();
     text_fit_pens_and_bitmaps_of_v39();

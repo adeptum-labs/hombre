@@ -94,6 +94,7 @@ constexpr u32 rp_AlgoStyle = 56;
 constexpr u32 rp_TxHeight = 58;
 constexpr u32 rp_TxWidth = 60;
 constexpr u32 rp_TxBaseline = 62;
+constexpr u32 rp_TxSpacing = 64;
 constexpr u32 RastPort_SIZEOF = 100;
 static_assert(RastPort_SIZEOF == 100);
 
@@ -299,13 +300,28 @@ static_assert(TextAttr_SIZEOF == 8);
 
 constexpr u32 tf_YSize = 20;
 constexpr u32 tf_Style = 22;
+constexpr u32 tf_Flags = 23;
 constexpr u32 tf_XSize = 24;
 constexpr u32 tf_Baseline = 26;
+constexpr u32 tf_BoldSmear = 28;
+constexpr u32 tf_Accessors = 30;
 constexpr u32 tf_LoChar = 32;
 constexpr u32 tf_HiChar = 33;
 constexpr u32 tf_CharData = 34;
+constexpr u32 tf_Modulo = 38;
+constexpr u32 tf_CharLoc = 40;
+constexpr u32 tf_CharSpace = 44;
+constexpr u32 tf_CharKern = 48;
 constexpr u32 TextFont_SIZEOF = 52;
 static_assert(TextFont_SIZEOF == 52);
+
+// The styles of a font or of drawn text, and the flags of a font
+constexpr u32 FSF_UNDERLINED = 0x01;
+constexpr u32 FSF_BOLD = 0x02;
+constexpr u32 FSF_ITALIC = 0x04;
+constexpr u32 FPF_ROMFONT = 0x01;
+constexpr u32 FPF_DESIGNED = 0x40;
+constexpr u32 FPF_REMOVED = 0x80;
 
 // Draw modes
 constexpr u32 JAM1 = 0;

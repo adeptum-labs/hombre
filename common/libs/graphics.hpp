@@ -30,9 +30,11 @@
 // graphics.library written in C++ for code run by the 68000 translator.
 //
 // It draws on the planar BitMap of a RastPort and has the colour table
-// calls, the raster allocator and the built-in 8x8 topaz font. The C++
-// methods are the same drawing code the native vectors use, for the
-// Intuition windows and the shell console. Every other vector logs
+// calls, the raster allocator and the fonts kept in the ROM: the built-in
+// 8x8 topaz and those of rom_fonts.hpp. Text is drawn from the tables of
+// whichever TextFont the RastPort has. The C++ methods are the same
+// drawing code the native vectors use, for the Intuition windows and the
+// shell console. Every other vector logs
 // "graphics: unimplemented LVO -<n>" and ends the run with Unimplemented.
 //
 // Every guest pointer goes through native::Bus, so a bad one ends the run
@@ -41,10 +43,13 @@
 namespace hombre {
 
 class Exec;
+struct RomFont;
 
 namespace raster {
 struct Clip;
+struct Font;
 struct RastPortView;
+struct TextStyle;
 }
 
 // Library vector offsets of graphics.library, n of LVO -n, as the 3.1
@@ -142,9 +147,9 @@ constexpr u32 Last = 1056;
 
 class Graphics {
 public:
-    // Makes graphics.library with its vectors and allocates the built-in
-    // topaz font. exec must be initialised. False if exec runs out of
-    // memory or native ids.
+    // Makes graphics.library with its vectors and its list of the fonts in
+    // memory: topaz 8, then the fonts of rom_fonts.hpp. exec must be
+    // initialised. False if exec runs out of memory or native ids.
     bool init(m68k::Machine& m, Exec& exec, DisplayState& display);
 
     u32 graphics_base() const { return base_; }
@@ -167,6 +172,10 @@ public:
     // a bad map or a pen it has not.
     bool color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue);
     void draw_line(u32 rp, i32 x1, i32 y1);
+    // Draws the characters in the built-in font, whatever font the
+    // RastPort has, and moves its pen past them: the system's own windows,
+    // gadgets and console lay their text out in that font's cells. How
+    // far the pen moved.
     u32 text(u32 rp, const u8* chars, u32 count);
     void scroll(u32 rp, i32 dx, i32 dy, i32 x0, i32 y0, i32 x1, i32 y1);
     void set_font(u32 rp, u32 font);
@@ -194,6 +203,18 @@ private:
     u16 pen_users_[kPens]{};
     bool pen_exclusive_[kPens]{};
     bool pens_ready_ = false;
+    // A TextFont with its glyph tables, in one block of exec's memory and
+    // at the end of the fonts in memory, named by the guest string at
+    // name. 0 if exec has no memory for it.
+    u32 add_rom_font(native::Bus& b, const RomFont& font, u32 name);
+    // The glyph tables and the styles rp draws text with: those of its
+    // font, or of the built-in font for a RastPort without a font or with
+    // one that has no glyph tables. False if the RastPort cannot be read.
+    bool text_font(native::Bus& b, u32 rp, raster::Font& font, raster::TextStyle& style);
+    // Draws the characters in the RastPort's draw mode and moves its pen
+    // past them; in its font and styles for own_font, else in the
+    // built-in font. How far the pen moved.
+    u32 draw_text(u32 rp, const u8* chars, u32 count, bool own_font);
     u32 blit(native::Bus& b, u32 src, i32 sx, i32 sy, const raster::RastPortView& v,
              const raster::Clip* clip, i32 dx, i32 dy, i32 width, i32 height, u32 minterm,
              u32 mask);

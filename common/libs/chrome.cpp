@@ -26,6 +26,7 @@
 #include "chrome_palette.hpp"
 #include "graphics.hpp"
 #include "intuition.hpp"
+#include "raster_text.hpp"
 
 namespace hombre::chrome {
 
@@ -473,8 +474,8 @@ void draw_guest_text(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& c
         }
         if (length != 0) {
             u32 advance = 0;
-            raster::draw_text(b, bitmap, clip, pens, x + static_cast<i32>(at) * 8, baseline,
-                              buffer, length, advance);
+            raster::draw_text(b, bitmap, clip, pens, raster::builtin_font(), raster::TextStyle{},
+                              x + static_cast<i32>(at) * 8, baseline, buffer, length, advance);
         }
         if (length < n) {
             return;
@@ -642,8 +643,9 @@ void draw_menu_items(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& c
             if (item.command != 0) {
                 const raster::Pens text_pens{shortcut, 0, static_cast<u8>(ndk::JAM1)};
                 u32 advance = 0;
-                raster::draw_text(b, bitmap, clip, text_pens, letter_x, baseline, &item.command,
-                                  1, advance);
+                raster::draw_text(b, bitmap, clip, text_pens, raster::builtin_font(),
+                                  raster::TextStyle{}, letter_x, baseline, &item.command, 1,
+                                  advance);
             }
             text_right = key_x - 4;
         } else if (item.sub != 0) {

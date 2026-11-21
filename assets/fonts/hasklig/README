@@ -1,0 +1,15 @@
+Hasklig bitmap fonts
+====================
+
+hasklig.romfont holds hasklig.font in the sizes 8, 11 and 13: bitmap
+conversions of Hasklig Regular, a character to a cell, for the characters
+32 to 255 of ISO 8859-1. The kernel keeps them in memory beside topaz.
+Bitmap fonts have no ligatures, so those of Hasklig are left out.
+
+Source:  https://github.com/i-tu/Hasklig
+Version: 1.2 (TTF/Hasklig-Regular.ttf of Hasklig-1.2.zip)
+Licence: SIL Open Font License 1.1, see LICENSE
+
+tools/mkfont.py makes hasklig.romfont from Hasklig-Regular.ttf:
+
+    tools/mkfont.py Hasklig-Regular.ttf
