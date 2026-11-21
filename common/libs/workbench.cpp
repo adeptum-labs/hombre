@@ -113,9 +113,17 @@ constexpr u32 WBArg_SIZEOF = 8;
 constexpr i32 kDiskMargin = 8;
 constexpr u32 kDiskLabelChars = 13;  // the widest label a disk column fits
 constexpr i32 kVolumeTop = 16;
-constexpr i32 kLabelBaseline = 10; // from the bottom of the image to the label's
-constexpr u32 kLabelWidth = 8;     // the topaz font's character width
-constexpr u32 kLabelRows = 8;
+constexpr i32 kLabelBaseline = 10;  // from the bottom of the image to a topaz label's baseline
+constexpr i32 kTopazBaseline = 6;   // the built-in font's rows above its baseline
+constexpr i32 kLabelGap = kLabelBaseline - kTopazBaseline;  // blank rows above a label
+
+// The struct IPrefs passes over for the icon and the system font: the
+// TextAttr and TextFont it opened, the draw mode and pens to draw text
+// with, and a TextAttr and name the struct keeps.
+constexpr u32 fc_TextFont = 4;
+constexpr u32 fc_DrawMode = 8;
+constexpr u32 fc_FrontPen = 10;
+constexpr u32 fc_BackPen = 11;
 // The raised frame round an icon's image, as on 3.1: how far its lines sit
 // out from the image on either side and above and below it.
 constexpr i32 kFrameOutX = 3;
@@ -400,24 +408,28 @@ IconArt art_of(Bus& b, u32 object) {
 }
 
 // The label under an icon in drawer coordinates: the start of its
-// baseline and its width, centred under the image when there is one.
+// baseline, its top and bottom rows and its width, centred under the image
+// when there is one.
 struct LabelPlace {
     i32 x = 0;
-    i32 y = 0;
+    i32 y = 0;       // the baseline
+    i32 top = 0;
+    i32 bottom = 0;  // one past the label's last row
     i32 span = 0;
 };
 
-constexpr i32 kLabelAscent = 6;  // the topaz font's rows above the baseline
-
-LabelPlace label_place(const IconArt& art, const Workbench::IconEntry& icon) {
+LabelPlace label_place(const IconArt& art, const Workbench::IconEntry& icon,
+                       const Graphics::FontMetrics& metrics, i32 span) {
     LabelPlace place;
-    place.span = static_cast<i32>(text_length(icon.name) * kLabelWidth);
+    place.span = span;
     place.x = icon.left;
-    place.y = icon.top + icon.height + kLabelBaseline;
+    place.top = icon.top + icon.height + kLabelGap;
     if (art.render != 0 && art.width > 0) {
         place.x = icon.left + art.left + (art.width - place.span) / 2;
-        place.y = icon.top + art.top + art.height + kLabelBaseline;
+        place.top = icon.top + art.top + art.height + kLabelGap;
     }
+    place.y = place.top + metrics.baseline;
+    place.bottom = place.top + metrics.y_size;
     return place;
 }
 
@@ -734,19 +746,20 @@ void Workbench::open_root() {
 // column to the left once one is full.
 void Workbench::place_root_icon(IconEntry& icon) {
     const DrawerWindow& root = windows_[0];
+    const Graphics::FontMetrics metrics = label_metrics();
+    const i32 label_width = static_cast<i32>(kDiskLabelChars) * metrics.x_size;
     // The column's icons are centred on one line, far enough in for a
     // label of kDiskLabelChars characters to stay on the screen.
-    const i32 centre = root.inner_width - kDiskMargin -
-                       static_cast<i32>(kDiskLabelChars * kLabelWidth) / 2;
+    const i32 centre = root.inner_width - kDiskMargin - label_width / 2;
     i32 left = centre - icon.width / 2;
     i32 top = volume_top_ == 0 ? kVolumeTop : volume_top_;
-    if (top + icon.height + static_cast<i32>(kLabelRows) > root.inner_height) {
-        left -= static_cast<i32>(kDiskLabelChars * kLabelWidth) + kIconGapX;
+    if (top + icon.height + metrics.y_size > root.inner_height) {
+        left -= label_width + kIconGapX;
         top = kVolumeTop;
     }
     icon.left = left < 0 ? 0 : left;
     icon.top = top;
-    volume_top_ = top + icon.height + static_cast<i32>(kLabelRows) + kIconGapY;
+    volume_top_ = top + icon.height + metrics.y_size + kIconGapY;
 }
 
 // Icons with a place of their own keep it, moved inside the window when
@@ -754,6 +767,7 @@ void Workbench::place_root_icon(IconEntry& icon) {
 void Workbench::place_root_icons() {
     volume_top_ = 0;
     const DrawerWindow& root = windows_[0];
+    const Graphics::FontMetrics metrics = label_metrics();
     for (IconEntry& icon : icons_) {
         if (!icon.used || icon.owner != 0) {
             continue;
@@ -763,7 +777,7 @@ void Workbench::place_root_icons() {
             continue;
         }
         const i32 max_left = root.inner_width - icon.width;
-        const i32 max_top = root.inner_height - icon.height - static_cast<i32>(kLabelRows);
+        const i32 max_top = root.inner_height - icon.height - metrics.y_size;
         icon.left = icon.left > max_left ? max_left : icon.left;
         icon.top = icon.top > max_top ? max_top : icon.top;
         icon.left = icon.left < 0 ? 0 : icon.left;
@@ -1005,6 +1019,7 @@ void Workbench::fill_drawer(u32 window_index) {
 
 void Workbench::place_icons(u32 window_index) {
     const DrawerWindow& drawer = windows_[window_index];
+    const i32 label_height = label_metrics().y_size;
     i32 cell_width = 16;
     i32 cell_height = 16;
     for (const IconEntry& icon : icons_) {
@@ -1012,8 +1027,8 @@ void Workbench::place_icons(u32 window_index) {
             continue;
         }
         cell_width = icon.width + kCellGapX > cell_width ? icon.width + kCellGapX : cell_width;
-        cell_height = icon.height + static_cast<i32>(kLabelRows) + kCellGapY > cell_height
-                          ? icon.height + static_cast<i32>(kLabelRows) + kCellGapY
+        cell_height = icon.height + label_height + kCellGapY > cell_height
+                          ? icon.height + label_height + kCellGapY
                           : cell_height;
     }
     i32 rows = (drawer.inner_height - kGridMarginY) / cell_height;
@@ -1215,6 +1230,31 @@ void Workbench::close_drawer(u32 window_index) {
 
 // --- drawing -------------------------------------------------------------
 
+Graphics::FontMetrics Workbench::label_metrics() const {
+    return graphics_->font_metrics(icon_font());
+}
+
+i32 Workbench::label_span(const IconEntry& icon) const {
+    return static_cast<i32>(
+        graphics_->text_width(icon_font(), reinterpret_cast<const u8*>(icon.name),
+                              text_length(icon.name)));
+}
+
+// The pens and draw mode the icon font's struct names, or the label's own
+// for a Workbench without one.
+void Workbench::set_label_pens(u32 rp) {
+    u32 front = 1;
+    u32 back = 0;
+    u32 mode = ndk::JAM1;
+    if (icon_font_ != 0) {
+        Bus b(*machine_);
+        mode = b.r16(icon_font_ + fc_DrawMode);
+        front = b.r8(icon_font_ + fc_FrontPen);
+        back = b.r8(icon_font_ + fc_BackPen);
+    }
+    graphics_->set_pens(rp, front, back, mode);
+}
+
 void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, bool selected) {
     if (icon.object == 0) {
         return;
@@ -1250,11 +1290,12 @@ void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, boo
             intuition_->draw_image(drawer.rp, art.render, left, top);
         }
     }
-    const LabelPlace label = label_place(art, icon);
+    const LabelPlace label = label_place(art, icon, label_metrics(), label_span(icon));
     // A label past the inner edges is cut off there, as the image is.
-    graphics_->set_pens(drawer.rp, 1, 0, ndk::JAM1);
+    set_label_pens(drawer.rp);
     graphics_->move(drawer.rp, origin_x + label.x, origin_y + label.y);
-    graphics_->text(drawer.rp, reinterpret_cast<const u8*>(icon.name), text_length(icon.name));
+    graphics_->text_in(drawer.rp, icon_font(), reinterpret_cast<const u8*>(icon.name),
+                       text_length(icon.name));
 }
 
 // The window's view kept inside its icons and its sliders set to match,
@@ -1293,17 +1334,18 @@ void Workbench::paint_window(u32 window_index) {
 Workbench::Extent Workbench::extent(u32 window_index) const {
     Extent e;
     Bus b(*machine_);
+    const Graphics::FontMetrics metrics = label_metrics();
     for (const IconEntry& icon : icons_) {
         if (!icon.used || icon.owner != window_index) {
             continue;
         }
-        const LabelPlace label = label_place(art_of(b, icon.object), icon);
+        const LabelPlace label =
+            label_place(art_of(b, icon.object), icon, metrics, label_span(icon));
         const i32 x0 = label.x < icon.left ? label.x : icon.left;
         const i32 x1 = label.x + label.span > icon.left + icon.width ? label.x + label.span
                                                                      : icon.left + icon.width;
         const i32 y0 = icon.top;
-        const i32 label_bottom = label.y - kLabelAscent + static_cast<i32>(kLabelRows);
-        const i32 y1 = label_bottom > icon.top + icon.height ? label_bottom
+        const i32 y1 = label.bottom > icon.top + icon.height ? label.bottom
                                                              : icon.top + icon.height;
         e.min_x = x0 < e.min_x ? x0 : e.min_x;
         e.min_y = y0 < e.min_y ? y0 : e.min_y;
@@ -1875,6 +1917,21 @@ void Workbench::redraw_all() {
     for (u32 i = 0; i < kMaxWindows; ++i) {
         draw_window(i);
     }
+}
+
+// The labels take their size from the icon font: the unplaced icons take
+// their cells again and every window draws its labels in the new one.
+void Workbench::relayout_labels() {
+    if (!windows_[0].used) {
+        return;
+    }
+    place_root_icons();
+    for (u32 i = 1; i < kMaxWindows; ++i) {
+        if (windows_[i].used) {
+            place_icons(i);
+        }
+    }
+    redraw_all();
 }
 
 void Workbench::refresh_title() {
@@ -2797,13 +2854,46 @@ void Workbench::wake_for_patterns() {
     }
 }
 
+u32 Workbench::icon_font() const {
+    if (icon_font_ == 0 || machine_ == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    return b.r32(icon_font_ + fc_TextFont);
+}
+
+u32 Workbench::system_font() const {
+    if (system_font_config_ == 0 || machine_ == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    return b.r32(system_font_config_ + fc_TextFont);
+}
+
 // WBConfig: IPrefs passes the desktop's and the windows' backdrop, kinds 1
 // and 2, as it applies WBPattern's prefs. The Workbench reads those prefs
-// itself, so a backdrop only wakes it; every other kind is taken and left.
-void Workbench::wb_config(u32 kind) {
+// itself, so a backdrop only wakes it. Kinds 3 and 4 are the icon text font
+// and the system font: the struct is kept for the Workbench to draw with
+// and the one it replaces goes back, IPrefs closing its font. Every other
+// kind is taken and left.
+u32 Workbench::wb_config(u32 kind, u32 data) {
     if (kind == 1 || kind == 2) {
         wake_for_patterns();
+        return 0;
     }
+    if (kind != 3 && kind != 4) {
+        return 0;
+    }
+    u32& config = kind == 3 ? icon_font_ : system_font_config_;
+    const u32 previous = config;
+    if (data == previous) {
+        return previous;
+    }
+    config = data;
+    if (kind == 3) {
+        relayout_labels();
+    }
+    return previous;
 }
 
 // --- starting programs ---------------------------------------------------
@@ -3470,8 +3560,7 @@ struct WorkbenchNatives {
     }
 
     static void wb_config(void* ctx, Machine& m) {
-        of(ctx).wb_config(m.cpu.d[0]);
-        native::set_result(m, 0);
+        native::set_result(m, of(ctx).wb_config(m.cpu.d[0], m.cpu.d[1]));
     }
 
     static void wb_info(void*, Machine& m) { native::set_result(m, 0); }

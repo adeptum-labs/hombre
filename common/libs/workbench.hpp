@@ -49,8 +49,8 @@
 // and bottom borders. Snapshot keeps an icon's place, or a drawer window's
 // box and scroll, in the .info. The other
 // vectors register application windows, icons and menu items, or rescan a
-// drawer. WBConfig, IPrefs' private call, makes the Workbench read the
-// backdrop pattern prefs again.
+// drawer. WBConfig, IPrefs' private call, hands over the icon and system
+// fonts and makes the Workbench read the backdrop pattern prefs again.
 
 namespace hombre {
 
@@ -263,6 +263,10 @@ public:
     const RunningTool& tool(u32 index) const { return tools_[index]; }
     const App& app(u32 index) const { return apps_[index]; }
     const IconDrag& drag() const { return drag_; }
+    // The TextFont of the icon text font and of the system font IPrefs
+    // passed over; 0 is the built-in font.
+    u32 icon_font() const;
+    u32 system_font() const;
 
     // The window's scroll gadget with the GadgetID id; 0 when it has none.
     u32 scroll_gadget(u32 window_index, u16 id) const;
@@ -301,9 +305,11 @@ public:
     bool remove_app_icon(u32 handle);
     u32 add_app_menu_item(u32 id, u32 user, u32 text, u32 msg_port, u32 tags);
     bool remove_app_menu_item(u32 handle);
-    // WBConfig of the kind in D0: the backdrop kinds wake the Workbench to
-    // read the pattern prefs again.
-    void wb_config(u32 kind);
+    // WBConfig of the kind in D0 and its data in D1: the icon and system
+    // font kinds keep the struct and give back the one they replace, 0 the
+    // first time; the backdrop kinds wake the Workbench to read the pattern
+    // prefs again.
+    u32 wb_config(u32 kind, u32 data);
 
     // Builds the WBStartup message posted to a started process: its
     // ReplyPort is the Workbench's port, and each argument gets the lock of
@@ -443,6 +449,10 @@ private:
     u16 scroll_gadget_id(u32 window_index, u32 address) const;
     void scroll_message(u32 window_index, u32 idcmp_class, u16 id);
     void draw_icon(const DrawerWindow& drawer, const IconEntry& icon, bool selected);
+    Graphics::FontMetrics label_metrics() const;
+    i32 label_span(const IconEntry& icon) const;
+    void set_label_pens(u32 rp);
+    void relayout_labels();
     void redraw_all();
     void update_all();
     void select_contents(u32 window_index);
@@ -490,6 +500,12 @@ private:
     u32 menu_ = 0;
     u32 title_buffer_ = 0;
     u32 arrows_ = 0;  // the arrow gadgets' images, made once
+    // The structs IPrefs passed over for the icon text font and the system
+    // font: a TextAttr, a TextFont, a draw mode, a front and a back pen,
+    // and a TextAttr and name of their own. IPrefs frees the ones a
+    // WBConfig hands back.
+    u32 icon_font_ = 0;
+    u32 system_font_config_ = 0;
     // The backdrops of ENV:Sys/WBPattern.prefs, the root window's and the
     // drawers': a BitMap of up to eight planes to tile them from, a 16 by
     // 16 pixel pattern or a picture as large as it is; depth 0 for none.

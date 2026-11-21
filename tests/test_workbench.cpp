@@ -89,6 +89,13 @@ constexpr u32 WBStartup_SIZEOF = 40;
 constexpr u32 wa_Lock = 0;
 constexpr u32 wa_Name = 4;
 
+// The private struct IPrefs passes WBConfig for the icon and system fonts.
+constexpr u32 fc_TextAttr = 0;
+constexpr u32 fc_TextFont = 4;
+constexpr u32 fc_DrawMode = 8;
+constexpr u32 fc_FrontPen = 10;
+constexpr u32 fc_BackPen = 11;
+
 // Static storage, as the kernel keeps them.
 Jit g_jit;
 Exec g_exec;
@@ -581,6 +588,42 @@ private:
     const u8* rx_ = nullptr;
 };
 
+// WBConfig through the vector: D0 the kind and D1 its data.
+u32 wbconfig(Rig& r, u32 kind, u32 data) {
+    r.m.cpu.d[0] = kind;
+    r.m.cpu.d[1] = data;
+    return r.result(r.workbench.base(), workbench_lvo::WBConfig);
+}
+
+// The hasklig font of y_size opened through graphics.library, as IPrefs
+// opens the font it passes over.
+u32 open_hasklig(Rig& r, u32 attr, u32 name, u32 y_size) {
+    r.put32(attr + ta_Name, name);
+    r.put16(attr + ta_YSize, y_size);
+    r.put8(attr + ta_Style, 0);
+    r.put8(attr + ta_Flags, 0);
+    r.put_string(name, "hasklig.font");
+    const u32 font = g_graphics.open_font(attr);
+    CHECK(font != 0);
+    return font;
+}
+
+// A font struct at at as IPrefs builds it: the TextFont, the draw mode and
+// pens to draw with, and a TextAttr and name of its own.
+u32 put_font_config(Rig& r, u32 at, u32 font, u32 mode, u32 front, u32 back) {
+    r.put32(at + fc_TextAttr, at + 12);
+    r.put32(at + fc_TextFont, font);
+    r.put16(at + fc_DrawMode, mode);
+    r.put8(at + fc_FrontPen, front);
+    r.put8(at + fc_BackPen, back);
+    r.put32(at + 12 + ta_Name, at + 20);
+    r.put16(at + 12 + ta_YSize, 8);
+    r.put8(at + 12 + ta_Style, 0);
+    r.put8(at + 12 + ta_Flags, 0);
+    r.put_string(at + 20, "topaz.font");
+    return at;
+}
+
 // --- the vectors ---------------------------------------------------------
 
 void layout_matches_the_ndk() {
@@ -599,16 +642,127 @@ void layout_matches_the_ndk() {
     CHECK_EQ(WBStartup_SIZEOF, 40u);
 }
 
-// IPrefs hands its backdrops and other settings over through WBConfig,
-// which takes every kind and answers 0.
-void wb_config_takes_the_iprefs_settings() {
+// IPrefs hands the fonts it opened over through WBConfig, which keeps each
+// struct and gives back the one of its kind it replaces, 0 the first time.
+void wb_config_keeps_the_fonts() {
     Rig r;
-    for (u32 kind = 1; kind <= 5; ++kind) {
-        r.m.cpu.d[0] = kind;
-        r.m.cpu.d[1] = 0;
-        CHECK_EQ(r.result(r.workbench.base(), workbench_lvo::WBConfig), 0u);
-    }
+    const u32 hasklig13 = open_hasklig(r, kData + 0x100, kData + 0x140, 13);
+    const u32 s1 = put_font_config(r, kData + 0x600, hasklig13, JAM2, 2, 3);
+    const u32 s2 = put_font_config(r, kData + 0x700, 0, JAM1, 1, 0);
+    const u32 t1 = put_font_config(r, kData + 0x800, hasklig13, JAM2, 2, 3);
+    const u32 t2 = put_font_config(r, kData + 0x900, 0, JAM1, 1, 0);
+
+    CHECK_EQ(wbconfig(r, 3, s1), 0u);
+    CHECK_EQ(r.workbench.icon_font(), hasklig13);
+    CHECK_EQ(r.workbench.system_font(), 0u);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 1u);  // still IPrefs' to close
+    CHECK_EQ(wbconfig(r, 4, t1), 0u);
+    CHECK_EQ(r.workbench.system_font(), hasklig13);
+    CHECK_EQ(r.workbench.icon_font(), hasklig13);
+
+    // Each kind hands back its own previous struct, which Workbench does
+    // not close.
+    CHECK_EQ(wbconfig(r, 3, s2), s1);
+    CHECK_EQ(r.get16(hasklig13 + tf_Accessors), 1u);
+    CHECK_EQ(r.workbench.icon_font(), 0u);
+    CHECK_EQ(r.workbench.system_font(), hasklig13);
+    CHECK_EQ(wbconfig(r, 4, t2), t1);
+    CHECK_EQ(r.workbench.system_font(), 0u);
+    CHECK_EQ(wbconfig(r, 3, s1), s2);
+    CHECK_EQ(r.workbench.icon_font(), hasklig13);
+
+    // The other kinds answer 0 and leave the fonts alone.
+    CHECK_EQ(wbconfig(r, 1, 0), 0u);
+    CHECK_EQ(wbconfig(r, 2, 0), 0u);
+    CHECK_EQ(wbconfig(r, 5, s1), 0u);
+    CHECK_EQ(r.workbench.icon_font(), hasklig13);
+    CHECK_EQ(r.workbench.system_font(), 0u);
     CHECK(!logged("workbench: unimplemented LVO -84"));
+}
+
+// A backdrop kind wakes the Workbench to read the pattern prefs; a font
+// kind only hands its struct back.
+void wb_config_wakes_the_workbench_for_the_backdrops() {
+    Rig r;
+    r.workbench.open_desktop();
+    CHECK_EQ(r.workbench.start(0, 0), DOSTRUE);
+    const u32 process = r.workbench.process();
+    const u32 bit = r.get8(r.workbench.reply_port() + mp_SigBit);
+    CHECK(bit < 32);
+    for (u32 kind = 1; kind <= 2; ++kind) {
+        r.put32(process + TC_SIGRECVD, 0);
+        CHECK_EQ(r.workbench.wb_config(kind, 0), 0u);
+        CHECK_EQ(r.get32(process + TC_SIGRECVD), 1u << bit);
+    }
+    r.put32(process + TC_SIGRECVD, 0);
+    CHECK_EQ(r.workbench.wb_config(3, 0), 0u);
+    CHECK_EQ(r.get32(process + TC_SIGRECVD), 0u);
+}
+
+// The icon text font IPrefs passes over draws the labels in its own font,
+// pens and draw mode, as tall as its cells and from the same top line.
+void an_icon_font_draws_and_lays_out_the_labels() {
+    std::vector<AdfFile> files = test_files();
+    files.push_back({"Fonts.info", drawer_icon_info(static_cast<i32>(kNoIconPosition),
+                                                    static_cast<i32>(kNoIconPosition), 30,
+                                                    50, 300, 120)});
+    files.push_back({"Fonts/WideLabel.info", icon_info(kWBTool, 10, 10)});
+    Rig r(files);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon_in(root, "Fonts"));
+    const u32 labels = r.find_window("HombreTest:Fonts");
+    CHECK(labels != Workbench::kMaxWindows);
+    const Workbench::DrawerWindow& w = r.workbench.window(labels);
+    const u32 window = w.window;
+    const u32 hasklig13 = open_hasklig(r, kData + 0x100, kData + 0x140, 13);
+
+    struct LabelPixels {
+        i32 first = -1;
+        i32 last = -1;
+        u32 front = 0;
+        u32 back = 0;
+    };
+    auto label_pixels = [&]() {
+        LabelPixels pixels;
+        for (i32 y = w.inner_top + 25; y <= w.inner_top + 50; ++y) {
+            for (i32 x = w.inner_left; x < w.inner_left + w.inner_width; ++x) {
+                const u32 pen = r.window_pixel(window, x, y);
+                if (pen == 2 || pen == 3) {
+                    pixels.first = pixels.first < 0 ? y : pixels.first;
+                    pixels.last = y;
+                }
+                pixels.front += pen == 2 ? 1 : 0;
+                pixels.back += pen == 3 ? 1 : 0;
+            }
+        }
+        return pixels;
+    };
+
+    const Workbench::Extent topaz = r.workbench.extent(labels);
+    // The label in the built-in font, in the struct's pens and draw mode:
+    // JAM2 fills every row of its eight-row cell.
+    CHECK_EQ(wbconfig(r, 3, put_font_config(r, kData + 0x600, 0, JAM2, 2, 3)), 0u);
+    const LabelPixels topaz_pixels = label_pixels();
+    CHECK_EQ(topaz_pixels.first, w.inner_top + 26);
+    CHECK_EQ(topaz_pixels.last, w.inner_top + 33);
+    CHECK(topaz_pixels.front > 0);
+    CHECK(topaz_pixels.back > 0);
+
+    // hasklig 13 starts the label on the same row and is five rows taller;
+    // the icon's box grows with the label and narrows with its width.
+    CHECK_EQ(wbconfig(r, 3, put_font_config(r, kData + 0x700, hasklig13, JAM2, 2, 3)),
+             kData + 0x600);
+    CHECK_EQ(r.workbench.icon_font(), hasklig13);
+    const LabelPixels hasklig_pixels = label_pixels();
+    CHECK_EQ(hasklig_pixels.first, topaz_pixels.first);
+    CHECK_EQ(hasklig_pixels.last, topaz_pixels.last + 5);
+    CHECK(hasklig_pixels.front > 0);
+    CHECK(hasklig_pixels.back > 0);
+    const Workbench::Extent taller = r.workbench.extent(labels);
+    CHECK_EQ(taller.max_y, topaz.max_y + 5);
+    CHECK_EQ(taller.max_x, topaz.max_x - 4);
 }
 
 void start_starts_the_workbench_once() {
@@ -2093,7 +2247,9 @@ int main() {
     the_backdrop_shows_a_wbpattern_picture();
     the_backdrop_shows_the_wbpattern_pattern();
     layout_matches_the_ndk();
-    wb_config_takes_the_iprefs_settings();
+    wb_config_keeps_the_fonts();
+    wb_config_wakes_the_workbench_for_the_backdrops();
+    an_icon_font_draws_and_lays_out_the_labels();
     start_starts_the_workbench_once();
     desktop_shows_the_volumes_and_their_menus();
     drawer_icons_keep_their_positions_and_use_the_grid();
