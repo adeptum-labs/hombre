@@ -1,26 +1,34 @@
-# The Hombre Operating System
+<p align="center">
+  <img src="docs/logo.png" alt="Hombre OS" width="480">
+</p>
 
 Hombre is an operating system for x86-64 PCs that is compatible with AmigaOS
 and MorphOS. It aims to run classic Amiga 680x0 applications alongside native
 software, on modern hardware and in virtual machines.
 
-![The Hombre Workbench running Clock](docs/workbench.png)
+![The Hombre Workbench with drawers open and Clock running](docs/workbench.png)
 
 ## Features
 
 - Runs unmodified Amiga 68000 programs through a built-in 68k to x86-64
   translator.
 - Native AmigaOS libraries written in C++: exec, dos, intuition, graphics,
-  layers, gadtools, icon, workbench and version. No Kickstart ROM needed.
+  layers, gadtools, icon, workbench, utility, keymap and version. No
+  Kickstart ROM needed.
 - Reads real Amiga floppy images, ADF and DMS, in DF0: to DF3:, next to a
   writable Ram Disk.
-- A Workbench desktop: drawers, icon drag and drop, snapshot, sliders and
-  scroll arrows, menus, backdrop on and off.
+- Boots with a splash and a progress bar, then runs the boot disk's
+  `S:Startup-Sequence`, as an Amiga does.
+- A Workbench desktop: drawers, framed icons as on 3.1, icon drag and drop,
+  snapshot, sliders and scroll arrows, menus, backdrop on and off.
+- Preferences from the 3.1 Extras disk: Palette recolours the whole system,
+  WBPattern gives the Workbench a backdrop pattern or picture, and Input
+  opens with the built-in American keymap.
 - HombreShell, a native shell with the Workbench 3.1 builtins that runs the
-  3.1 `C:` commands.
+  3.1 `C:` commands and AmigaDOS scripts.
 - Starts programs such as Clock and Calculator from the AmigaOS 3.1 disks.
-- A modern window look: shaded title bars, knob-style buttons and soft
-  shadows.
+- A modern window look: shaded title bars, knob-style buttons with the 3.1
+  symbols and soft shadows, in the colours of your palette.
 - A 64-bit kernel with UEFI boot, preemptive multitasking, and USB keyboard
   and mouse.
 
@@ -29,7 +37,8 @@ software, on modern hardware and in virtual machines.
 The wiki has the full story:
 
 - **[Feature tour](https://github.com/adeptum-labs/hombre/wiki/Feature-Tour)**:
-  the Workbench, the shell, Amiga programs and disks, with screenshots.
+  the Workbench, Amiga programs, Preferences, the shell and disks, with
+  screenshots.
 - **[Getting started](https://github.com/adeptum-labs/hombre/wiki/Getting-Started)**:
   requirements, building, and booting your Workbench disks.
 - **[How it works](https://github.com/adeptum-labs/hombre/wiki/How-It-Works)**:
@@ -63,7 +72,9 @@ boots a generated test disk.
 
 Hombre ships no AmigaOS files. Use your own, legally owned AmigaOS disks.
 
-At the shell prompt, type `loadwb` to start the Workbench.
+Hombre runs the disk's `S:Startup-Sequence`. On the Workbench 3.1 disk it
+ends with `LoadWB`, so you land on the Workbench. Press Ctrl+D while Hombre
+boots to stop the script and get the shell prompt instead.
 
 `make test` runs the host unit tests and `make check` runs the headless
 boot checks. See the
