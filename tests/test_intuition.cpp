@@ -128,6 +128,14 @@ constexpr u32 kIdcmpOut = kData + 0x2200;
 constexpr u32 kEasyMessage = kData + 0x2240;
 constexpr u32 kEasyTask = kData + 0x2280;
 constexpr u32 kIPrefs = kData + 0x2300;
+constexpr u32 kAutoBodyText0 = kData + 0x2400;
+constexpr u32 kAutoBodyText1 = kData + 0x2440;
+constexpr u32 kAutoPosText = kData + 0x2480;
+constexpr u32 kAutoNegText = kData + 0x24C0;
+constexpr u32 kAutoBody0 = kData + 0x2500;
+constexpr u32 kAutoBody1 = kData + 0x2520;
+constexpr u32 kAutoPos = kData + 0x2540;
+constexpr u32 kAutoNeg = kData + 0x2560;
 
 // struct Menu, struct MenuItem and struct IntuiText
 constexpr u32 mu_NextMenu = 0;
@@ -149,7 +157,10 @@ constexpr u32 mi_ItemFill = 18;
 constexpr u32 mi_Command = 26;
 constexpr u32 mi_SubItem = 28;
 constexpr u32 mi_NextSelect = 32;
+constexpr u32 it_LeftEdge = 4;
+constexpr u32 it_TopEdge = 6;
 constexpr u32 it_IText = 12;
+constexpr u32 it_NextText = 16;
 constexpr u16 MENUENABLED = 0x0001;
 constexpr u16 CHECKIT = 0x0001;
 constexpr u16 ITEMTEXT = 0x0002;
@@ -6540,6 +6551,202 @@ void easy_request_ends_on_the_classes_its_idcmp_pointer_holds() {
     CHECK_EQ(IntuitionTest::requester_window(r.intuition), 0u);
 }
 
+void put_auto_itext(GfxRig& r, u32 at, i32 left, i32 top, u32 text, u32 next = 0) {
+    r.put16(at + it_LeftEdge, static_cast<u32>(left));
+    r.put16(at + it_TopEdge, static_cast<u32>(top));
+    r.put32(at + it_IText, text);
+    r.put32(at + it_NextText, next);
+}
+
+void put_auto_request_texts(GfxRig& r) {
+    r.str(kAutoBodyText0, "first line");
+    r.str(kAutoBodyText1, "second line");
+    r.str(kAutoPosText, "Retry");
+    r.str(kAutoNegText, "Cancel");
+    put_auto_itext(r, kAutoBody0, 0, 0, kAutoBodyText0, kAutoBody1);
+    put_auto_itext(r, kAutoBody1, 0, 10, kAutoBodyText1);
+    put_auto_itext(r, kAutoPos, 0, 0, kAutoPosText);
+    put_auto_itext(r, kAutoNeg, 0, 0, kAutoNegText);
+}
+
+void prepare_auto_request(GfxRig& r) {
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        r.put8(kEasyTask + i, 0);
+    }
+    r.put8(kEasyTask + LN_TYPE, NT_TASK);
+    r.put32(kEasyTask + TC_SIGALLOC, 0x0000FFFF);
+    r.exec.set_this_task(kEasyTask);
+    TaskHost host{};
+    host.now_us = requester_clock;
+    r.exec.set_task_host(host);
+}
+
+u32 call_auto_request(GfxRig& r, u32 window, u32 body, u32 pos, u32 neg, u32 pos_flags,
+                      u32 neg_flags, u32 width, u32 height) {
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = body;
+    r.cpu().a[2] = pos;
+    r.cpu().a[3] = neg;
+    r.cpu().d[0] = pos_flags;
+    r.cpu().d[1] = neg_flags;
+    r.cpu().d[2] = width;
+    r.cpu().d[3] = height;
+    return r.result(Base::Intuition, intuition_lvo::AutoRequest);
+}
+
+struct AutoClick {
+    GfxRig* rig;
+    u32 button = 0;
+    bool clicked = false;
+    u32 window = 0;
+    u32 screen = 0;
+    u32 buttons = 0;
+    i32 left = 0;
+    i32 top = 0;
+    i32 width = 0;
+    i32 height = 0;
+    std::string title{};
+};
+
+bool click_auto_request(void* ctx) {
+    AutoClick& click = *static_cast<AutoClick*>(ctx);
+    if (click.clicked) {
+        return true;
+    }
+    if (click.window == 0) {
+        click.window = IntuitionTest::requester_window(click.rig->intuition);
+        if (click.window == 0) {
+            return true;
+        }
+        const u32 window = click.window;
+        click.screen = click.rig->get32(window + wd_WScreen);
+        click.buttons = IntuitionTest::button_count(click.rig->intuition, window);
+        click.title = click.rig->read_str(click.rig->get32(window + wd_Title));
+        click.left = static_cast<i16>(click.rig->get16(window + wd_LeftEdge));
+        click.top = static_cast<i16>(click.rig->get16(window + wd_TopEdge));
+        click.width = static_cast<i16>(click.rig->get16(window + wd_Width));
+        click.height = static_cast<i16>(click.rig->get16(window + wd_Height));
+    }
+    const Rect box = IntuitionTest::button(click.rig->intuition, click.window, click.button);
+    CHECK(box.x1 >= box.x0 && box.y1 >= box.y0);
+    const i32 x = click.left + (box.x0 + box.x1) / 2;
+    const i32 y = click.top + (box.y0 + box.y1) / 2;
+    click.rig->intuition.pointer_event(x, y, kMouseLeft, kMouseLeft, 0, false);
+    click.rig->intuition.pointer_event(x, y, 0, 0, kMouseLeft, false);
+    click.clicked = true;
+    return true;
+}
+
+void auto_request_answers_with_the_button_that_was_chosen() {
+    for (u32 button = 0; button < 2; ++button) {
+        GfxRig r;
+        open_requester_screen(r);
+        put_auto_request_texts(r);
+        prepare_auto_request(r);
+        AutoClick click{&r, button};
+        r.exec.set_idle_hook(IdleHook{click_auto_request, &click});
+        CHECK_EQ(call_auto_request(r, 0, kAutoBody0, kAutoPos, kAutoNeg, 0, 0, 0, 0),
+                 button == 0 ? 1u : 0u);
+        CHECK(click.clicked);
+        CHECK_EQ(click.buttons, 2u);
+        CHECK_EQ(IntuitionTest::requester_window(r.intuition), 0u);
+    }
+}
+
+void auto_request_without_a_positive_button_only_has_the_negative() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kAutoBodyText0, "body");
+    r.str(kAutoNegText, "Cancel");
+    put_auto_itext(r, kAutoBody0, 0, 0, kAutoBodyText0);
+    put_auto_itext(r, kAutoNeg, 0, 0, kAutoNegText);
+    prepare_auto_request(r);
+    AutoClick click{&r, 0};
+    r.exec.set_idle_hook(IdleHook{click_auto_request, &click});
+    CHECK_EQ(call_auto_request(r, 0, kAutoBody0, 0, kAutoNeg, 0, 0, 0, 0), 0u);
+    CHECK(click.clicked);
+    CHECK_EQ(click.buttons, 1u);
+}
+
+void auto_request_uses_the_windows_screen_and_the_default_one() {
+    {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        r.str(kWinTitle, "Ref");
+        put_new_window(r, kNewWindow, 50, 60, 100, 60, 0, kWinTitle, screen, CUSTOMSCREEN);
+        const u32 reference = open_win(r, kNewWindow);
+        CHECK(reference != 0);
+        put_auto_request_texts(r);
+        prepare_auto_request(r);
+        AutoClick on_window{&r, 0};
+        r.exec.set_idle_hook(IdleHook{click_auto_request, &on_window});
+        CHECK_EQ(call_auto_request(r, reference, kAutoBody0, kAutoPos, kAutoNeg, 0, 0, 0, 0),
+                 1u);
+        CHECK_EQ(on_window.screen, screen);
+        CHECK(on_window.title == "Ref");
+        CHECK_EQ(on_window.left, (640 - on_window.width) / 2);
+        CHECK_EQ(on_window.top, (400 - on_window.height) / 2);
+    }
+    {
+        GfxRig r;
+        const u32 screen = open_requester_screen(r);
+        put_auto_request_texts(r);
+        prepare_auto_request(r);
+        AutoClick on_default{&r, 0};
+        r.exec.set_idle_hook(IdleHook{click_auto_request, &on_default});
+        CHECK_EQ(call_auto_request(r, 0, kAutoBody0, kAutoPos, kAutoNeg, 0, 0, 0, 0), 1u);
+        CHECK_EQ(on_default.screen, screen);
+        CHECK(on_default.title == "System Request");
+        CHECK_EQ(on_default.left, (640 - on_default.width) / 2);
+        CHECK_EQ(on_default.top, (400 - on_default.height) / 2);
+    }
+}
+
+struct AutoFlag {
+    GfxRig* rig;
+    u32 idcmp_class;
+    bool posted = false;
+};
+
+bool post_auto_request_class(void* ctx) {
+    AutoFlag& flag = *static_cast<AutoFlag*>(ctx);
+    if (flag.posted) {
+        return true;
+    }
+    const u32 window = IntuitionTest::requester_window(flag.rig->intuition);
+    if (window == 0) {
+        return true;
+    }
+    const u32 port = flag.rig->get32(window + wd_UserPort);
+    flag.rig->put32(kEasyMessage + mn_ReplyPort, 0);
+    flag.rig->put32(kEasyMessage + im_Class, flag.idcmp_class);
+    flag.rig->put16(kEasyMessage + im_Code, 0);
+    flag.rig->put16(kEasyMessage + im_MouseX, 0);
+    flag.rig->put16(kEasyMessage + im_MouseY, 0);
+    flag.posted = flag.rig->exec.post_message(port, kEasyMessage);
+    return true;
+}
+
+void auto_request_answers_by_the_flag_class_that_came() {
+    for (u32 positive = 0; positive < 2; ++positive) {
+        GfxRig r;
+        open_requester_screen(r);
+        put_auto_request_texts(r);
+        prepare_auto_request(r);
+        AutoFlag flag{&r, IDCMP_RAWKEY};
+        r.exec.set_idle_hook(IdleHook{post_auto_request_class, &flag});
+        const u32 pos_flags = positive != 0 ? IDCMP_RAWKEY : 0;
+        const u32 neg_flags = positive != 0 ? 0 : IDCMP_RAWKEY;
+        CHECK_EQ(
+            call_auto_request(r, 0, kAutoBody0, kAutoPos, kAutoNeg, pos_flags, neg_flags, 0, 0),
+            positive);
+        CHECK(flag.posted);
+        CHECK_EQ(IntuitionTest::requester_window(r.intuition), 0u);
+    }
+}
+
 }
 
 
@@ -7313,6 +7520,33 @@ void a_long_int_gadget_takes_only_numbers_and_keeps_the_value() {
     reply_msg(r, msg);
 }
 
+// AllocRemember notes every block on the key's list; FreeRemember with
+// reallyForget gives the blocks and the nodes back and empties the key.
+void remember_lists_allocate_and_free() {
+    GfxRig r;
+    constexpr u32 kKey = kData + 0x800;
+    r.put32(kKey, 0);
+    const u32 before = r.exec.free_bytes();
+    u32 blocks[3]{};
+    for (u32 i = 0; i < 3; ++i) {
+        r.cpu().a[0] = kKey;
+        r.cpu().d[0] = 100 + i;
+        r.cpu().d[1] = MEMF_CLEAR;
+        blocks[i] = r.result(Base::Intuition, intuition_lvo::AllocRemember);
+        CHECK(blocks[i] != 0);
+    }
+    const u32 head = r.get32(kKey);
+    CHECK_EQ(r.get32(head + 8), blocks[2]);
+    CHECK_EQ(r.get32(head + 4), 102u);
+    CHECK_EQ(r.get32(r.get32(head) + 8), blocks[1]);
+    CHECK(r.exec.free_bytes() < before);
+    r.cpu().a[0] = kKey;
+    r.cpu().d[0] = 1;
+    r.result(Base::Intuition, intuition_lvo::FreeRemember);
+    CHECK_EQ(r.get32(kKey), 0u);
+    CHECK_EQ(r.exec.free_bytes(), before);
+}
+
 int main() {
     a_string_gadget_is_edited_from_the_keyboard();
     a_long_int_gadget_takes_only_numbers_and_keeps_the_value();
@@ -7424,6 +7658,7 @@ int main() {
     resize_grows_and_clears();
     resize_clamps_to_limits();
     window_limits_set_and_report_limits();
+    remember_lists_allocate_and_free();
     newsize_coalesced_and_final_on_release();
     unreplied_resizes_do_not_exhaust_messages();
     move_posts_changewindow_only();
@@ -7505,5 +7740,9 @@ int main() {
     free_sys_request_ignores_zero_and_one();
     requester_memory_comes_back_after_easy_request();
     easy_request_ends_on_the_classes_its_idcmp_pointer_holds();
+    auto_request_answers_with_the_button_that_was_chosen();
+    auto_request_without_a_positive_button_only_has_the_negative();
+    auto_request_uses_the_windows_screen_and_the_default_one();
+    auto_request_answers_by_the_flag_class_that_came();
     return check::finish("test_intuition");
 }

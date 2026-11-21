@@ -873,7 +873,11 @@ constexpr u32 kMiItemFill = 18;
 constexpr u32 kMiCommand = 26;
 constexpr u32 kMiSubItem = 28;
 constexpr u32 kMiNextSelect = 32;
+constexpr u32 kItLeftEdge = 4;
+constexpr u32 kItTopEdge = 6;
 constexpr u32 kItText = 12;
+constexpr u32 kItNextText = 16;
+constexpr u32 kItMaxChars = 255;
 constexpr u16 kMenuNull = 0xFFFF;
 constexpr u32 kIdcmpMenuPick = 0x00000100;
 constexpr u32 kDriNewLook = 1;
@@ -884,6 +888,15 @@ constexpr u32 kDrawInfoPensAt = 52;
 constexpr u32 kDrawInfoBytes = kDrawInfoPensAt + (kDriPenCount + 1) * 2;
 
 namespace {
+
+// The characters of the IntuiText string at text, up to its NUL.
+u32 itext_chars(Bus& b, u32 text) {
+    u32 n = 0;
+    while (text != 0 && n < kItMaxChars && b.r8(text + n) != 0 && b.ok()) {
+        ++n;
+    }
+    return n;
+}
 
 u32 read_menu_titles(Bus& b, u32 strip, menu_layout::Title* titles, u32 max) {
     u32 count = 0;
@@ -1179,6 +1192,69 @@ struct IntuitionNatives {
         of(ctx).free_sys_request(m.cpu.a[0]);
     }
 
+    // struct Remember (intuition/intuition.h): the next node, the size of
+    // the block and the block AllocRemember got for it.
+    static constexpr u32 rm_NextRemember = 0;
+    static constexpr u32 rm_RememberSize = 4;
+    static constexpr u32 rm_Memory = 8;
+    static constexpr u32 kRememberBytes = 12;
+    static constexpr u32 kMaxRemembered = 1u << 20;
+
+    // AllocRemember(rememberKey A0, size D0, flags D1): AllocMem's block,
+    // noted at the head of the key's list so FreeRemember can give it
+    // back. 0 when either allocation fails.
+    static void alloc_remember(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        Bus b(m);
+        const u32 key = m.cpu.a[0];
+        const u32 size = m.cpu.d[0];
+        if (key == 0 || size == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 node = in.exec_->alloc(kRememberBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (node == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 memory = in.exec_->alloc(size, m.cpu.d[1]);
+        if (memory == 0) {
+            in.exec_->free(node, kRememberBytes);
+            native::set_result(m, 0);
+            return;
+        }
+        b.w32(node + rm_NextRemember, b.r32(key));
+        b.w32(node + rm_RememberSize, size);
+        b.w32(node + rm_Memory, memory);
+        b.w32(key, node);
+        native::set_result(m, memory);
+    }
+
+    // FreeRemember(rememberKey A0, reallyForget D0): frees the key's
+    // nodes, and the blocks they note as well when reallyForget is set,
+    // and empties the key.
+    static void free_remember(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        Bus b(m);
+        const u32 key = m.cpu.a[0];
+        if (key == 0) {
+            return;
+        }
+        u32 node = b.r32(key);
+        for (u32 i = 0; node != 0 && i < kMaxRemembered && b.ok(); ++i) {
+            const u32 next = b.r32(node + rm_NextRemember);
+            if (m.cpu.d[0] != 0) {
+                const u32 memory = b.r32(node + rm_Memory);
+                if (memory != 0) {
+                    in.exec_->free(memory, b.r32(node + rm_RememberSize));
+                }
+            }
+            in.exec_->free(node, kRememberBytes);
+            node = next;
+        }
+        b.w32(key, 0);
+    }
+
     static void easy_request_args(void* ctx, Machine& m) {
         native::set_result(m, static_cast<u32>(of(ctx).easy_request(
                                   m.cpu.a[0], m.cpu.a[1], m.cpu.a[2], m.cpu.a[3])));
@@ -1187,6 +1263,15 @@ struct IntuitionNatives {
     static void build_easy_request_args(void* ctx, Machine& m) {
         native::set_result(
             m, of(ctx).build_easy_request(m.cpu.a[0], m.cpu.a[1], m.cpu.d[0], m.cpu.a[3]));
+    }
+
+    static void auto_request(void* ctx, Machine& m) {
+        native::set_result(
+            m, of(ctx).auto_request(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2], m.cpu.a[3], m.cpu.d[0],
+                                    m.cpu.d[1], static_cast<i32>(m.cpu.d[2] & 0xFFFF),
+                                    static_cast<i32>(m.cpu.d[3] & 0xFFFF))
+                   ? 1
+                   : 0);
     }
 
     static void sys_req_handler(void* ctx, Machine& m) {
@@ -1255,17 +1340,7 @@ struct IntuitionNatives {
     static constexpr u32 kItDrawMode = 2;
     static constexpr u32 kItLeftEdge = 4;
     static constexpr u32 kItTopEdge = 6;
-    static constexpr u32 kItNextText = 16;
     static constexpr u32 kItChain = 64;
-    static constexpr u32 kItMaxChars = 255;
-
-    static u32 itext_chars(Bus& b, u32 text) {
-        u32 n = 0;
-        while (text != 0 && n < kItMaxChars && b.r8(text + n) != 0 && b.ok()) {
-            ++n;
-        }
-        return n;
-    }
 
     // IntuiTextLength: the width in pixels of the IntuiText at A0.
     static void intui_text_length(void*, Machine& m) {
@@ -1747,10 +1822,13 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::BeginRefresh, IntuitionNatives::begin_refresh, "BeginRefresh"},
     {intuition_lvo::EndRefresh, IntuitionNatives::end_refresh, "EndRefresh"},
     {intuition_lvo::FreeSysRequest, IntuitionNatives::free_sys_request, "FreeSysRequest"},
+    {intuition_lvo::AllocRemember, IntuitionNatives::alloc_remember, "AllocRemember"},
+    {intuition_lvo::FreeRemember, IntuitionNatives::free_remember, "FreeRemember"},
     {intuition_lvo::EasyRequestArgs, IntuitionNatives::easy_request_args, "EasyRequestArgs"},
     {intuition_lvo::BuildEasyRequestArgs, IntuitionNatives::build_easy_request_args,
      "BuildEasyRequestArgs"},
     {intuition_lvo::SysReqHandler, IntuitionNatives::sys_req_handler, "SysReqHandler"},
+    {intuition_lvo::AutoRequest, IntuitionNatives::auto_request, "AutoRequest"},
     {intuition_lvo::GetScreenDrawInfo, IntuitionNatives::get_screen_draw_info,
      "GetScreenDrawInfo"},
     {intuition_lvo::FreeScreenDrawInfo, IntuitionNatives::free_screen_draw_info,
@@ -3752,7 +3830,9 @@ void Intuition::drop_requester(u32 window) {
     }
 }
 
-u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 args) {
+u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text, u32 text_count,
+                               const RequesterLabel* labels, u32 label_count, u32 idcmp,
+                               i32 min_width, i32 min_height) {
     if (machine_ == nullptr || exec_ == nullptr || graphics_ == nullptr) {
         return 0;
     }
@@ -3762,12 +3842,6 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
         return 0;
     }
     Bus b(*machine_);
-    const u32 easy_title = b.r32(easy_struct + ndk::es_Title);
-    const u32 text_format = b.r32(easy_struct + ndk::es_TextFormat);
-    const u32 gadget_format = b.r32(easy_struct + ndk::es_GadgetFormat);
-    if (!b.ok()) {
-        return 0;
-    }
     u32 screen = 0;
     if (window != 0 && window_open(window)) {
         screen = b.r32(window + ndk::wd_WScreen);
@@ -3784,61 +3858,31 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
     if (!b.ok() || screen_w <= 0 || screen_h <= 0) {
         return 0;
     }
-    if (gadget_format == 0) {
-        LogLine().text("intuition: requester without gadgets").send();
-        return 0;
-    }
-
-    char text[kMaxRequesterText];
-    char gadgets[kMaxRequesterGadgetText];
-    u32 stream = args;
-    if (!format_requester_text(b, text_format, stream, text, sizeof text) ||
-        !format_requester_text(b, gadget_format, stream, gadgets, sizeof gadgets)) {
-        return 0;
-    }
 
     Requester req;
     req.idcmp = idcmp;
-    bool too_many_buttons = false;
-    char* at = gadgets;
-    for (;;) {
-        char* end = at;
-        while (*end != '\0' && *end != '|') {
-            ++end;
+    u32 widest = 0;
+    const u32 button_count =
+        label_count < kMaxRequesterButtons ? label_count : kMaxRequesterButtons;
+    for (u32 i = 0; i < button_count; ++i) {
+        u32 length = labels[i].length;
+        if (length >= kMaxRequesterLabel) {
+            length = kMaxRequesterLabel - 1;
         }
-        if (req.button_count < kMaxRequesterButtons) {
-            u32 length = static_cast<u32>(end - at);
-            if (length >= kMaxRequesterLabel) {
-                length = kMaxRequesterLabel - 1;
-            }
-            for (u32 i = 0; i < length; ++i) {
-                req.labels[req.button_count][i] = at[i];
-            }
-            req.labels[req.button_count][length] = '\0';
-            req.label_length[req.button_count] = static_cast<u8>(length);
-            ++req.button_count;
-        } else {
-            too_many_buttons = true;
+        for (u32 j = 0; j < length; ++j) {
+            req.labels[i][j] = labels[i].text[j];
         }
-        if (*end == '\0') {
-            break;
-        }
-        at = end + 1;
-    }
-    if (too_many_buttons) {
-        LogLine().text("intuition: requester has more than ").dec(kMaxRequesterButtons)
-            .text(" buttons").send();
+        req.labels[i][length] = '\0';
+        req.label_length[i] = static_cast<u8>(length);
+        widest = length > widest ? length : widest;
+        ++req.button_count;
     }
 
-    RequesterLine lines[kMaxRequesterLines];
-    const u32 line_count = split_requester_lines(text, lines, kMaxRequesterLines);
-    u32 max_chars = 0;
-    for (u32 i = 0; i < line_count; ++i) {
-        max_chars = lines[i].length > max_chars ? lines[i].length : max_chars;
-    }
-    u32 widest = 0;
-    for (u32 i = 0; i < req.button_count; ++i) {
-        widest = req.label_length[i] > widest ? req.label_length[i] : widest;
+    i32 text_right = 0;
+    i32 text_bottom = 0;
+    for (u32 i = 0; i < text_count; ++i) {
+        text_right = larger(text_right, text[i].left + static_cast<i32>(text[i].length) * 8);
+        text_bottom = larger(text_bottom, text[i].top + 8);
     }
 
     const i32 button_w = static_cast<i32>(widest) * 8 + kRequesterButtonPad;
@@ -3847,24 +3891,26 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
             ? button_w
             : static_cast<i32>(req.button_count) * button_w +
                   static_cast<i32>(req.button_count - 1) * kRequesterButtonGap;
-    const i32 text_box_w = static_cast<i32>(max_chars) * 8 + 2 * kRequesterTextPad;
-    const i32 text_box_h = static_cast<i32>(line_count) * 8 + 2 * kRequesterTextPad;
+    const i32 text_box_w = text_right + 2 * kRequesterTextPad;
+    const i32 text_box_h = text_bottom + 2 * kRequesterTextPad;
     const i32 content_w = larger(text_box_w, button_row_w);
     const i32 content_h = text_box_h + kRequesterGap + kRequesterButtonHeight;
     i32 width = content_w + 2 * kRequesterMargin + static_cast<i32>(chrome::kBorderLeft) +
                 static_cast<i32>(chrome::kBorderRight);
     i32 height = content_h + 2 * kRequesterMargin + static_cast<i32>(chrome::kBorderTop) +
                  static_cast<i32>(chrome::kBorderBottom);
+    width = larger(width, min_width);
+    height = larger(height, min_height);
     width = smaller(width, screen_w);
     height = smaller(height, screen_h);
     const i32 left = (screen_w - width) / 2;
     const i32 top = (screen_h - height) / 2;
 
-    u32 title = easy_title;
-    if (title == 0 && window != 0 && window_open(window)) {
-        title = b.r32(window + ndk::wd_Title);
+    u32 requester_title = title;
+    if (requester_title == 0 && window != 0 && window_open(window)) {
+        requester_title = b.r32(window + ndk::wd_Title);
     }
-    const bool literal_title = title == 0;
+    const bool literal_title = requester_title == 0;
     const u32 title_bytes = literal_title ? sizeof kSystemRequestTitle : 0;
     const u32 new_window_bytes = ndk::NewWindow_SIZEOF + title_bytes;
     const u32 new_window = exec_->alloc(new_window_bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
@@ -3873,9 +3919,9 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
         return 0;
     }
     if (literal_title) {
-        title = new_window + ndk::NewWindow_SIZEOF;
+        requester_title = new_window + ndk::NewWindow_SIZEOF;
         for (u32 i = 0; i < sizeof kSystemRequestTitle; ++i) {
-            b.w8(title + i, static_cast<u8>(kSystemRequestTitle[i]));
+            b.w8(requester_title + i, static_cast<u8>(kSystemRequestTitle[i]));
         }
     }
     b.w16(new_window + ndk::nw_LeftEdge, static_cast<u32>(left));
@@ -3887,7 +3933,7 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
     b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_MOUSEBUTTONS | idcmp);
     b.w32(new_window + ndk::nw_Flags, ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET |
                                           ndk::WFLG_ACTIVATE | ndk::WFLG_RMBTRAP);
-    b.w32(new_window + ndk::nw_Title, title);
+    b.w32(new_window + ndk::nw_Title, requester_title);
     b.w32(new_window + ndk::nw_Screen, screen);
     b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
     const u32 requester = b.ok() ? open_window(new_window, 0) : 0;
@@ -3935,16 +3981,16 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
         begin_batch();
         if (text_box.x1 >= text_box.x0 && text_box.y1 >= text_box.y0) {
             draw_requester_box(*graphics_, rp, text_box, pens, true);
-            const u32 room = static_cast<u32>(
-                larger(0, (text_box.x1 - text_box.x0 + 1 - 2 * kRequesterTextPad) / 8));
-            i32 baseline = text_box.y0 + kRequesterTextPad + 6;
-            for (u32 i = 0; i < line_count; ++i) {
+            for (u32 i = 0; i < text_count; ++i) {
+                const i32 x = text_box.x0 + kRequesterTextPad + text[i].left;
+                const i32 baseline = text_box.y0 + kRequesterTextPad + text[i].top + 6;
                 if (baseline + 1 > text_box.y1) {
-                    break;
+                    continue;
                 }
-                draw_requester_text(*graphics_, rp, text_box.x0 + kRequesterTextPad, baseline,
-                                    lines[i].text, lines[i].length, room, pens.text);
-                baseline += 8;
+                const u32 room = static_cast<u32>(
+                    larger(0, (text_box.x1 - kRequesterTextPad - x + 1) / 8));
+                draw_requester_text(*graphics_, rp, x, baseline, text[i].text, text[i].length,
+                                    room, pens.text);
             }
         }
         for (u32 i = 0; i < req.button_count; ++i) {
@@ -3969,6 +4015,75 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
     }
     LogLine().text("intuition: requester ").text(name).text(" opened").send();
     return requester;
+}
+
+u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 args) {
+    if (machine_ == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 easy_title = b.r32(easy_struct + ndk::es_Title);
+    const u32 text_format = b.r32(easy_struct + ndk::es_TextFormat);
+    const u32 gadget_format = b.r32(easy_struct + ndk::es_GadgetFormat);
+    if (!b.ok()) {
+        return 0;
+    }
+    if (gadget_format == 0) {
+        LogLine().text("intuition: requester without gadgets").send();
+        return 0;
+    }
+
+    char text[kMaxRequesterText];
+    char gadgets[kMaxRequesterGadgetText];
+    u32 stream = args;
+    if (!format_requester_text(b, text_format, stream, text, sizeof text) ||
+        !format_requester_text(b, gadget_format, stream, gadgets, sizeof gadgets)) {
+        return 0;
+    }
+
+    RequesterLine lines[kMaxRequesterLines];
+    const u32 line_count = split_requester_lines(text, lines, kMaxRequesterLines);
+    RequesterText runs[kMaxRequesterLines];
+    for (u32 i = 0; i < line_count; ++i) {
+        runs[i] = RequesterText{lines[i].text, lines[i].length, 0, static_cast<i32>(i) * 8};
+    }
+
+    RequesterLabel labels[kMaxRequesterButtons];
+    char label_text[kMaxRequesterButtons][kMaxRequesterLabel];
+    u32 label_count = 0;
+    bool too_many_buttons = false;
+    char* at = gadgets;
+    for (;;) {
+        char* end = at;
+        while (*end != '\0' && *end != '|') {
+            ++end;
+        }
+        if (label_count < kMaxRequesterButtons) {
+            u32 length = static_cast<u32>(end - at);
+            if (length >= kMaxRequesterLabel) {
+                length = kMaxRequesterLabel - 1;
+            }
+            for (u32 i = 0; i < length; ++i) {
+                label_text[label_count][i] = at[i];
+            }
+            label_text[label_count][length] = '\0';
+            labels[label_count] = RequesterLabel{label_text[label_count], length};
+            ++label_count;
+        } else {
+            too_many_buttons = true;
+        }
+        if (*end == '\0') {
+            break;
+        }
+        at = end + 1;
+    }
+    if (too_many_buttons) {
+        LogLine().text("intuition: requester has more than ").dec(kMaxRequesterButtons)
+            .text(" buttons").send();
+    }
+
+    return build_requester(window, easy_title, runs, line_count, labels, label_count, idcmp, 0,
+                           0);
 }
 
 i32 Intuition::sys_req_handler(u32 window, u32 idcmp_ptr, bool wait) {
@@ -4087,6 +4202,94 @@ i32 Intuition::easy_request(u32 window, u32 easy_struct, u32 idcmp_ptr, u32 args
         result = sys_req_handler(requester, idcmp_ptr, true);
     }
     free_sys_request(requester);
+    return result;
+}
+
+bool Intuition::auto_request(u32 window, u32 body, u32 pos_text, u32 neg_text, u32 pos_flags,
+                             u32 neg_flags, i32 width, i32 height) {
+    if (machine_ == nullptr || exec_ == nullptr || graphics_ == nullptr) {
+        return false;
+    }
+    Bus b(*machine_);
+    char text[kMaxRequesterText];
+    RequesterText runs[kMaxRequesterLines];
+    u32 run_count = 0;
+    u32 used = 0;
+    for (u32 it = body; it != 0 && run_count < kMaxRequesterLines;
+         it = b.r32(it + kItNextText)) {
+        const u32 text_at = b.r32(it + kItText);
+        const u32 chars = itext_chars(b, text_at);
+        const u32 room = used < kMaxRequesterText - 1 ? kMaxRequesterText - 1 - used : 0;
+        const u32 length = chars < room ? chars : room;
+        for (u32 i = 0; i < length; ++i) {
+            text[used + i] = static_cast<char>(b.r8(text_at + i));
+        }
+        runs[run_count++] = RequesterText{text + used, length,
+                                          static_cast<i16>(b.r16(it + kItLeftEdge)),
+                                          static_cast<i16>(b.r16(it + kItTopEdge))};
+        used += length;
+        if (!b.ok()) {
+            return false;
+        }
+    }
+
+    char label_text[2][kMaxRequesterLabel];
+    RequesterLabel labels[2];
+    u32 label_count = 0;
+    auto read_label = [&](u32 it, char* out) {
+        const u32 text_at = b.r32(it + kItText);
+        const u32 chars = itext_chars(b, text_at);
+        const u32 length = chars < kMaxRequesterLabel - 1 ? chars : kMaxRequesterLabel - 1;
+        for (u32 i = 0; i < length; ++i) {
+            out[i] = static_cast<char>(b.r8(text_at + i));
+        }
+        out[length] = '\0';
+        return length;
+    };
+    if (pos_text != 0) {
+        const u32 length = read_label(pos_text, label_text[label_count]);
+        labels[label_count] = RequesterLabel{label_text[label_count], length};
+        ++label_count;
+    }
+    if (neg_text != 0) {
+        const u32 length = read_label(neg_text, label_text[label_count]);
+        labels[label_count] = RequesterLabel{label_text[label_count], length};
+        ++label_count;
+    }
+    if (!b.ok()) {
+        return false;
+    }
+
+    const u32 requester =
+        build_requester(window, 0, runs, run_count, labels, label_count, pos_flags | neg_flags,
+                        width, height);
+    if (requester == 0) {
+        return false;
+    }
+
+    const u32 mask = pos_flags | neg_flags;
+    u32 mask_at = 0;
+    if (mask != 0) {
+        mask_at = exec_->alloc(4, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (mask_at != 0) {
+            Bus out(*machine_);
+            out.w32(mask_at, mask);
+        }
+    }
+    bool result = false;
+    i32 answer = -2;
+    while (answer == -2 && machine_->cpu.exit == m68k::ExitReason::None) {
+        answer = sys_req_handler(requester, mask_at, true);
+        if (answer >= 0) {
+            result = label_count == 2 ? answer != 0 : pos_text != 0;
+        } else if (answer == -1 && mask_at != 0) {
+            result = (b.r32(mask_at) & pos_flags) != 0;
+        }
+    }
+    free_sys_request(requester);
+    if (mask_at != 0) {
+        exec_->free(mask_at, 4);
+    }
     return result;
 }
 

@@ -88,9 +88,12 @@ constexpr u32 SetWindowTitles = 276;
 constexpr u32 WindowToBack = 306;
 constexpr u32 WindowToFront = 312;
 constexpr u32 WindowLimits = 318;
+constexpr u32 AutoRequest = 348;
 constexpr u32 BeginRefresh = 354;
 constexpr u32 EndRefresh = 366;
 constexpr u32 FreeSysRequest = 372;
+constexpr u32 AllocRemember = 396;
+constexpr u32 FreeRemember = 408;
 constexpr u32 LockIBase = 414;
 constexpr u32 UnlockIBase = 420;
 constexpr u32 GetScreenData = 426;
@@ -228,6 +231,11 @@ public:
     // Builds the requester, answers it until a button or the caller's event
     // ends it, and frees it.
     i32 easy_request(u32 window, u32 easy_struct, u32 idcmp_ptr, u32 args);
+    // AutoRequest: shows the body IntuiText chain with the positive and
+    // negative buttons and waits. TRUE for the positive button or a
+    // pos_flags class, FALSE for the negative button or a neg_flags one.
+    bool auto_request(u32 window, u32 body, u32 pos_text, u32 neg_text, u32 pos_flags,
+                      u32 neg_flags, i32 width, i32 height);
 
     bool modify_idcmp(u32 window, u32 flags);
     void set_window_titles(u32 window, u32 title, u32 screen_title);
@@ -458,9 +466,10 @@ private:
         i32 newsize_h = 0;
     };
 
-    // A requester window EasyRequestArgs built: the IDCMP classes that are
-    // the caller's rather than the requester's, where each button lies, its
-    // label kept for redrawing, and the button the pointer holds down.
+    // A requester window EasyRequestArgs or AutoRequest built: the IDCMP
+    // classes that are the caller's rather than the requester's, where each
+    // button lies, its label kept for redrawing, and the button the pointer
+    // holds down.
     struct Requester {
         u32 window = 0;
         u32 idcmp = 0;
@@ -469,6 +478,20 @@ private:
         Rect buttons[kMaxRequesterButtons]{};
         char labels[kMaxRequesterButtons][kMaxRequesterLabel]{};
         u8 label_length[kMaxRequesterButtons]{};
+    };
+
+    // The text of a requester: its characters and place in the text area.
+    struct RequesterText {
+        const char* text;
+        u32 length;
+        i32 left;
+        i32 top;
+    };
+
+    // The label of one of the requester's buttons.
+    struct RequesterLabel {
+        const char* text;
+        u32 length;
     };
 
     struct GadgetHookEntry {
@@ -611,6 +634,14 @@ private:
     void clear_window_gadget_hooks(u32 window);
     void log_unhandled_gadget_type(u32 gtype);
     u32 find_gadget_window(u32 gadget) const;
+    // Opens the requester window on the screen of window, or the default
+    // one when window is 0 or not open, draws text and buttons and keeps
+    // them for SysReqHandler. A 0 title takes the window's, then the system
+    // one. The window is at least min_width by min_height and no larger
+    // than its screen.
+    u32 build_requester(u32 window, u32 title, const RequesterText* text, u32 text_count,
+                        const RequesterLabel* labels, u32 label_count, u32 idcmp,
+                        i32 min_width, i32 min_height);
     Requester* find_requester(u32 window);
     const Requester* find_requester(u32 window) const;
     Requester* free_requester();
