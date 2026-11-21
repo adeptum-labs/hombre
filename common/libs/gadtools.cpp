@@ -82,6 +82,7 @@ constexpr u16 kOptScaled = 0x4;
 constexpr u32 GENERIC_KIND = 0;
 constexpr u32 BUTTON_KIND = 1;
 constexpr u32 CHECKBOX_KIND = 2;
+constexpr u32 INTEGER_KIND = 3;
 constexpr u32 LISTVIEW_KIND = 4;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 CYCLE_KIND = 7;
@@ -130,6 +131,8 @@ constexpr u32 GTSC_Total = 0x80080016;
 constexpr u32 GTSC_Visible = 0x80080017;
 constexpr u32 GTST_String = 0x8008002D;
 constexpr u32 GTST_MaxChars = 0x8008002E;
+constexpr u32 GTIN_Number = 0x8008002F;
+constexpr u32 GTIN_MaxChars = 0x80080030;
 constexpr u32 PGA_Freedom = 0x80031001;
 constexpr u32 LORIENT_HORIZ = 1;
 // A scroller keeps its total where a palette keeps its colour table, how
@@ -139,6 +142,7 @@ constexpr u32 gt_Total = 72;
 constexpr u32 gt_Visible = 68;
 constexpr u32 gt_Freedom = 70;
 constexpr u32 kDefaultMaxChars = 64;
+constexpr u32 kDefaultIntMaxChars = 10;
 // A slider is a scroller over its levels: its level where a scroller keeps
 // its top, its maximum where a scroller keeps its total, and its minimum,
 // a WORD, where a palette keeps its indicator width.
@@ -295,6 +299,8 @@ private:
 struct GadToolsNatives {
     static GadTools& of(void* ctx) { return *static_cast<GadTools*>(ctx); }
 
+    static void set_integer_number(GadTools& g, Bus& b, u32 gadget, i32 value);
+
     static void get_visual_info(void* ctx, Machine& m) {
         GadTools& g = of(ctx);
         const u32 screen = m.cpu.a[0];
@@ -369,14 +375,18 @@ struct GadToolsNatives {
     // and there even for no text.
     static void set_text(GadTools& g, Bus& b, u32 gadget, u32 text, bool copy) {
         drop_text_copy(g, b, gadget);
-        const bool buffer = b.r16(gadget + gt_Kind) == STRING_KIND;
+        const u32 kind = b.r16(gadget + gt_Kind);
+        const bool buffer = kind == STRING_KIND || kind == INTEGER_KIND;
         if (!copy || (text == 0 && !buffer)) {
             b.w32(gadget + gt_Text, text);
             return;
         }
         const u32 length = text != 0 ? label_length(b, text) : 0;
-        const u32 bytes = buffer && length + 1 < kDefaultMaxChars ? kDefaultMaxChars : length + 1;
-        const u32 at = g.exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        const u32 max_chars = kind == INTEGER_KIND ? b.r16(gadget + gt_Count) + 1 : 0;
+        const u32 undo = kind == INTEGER_KIND ? max_chars : 0;
+        u32 bytes = buffer && length + 1 < kDefaultMaxChars ? kDefaultMaxChars : length + 1;
+        bytes = bytes < max_chars ? max_chars : bytes;
+        const u32 at = g.exec_->alloc(bytes + undo, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (at == 0) {
             b.w32(gadget + gt_Text, 0);
             return;
@@ -385,11 +395,12 @@ struct GadToolsNatives {
             b.w8(at + i, b.r8(text + i));
         }
         b.w32(gadget + gt_Text, at);
-        b.w32(gadget + gt_CopyBytes, bytes);
+        b.w32(gadget + gt_CopyBytes, bytes + undo);
         if (buffer) {
             const u32 si = gadget + gt_StringInfo;
             b.w32(si + ndk::si_Buffer, at);
-            b.w16(si + ndk::si_MaxChars, bytes);
+            b.w32(si + ndk::si_UndoBuffer, undo != 0 ? at + bytes : 0);
+            b.w16(si + ndk::si_MaxChars, kind == INTEGER_KIND ? max_chars : bytes);
             b.w16(si + ndk::si_NumChars, length);
             b.w16(si + ndk::si_BufferPos, length);
             b.w16(si + ndk::si_DispPos, 0);
@@ -518,6 +529,17 @@ struct GadToolsNatives {
                 has_text = true;
                 copy = true;
                 break;
+            case GTIN_Number:
+                b.w32(gadget + gt_Number, data);
+                if (!creating && b.r16(gadget + gt_Kind) == INTEGER_KIND) {
+                    set_integer_number(g, b, gadget, static_cast<i32>(data));
+                }
+                break;
+            case GTIN_MaxChars:
+                if (creating) {
+                    b.w16(gadget + gt_Count, data < 0xFFFF ? data : 0xFFFE);
+                }
+                break;
             case GTTX_Border:
             case GTNM_Border:
                 if (creating) {
@@ -611,17 +633,24 @@ struct GadToolsNatives {
         b.w16(gadget + ndk::gg_Height, b.r16(ng + ng_Height));
         b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
         const bool clicks = kind == BUTTON_KIND || kind == CHECKBOX_KIND ||
-                            kind == CYCLE_KIND || kind == PALETTE_KIND ||
-                            kind == STRING_KIND || kind == LISTVIEW_KIND;
-        // A checkbox turns its own state over when it is let go.
+                            kind == INTEGER_KIND || kind == CYCLE_KIND ||
+                            kind == PALETTE_KIND || kind == STRING_KIND ||
+                            kind == LISTVIEW_KIND;
+        // A checkbox turns its own state over when it is let go, an integer
+        // gadget takes only numbers and a minus sign.
+        const u32 activation =
+            kind == CHECKBOX_KIND ? ndk::GACT_RELVERIFY | ndk::GACT_TOGGLESELECT
+            : clicks              ? ndk::GACT_RELVERIFY
+                                  : 0;
         b.w16(gadget + ndk::gg_Activation,
-              kind == CHECKBOX_KIND
-                  ? ndk::GACT_RELVERIFY | ndk::GACT_TOGGLESELECT
-                  : clicks ? ndk::GACT_RELVERIFY : 0);
+              kind == INTEGER_KIND ? activation | ndk::GACT_LONGINT : activation);
         if (kind == PALETTE_KIND) {
             // One plane and colour 1, unless the tags say otherwise.
             b.w16(gadget + gt_Count, 2);
             b.w32(gadget + gt_Number, 1);
+        }
+        if (kind == INTEGER_KIND) {
+            b.w16(gadget + gt_Count, kDefaultIntMaxChars);
         }
         const bool prop = kind == SCROLLER_KIND || kind == SLIDER_KIND;
         if (prop) {
@@ -634,9 +663,10 @@ struct GadToolsNatives {
             b.w32(gadget + gt_Number, 0xFFFFFFFF);
         }
         b.w16(gadget + ndk::gg_GadgetType,
-              ndk::GTYP_GADTOOLS | (kind == STRING_KIND ? ndk::GTYP_STRGADGET
-                                    : prop              ? ndk::GTYP_PROPGADGET
-                                                        : ndk::GTYP_BOOLGADGET));
+              ndk::GTYP_GADTOOLS | (kind == STRING_KIND || kind == INTEGER_KIND
+                                        ? ndk::GTYP_STRGADGET
+                                    : prop ? ndk::GTYP_PROPGADGET
+                                           : ndk::GTYP_BOOLGADGET));
         if (prop) {
             b.w16(gadget + ndk::gg_Activation,
                   ndk::GACT_RELVERIFY | ndk::GACT_IMMEDIATE | ndk::GACT_FOLLOWMOUSE);
@@ -668,12 +698,14 @@ struct GadToolsNatives {
             native::set_result(m, 0);
             return;
         }
-        if (kind == STRING_KIND && b.r32(gadget + gt_Text) == 0) {
+        if (kind == INTEGER_KIND) {
+            set_integer_number(g, b, gadget, static_cast<i32>(b.r32(gadget + gt_Number)));
+        } else if (kind == STRING_KIND && b.r32(gadget + gt_Text) == 0) {
             set_text(g, b, gadget, 0, true);
         }
         if (kind != GENERIC_KIND && kind != BUTTON_KIND && kind != CHECKBOX_KIND &&
-            kind != TEXT_KIND && kind != NUMBER_KIND && kind != CYCLE_KIND &&
-            kind != PALETTE_KIND &&
+            kind != INTEGER_KIND && kind != TEXT_KIND && kind != NUMBER_KIND &&
+            kind != CYCLE_KIND && kind != PALETTE_KIND &&
             kind != SCROLLER_KIND && kind != STRING_KIND && kind != SLIDER_KIND &&
             kind != LISTVIEW_KIND && kind < kKinds &&
             !g.unhandled_kinds_[kind]) {
@@ -697,7 +729,8 @@ struct GadToolsNatives {
         if (window != 0 && b.ok()) {
             const u32 kind = b.r16(gadget + gt_Kind);
             // Intuition draws a scroller's prop and a string's cursor.
-            if ((kind == SCROLLER_KIND || kind == SLIDER_KIND || kind == STRING_KIND) &&
+            if ((kind == SCROLLER_KIND || kind == SLIDER_KIND || kind == STRING_KIND ||
+                 kind == INTEGER_KIND) &&
                 g.intuition_ != nullptr) {
                 g.intuition_->refresh_glist(gadget, window, 1);
             } else {
@@ -731,6 +764,9 @@ struct GadToolsNatives {
                 ++answered;
             } else if (tag == GTNM_Number || tag == GTCY_Active || tag == GTPA_Color) {
                 b.w32(data, b.r32(gadget + gt_Number));
+                ++answered;
+            } else if (tag == GTIN_Number) {
+                b.w32(data, b.r32(gadget + gt_StringInfo + ndk::si_LongInt));
                 ++answered;
             } else if (tag == GTCY_Labels || tag == GTST_String) {
                 b.w32(data, b.r32(gadget + gt_Text));
@@ -1151,6 +1187,36 @@ u32 format_number(i32 value, char* out) {
 
 }  // namespace
 
+// An integer gadget's text is the decimal of its number, in a buffer of
+// MaxChars + 1 characters with as much again to undo with.
+void GadToolsNatives::set_integer_number(GadTools& g, Bus& b, u32 gadget, i32 value) {
+    drop_text_copy(g, b, gadget);
+    const u32 si = gadget + gt_StringInfo;
+    const u32 max_chars = static_cast<u32>(b.r16(gadget + gt_Count)) + 1;
+    char text[12];
+    const u32 length = format_number(value, text);
+    const u32 bytes = length + 1 > max_chars ? length + 1 : max_chars;
+    const u32 at = g.exec_->alloc(bytes + max_chars, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (at == 0) {
+        b.w32(gadget + gt_Text, 0);
+        return;
+    }
+    for (u32 i = 0; i < length; ++i) {
+        b.w8(at + i, static_cast<u8>(text[i]));
+    }
+    b.w32(gadget + gt_Text, at);
+    b.w32(gadget + gt_CopyBytes, bytes + max_chars);
+    b.w32(si + ndk::si_Buffer, at);
+    b.w32(si + ndk::si_UndoBuffer, at + bytes);
+    b.w16(si + ndk::si_MaxChars, max_chars);
+    b.w32(si + ndk::si_LongInt, static_cast<u32>(value));
+    b.w16(si + ndk::si_NumChars, length);
+    b.w16(si + ndk::si_BufferPos, length);
+    b.w16(si + ndk::si_DispPos, 0);
+    b.w32(gadget + ndk::gg_SpecialInfo, si);
+}
+
+
 namespace {
 
 // The cycle glyph, a loop with its arrow, 12 by 7 pixels.
@@ -1513,7 +1579,8 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     const bool selected = (flags & ndk::GFLG_SELECTED) != 0;
     const bool framed = kind == BUTTON_KIND || (options & kOptBorder) != 0 ||
                         (kind != TEXT_KIND && kind != NUMBER_KIND);
-    const bool recessed = kind == TEXT_KIND || kind == NUMBER_KIND || kind == STRING_KIND ||
+    const bool recessed = kind == TEXT_KIND || kind == NUMBER_KIND ||
+                          kind == STRING_KIND || kind == INTEGER_KIND ||
                           kind == SCROLLER_KIND || kind == SLIDER_KIND ||
                           kind == LISTVIEW_KIND || selected;
     // The inside first, then the frame around it. Intuition draws a
@@ -1550,7 +1617,7 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     // Intuition draws the cursor over it while it is being edited.
     if (kind == TEXT_KIND) {
         length = read_label(b, b.r32(gadget + gt_Text), 0, text, sizeof text);
-    } else if (kind == STRING_KIND) {
+    } else if (kind == STRING_KIND || kind == INTEGER_KIND) {
         const u32 si = gadget + gt_StringInfo;
         const u32 disp = b.r16(si + ndk::si_DispPos);
         const u32 count = b.r16(si + ndk::si_NumChars);

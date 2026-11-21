@@ -69,6 +69,7 @@ constexpr u32 ng_Flags = 18;
 constexpr u32 ng_UserData = 26;
 constexpr u32 BUTTON_KIND = 1;
 constexpr u32 CHECKBOX_KIND = 2;
+constexpr u32 INTEGER_KIND = 3;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 TEXT_KIND = 13;
 constexpr u32 CYCLE_KIND = 7;
@@ -85,6 +86,8 @@ constexpr u32 GTSC_Top = 0x80080015;
 constexpr u32 GTSC_Total = 0x80080016;
 constexpr u32 GTSC_Visible = 0x80080017;
 constexpr u32 GTST_String = 0x8008002D;
+constexpr u32 GTIN_Number = 0x8008002F;
+constexpr u32 GTIN_MaxChars = 0x80080030;
 constexpr u32 GA_Disabled = 0x8003000E;
 constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTTX_CopyText = 0x8008000C;
@@ -799,6 +802,63 @@ void strings_keep_a_buffer_and_scrollers_their_place() {
     CHECK_EQ(avail_mem(r), before);
 }
 
+void integer_gadgets_hold_their_number_as_text() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 before = avail_mem(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    put_new_gadget(r, 10, 20, 60, 12, 0, 5, 0, 0);
+    const u32 integer = create_gadget(r, g, INTEGER_KIND, context,
+                                      r.tags(kTags, {{GTIN_Number, 42}, {TAG_DONE, 0}}));
+    CHECK(integer != 0);
+    CHECK_EQ(r.get16(integer + gg_GadgetType), GTYP_GADTOOLS | GTYP_STRGADGET);
+    CHECK_EQ(r.get16(integer + gg_Activation), GACT_RELVERIFY | GACT_LONGINT);
+    const u32 si = r.get32(integer + gg_SpecialInfo);
+    CHECK(si != 0);
+    CHECK(r.read_str(r.get32(si + si_Buffer)) == "42");
+    CHECK_EQ(r.get32(si + si_LongInt), 42u);
+    CHECK_EQ(r.get16(si + si_MaxChars), 11u);
+    r.cpu().a[0] = integer;
+    r.cpu().a[3] = r.tags(kTags, {{GTIN_Number, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), 42u);
+
+    // Setting the number rewrites the buffer.
+    r.cpu().a[0] = integer;
+    r.cpu().a[1] = 0;
+    r.cpu().a[3] = r.tags(kTags, {{GTIN_Number, static_cast<u32>(-7)}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_SetGadgetAttrsA), ExitReason::Halt);
+    CHECK(r.read_str(r.get32(si + si_Buffer)) == "-7");
+    CHECK_EQ(r.get32(si + si_LongInt), static_cast<u32>(-7));
+    r.cpu().a[0] = integer;
+    r.cpu().a[3] = r.tags(kTags, {{GTIN_Number, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), static_cast<u32>(-7));
+
+    // Without GTIN_Number an integer gadget holds zero.
+    put_new_gadget(r, 10, 40, 60, 12, 0, 6, 0, 0);
+    const u32 zero = create_gadget(r, g, INTEGER_KIND, integer, 0);
+    const u32 zero_si = r.get32(zero + gg_SpecialInfo);
+    CHECK(r.read_str(r.get32(zero_si + si_Buffer)) == "0");
+    CHECK_EQ(r.get32(zero_si + si_LongInt), 0u);
+
+    // GTIN_MaxChars leaves room for that many characters and the null.
+    put_new_gadget(r, 10, 60, 60, 12, 0, 7, 0, 0);
+    const u32 limited = create_gadget(
+        r, g, INTEGER_KIND, zero,
+        r.tags(kTags, {{GTIN_Number, 7}, {GTIN_MaxChars, 4}, {TAG_DONE, 0}}));
+    const u32 limited_si = r.get32(limited + gg_SpecialInfo);
+    CHECK_EQ(r.get16(limited_si + si_MaxChars), 5u);
+    CHECK(r.read_str(r.get32(limited_si + si_Buffer)) == "7");
+    CHECK(!logged("gadtools: gadget kind 3 not handled"));
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    CHECK_EQ(avail_mem(r), before);
+}
+
 // A slider is a prop gadget over its levels, and its messages carry the
 // level; a list view shows its nodes and picks the row clicked.
 void sliders_carry_levels_and_list_views_pick_rows() {
@@ -918,6 +978,7 @@ int main() {
     checkboxes_toggle_and_report_their_state();
     sliders_carry_levels_and_list_views_pick_rows();
     strings_keep_a_buffer_and_scrollers_their_place();
+    integer_gadgets_hold_their_number_as_text();
     cycles_step_through_their_labels_and_palettes_pick_colours();
     visual_info_holds_the_screen_and_is_freed();
     create_context_stores_and_frees_the_gadget();
