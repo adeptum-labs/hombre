@@ -6615,6 +6615,34 @@ void requester_builds_on_the_default_screen_with_its_title_and_buttons() {
     CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
 }
 
+// A requester's text and labels are in the font of its screen's titles,
+// and its boxes sized by it: topaz 8 with cells of 8, then hasklig 13
+// with cells of 7.
+void requester_is_laid_out_in_the_font_of_its_screen() {
+    GfxRig r;
+    const u32 screen = open_requester_screen(r);
+    r.str(kEasyTitle, "Q");
+    r.str(kEasyText, "first line\nsecond line");
+    r.str(kEasyGadgets, "Yes|Maybe|No");
+    put_easy(r, kEasy, 0, kEasyTitle, kEasyText, kEasyGadgets);
+    // Three buttons as wide as "Maybe" and its padding with two gaps, the
+    // margins and the borders; two lines, a gap and a button high.
+    const u32 plain = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(plain != 0);
+    CHECK_EQ(r.get16(plain + wd_Width), 3u * (5 * 8 + 12) + 2 * 8 + 2 * 8 + 4);
+    CHECK_EQ(r.get16(plain + wd_Height), (2u * 8 + 16) + 8 + (8 + 6) + 2 * 8 + 15 + 2);
+    free_requester(r, plain);
+
+    const u32 size = put_font_prefs(r, kIPrefs, "hasklig.font", 13, 1);
+    set_iprefs(r, kIPrefs, size, 2);
+    CHECK_EQ(r.get8(screen + sc_BarHeight), 19u);
+    const u32 window = build_requester(r, 0, kEasy, 0, 0);
+    CHECK(window != 0);
+    CHECK_EQ(r.get16(window + wd_Width), 3u * (5 * 7 + 12) + 2 * 8 + 2 * 8 + 4);
+    CHECK_EQ(r.get16(window + wd_Height), (2u * 13 + 16) + 8 + (13 + 6) + 2 * 8 + 20 + 2);
+    free_requester(r, window);
+}
+
 void requester_handler_without_input_returns_minus_two() {
     GfxRig r;
     open_requester_screen(r);
@@ -8118,6 +8146,7 @@ int main() {
     draw_image_complemented_inverts_every_pen_of_the_image_box();
     draw_image_clips_at_the_window_edge();
     requester_builds_on_the_default_screen_with_its_title_and_buttons();
+    requester_is_laid_out_in_the_font_of_its_screen();
     requester_handler_without_input_returns_minus_two();
     requester_buttons_answer_with_their_numbers();
     requester_release_outside_raises_the_button_again();

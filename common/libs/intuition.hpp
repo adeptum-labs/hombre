@@ -405,7 +405,8 @@ private:
     static constexpr i32 kRequesterMargin = 8;
     static constexpr i32 kRequesterTextPad = 8;
     static constexpr i32 kRequesterGap = 8;
-    static constexpr i32 kRequesterButtonHeight = 14;
+    // A button is this much higher than the font of its label.
+    static constexpr i32 kRequesterButtonLeading = 6;
     static constexpr i32 kRequesterButtonPad = 12;
     static constexpr i32 kRequesterButtonGap = 8;
 
@@ -692,6 +693,9 @@ private:
     // them for SysReqHandler. A 0 title takes the window's, then the system
     // one. The window is at least min_width by min_height and no larger
     // than its screen.
+    // The height of a line of requester text on the screen a requester
+    // for window opens on.
+    i32 requester_line_height(u32 window);
     u32 build_requester(u32 window, u32 title, const RequesterText* text, u32 text_count,
                         const RequesterLabel* labels, u32 label_count, u32 idcmp,
                         i32 min_width, i32 min_height);

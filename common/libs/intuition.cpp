@@ -354,33 +354,34 @@ void draw_requester_box(Graphics& graphics, u32 rp, const Rect& box, const Reque
     }
 }
 
+// The characters of the text that fit in room pixels in font, from x on
+// the baseline.
 void draw_requester_text(Graphics& graphics, u32 rp, i32 x, i32 baseline, const char* text,
-                         u32 length, u32 room, u8 pen) {
-    if (length > room) {
-        length = room;
-    }
-    if (length == 0) {
+                         u32 length, i32 room, u8 pen, u32 font) {
+    const u8* chars = reinterpret_cast<const u8*>(text);
+    const u32 shown = graphics.text_fit(font, chars, length, room);
+    if (shown == 0) {
         return;
     }
     graphics.set_pens(rp, pen, 0, ndk::JAM1);
     graphics.move(rp, x, baseline);
-    graphics.text(rp, reinterpret_cast<const u8*>(text), length);
+    graphics.plain_text_in(rp, font, chars, shown);
 }
 
 void draw_requester_label(Graphics& graphics, u32 rp, const Rect& box, const char* text,
-                          u32 length, u8 pen) {
+                          u32 length, u8 pen, const chrome::Metrics& style) {
     const i32 width = box.x1 - box.x0 + 1;
     const i32 height = box.y1 - box.y0 + 1;
-    const i32 room = (width - 4) / 8;
-    if (room <= 0 || height < 8) {
+    const i32 room = width - 4;
+    if (height < style.font_height) {
         return;
     }
-    if (length > static_cast<u32>(room)) {
-        length = static_cast<u32>(room);
-    }
-    const i32 x = box.x0 + (width - static_cast<i32>(length) * 8) / 2;
-    const i32 baseline = box.y0 + (height - 8) / 2 + 6;
-    draw_requester_text(graphics, rp, x, baseline, text, length, static_cast<u32>(room), pen);
+    const u8* chars = reinterpret_cast<const u8*>(text);
+    const u32 shown = graphics.text_fit(style.font, chars, length, room);
+    const i32 span = static_cast<i32>(graphics.text_width(style.font, chars, shown));
+    const i32 x = box.x0 + (width - span) / 2;
+    const i32 baseline = box.y0 + (height - style.font_height) / 2 + style.font_baseline;
+    draw_requester_text(graphics, rp, x, baseline, text, shown, room, pen, style.font);
 }
 
 void refresh_full(DisplayState& display, Machine& m, u32 screen, u32 width, u32 height) {
@@ -3996,6 +3997,16 @@ void Intuition::drop_requester(u32 window) {
     }
 }
 
+i32 Intuition::requester_line_height(u32 window) {
+    Bus b(*machine_);
+    u32 screen = window != 0 && window_open(window) ? b.r32(window + ndk::wd_WScreen) : 0;
+    if (screen == 0) {
+        screen = default_screen_ != 0 ? default_screen_ : front_;
+    }
+    const ScreenRecord* rec = screen != 0 ? find_screen_record(screen) : nullptr;
+    return rec != nullptr ? rec->metrics.font_height : 8;
+}
+
 u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text, u32 text_count,
                                const RequesterLabel* labels, u32 label_count, u32 idcmp,
                                i32 min_width, i32 min_height) {
@@ -4027,7 +4038,6 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
 
     Requester req;
     req.idcmp = idcmp;
-    u32 widest = 0;
     const u32 button_count =
         label_count < kMaxRequesterButtons ? label_count : kMaxRequesterButtons;
     for (u32 i = 0; i < button_count; ++i) {
@@ -4040,18 +4050,28 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
         }
         req.labels[i][length] = '\0';
         req.label_length[i] = static_cast<u8>(length);
-        widest = length > widest ? length : widest;
         ++req.button_count;
     }
 
+    // The text and the labels are in the font of the screen's titles.
+    const chrome::Metrics style = find_screen_record(screen)->metrics;
+    const auto text_span = [&](const char* chars, u32 length) {
+        return static_cast<i32>(
+            graphics_->text_width(style.font, reinterpret_cast<const u8*>(chars), length));
+    };
     i32 text_right = 0;
     i32 text_bottom = 0;
     for (u32 i = 0; i < text_count; ++i) {
-        text_right = larger(text_right, text[i].left + static_cast<i32>(text[i].length) * 8);
-        text_bottom = larger(text_bottom, text[i].top + 8);
+        text_right = larger(text_right, text[i].left + text_span(text[i].text, text[i].length));
+        text_bottom = larger(text_bottom, text[i].top + style.font_height);
+    }
+    i32 widest_label = 0;
+    for (u32 i = 0; i < req.button_count; ++i) {
+        widest_label = larger(widest_label, text_span(req.labels[i], req.label_length[i]));
     }
 
-    const i32 button_w = static_cast<i32>(widest) * 8 + kRequesterButtonPad;
+    const i32 button_h = style.font_height + kRequesterButtonLeading;
+    const i32 button_w = widest_label + kRequesterButtonPad;
     const i32 button_row_w =
         req.button_count <= 1
             ? button_w
@@ -4060,10 +4080,10 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     const i32 text_box_w = text_right + 2 * kRequesterTextPad;
     const i32 text_box_h = text_bottom + 2 * kRequesterTextPad;
     const i32 content_w = larger(text_box_w, button_row_w);
-    const i32 content_h = text_box_h + kRequesterGap + kRequesterButtonHeight;
+    const i32 content_h = text_box_h + kRequesterGap + button_h;
     i32 width = content_w + 2 * kRequesterMargin + static_cast<i32>(chrome::kBorderLeft) +
                 static_cast<i32>(chrome::kBorderRight);
-    const i32 border_top = find_screen_record(screen)->metrics.border_top();
+    const i32 border_top = style.border_top();
     i32 height = content_h + 2 * kRequesterMargin + border_top +
                  static_cast<i32>(chrome::kBorderBottom);
     width = larger(width, min_width);
@@ -4122,7 +4142,7 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     const i32 inner_y1 =
         req_h - static_cast<i32>(chrome::kBorderBottom) - 1 - kRequesterMargin;
     const i32 button_y1 = inner_y1;
-    const i32 button_y0 = button_y1 - kRequesterButtonHeight + 1;
+    const i32 button_y0 = button_y1 - button_h + 1;
     const i32 span = larger(0, inner_x1 - inner_x0 + 1);
     const i32 last_x = larger(inner_x0, inner_x1 - button_w + 1);
     for (u32 i = 0; i < req.button_count; ++i) {
@@ -4150,20 +4170,19 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
             draw_requester_box(*graphics_, rp, text_box, pens, true);
             for (u32 i = 0; i < text_count; ++i) {
                 const i32 x = text_box.x0 + kRequesterTextPad + text[i].left;
-                const i32 baseline = text_box.y0 + kRequesterTextPad + text[i].top + 6;
-                if (baseline + 1 > text_box.y1) {
+                const i32 top = text_box.y0 + kRequesterTextPad + text[i].top;
+                if (top + style.font_height - 1 > text_box.y1) {
                     continue;
                 }
-                const u32 room = static_cast<u32>(
-                    larger(0, (text_box.x1 - kRequesterTextPad - x + 1) / 8));
-                draw_requester_text(*graphics_, rp, x, baseline, text[i].text, text[i].length,
-                                    room, pens.text);
+                draw_requester_text(*graphics_, rp, x, top + style.font_baseline, text[i].text,
+                                    text[i].length, text_box.x1 - kRequesterTextPad - x + 1,
+                                    pens.text, style.font);
             }
         }
         for (u32 i = 0; i < req.button_count; ++i) {
             draw_requester_box(*graphics_, rp, req.buttons[i], pens, false);
             draw_requester_label(*graphics_, rp, req.buttons[i], req.labels[i],
-                                 req.label_length[i], pens.text);
+                                 req.label_length[i], pens.text, style);
         }
         end_batch();
     }
@@ -4211,8 +4230,10 @@ u32 Intuition::build_easy_request(u32 window, u32 easy_struct, u32 idcmp, u32 ar
     RequesterLine lines[kMaxRequesterLines];
     const u32 line_count = split_requester_lines(text, lines, kMaxRequesterLines);
     RequesterText runs[kMaxRequesterLines];
+    const i32 line_height = requester_line_height(window);
     for (u32 i = 0; i < line_count; ++i) {
-        runs[i] = RequesterText{lines[i].text, lines[i].length, 0, static_cast<i32>(i) * 8};
+        runs[i] = RequesterText{lines[i].text, lines[i].length, 0,
+                                static_cast<i32>(i) * line_height};
     }
 
     RequesterLabel labels[kMaxRequesterButtons];
@@ -4341,7 +4362,7 @@ void Intuition::draw_requester_button(u32 window, const Requester& req, u32 inde
     begin_batch();
     draw_requester_box(*graphics_, rp, req.buttons[index], pens, pressed);
     draw_requester_label(*graphics_, rp, req.buttons[index], req.labels[index],
-                         req.label_length[index], pens.text);
+                         req.label_length[index], pens.text, window_metrics(window));
     end_batch();
 }
 
