@@ -22,6 +22,7 @@
  */
 
 #include "libs/raster_text.hpp"
+#include "libs/text_blend.hpp"
 #include "check.hpp"
 
 #include <algorithm>
@@ -970,6 +971,228 @@ void jam2_text_matches_pixel_reference() {
     }
 }
 
+// A two-glyph font whose coverage runs up and down through the levels,
+// the 1-bit plane set wherever a pixel has any coverage.
+struct CoverageFont {
+    u8 data[2];
+    u8 loc[3 * 4];
+    u8 cover[6];
+    raster::Font font;
+
+    CoverageFont() {
+        const u8 plane[] = {0xB0, 0xF0};
+        const u8 coverage[] = {0x05, 0xAF, 0xFA, 0x50, 0x00, 0x00};
+        for (u32 i = 0; i < sizeof(plane); ++i) {
+            data[i] = plane[i];
+        }
+        for (u32 i = 0; i < sizeof(coverage); ++i) {
+            cover[i] = coverage[i];
+        }
+        font.data = data;
+        font.loc = loc;
+        font.modulo = 2;
+        font.coverage = cover;
+        font.coverage_modulo = 6;
+        font.lo_char = 'A';
+        font.glyphs = 3;
+        font.y_size = 1;
+        font.x_size = 4;
+        font.baseline = 0;
+        font.bold_smear = 1;
+        raster::build_cell_loc(loc, font.glyphs, font.x_size);
+    }
+};
+
+void fill_grey_palette(u8 (&palette)[256][3]) {
+    for (u32 i = 0; i < 256; ++i) {
+        palette[i][0] = static_cast<u8>(i);
+        palette[i][1] = static_cast<u8>(i);
+        palette[i][2] = static_cast<u8>(i);
+    }
+}
+
+// A's pixels hold coverage 0, 5, 10, 15 and B's 15, 10, 5, 0, so the two
+// cells' pens at x are levels[x - 4].
+constexpr u8 kCoverageLevels[8] = {0, 5, 10, 15, 15, 10, 5, 0};
+
+void coverage_jam2_uses_ramp_pens() {
+    Rig r;
+    r.clear_planes();
+    const raster::Bitmap bm = r.bitmap_at(kPlaneBase, 8);
+    native::Bus b = r.bus();
+    CoverageFont cf;
+    u8 palette[256][3];
+    fill_grey_palette(palette);
+    text_blend::Cache cache;
+    cache.set_palette(palette, 256);
+    const u8 fg = 200;
+    const u8 bg = 40;
+    const u8* ramp = cache.ramp(fg, bg);
+    const u8 text[] = {'A', 'B'};
+    u32 advance = 0;
+    const Rect dirty =
+        raster::draw_text(b, bm, kFullClip, raster::Pens{fg, bg, ndk::JAM2}, cf.font,
+                          raster::TextStyle{}, 4, 0, text, 2, advance, &cache);
+    CHECK(b.ok());
+    CHECK_EQ(advance, 8u);
+    for (u32 i = 0; i < 8; ++i) {
+        CHECK_EQ(raster::read_pixel(b, bm, 4 + static_cast<i32>(i), 0),
+                 static_cast<u32>(ramp[kCoverageLevels[i]]));
+    }
+    CHECK_EQ(raster::read_pixel(b, bm, 3, 0), 0u);
+    CHECK_EQ(raster::read_pixel(b, bm, 12, 0), 0u);
+    CHECK_EQ(dirty.x0, 4);
+    CHECK_EQ(dirty.y0, 0);
+    CHECK_EQ(dirty.x1, 11);
+    CHECK_EQ(dirty.y1, 0);
+}
+
+void coverage_jam1_blends_against_each_background_pen() {
+    Rig r;
+    r.clear_planes();
+    const raster::Bitmap bm = r.bitmap_at(kPlaneBase, 8);
+    native::Bus b = r.bus();
+    CoverageFont cf;
+    u8 palette[256][3];
+    fill_grey_palette(palette);
+    text_blend::Cache cache;
+    cache.set_palette(palette, 256);
+    const u8 fg = 200;
+    const u8 under[8] = {40, 220, 40, 220, 40, 220, 40, 220};
+    for (u32 i = 0; i < 8; ++i) {
+        raster::write_pixel(b, bm, 4 + static_cast<i32>(i), 0, under[i]);
+    }
+    const u8 text[] = {'A', 'B'};
+    u32 advance = 0;
+    raster::draw_text(b, bm, kFullClip, raster::Pens{fg, 0, ndk::JAM1}, cf.font,
+                      raster::TextStyle{}, 4, 0, text, 2, advance, &cache);
+    CHECK(b.ok());
+    for (u32 i = 0; i < 8; ++i) {
+        u32 expected = under[i];
+        if (kCoverageLevels[i] == 15) {
+            expected = fg;
+        } else if (kCoverageLevels[i] != 0) {
+            expected = cache.ramp(fg, under[i])[kCoverageLevels[i]];
+        }
+        CHECK_EQ(raster::read_pixel(b, bm, 4 + static_cast<i32>(i), 0), expected);
+    }
+}
+
+void coverage_clip_cuts_columns() {
+    Rig r;
+    r.clear_planes();
+    const raster::Bitmap bm = r.bitmap_at(kPlaneBase, 8);
+    native::Bus b = r.bus();
+    CoverageFont cf;
+    u8 palette[256][3];
+    fill_grey_palette(palette);
+    text_blend::Cache cache;
+    cache.set_palette(palette, 256);
+    const u8 fg = 200;
+    const u8 bg = 40;
+    const u8* ramp = cache.ramp(fg, bg);
+    const u8 text[] = {'A', 'B'};
+    const raster::Clip clip{6, 0, 9, 0};
+    u32 advance = 0;
+    const Rect dirty =
+        raster::draw_text(b, bm, clip, raster::Pens{fg, bg, ndk::JAM2}, cf.font,
+                          raster::TextStyle{}, 4, 0, text, 2, advance, &cache);
+    CHECK(b.ok());
+    for (i32 x = 4; x <= 11; ++x) {
+        const u32 expected = x >= 6 && x <= 9 ? ramp[kCoverageLevels[x - 4]] : 0u;
+        CHECK_EQ(raster::read_pixel(b, bm, x, 0), expected);
+    }
+    CHECK_EQ(dirty.x0, 6);
+    CHECK_EQ(dirty.x1, 9);
+}
+
+void coverage_bold_and_underline() {
+    Rig r;
+    r.clear_planes();
+    const raster::Bitmap bm = r.bitmap_at(kPlaneBase, 8);
+    native::Bus b = r.bus();
+    CoverageFont cf;
+    u8 palette[256][3];
+    fill_grey_palette(palette);
+    text_blend::Cache cache;
+    cache.set_palette(palette, 256);
+    const u8 fg = 200;
+    const u8 bg = 40;
+    const u8* ramp = cache.ramp(fg, bg);
+    const u8 text[] = {'A', 'B'};
+    raster::TextStyle bold;
+    bold.algo = ndk::FSF_BOLD;
+    u32 advance = 0;
+    raster::draw_text(b, bm, kFullClip, raster::Pens{fg, bg, ndk::JAM2}, cf.font, bold, 4, 0,
+                      text, 2, advance, &cache);
+    const u8 bold_levels[8] = {0, 5, 10, 15, 15, 15, 10, 5};
+    for (u32 i = 0; i < 8; ++i) {
+        CHECK_EQ(raster::read_pixel(b, bm, 4 + static_cast<i32>(i), 0),
+                 static_cast<u32>(ramp[bold_levels[i]]));
+    }
+    r.clear_planes();
+    raster::TextStyle underlined;
+    underlined.algo = ndk::FSF_UNDERLINED;
+    raster::draw_text(b, bm, kFullClip, raster::Pens{fg, bg, ndk::JAM2}, cf.font, underlined, 4,
+                      0, text, 2, advance, &cache);
+    for (i32 x = 4; x <= 11; ++x) {
+        CHECK_EQ(raster::read_pixel(b, bm, x, 0), static_cast<u32>(fg));
+    }
+}
+
+void coverage_modes_and_depth_keep_the_one_bit_result() {
+    const raster::Pens cases[] = {
+        {1, 2, ndk::COMPLEMENT},
+        {1, 2, ndk::JAM1 | ndk::INVERSVID},
+        {1, 2, ndk::JAM2 | ndk::INVERSVID},
+    };
+    for (const raster::Pens& pens : cases) {
+        Rig fast;
+        Rig slow;
+        fast.clear_planes();
+        slow.clear_planes();
+        CoverageFont cf;
+        u8 palette[256][3];
+        fill_grey_palette(palette);
+        text_blend::Cache cache;
+        cache.set_palette(palette, 256);
+        const u8 text[] = {'A', 'B'};
+        native::Bus fb = fast.bus();
+        native::Bus sb = slow.bus();
+        u32 fast_advance = 0;
+        u32 slow_advance = 0;
+        raster::draw_text(fb, fast.bitmap_at(kPlaneBase, 8), kFullClip, pens, cf.font,
+                          raster::TextStyle{}, 4, 0, text, 2, fast_advance, &cache);
+        raster::draw_text(sb, slow.bitmap_at(kPlaneBase, 8), kFullClip, pens, cf.font,
+                          raster::TextStyle{}, 4, 0, text, 2, slow_advance, nullptr);
+        CHECK(fb.ok());
+        CHECK(sb.ok());
+        CHECK_EQ(fast_advance, slow_advance);
+        CHECK(fast.memory() == slow.memory());
+    }
+    Rig fast;
+    Rig slow;
+    fast.clear_planes();
+    slow.clear_planes();
+    CoverageFont cf;
+    u8 palette[256][3];
+    fill_grey_palette(palette);
+    text_blend::Cache cache;
+    cache.set_palette(palette, 256);
+    const u8 text[] = {'A', 'B'};
+    native::Bus fb = fast.bus();
+    native::Bus sb = slow.bus();
+    u32 fast_advance = 0;
+    u32 slow_advance = 0;
+    raster::draw_text(fb, fast.bitmap_at(kPlaneBase, 4), kFullClip, raster::Pens{1, 2, ndk::JAM2},
+                      cf.font, raster::TextStyle{}, 4, 0, text, 2, fast_advance, &cache);
+    raster::draw_text(sb, slow.bitmap_at(kPlaneBase, 4), kFullClip, raster::Pens{1, 2, ndk::JAM2},
+                      cf.font, raster::TextStyle{}, 4, 0, text, 2, slow_advance, nullptr);
+    CHECK(fb.ok());
+    CHECK(sb.ok());
+    CHECK(fast.memory() == slow.memory());
+}
+
 int main() {
     write_then_read_pixel_roundtrips_every_pen();
     read_outside_gives_all_ones();
@@ -997,5 +1220,10 @@ int main() {
     vertical_scroll_matches_pixel_reference();
     copy_rect_matches_pixel_reference();
     jam2_text_matches_pixel_reference();
+    coverage_jam2_uses_ramp_pens();
+    coverage_jam1_blends_against_each_background_pen();
+    coverage_clip_cuts_columns();
+    coverage_bold_and_underline();
+    coverage_modes_and_depth_keep_the_one_bit_result();
     return check::finish("test_raster");
 }

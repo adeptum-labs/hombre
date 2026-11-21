@@ -25,6 +25,7 @@
 
 #include "../font.hpp"
 #include "raster.hpp"
+#include "text_blend.hpp"
 
 // Text drawn from the tables of a struct TextFont (graphics/text.h).
 //
@@ -48,6 +49,10 @@ struct Font {
     const u8* space = nullptr;
     const u8* kern = nullptr;
     u32 modulo = 0;
+    // The glyphs' 4-bit coverage beside the 1-bit plane, a nibble a pixel
+    // in the same cells, or none.
+    const u8* coverage = nullptr;
+    u32 coverage_modulo = 0;
     u32 lo_char = 0;
     // Every character from lo_char up, and the one drawn for all others.
     u32 glyphs = 0;
@@ -255,6 +260,36 @@ void smear_right(u8* line, u32 line_bytes, i32 smear) {
     }
 }
 
+// Puts width pixels of coverage from src into line at col, the greater of
+// the two kept. Pixels outside the line are dropped.
+void or_coverage(u8* line, u32 line_pixels, i64 col, const u8* src, u32 offset, u32 width) {
+    for (u32 i = 0; i < width; ++i, ++col) {
+        if (col < 0 || col >= static_cast<i64>(line_pixels)) {
+            continue;
+        }
+        const u32 pixel = offset + i;
+        const u8 bits = src[pixel >> 1];
+        const u8 value = (pixel & 1) == 0 ? static_cast<u8>(bits >> 4)
+                                          : static_cast<u8>(bits & 0xF);
+        line[col] = value > line[col] ? value : line[col];
+    }
+}
+
+void set_coverage(u8* line, u32 line_pixels, i64 from, i64 to, u8 value) {
+    from = from < 0 ? 0 : from;
+    to = to >= static_cast<i64>(line_pixels) ? static_cast<i64>(line_pixels) - 1 : to;
+    for (i64 i = from; i <= to; ++i) {
+        line[i] = value;
+    }
+}
+
+// Moves coverage pixels smear to the right, the greater of the two kept.
+void smear_coverage(u8* line, u32 line_pixels, u32 smear) {
+    for (u32 i = line_pixels; i-- > smear;) {
+        line[i] = line[i - smear] > line[i] ? line[i - smear] : line[i];
+    }
+}
+
 // The first and last set bit of the bytes, as columns. False if none is
 // set.
 bool inked_columns(const u8* bits, u32 bytes, u32& first, u32& last) {
@@ -276,7 +311,8 @@ bool inked_columns(const u8* bits, u32 bytes, u32& first, u32& last) {
 
 Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
                     const Font& f, const TextStyle& style, const TextSpan& span, i32 x,
-                    i32 baseline_y, const u8* chars, u32 count) {
+                    i32 baseline_y, const u8* chars, u32 count,
+                    text_blend::Cache* blend = nullptr) {
     Rect dirty = empty_rect();
     // The text's rectangle, cut to the bitmap and the clip.
     const i64 top = static_cast<i64>(baseline_y) - f.baseline;
@@ -336,8 +372,121 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
     const bool inverse = (pens.mode & ndk::INVERSVID) != 0;
     const bool underlined = (style.algo & ndk::FSF_UNDERLINED) != 0;
     const u32 mode = pens.mode & ~ndk::INVERSVID;
+    // Only an eight-plane palette through a cache can take the coverage
+    // levels; every other mode keeps the font's 1-bit glyphs.
+    const bool can_blend = f.coverage != nullptr && blend != nullptr && bitmap.depth == 8 &&
+                           !inverse && (mode == ndk::JAM1 || mode == ndk::JAM2);
+    const u8* bg_ramp = can_blend && mode == ndk::JAM2 ? blend->ramp(pens.fg, pens.bg) : nullptr;
+    const bool antialiased = can_blend && (mode == ndk::JAM1 || bg_ramp != nullptr);
     for (i64 y = y0; y <= y1; ++y) {
         const i32 row = static_cast<i32>(y - top);
+        if (antialiased) {
+            // A coverage pixel for every column from the left the bold
+            // smear can reach into, from x0 on.
+            const u32 line_pixels = static_cast<u32>(x1 - x0 + 1) + static_cast<u32>(smear);
+            u8 cover[kMaxBoldSmear + kMaxBytesPerRow * 8];
+            for (u32 i = 0; i < line_pixels; ++i) {
+                cover[i] = 0;
+            }
+            const i64 cover_origin = static_cast<i64>(x0) - smear;
+            const u8* coverage = f.coverage + static_cast<u32>(row) * f.coverage_modulo;
+            const i64 shift = italic_shift(f, style, row) - cover_origin;
+            pen = begin_pen;
+            const u64 cover_pixels = static_cast<u64>(f.coverage_modulo) * 2;
+            for (u32 i = begin; i < end; ++i) {
+                Glyph g = glyph_of(f, style.spacing, chars[i]);
+                if (g.offset < cover_pixels && g.width != 0) {
+                    if (static_cast<u64>(g.offset) + g.width > cover_pixels) {
+                        g.width = static_cast<u32>(cover_pixels - g.offset);
+                    }
+                    or_coverage(cover, line_pixels, pen + g.kern + shift, coverage, g.offset,
+                                g.width);
+                }
+                pen += g.advance;
+            }
+            if (underlined && row == underline_row(f)) {
+                set_coverage(cover, line_pixels, x - cover_origin,
+                             x + span.advance - 1 - cover_origin, 15);
+            }
+            if (smear != 0) {
+                smear_coverage(cover, line_pixels, static_cast<u32>(smear));
+            }
+            const u32 row_offset = static_cast<u32>(y) * bitmap.bytes_per_row + first;
+            u8* planes[8];
+            for (u32 plane = 0; plane < 8; ++plane) {
+                planes[plane] = bus.bytes_at(bitmap.planes[plane] + row_offset, bytes);
+                if (planes[plane] == nullptr) {
+                    return dirty;
+                }
+            }
+            u32 leftmost = 0;
+            u32 rightmost = 0;
+            bool inked = false;
+            for (u32 i = 0; i < bytes; ++i) {
+                const u32 base = first * 8 + i * 8;
+                u8 old[8];
+                u8 result[8];
+                for (u32 plane = 0; plane < 8; ++plane) {
+                    old[plane] = planes[plane][i];
+                    result[plane] = old[plane];
+                }
+                for (u32 bit = 0; bit < 8; ++bit) {
+                    const u32 at_x = base + bit;
+                    if (at_x < static_cast<u32>(x0) || at_x > static_cast<u32>(x1)) {
+                        continue;
+                    }
+                    const u8 level = cover[static_cast<u32>(at_x - cover_origin)];
+                    u8 pixel_pen = 0;
+                    if (mode == ndk::JAM2) {
+                        pixel_pen = bg_ramp[level];
+                    } else {
+                        if (level == 0) {
+                            continue;
+                        }
+                        if (static_cast<u32>(level) == text_blend::kLevels - 1) {
+                            pixel_pen = pens.fg;
+                        } else {
+                            const u8 bit_mask = static_cast<u8>(0x80u >> bit);
+                            u32 under = 0;
+                            for (u32 plane = 0; plane < 8; ++plane) {
+                                if ((old[plane] & bit_mask) != 0) {
+                                    under |= 1u << plane;
+                                }
+                            }
+                            const u8* ramp = blend->ramp(pens.fg, static_cast<u8>(under));
+                            if (ramp == nullptr) {
+                                continue;
+                            }
+                            pixel_pen = ramp[level];
+                        }
+                        if (!inked) {
+                            leftmost = at_x;
+                            inked = true;
+                        }
+                        rightmost = at_x;
+                    }
+                    const u8 bit_mask = static_cast<u8>(0x80u >> bit);
+                    for (u32 plane = 0; plane < 8; ++plane) {
+                        if (((pixel_pen >> plane) & 1) != 0) {
+                            result[plane] |= bit_mask;
+                        } else {
+                            result[plane] &= static_cast<u8>(~bit_mask);
+                        }
+                    }
+                }
+                for (u32 plane = 0; plane < 8; ++plane) {
+                    planes[plane][i] = result[plane];
+                }
+            }
+            if (mode == ndk::JAM2) {
+                grow(dirty, static_cast<i32>(x0), static_cast<i32>(y));
+                grow(dirty, static_cast<i32>(x1), static_cast<i32>(y));
+            } else if (inked) {
+                grow(dirty, static_cast<i32>(leftmost), static_cast<i32>(y));
+                grow(dirty, static_cast<i32>(rightmost), static_cast<i32>(y));
+            }
+            continue;
+        }
         for (u32 i = 0; i < kLead + bytes; ++i) {
             line[i] = 0;
         }
@@ -446,17 +595,20 @@ inline TextSpan measure_text(const Font& f, const TextStyle& style, const u8* ch
 // bits of the glyphs in the foreground pen under JAM1, the rest of the
 // text's rectangle in the background pen as well under JAM2, the set bits
 // turned over through the foreground pen under COMPLEMENT. INVERSVID swaps
-// set and clear bits throughout the rectangle. advance is how far the pen
+// set and clear bits throughout the rectangle. A font with a coverage plane
+// drawn through blend on an eight-plane bitmap takes the pen of each
+// pixel's level instead of its 1-bit glyph. advance is how far the pen
 // moves; the answer is the rectangle that changed.
 inline Rect draw_text(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
                       const Font& f, const TextStyle& style, i32 x, i32 baseline_y,
-                      const u8* chars, u32 count, u32& advance) {
+                      const u8* chars, u32 count, u32& advance,
+                      text_blend::Cache* blend = nullptr) {
     const TextSpan span = measure_text(f, style, chars, count);
     advance = static_cast<u32>(span.advance);
     Rect dirty = empty_rect();
     walk_clip(bus, clip, [&](const Clip& part) {
         dirty = unite_rects(dirty, draw_text_part(bus, bitmap, part, pens, f, style, span, x,
-                                                  baseline_y, chars, count));
+                                                  baseline_y, chars, count, blend));
         return true;
     });
     return dirty;
