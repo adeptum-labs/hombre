@@ -113,13 +113,13 @@ constexpr u32 WBArg_SIZEOF = 8;
 constexpr i32 kDiskMargin = 8;
 constexpr u32 kDiskLabelChars = 13;  // the widest label a disk column fits
 constexpr i32 kVolumeTop = 16;
-constexpr i32 kLabelBaseline = 11; // from the bottom of the image to the label's
+constexpr i32 kLabelBaseline = 10; // from the bottom of the image to the label's
 constexpr u32 kLabelWidth = 8;     // the topaz font's character width
 constexpr u32 kLabelRows = 8;
 // The raised frame round an icon's image, as on 3.1: how far its lines sit
 // out from the image on either side and above and below it.
-constexpr i32 kFrameOutX = 4;
-constexpr i32 kFrameOutY = 4;
+constexpr i32 kFrameOutX = 3;
+constexpr i32 kFrameOutY = 3;
 constexpr u32 kFrameShinePen = 2;
 constexpr u32 kFrameShadowPen = 1;
 constexpr i32 kIconGapX = 16;
