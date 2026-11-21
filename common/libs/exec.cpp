@@ -3924,6 +3924,19 @@ void Exec::end_child_tasks() {
     end_tasks_of(tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_);
 }
 
+void Exec::detach_tasks_of(u32 parent) {
+    if (parent == 0) {
+        return;
+    }
+    for (u32 i = 1; i < Scheduler::kMaxTasks; ++i) {
+        const Scheduler::Slot s = sched_.slot(i);
+        if (s.state != TaskState::Free && s.state != TaskState::Removed &&
+            tasks_[i].parent == parent) {
+            tasks_[i].detached = true;
+        }
+    }
+}
+
 void Exec::end_tasks_of(u32 parent) {
     if (m_ == nullptr) {
         return;

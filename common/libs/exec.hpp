@@ -463,6 +463,10 @@ public:
     // parent, and their non-detached descendants, logging each as ended.
     void end_tasks_of(u32 parent);
 
+    // Marks every live task whose parent is the task at parent detached, so
+    // that it outlives its parent: end_tasks_of and end_child_tasks leave it.
+    void detach_tasks_of(u32 parent);
+
     // Puts the task's nest counts back to -1 (0xFF), clears its received
     // signals and gives it all signals back. ExecBase gets the nest counts
     // when the task is the running one.

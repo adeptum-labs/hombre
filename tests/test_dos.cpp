@@ -342,6 +342,30 @@ std::vector<u8> spawn_with_own_handle_command() {
     return hunk_file(a.build());
 }
 
+// Starts a child process on code of its own (NP_Entry) and, with keep set,
+// clears its own cli_Module as a program that detaches does, keeping its
+// code for the child: the shell then unloads nothing and the child
+// outlives it.
+std::vector<u8> spawn_child_command(bool keep) {
+    const u32 tags = kData + 0x700;
+    Asm a;
+    a.open_dos();
+    a.address(0, "child");
+    a.store_d0(tags + 4);
+    a.store_imm(NP_Entry, tags);
+    a.store_imm(TAG_DONE, tags + 8);
+    a.store_imm(0, tags + 12);
+    a.move_l(tags, 1).dos(dos_lvo::CreateNewProc);
+    a.store_d0(kOut);
+    if (keep) {
+        a.dos(dos_lvo::Cli);
+        a.op({0x2040, 0x42A8, 0x003C});  // MOVEA.L D0,A0 ; CLR.L 60(A0)
+    }
+    a.moveq(0, 0).rts();
+    a.label("child").moveq(0, 0).rts();
+    return hunk_file(a.build());
+}
+
 std::vector<AdfFile> standard_files() {
     return {
         {"C/Echo", echo_bytes()},
@@ -6841,6 +6865,36 @@ void a_passed_handle_belongs_to_the_child() {
     CHECK_EQ(as_signed(r.call(dos_lvo::Write, handle, kData + 0x100, 4)), -1);
 }
 
+// A child outlives a command that took its code over from the shell, and
+// is ended with one that did not.
+void a_detaching_command_leaves_its_child_running() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/Detach", spawn_child_command(true)});
+    files.push_back({"C/Spawn", spawn_child_command(false)});
+    Rig r(files);
+    use_noop_task_host();
+    u32 result = 1;
+
+    g_lines.clear();
+    CHECK(g_dos.run_command("C:Detach", "", result, kBlocks));
+    CHECK_EQ(result, 0u);
+    const u32 kept = r.get32(kOut);
+    CHECK(kept != 0);
+    CHECK(!logged_containing("exec: ended task"));
+    CHECK(r.get8(kept + TC_STATE) != TS_REMOVED);
+
+    g_lines.clear();
+    CHECK(g_dos.run_command("C:Spawn", "", result, kBlocks));
+    CHECK_EQ(result, 0u);
+    const u32 ended = r.get32(kOut);
+    CHECK(ended != 0);
+    CHECK(logged_containing("exec: ended task"));
+    CHECK(r.get8(kept + TC_STATE) != TS_REMOVED);
+
+    r.cpu().a[1] = kept;
+    r.exec(exec_lvo::RemTask);
+}
+
 void stale_handle_bptrs_are_rejected() {
     Rig r;
     r.str(kData, "C:Echo");
@@ -7245,6 +7299,7 @@ int main() {
     nested_runs_stop_at_the_limit();
     processes_leave_the_parents_output_open();
     a_passed_handle_belongs_to_the_child();
+    a_detaching_command_leaves_its_child_running();
     stale_handle_bptrs_are_rejected();
     a_shell_console_pair_serves_its_children();
     run_command_in_ends_the_shells_children();

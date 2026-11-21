@@ -9621,6 +9621,9 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
     put_bstr(b, p.command_name, path, 255);
     b.w32(p.cli + cli_CommandName, p.command_name >> 2);
     b.w32(p.cli + cli_Module, seglist);
+    // The link out of the first segment, to see whether the program cut its
+    // seglist to keep the rest of its code after it returns.
+    const u32 first_link = b.r32(seglist << 2);
     b.w32(p.cli + cli_ReturnCode, 0);
     b.w32(p.process + pr_Result2, 0);
     b.w32(p.process + pr_Arguments, p.args);
@@ -9664,6 +9667,16 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
     p.exited = false;
     const ExitReason why = m_->jit->call_guest((seglist << 2) + 4, max_blocks);
     p.running = false;
+    // A program that put another seglist in cli_Module, or cut the link out
+    // of its first segment, keeps that code for the processes it started:
+    // they outlive it, and only what cli_Module still holds is unloaded.
+    u32 module = seglist;
+    m_->mem.read32(p.cli + cli_Module, module);
+    u32 link_now = first_link;
+    m_->mem.read32(seglist << 2, link_now);
+    if (module != seglist || link_now != first_link) {
+        exec_->detach_tasks_of(p.process);
+    }
     // Ending the boot task's children and restoring its nest counts switches
     // back to the boot task, which is the kernel's call and no shell's.
     if (index == 0 && exec_->scheduler().current() == 0) {
@@ -9706,7 +9719,7 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
         m_->mem.read32(p.process + pr_Result2, io_err);
         m_->mem.write32(p.cli + cli_Result2, io_err);
     }
-    DosOps::unload(*this, seglist);
+    DosOps::unload(*this, module);
     return ok;
 }
 
