@@ -68,8 +68,10 @@ constexpr u32 ng_TopEdge = 2;
 constexpr u32 ng_Width = 4;
 constexpr u32 ng_Height = 6;
 constexpr u32 ng_GadgetText = 8;
+constexpr u32 ng_TextAttr = 12;
 constexpr u32 ng_GadgetID = 16;
 constexpr u32 ng_Flags = 18;
+constexpr u32 ng_VisualInfo = 22;
 constexpr u32 ng_UserData = 26;
 constexpr u32 BUTTON_KIND = 1;
 constexpr u32 CHECKBOX_KIND = 2;
@@ -1276,6 +1278,87 @@ bool box_has_pen(GfxRig& r, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1, u32 pen) {
     return false;
 }
 
+// The first and last column of the box that has the pen, -1 for none.
+struct InkSpan {
+    i32 first = -1;
+    i32 last = -1;
+};
+
+InkSpan inked_columns(GfxRig& r, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1, u32 pen) {
+    InkSpan span;
+    for (i32 x = x0; x <= x1; ++x) {
+        for (i32 y = y0; y <= y1; ++y) {
+            if (read_pixel(r, rp, x, y) == pen) {
+                span.first = span.first < 0 ? x : span.first;
+                span.last = x;
+                break;
+            }
+        }
+    }
+    return span;
+}
+
+// A gadget is drawn and laid out in the font its NewGadget names, or else
+// in its VisualInfo's, and holds it open until FreeGadgets: hasklig 13,
+// with cells 7 wide, where topaz 8 has cells of 8.
+void gadgets_draw_in_the_font_of_their_newgadget() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 screen = open_screen_in(r, "hasklig.font", 13, 2);
+    const u32 font = r.intuition.font_of_screen(screen);
+    const u32 accessors = r.get16(font + tf_Accessors);
+    const u32 rp = make_surface(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+
+    // A label to the left ends a gap before the gadget: four cells of 7.
+    r.str(kLabel, "Name");
+    r.str(kText, "xy");
+    put_new_gadget(r, 100, 20, 60, 14, kLabel, 1, 0, 0);
+    r.put32(kNewGadget + ng_TextAttr, kFontAttr);
+    const u32 text = create_gadget(r, g, TEXT_KIND, context,
+                                   r.tags(kTags, {{GTTX_Text, kText}, {TAG_DONE, 0}}));
+    CHECK(text != 0);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors + 1);
+    g.render(0, rp, text);
+    const InkSpan label = inked_columns(r, rp, 40, 18, 99, 36, kTextPen);
+    CHECK(label.first >= 100 - 8 - 4 * 7 && label.first < 100 - 8 - 3 * 7);
+    CHECK(label.last < 100 - 8);
+    const InkSpan shown = inked_columns(r, rp, 100, 18, 159, 36, kTextPen);
+    CHECK(shown.first >= 100 && shown.last < 100 + 2 * 7);
+
+    // A list view's rows are the font high: two of 13 in a box of 40.
+    put_new_gadget(r, 20, 60, 100, 40, 0, 2, 0, 0);
+    put_list(r, kHead, kNodes, kEightNames, 3);
+    const u32 list = create_gadget(r, g, LISTVIEW_KIND, text,
+                                   r.tags(kTags, {{GTLV_Labels, kHead}, {TAG_DONE, 0}}));
+    CHECK(list != 0);
+    CHECK_EQ(r.get16(list + gg_Height), 2u * 13 + 4);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors + 2);
+
+    // Without a TextAttr the VisualInfo's font is the gadget's; a string
+    // gadget names it to Intuition in a StringExtend.
+    const u32 vi = visual_info(r, g, screen);
+    put_new_gadget(r, 200, 20, 80, 16, 0, 3, 0, 0);
+    r.put32(kNewGadget + ng_TextAttr, 0);
+    r.put32(kNewGadget + ng_VisualInfo, vi);
+    const u32 string = create_gadget(r, g, STRING_KIND, list, 0);
+    CHECK(string != 0);
+    CHECK((r.get16(string + gg_Flags) & GFLG_STRINGEXTEND) != 0);
+    const u32 extend = r.get32(r.get32(string + gg_SpecialInfo) + si_Extension);
+    CHECK(extend != 0);
+    CHECK_EQ(r.get32(extend + sex_Font), font);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors + 4);  // the VisualInfo's too
+
+    r.cpu().a[0] = context;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::FreeGadgets), ExitReason::Halt);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors + 1);
+    r.cpu().a[0] = vi;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::FreeVisualInfo), ExitReason::Halt);
+    CHECK_EQ(r.get16(font + tf_Accessors), accessors);
+}
+
 // A list view draws a raised frame around its rows, each label in its row,
 // the selected row in the fill pens when GTLV_ShowSelected was given, and
 // an arrow in each arrow's box. One only to read is recessed and takes no
@@ -1467,5 +1550,6 @@ int main() {
     draw_bevel_box_leaves_the_rastport_as_it_was();
     create_gadget_makes_buttons_and_displays();
     a_button_draws_raised_and_pressed();
+    gadgets_draw_in_the_font_of_their_newgadget();
     return check::finish("test_gadtools");
 }

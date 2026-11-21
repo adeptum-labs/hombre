@@ -91,7 +91,12 @@ constexpr u32 gt_MakeVisible = gt_Show + 4;
 constexpr u32 gt_RowHeight = gt_MakeVisible + 4;
 constexpr u32 gt_Spacing = gt_RowHeight + 2;
 constexpr u32 gt_ScrollWidth = gt_Spacing + 2;
-constexpr u32 kGadgetBytes = gt_ScrollWidth + 2;
+// The font of the gadget's label and text, held open until FreeGadgets;
+// 0 for the built-in one. A string gadget's StringExtend names it to
+// Intuition, which draws the cursor.
+constexpr u32 gt_Font = gt_ScrollWidth + 2;
+constexpr u32 gt_StringExtend = gt_Font + 4;
+constexpr u32 kGadgetBytes = gt_StringExtend + ndk::StringExtend_SIZEOF;
 constexpr u32 kMaxCycleLabels = 256;
 constexpr u32 kMaxPaletteColors = 256;
 constexpr u16 kOptBorder = 0x1;
@@ -122,8 +127,10 @@ constexpr u32 ng_TopEdge = 2;
 constexpr u32 ng_Width = 4;
 constexpr u32 ng_Height = 6;
 constexpr u32 ng_GadgetText = 8;
+constexpr u32 ng_TextAttr = 12;
 constexpr u32 ng_GadgetID = 16;
 constexpr u32 ng_Flags = 18;
+constexpr u32 ng_VisualInfo = 22;
 constexpr u32 ng_UserData = 26;
 
 // Label placement, ng_Flags.
@@ -190,7 +197,6 @@ constexpr u32 LAYOUTA_Spacing = 0x80038002;
 constexpr u16 kOptReadOnly = 0x2;
 // GTLV_ShowSelected was given: the selected row shows in the fill pens.
 constexpr u16 kOptShowSelected = 0x8;
-constexpr u32 kListRowHeight = 8;  // the topaz font
 constexpr u32 kMaxListNodes = 4096;
 constexpr u32 kNoOrdinal = 0xFFFFFFFF;
 constexpr u32 kDefaultScrollWidth = 16;
@@ -208,9 +214,8 @@ constexpr u32 GT_Underscore = 0x80080040;
 constexpr u32 kFillPen = 3;
 constexpr u32 kFillTextPen = 2;
 constexpr u32 kTextPen = 1;
-constexpr u32 kGlyphWidth = 8;   // the topaz font
-constexpr u32 kGlyphHeight = 8;
-constexpr u32 kGlyphBaseline = 6;
+// The gap between a gadget and a label beside it.
+constexpr i32 kLabelGap = 8;
 constexpr u32 kCheckBoxWidth = 26;
 constexpr u32 kCheckBoxHeight = 11;
 
@@ -436,6 +441,7 @@ struct GadToolsNatives {
             // A gadget of the program's own in the chain is its to free.
             if ((b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GADTOOLS) != 0) {
                 drop_text_copy(g, b, gadget);
+                g.graphics_->close_font(b.r32(gadget + gt_Font));
                 g.exec_->free(gadget, kGadgetBytes);
             }
             gadget = next;
@@ -794,7 +800,9 @@ struct GadToolsNatives {
         const u32 show = b.r32(gadget + gt_Show);
         const i32 show_h = show != 0 ? static_cast<i16>(b.r16(show + ndk::gg_Height)) : 0;
         if (b.r16(gadget + gt_RowHeight) == 0) {
-            b.w16(gadget + gt_RowHeight, kListRowHeight + b.r16(gadget + gt_Spacing));
+            const i32 font_height = g.graphics_->font_metrics(b.r32(gadget + gt_Font)).y_size;
+            b.w16(gadget + gt_RowHeight,
+                  static_cast<u32>(font_height) + b.r16(gadget + gt_Spacing));
         }
         const i32 row_h = static_cast<i32>(b.r16(gadget + gt_RowHeight));
         i32 scroll_w = static_cast<i32>(b.r16(gadget + gt_ScrollWidth));
@@ -969,6 +977,23 @@ struct GadToolsNatives {
                                                           : PLACETEXT_LEFT;
         b.w16(gadget + gt_Place, (place & 0x1F) != 0 ? place & 0x1F : default_place);
         b.w32(gadget + gt_Label, b.r32(ng + ng_GadgetText));
+        // The font its NewGadget names when that is in memory, else its
+        // VisualInfo's.
+        const u32 attr = b.r32(ng + ng_TextAttr);
+        u32 font = attr != 0 && b.ok() ? g.graphics_->open_font(attr) : 0;
+        if (font == 0) {
+            font = g.visual_font(b, b.r32(ng + ng_VisualInfo));
+            g.graphics_->hold_font(font);
+        }
+        b.w32(gadget + gt_Font, font);
+        if (font != 0 && (kind == STRING_KIND || kind == INTEGER_KIND)) {
+            const u32 extend = gadget + gt_StringExtend;
+            b.w32(extend + ndk::sex_Font, font);
+            b.w8(extend + ndk::sex_Pens, kTextPen);
+            b.w8(extend + ndk::sex_ActivePens, kTextPen);
+            b.w32(gadget + gt_StringInfo + ndk::si_Extension, extend);
+            b.w16(gadget + gg_Flags, GFLG_GADGHNONE | ndk::GFLG_STRINGEXTEND);
+        }
         apply_tags(g, b, gadget, m.cpu.a[2], true);
         // A checkbox is its own size unless GTCB_Scaled takes the
         // NewGadget's.
@@ -985,6 +1010,7 @@ struct GadToolsNatives {
             // the next one made links to.
             first = make_list_parts(g, b, gadget);
             if (first == 0) {
+                g.graphics_->close_font(font);
                 g.exec_->free(gadget, kGadgetBytes);
                 native::set_result(m, 0);
                 return;
@@ -1680,7 +1706,7 @@ u32 palette_pen(Bus& b, u32 gadget, i32 index) {
 // ordinal on, as many as it has rows for. The selected one shows in the
 // fill pens when GTLV_ShowSelected was given.
 void GadTools::draw_list(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
-                         i32 bottom) {
+                         i32 bottom, u32 font) {
     Graphics& gfx = *graphics_;
     const u32 list = b.r32(gadget + gt_Text);
     const u32 first = b.r32(gadget + gt_Total);
@@ -1688,8 +1714,9 @@ void GadTools::draw_list(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 righ
     const u32 selected = shows ? b.r32(gadget + gt_Number) : kNoOrdinal;
     const i32 row_h = static_cast<i32>(b.r16(gadget + gt_RowHeight));
     const u32 rows = b.r16(gadget + gt_Visible);
-    const i32 columns = (right - left - 6) / static_cast<i32>(kGlyphWidth);
-    if (list == 0 || columns <= 0 || row_h <= 0) {
+    const Graphics::FontMetrics cell = gfx.font_metrics(font);
+    const i32 room = right - left - 6;
+    if (list == 0 || room < cell.x_size || row_h <= 0) {
         return;
     }
     u32 ordinal = 0;
@@ -1710,13 +1737,14 @@ void GadTools::draw_list(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 righ
         }
         char name[256];
         const u32 length = read_label(b, b.r32(node + ndk::LN_NAME), 0, name, sizeof name);
-        const u32 shown = length < static_cast<u32>(columns) ? length : static_cast<u32>(columns);
+        const u8* chars = reinterpret_cast<const u8*>(name);
+        const u32 shown = gfx.text_fit(font, chars, length, room);
         if (shown > 0) {
             // The text sits in the middle of a row higher than the font.
-            const i32 text_top = y + (row_h - static_cast<i32>(kGlyphHeight)) / 2;
+            const i32 text_top = y + (row_h - cell.y_size) / 2;
             gfx.set_pens(rp, chosen ? kFillTextPen : kTextPen, 0, ndk::JAM1);
-            gfx.move(rp, left + 4, text_top + static_cast<i32>(kGlyphBaseline));
-            gfx.text(rp, reinterpret_cast<const u8*>(name), shown);
+            gfx.move(rp, left + 4, text_top + cell.baseline);
+            gfx.plain_text_in(rp, font, chars, shown);
         }
         y += row_h;
     }
@@ -1769,7 +1797,7 @@ void GadTools::draw_list_view(Bus& b, u32 window, u32 gadget) {
 }
 
 void GadTools::draw_cycle(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
-                          i32 bottom, i32 baseline, bool selected) {
+                          i32 bottom, i32 baseline, bool selected, u32 font) {
     Graphics& gfx = *graphics_;
     const i32 gx = left + 4;
     const i32 gy = top + (bottom - top + 1 - kCycleGlyphHeight) / 2;
@@ -1796,15 +1824,15 @@ void GadTools::draw_cycle(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 rig
     char text[128];
     const u32 length = read_label(b, b.r32(labels + active * 4), 0, text, sizeof text);
     const i32 x0 = left + kCycleKnob;
-    const i32 room = (right - 3 - x0) / static_cast<i32>(kGlyphWidth);
-    if (length == 0 || room <= 0) {
+    const u8* chars = reinterpret_cast<const u8*>(text);
+    const u32 shown = gfx.text_fit(font, chars, length, right - 3 - x0);
+    if (shown == 0) {
         return;
     }
-    const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);
-    const i32 span = static_cast<i32>(shown * kGlyphWidth);
+    const i32 span = static_cast<i32>(gfx.text_width(font, chars, shown));
     gfx.set_pens(rp, selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
     gfx.move(rp, x0 + (right - 3 - x0 - span) / 2, baseline);
-    gfx.text(rp, reinterpret_cast<const u8*>(text), shown);
+    gfx.plain_text_in(rp, font, chars, shown);
 }
 
 void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
@@ -2061,9 +2089,10 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     } else {
         gfx.rect_fill(rp, left, top, right, bottom);
     }
-    const i32 baseline =
-        top + (height - static_cast<i32>(kGlyphHeight)) / 2 + static_cast<i32>(kGlyphBaseline);
-    const i32 room = (width - (framed ? 8 : 0)) / static_cast<i32>(kGlyphWidth);
+    const u32 font = b.r32(gadget + gt_Font);
+    const Graphics::FontMetrics cell = gfx.font_metrics(font);
+    const i32 baseline = top + (height - cell.y_size) / 2 + cell.baseline;
+    const i32 room = width - (framed ? 8 : 0);
 
     // What a display shows, cut to fit inside it.
     char text[256];
@@ -2083,17 +2112,17 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     } else if (kind == NUMBER_KIND) {
         length = format_number(static_cast<i32>(b.r32(gadget + gt_Number)), text);
     } else if (kind == CYCLE_KIND) {
-        draw_cycle(b, rp, gadget, left, top, right, bottom, baseline, selected);
+        draw_cycle(b, rp, gadget, left, top, right, bottom, baseline, selected, font);
     } else if (kind == PALETTE_KIND) {
         draw_palette(b, rp, gadget, left, top, right, bottom);
     } else if (kind == LISTVIEW_KIND) {
-        draw_list(b, rp, gadget, left, top, right, bottom);
+        draw_list(b, rp, gadget, left, top, right, bottom, font);
     }
-    if (length != 0 && room > 0) {
-        const u32 shown = length < static_cast<u32>(room) ? length : static_cast<u32>(room);
+    const u32 shown = gfx.text_fit(font, reinterpret_cast<const u8*>(text), length, room);
+    if (shown != 0) {
         gfx.set_pens(rp, kTextPen, 0, ndk::JAM1);
         gfx.move(rp, left + (framed ? 4 : 0), baseline);
-        gfx.text(rp, reinterpret_cast<const u8*>(text), shown);
+        gfx.plain_text_in(rp, font, reinterpret_cast<const u8*>(text), shown);
     }
 
     // The label, inside a button or beside the gadget.
@@ -2104,7 +2133,8 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         ghost(rp, flags, left, top, right, bottom);
         return true;
     }
-    const i32 span = static_cast<i32>(label_chars * kGlyphWidth);
+    const u8* label_text = reinterpret_cast<const u8*>(label);
+    const i32 span = static_cast<i32>(gfx.text_width(font, label_text, label_chars));
     // A list view's label is placed by the whole of it, the scroller and
     // the gadget that shows its selected label included.
     i32 full_width = width;
@@ -2114,23 +2144,23 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         full_width += static_cast<i32>(b.r16(gadget + gt_ScrollWidth));
         full_bottom += show != 0 ? static_cast<i16>(b.r16(show + ndk::gg_Height)) : 0;
     }
-    i32 x = left - span - static_cast<i32>(kGlyphWidth);
+    i32 x = left - span - kLabelGap;
     i32 y = baseline;
     if ((place & PLACETEXT_IN) != 0) {
         x = left + (width - span) / 2;
     } else if ((place & PLACETEXT_RIGHT) != 0) {
-        x = left + full_width + static_cast<i32>(kGlyphWidth);
+        x = left + full_width + kLabelGap;
     } else if ((place & PLACETEXT_ABOVE) != 0) {
         x = left + (full_width - span) / 2;
-        y = top - 4 - static_cast<i32>(kGlyphHeight - kGlyphBaseline);
+        y = top - 4 - (cell.y_size - cell.baseline);
     } else if ((place & PLACETEXT_BELOW) != 0) {
         x = left + (full_width - span) / 2;
-        y = full_bottom + 3 + static_cast<i32>(kGlyphBaseline);
+        y = full_bottom + 3 + cell.baseline;
     }
     const bool inside = (place & PLACETEXT_IN) != 0;
     gfx.set_pens(rp, inside && selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
     gfx.move(rp, x, y);
-    gfx.text(rp, reinterpret_cast<const u8*>(label), label_chars);
+    gfx.plain_text_in(rp, font, label_text, label_chars);
     ghost(rp, flags, left, top, right, bottom);
     return true;
 }

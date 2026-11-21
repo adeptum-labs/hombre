@@ -131,12 +131,12 @@ private:
     bool layout_strip(u32 menu, const MenuFont& font);
 
     void draw_cycle(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
-                    i32 bottom, i32 baseline, bool selected);
+                    i32 bottom, i32 baseline, bool selected, u32 font);
     void draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom, bool selected);
     void draw_palette(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                       i32 bottom);
     void draw_list(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
-                   i32 bottom);
+                   i32 bottom, u32 font);
     void draw_list_arrow(native::Bus& b, u32 rp, i32 left, i32 top, i32 width, i32 height,
                          bool down, bool pressed);
     void draw_list_view(native::Bus& b, u32 window, u32 gadget);
