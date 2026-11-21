@@ -5234,6 +5234,17 @@ void set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info() {
     set_iprefs(r, kIPrefs, size, 9);
     r.intuition.apply_pen_prefs(screen);
     CHECK_EQ(r.get16(pens + 10 * 2), 7u);
+
+    // PEN_C3 and PEN_C0 name the palette's colours 4 and 7, kept in pens 4
+    // and 7.
+    put_pen_prefs(r, 1, 0xFEFC);
+    set_iprefs(r, kIPrefs, size, 9);
+    r.intuition.apply_pen_prefs(screen);
+    CHECK_EQ(r.get16(pens + 10 * 2), 4u);
+    put_pen_prefs(r, 1, 0xFEFF);
+    set_iprefs(r, kIPrefs, size, 9);
+    r.intuition.apply_pen_prefs(screen);
+    CHECK_EQ(r.get16(pens + 10 * 2), 7u);
 }
 
 void close_and_open_workbench_follow_the_windows_and_the_pens() {

@@ -1989,7 +1989,15 @@ void Intuition::store_pen_prefs(u32 prefs, u32 size) {
         if (!b.ok() || pen == 0xFFFF) {
             break;
         }
-        stored.pen[i] = static_cast<u16>(pen);
+        // PEN_C3 to PEN_C0 name the palette's colours 4 to 7, which this
+        // screen keeps in pens 4 to 7: its top pens are the chrome's.
+        constexpr u32 kPenC3 = 0xFEFC;
+        constexpr u32 kPenC0 = 0xFEFF;
+        if (pen >= kPenC3 && pen <= kPenC0) {
+            stored.pen[i] = static_cast<u16>(4 + (pen - kPenC3));
+        } else if (pen < 256) {
+            stored.pen[i] = static_cast<u16>(pen);
+        }
     }
     stored.set = true;
 }
