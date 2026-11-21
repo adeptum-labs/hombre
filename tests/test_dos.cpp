@@ -4007,7 +4007,7 @@ void default_assigns_resolve() {
         r.call(dos_lvo::UnLock, c_echo);
 
         // Absent directories have no assigns; T: and ENV: point to RAM:.
-        for (const char* missing : {"FONTS:", "L:", "ENVARC:"}) {
+        for (const char* missing : {"L:", "ENVARC:"}) {
             r.str(kData, missing);
             CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
             CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
@@ -4302,13 +4302,94 @@ void get_device_proc_walks_assign_list() {
     CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
 }
 
+// With no assign and no disk named Fonts, FONTS: is the ROM's own empty,
+// write-protected directory, so that a search for disk fonts finds none
+// instead of failing. An assign or a Fonts disk takes the name over.
+void fonts_without_a_disk_is_an_empty_rom_directory() {
+    {
+        Rig r;
+        const u32 fib = kData + 0x200;
+        const u32 buf = kData + 0x400;
+        const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+
+        r.str(kData, "FONTS:");
+        const u32 dir = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(dir != 0);
+        CHECK_EQ(r.call(dos_lvo::Examine, dir, fib), DOSTRUE);
+        CHECK_EQ(read_fib(r, fib).type, 1);  // ST_ROOT
+        CHECK_EQ(r.call(dos_lvo::ExNext, dir, fib), DOSFALSE);
+        CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+        CHECK_EQ(r.call(dos_lvo::NameFromLock, dir, buf, 64), DOSTRUE);
+        CHECK(r.read_str(buf) == "Fonts:");
+        CHECK_EQ(r.call(dos_lvo::Info, dir, buf), DOSTRUE);
+        CHECK_EQ(r.get32(buf + id_DiskState), ID_WRITE_PROTECTED);
+        CHECK_EQ(r.get32(buf + id_NumBlocksUsed), 0u);
+        r.call(dos_lvo::UnLock, dir);
+
+        r.str(kData, "fonts:topaz.font");
+        CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+        CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+        CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
+        CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+        CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+
+        // GetDeviceProc hands out the directory once, as diskfont and asl
+        // walk FONTS:, and a packet to its port finds the directory.
+        r.str(kData, "FONTS:");
+        const u32 dp = r.call(dos_lvo::GetDeviceProc, kData, 0);
+        CHECK(dp != 0);
+        CHECK_EQ(r.get32(dp + dvp_Flags) & DVPF_ASSIGN, 0u);
+        CHECK(r.get32(dp + dvp_Lock) != 0);
+        const u32 empty = kData + 0x300;
+        put_bstr_at(r, empty, "");
+        const u32 located = r.call(dos_lvo::DoPkt, r.get32(dp + dvp_Port), ACTION_LOCATE_OBJECT,
+                                   r.get32(dp + dvp_Lock), empty >> 2, SHARED_LOCK);
+        CHECK(located != 0);
+        CHECK_EQ(r.call(dos_lvo::Examine, located, fib), DOSTRUE);
+        CHECK(read_fib(r, fib).type > 0);
+        CHECK_EQ(r.call(dos_lvo::ExNext, located, fib), DOSFALSE);
+        r.call(dos_lvo::UnLock, located);
+        CHECK_EQ(r.call(dos_lvo::GetDeviceProc, kData, dp), 0u);
+        CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+        CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+
+        // An assign takes the name, and gives it back when it is removed.
+        r.str(kData, "C:");
+        const u32 lock_c = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        r.str(kData, "FONTS");
+        CHECK_EQ(r.call(dos_lvo::AssignLock, kData, lock_c), DOSTRUE);
+        r.str(kData + 0x40, "FONTS:Echo");
+        const u32 echo = r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK);
+        CHECK(echo != 0);
+        CHECK_EQ(r.call(dos_lvo::NameFromLock, echo, buf, 64), DOSTRUE);
+        CHECK(r.read_str(buf) == "HombreTest:C/Echo");
+        r.call(dos_lvo::UnLock, echo);
+        CHECK_EQ(r.call(dos_lvo::AssignLock, kData, 0), DOSTRUE);
+        CHECK_EQ(r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK), 0u);
+        CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    }
+
+    // So does a disk named Fonts in a drive.
+    Rig disk(build_adf("HombreTest", false, standard_files()),
+             build_adf("Fonts", false, {{"topaz.font", text("font")}}), 1);
+    disk.str(kData, "FONTS:topaz.font");
+    const u32 font = disk.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(font != 0);
+    const u32 buf = kData + 0x400;
+    CHECK_EQ(disk.call(dos_lvo::NameFromLock, font, buf, 64), DOSTRUE);
+    CHECK(disk.read_str(buf) == "Fonts:topaz.font");
+    disk.call(dos_lvo::UnLock, font);
+}
+
 void is_file_system_for_assigns_and_df0() {
     Rig r;
-    for (const char* name : {"DF0:", "df0:C/Echo", "DEVS:", "C:", "SYS:", "HombreTest:"}) {
+    for (const char* name :
+         {"DF0:", "df0:C/Echo", "DEVS:", "C:", "SYS:", "HombreTest:", "FONTS:"}) {
         r.str(kData, name);
         CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData), DOSTRUE);
     }
-    for (const char* name : {"FONTS:", "FOO:", "CONSOLE:", "*"}) {
+    for (const char* name : {"FOO:", "CONSOLE:", "*"}) {
         r.str(kData, name);
         CHECK_EQ(r.call(dos_lvo::IsFileSystem, kData), DOSFALSE);
     }
@@ -7424,6 +7505,7 @@ int main() {
     assign_late_and_path();
     dos_list_walk();
     get_device_proc_walks_assign_list();
+    fonts_without_a_disk_is_an_empty_rom_directory();
     is_file_system_for_assigns_and_df0();
     change_dir_and_current_dir_name();
     find_command_uses_path();

@@ -884,6 +884,17 @@ struct DosOps {
 
     static bool is_drive(u8 vol) { return vol < Dos::kMaxDrives; }
 
+    // The name Dos::kVolRomFonts answers to while nothing else does.
+    static constexpr char kRomFontsName[] = "Fonts";
+
+    // The one directory of Dos::kVolRomFonts.
+    static DirEntry rom_fonts_root() {
+        DirEntry root{};
+        root.is_dir = true;
+        root.volume = Dos::kVolRomFonts;
+        return root;
+    }
+
     // The volume of the disk in the drive, null for RAM: or an empty drive.
     static const AdfVolume* disk_of(const Dos& d, u8 vol) {
         return is_drive(vol) && d.drives_[vol].has_disk ? &d.drives_[vol].volume : nullptr;
@@ -892,6 +903,9 @@ struct DosOps {
     static const char* volume_name(const Dos& d, u8 vol) {
         if (vol == Dos::kVolRam) {
             return "Ram Disk";
+        }
+        if (vol == Dos::kVolRomFonts) {
+            return kRomFontsName;
         }
         const AdfVolume* disk = disk_of(d, vol);
         return disk != nullptr ? disk->name : "";
@@ -1138,6 +1152,13 @@ struct DosOps {
             out = ram_entry(d, node);
             return 0;
         }
+        if (vol == Dos::kVolRomFonts) {
+            if (path[0] != '\0') {
+                return ERROR_OBJECT_NOT_FOUND;
+            }
+            out = rom_fonts_root();
+            return 0;
+        }
         const AdfVolume* disk = disk_of(d, vol);
         if (disk == nullptr) {
             return ERROR_NO_DISK;
@@ -1166,6 +1187,9 @@ struct DosOps {
     }
 
     static u32 list_drive(const Dos& d, u8 vol, const char* path, DirVisitor visitor, void* ctx) {
+        if (vol == Dos::kVolRomFonts) {
+            return path[0] == '\0' ? 0 : ERROR_OBJECT_NOT_FOUND;
+        }
         const AdfVolume* disk = disk_of(d, vol);
         if (disk == nullptr) {
             return ERROR_NO_DISK;
@@ -1328,6 +1352,12 @@ struct DosOps {
             out.comment_len = clen < 79 ? clen : 79;
             return 0;
         }
+        if (entry.volume == Dos::kVolRomFonts) {
+            out = FsMeta{};
+            out.type = ST_ROOT;
+            out.comment = "";
+            return 0;
+        }
         using namespace amiga_fs_detail;
         FsError error = FsError::Ok;
         const AdfVolume* disk = disk_of(d, entry.volume);
@@ -1386,7 +1416,7 @@ struct DosOps {
         if (colon == 0 || is_volume_or_device(d, name, colon)) {
             return true;
         }
-        return find_assign(d, name, colon) >= 0;
+        return find_assign(d, name, colon) >= 0 || same_name(name, colon, kRomFontsName);
     }
 
     static i64 find_assign(const Dos& d, const char* name, u32 count) {
@@ -1990,6 +2020,10 @@ struct DosOps {
                 return apply_relative_path("", rest, out, error);
             }
             const i64 idx = find_assign(d, name, colon);
+            if (idx < 0 && same_name(name, colon, kRomFontsName)) {
+                vol = Dos::kVolRomFonts;
+                return apply_relative_path("", rest, out, error);
+            }
             if (idx < 0) {
                 error = ERROR_DEVICE_NOT_MOUNTED;
                 return false;
@@ -5196,6 +5230,15 @@ struct DosOps {
         } else if (same_name(name, colon, "RAM")) {
             dvp_port = d.ram_port_;
             dvp_node = d.ram_device_node_;
+        } else if (find_assign(d, name, colon) < 0 && same_name(name, colon, kRomFontsName)) {
+            // No file system port serves the ROM's FONTS:, so the lock on
+            // its directory tells whoever sends packets where they go.
+            if (!alloc_assign_lock(d, b, "", rom_fonts_root(), dvp_lock)) {
+                fail(d, b, ERROR_NO_FREE_STORE, 0);
+                return;
+            }
+            dvp_port = port_for_volume(d, Dos::kVolRomFonts);
+            dvp_flags = DVPF_UNLOCK;
         } else {
             const i64 idx = find_assign(d, name, colon);
             if (idx < 0) {
@@ -6461,6 +6504,13 @@ struct DosOps {
             b.w32(id + id_BytesPerBlock, 512);
             b.w32(id + id_DiskType, ID_DOS_DISK);
             b.w32(id + id_VolumeNode, d.ram_volume_node_ >> 2);
+        } else if (entry.volume == Dos::kVolRomFonts) {
+            b.w32(id + id_DiskState, ID_WRITE_PROTECTED);
+            b.w32(id + id_NumBlocks, 0);
+            b.w32(id + id_NumBlocksUsed, 0);
+            b.w32(id + id_BytesPerBlock, 512);
+            b.w32(id + id_DiskType, ID_DOS_DISK);
+            b.w32(id + id_VolumeNode, 0);
         } else {
             const AdfVolume& disk = d.drives_[entry.volume].volume;
             const u32 blocks = disk.block_count - 2;  // the bootblock is not counted

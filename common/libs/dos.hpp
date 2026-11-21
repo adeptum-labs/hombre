@@ -710,6 +710,16 @@ public:
     static constexpr u32 kMaxDrives = kFloppyDrives;
     static constexpr u8 kVolDf0 = 0;
     static constexpr u8 kVolRam = static_cast<u8>(kMaxDrives);
+    // The ROM's stand-in for the Fonts disk. The 3.1 Startup-Sequence
+    // takes the FONTS: assign away on a disk without a Fonts drawer, and
+    // asl's font requester gives up when GetDeviceProc then finds no
+    // FONTS: at all. So while no assign and no disk in a drive answers to
+    // FONTS:, the name is this volume: one empty, write-protected
+    // directory that is in no list of volumes. The fonts kept in the ROM
+    // are in graphics' list of fonts in memory, not in files, so a search
+    // of FONTS: finds no disk font and the fonts in memory are all there
+    // is. An assign or a disk named Fonts takes the name over at once.
+    static constexpr u8 kVolRomFonts = static_cast<u8>(kMaxDrives + 1);
     static constexpr u32 kMaxConsoles = 4;
     static constexpr u32 kStackBytes = 4096;
     static constexpr u32 kMaxArgs = 512;    // bytes of a command's argument line
