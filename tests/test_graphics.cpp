@@ -25,6 +25,7 @@
 #include "gfx_rig.hpp"
 #include "libs/rom_fonts.hpp"
 #include "libs/text_blend.hpp"
+#include "libs/utility.hpp"
 
 #include <cstring>
 #include <vector>
@@ -2810,38 +2811,61 @@ void monitors_open_and_close() {
     CHECK_EQ(r.get16(spec + 48), 1u);
 }
 
-// The display database presents the NTSC monitor's High Res Laced mode
-// next to the default monitor's 640 by 400 mode.
+// The display database lists every standard PAL and NTSC mode.
 void display_info_presents_ntsc() {
     GfxRig r;
     constexpr u32 kDisplayInfo = kData + 0xE00;
     constexpr u32 kMonitorName = kData + 0xF00;
+    constexpr u32 kTags = kData + 0x1000;
+    constexpr u32 kHandleBase = 0x10000;
     constexpr u32 kDisp = 0x80000000;
+    constexpr u32 kDims = 0x80001000;
     constexpr u32 kMntr = 0x80002000;
     constexpr u32 kName = 0x80003000;
+    constexpr u32 kInvalid = 0xFFFFFFFF;
     constexpr u32 kHiresLace = 0x8004;
     constexpr u32 kNtscHiresLace = 0x19004;
-    constexpr u32 kInvalid = 0xFFFFFFFF;
+    constexpr u32 kPalLores = 0x21000;
+    constexpr u32 kPalHam = 0x21800;
+    constexpr u32 kPalHiresLace = 0x29004;
+    constexpr u32 kMustHave = 0x80000001;
+    constexpr u32 kNominalWidth = 0x80000004;
+    constexpr u32 kNominalHeight = 0x80000005;
+    constexpr u32 kDesiredWidth = 0x80000006;
+    constexpr u32 kDesiredHeight = 0x80000007;
+    constexpr u32 kDepth = 0x80000008;
+    constexpr u32 kMonitorId = 0x80000009;
 
     r.cpu().d[0] = kInvalid;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), 0u);
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), 0x4u);
+    r.cpu().d[0] = 0x4;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), 0x8000u);
+    r.cpu().d[0] = 0x8000;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kHiresLace);
-    r.cpu().d[0] = kHiresLace;
-    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kNtscHiresLace);
-    r.cpu().d[0] = kNtscHiresLace;
-    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kInvalid);
-    r.cpu().d[0] = 0x29004;
+    u32 entries = 4;
+    u32 last = kHiresLace;
+    while (entries < 60) {
+        r.cpu().d[0] = last;
+        last = r.result(Base::Graphics, graphics_lvo::NextDisplayInfo);
+        if (last == kInvalid) {
+            break;
+        }
+        ++entries;
+    }
+    CHECK_EQ(entries, 54u);
+    r.cpu().d[0] = 0x31004;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kInvalid);
 
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::FindDisplayInfo), kHandleBase);
     r.cpu().d[0] = kHiresLace;
-    const u32 default_handle = r.result(Base::Graphics, graphics_lvo::FindDisplayInfo);
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::FindDisplayInfo), kHandleBase + 3);
     r.cpu().d[0] = kNtscHiresLace;
     const u32 ntsc_handle = r.result(Base::Graphics, graphics_lvo::FindDisplayInfo);
-    CHECK(default_handle != 0);
-    CHECK(ntsc_handle != 0);
-    CHECK(ntsc_handle != default_handle);
-    r.cpu().d[0] = 0;
-    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::FindDisplayInfo), default_handle);
-    r.cpu().d[0] = 0x29004;
+    CHECK_EQ(ntsc_handle, kHandleBase + 21);
+    r.cpu().d[0] = 0x31004;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::FindDisplayInfo), 0u);
 
     r.cpu().a[0] = ntsc_handle;
@@ -2851,7 +2875,8 @@ void display_info_presents_ntsc() {
     r.cpu().d[2] = kInvalid;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
     CHECK_EQ(r.get32(kDisplayInfo + 4), kNtscHiresLace);
-    CHECK_EQ(r.get32(kDisplayInfo + 18), 0x101u);
+    CHECK_EQ(r.get16(kDisplayInfo + 16), 0u);
+    CHECK_EQ(r.get32(kDisplayInfo + 18), 0x10101u);
 
     r.cpu().a[0] = ntsc_handle;
     r.cpu().a[1] = kDisplayInfo;
@@ -2860,8 +2885,8 @@ void display_info_presents_ntsc() {
     r.cpu().d[2] = kInvalid;
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 96u);
     CHECK_EQ(r.get32(kDisplayInfo + 84), kNtscHiresLace);
-    const u32 spec = r.get32(kDisplayInfo + 16);
-    CHECK(r.read_str(r.get32(spec + LN_NAME)) == "ntsc.monitor");
+    const u32 ntsc_spec = r.get32(kDisplayInfo + 16);
+    CHECK(r.read_str(r.get32(ntsc_spec + LN_NAME)) == "ntsc.monitor");
 
     r.cpu().a[0] = ntsc_handle;
     r.cpu().a[1] = kDisplayInfo;
@@ -2871,14 +2896,81 @@ void display_info_presents_ntsc() {
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
     CHECK(r.read_str(kDisplayInfo + 16) == "NTSC:High Res Laced");
 
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kDisplayInfo;
+    r.cpu().d[0] = 88;
+    r.cpu().d[1] = kDims;
+    r.cpu().d[2] = kPalHiresLace;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 88u);
+    CHECK_EQ(r.get16(kDisplayInfo + 26), 0u);
+    CHECK_EQ(r.get16(kDisplayInfo + 28), 0u);
+    CHECK_EQ(r.get16(kDisplayInfo + 30), 639u);
+    CHECK_EQ(r.get16(kDisplayInfo + 32), 511u);
+    r.cpu().d[0] = 56;
+    r.cpu().d[1] = kDisp;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
+    CHECK((r.get32(kDisplayInfo + 18) & 0x20u) != 0);
+
+    r.cpu().d[1] = kDisp;
+    r.cpu().d[2] = kPalHam;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
+    const u32 ham_flags = r.get32(kDisplayInfo + 18);
+    CHECK((ham_flags & 0x8u) != 0);
+    CHECK((ham_flags & 0x100u) == 0);
+    r.cpu().d[1] = kName;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
+    CHECK(r.read_str(kDisplayInfo + 16) == "PAL:Low Res HAM");
+
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kDisplayInfo;
+    r.cpu().d[0] = 96;
+    r.cpu().d[1] = kMntr;
+    r.cpu().d[2] = kPalHiresLace;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 96u);
+    CHECK_EQ(r.get16(kDisplayInfo + 36), 625u);
+    CHECK_EQ(r.get16(kDisplayInfo + 40), 29u);
+    CHECK_EQ(r.get32(kDisplayInfo + 84), kPalHiresLace);
+    const u32 pal_spec = r.get32(kDisplayInfo + 16);
+    CHECK(r.read_str(r.get32(pal_spec + LN_NAME)) == "pal.monitor");
+
+    r.cpu().d[0] = kPalHiresLace;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::ModeNotAvailable), 0u);
+    r.cpu().d[0] = 0x31004;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::ModeNotAvailable), 2u);
+
+    r.put16(kViewPort + vp_Modes, kHiresLace);
+    r.cpu().a[0] = kViewPort;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetVPModeID), kHiresLace);
+    r.graphics.set_vp_mode_id(kViewPort, kPalHiresLace);
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetVPModeID), kPalHiresLace);
+    r.graphics.clear_vp_mode_id(kViewPort);
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetVPModeID), kHiresLace);
+
     r.cpu().a[1] = r.str(kMonitorName, "ntsc.monitor");
     r.cpu().d[0] = kNtscHiresLace;
-    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenMonitor), spec);
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenMonitor), ntsc_spec);
+    r.cpu().a[1] = r.str(kMonitorName, "pal.monitor");
+    r.cpu().d[0] = kPalHiresLace;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenMonitor), pal_spec);
     r.cpu().a[1] = 0;
     r.cpu().d[0] = 0;
     const u32 default_spec = r.result(Base::Graphics, graphics_lvo::OpenMonitor);
     CHECK(default_spec != 0);
-    CHECK(default_spec != spec);
+    CHECK(default_spec != ntsc_spec);
+    CHECK(default_spec != pal_spec);
+
+    r.tags(kTags, {{kNominalWidth, 320}, {kNominalHeight, 256}, {kMonitorId, 0x21000},
+                   {TAG_DONE, 0}});
+    r.cpu().a[0] = kTags;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::BestModeIDA), kPalLores);
+    r.tags(kTags, {{kDesiredWidth, 640}, {kDesiredHeight, 400}, {kDepth, 8},
+                   {TAG_DONE, 0}});
+    r.cpu().a[0] = kTags;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::BestModeIDA), kHiresLace);
+    r.tags(kTags, {{kMustHave, 0x8}, {kMonitorId, 0x21000}, {kDesiredWidth, 320},
+                   {kDesiredHeight, 256}, {TAG_DONE, 0}});
+    r.cpu().a[0] = kTags;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::BestModeIDA), kPalHam);
 }
 
 int main() {

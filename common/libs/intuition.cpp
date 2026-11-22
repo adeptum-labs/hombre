@@ -26,6 +26,7 @@
 #include "../hid_mouse.hpp"
 #include "chrome.hpp"
 #include "chrome_palette.hpp"
+#include "display_modes.hpp"
 #include "exec.hpp"
 #include "graphics.hpp"
 #include "keymap_library.hpp"
@@ -1806,20 +1807,20 @@ struct IntuitionNatives {
     }
 
     // QueryOverscan(displayID A0, rect A1, oScanType D0): the overscan
-    // rectangle of the mode. The one 640 by 400 mode has the same
-    // rectangle for every overscan type, as GetDisplayInfoData gives it.
+    // rectangle of the mode, 0,0,w-1,h-1 for every overscan type, as
+    // GetDisplayInfoData gives it. FALSE for an unknown mode.
     static void query_overscan(void*, Machine& m) {
-        constexpr u32 kInvalidId = 0xFFFFFFFF;
         const u32 rect = m.cpu.a[1];
-        if (m.cpu.a[0] == kInvalidId || rect == 0) {
+        const display_modes::Mode* mode = display_modes::find(m.cpu.a[0]);
+        if (mode == nullptr || rect == 0) {
             native::set_result(m, 0);
             return;
         }
         Bus b(m);
         b.w16(rect + 0, 0);
         b.w16(rect + 2, 0);
-        b.w16(rect + 4, 639);
-        b.w16(rect + 6, 399);
+        b.w16(rect + 4, static_cast<u32>(mode->width) - 1);
+        b.w16(rect + 6, static_cast<u32>(mode->height) - 1);
         native::set_result(m, b.ok() ? 1 : 0);
     }
 

@@ -23,6 +23,7 @@
 
 #include "graphics.hpp"
 
+#include "display_modes.hpp"
 #include "tags.hpp"
 
 #include "exec.hpp"
@@ -2022,11 +2023,26 @@ struct GraphicsNatives {
         native::set_result(m, pen < 0 ? 0 : static_cast<u32>(pen));
     }
 
-    // GetVPModeID(vp A0): every screen is 640 by 400, high resolution and
-    // interlaced: HIRESLACE_KEY of the default monitor.
-    static void get_vp_mode_id(void*, Machine& m) {
-        constexpr u32 kHiresLaceKey = 0x8004;
-        native::set_result(m, m.cpu.a[0] != 0 ? kHiresLaceKey : 0xFFFFFFFF);
+    // The display mode of a ViewPort: the one registered for it, or the
+    // mode its vp_Modes word asks for. INVALID_ID for no ViewPort.
+    static u32 mode_id_of_viewport(Graphics& g, Bus& b, u32 vp) {
+        if (vp == 0) {
+            return 0xFFFFFFFF;
+        }
+        u32 id = 0;
+        if (g.vp_mode_id(vp, id)) {
+            return id;
+        }
+        return display_modes::from_view_modes(static_cast<u16>(b.r16(vp + ndk::vp_Modes)));
+    }
+
+    // GetVPModeID(vp A0): the display mode its vp_Modes word asks for, or
+    // the one registered for it.
+    static void get_vp_mode_id(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 id = mode_id_of_viewport(g, b, m.cpu.a[0]);
+        native::set_result(m, b.ok() ? id : 0xFFFFFFFF);
     }
 
     // struct MonitorSpec (graphics/monitor.h): its ExtendedNode, the ratios
@@ -2071,26 +2087,43 @@ struct GraphicsNatives {
         return block;
     }
 
-    // The MonitorSpec of the default or the NTSC monitor, made on first use.
-    static u32 monitor_spec(Graphics& g, Bus& b, bool ntsc) {
-        u32& spec = ntsc ? g.ntsc_monitor_ : g.monitor_;
+    // The MonitorSpec of the default, NTSC or PAL monitor, made on first
+    // use.
+    static u32 monitor_spec(Graphics& g, Bus& b, u32 monitor) {
+        const bool ntsc = monitor == display_modes::kNtscMonitorId;
+        const bool pal = monitor == display_modes::kPalMonitorId;
+        u32& spec = pal ? g.pal_monitor_ : ntsc ? g.ntsc_monitor_ : g.monitor_;
         if (spec == 0) {
-            spec = make_monitor_spec(g, b, ntsc ? "ntsc.monitor" : "default.monitor", 262,
-                                     ntsc ? 227 : 226);
+            spec = make_monitor_spec(
+                g, b,
+                pal ? "pal.monitor" : ntsc ? "ntsc.monitor" : "default.monitor",
+                pal ? 312 : 262, pal || ntsc ? 227 : 226);
         }
         return spec;
     }
 
-    // OpenMonitor(name A1, displayID D0): the MonitorSpec of the NTSC
-    // monitor for its name or its monitor ID, the default monitor's for
+    // OpenMonitor(name A1, displayID D0): the MonitorSpec of the monitor
+    // named or of the display ID's monitor, the default monitor's for
     // anything else, its open count one up.
     static void open_monitor(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
         const u32 name = m.cpu.a[1];
-        const bool by_name = name != 0 && b.equals(name, "ntsc.monitor");
-        const bool by_id = name == 0 && (m.cpu.d[0] & 0xFFFF1000) == 0x11000;
-        const u32 spec = monitor_spec(g, b, by_name || by_id);
+        u32 monitor = display_modes::kDefaultMonitorId;
+        if (name != 0) {
+            if (b.equals(name, "ntsc.monitor")) {
+                monitor = display_modes::kNtscMonitorId;
+            } else if (b.equals(name, "pal.monitor")) {
+                monitor = display_modes::kPalMonitorId;
+            }
+        } else {
+            const u32 display_monitor = m.cpu.d[0] & display_modes::kMonitorIdMask;
+            if (display_monitor == display_modes::kNtscMonitorId ||
+                display_monitor == display_modes::kPalMonitorId) {
+                monitor = display_monitor;
+            }
+        }
+        const u32 spec = monitor_spec(g, b, monitor);
         if (spec == 0) {
             native::set_result(m, 0);
             return;
@@ -2105,41 +2138,46 @@ struct GraphicsNatives {
         Graphics& g = of(ctx);
         Bus b(m);
         const u32 spec = m.cpu.a[0];
-        if (spec != 0 && (spec == g.monitor_ || spec == g.ntsc_monitor_) &&
+        if (spec != 0 &&
+            (spec == g.monitor_ || spec == g.ntsc_monitor_ || spec == g.pal_monitor_) &&
             b.r16(spec + ms_OpenCount) != 0) {
             b.w16(spec + ms_OpenCount, b.r16(spec + ms_OpenCount) - 1);
         }
         native::set_result(m, 0);
     }
 
-    // FindDisplayInfo(ID D0): a handle for the display mode, the default
-    // monitor's mode for the default monitor lookup, 0 for any other.
-    static void find_display_info(void*, Machine& m) {
-        constexpr u32 kHiresLaceKey = 0x8004;
-        constexpr u32 kNtscHiresLaceKey = 0x19004;
-        constexpr u32 kHiresLaceHandle = 0x00010000;  // never read, only handed back
-        constexpr u32 kNtscHiresLaceHandle = 0x00010001;
-        const u32 id = m.cpu.d[0];
-        u32 handle = 0;
-        if (id == kNtscHiresLaceKey) {
-            handle = kNtscHiresLaceHandle;
-        } else if (id == kHiresLaceKey || id == 0) {
-            handle = kHiresLaceHandle;
+    // The monitor a mode belongs to: PAL, else NTSC, else the default one.
+    static u32 monitor_of(u32 id) {
+        if ((id & display_modes::kPalMonitorId) == display_modes::kPalMonitorId) {
+            return display_modes::kPalMonitorId;
         }
-        native::set_result(m, handle);
+        if ((id & display_modes::kNtscMonitorId) == display_modes::kNtscMonitorId) {
+            return display_modes::kNtscMonitorId;
+        }
+        return display_modes::kDefaultMonitorId;
+    }
+
+    // FindDisplayInfo(ID D0): the handle of a known display mode, 0 for
+    // any other.
+    static void find_display_info(void*, Machine& m) {
+        constexpr u32 kHandleBase = 0x10000;
+        const u32 index = display_modes::index_of(m.cpu.d[0]);
+        native::set_result(m, index < display_modes::count() ? kHandleBase + index : 0);
     }
 
     // NextDisplayInfo(last ID D0): the display modes in turn, then
     // INVALID_ID for the end of the list.
     static void next_display_info(void*, Machine& m) {
-        constexpr u32 kHiresLaceKey = 0x8004;
-        constexpr u32 kNtscHiresLaceKey = 0x19004;
+        constexpr u32 kInvalidId = 0xFFFFFFFF;
         const u32 last = m.cpu.d[0];
-        u32 next = 0xFFFFFFFF;
-        if (last == 0xFFFFFFFF) {
-            next = kHiresLaceKey;
-        } else if (last == kHiresLaceKey) {
-            next = kNtscHiresLaceKey;
+        u32 next = kInvalidId;
+        if (last == kInvalidId) {
+            next = display_modes::at(0).id;
+        } else {
+            const u32 index = display_modes::index_of(last);
+            if (index + 1 < display_modes::count()) {
+                next = display_modes::at(index + 1).id;
+            }
         }
         native::set_result(m, next);
     }
@@ -2151,19 +2189,24 @@ struct GraphicsNatives {
     static void get_display_info_data(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
+        constexpr u32 kHandleBase = 0x10000;
+        constexpr u32 kInvalidId = 0xFFFFFFFF;
         constexpr u32 kDisp = 0x80000000;
         constexpr u32 kDims = 0x80001000;
         constexpr u32 kMntr = 0x80002000;
         constexpr u32 kName = 0x80003000;
-        constexpr u32 kHiresLaceKey = 0x8004;
-        constexpr u32 kNtscHiresLaceKey = 0x19004;
-        constexpr u32 kNtscHiresLaceHandle = 0x00010001;
         const u32 buf = m.cpu.a[1];
         const u32 tag = m.cpu.d[1];
-        u32 mode = m.cpu.d[2];
-        if (mode == 0xFFFFFFFF) {
-            mode = m.cpu.a[0] == kNtscHiresLaceHandle ? kNtscHiresLaceKey : kHiresLaceKey;
-        } else if (mode != kHiresLaceKey && mode != kNtscHiresLaceKey) {
+        const display_modes::Mode* mode = nullptr;
+        if (m.cpu.d[2] != kInvalidId) {
+            mode = display_modes::find(m.cpu.d[2]);
+        } else {
+            const u32 handle = m.cpu.a[0];
+            if (handle >= kHandleBase && handle - kHandleBase < display_modes::count()) {
+                mode = &display_modes::at(handle - kHandleBase);
+            }
+        }
+        if (mode == nullptr) {
             native::set_result(m, 0);
             return;
         }
@@ -2180,17 +2223,19 @@ struct GraphicsNatives {
         const auto rect = [&](u32 at) {
             put16(at, 0);
             put16(at + 2, 0);
-            put16(at + 4, 639);
-            put16(at + 6, 399);
+            put16(at + 4, mode->width - 1);
+            put16(at + 6, mode->height - 1);
         };
         if (tag == kDisp) {
             bytes = 56;
-            put32(18, 0x00000101);  // PropertyFlags: DIPF_IS_LACE | DIPF_IS_WB
-            put16(22, 22);          // Resolution: ticks a pixel across
-            put16(24, 22);          // and down
-            put16(26, 35);          // PixelSpeed, ns
-            put16(28, 1);           // NumStdSprites
-            put16(30, 0xFFFF);      // PaletteRange: 24-bit colour
+            put16(16, 0);            // NotAvailable
+            put32(18, mode->flags);  // PropertyFlags
+            put16(22, mode->res_x);  // Resolution: ticks a pixel across
+            put16(24, mode->res_y);  // and down
+            const u32 pixel_speed = mode->width == 1280 ? 18 : mode->width == 640 ? 35 : 70;
+            put16(26, pixel_speed);  // PixelSpeed, ns
+            put16(28, 1);            // NumStdSprites
+            put16(30, 0xFFFF);       // PaletteRange: 24-bit colour
             put16(32, 22);
             put16(34, 22);
             data[40] = 8;  // RedBits
@@ -2198,37 +2243,38 @@ struct GraphicsNatives {
             data[42] = 8;  // BlueBits
         } else if (tag == kDims) {
             bytes = 88;
-            put16(16, 8);       // MaxDepth
-            put16(18, 16);      // MinRasterWidth
-            put16(20, 16);      // MinRasterHeight
-            put16(22, 16368);   // MaxRasterWidth
-            put16(24, 16384);   // MaxRasterHeight
-            rect(26);           // Nominal
-            rect(34);           // MaxOScan
-            rect(42);           // VideoOScan
-            rect(50);           // TxtOScan
-            rect(58);           // StdOScan
+            put16(16, mode->max_depth);  // MaxDepth
+            put16(18, 16);               // MinRasterWidth
+            put16(20, 16);               // MinRasterHeight
+            put16(22, 16368);            // MaxRasterWidth
+            put16(24, 16384);            // MaxRasterHeight
+            rect(26);                    // Nominal
+            rect(34);                    // MaxOScan
+            rect(42);                    // VideoOScan
+            rect(50);                    // TxtOScan
+            rect(58);                    // StdOScan
         } else if (tag == kMntr) {
-            const u32 spec = monitor_spec(g, b, true);
+            const u32 monitor = monitor_of(mode->id);
+            const u32 spec = monitor_spec(g, b, monitor);
             if (spec == 0 || !b.ok()) {
                 native::set_result(m, 0);
                 return;
             }
+            const bool pal = monitor == display_modes::kPalMonitorId;
             bytes = 96;
             put32(16, spec);  // Mspc
             put16(24, 22);    // ViewResolution across
             put16(26, 22);    // and down
-            put16(36, 525);   // TotalRows
-            put16(38, 227);   // TotalColorClocks
-            put16(40, 21);    // MinRow
-            put16(76, 1);     // MouseTicks across
-            put16(78, 1);     // and down
-            put32(84, kNtscHiresLaceKey);  // PreferredModeID
+            put16(36, pal ? 625 : 525);  // TotalRows
+            put16(38, 227);              // TotalColorClocks
+            put16(40, pal ? 29 : 21);    // MinRow
+            put16(76, 1);                // MouseTicks across
+            put16(78, 1);                // and down
+            put32(84, display_modes::preferred(monitor));  // PreferredModeID
         } else if (tag == kName) {
             bytes = 56;
-            constexpr char kModeName[] = "NTSC:High Res Laced";
-            for (u32 i = 0; kModeName[i] != '\0'; ++i) {
-                data[16 + i] = static_cast<u8>(kModeName[i]);
+            for (u32 i = 0; mode->name[i] != '\0'; ++i) {
+                data[16 + i] = static_cast<u8>(mode->name[i]);
             }
         }
         if (bytes == 0 || buf == 0) {
@@ -2236,7 +2282,7 @@ struct GraphicsNatives {
             return;
         }
         put32(0, tag);
-        put32(4, mode);
+        put32(4, mode->id);
         put32(8, 0);
         put32(12, (bytes + 7) / 8);  // QueryHeader Length, in double longwords
         const u32 n = m.cpu.d[0] < bytes ? m.cpu.d[0] : bytes;
@@ -2246,14 +2292,85 @@ struct GraphicsNatives {
         native::set_result(m, n);
     }
 
-    // BestModeIDA(tags A0): the one mode there is, whatever is asked.
-    static void best_mode_id(void*, Machine& m) {
-        constexpr u32 kHiresLaceKey = 0x8004;
-        native::set_result(m, kHiresLaceKey);
+    // BestModeIDA(tags A0): the display mode nearest the size, depth and
+    // property flags the tags ask for. INVALID_ID when no mode fits.
+    static void best_mode_id(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        constexpr u32 kInvalidId = 0xFFFFFFFF;
+        constexpr u32 kMustHave = 0x80000001;
+        constexpr u32 kMustNotHave = 0x80000002;
+        constexpr u32 kViewPort = 0x80000003;
+        constexpr u32 kNominalWidth = 0x80000004;
+        constexpr u32 kNominalHeight = 0x80000005;
+        constexpr u32 kDesiredWidth = 0x80000006;
+        constexpr u32 kDesiredHeight = 0x80000007;
+        constexpr u32 kDepth = 0x80000008;
+        constexpr u32 kMonitorId = 0x80000009;
+        constexpr u32 kSourceId = 0x8000000A;
+        const u32 tag_list = m.cpu.a[0];
+        const u32 nominal_width = tags::data(b, kNominalWidth, tag_list, 640);
+        const u32 nominal_height = tags::data(b, kNominalHeight, tag_list, 200);
+        const u32 desired_width = tags::data(b, kDesiredWidth, tag_list, nominal_width);
+        const u32 desired_height = tags::data(b, kDesiredHeight, tag_list, nominal_height);
+        const u32 depth = tags::data(b, kDepth, tag_list, 1);
+        u32 must_have = tags::data(b, kMustHave, tag_list, 0);
+        u32 source = tags::data(b, kSourceId, tag_list, kInvalidId);
+        const u32 vp_item = tags::find(b, kViewPort, tag_list);
+        if (vp_item != 0) {
+            source = mode_id_of_viewport(g, b, b.r32(vp_item + 4));
+        }
+        u32 monitor = display_modes::kDefaultMonitorId;
+        bool monitor_any = true;
+        const u32 monitor_item = tags::find(b, kMonitorId, tag_list);
+        if (monitor_item != 0) {
+            monitor = monitor_of(b.r32(monitor_item + 4));
+            monitor_any = false;
+        }
+        if (const display_modes::Mode* source_mode = display_modes::find(source)) {
+            must_have |= source_mode->flags & (display_modes::kIsHam |
+                                               display_modes::kIsExtraHalfBrite |
+                                               display_modes::kIsLace);
+            if (monitor_any) {
+                monitor = monitor_of(source_mode->id);
+                monitor_any = false;
+            }
+        }
+        const u32 must_not = tags::data(
+            b, kMustNotHave, tag_list,
+            (display_modes::kIsHam | display_modes::kIsExtraHalfBrite) & ~must_have);
+        const display_modes::Mode* best = nullptr;
+        u32 best_area = 0;
+        bool best_fits = false;
+        for (u32 i = 0; i < display_modes::count(); ++i) {
+            const display_modes::Mode& mode = display_modes::at(i);
+            if (!monitor_any && monitor_of(mode.id) != monitor) {
+                continue;
+            }
+            if ((mode.flags & must_have) != must_have || (mode.flags & must_not) != 0) {
+                continue;
+            }
+            if (mode.max_depth < depth) {
+                continue;
+            }
+            const bool fits = mode.width >= desired_width && mode.height >= desired_height;
+            const u32 area = static_cast<u32>(mode.width) * mode.height;
+            if (best == nullptr || (fits && !best_fits) ||
+                (fits == best_fits && (fits ? area < best_area : area > best_area))) {
+                best = &mode;
+                best_area = area;
+                best_fits = fits;
+            }
+        }
+        native::set_result(m, best != nullptr ? best->id : kInvalidId);
     }
 
-    // ModeNotAvailable(modeID D0): 0, every mode is there to ask for.
-    static void mode_not_available(void*, Machine& m) { native::set_result(m, 0); }
+    // ModeNotAvailable(modeID D0): 0 for a known mode, DI_AVAIL_NOMONITOR
+    // for any other.
+    static void mode_not_available(void*, Machine& m) {
+        constexpr u32 kDiAvailNoMonitor = 2;
+        native::set_result(m, display_modes::find(m.cpu.d[0]) != nullptr ? 0 : kDiAvailNoMonitor);
+    }
 
     // A copy of a tag list as one block, TAG_MORE followed and TAG_IGNORE
     // and TAG_SKIP left out, at most kMaxFontTags items; the block's size
@@ -2528,6 +2645,9 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     topaz_ = 0;
     topaz_name_ = 0;
     topaz_attr_ = 0;
+    for (VpModeId& pair : vp_mode_ids_) {
+        pair = VpModeId{};
+    }
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -2683,6 +2803,45 @@ bool Graphics::text_font(Bus& b, u32 rp, u32 own, raster::Font& font,
     style.spacing = rp != 0 ? static_cast<i16>(b.r16(rp + ndk::rp_TxSpacing)) : 0;
     style.algo = rp != 0 ? b.r8(rp + ndk::rp_AlgoStyle) : 0;
     return b.ok();
+}
+
+void Graphics::set_vp_mode_id(u32 vp, u32 id) {
+    if (vp == 0) {
+        return;
+    }
+    for (VpModeId& pair : vp_mode_ids_) {
+        if (pair.vp == vp) {
+            pair.id = id;
+            return;
+        }
+    }
+    for (VpModeId& pair : vp_mode_ids_) {
+        if (pair.vp == 0) {
+            pair = VpModeId{vp, id};
+            return;
+        }
+    }
+}
+
+void Graphics::clear_vp_mode_id(u32 vp) {
+    for (VpModeId& pair : vp_mode_ids_) {
+        if (pair.vp == vp) {
+            pair = VpModeId{};
+        }
+    }
+}
+
+bool Graphics::vp_mode_id(u32 vp, u32& id) const {
+    if (vp == 0) {
+        return false;
+    }
+    for (const VpModeId& pair : vp_mode_ids_) {
+        if (pair.vp == vp) {
+            id = pair.id;
+            return true;
+        }
+    }
+    return false;
 }
 
 void Graphics::init_rastport(u32 rp) {

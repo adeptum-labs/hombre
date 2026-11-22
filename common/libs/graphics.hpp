@@ -233,6 +233,10 @@ public:
     u32 text(u32 rp, const u8* chars, u32 count);
     void scroll(u32 rp, i32 dx, i32 dy, i32 x0, i32 y0, i32 x1, i32 y1);
     void set_font(u32 rp, u32 font);
+    // Records the display mode of a ViewPort, for GetVPModeID, and
+    // forgets it.
+    void set_vp_mode_id(u32 vp, u32 id);
+    void clear_vp_mode_id(u32 vp);
 
 private:
     friend struct GraphicsNatives;
@@ -246,10 +250,20 @@ private:
     u32 topaz_ = 0;
     u32 topaz_name_ = 0;
     u32 topaz_attr_ = 0;
-    // The MonitorSpecs OpenMonitor hands out for the default and the NTSC
-    // monitor, made on first use.
+    // The MonitorSpecs OpenMonitor hands out for the default, NTSC and PAL
+    // monitors, made on first use.
     u32 monitor_ = 0;
     u32 ntsc_monitor_ = 0;
+    u32 pal_monitor_ = 0;
+    // The display modes of the ViewPorts registered for GetVPModeID; vp is
+    // 0 for a free pair.
+    static constexpr u32 kVpModeIds = 16;
+    struct VpModeId {
+        u32 vp;
+        u32 id;
+    };
+    bool vp_mode_id(u32 vp, u32& id) const;
+    VpModeId vp_mode_ids_[kVpModeIds]{};
     NativeVector vectors_[kVectors]{};
     // Who holds each pen of the screen's colour map, for ObtainPen and
     // ReleasePen: how many share it, and whether one holds it alone. The
