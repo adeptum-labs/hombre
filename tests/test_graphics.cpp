@@ -2790,7 +2790,28 @@ void text_blends_on_an_eight_plane_palette() {
     CHECK(changed > 0);
 }
 
+// OpenMonitor hands out the one display's MonitorSpec, whatever is asked
+// for, counting its opens; CloseMonitor counts them down again.
+void monitors_open_and_close() {
+    GfxRig r;
+    r.cpu().a[1] = 0;
+    r.cpu().d[0] = 0x8004;
+    const u32 spec = r.result(Base::Graphics, graphics_lvo::OpenMonitor);
+    CHECK(spec != 0);
+    CHECK_EQ(r.get32(spec + 26), 16u);  // ratioh, RATIO_UNITY
+    CHECK_EQ(r.get32(spec + 30), 16u);  // ratiov
+    CHECK_EQ(r.get16(spec + 48), 1u);   // ms_OpenCount
+    r.cpu().a[1] = 0;
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenMonitor), spec);
+    CHECK_EQ(r.get16(spec + 48), 2u);
+    r.cpu().a[0] = spec;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::CloseMonitor), 0u);
+    CHECK_EQ(r.get16(spec + 48), 1u);
+}
+
 int main() {
+    monitors_open_and_close();
     set_soft_style_keeps_the_drawn_styles();
     gfx_base_lists_the_memory_fonts();
     topaz_font_holds_the_built_in_glyphs();

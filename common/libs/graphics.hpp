@@ -116,6 +116,8 @@ constexpr u32 GetRGB4 = 582;
 constexpr u32 BltTemplate = 36;
 constexpr u32 PolyDraw = 336;
 constexpr u32 ClipBlit = 552;
+constexpr u32 OpenMonitor = 714;
+constexpr u32 CloseMonitor = 720;
 constexpr u32 FindDisplayInfo = 726;
 constexpr u32 NextDisplayInfo = 732;
 constexpr u32 GetDisplayInfoData = 756;
@@ -244,6 +246,9 @@ private:
     u32 topaz_ = 0;
     u32 topaz_name_ = 0;
     u32 topaz_attr_ = 0;
+    // The MonitorSpec OpenMonitor hands out for the one display, made on
+    // first use.
+    u32 monitor_ = 0;
     NativeVector vectors_[kVectors]{};
     // Who holds each pen of the screen's colour map, for ObtainPen and
     // ReleasePen: how many share it, and whether one holds it alone. The

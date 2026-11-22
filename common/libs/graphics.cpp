@@ -2029,6 +2029,63 @@ struct GraphicsNatives {
         native::set_result(m, m.cpu.a[0] != 0 ? kHiresLaceKey : 0xFFFFFFFF);
     }
 
+    // struct MonitorSpec (graphics/monitor.h): its ExtendedNode, the ratios
+    // of the display to a standard one, its open count and its size.
+    static constexpr u32 xln_Subsystem = 14;
+    static constexpr u32 xln_Subtype = 15;
+    static constexpr u32 ms_ratioh = 26;
+    static constexpr u32 ms_ratiov = 30;
+    static constexpr u32 ms_total_rows = 34;
+    static constexpr u32 ms_total_colorclocks = 36;
+    static constexpr u32 ms_OpenCount = 48;
+    static constexpr u32 kMonitorSpecBytes = 160;
+    static constexpr u32 kRatioUnity = 16;
+    static constexpr u32 kNtGraphics = 9;
+    static constexpr u32 kSsGraphics = 2;
+    static constexpr u32 kMonitorSpecType = 0;
+
+    // OpenMonitor(name A1, displayID D0): the MonitorSpec of the one
+    // display, whatever name or mode is asked for, its open count one up.
+    static void open_monitor(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        if (g.monitor_ == 0) {
+            constexpr char kName[] = "default.monitor";
+            const u32 block = g.exec_->alloc(kMonitorSpecBytes + sizeof kName,
+                                             ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+            if (block == 0) {
+                native::set_result(m, 0);
+                return;
+            }
+            for (u32 i = 0; i < sizeof kName; ++i) {
+                b.w8(block + kMonitorSpecBytes + i, static_cast<u8>(kName[i]));
+            }
+            b.w8(block + ndk::LN_TYPE, kNtGraphics);
+            b.w32(block + ndk::LN_NAME, block + kMonitorSpecBytes);
+            b.w8(block + xln_Subsystem, kSsGraphics);
+            b.w8(block + xln_Subtype, kMonitorSpecType);
+            b.w32(block + ms_ratioh, kRatioUnity);
+            b.w32(block + ms_ratiov, kRatioUnity);
+            b.w16(block + ms_total_rows, 262);
+            b.w16(block + ms_total_colorclocks, 226);
+            g.monitor_ = block;
+        }
+        b.w16(g.monitor_ + ms_OpenCount, b.r16(g.monitor_ + ms_OpenCount) + 1);
+        native::set_result(m, b.ok() ? g.monitor_ : 0);
+    }
+
+    // CloseMonitor(monitorSpec A0): its open count one down; the spec
+    // itself lives on. FALSE back, as for success.
+    static void close_monitor(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 spec = m.cpu.a[0];
+        if (spec != 0 && spec == g.monitor_ && b.r16(spec + ms_OpenCount) != 0) {
+            b.w16(spec + ms_OpenCount, b.r16(spec + ms_OpenCount) - 1);
+        }
+        native::set_result(m, 0);
+    }
+
     // FindDisplayInfo(ID D0): a handle for the one mode, 0 for any other.
     static void find_display_info(void*, Machine& m) {
         constexpr u32 kHiresLaceKey = 0x8004;
@@ -2372,6 +2429,8 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::PolyDraw, GraphicsNatives::poly_draw, "PolyDraw"},
     {graphics_lvo::BltTemplate, GraphicsNatives::blt_template, "BltTemplate"},
     {graphics_lvo::ClipBlit, GraphicsNatives::clip_blit, "ClipBlit"},
+    {graphics_lvo::OpenMonitor, GraphicsNatives::open_monitor, "OpenMonitor"},
+    {graphics_lvo::CloseMonitor, GraphicsNatives::close_monitor, "CloseMonitor"},
     {graphics_lvo::FindDisplayInfo, GraphicsNatives::find_display_info, "FindDisplayInfo"},
     {graphics_lvo::NextDisplayInfo, GraphicsNatives::next_display_info, "NextDisplayInfo"},
     {graphics_lvo::GetDisplayInfoData, GraphicsNatives::get_display_info_data,
