@@ -55,6 +55,7 @@ public:
         u32 data = 0;
         u32 capacity = 0;
         u32 open_count = 0;
+        u32 owner = 0;  // owner UID in the high word, GID in the low word
     };
 
     struct Store {
@@ -326,6 +327,14 @@ public:
             return ERROR_OBJECT_NOT_FOUND;
         }
         nodes_[node].protection = protection;
+        return 0;
+    }
+
+    u32 set_owner(u32 node, u32 owner) {
+        if (!valid(node)) {
+            return ERROR_OBJECT_NOT_FOUND;
+        }
+        nodes_[node].owner = owner;
         return 0;
     }
 

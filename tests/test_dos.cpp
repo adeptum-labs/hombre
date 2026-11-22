@@ -1173,8 +1173,8 @@ void unknown_vector_ends_the_run() {
     CHECK(logged_containing("C:Unknown"));
     // The last vector of the table, and one next to implemented ones.
     g_lines.clear();
-    CHECK_EQ(r.dos(dos_lvo::SetOwner), ExitReason::Unimplemented);
-    CHECK(logged("dos: unimplemented LVO -996"));
+    CHECK_EQ(r.dos(984), ExitReason::Unimplemented);  // SameDevice
+    CHECK(logged("dos: unimplemented LVO -984"));
     CHECK_EQ(r.dos(258), ExitReason::Unimplemented);  // ReplyPkt
     CHECK(logged("dos: unimplemented LVO -258"));
 }
@@ -5472,6 +5472,31 @@ void ram_deep_paths_stay_valid() {
     r.call(dos_lvo::UnLock, held);
 }
 
+// SetOwner keeps a RAM: file's owner, which Examine reports; a disk is
+// read-only and a missing name is not found.
+void set_owner_on_ram_and_disk() {
+    Rig r;
+    const u32 fib = kData + 0x400;
+    r.str(kData, "RAM:owned");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::SetOwner, kData, 0x00120034), DOSTRUE);
+    const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(lock != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, lock, fib), DOSTRUE);
+    CHECK_EQ(r.get16(fib + fib_OwnerUID), 0x12u);
+    CHECK_EQ(r.get16(fib + fib_OwnerGID), 0x34u);
+    CHECK_EQ(r.call(dos_lvo::UnLock, lock), DOSTRUE);
+
+    r.str(kData, "C:Echo");
+    CHECK_EQ(r.call(dos_lvo::SetOwner, kData, 1), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    r.str(kData, "RAM:nothing");
+    CHECK_EQ(r.call(dos_lvo::SetOwner, kData, 1), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+}
+
 void ram_protection_bits_are_enforced() {
     Rig r;
     const u32 buf = kData + 0x200;
@@ -7588,6 +7613,7 @@ int main() {
     closing_a_written_file_calls_the_file_closed_hook();
     redirections_write_and_append_to_ram_files();
     ram_protection_bits_are_enforced();
+    set_owner_on_ram_and_disk();
     ram_deep_paths_stay_valid();
     ram_buffered_output_and_set_file_size();
     ram_delete_createdir_rename_and_metadata();

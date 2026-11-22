@@ -1328,6 +1328,7 @@ struct DosOps {
         u32 tick;
         const char* comment;
         u32 comment_len;
+        u32 owner;
     };
 
     static u32 fs_meta(const Dos& d, const DirEntry& entry, FsMeta& out) {
@@ -1350,6 +1351,7 @@ struct DosOps {
             out.comment = n.comment;
             const u32 clen = length_of(n.comment);
             out.comment_len = clen < 79 ? clen : 79;
+            out.owner = n.owner;
             return 0;
         }
         if (entry.volume == Dos::kVolRomFonts) {
@@ -1379,6 +1381,7 @@ struct DosOps {
         const u8* comment = header + (block_longs - 46) * 4;
         out.comment_len = comment[0] < 79 ? comment[0] : 79;
         out.comment = reinterpret_cast<const char*>(comment + 1);
+        out.owner = 0;
         return 0;
     }
 
@@ -5542,8 +5545,8 @@ struct DosOps {
             b.w8(fib + fib_Comment + k, static_cast<u8>(meta.comment[k]));
         }
         b.w8(fib + fib_Comment + meta.comment_len, 0);
-        b.w16(fib + fib_OwnerUID, 0);
-        b.w16(fib + fib_OwnerGID, 0);
+        b.w16(fib + fib_OwnerUID, meta.owner >> 16);
+        b.w16(fib + fib_OwnerGID, meta.owner & 0xFFFF);
         return b.ok();
     }
 
@@ -7052,6 +7055,48 @@ struct DosOps {
         }
     }
 
+    // SetOwner(name D1, owner_info D2): the owner UID (high word) and GID
+    // (low word) of a file or drawer. Only RAM: can be written.
+    static void set_owner(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        if (m.cpu.d[1] == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        const u32 cur = b.r32(d.cur().process + pr_CurrentDir);
+        u8 vol = Dos::kVolDf0;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!b.ok() || !resolve_from_lock(d, b, cur, name, vol, resolved, error)) {
+            if (b.ok()) {
+                fail(d, b, error, DOSFALSE);
+            }
+            return;
+        }
+        if (vol != Dos::kVolRam) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            return;
+        }
+        u32 node = RamFs::kNone;
+        u32 err = d.ram_.find_path(resolved, node);
+        if (err == 0) {
+            err = d.ram_.set_owner(node, m.cpu.d[2]);
+        }
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return;
+        }
+        native::set_result(m, DOSTRUE);
+    }
+
     static bool set_comment_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
                                  const char* comment, u8 zero_vol = Dos::kVolDf0) {
         u8 vol = Dos::kVolDf0;
@@ -8478,6 +8523,7 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::UnLoadSeg, DosOps::unload_seg, "UnLoadSeg"},
     {dos_lvo::SetComment, DosOps::set_comment, "SetComment"},
     {dos_lvo::SetProtection, DosOps::set_protection, "SetProtection"},
+    {dos_lvo::SetOwner, DosOps::set_owner, "SetOwner"},
     {dos_lvo::DateStamp, DosOps::date_stamp, "DateStamp"},
     {dos_lvo::Delay, DosOps::delay, "Delay"},
     {dos_lvo::WaitForChar, DosOps::wait_for_char, "WaitForChar"},
