@@ -4199,7 +4199,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     u32 title_bytes = 0;
     u32 user_port = 0;
     bool user_port_owned = false;
-    auto fail = [&]() -> u32 {
+    auto fail = [&](const char* problem = "intuition: no memory for a window") -> u32 {
         if (user_port_owned && user_port != 0) {
             exec_->delete_port(user_port);
         }
@@ -4221,7 +4221,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         if (window != 0) {
             exec_->free(window, ndk::Window_SIZEOF);
         }
-        LogLine().text("intuition: no memory for a window").send();
+        LogLine().text(problem).send();
         return 0;
     };
 
@@ -4256,7 +4256,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         if (user_port == 0) {
             user_port = exec_->create_port();
             if (user_port == 0) {
-                return fail();
+                return fail("intuition: no free signal for a window's port");
             }
             user_port_owned = true;
         }

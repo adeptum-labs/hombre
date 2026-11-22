@@ -3434,7 +3434,16 @@ void Exec::delete_port(u32 port) {
     if (sig < 32) {
         port_signals_ &= ~(1u << sig);
     }
-    ExecOps::free_signal(*this, b, sig);
+    // The bit belongs to the task the port signals, which need not be the
+    // one deleting it: IPrefs closes the windows the Workbench opened. A
+    // task that has ended keeps nothing to free.
+    const u32 owner = b.r32(port + mp_SigTask);
+    if (owner == task_) {
+        ExecOps::free_signal(*this, b, sig);
+    } else if (sig < 32 && ExecOps::known_task(*this, owner)) {
+        ExecOps::store_sig_alloc_of(*this, b, owner,
+                                    ExecOps::sig_alloc_of(*this, b, owner) & ~(1u << sig));
+    }
     free(port, MP_SIZE);
 }
 

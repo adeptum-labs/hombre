@@ -2256,7 +2256,24 @@ void a_reset_closes_and_reopens_the_windows() {
     CHECK_EQ(r.get32(again + wd_Flags) & WFLG_WBENCHWINDOW, WFLG_WBENCHWINDOW);
 }
 
+// Resets with a drawer open leave the memory as it was.
+void resets_give_back_their_memory() {
+    Rig r;
+    r.workbench.open_desktop();
+    const u32 volume = r.find_icon("HombreTest");
+    r.workbench.open_icon(0, volume);
+    CHECK(r.workbench.close_for_reset());
+    r.workbench.open_after_reset();
+    const u32 before = r.free_bytes();
+    for (int i = 0; i < 5; ++i) {
+        CHECK(r.workbench.close_for_reset());
+        r.workbench.open_after_reset();
+    }
+    CHECK_EQ(r.free_bytes(), before);
+}
+
 int main() {
+    resets_give_back_their_memory();
     the_backdrop_shows_a_wbpattern_picture();
     the_backdrop_shows_the_wbpattern_pattern();
     layout_matches_the_ndk();

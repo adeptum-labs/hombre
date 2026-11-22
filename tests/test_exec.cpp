@@ -2751,6 +2751,32 @@ u32 setup_child_task(Rig& r, u32 task_addr, u32 stack_top, i8 pri, const char* n
     return task_addr;
 }
 
+// A port deleted by another task gives the signal back to the task it
+// signals, as when IPrefs closes the windows the Workbench opened.
+void delete_port_frees_the_signal_of_the_task_it_signals() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 main_task = make_test_task(r, kData);
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.put32(child + TC_SIGALLOC, 0x0000FFFF);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    g_exec.set_this_task(child);
+    const u32 port = g_exec.create_port();
+    CHECK(port != 0);
+    CHECK_EQ(r.get32(child + TC_SIGALLOC), 0x0001FFFFu);
+
+    g_exec.set_this_task(main_task);
+    r.put32(main_task + TC_SIGALLOC, 0x0001FFFF);
+    g_exec.delete_port(port);
+    CHECK_EQ(r.get32(child + TC_SIGALLOC), 0x0000FFFFu);
+    CHECK_EQ(r.get32(main_task + TC_SIGALLOC), 0x0001FFFFu);
+}
+
 void add_task_populates_lists_stack_and_d0() {
     Rig r;
     FakeHostState host{};
@@ -4517,6 +4543,7 @@ int main() {
     calls_from_natives_share_the_block_budget();
     raw_do_fmt_output_is_capped();
     create_and_delete_port_balance_memory_and_signals();
+    delete_port_frees_the_signal_of_the_task_it_signals();
     alloc_signal_picks_bit_16_first_and_free_signal_releases_it();
     alloc_signal_specific_bit_and_taken_bit_fails();
     put_and_get_msg_preserve_order_and_signal_the_task();
