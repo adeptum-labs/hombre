@@ -188,7 +188,7 @@ run: image disk-image
 	        extra="$$extra -device virtio-blk-pci,disable-legacy=on,drive=disk$$n,addr=0x1$$n"; \
 	    fi; \
 	done; \
-	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M -no-reboot \
+	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G -no-reboot \
 	    -serial stdio \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF)/OVMF_CODE_4M.fd \
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS-run.fd \

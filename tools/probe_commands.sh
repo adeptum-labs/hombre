@@ -112,7 +112,7 @@ wait_for() {
 for line in "$@"; do
     : > "$work/serial.log"
     cp "$ovmf_dir/OVMF_VARS_4M.fd" "$work/vars.fd"
-    qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
+    qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G \
         -display none -no-reboot -serial "file:$work/serial.log" \
         -monitor "unix:$work/monitor.sock,server,nowait" \
         -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \

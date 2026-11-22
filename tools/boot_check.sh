@@ -191,7 +191,7 @@ cp "$ovmf_dir/OVMF_VARS_4M.fd" "$ovmf_vars"
 
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
 # error while the firmware is still in 32-bit mode.
-qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
+qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G \
     "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
     -drive if=pflash,format=raw,file="$ovmf_vars" \

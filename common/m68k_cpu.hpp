@@ -140,6 +140,11 @@ struct GuestMemory {
     }
 };
 
-constexpr u32 kGuestBytes = 16u << 20;
+// Amiga programs see chip memory from address 0 and fast memory right
+// above it, in one guest buffer. The fast part shrinks on a PC with too
+// little memory; kGuestBytes is the most there can be.
+constexpr u32 kChipBytes = 64u << 20;
+constexpr u32 kFastBytes = 512u << 20;
+constexpr u32 kGuestBytes = kChipBytes + kFastBytes;
 
 }

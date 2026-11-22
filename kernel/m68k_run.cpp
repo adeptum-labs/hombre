@@ -72,10 +72,14 @@ using m68k::ExitReason;
 constexpr u64 page_size = 4096;
 // Generated code; the translator starts over when it is full.
 constexpr u64 code_region_bytes = 2ull << 20;
-// The 68000 has 24 address lines, and software written for it may keep
-// flags in the top byte of a pointer. Guest memory is 16 MiB, all of it
-// below the mask, so the mask costs nothing.
-constexpr u32 address_mask = 0x00FFFFFF;
+// Guest memory reaches far above 16 MiB, so addresses are 32 bits wide, as
+// on a 68020 or later Amiga.
+constexpr u32 address_mask = 0xFFFFFFFF;
+// Physical memory left to the kernel after the guest takes its share: the
+// translator's code, task stacks and device buffers come from it.
+constexpr u64 kernel_reserve_bytes = 64ull << 20;
+// Fast memory shrinks in steps of this size on a PC with too little memory.
+constexpr u32 fast_step_bytes = 64u << 20;
 // The stack exec and dos start on; commands run on a stack dos allocates.
 constexpr u32 boot_stack = 0x8000;
 // exec's free memory: everything above the vectors, the stubs and the boot
@@ -802,12 +806,30 @@ void register_console(u8 index) {
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
 // line and returns false when a step fails.
 bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
-    constexpr u64 guest_pages = m68k::kGuestBytes / page_size;
-    const u64 guest = pages.alloc_pages(guest_pages);
+    // As much fast memory as the PC can spare, chip memory always.
+    u32 fast_bytes = m68k::kFastBytes;
+    u64 guest = 0;
+    u64 guest_pages = 0;
+    for (;;) {
+        guest_pages = (m68k::kChipBytes + static_cast<u64>(fast_bytes)) / page_size;
+        if (pages.free_page_count() >= guest_pages + kernel_reserve_bytes / page_size) {
+            guest = pages.alloc_pages(guest_pages);
+        }
+        if (guest != 0 || fast_bytes == 0) {
+            break;
+        }
+        fast_bytes = fast_bytes > fast_step_bytes ? fast_bytes - fast_step_bytes : 0;
+    }
     if (guest == 0) {
         fail("no memory for the guest");
         return false;
     }
+    const u32 guest_bytes = m68k::kChipBytes + fast_bytes;
+    serial::write("memory: chip ");
+    serial::write_dec(m68k::kChipBytes >> 20);
+    serial::write(" MiB, fast ");
+    serial::write_dec(fast_bytes >> 20);
+    serial::write(" MiB\n");
     m68k::CodeRegion region{};
     if (!code_region_create(info, pages, code_region_bytes, region)) {
         pages.free_pages(guest, guest_pages);
@@ -817,7 +839,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
 
     m68k::decode_init();
     machine.cpu = m68k::CpuState{};
-    machine.mem = m68k::GuestMemory{pages.to_ptr(guest), m68k::kGuestBytes};
+    machine.mem = m68k::GuestMemory{pages.to_ptr(guest), guest_bytes};
     machine.jit = nullptr;
     if (!jit.init(region, machine)) {
         fail("translator init failed");
@@ -832,7 +854,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     exec.set_task_host(TaskHost{&task_host_create, &task_host_switch, &task_host_destroy,
                                 &task_host_slice_over, &task_host_poll, &hook_trampoline,
                                 &task_host_now_us, nullptr});
-    if (!exec.init(machine, free_start, m68k::kGuestBytes)) {
+    if (!exec.init(machine, free_start, m68k::kChipBytes, guest_bytes)) {
         fail("exec init failed");
         return false;
     }
