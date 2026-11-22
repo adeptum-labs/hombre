@@ -42,6 +42,8 @@
 # leaves the boot shell open.
 #
 # --mouse-after <marker> and --mouse "<commands>" must be given together.
+# --sound <wav> attaches an Intel HD Audio controller with an output codec
+# whose sound QEMU writes to the WAV file <wav>.
 # --mouse implies the USB devices of --usb-kbd and also attaches a USB mouse
 # (-device usb-mouse); once <marker> shows on the serial console and any
 # --keys have been sent, the ';'-separated HMP commands (for example
@@ -49,7 +51,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -58,6 +60,7 @@ build_dir="$tools_dir/../build"
 image_name=hombre.img
 vga_args=()
 usb_args=()
+sound_args=()
 usb_kbd=false
 usb_mouse=false
 keys=
@@ -108,6 +111,12 @@ while [[ ${1:-} == --* ]]; do
             usb_kbd=true
             usb_mouse=true
             mouse=$2
+            shift
+            ;;
+        --sound)
+            [[ $# -ge 2 && $2 != --* && -n $2 ]] || { echo "$usage" >&2; exit 2; }
+            sound_args=(-audiodev "wav,id=snd0,path=$2" -device ich9-intel-hda
+                        -device hda-output,audiodev=snd0)
             shift
             ;;
         --no-kernel) image_name=hombre-nokernel.img ;;
@@ -186,7 +195,8 @@ qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 256M \
     "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
     -drive if=pflash,format=raw,file="$ovmf_vars" \
-    -drive format=raw,snapshot=on,file="$image" "${disk_args[@]}" "${usb_args[@]}" "${monitor_args[@]}" &
+    -drive format=raw,snapshot=on,file="$image" "${disk_args[@]}" "${usb_args[@]}" \
+    "${sound_args[@]}" "${monitor_args[@]}" &
 qemu_pid=$!
 trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; rm -f "$monitor_socket" "$ovmf_vars"' EXIT
 

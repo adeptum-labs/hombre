@@ -22,6 +22,7 @@
  */
 
 #include "boot_disk.hpp"
+#include "hda.hpp"
 #include "usb_keyboard.hpp"
 
 #include "../common/amiga_fs.hpp"
@@ -399,6 +400,7 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
     }
     splash_progress(4, kSplashKernelSteps);
     usb_keyboard_start(mmio, phys_pages);
+    hda_init(mmio, phys_pages);
     splash_progress(5, kSplashKernelSteps);
     if (!mount_disk(boot, "", drive_volumes[0])) {
         return;

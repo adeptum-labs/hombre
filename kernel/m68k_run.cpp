@@ -22,11 +22,13 @@
  */
 
 #include "m68k_run.hpp"
+#include "hda.hpp"
 #include "splash.hpp"
 
 #include "../common/console_keys.hpp"
 #include "../common/dos_date.hpp"
 #include "../common/format.hpp"
+#include "../common/libs/audio_device.hpp"
 #include "../common/libs/console_device.hpp"
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
@@ -96,6 +98,7 @@ constinit m68k::Machine machine{};
 constinit m68k::Jit jit{};
 constinit Exec exec{};
 constinit TimerDevice timer_device{};
+constinit AudioDevice audio_device{};
 constinit TaskStacks task_stacks{};
 constinit Utility utility{};
 constinit Dos dos{};
@@ -640,11 +643,38 @@ void poll_keys() {
     }
 }
 
+u32 audio_fill(void*, i16* out, u32 frames) {
+    return audio_device.pump(out, frames);
+}
+
+// The sound card asks for frames as it plays them. Without one,
+// audio.device still plays in real time, its frames dropped, so programs
+// waiting for their sounds to end go on.
+void pump_audio() {
+    static u64 last_us = 0;
+    if (hda_ready()) {
+        hda_pump(&audio_fill, nullptr);
+        return;
+    }
+    const u64 now = clock_us();
+    if (!audio_device.active()) {
+        last_us = now;
+        return;
+    }
+    constexpr u64 kRate = 48000;
+    const u64 frames = (now - last_us) * kRate / 1000000;
+    if (frames != 0) {
+        audio_device.pump_discard(static_cast<u32>(frames < 4096 ? frames : 4096));
+        last_us = now;
+    }
+}
+
 void task_host_poll(void*) {
     intuition.flush_palette();
     poll_mouse();
     poll_keys();
     intuition.intui_ticks();
+    pump_audio();
 }
 
 bool hook_trampoline(void*) {
@@ -809,6 +839,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
+        return false;
+    }
+    if (!audio_device.init(machine, exec)) {
+        fail("audio device init failed");
         return false;
     }
     if (!utility.init(machine, exec)) {

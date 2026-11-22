@@ -175,6 +175,10 @@ $(foreach n,$(FAULT_TESTS),$(eval $(call FAULT_VARIANT,$(n))))
 # error while the firmware is still in 32-bit mode.
 # The boot image opens as a snapshot and the firmware variables are run's
 # own, so a boot check can run beside it.
+# AUDIODEV is QEMU's sound backend for the HD Audio controller: pa
+# (PulseAudio and PipeWire), alsa, sdl, or none for silence.
+AUDIODEV ?= pa
+
 run: image disk-image
 	cp $(OVMF)/OVMF_VARS_4M.fd $(BUILD)/OVMF_VARS-run.fd
 	extra=; \
@@ -192,7 +196,8 @@ run: image disk-image
 	    -drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG) \
 	    -device virtio-blk-pci,disable-legacy=on,drive=disk0,addr=0x10 \
 	    $$extra \
-	    -device qemu-xhci -device usb-kbd -device usb-mouse
+	    -device qemu-xhci -device usb-kbd -device usb-mouse \
+	    -audiodev $(AUDIODEV),id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0
 
 # The boots attach the generated test disk whatever DISK says, so they stay
 # hermetic. The main boot expects its size in 512-byte sectors, rounded up.
