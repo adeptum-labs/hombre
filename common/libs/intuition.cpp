@@ -2516,6 +2516,7 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
     // Everything the new screen needs is allocated before anything of the old
     // one is let go, so that too little memory leaves the screen as it is.
     struct WindowFit {
+        u32 window = 0;
         AxisFit x{};
         AxisFit y{};
         u32 bytes_per_row = 0;
@@ -2531,6 +2532,7 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
             continue;
         }
         WindowFit& fit = fits[i];
+        fit.window = w.addr;
         fit.x = fit_axis(w.left, w.width, w.min_w, w.lim_w, static_cast<i32>(rec.width),
                          static_cast<i32>(width));
         fit.y = fit_axis(w.top, w.height, w.min_h, w.lim_h, static_cast<i32>(rec.height),
@@ -2587,7 +2589,13 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
         if (fit.planes == 0) {
             continue;
         }
-        WindowRecord& wrec = window_records_[i];
+        // A size hook of a window before this one may have closed it.
+        WindowRecord* found = find_window_record(fit.window);
+        if (found == nullptr) {
+            exec_->free(fit.planes, fit.plane_bytes);
+            continue;
+        }
+        WindowRecord& wrec = *found;
         exec_->free(wrec.planes, wrec.planes_bytes);
         wrec.planes = fit.planes;
         wrec.planes_bytes = fit.plane_bytes;

@@ -6105,6 +6105,51 @@ void open_workbench_fits_its_windows_to_a_smaller_screen() {
     CHECK_EQ(hook.height, 200u);
 }
 
+// A size hook that closes another window, as a program's own layout code
+// might.
+struct ClosingHook {
+    Intuition* intuition = nullptr;
+    u32 other = 0;
+};
+
+void close_other_window(void* ctx, u32) {
+    ClosingHook& hook = *static_cast<ClosingHook*>(ctx);
+    if (hook.other != 0) {
+        hook.intuition->close_window(hook.other);
+        hook.other = 0;
+    }
+}
+
+void open_workbench_lets_a_size_hook_close_a_window() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    put_new_window(r, kNewWindow, 20, 30, 300, 200, kWindowGadgets, 0, screen, CUSTOMSCREEN);
+    const u32 first = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 40, 50, 300, 200, kWindowGadgets, 0, screen, CUSTOMSCREEN);
+    const u32 second = open_win(r, kNewWindow);
+    CHECK(first != 0 && second != 0);
+    r.intuition.keep_through_workbench_reset(first);
+    r.intuition.keep_through_workbench_reset(second);
+    ClosingHook hook{&r.intuition, second};
+    r.intuition.set_size_hook(first, close_other_window, &hook);
+    const u32 free_before = r.exec.free_bytes();
+    const u32 exec_base = r.get32(4);
+
+    send_screen_mode(r, kModeHighRes, 0xFFFF, 0xFFFF, 2);
+    CHECK_EQ(reset_workbench(r), screen);
+
+    CHECK(r.intuition.window_open(first));
+    CHECK(!r.intuition.window_open(second));
+    CHECK_EQ(r.get8(window_bitmap(r, first) + bm_Depth), 2u);
+    // Nothing was written for the closed window, and the planes made for it
+    // went back.
+    CHECK_EQ(r.get32(4), exec_base);
+    CHECK(r.exec.free_bytes() > free_before);
+}
+
 void open_workbench_keeps_a_screen_that_has_the_mode_of_the_prefs() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
@@ -8941,6 +8986,7 @@ int main() {
     close_workbench_does_not_wait_for_a_window_marked_to_stay();
     open_workbench_rebuilds_the_screen_for_the_mode_of_the_prefs();
     open_workbench_fits_its_windows_to_a_smaller_screen();
+    open_workbench_lets_a_size_hook_close_a_window();
     open_workbench_keeps_a_screen_that_has_the_mode_of_the_prefs();
     open_workbench_keeps_the_screen_for_a_mode_it_cannot_have();
     open_workbench_keeps_the_screen_when_memory_runs_out();
