@@ -204,6 +204,79 @@ struct ConsoleOps {
         native::set_result(m, m.cpu.a[0]);
     }
 
+    // GetConSnip: a copy of the snip from AllocVec, which the caller frees
+    // with FreeVec; 0 when there is no snip or no memory.
+    static void get_con_snip(void* ctx, Machine& m) {
+        ConsoleDevice& d = of(ctx);
+        u32 length = 0;
+        while (d.snip_[length] != '\0') {
+            ++length;
+        }
+        if (length == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        // AllocVec's layout: the block's whole size in the longword below
+        // the pointer handed out.
+        const u32 total = length + 1 + 8;
+        const u32 block = d.exec_->alloc(total, ndk::MEMF_PUBLIC);
+        if (block == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        Bus b(m);
+        b.w32(block + 4, total);
+        for (u32 i = 0; i <= length; ++i) {
+            b.w8(block + 8 + i, static_cast<u8>(d.snip_[i]));
+        }
+        native::set_result(m, b.ok() ? block + 8 : 0);
+    }
+
+    // SetConSnip(snip A0): takes a copy of the string as the snip; FALSE
+    // when it is too long to keep.
+    static void set_con_snip(void* ctx, Machine& m) {
+        ConsoleDevice& d = of(ctx);
+        Bus b(m);
+        const u32 at = m.cpu.a[0];
+        if (at == 0) {
+            d.snip_[0] = '\0';
+            native::set_result(m, 1);
+            return;
+        }
+        if (!b.string(at, d.snip_, sizeof d.snip_)) {
+            d.snip_[0] = '\0';
+            if (b.ok()) {
+                native::set_result(m, 0);
+            }
+            return;
+        }
+        native::set_result(m, 1);
+    }
+
+    static void add_con_snip_hook(void* ctx, Machine& m) {
+        ConsoleDevice& d = of(ctx);
+        const u32 hook = m.cpu.a[0];
+        for (u32& slot : d.snip_hooks_) {
+            if (slot == hook) {
+                return;
+            }
+        }
+        for (u32& slot : d.snip_hooks_) {
+            if (slot == 0) {
+                slot = hook;
+                return;
+            }
+        }
+    }
+
+    static void rem_con_snip_hook(void* ctx, Machine& m) {
+        for (u32& slot : of(ctx).snip_hooks_) {
+            if (slot == m.cpu.a[0]) {
+                slot = 0;
+            }
+        }
+    }
+
     static void raw_key_convert(void* ctx, Machine& m) {
         Bus b(m);
         native::set_result(m, of(ctx).keymaps_->map_raw(b, m.cpu.a[0], m.cpu.a[1], m.cpu.d[1],
@@ -222,6 +295,10 @@ constexpr NativeVector kConsoleVectors[] = {
     {ConsoleOps::abort_io, "AbortIO"},
     {ConsoleOps::input_handler, "CDInputHandler"},
     {ConsoleOps::raw_key_convert, "RawKeyConvert"},
+    {ConsoleOps::get_con_snip, "GetConSnip"},
+    {ConsoleOps::set_con_snip, "SetConSnip"},
+    {ConsoleOps::add_con_snip_hook, "AddConSnipHook"},
+    {ConsoleOps::rem_con_snip_hook, "RemConSnipHook"},
 };
 
 }

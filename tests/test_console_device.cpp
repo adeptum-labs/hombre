@@ -28,6 +28,7 @@
 #include <cstring>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <string>
 #include <vector>
 
 using namespace hombre;
@@ -306,6 +307,58 @@ void close_frees_the_unit() {
 
 }
 
+// The snip ConClip copies to the clipboard: SetConSnip keeps a copy,
+// GetConSnip hands out an AllocVec copy FreeVec takes back, and the snip
+// hooks register once each.
+void snip_and_snip_hooks() {
+    Rig r;
+    CHECK_EQ(r.open(CONU_LIBRARY, 0), 0u);
+    const u32 base = g_console.device_base();
+    CHECK_EQ(r.call(base, console_lvo::GetConSnip), ExitReason::Returned);
+    CHECK_EQ(r.m.cpu.d[0], 0u);
+
+    const char text[] = "dir ram:";
+    for (u32 i = 0; i < sizeof text; ++i) {
+        r.put8(kBuffer + i, static_cast<u8>(text[i]));
+    }
+    r.m.cpu.a[0] = kBuffer;
+    CHECK_EQ(r.call(base, console_lvo::SetConSnip), ExitReason::Returned);
+    CHECK_EQ(r.m.cpu.d[0], 1u);
+    CHECK(std::string(g_console.snip()) == "dir ram:");
+
+    const u32 before = g_exec.free_bytes();
+    CHECK_EQ(r.call(base, console_lvo::GetConSnip), ExitReason::Returned);
+    const u32 copy = r.m.cpu.d[0];
+    CHECK(copy != 0 && copy != kBuffer);
+    for (u32 i = 0; i < sizeof text; ++i) {
+        CHECK_EQ(r.get8(copy + i), static_cast<u32>(static_cast<u8>(text[i])));
+    }
+    r.m.cpu.a[1] = copy;
+    CHECK_EQ(r.call(g_exec.exec_base(), exec_lvo::FreeVec), ExitReason::Returned);
+    CHECK_EQ(g_exec.free_bytes(), before);
+
+    constexpr u32 kHook = kBuffer + 0x100;
+    r.m.cpu.a[0] = kHook;
+    CHECK_EQ(r.call(base, console_lvo::AddConSnipHook), ExitReason::Returned);
+    r.m.cpu.a[0] = kHook;
+    CHECK_EQ(r.call(base, console_lvo::AddConSnipHook), ExitReason::Returned);
+    u32 registered = 0;
+    for (u32 i = 0; i < ConsoleDevice::kMaxSnipHooks; ++i) {
+        registered += g_console.snip_hook(i) == kHook ? 1 : 0;
+    }
+    CHECK_EQ(registered, 1u);
+    r.m.cpu.a[0] = kHook;
+    CHECK_EQ(r.call(base, console_lvo::RemConSnipHook), ExitReason::Returned);
+    for (u32 i = 0; i < ConsoleDevice::kMaxSnipHooks; ++i) {
+        CHECK(g_console.snip_hook(i) != kHook);
+    }
+
+    r.m.cpu.a[0] = 0;
+    CHECK_EQ(r.call(base, console_lvo::SetConSnip), ExitReason::Returned);
+    CHECK_EQ(r.call(base, console_lvo::GetConSnip), ExitReason::Returned);
+    CHECK_EQ(r.m.cpu.d[0], 0u);
+}
+
 int main() {
     window_units_open_and_library_unit_needs_no_window();
     opening_without_a_window_or_with_a_bad_unit_fails();
@@ -315,5 +368,6 @@ int main() {
     library_unit_converts_raw_keys_like_keymap_library();
     write_clear_read_and_unknown_commands();
     close_frees_the_unit();
+    snip_and_snip_hooks();
     return check::finish("test_console_device");
 }

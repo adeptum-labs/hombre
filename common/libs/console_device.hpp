@@ -40,6 +40,12 @@ namespace console_lvo {
 
 constexpr u32 CDInputHandler = 42;
 constexpr u32 RawKeyConvert = 48;
+// Private since 2.0: the text snipped from a console window, and the hooks
+// told when it changes. ConClip uses them.
+constexpr u32 GetConSnip = 54;
+constexpr u32 SetConSnip = 60;
+constexpr u32 AddConSnipHook = 66;
+constexpr u32 RemConSnipHook = 72;
 
 }
 
@@ -67,12 +73,22 @@ public:
 
     u32 device_base() const { return base_; }
 
+    // The current snip, "" when there is none.
+    const char* snip() const { return snip_; }
+    // The hooks AddConSnipHook registered; 0 in unused slots.
+    static constexpr u32 kMaxSnipHooks = 8;
+    u32 snip_hook(u32 index) const { return index < kMaxSnipHooks ? snip_hooks_[index] : 0; }
+
 private:
     friend struct ConsoleOps;
+
+    static constexpr u32 kMaxSnip = 4096;
 
     Exec* exec_ = nullptr;
     KeymapLibrary* keymaps_ = nullptr;
     u32 base_ = 0;
+    char snip_[kMaxSnip + 1]{};
+    u32 snip_hooks_[kMaxSnipHooks]{};
 };
 
 }
