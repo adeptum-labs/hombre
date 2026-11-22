@@ -148,6 +148,14 @@ void write_complement_mirrors(Bus& b, u32 depth, u32 colors, u32 low_colors) {
     }
 }
 
+// STDSCREENWIDTH and STDSCREENHEIGHT: -1 as a tag value, which a 16-bit
+// NewScreen field holds as 0xFFFF.
+constexpr u32 kStandardSize = 0xFFFFFFFF;
+
+bool wants_standard_size(u32 size) { return size == 0 || size == kStandardSize; }
+
+u32 new_screen_size(u32 field) { return field == 0xFFFF ? kStandardSize : field; }
+
 // The fields of a NewScreen as the SA_ tags can override them.
 struct OpenArgs {
     u32 left = 0;
@@ -155,6 +163,12 @@ struct OpenArgs {
     u32 width = 0;
     u32 height = 0;
     u32 depth = 0;
+    u32 display_id = Intuition::kInvalidModeId;
+    u16 view_modes = 0;
+    u32 overscan = 0;
+    // The Rectangle SA_DClip points to and the longword SA_ErrorCode points to.
+    u32 dclip = 0;
+    u32 error_code = 0;
     u32 detail = 0;
     u32 block = 1;
     u32 title = 0;
@@ -170,11 +184,12 @@ void read_new_screen(Bus& b, u32 ns, OpenArgs& a) {
     }
     a.left = b.r16(ns + ndk::ns_LeftEdge);
     a.top = b.r16(ns + ndk::ns_TopEdge);
-    a.width = b.r16(ns + ndk::ns_Width);
-    a.height = b.r16(ns + ndk::ns_Height);
+    a.width = new_screen_size(b.r16(ns + ndk::ns_Width));
+    a.height = new_screen_size(b.r16(ns + ndk::ns_Height));
     a.depth = b.r16(ns + ndk::ns_Depth);
     a.detail = b.r8(ns + ndk::ns_DetailPen);
     a.block = b.r8(ns + ndk::ns_BlockPen);
+    a.view_modes = static_cast<u16>(b.r16(ns + ndk::ns_ViewModes));
     a.font = b.r32(ns + ndk::ns_Font);
     a.title = b.r32(ns + ndk::ns_DefaultTitle);
 }
@@ -195,6 +210,18 @@ void apply_tag(OpenArgs& a, u32 tag, u32 data) {
         break;
     case ndk::SA_Depth:
         a.depth = data;
+        break;
+    case ndk::SA_DisplayID:
+        a.display_id = data;
+        break;
+    case ndk::SA_Overscan:
+        a.overscan = data;
+        break;
+    case ndk::SA_DClip:
+        a.dclip = data;
+        break;
+    case ndk::SA_ErrorCode:
+        a.error_code = data;
         break;
     case ndk::SA_DetailPen:
         a.detail = data & 0xFF;
@@ -245,6 +272,41 @@ void read_tags(Bus& b, u32 tags, OpenArgs& a) {
             break;
         }
     }
+}
+
+// A screen that names no mode bits and either leaves its size to the system
+// or asks for 640x400 is the Workbench kind: it keeps the High Res Laced mode
+// of the default monitor, as every screen did before modes were honoured.
+bool wants_workbench_mode(const OpenArgs& a) {
+    constexpr u16 kModeBits = display_modes::kViewHires | display_modes::kViewLace |
+                              display_modes::kViewSuperHires | display_modes::kViewHam |
+                              display_modes::kViewExtraHalfBrite;
+    return a.display_id == Intuition::kInvalidModeId && (a.view_modes & kModeBits) == 0 &&
+           (wants_standard_size(a.width) || a.width == 640) &&
+           (wants_standard_size(a.height) || a.height == 400);
+}
+
+u32 requested_mode_id(const OpenArgs& a, bool workbench) {
+    if (a.display_id != Intuition::kInvalidModeId) {
+        return a.display_id;
+    }
+    return workbench ? display_modes::kHiresLace : display_modes::from_view_modes(a.view_modes);
+}
+
+// The ViewModes bits of the mode: its ID without the monitor part.
+u16 view_modes_of(const display_modes::Mode& mode) {
+    return static_cast<u16>(mode.id & ~display_modes::kMonitorIdMask);
+}
+
+// The standard size of a screen: the extent of the DClip rectangle if one
+// was given and is not empty, otherwise the mode's nominal size.
+u32 standard_extent(Bus& b, u32 dclip, u32 nominal, u32 min_offset, u32 max_offset) {
+    if (dclip == 0) {
+        return nominal;
+    }
+    const i32 extent = static_cast<i16>(b.r16(dclip + max_offset)) -
+                       static_cast<i16>(b.r16(dclip + min_offset)) + 1;
+    return extent > 0 ? static_cast<u32>(extent) : nominal;
 }
 
 // Copies the guest string at src into a fresh block, NUL included; 0 if
@@ -2942,6 +3004,15 @@ Intuition::ScreenRecord* Intuition::find_screen_record(u32 screen) {
     return nullptr;
 }
 
+u32 Intuition::screen_mode_id(u32 screen) const {
+    for (const ScreenRecord& rec : screen_records_) {
+        if (rec.addr == screen) {
+            return rec.mode_id;
+        }
+    }
+    return kInvalidModeId;
+}
+
 Intuition::ScreenRecord* Intuition::free_screen_record() {
     for (ScreenRecord& rec : screen_records_) {
         if (rec.addr == 0) {
@@ -3005,14 +3076,31 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     if (!b.ok()) {
         return 0;
     }
-    if (a.width == 0) {
-        a.width = 640;
+    const bool workbench = wants_workbench_mode(a);
+    const display_modes::Mode* mode = display_modes::find(requested_mode_id(a, workbench));
+    auto reject = [&](u32 error) -> u32 {
+        if (a.error_code != 0) {
+            b.w32(a.error_code, error);
+        }
+        return 0;
+    };
+    if (mode == nullptr) {
+        return reject(ndk::OSERR_UNKNOWNMODE);
     }
-    if (a.height == 0) {
-        a.height = 400;
+    if (wants_standard_size(a.width)) {
+        a.width = standard_extent(b, a.dclip, mode->width, ndk::ra_MinX, ndk::ra_MaxX);
     }
-    if (a.depth == 0 || a.depth > 8) {
-        a.depth = 8;
+    if (wants_standard_size(a.height)) {
+        a.height = standard_extent(b, a.dclip, mode->height, ndk::ra_MinY, ndk::ra_MaxY);
+    }
+    if (a.depth == 0) {
+        a.depth = workbench ? 8 : 1;
+    }
+    if (a.depth > mode->max_depth) {
+        return reject(ndk::OSERR_TOODEEP);
+    }
+    if (!b.ok()) {
+        return 0;
     }
     if (a.width > 0xFFFF) {
         a.width = 0xFFFF;
@@ -3163,8 +3251,9 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w32(backdrop_rp + ndk::rp_BitMap, backdrop_bitmap);
 
     b.w32(vp + ndk::vp_ColorMap, map);
-    b.w16(vp + ndk::vp_DWidth, a.width);
-    b.w16(vp + ndk::vp_DHeight, a.height);
+    b.w16(vp + ndk::vp_DWidth, a.width < mode->width ? a.width : mode->width);
+    b.w16(vp + ndk::vp_DHeight, a.height < mode->height ? a.height : mode->height);
+    b.w16(vp + ndk::vp_Modes, view_modes_of(*mode));
     b.w8(map + ndk::cm_Flags, 0);
     b.w8(map + ndk::cm_Type, ndk::COLORMAP_TYPE_V39);
     b.w16(map + ndk::cm_Count, color_count);
@@ -3218,6 +3307,8 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     rec->width = a.width;
     rec->height = a.height;
     rec->depth = a.depth;
+    rec->mode_id = mode->id;
+    graphics_->set_vp_mode_id(vp, mode->id);
     rec->first_window = 0;
     rec->pending = Rect{0, 0, -1, -1};
     if (a.depth >= 8) {
@@ -3295,6 +3386,7 @@ bool Intuition::close_screen(u32 screen) {
     if (rec->draw_info != 0) {
         exec_->free(rec->draw_info, kDrawInfoBytes);
     }
+    graphics_->clear_vp_mode_id(screen + ndk::sc_ViewPort);
     exec_->free(screen, rec->screen_bytes);
     *rec = ScreenRecord{};
     if (default_screen_ == screen) {

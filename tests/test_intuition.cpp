@@ -582,8 +582,127 @@ void open_screen_taglist_reads_sa_tags() {
     CHECK(second != 0);
     CHECK_EQ(r.get16(second + sc_Width), 100u);
     CHECK_EQ(r.get16(second + sc_Height), 50u);
-    CHECK_EQ(r.get8(second + sc_BitMap + bm_Depth), 8u);
+    CHECK_EQ(r.get8(second + sc_BitMap + bm_Depth), 1u);
     CHECK_EQ(r.display.front_screen, second);
+}
+
+constexpr u32 kViewHires = 0x8000;
+constexpr u32 kViewLace = 0x0004;
+constexpr u32 kModeHiresLace = 0x8004;
+constexpr u32 kModePalLowRes = 0x21000;
+constexpr u32 kModePalSuperLace = 0x29024;
+constexpr u32 kModePalEhb = 0x21080;
+constexpr u32 kModeUnknown = 0x31004;
+constexpr u32 kStdSize = 0xFFFFFFFF;
+constexpr u32 kErrorCode = kBuffer;
+constexpr u32 kDClip = kBuffer + 0x20;
+
+u32 vp_mode_id(GfxRig& r, u32 screen) {
+    r.cpu().a[0] = screen + sc_ViewPort;
+    return r.result(Base::Graphics, graphics_lvo::GetVPModeID);
+}
+
+void open_screen_view_modes_choose_the_default_monitor_mode() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 0, 0, 2, 0, 1, 0);
+    r.put16(kNewScreen + ns_ViewModes, kViewHires | kViewLace);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    CHECK_EQ(r.get16(screen + sc_Width), 640u);
+    CHECK_EQ(r.get16(screen + sc_Height), 400u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_Modes), kModeHiresLace);
+    CHECK_EQ(vp_mode_id(r, screen), kModeHiresLace);
+    CHECK_EQ(r.intuition.screen_mode_id(screen), kModeHiresLace);
+
+    // Without mode bits a NewScreen that is not 640x400 is Low Res.
+    put_new_screen(r, kNewScreen, 320, 200, 2, 0, 1, 0);
+    const u32 low = open_new(r, kNewScreen);
+    CHECK(low != 0);
+    CHECK_EQ(r.get16(low + sc_ViewPort + vp_Modes), 0u);
+    CHECK_EQ(r.intuition.screen_mode_id(low), 0u);
+    CHECK_EQ(r.get16(low + sc_ViewPort + vp_DWidth), 320u);
+}
+
+void open_screen_standard_size_without_view_modes_keeps_workbench_mode() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 0, 0, 5, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    CHECK_EQ(r.get16(screen + sc_Width), 640u);
+    CHECK_EQ(r.get16(screen + sc_Height), 400u);
+    CHECK_EQ(r.get8(screen + sc_BitMap + bm_Depth), 5u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_Modes), kModeHiresLace);
+    CHECK_EQ(r.intuition.screen_mode_id(screen), kModeHiresLace);
+}
+
+void open_screen_display_id_gives_the_modes_size() {
+    GfxRig r;
+    const u32 tags = r.tags(kTagList, {{SA_DisplayID, kModePalLowRes}, {SA_Width, kStdSize},
+                                       {SA_Height, kStdSize}, {SA_Depth, 5}, {TAG_DONE, 0}});
+    const u32 screen = open_tags(r, 0, tags);
+    CHECK(screen != 0);
+    CHECK_EQ(r.get16(screen + sc_Width), 320u);
+    CHECK_EQ(r.get16(screen + sc_Height), 256u);
+    CHECK_EQ(r.get8(screen + sc_BitMap + bm_Depth), 5u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_DWidth), 320u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_DHeight), 256u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_Modes), 0u);
+    CHECK_EQ(r.intuition.screen_mode_id(screen), kModePalLowRes);
+    CHECK_EQ(vp_mode_id(r, screen), kModePalLowRes);
+
+    r.cpu().a[0] = screen;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseScreen), ExitReason::Halt);
+    CHECK_EQ(r.intuition.screen_mode_id(screen), Intuition::kInvalidModeId);
+    r.cpu().a[0] = screen + sc_ViewPort;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::GetVPModeID), ExitReason::Halt);
+}
+
+void open_screen_display_id_of_a_super_hires_mode() {
+    GfxRig r;
+    const u32 tags = r.tags(kTagList, {{SA_DisplayID, kModePalSuperLace}, {SA_Depth, 2},
+                                       {TAG_DONE, 0}});
+    const u32 screen = open_tags(r, 0, tags);
+    CHECK(screen != 0);
+    CHECK_EQ(r.get16(screen + sc_Width), 1280u);
+    CHECK_EQ(r.get16(screen + sc_Height), 512u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_Modes), 0x8024u);
+    CHECK_EQ(vp_mode_id(r, screen), kModePalSuperLace);
+}
+
+void open_screen_dclip_sets_the_standard_size() {
+    GfxRig r;
+    r.put16(kDClip + ra_MinX, 0);
+    r.put16(kDClip + ra_MinY, 0);
+    r.put16(kDClip + ra_MaxX, 359);
+    r.put16(kDClip + ra_MaxY, 279);
+    const u32 tags = r.tags(kTagList, {{SA_DisplayID, kModePalLowRes}, {SA_DClip, kDClip},
+                                       {SA_Width, kStdSize}, {SA_Height, kStdSize},
+                                       {SA_Depth, 2}, {TAG_DONE, 0}});
+    const u32 screen = open_tags(r, 0, tags);
+    CHECK(screen != 0);
+    CHECK_EQ(r.get16(screen + sc_Width), 360u);
+    CHECK_EQ(r.get16(screen + sc_Height), 280u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_DWidth), 320u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_DHeight), 256u);
+}
+
+void open_screen_too_deep_or_unknown_mode_fails_with_an_error_code() {
+    GfxRig r;
+    r.put32(kErrorCode, 0);
+    u32 tags = r.tags(kTagList, {{SA_DisplayID, kModePalEhb}, {SA_Depth, 7},
+                                 {SA_ErrorCode, kErrorCode}, {TAG_DONE, 0}});
+    CHECK_EQ(open_tags(r, 0, tags), 0u);
+    CHECK_EQ(r.get32(kErrorCode), OSERR_TOODEEP);
+
+    tags = r.tags(kTagList, {{SA_DisplayID, kModeUnknown}, {SA_ErrorCode, kErrorCode},
+                             {TAG_DONE, 0}});
+    CHECK_EQ(open_tags(r, 0, tags), 0u);
+    CHECK_EQ(r.get32(kErrorCode), OSERR_UNKNOWNMODE);
+    CHECK_EQ(r.intuition.front_screen(), 0u);
+
+    // The caller may leave out SA_ErrorCode.
+    tags = r.tags(kTagList, {{SA_DisplayID, kModeUnknown}, {TAG_DONE, 0}});
+    CHECK_EQ(open_tags(r, 0, tags), 0u);
 }
 
 void open_screen_null_newscreen_and_taglist_gives_zero_and_faults() {
@@ -758,9 +877,13 @@ u32 colormap_rgb24(const GfxRig& r, u32 map, u32 pen) {
 void open_screen_honours_depth_and_allocates_planes() {
     GfxRig r;
     const u32 before = heap_capacity(r);
-    const u32 requests[] = {8, 3, 0, 9};
-    const u32 expected[] = {8, 3, 8, 8};
-    for (u32 idx = 0; idx < 4; ++idx) {
+    // A 128x64 screen without mode bits is Low Res: depth 0 gives one
+    // plane, and more planes than the mode has fail.
+    put_new_screen(r, kNewScreen, 128, 64, 9, 0, 1, 0);
+    CHECK_EQ(open_new(r, kNewScreen), 0u);
+    const u32 requests[] = {8, 3, 0};
+    const u32 expected[] = {8, 3, 1};
+    for (u32 idx = 0; idx < 3; ++idx) {
         put_new_screen(r, kNewScreen, 128, 64, requests[idx], 0, 1, 0);
         const u32 screen = open_new(r, kNewScreen);
         CHECK(screen != 0);
@@ -8263,6 +8386,12 @@ int main() {
     open_screen_clears_and_draws_title_bar();
     open_screen_makes_it_front_and_refreshes_the_whole_screen();
     open_screen_taglist_reads_sa_tags();
+    open_screen_view_modes_choose_the_default_monitor_mode();
+    open_screen_standard_size_without_view_modes_keeps_workbench_mode();
+    open_screen_display_id_gives_the_modes_size();
+    open_screen_display_id_of_a_super_hires_mode();
+    open_screen_dclip_sets_the_standard_size();
+    open_screen_too_deep_or_unknown_mode_fails_with_an_error_code();
     open_screen_null_newscreen_and_taglist_gives_zero_and_faults();
     open_screen_out_of_memory_returns_zero_and_frees();
     open_screen_limit_returns_zero();

@@ -475,8 +475,22 @@ constexpr u32 SA_Depth = 0x80000025;
 constexpr u32 SA_DetailPen = 0x80000026;
 constexpr u32 SA_BlockPen = 0x80000027;
 constexpr u32 SA_Title = 0x80000028;
+constexpr u32 SA_ErrorCode = 0x8000002A;
 constexpr u32 SA_Font = 0x8000002B;
 constexpr u32 SA_SysFont = 0x8000002C;
+constexpr u32 SA_DisplayID = 0x80000032;
+constexpr u32 SA_DClip = 0x80000033;
+constexpr u32 SA_Overscan = 0x80000034;
+
+// OpenScreen error codes, as SA_ErrorCode reports them.
+constexpr u32 OSERR_UNKNOWNMODE = 6;
+constexpr u32 OSERR_TOODEEP = 7;
+
+// struct Rectangle
+constexpr u32 ra_MinX = 0;
+constexpr u32 ra_MinY = 2;
+constexpr u32 ra_MaxX = 4;
+constexpr u32 ra_MaxY = 6;
 
 }
 

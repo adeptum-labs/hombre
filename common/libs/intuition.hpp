@@ -188,6 +188,7 @@ public:
     static constexpr u32 kMaxScreens = 4;
     static constexpr u32 kMaxWindows = 16;
     static constexpr u32 kMaxTagItems = 256;
+    static constexpr u32 kInvalidModeId = 0xFFFFFFFF;
     static constexpr u32 kMaxMessages = 128;
     static constexpr u32 kMaxGadgets = 64;
     static constexpr u32 kMaxGadgetHooks = 8;
@@ -306,6 +307,8 @@ public:
     // PlanePick selects, the bits of unselected planes from PlaneOnOff.
     // GetScreenDrawInfo: the screen's DrawInfo, 0 for no open screen.
     u32 screen_draw_info(u32 screen);
+    // The display mode the screen was opened in, kInvalidModeId if unknown.
+    u32 screen_mode_id(u32 screen) const;
 
     // BOOPSI: the classes and objects of the BOOPSI vectors.
     Boopsi& boopsi() { return boopsi_; }
@@ -457,6 +460,7 @@ private:
         u32 width = 0;
         u32 height = 0;
         u32 depth = 0;
+        u32 mode_id = kInvalidModeId;
         u32 first_window = 0;
         u32 palette_gen = 0;
         Rect pending = {0, 0, -1, -1};
