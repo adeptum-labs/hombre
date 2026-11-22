@@ -5456,6 +5456,140 @@ void set_iprefs_type8_writes_the_palette_into_the_default_screen() {
     CHECK_EQ(colormap_rgb24(r, next_map, 0), 0x445566u);
 }
 
+constexpr u32 kPointerRecord = kData + 0x2600;
+constexpr u32 kPointerBitmapA = kData + 0x2640;
+constexpr u32 kPointerBitmapB = kData + 0x2680;
+constexpr u32 kPointerPlanes = kData + 0x2700;
+
+// A 16x16 BitMap of two planes of 32 bytes at planes: plane 0 has the left
+// eight pixels of every row set and plane 1 pixels 4 to 7 and 12 to 15, so a
+// row reads 1 1 1 1 3 3 3 3 0 0 0 0 2 2 2 2.
+void put_pointer_bitmap(GfxRig& r, u32 bitmap, u32 planes) {
+    r.put16(bitmap + bm_BytesPerRow, 2);
+    r.put16(bitmap + bm_Rows, 16);
+    r.put8(bitmap + bm_Depth, 2);
+    r.put32(bitmap + bm_Planes, planes);
+    r.put32(bitmap + bm_Planes + 4, planes + 32);
+    for (u32 row = 0; row < 16; ++row) {
+        r.put16(planes + row * 2, 0xFF00);
+        r.put16(planes + 32 + row * 2, 0x0F0F);
+    }
+}
+
+// SetIPrefs type 7 with the BitMap, the hot spot and which pointer: what it answers.
+u32 set_pointer_prefs(GfxRig& r, u32 bitmap, u32 hot_x, u32 hot_y, u32 which) {
+    r.put32(kPointerRecord, bitmap);
+    r.put16(kPointerRecord + 4, hot_x);
+    r.put16(kPointerRecord + 6, hot_y);
+    r.put16(kPointerRecord + 8, 1);
+    r.put16(kPointerRecord + 10, 5);  // the size and y-size choices IPrefs passes
+    r.put16(kPointerRecord + 12, 0);
+    r.put16(kPointerRecord + 14, which);
+    r.put32(kPointerRecord + 16, 0);
+    r.cpu().a[0] = kPointerRecord;
+    r.cpu().d[0] = 20;
+    r.cpu().d[1] = 7;
+    return r.result(Base::Intuition, intuition_lvo::SetIPrefs);
+}
+
+void set_iprefs_type7_takes_the_pointer_image_and_hands_back_the_previous_bitmap() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_pointer_bitmap(r, kPointerBitmapA, kPointerPlanes);
+    put_pointer_bitmap(r, kPointerBitmapB, kPointerPlanes + 0x40);
+    CHECK(r.display.pointer == nullptr);
+    r.refreshes.clear();
+
+    CHECK_EQ(set_pointer_prefs(r, kPointerBitmapA, 3, 5, 0), 0xFFFFFFFFu);
+    const PointerShape* shape = r.display.pointer;
+    CHECK(shape != nullptr);
+    CHECK(!r.refreshes.empty());
+    CHECK_EQ(shape->width, 16);
+    CHECK_EQ(shape->height, 16);
+    CHECK_EQ(shape->hot_x, 3);
+    CHECK_EQ(shape->hot_y, 5);
+    const u8 row[16] = {1, 1, 1, 1, 3, 3, 3, 3, 0, 0, 0, 0, 2, 2, 2, 2};
+    for (u32 x = 0; x < 16; ++x) {
+        CHECK_EQ(shape->pixels[0][x], row[x]);
+        CHECK_EQ(shape->pixels[15][x], row[x]);
+    }
+
+    // Which 1 is the busy pointer: kept, not shown.
+    CHECK_EQ(set_pointer_prefs(r, kPointerBitmapB, 7, 7, 1), 0xFFFFFFFFu);
+    CHECK(r.display.pointer == shape);
+    CHECK_EQ(shape->hot_x, 3);
+    CHECK_EQ(set_pointer_prefs(r, kPointerBitmapA, 7, 7, 1), kPointerBitmapB);
+
+    // A second normal pointer gives back the first BitMap.
+    CHECK_EQ(set_pointer_prefs(r, kPointerBitmapB, 0, 1, 0), kPointerBitmapA);
+    CHECK_EQ(r.display.pointer->hot_x, 0);
+    CHECK_EQ(r.display.pointer->hot_y, 1);
+}
+
+void set_iprefs_type7_refuses_a_record_without_an_image() {
+    GfxRig r;
+    put_pointer_bitmap(r, kPointerBitmapA, kPointerPlanes);
+    CHECK_EQ(set_pointer_prefs(r, 0, 0, 0, 0), 0u);
+    r.put16(kPointerRecord + 8, 0);
+    r.put32(kPointerRecord, kPointerBitmapA);
+    r.cpu().a[0] = kPointerRecord;
+    r.cpu().d[0] = 20;
+    r.cpu().d[1] = 7;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetIPrefs), 0u);
+    r.put16(kPointerRecord + 8, 1);
+    r.put16(kPointerBitmapA + bm_Rows, 0);
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetIPrefs), 0u);
+    CHECK(r.display.pointer == nullptr);
+}
+
+void set_iprefs_type8_pens_8_to_10_are_the_pointer_colours() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+    put_pointer_bitmap(r, kPointerBitmapA, kPointerPlanes);
+    CHECK_EQ(set_pointer_prefs(r, kPointerBitmapA, 0, 0, 0), 0xFFFFFFFFu);
+    const PointerShape* shape = r.display.pointer;
+    const u32 pen8 = colormap_rgb24(r, map, 8);
+    const u32 pen9 = colormap_rgb24(r, map, 9);
+    const u32 pen10 = colormap_rgb24(r, map, 10);
+
+    r.put16(kIPrefs, 8);
+    r.put16(kIPrefs + 2, 0x1111);
+    r.put16(kIPrefs + 4, 0x2222);
+    r.put16(kIPrefs + 6, 0x3333);
+    r.put16(kIPrefs + 8, 9);
+    r.put16(kIPrefs + 10, 0x4444);
+    r.put16(kIPrefs + 12, 0x5555);
+    r.put16(kIPrefs + 14, 0x6666);
+    r.put16(kIPrefs + 16, 10);
+    r.put16(kIPrefs + 18, 0x7777);
+    r.put16(kIPrefs + 20, 0x8888);
+    r.put16(kIPrefs + 22, 0x9999);
+    r.put16(kIPrefs + 24, 0xFFFF);
+    r.refreshes.clear();
+    set_iprefs(r, kIPrefs, 24, 8);
+    CHECK_EQ(shape->rgb[1], 0x112233u);
+    CHECK_EQ(shape->rgb[2], 0x445566u);
+    CHECK_EQ(shape->rgb[3], 0x778899u);
+    CHECK(!r.refreshes.empty());
+    CHECK_EQ(colormap_rgb24(r, map, 8), pen8);
+    CHECK_EQ(colormap_rgb24(r, map, 9), pen9);
+    CHECK_EQ(colormap_rgb24(r, map, 10), pen10);
+
+    // The colours go to a pointer that arrives later, and pens 0 to 7 stay screen pens.
+    const u32 size = put_palette_pref(r, 1, 0xAAAA, 0xBBBB, 0xCCCC);
+    set_iprefs(r, kIPrefs, size, 8);
+    CHECK_EQ(colormap_rgb24(r, map, 1), 0xAABBCCu);
+    CHECK_EQ(shape->rgb[1], 0x112233u);
+    put_pointer_bitmap(r, kPointerBitmapB, kPointerPlanes + 0x40);
+    CHECK_EQ(set_pointer_prefs(r, kPointerBitmapB, 0, 0, 0), kPointerBitmapA);
+    CHECK_EQ(r.display.pointer->rgb[2], 0x445566u);
+}
+
 void set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
@@ -8205,6 +8339,9 @@ int main() {
     get_default_pub_screen_writes_workbench();
     get_screen_draw_info_has_the_default_pens_and_topaz();
     set_iprefs_type8_writes_the_palette_into_the_default_screen();
+    set_iprefs_type7_takes_the_pointer_image_and_hands_back_the_previous_bitmap();
+    set_iprefs_type7_refuses_a_record_without_an_image();
+    set_iprefs_type8_pens_8_to_10_are_the_pointer_colours();
     set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info();
     set_iprefs_type2_sets_the_system_and_screen_fonts();
     screen_with_sa_font_sizes_its_bars_by_the_font();

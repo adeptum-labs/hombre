@@ -572,6 +572,13 @@ private:
     // not arrived.
     const u16* pen_prefs_for(u32 depth) const;
     void store_palette_prefs(u32 prefs, u32 size);
+    // Takes the pointer image of a type 7 record, and gives back what
+    // SetIPrefs answers: 0 when it is not taken, else the BitMap it replaces
+    // or 0xFFFFFFFF.
+    u32 store_pointer_prefs(u32 prefs, u32 size);
+    void set_pointer_colour(u32 colour, u32 rgb);
+    // Draws the front screen again, pointer included.
+    void redraw_pointer();
     void store_pen_prefs(u32 prefs, u32 size);
     void store_font_prefs(u32 prefs, u32 size);
     // What the height of a TextFont makes of a title bar.
@@ -756,6 +763,12 @@ private:
     bool palette_prefs_set_[256]{};
     u32 palette_prefs_[256]{};
     PenPrefs pen_prefs_[2];
+    // The pointer images IPrefs sent, the normal one then the busy one, and
+    // the BitMaps they came from, which IPrefs gets back to free when
+    // a new one replaces them. Only the normal one is shown, through
+    // DisplayState::pointer.
+    PointerShape pointer_shapes_[2]{};
+    u32 pointer_bitmaps_[2]{};
     // The windows a Request() blocks, with its Requester, until EndRequest:
     // a press in one reaches none of its gadgets.
     struct Block {

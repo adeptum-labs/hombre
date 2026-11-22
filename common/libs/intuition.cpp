@@ -1585,15 +1585,19 @@ struct IntuitionNatives {
     }
 
     // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: type 2 is
-    // the system and screen fonts, type 8 the palette and type 9 the two
-    // DrawInfo pen sets. Other types are preferences this does not use
-    // yet. 0 back.
+    // the system and screen fonts, type 7 a pointer image, type 8 the palette
+    // and the pointer colours and type 9 the two DrawInfo pen sets. Other
+    // types are preferences this does not use yet. 0 back, except for type 7,
+    // which answers who owns the image's BitMap.
     static void set_iprefs(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         const u32 prefs = m.cpu.a[0];
         const u32 size = m.cpu.d[0];
+        u32 result = 0;
         if (m.cpu.d[1] == 2) {
             in.store_font_prefs(prefs, size);
+        } else if (m.cpu.d[1] == 7) {
+            result = in.store_pointer_prefs(prefs, size);
         } else if (m.cpu.d[1] == 8) {
             in.store_palette_prefs(prefs, size);
             if (in.default_screen_ != 0) {
@@ -1607,7 +1611,7 @@ struct IntuitionNatives {
         } else if (m.cpu.d[1] == 9) {
             in.store_pen_prefs(prefs, size);
         }
-        native::set_result(m, 0);
+        native::set_result(m, result);
     }
 
     // PubScreenStatus(screen A0, flags D0): public screens are not tracked
@@ -2016,6 +2020,13 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     for (PenPrefs& prefs : pen_prefs_) {
         prefs = PenPrefs{};
     }
+    for (PointerShape& shape : pointer_shapes_) {
+        shape = kDefaultPointerShape;
+    }
+    for (u32& bitmap : pointer_bitmaps_) {
+        bitmap = 0;
+    }
+    display.pointer = nullptr;
     for (bool& seen : unhandled_gadget_types_) {
         seen = false;
     }
@@ -2125,9 +2136,96 @@ const u16* Intuition::pen_prefs_for(u32 depth) const {
     return prefs.set ? prefs.pen : nullptr;
 }
 
+// Type 7: the BitMap of the image, the hot spot, the width in words, the
+// pointer size, the height, which pointer (0 normal, 1 busy) and a long of 0.
+// The BitMap is kept, not copied: IPrefs frees the one that comes back.
+u32 Intuition::store_pointer_prefs(u32 prefs, u32 size) {
+    constexpr u32 kRecordBytes = 16;
+    constexpr u32 kNoPreviousBitmap = 0xFFFFFFFF;
+    constexpr u32 kMaxPlanes = 2;
+    if (prefs == 0 || machine_ == nullptr || size < kRecordBytes) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 bitmap = b.r32(prefs);
+    const u32 hot_x = b.r16(prefs + 4);
+    const u32 hot_y = b.r16(prefs + 6);
+    const u32 words = b.r16(prefs + 8);
+    // +10 and +12 are the pointer's resolution choices, which a pointer
+    // drawn on the screen's own pixels does without; the rows are the
+    // BitMap's.
+    const u32 which = b.r16(prefs + 14);
+    if (!b.ok() || bitmap == 0 || words == 0 || which > 1) {
+        return 0;
+    }
+    const u32 rows = b.r16(bitmap + ndk::bm_Rows);
+    if (!b.ok() || rows == 0) {
+        return 0;
+    }
+    const u32 bytes_per_row = b.r16(bitmap + ndk::bm_BytesPerRow);
+    const u32 depth = b.r8(bitmap + ndk::bm_Depth);
+    const u32 planes = depth < kMaxPlanes ? depth : kMaxPlanes;
+    u32 width = words * 16;
+    width = width < kMaxPointerWidth ? width : kMaxPointerWidth;
+    width = width < bytes_per_row * 8 ? width : bytes_per_row * 8;
+    const u32 height = rows < kMaxPointerHeight ? rows : kMaxPointerHeight;
+    if (!b.ok() || planes == 0 || width == 0) {
+        return 0;
+    }
+    const u32 width_bytes = (width + 7) / 8;
+    const u8* plane_data[kMaxPlanes]{};
+    for (u32 plane = 0; plane < planes; ++plane) {
+        plane_data[plane] =
+            b.bytes_at(b.r32(bitmap + ndk::bm_Planes + plane * 4),
+                       (height - 1) * bytes_per_row + width_bytes);
+    }
+    if (!b.ok()) {
+        return 0;
+    }
+    PointerShape& shape = pointer_shapes_[which];
+    shape.width = static_cast<u16>(width);
+    shape.height = static_cast<u16>(height);
+    shape.hot_x = static_cast<i16>(hot_x);
+    shape.hot_y = static_cast<i16>(hot_y);
+    for (u32 y = 0; y < height; ++y) {
+        for (u32 x = 0; x < width; ++x) {
+            u32 pixel = 0;
+            for (u32 plane = 0; plane < planes; ++plane) {
+                const u32 bits = plane_data[plane][y * bytes_per_row + (x >> 3)];
+                pixel |= ((bits >> (7 - (x & 7))) & 1u) << plane;
+            }
+            shape.pixels[y][x] = static_cast<u8>(pixel);
+        }
+    }
+    const u32 previous = pointer_bitmaps_[which];
+    pointer_bitmaps_[which] = bitmap;
+    // TODO: the busy pointer (which 1) shows with WA_BusyPointer; until
+    // then it is only kept.
+    if (which == 0) {
+        display_->pointer = &shape;
+        redraw_pointer();
+    }
+    return previous != 0 ? previous : kNoPreviousBitmap;
+}
+
+void Intuition::set_pointer_colour(u32 colour, u32 rgb) {
+    for (PointerShape& shape : pointer_shapes_) {
+        shape.rgb[colour] = rgb;
+    }
+}
+
+void Intuition::redraw_pointer() {
+    if (display_ != nullptr) {
+        refresh_screen(display_->front_screen);
+    }
+}
+
 // Type 8: records of pen, red, green and blue, each 16 bits, ended by
-// 0xFFFF. The high byte of a colour is its 8 bits.
+// 0xFFFF. The high byte of a colour is its 8 bits. Pens 8 to 10 are the
+// colours 1 to 3 of the pointer, not of a screen.
 void Intuition::store_palette_prefs(u32 prefs, u32 size) {
+    constexpr u32 kFirstPointerPen = 8;
+    constexpr u32 kLastPointerPen = 10;
     if (prefs == 0 || machine_ == nullptr) {
         return;
     }
@@ -2135,6 +2233,7 @@ void Intuition::store_palette_prefs(u32 prefs, u32 size) {
     u32 at = prefs;
     u32 used = 0;
     u32 entries = 0;
+    bool pointer_changed = false;
     while (used + 2 <= size && entries < 256 && b.ok()) {
         const u32 pen = b.r16(at);
         if (!b.ok() || pen == 0xFFFF) {
@@ -2148,13 +2247,19 @@ void Intuition::store_palette_prefs(u32 prefs, u32 size) {
         if (!b.ok()) {
             break;
         }
-        if (pen < 256) {
+        if (pen >= kFirstPointerPen && pen <= kLastPointerPen) {
+            set_pointer_colour(pen - kFirstPointerPen + 1, rgb);
+            pointer_changed = true;
+        } else if (pen < 256) {
             palette_prefs_[pen] = rgb;
             palette_prefs_set_[pen] = true;
         }
         at += 8;
         used += 8;
         ++entries;
+    }
+    if (pointer_changed && display_->pointer != nullptr) {
+        redraw_pointer();
     }
     for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
         if (!palette_prefs_set_[pen]) {
