@@ -98,6 +98,7 @@ constexpr u32 RefreshGList = 432;
 constexpr u32 AddGList = 438;
 constexpr u32 RemoveGList = 444;
 constexpr u32 NewModifyProp = 468;
+constexpr u32 QueryOverscan = 474;
 constexpr u32 LockPubScreen = 510;
 constexpr u32 UnlockPubScreen = 516;
 constexpr u32 LockPubScreenList = 522;

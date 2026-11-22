@@ -8102,6 +8102,26 @@ void a_string_gadget_is_edited_from_the_keyboard() {
     r.cpu().d[2] = 10;
     r.cpu().d[3] = 250000;
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 1u);
+
+    // QueryOverscan: the 640 by 400 rectangle for the mode, nothing for
+    // INVALID_ID.
+    constexpr u32 kRectAt = kData + 0x3900;
+    for (u32 i = 0; i < 8; i += 2) {
+        r.put16(kRectAt + i, 0x5555);
+    }
+    r.cpu().a[0] = 0xFFFFFFFF;
+    r.cpu().a[1] = kRectAt;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::QueryOverscan), 0u);
+    CHECK_EQ(r.get16(kRectAt + 4), 0x5555u);
+    r.cpu().a[0] = 0x8004;
+    r.cpu().a[1] = kRectAt;
+    r.cpu().d[0] = 2;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::QueryOverscan), 1u);
+    CHECK_EQ(r.get16(kRectAt + 0), 0u);
+    CHECK_EQ(r.get16(kRectAt + 2), 0u);
+    CHECK_EQ(r.get16(kRectAt + 4), 639u);
+    CHECK_EQ(r.get16(kRectAt + 6), 399u);
 }
 
 void a_long_int_gadget_takes_only_numbers_and_keeps_the_value() {

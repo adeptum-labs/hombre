@@ -1805,6 +1805,24 @@ struct IntuitionNatives {
                                     static_cast<i16>(m.cpu.d[0] & 0xFFFF)));
     }
 
+    // QueryOverscan(displayID A0, rect A1, oScanType D0): the overscan
+    // rectangle of the mode. The one 640 by 400 mode has the same
+    // rectangle for every overscan type, as GetDisplayInfoData gives it.
+    static void query_overscan(void*, Machine& m) {
+        constexpr u32 kInvalidId = 0xFFFFFFFF;
+        const u32 rect = m.cpu.a[1];
+        if (m.cpu.a[0] == kInvalidId || rect == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        Bus b(m);
+        b.w16(rect + 0, 0);
+        b.w16(rect + 2, 0);
+        b.w16(rect + 4, 639);
+        b.w16(rect + 6, 399);
+        native::set_result(m, b.ok() ? 1 : 0);
+    }
+
     static void new_modify_prop(void* ctx, Machine& m) {
         of(ctx).new_modify_prop(m.cpu.a[0], m.cpu.a[1], m.cpu.d[0] & 0xFFFF,
                                 m.cpu.d[1] & 0xFFFF, m.cpu.d[2] & 0xFFFF, m.cpu.d[3] & 0xFFFF,
@@ -1884,6 +1902,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::AddGList, IntuitionNatives::add_glist, "AddGList"},
     {intuition_lvo::RemoveGList, IntuitionNatives::remove_glist, "RemoveGList"},
     {intuition_lvo::NewModifyProp, IntuitionNatives::new_modify_prop, "NewModifyProp"},
+    {intuition_lvo::QueryOverscan, IntuitionNatives::query_overscan, "QueryOverscan"},
     {intuition_lvo::LockPubScreen, IntuitionNatives::lock_pub_screen, "LockPubScreen"},
     {intuition_lvo::SetMenuStrip, IntuitionNatives::set_menu_strip, "SetMenuStrip"},
     {intuition_lvo::ResetMenuStrip, IntuitionNatives::set_menu_strip, "ResetMenuStrip"},
