@@ -293,6 +293,20 @@ void draw_text_jam2_fills_bg() {
     CHECK_EQ(dirty.y1, 9);
 }
 
+void fill_rect_keeps_planes_outside_the_mask() {
+    Rig r;
+    r.clear_planes();
+    const raster::Bitmap bm = r.bitmap();
+    native::Bus b = r.bus();
+    raster::fill_rect(b, bm, kFullClip, Rect{0, 0, 15, 3}, 3);
+    // Pen 0 through mask 2 clears plane 1 only: pen 3 becomes pen 1.
+    raster::fill_rect(b, bm, kFullClip, Rect{0, 0, 7, 3}, 0, 0x02);
+    CHECK(b.ok());
+    CHECK_EQ(raster::read_pixel(b, bm, 0, 0), 1u);
+    CHECK_EQ(raster::read_pixel(b, bm, 7, 3), 1u);
+    CHECK_EQ(raster::read_pixel(b, bm, 8, 0), 3u);
+}
+
 void draw_text_complement_twice_restores() {
     Rig r;
     r.clear_planes();
@@ -1201,6 +1215,7 @@ int main() {
     draw_line_horizontal_vertical_diagonal();
     draw_text_jam1_sets_only_fg();
     draw_text_jam2_fills_bg();
+    fill_rect_keeps_planes_outside_the_mask();
     draw_text_complement_twice_restores();
     draw_text_clips_at_clip_edge();
     scroll_rect_up_one_row_moves_and_clears_bottom();

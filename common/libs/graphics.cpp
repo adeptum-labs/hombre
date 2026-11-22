@@ -2840,7 +2840,8 @@ void Graphics::rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
     const Rect dirty = (p.mode & ~ndk::INVERSVID) == ndk::COMPLEMENT
                            ? raster::complement_rect(b, v.bitmap, v.clip, area,
                                                      b.r8(rp + ndk::rp_Mask))
-                           : raster::fill_rect(b, v.bitmap, v.clip, area, p.fg);
+                           : raster::fill_rect(b, v.bitmap, v.clip, area, p.fg,
+                                               b.r8(rp + ndk::rp_Mask));
     if (b.ok()) {
         report(display_, *machine_, v, dirty);
     }

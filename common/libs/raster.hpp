@@ -331,7 +331,8 @@ inline bool in_clip(native::Bus& bus, const Clip& clip, i32 x, i32 y) {
 
 namespace {
 
-Rect fill_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen) {
+Rect fill_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen,
+                    u8 plane_mask) {
     const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
     const i64 height = static_cast<i64>(bitmap.rows);
     i64 left = r.x0 > clip.x0 ? r.x0 : clip.x0;
@@ -359,6 +360,9 @@ Rect fill_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Re
     const u8 lmask = left_mask(left);
     const u8 rmask = right_mask(right);
     for (u32 plane = 0; plane < bitmap.depth && plane < 8; ++plane) {
+        if ((plane_mask & (1u << plane)) == 0) {
+            continue;
+        }
         const u8 value = ((pen >> plane) & 1) != 0 ? 0xFF : 0x00;
         for (i64 y = top; y <= bottom; ++y) {
             u8* row = bus.bytes_at(bitmap.planes[plane] +
@@ -491,10 +495,13 @@ Rect scroll_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
 // region, inside every rectangle of the region in turn. The rectangle it
 // returns holds every pixel it changed.
 
-inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen) {
+// fill_rect writes only the planes plane_mask has a bit for, as a
+// RastPort's Mask limits drawing.
+inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen,
+                      u8 plane_mask = 0xFF) {
     Rect dirty = empty_rect();
     walk_clip(bus, clip, [&](const Clip& part) {
-        dirty = unite_rects(dirty, fill_rect_part(bus, bitmap, part, r, pen));
+        dirty = unite_rects(dirty, fill_rect_part(bus, bitmap, part, r, pen, plane_mask));
         return true;
     });
     return dirty;
