@@ -13,8 +13,8 @@ software, on modern hardware and in virtual machines.
 - Runs unmodified Amiga 68000 programs through a built-in 68k to x86-64
   translator.
 - Native AmigaOS libraries written in C++: exec, dos, intuition, graphics,
-  layers, gadtools, icon, workbench, utility, keymap and version. No
-  Kickstart ROM needed.
+  layers, gadtools, icon, workbench, utility, keymap and version, with
+  timer.device and console.device. No Kickstart ROM needed.
 - Reads real Amiga floppy images, ADF and DMS, in DF0: to DF3:, next to a
   writable Ram Disk.
 - Boots with a splash and a progress bar, then runs the boot disk's
@@ -22,8 +22,13 @@ software, on modern hardware and in virtual machines.
 - A Workbench desktop: drawers, framed icons as on 3.1, icon drag and drop,
   snapshot, sliders and scroll arrows, menus, backdrop on and off.
 - Preferences from the 3.1 Extras disk: Palette recolours the whole system,
-  WBPattern gives the Workbench a backdrop pattern or picture, and Input
-  opens with the built-in American keymap.
+  WBPattern gives the Workbench a backdrop pattern or picture, Font sets the
+  system fonts, Pointer the mouse pointer, Input the double-click time, and
+  ScreenMode reopens the Workbench in another mode.
+- Every standard PAL and NTSC screen mode, Low, High and Super-High Res,
+  plain and laced, in up to 256 colours, scaled to fill the display.
+- Built-in topaz and Hasklig fonts, Hasklig antialiased on 256-colour
+  screens.
 - HombreShell, a native shell with the Workbench 3.1 builtins that runs the
   3.1 `C:` commands and AmigaDOS scripts.
 - Starts programs such as Clock and Calculator from the AmigaOS 3.1 disks.
@@ -45,6 +50,8 @@ The wiki has the full story:
   the design, explained with diagrams.
 - **[Compatibility and status](https://github.com/adeptum-labs/hombre/wiki/Compatibility-and-Status)**:
   what runs today and what comes next.
+- **[Supported hardware](https://github.com/adeptum-labs/hombre/wiki/Supported-Hardware)**:
+  the processor, firmware, display, input and disks Hombre needs.
 - **[HombreShell](https://github.com/adeptum-labs/hombre/wiki/HombreShell)**:
   builtins, commands and keys.
 - **[Developer notes](https://github.com/adeptum-labs/hombre/wiki/Developer-Notes)**:
