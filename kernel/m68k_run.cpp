@@ -805,6 +805,8 @@ void register_console(u8 index) {
 
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
 // line and returns false when a step fails.
+void reclaim_after_task(void* ctx, u32 task);
+
 bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     // As much fast memory as the PC can spare, chip memory always.
     u32 fast_bytes = m68k::kFastBytes;
@@ -867,6 +869,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         fail("audio device init failed");
         return false;
     }
+    if (!exec.add_timer_drop_hook(&reclaim_after_task, nullptr)) {
+        fail("exec task hook init failed");
+        return false;
+    }
     if (!utility.init(machine, exec)) {
         fail("utility init failed");
         return false;
@@ -916,21 +922,34 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
 // messages it never replied to and the signals it allocated. Ending child
 // tasks and resetting signals belongs to the boot task; a shell's command
 // runs on the shell's own task.
+void reclaim_windows_of(u32 task) {
+    if (amiga_screen == 0) {
+        return;
+    }
+    u32 keep[Dos::kMaxConsoles]{};
+    u32 count = 0;
+    for (Console& c : consoles) {
+        if (c.shell.is_open()) {
+            keep[count++] = c.shell.window();
+        }
+    }
+    intuition.reclaim_owned_by(task, keep, count, amiga_screen);
+}
+
 void reclaim_after_program(u32 task) {
     if (exec.this_task() == dos.process()) {
         exec.end_child_tasks();
         exec.reset_nest_counts();
         exec.reset_task_signals();
     }
-    if (amiga_screen != 0) {
-        u32 keep[Dos::kMaxConsoles]{};
-        u32 count = 0;
-        for (Console& c : consoles) {
-            if (c.shell.is_open()) {
-                keep[count++] = c.shell.window();
-            }
-        }
-        intuition.reclaim_owned_by(task, keep, count, amiga_screen);
+    reclaim_windows_of(task);
+}
+
+// A task exec removes, a program the Workbench started among them, leaves
+// its windows, screens and messages behind as well.
+void reclaim_after_task(void*, u32 task) {
+    if (task != 0) {
+        reclaim_windows_of(task);
     }
 }
 
