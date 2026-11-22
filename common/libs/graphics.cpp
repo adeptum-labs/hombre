@@ -2044,34 +2044,59 @@ struct GraphicsNatives {
     static constexpr u32 kSsGraphics = 2;
     static constexpr u32 kMonitorSpecType = 0;
 
-    // OpenMonitor(name A1, displayID D0): the MonitorSpec of the one
-    // display, whatever name or mode is asked for, its open count one up.
+    // A MonitorSpec named name, with total_rows raster lines of colorclocks
+    // clocks, in a block of exec's memory; 0 if exec has no memory for it.
+    static u32 make_monitor_spec(Graphics& g, Bus& b, const char* name, u32 total_rows,
+                                 u32 colorclocks) {
+        u32 name_bytes = 1;
+        while (name[name_bytes - 1] != 0) {
+            ++name_bytes;
+        }
+        const u32 block = g.exec_->alloc(kMonitorSpecBytes + name_bytes,
+                                         ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (block == 0) {
+            return 0;
+        }
+        for (u32 i = 0; i < name_bytes; ++i) {
+            b.w8(block + kMonitorSpecBytes + i, static_cast<u8>(name[i]));
+        }
+        b.w8(block + ndk::LN_TYPE, kNtGraphics);
+        b.w32(block + ndk::LN_NAME, block + kMonitorSpecBytes);
+        b.w8(block + xln_Subsystem, kSsGraphics);
+        b.w8(block + xln_Subtype, kMonitorSpecType);
+        b.w32(block + ms_ratioh, kRatioUnity);
+        b.w32(block + ms_ratiov, kRatioUnity);
+        b.w16(block + ms_total_rows, total_rows);
+        b.w16(block + ms_total_colorclocks, colorclocks);
+        return block;
+    }
+
+    // The MonitorSpec of the default or the NTSC monitor, made on first use.
+    static u32 monitor_spec(Graphics& g, Bus& b, bool ntsc) {
+        u32& spec = ntsc ? g.ntsc_monitor_ : g.monitor_;
+        if (spec == 0) {
+            spec = make_monitor_spec(g, b, ntsc ? "ntsc.monitor" : "default.monitor", 262,
+                                     ntsc ? 227 : 226);
+        }
+        return spec;
+    }
+
+    // OpenMonitor(name A1, displayID D0): the MonitorSpec of the NTSC
+    // monitor for its name or its monitor ID, the default monitor's for
+    // anything else, its open count one up.
     static void open_monitor(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
-        if (g.monitor_ == 0) {
-            constexpr char kName[] = "default.monitor";
-            const u32 block = g.exec_->alloc(kMonitorSpecBytes + sizeof kName,
-                                             ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-            if (block == 0) {
-                native::set_result(m, 0);
-                return;
-            }
-            for (u32 i = 0; i < sizeof kName; ++i) {
-                b.w8(block + kMonitorSpecBytes + i, static_cast<u8>(kName[i]));
-            }
-            b.w8(block + ndk::LN_TYPE, kNtGraphics);
-            b.w32(block + ndk::LN_NAME, block + kMonitorSpecBytes);
-            b.w8(block + xln_Subsystem, kSsGraphics);
-            b.w8(block + xln_Subtype, kMonitorSpecType);
-            b.w32(block + ms_ratioh, kRatioUnity);
-            b.w32(block + ms_ratiov, kRatioUnity);
-            b.w16(block + ms_total_rows, 262);
-            b.w16(block + ms_total_colorclocks, 226);
-            g.monitor_ = block;
+        const u32 name = m.cpu.a[1];
+        const bool by_name = name != 0 && b.equals(name, "ntsc.monitor");
+        const bool by_id = name == 0 && (m.cpu.d[0] & 0xFFFF1000) == 0x11000;
+        const u32 spec = monitor_spec(g, b, by_name || by_id);
+        if (spec == 0) {
+            native::set_result(m, 0);
+            return;
         }
-        b.w16(g.monitor_ + ms_OpenCount, b.r16(g.monitor_ + ms_OpenCount) + 1);
-        native::set_result(m, b.ok() ? g.monitor_ : 0);
+        b.w16(spec + ms_OpenCount, b.r16(spec + ms_OpenCount) + 1);
+        native::set_result(m, b.ok() ? spec : 0);
     }
 
     // CloseMonitor(monitorSpec A0): its open count one down; the spec
@@ -2080,38 +2105,69 @@ struct GraphicsNatives {
         Graphics& g = of(ctx);
         Bus b(m);
         const u32 spec = m.cpu.a[0];
-        if (spec != 0 && spec == g.monitor_ && b.r16(spec + ms_OpenCount) != 0) {
+        if (spec != 0 && (spec == g.monitor_ || spec == g.ntsc_monitor_) &&
+            b.r16(spec + ms_OpenCount) != 0) {
             b.w16(spec + ms_OpenCount, b.r16(spec + ms_OpenCount) - 1);
         }
         native::set_result(m, 0);
     }
 
-    // FindDisplayInfo(ID D0): a handle for the one mode, 0 for any other.
+    // FindDisplayInfo(ID D0): a handle for the display mode, the default
+    // monitor's mode for the default monitor lookup, 0 for any other.
     static void find_display_info(void*, Machine& m) {
         constexpr u32 kHiresLaceKey = 0x8004;
-        constexpr u32 kHandle = 0x00010000;  // never read, only handed back
-        native::set_result(m, m.cpu.d[0] == kHiresLaceKey ? kHandle : 0);
+        constexpr u32 kNtscHiresLaceKey = 0x19004;
+        constexpr u32 kHiresLaceHandle = 0x00010000;  // never read, only handed back
+        constexpr u32 kNtscHiresLaceHandle = 0x00010001;
+        const u32 id = m.cpu.d[0];
+        u32 handle = 0;
+        if (id == kNtscHiresLaceKey) {
+            handle = kNtscHiresLaceHandle;
+        } else if (id == kHiresLaceKey || id == 0) {
+            handle = kHiresLaceHandle;
+        }
+        native::set_result(m, handle);
     }
 
-    // NextDisplayInfo(last ID D0): the one mode after INVALID_ID, then
-    // INVALID_ID.
+    // NextDisplayInfo(last ID D0): the display modes in turn, then
+    // INVALID_ID for the end of the list.
     static void next_display_info(void*, Machine& m) {
         constexpr u32 kHiresLaceKey = 0x8004;
-        native::set_result(m, m.cpu.d[0] == 0xFFFFFFFF ? kHiresLaceKey : 0xFFFFFFFF);
+        constexpr u32 kNtscHiresLaceKey = 0x19004;
+        const u32 last = m.cpu.d[0];
+        u32 next = 0xFFFFFFFF;
+        if (last == 0xFFFFFFFF) {
+            next = kHiresLaceKey;
+        } else if (last == kHiresLaceKey) {
+            next = kNtscHiresLaceKey;
+        }
+        native::set_result(m, next);
     }
 
     // GetDisplayInfoData(handle A0, buf A1, size D0, tagID D1, ID D2): the
-    // DisplayInfo, DimensionInfo or NameInfo of the 640 by 400, 8-plane,
-    // 24-bit colour mode; the number of bytes written, 0 for other tags.
-    static void get_display_info_data(void*, Machine& m) {
+    // DisplayInfo, DimensionInfo, MonitorInfo or NameInfo of the display
+    // mode, the handle's mode when ID is INVALID_ID; the number of bytes
+    // written, 0 for other tags or IDs.
+    static void get_display_info_data(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
         Bus b(m);
         constexpr u32 kDisp = 0x80000000;
         constexpr u32 kDims = 0x80001000;
+        constexpr u32 kMntr = 0x80002000;
         constexpr u32 kName = 0x80003000;
         constexpr u32 kHiresLaceKey = 0x8004;
+        constexpr u32 kNtscHiresLaceKey = 0x19004;
+        constexpr u32 kNtscHiresLaceHandle = 0x00010001;
         const u32 buf = m.cpu.a[1];
         const u32 tag = m.cpu.d[1];
-        u8 data[88] = {};
+        u32 mode = m.cpu.d[2];
+        if (mode == 0xFFFFFFFF) {
+            mode = m.cpu.a[0] == kNtscHiresLaceHandle ? kNtscHiresLaceKey : kHiresLaceKey;
+        } else if (mode != kHiresLaceKey && mode != kNtscHiresLaceKey) {
+            native::set_result(m, 0);
+            return;
+        }
+        u8 data[96] = {};
         u32 bytes = 0;
         const auto put16 = [&](u32 at, u32 v) {
             data[at] = static_cast<u8>(v >> 8);
@@ -2129,7 +2185,7 @@ struct GraphicsNatives {
         };
         if (tag == kDisp) {
             bytes = 56;
-            put32(18, 0x00000001);  // PropertyFlags: DIPF_IS_LACE
+            put32(18, 0x00000101);  // PropertyFlags: DIPF_IS_LACE | DIPF_IS_WB
             put16(22, 22);          // Resolution: ticks a pixel across
             put16(24, 22);          // and down
             put16(26, 35);          // PixelSpeed, ns
@@ -2152,9 +2208,25 @@ struct GraphicsNatives {
             rect(42);           // VideoOScan
             rect(50);           // TxtOScan
             rect(58);           // StdOScan
+        } else if (tag == kMntr) {
+            const u32 spec = monitor_spec(g, b, true);
+            if (spec == 0 || !b.ok()) {
+                native::set_result(m, 0);
+                return;
+            }
+            bytes = 96;
+            put32(16, spec);  // Mspc
+            put16(24, 22);    // ViewResolution across
+            put16(26, 22);    // and down
+            put16(36, 525);   // TotalRows
+            put16(38, 227);   // TotalColorClocks
+            put16(40, 21);    // MinRow
+            put16(76, 1);     // MouseTicks across
+            put16(78, 1);     // and down
+            put32(84, kNtscHiresLaceKey);  // PreferredModeID
         } else if (tag == kName) {
             bytes = 56;
-            constexpr char kModeName[] = "HOMBRE:640x400";
+            constexpr char kModeName[] = "NTSC:High Res Laced";
             for (u32 i = 0; kModeName[i] != '\0'; ++i) {
                 data[16 + i] = static_cast<u8>(kModeName[i]);
             }
@@ -2164,7 +2236,7 @@ struct GraphicsNatives {
             return;
         }
         put32(0, tag);
-        put32(4, kHiresLaceKey);
+        put32(4, mode);
         put32(8, 0);
         put32(12, (bytes + 7) / 8);  // QueryHeader Length, in double longwords
         const u32 n = m.cpu.d[0] < bytes ? m.cpu.d[0] : bytes;

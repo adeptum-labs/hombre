@@ -2790,8 +2790,8 @@ void text_blends_on_an_eight_plane_palette() {
     CHECK(changed > 0);
 }
 
-// OpenMonitor hands out the one display's MonitorSpec, whatever is asked
-// for, counting its opens; CloseMonitor counts them down again.
+// OpenMonitor hands out the default and the NTSC monitor's MonitorSpecs,
+// counting their opens; CloseMonitor counts them down again.
 void monitors_open_and_close() {
     GfxRig r;
     r.cpu().a[1] = 0;
@@ -2810,8 +2810,80 @@ void monitors_open_and_close() {
     CHECK_EQ(r.get16(spec + 48), 1u);
 }
 
+// The display database presents the NTSC monitor's High Res Laced mode
+// next to the default monitor's 640 by 400 mode.
+void display_info_presents_ntsc() {
+    GfxRig r;
+    constexpr u32 kDisplayInfo = kData + 0xE00;
+    constexpr u32 kMonitorName = kData + 0xF00;
+    constexpr u32 kDisp = 0x80000000;
+    constexpr u32 kMntr = 0x80002000;
+    constexpr u32 kName = 0x80003000;
+    constexpr u32 kHiresLace = 0x8004;
+    constexpr u32 kNtscHiresLace = 0x19004;
+    constexpr u32 kInvalid = 0xFFFFFFFF;
+
+    r.cpu().d[0] = kInvalid;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kHiresLace);
+    r.cpu().d[0] = kHiresLace;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kNtscHiresLace);
+    r.cpu().d[0] = kNtscHiresLace;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kInvalid);
+    r.cpu().d[0] = 0x29004;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo), kInvalid);
+
+    r.cpu().d[0] = kHiresLace;
+    const u32 default_handle = r.result(Base::Graphics, graphics_lvo::FindDisplayInfo);
+    r.cpu().d[0] = kNtscHiresLace;
+    const u32 ntsc_handle = r.result(Base::Graphics, graphics_lvo::FindDisplayInfo);
+    CHECK(default_handle != 0);
+    CHECK(ntsc_handle != 0);
+    CHECK(ntsc_handle != default_handle);
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::FindDisplayInfo), default_handle);
+    r.cpu().d[0] = 0x29004;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::FindDisplayInfo), 0u);
+
+    r.cpu().a[0] = ntsc_handle;
+    r.cpu().a[1] = kDisplayInfo;
+    r.cpu().d[0] = 56;
+    r.cpu().d[1] = kDisp;
+    r.cpu().d[2] = kInvalid;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
+    CHECK_EQ(r.get32(kDisplayInfo + 4), kNtscHiresLace);
+    CHECK_EQ(r.get32(kDisplayInfo + 18), 0x101u);
+
+    r.cpu().a[0] = ntsc_handle;
+    r.cpu().a[1] = kDisplayInfo;
+    r.cpu().d[0] = 96;
+    r.cpu().d[1] = kMntr;
+    r.cpu().d[2] = kInvalid;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 96u);
+    CHECK_EQ(r.get32(kDisplayInfo + 84), kNtscHiresLace);
+    const u32 spec = r.get32(kDisplayInfo + 16);
+    CHECK(r.read_str(r.get32(spec + LN_NAME)) == "ntsc.monitor");
+
+    r.cpu().a[0] = ntsc_handle;
+    r.cpu().a[1] = kDisplayInfo;
+    r.cpu().d[0] = 56;
+    r.cpu().d[1] = kName;
+    r.cpu().d[2] = kInvalid;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
+    CHECK(r.read_str(kDisplayInfo + 16) == "NTSC:High Res Laced");
+
+    r.cpu().a[1] = r.str(kMonitorName, "ntsc.monitor");
+    r.cpu().d[0] = kNtscHiresLace;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::OpenMonitor), spec);
+    r.cpu().a[1] = 0;
+    r.cpu().d[0] = 0;
+    const u32 default_spec = r.result(Base::Graphics, graphics_lvo::OpenMonitor);
+    CHECK(default_spec != 0);
+    CHECK(default_spec != spec);
+}
+
 int main() {
     monitors_open_and_close();
+    display_info_presents_ntsc();
     set_soft_style_keeps_the_drawn_styles();
     gfx_base_lists_the_memory_fonts();
     topaz_font_holds_the_built_in_glyphs();

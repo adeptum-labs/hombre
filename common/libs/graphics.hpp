@@ -246,9 +246,10 @@ private:
     u32 topaz_ = 0;
     u32 topaz_name_ = 0;
     u32 topaz_attr_ = 0;
-    // The MonitorSpec OpenMonitor hands out for the one display, made on
-    // first use.
+    // The MonitorSpecs OpenMonitor hands out for the default and the NTSC
+    // monitor, made on first use.
     u32 monitor_ = 0;
+    u32 ntsc_monitor_ = 0;
     NativeVector vectors_[kVectors]{};
     // Who holds each pen of the screen's colour map, for ObtainPen and
     // ReleasePen: how many share it, and whether one holds it alone. The
