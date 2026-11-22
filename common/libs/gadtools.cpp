@@ -96,7 +96,15 @@ constexpr u32 gt_ScrollWidth = gt_Spacing + 2;
 // Intuition, which draws the cursor.
 constexpr u32 gt_Font = gt_ScrollWidth + 2;
 constexpr u32 gt_StringExtend = gt_Font + 4;
-constexpr u32 kGadgetBytes = gt_StringExtend + ndk::StringExtend_SIZEOF;
+// How a slider shows its level: the format string and the display function
+// the program gave, the one argument the format takes, the characters its
+// field holds and where the field is placed.
+constexpr u32 gt_LevelFormat = gt_StringExtend + ndk::StringExtend_SIZEOF;
+constexpr u32 gt_LevelFunc = gt_LevelFormat + 4;
+constexpr u32 gt_LevelArg = gt_LevelFunc + 4;
+constexpr u32 gt_LevelLen = gt_LevelArg + 4;
+constexpr u32 gt_LevelPlace = gt_LevelLen + 2;
+constexpr u32 kGadgetBytes = gt_LevelPlace + 2;
 constexpr u32 kMaxCycleLabels = 256;
 constexpr u32 kMaxPaletteColors = 256;
 constexpr u16 kOptBorder = 0x1;
@@ -180,7 +188,15 @@ constexpr u32 gt_Min = 76;
 constexpr u32 GTSL_Min = 0x80080026;
 constexpr u32 GTSL_Max = 0x80080027;
 constexpr u32 GTSL_Level = 0x80080028;
+constexpr u32 GTSL_MaxLevelLen = 0x80080029;
+constexpr u32 GTSL_LevelFormat = 0x8008002A;
+constexpr u32 GTSL_LevelPlace = 0x8008002B;
+constexpr u32 GTSL_DispFunc = 0x8008002C;
 constexpr u32 kDefaultSliderMax = 15;
+// Blocks of 68000 code a display function may run for one level.
+constexpr u64 kLevelFuncBlocks = 1ull << 20;
+// The characters of a level's text kept, as many as a format can usefully give.
+constexpr u32 kMaxLevelText = 128;
 // A list view keeps its struct List where a text display keeps its text,
 // its selected ordinal, ~0 for none, where a number keeps its number, its
 // top ordinal where a scroller keeps its total, and the number of rows it
@@ -214,6 +230,7 @@ constexpr u32 GT_Underscore = 0x80080040;
 constexpr u32 kFillPen = 3;
 constexpr u32 kFillTextPen = 2;
 constexpr u32 kTextPen = 1;
+constexpr u32 kBackgroundPen = 0;
 // The gap between a gadget and a label beside it.
 constexpr i32 kLabelGap = 8;
 constexpr u32 kCheckBoxWidth = 26;
@@ -593,6 +610,26 @@ struct GadToolsNatives {
             case GTSL_Level:
                 b.w32(gadget + gt_Number, data);
                 break;
+            case GTSL_MaxLevelLen:
+                if (creating) {
+                    b.w16(gadget + gt_LevelLen, data < 0xFFFF ? data : 0xFFFF);
+                }
+                break;
+            case GTSL_LevelFormat:
+                if (creating) {
+                    b.w32(gadget + gt_LevelFormat, data);
+                }
+                break;
+            case GTSL_LevelPlace:
+                if (creating && (data & 0x1F) != 0) {
+                    b.w16(gadget + gt_LevelPlace, data & 0x1F);
+                }
+                break;
+            case GTSL_DispFunc:
+                if (creating) {
+                    b.w32(gadget + gt_LevelFunc, data);
+                }
+                break;
             case GTLV_Labels:
                 // ~0 takes the list away while the caller changes it.
                 b.w32(gadget + gt_Text, data == 0xFFFFFFFF ? 0 : data);
@@ -950,6 +987,7 @@ struct GadToolsNatives {
         }
         if (kind == SLIDER_KIND) {
             b.w32(gadget + gt_Total, kDefaultSliderMax);
+            b.w16(gadget + gt_LevelPlace, PLACETEXT_LEFT);
         }
         if (kind == LISTVIEW_KIND) {
             b.w32(gadget + gt_Number, kNoOrdinal);
@@ -1058,6 +1096,9 @@ struct GadToolsNatives {
                  kind == INTEGER_KIND) &&
                 g.intuition_ != nullptr) {
                 g.intuition_->refresh_glist(gadget, window, 1);
+                if (kind == SLIDER_KIND) {
+                    g.draw_slider_level(b, b.r32(window + ndk::wd_RPort), gadget);
+                }
             } else if (kind == LISTVIEW_KIND) {
                 g.draw_list_view(b, window, gadget);
             } else {
@@ -1268,7 +1309,10 @@ struct GadToolsNatives {
     }
 
     static void get_imsg(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).exec_->get_message(m.cpu.a[0]));
+        GadTools& g = of(ctx);
+        Bus b(m);
+        g.draw_pending_levels(b, m.cpu.a[0]);
+        native::set_result(m, g.exec_->get_message(m.cpu.a[0]));
     }
 
     static void reply_imsg(void* ctx, Machine& m) {
@@ -1564,6 +1608,49 @@ u32 read_label(Bus& b, u32 addr, u8 underscore, char* out, u32 max) {
         out[n++] = static_cast<char>(c);
     }
     return n;
+}
+
+// Where text starts, and its baseline, when it is placed per a PLACETEXT_
+// flag on a gadget: beside the whole of it, or for PLACETEXT_IN centred in
+// its box, which is inner_width wide.
+struct TextOrigin {
+    i32 x;
+    i32 y;
+};
+
+TextOrigin text_origin(u32 place, i32 span, const Rect& whole, i32 inner_width, i32 baseline,
+                       const Graphics::FontMetrics& cell) {
+    if ((place & PLACETEXT_IN) != 0) {
+        return {whole.x0 + (inner_width - span) / 2, baseline};
+    }
+    if ((place & PLACETEXT_RIGHT) != 0) {
+        return {whole.x1 + 1 + kLabelGap, baseline};
+    }
+    const i32 centred = whole.x0 + (whole.x1 - whole.x0 + 1 - span) / 2;
+    if ((place & PLACETEXT_ABOVE) != 0) {
+        return {centred, whole.y0 - 4 - (cell.y_size - cell.baseline)};
+    }
+    if ((place & PLACETEXT_BELOW) != 0) {
+        return {centred, whole.y1 + 3 + cell.baseline};
+    }
+    return {whole.x0 - span - kLabelGap, baseline};
+}
+
+// Whether the first conversion of the RawDoFmt format at fmt takes a word,
+// as %d does, rather than a long, as %ld does.
+bool format_takes_word(Bus& b, u32 fmt) {
+    for (u32 c = b.r8(fmt); c != 0 && b.ok(); c = b.r8(++fmt)) {
+        if (c != '%') {
+            continue;
+        }
+        do {
+            c = b.r8(++fmt);
+        } while (c == '-' || c == '.' || (c >= '0' && c <= '9'));
+        if (c != '%') {
+            return c != 'l';
+        }
+    }
+    return false;
 }
 
 u32 format_number(i32 value, char* out) {
@@ -1932,7 +2019,25 @@ bool GadTools::prop_moved(u32 window, u32 gadget, u16& code) {
         return true;
     }
     Bus b(*machine_);
-    if (b.r16(gadget + gt_Kind) != kListScrollerKind) {
+    const u32 kind = b.r16(gadget + gt_Kind);
+    if (kind == SLIDER_KIND && window != 0) {
+        if (b.r32(gadget + gt_LevelFunc) == 0) {
+            draw_slider_level(b, b.r32(window + ndk::wd_RPort), gadget);
+        } else {
+            bool queued = false;
+            for (PendingLevel& p : pending_levels_) {
+                if (p.gadget == gadget || (!queued && p.gadget == 0)) {
+                    if (!queued) {
+                        p = PendingLevel{window, gadget};
+                        queued = true;
+                    } else {
+                        p = PendingLevel{};
+                    }
+                }
+            }
+        }
+    }
+    if (kind != kListScrollerKind) {
         return true;
     }
     const u32 list = b.r32(gadget + gt_Owner);
@@ -2024,6 +2129,125 @@ bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
         return false;
     }
     return true;
+}
+
+// What GTSL_DispFunc makes of a level: the function is called as C code is,
+// with the gadget and then the level on the stack, and answers in D0. The
+// level itself shows when there is no function or the call does not return.
+void GadTools::draw_pending_levels(Bus& b, u32 port) {
+    for (PendingLevel& p : pending_levels_) {
+        if (p.gadget == 0 || p.window == 0 || b.r32(p.window + ndk::wd_UserPort) != port) {
+            continue;
+        }
+        const PendingLevel level = p;
+        p = PendingLevel{};
+        draw_slider_level(b, b.r32(level.window + ndk::wd_RPort), level.gadget);
+    }
+}
+
+i32 GadTools::displayed_level(Bus& b, u32 gadget, i32 level) {
+    const u32 func = b.r32(gadget + gt_LevelFunc);
+    if (func == 0 || !b.ok() || !exec_->enter_nested_run()) {
+        return level;
+    }
+    m68k::CpuState& cpu = machine_->cpu;
+    u32 d[8];
+    u32 a[8];
+    for (u32 i = 0; i < 8; ++i) {
+        d[i] = cpu.d[i];
+        a[i] = cpu.a[i];
+    }
+    const u32 args = a[7] - 8;
+    b.w32(args, gadget);
+    b.w32(args + 4, static_cast<u32>(level));
+    m68k::ExitReason why = m68k::ExitReason::BusError;
+    if (b.ok()) {
+        cpu.a[7] = args;
+        why = machine_->jit->call_guest(func, kLevelFuncBlocks);
+    }
+    exec_->leave_nested_run();
+    if (why != m68k::ExitReason::Returned) {
+        return level;
+    }
+    const i32 shown = static_cast<i32>(cpu.d[0]);
+    for (u32 i = 0; i < 8; ++i) {
+        cpu.d[i] = d[i];
+        cpu.a[i] = a[i];
+    }
+    return shown;
+}
+
+// A slider's level as text, formatted with GTSL_LevelFormat. The format
+// takes the level as a word for %d and %u and as a long for %ld and %lu.
+u32 GadTools::level_text(Bus& b, u32 gadget, i32 level, char* out, u32 capacity) {
+    struct Sink {
+        char* out;
+        u32 capacity;
+        u32 length = 0;
+
+        bool put(u32 c) {
+            if (length >= capacity) {
+                return false;
+            }
+            out[length++] = static_cast<char>(c);
+            return true;
+        }
+    } sink{out, capacity};
+    const u32 format = b.r32(gadget + gt_LevelFormat);
+    const u32 argument = static_cast<u32>(displayed_level(b, gadget, level));
+    const u32 stream = gadget + gt_LevelArg;
+    if (format_takes_word(b, format)) {
+        b.w16(stream, argument);
+    } else {
+        b.w32(stream, argument);
+    }
+    u32 data = stream;
+    native::raw_format(b, format, data, sink);
+    return sink.length;
+}
+
+// A slider's level, when GTSL_LevelFormat was given, in a field of
+// GTSL_MaxLevelLen characters beside its box. The field is cleared first,
+// except for PLACETEXT_IN, whose field is the box itself, which Intuition
+// has drawn again by the time the level is.
+void GadTools::draw_slider_level(Bus& b, u32 rp, u32 gadget) {
+    if (rp == 0 || machine_ == nullptr || graphics_ == nullptr ||
+        b.r32(gadget + gt_LevelFormat) == 0 || !b.ok()) {
+        return;
+    }
+    const i32 left = static_cast<i16>(b.r16(gadget + ndk::gg_LeftEdge));
+    const i32 top = static_cast<i16>(b.r16(gadget + ndk::gg_TopEdge));
+    const i32 width = static_cast<i16>(b.r16(gadget + ndk::gg_Width));
+    const i32 height = static_cast<i16>(b.r16(gadget + ndk::gg_Height));
+    const u32 place = b.r16(gadget + gt_LevelPlace);
+    const u32 font = b.r32(gadget + gt_Font);
+    Graphics& gfx = *graphics_;
+    const Graphics::FontMetrics cell = gfx.font_metrics(font);
+    u64 offset = 0;
+    u64 total = 0;
+    u64 visible = 0;
+    GadToolsNatives::scroller_span(b, gadget, offset, total, visible);
+    const i32 level = static_cast<i16>(b.r16(gadget + gt_Min)) + static_cast<i32>(offset);
+    char text[kMaxLevelText];
+    const u32 length = level_text(b, gadget, level, text, sizeof text);
+    // GTSL_MaxLevelLen bounds the string; the text itself is what is drawn,
+    // flush against the slider for LEFT, with the background pen behind
+    // it so a fixed-width format such as "%3lu" covers the last level.
+    const u8* chars = reinterpret_cast<const u8*>(text);
+    const i32 limit = static_cast<i32>(b.r16(gadget + gt_LevelLen)) * cell.x_size;
+    const u32 shown = gfx.text_fit(font, chars, length, limit);
+    const i32 span = gfx.text_width(font, chars, shown);
+    const i32 baseline = top + (height - cell.y_size) / 2 + cell.baseline;
+    const Rect box{left, top, left + width - 1, top + height - 1};
+    const TextOrigin at = text_origin(place, span, box, width, baseline, cell);
+    if (!b.ok() || shown == 0) {
+        return;
+    }
+    const RastPortState keep(b, rp);
+    const bool inside = (place & PLACETEXT_IN) != 0;
+    gfx.set_pens(rp, kTextPen, kBackgroundPen, inside ? ndk::JAM1 : ndk::JAM2);
+    gfx.move(rp, at.x, at.y);
+    gfx.plain_text_in(rp, font, chars, shown);
 }
 
 bool GadTools::render(u32 window, u32 rp, u32 gadget) {
@@ -2124,6 +2348,9 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         gfx.move(rp, left + (framed ? 4 : 0), baseline);
         gfx.plain_text_in(rp, font, reinterpret_cast<const u8*>(text), shown);
     }
+    if (kind == SLIDER_KIND) {
+        draw_slider_level(b, rp, gadget);
+    }
 
     // The label, inside a button or beside the gadget.
     char label[128];
@@ -2144,22 +2371,11 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
         full_width += static_cast<i32>(b.r16(gadget + gt_ScrollWidth));
         full_bottom += show != 0 ? static_cast<i16>(b.r16(show + ndk::gg_Height)) : 0;
     }
-    i32 x = left - span - kLabelGap;
-    i32 y = baseline;
-    if ((place & PLACETEXT_IN) != 0) {
-        x = left + (width - span) / 2;
-    } else if ((place & PLACETEXT_RIGHT) != 0) {
-        x = left + full_width + kLabelGap;
-    } else if ((place & PLACETEXT_ABOVE) != 0) {
-        x = left + (full_width - span) / 2;
-        y = top - 4 - (cell.y_size - cell.baseline);
-    } else if ((place & PLACETEXT_BELOW) != 0) {
-        x = left + (full_width - span) / 2;
-        y = full_bottom + 3 + cell.baseline;
-    }
+    const Rect whole{left, top, left + full_width - 1, full_bottom};
+    const TextOrigin at = text_origin(place, span, whole, width, baseline, cell);
     const bool inside = (place & PLACETEXT_IN) != 0;
     gfx.set_pens(rp, inside && selected ? kFillTextPen : kTextPen, 0, ndk::JAM1);
-    gfx.move(rp, x, y);
+    gfx.move(rp, at.x, at.y);
     gfx.plain_text_in(rp, font, label_text, label_chars);
     ghost(rp, flags, left, top, right, bottom);
     return true;

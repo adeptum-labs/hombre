@@ -141,6 +141,13 @@ private:
                          bool down, bool pressed);
     void draw_list_view(native::Bus& b, u32 window, u32 gadget);
     void ghost(u32 rp, u32 flags, i32 left, i32 top, i32 right, i32 bottom);
+    // A slider's level as text beside its box, when it has a level format.
+    void draw_slider_level(native::Bus& b, u32 rp, u32 gadget);
+    u32 level_text(native::Bus& b, u32 gadget, i32 level, char* out, u32 capacity);
+    i32 displayed_level(native::Bus& b, u32 gadget, i32 level);
+    // Draws the levels of sliders moved since the program last fetched a
+    // message from port, whose level text needs its own function.
+    void draw_pending_levels(native::Bus& b, u32 port);
     // The font of the VisualInfo at vi; the default screen's for 0 or for
     // what is no VisualInfo, and 0, the built-in font, without one.
     u32 visual_font(native::Bus& b, u32 vi) const;
@@ -153,6 +160,14 @@ private:
     Intuition* intuition_ = nullptr;
     u32 base_ = 0;
     bool unhandled_kinds_[14]{};
+    // Sliders with a level function Intuition moved: the function runs in
+    // the program's own task, when it next fetches a message.
+    struct PendingLevel {
+        u32 window;
+        u32 gadget;
+    };
+    static constexpr u32 kPendingLevels = 8;
+    PendingLevel pending_levels_[kPendingLevels]{};
     NativeVector vectors_[kVectors]{};
 };
 

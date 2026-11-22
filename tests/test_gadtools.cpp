@@ -1527,7 +1527,228 @@ void a_list_view_in_a_window_reports_rows_and_scrolls_by_itself() {
     r.intuition.set_gadget_prop_code(nullptr);
 }
 
+constexpr u32 SLIDER_KIND = 11;
+constexpr u32 GTSL_Min = 0x80080026;
+constexpr u32 GTSL_Max = 0x80080027;
+constexpr u32 GTSL_Level = 0x80080028;
+constexpr u32 GTSL_MaxLevelLen = 0x80080029;
+constexpr u32 GTSL_LevelFormat = 0x8008002A;
+constexpr u32 GTSL_LevelPlace = 0x8008002B;
+constexpr u32 GTSL_DispFunc = 0x8008002C;
+constexpr u32 PLACETEXT_RIGHT = 0x2;
+constexpr u32 kFormat = kLabel;
+constexpr u32 kOtherFormat = kText;
+constexpr u32 kDispFunc = kCall + 0x100;
+
+// The pens of the box, row by row, to tell one drawing of text from another.
+std::string pixels_of(GfxRig& r, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
+    std::string pens;
+    for (i32 y = y0; y <= y1; ++y) {
+        for (i32 x = x0; x <= x1; ++x) {
+            pens += static_cast<char>('0' + read_pixel(r, rp, x, y));
+        }
+    }
+    return pens;
+}
+
+// A slider whose level, 0 to 255, shows in a field of 3 characters left of
+// its 120 by 10 box at 100, top; the format is the one at kFormat.
+u32 create_level_slider(GfxRig& r, GadTools& g, u32 previous, i32 top, u32 level, u32 extra_tag,
+                        u32 extra_data) {
+    put_new_gadget(r, 100, top, 120, 10, 0, 1, 0, 0);
+    return create_gadget(
+        r, g, SLIDER_KIND, previous,
+        r.tags(kTags, {{GTSL_Min, 0}, {GTSL_Max, 255}, {GTSL_Level, level},
+                       {GTSL_MaxLevelLen, 3}, {GTSL_LevelFormat, kFormat},
+                       {extra_tag, extra_data}, {TAG_DONE, 0}}));
+}
+
+// A slider shows its level as text only when it has a level format: in a
+// field of GTSL_MaxLevelLen characters, 8 pixels from its box, to the left
+// of it unless GTSL_LevelPlace says otherwise. The field is cleared first.
+void a_slider_draws_its_level_beside_its_box() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 rp = make_surface(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+
+    // Without a format there is no text anywhere.
+    put_new_gadget(r, 100, 20, 120, 10, 0, 1, 0, 0);
+    const u32 bare = create_gadget(
+        r, g, SLIDER_KIND, context,
+        r.tags(kTags, {{GTSL_Min, 0}, {GTSL_Max, 255}, {GTSL_Level, 5}, {GTSL_MaxLevelLen, 3},
+                       {TAG_DONE, 0}}));
+    CHECK(bare != 0);
+    CHECK(g.render(0, rp, bare));
+    CHECK(!box_has_pen(r, rp, 0, 15, 639, 35, kTextPen));
+
+    // "%3lu" gives "  5": the field is 3 cells of 8 ending 8 before the box,
+    // and the 5 is in its last cell. What was in the field is gone.
+    r.str(kFormat, "%3lu");
+    r.graphics.set_pens(rp, kFillPen, 0, JAM1);
+    r.graphics.rect_fill(rp, 68, 22, 91, 27);
+    const u32 left = create_level_slider(r, g, bare, 20, 5, GTSL_LevelPlace, 0);
+    CHECK(left != 0);
+    CHECK(g.render(0, rp, left));
+    const InkSpan beside = inked_columns(r, rp, 0, 15, 639, 35, kTextPen);
+    CHECK(beside.first >= 68 + 16 && beside.last <= 91);
+    CHECK(!box_has_pen(r, rp, 68, 15, 91, 35, kFillPen));
+
+    // To the right the field starts 8 pixels past the box.
+    const u32 right = create_level_slider(r, g, left, 60, 5, GTSL_LevelPlace, PLACETEXT_RIGHT);
+    CHECK(g.render(0, rp, right));
+    const InkSpan after = inked_columns(r, rp, 100, 55, 639, 75, kTextPen);
+    CHECK(after.first >= 100 + 120 + 8 + 16 && after.last <= 100 + 120 + 8 + 23);
+
+    // A minus sign in the format puts the digits first in the field.
+    r.str(kOtherFormat, "%-3lu");
+    put_new_gadget(r, 100, 100, 120, 10, 0, 1, 0, 0);
+    const u32 flush = create_gadget(
+        r, g, SLIDER_KIND, right,
+        r.tags(kTags, {{GTSL_Max, 255}, {GTSL_Level, 5}, {GTSL_MaxLevelLen, 3},
+                       {GTSL_LevelFormat, kOtherFormat}, {TAG_DONE, 0}}));
+    CHECK(g.render(0, rp, flush));
+    const InkSpan first_cell = inked_columns(r, rp, 0, 95, 639, 115, kTextPen);
+    CHECK(first_cell.first >= 68 && first_cell.last < 68 + 8);
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+}
+
+// The level shown is what GTSL_DispFunc answers to the gadget and the
+// level pushed as C code takes them, here 1 << level, and the registers of
+// the caller are left as they were. %d takes the level as a word.
+void a_slider_shows_what_its_display_function_makes_of_the_level() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 rp = make_surface(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    // move.l 8(sp),d1; moveq #1,d0; lsl.l d1,d0; rts
+    const u32 code[] = {0x222F, 0x0008, 0x7001, 0xE3A8, 0x4E75};
+    for (u32 i = 0; i < 5; ++i) {
+        r.put16(kDispFunc + 2 * i, code[i]);
+    }
+    r.jit.flush();
+    r.str(kFormat, "%ld");
+    r.str(kOtherFormat, "%d");
+    const u32 eight = create_level_slider(r, g, context, 20, 8, GTSL_LevelPlace, 0);
+    const u32 shifted = create_level_slider(r, g, eight, 60, 3, GTSL_DispFunc, kDispFunc);
+    const u32 three = create_level_slider(r, g, shifted, 100, 3, GTSL_LevelPlace, 0);
+    CHECK(eight != 0 && shifted != 0 && three != 0);
+
+    CHECK(g.render(0, rp, eight));
+    CHECK(g.render(0, rp, three));
+    r.cpu().d[3] = 0xCAFE;
+    r.cpu().a[2] = 0x1234;
+    r.cpu().a[7] = kStack;
+    CHECK(g.render(0, rp, shifted));
+    CHECK_EQ(r.cpu().d[3], 0xCAFEu);
+    CHECK_EQ(r.cpu().a[2], 0x1234u);
+    CHECK_EQ(r.cpu().a[7], kStack);
+
+    const std::string eights = pixels_of(r, rp, 68, 20, 91, 29);
+    CHECK(eights.find_first_not_of('0') != std::string::npos);
+    CHECK(pixels_of(r, rp, 68, 60, 91, 69) == eights);
+    CHECK(pixels_of(r, rp, 68, 100, 91, 109) != eights);
+
+    // A word format shows the same level as a long one.
+    put_new_gadget(r, 100, 140, 120, 10, 0, 1, 0, 0);
+    const u32 word = create_gadget(
+        r, g, SLIDER_KIND, three,
+        r.tags(kTags, {{GTSL_Max, 255}, {GTSL_Level, 8}, {GTSL_MaxLevelLen, 3},
+                       {GTSL_LevelFormat, kOtherFormat}, {TAG_DONE, 0}}));
+    CHECK(g.render(0, rp, word));
+    CHECK(pixels_of(r, rp, 68, 140, 91, 149) == pixels_of(r, rp, 68, 20, 91, 29));
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+}
+
+// In a window the level is drawn again by GT_SetGadgetAttrs and by each
+// move of the knob, here a click on the track left of it.
+void a_slider_in_a_window_draws_its_level_again_when_it_changes() {
+    constexpr u32 kLeft = 1;
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.intuition.set_gadget_renderer(&GadTools::render_gadget, &g);
+    r.intuition.set_gadget_prop_code(&GadTools::prop_gadget_moved);
+    g.set_intuition(&r.intuition);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0);
+    CHECK(open_new_screen(r, kNewScreen) != 0);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    r.str(kFormat, "%3lu");
+    put_new_gadget(r, 60, 30, 120, 10, 0, 1, 0, 0);
+    const u32 slider = create_gadget(
+        r, g, SLIDER_KIND, context,
+        r.tags(kTags, {{GTSL_Min, 0}, {GTSL_Max, 9}, {GTSL_Level, 5}, {GTSL_MaxLevelLen, 3},
+                       {GTSL_LevelFormat, kFormat}, {TAG_DONE, 0}}));
+    CHECK(slider != 0);
+    for (u32 i = 0; i < NewWindow_SIZEOF; ++i) {
+        r.put8(kNewWindow + i, 0);
+    }
+    r.put16(kNewWindow + nw_LeftEdge, 50);
+    r.put16(kNewWindow + nw_TopEdge, 50);
+    r.put16(kNewWindow + nw_Width, 200);
+    r.put16(kNewWindow + nw_Height, 120);
+    r.put8(kNewWindow + nw_BlockPen, 1);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_GADGETDOWN | IDCMP_MOUSEMOVE);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE);
+    r.put32(kNewWindow + nw_FirstGadget, context);
+    r.cpu().a[0] = kNewWindow;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 wrp = r.get32(window + wd_RPort);
+
+    // The field is 3 cells of 8 ending 8 before the box, at 28 to 51.
+    r.cpu().a[0] = window;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_RefreshWindow), ExitReason::Halt);
+    CHECK(box_has_pen(r, wrp, 28, 30, 51, 39, kTextPen));
+    const std::string five = pixels_of(r, wrp, 28, 30, 51, 39);
+
+    r.cpu().a[0] = slider;
+    r.cpu().a[1] = window;
+    r.cpu().a[3] = r.tags(kTags, {{GTSL_Level, 7}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_SetGadgetAttrsA), ExitReason::Halt);
+    const std::string seven = pixels_of(r, wrp, 28, 30, 51, 39);
+    CHECK(box_has_pen(r, wrp, 28, 30, 51, 39, kTextPen));
+    CHECK(seven != five);
+
+    r.intuition.pointer_event(50 + 62, 50 + 35, kLeft, kLeft, 0, true);
+    r.intuition.pointer_event(50 + 62, 50 + 35, 0, 0, kLeft, false);
+    for (u32 msg = get_msg(r, port); msg != 0; msg = get_msg(r, port)) {
+        reply_msg(r, msg);
+    }
+    r.cpu().a[0] = slider;
+    r.cpu().a[3] = r.tags(kTags, {{GTSL_Level, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    const u32 moved_to = r.get32(kAnswer);
+    CHECK(moved_to < 7);
+    const std::string moved = pixels_of(r, wrp, 28, 30, 51, 39);
+    CHECK(moved != seven);
+    r.cpu().a[0] = slider;
+    r.cpu().a[1] = window;
+    r.cpu().a[3] = r.tags(kTags, {{GTSL_Level, moved_to}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_SetGadgetAttrsA), ExitReason::Halt);
+    CHECK(pixels_of(r, wrp, 28, 30, 51, 39) == moved);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    r.intuition.set_gadget_prop_code(nullptr);
+}
+
 int main() {
+    a_slider_draws_its_level_beside_its_box();
+    a_slider_shows_what_its_display_function_makes_of_the_level();
+    a_slider_in_a_window_draws_its_level_again_when_it_changes();
     list_views_lay_out_their_parts_and_show_the_selected_label();
     a_list_view_draws_its_rows_and_arrows();
     a_list_view_in_a_window_reports_rows_and_scrolls_by_itself();
