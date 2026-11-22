@@ -438,13 +438,27 @@ public:
     // Supplies the host context-switch and timer callbacks. Kept across init.
     void set_task_host(const TaskHost& host) { task_host_ = host; }
 
-    // Registers the timer expiry hook called at slice end, yield points, and
-    // before idling. Reset on init.
-    void set_timer_hook(const TimerHook& hook) { timer_hook_ = hook; }
+    static constexpr u32 kMaxTimerHooks = 4;
 
-    // Registers the hook called with each task exec removes, so that a timer
-    // can drop the requests that task issued. Reset on init.
-    void set_timer_drop_hook(void (*hook)(void* ctx, u32 task), void* ctx);
+    // Registers a timer hook, called at slice end, yield points, and before
+    // idling. Up to kMaxTimerHooks devices can have one; a hook with the same
+    // context as a registered one replaces it. False when the list is full.
+    // Reset on init.
+    bool add_timer_hook(const TimerHook& hook);
+
+    // Same as add_timer_hook, for callers that register a single hook.
+    bool set_timer_hook(const TimerHook& hook) { return add_timer_hook(hook); }
+
+    // Registers a hook called with each task exec removes, so that a device
+    // can drop the requests that task issued. Up to kMaxTimerHooks hooks are
+    // kept; one with the same function and context as a registered one is not
+    // added twice. False when the list is full. Reset on init.
+    bool add_timer_drop_hook(void (*hook)(void* ctx, u32 task), void* ctx);
+
+    // Same as add_timer_drop_hook, for callers that register a single hook.
+    bool set_timer_drop_hook(void (*hook)(void* ctx, u32 task), void* ctx) {
+        return add_timer_drop_hook(hook, ctx);
+    }
 
     // Entry point for newly created host task contexts.
     void task_main(u32 id);
@@ -649,9 +663,13 @@ private:
     SegmentLoader loader_{nullptr, nullptr};
     IdleHook idle_{nullptr, nullptr};
     TaskHost task_host_{};
-    TimerHook timer_hook_{};
-    void (*timer_drop_hook_)(void* ctx, u32 task) = nullptr;
-    void* timer_drop_ctx_ = nullptr;
+    struct DropHook {
+        void (*fn)(void* ctx, u32 task) = nullptr;
+        void* ctx = nullptr;
+    };
+    TimerHook timer_hooks_[kMaxTimerHooks]{};
+    DropHook timer_drop_hooks_[kMaxTimerHooks]{};
+    void drop_timer_requests_of(u32 task);
     Scheduler sched_{};
     TaskContext tasks_[Scheduler::kMaxTasks]{};
     SemWaitQueue sem_queues_[kMaxSemaphores]{};

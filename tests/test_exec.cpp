@@ -3803,6 +3803,77 @@ void timer_requests_of_a_removed_task_are_dropped() {
     CHECK_EQ(g_exec.get_message(port), 0u);
 }
 
+struct HookProbe {
+    u32 expired = 0;
+    u64 last_now = 0;
+    bool pending = false;
+    u32 dropped_task = 0;
+};
+
+void probe_expire(void* ctx, u64 now_us) {
+    HookProbe& p = *static_cast<HookProbe*>(ctx);
+    ++p.expired;
+    p.last_now = now_us;
+}
+
+bool probe_pending(void* ctx) {
+    return static_cast<HookProbe*>(ctx)->pending;
+}
+
+void probe_drop(void* ctx, u32 task) {
+    static_cast<HookProbe*>(ctx)->dropped_task = task;
+}
+
+void every_registered_timer_hook_runs() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+
+    HookProbe probes[Exec::kMaxTimerHooks + 1]{};
+    for (u32 i = 0; i < Exec::kMaxTimerHooks; ++i) {
+        CHECK(g_exec.add_timer_hook(TimerHook{probe_expire, probe_pending, &probes[i]}));
+    }
+    HookProbe& overflow = probes[Exec::kMaxTimerHooks];
+    CHECK(!g_exec.add_timer_hook(TimerHook{probe_expire, probe_pending, &overflow}));
+    // Registering a context again replaces its hook instead of taking a slot.
+    CHECK(g_exec.set_timer_hook(TimerHook{probe_expire, probe_pending, &probes[1]}));
+
+    host.now_us = 7000;
+    g_exec.expire_timers();
+    for (u32 i = 0; i < Exec::kMaxTimerHooks; ++i) {
+        CHECK_EQ(probes[i].expired, 1u);
+        CHECK_EQ(probes[i].last_now, 7000u);
+    }
+    CHECK_EQ(overflow.expired, 0u);
+
+    CHECK(!g_exec.has_pending_timers());
+    probes[Exec::kMaxTimerHooks - 1].pending = true;
+    CHECK(g_exec.has_pending_timers());
+}
+
+void every_registered_drop_hook_sees_a_removed_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    HookProbe first{};
+    HookProbe second{};
+    CHECK(g_exec.add_timer_drop_hook(probe_drop, &first));
+    CHECK(g_exec.set_timer_drop_hook(probe_drop, &second));
+    CHECK(g_exec.set_timer_drop_hook(probe_drop, &second));
+
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    r.cpu().a[1] = child;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK_EQ(first.dropped_task, child);
+    CHECK_EQ(second.dropped_task, child);
+}
+
 void yield_in_native_and_per_task_state() {
     Rig r;
     FakeHostState host{};
@@ -4301,6 +4372,8 @@ int main() {
     reset_task_state_restores_a_non_running_task_only();
     enter_nested_run_stops_at_the_call_depth_limit();
     timer_requests_of_a_removed_task_are_dropped();
+    every_registered_timer_hook_runs();
+    every_registered_drop_hook_sees_a_removed_task();
     yield_in_native_and_per_task_state();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();

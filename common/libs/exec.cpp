@@ -808,8 +808,8 @@ struct ExecOps {
         }
         const Scheduler::Slot slot = e.sched_.slot(static_cast<u32>(target_id));
         const u32 target_addr = slot.task_addr;
-        if (target_addr != 0 && e.timer_drop_hook_ != nullptr) {
-            e.timer_drop_hook_(e.timer_drop_ctx_, target_addr);
+        if (target_addr != 0) {
+            e.drop_timer_requests_of(target_addr);
         }
         if ((slot.state == TaskState::Ready || slot.state == TaskState::Waiting) &&
             target_addr != 0) {
@@ -2784,9 +2784,12 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     }
     task_end_hook_ = nullptr;
     task_end_ctx_ = nullptr;
-    timer_hook_ = TimerHook{};
-    timer_drop_hook_ = nullptr;
-    timer_drop_ctx_ = nullptr;
+    for (TimerHook& h : timer_hooks_) {
+        h = TimerHook{};
+    }
+    for (DropHook& h : timer_drop_hooks_) {
+        h = DropHook{};
+    }
     for (LibraryInfo& info : libraries_) {
         info = LibraryInfo{};
     }
@@ -3265,9 +3268,32 @@ void Exec::set_task_end_hook(void (*hook)(void* ctx, u32 task, bool self), void*
     task_end_ctx_ = ctx;
 }
 
-void Exec::set_timer_drop_hook(void (*hook)(void* ctx, u32 task), void* ctx) {
-    timer_drop_hook_ = hook;
-    timer_drop_ctx_ = ctx;
+bool Exec::add_timer_hook(const TimerHook& hook) {
+    for (TimerHook& h : timer_hooks_) {
+        if (h.expire == nullptr || h.ctx == hook.ctx) {
+            h = hook;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Exec::add_timer_drop_hook(void (*hook)(void* ctx, u32 task), void* ctx) {
+    for (DropHook& h : timer_drop_hooks_) {
+        if (h.fn == nullptr || (h.fn == hook && h.ctx == ctx)) {
+            h = DropHook{hook, ctx};
+            return true;
+        }
+    }
+    return false;
+}
+
+void Exec::drop_timer_requests_of(u32 task) {
+    for (const DropHook& h : timer_drop_hooks_) {
+        if (h.fn != nullptr) {
+            h.fn(h.ctx, task);
+        }
+    }
 }
 
 void Exec::set_this_task(u32 task_addr) {
@@ -3388,7 +3414,12 @@ bool Exec::has_pending_timers() const {
             return true;
         }
     }
-    return timer_hook_.has_pending != nullptr && timer_hook_.has_pending(timer_hook_.ctx);
+    for (const TimerHook& h : timer_hooks_) {
+        if (h.has_pending != nullptr && h.has_pending(h.ctx)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Exec::expire_timers() {
@@ -3424,9 +3455,11 @@ void Exec::expire_timers() {
         }
     }
     bool faulted = !b.ok();
-    if (timer_hook_.expire != nullptr) {
-        timer_hook_.expire(timer_hook_.ctx, now);
-        faulted = faulted || m_->cpu.exit != ExitReason::None;
+    for (const TimerHook& h : timer_hooks_) {
+        if (h.expire != nullptr) {
+            h.expire(h.ctx, now);
+            faulted = faulted || m_->cpu.exit != ExitReason::None;
+        }
     }
     if (faulted) {
         LogLine().text("exec: timer reply faulted at ").hex(m_->cpu.fault_addr).send();
@@ -3995,8 +4028,8 @@ void Exec::end_tasks_of(u32 parent) {
                 b.w8(s.task_addr + TC_STATE, TS_REMOVED);
             }
             remove_sem_waiter(i);
-            if (s.task_addr != 0 && timer_drop_hook_ != nullptr) {
-                timer_drop_hook_(timer_drop_ctx_, s.task_addr);
+            if (s.task_addr != 0) {
+                drop_timer_requests_of(s.task_addr);
             }
             sched_.remove(static_cast<i32>(i));
             if (task_end_hook_ != nullptr) {
