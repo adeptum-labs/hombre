@@ -9275,8 +9275,16 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
         return false;
     }
 
-    block_ = exec.alloc(kBlockBytes, MEMF_PUBLIC | MEMF_CLEAR);
+    // From chip memory, which fills from the bottom: a file handle's BPTR
+    // keeps a generation count in its top byte, so the handle table must
+    // lie in the first 16 MiB.
+    block_ = exec.alloc(kBlockBytes, MEMF_CHIP | MEMF_PUBLIC | MEMF_CLEAR);
     if (block_ == 0) {
+        return false;
+    }
+    if (static_cast<u64>(block_) + kBlockBytes > (static_cast<u64>(kHandleBptrMask) + 1) << 2) {
+        exec.free(block_, kBlockBytes);
+        block_ = 0;
         return false;
     }
     m_ = &m;
