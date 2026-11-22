@@ -30,59 +30,47 @@ namespace hombre {
 inline constexpr u32 kPointerWidth = 16;
 inline constexpr u32 kPointerHeight = 16;
 
-// The classic arrow pointer bitmap: an 11-pixel wide, 16-pixel high arrow with
-// its tip at (0, 0). Bit 15 is the leftmost pixel of a row.
-inline constexpr u16 kPointerOutline[16] = {
-    0x8000,
-    0xC000,
-    0xA000,
-    0x9000,
-    0x8800,
-    0x8400,
-    0x8200,
-    0x8100,
-    0x8080,
-    0x8040,
-    0x80E0,
-    0x9100,
-    0xA900,
-    0xC480,
-    0x0240,
-    0x0180,
+// The 3.1 default pointer, row by row from its tip at (0, 0): '.' is
+// transparent, 'r' the red colour 1, 'k' the black colour 2 and 'c' the
+// cream colour 3.
+inline constexpr const char* kPointerRows[] = {
+    "rc",
+    "krcc",
+    ".krrcc",
+    ".krrrrcc",
+    "..krrrrrcc",
+    "..krrrrrrr",
+    "...krrrc",
+    "...krrkrc",
+    "....kr.krc",
+    "....kr..krc",
+    ".........kr",
 };
 
-inline constexpr u16 kPointerFill[16] = {
-    0x0000,
-    0x0000,
-    0x4000,
-    0x6000,
-    0x7000,
-    0x7800,
-    0x7C00,
-    0x7E00,
-    0x7F00,
-    0x7F80,
-    0x7F00,
-    0x6E00,
-    0x4600,
-    0x0300,
-    0x0180,
-    0x0000,
-};
+inline constexpr u32 kPointerRowCount = sizeof kPointerRows / sizeof kPointerRows[0];
 
-// Returns 0 for transparent, 1 for outline (black), 2 for fill (white).
+// The colour of the default pointer at x, y: 0 transparent, 1 red, 2 black,
+// 3 cream.
 constexpr u32 pointer_pixel(u32 x, u32 y) {
-    if (x >= kPointerWidth || y >= kPointerHeight) {
+    if (x >= kPointerWidth || y >= kPointerRowCount) {
         return 0;
     }
-    const u16 mask = static_cast<u16>(1u << (15 - x));
-    if ((kPointerOutline[y] & mask) != 0) {
+    const char* row = kPointerRows[y];
+    for (u32 i = 0; i < x; ++i) {
+        if (row[i] == '\0') {
+            return 0;
+        }
+    }
+    switch (row[x]) {
+    case 'r':
         return 1;
-    }
-    if ((kPointerFill[y] & mask) != 0) {
+    case 'k':
         return 2;
+    case 'c':
+        return 3;
+    default:
+        return 0;
     }
-    return 0;
 }
 
 inline constexpr u32 kMaxPointerWidth = 64;
@@ -100,7 +88,7 @@ struct PointerShape {
     u32 rgb[4];
 };
 
-// The arrow: black outline, white fill, tip at the hot spot.
+// The default pointer in the colours 3.1 gives it, tip at the hot spot.
 constexpr PointerShape default_pointer_shape() {
     PointerShape shape{};
     shape.width = kPointerWidth;
@@ -110,8 +98,9 @@ constexpr PointerShape default_pointer_shape() {
             shape.pixels[y][x] = static_cast<u8>(pointer_pixel(x, y));
         }
     }
-    shape.rgb[1] = 0x000000;
-    shape.rgb[2] = 0xFFFFFF;
+    shape.rgb[1] = 0xE04040;
+    shape.rgb[2] = 0x000000;
+    shape.rgb[3] = 0xE0E0C0;
     return shape;
 }
 

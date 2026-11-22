@@ -358,8 +358,11 @@ void pointer_image_has_a_tip_at_the_origin() {
     CHECK_EQ(kDefaultPointerShape.hot_x, 0);
     CHECK_EQ(kDefaultPointerShape.hot_y, 0);
     CHECK_EQ(kDefaultPointerShape.pixels[2][1], 2u);
-    CHECK_EQ(kDefaultPointerShape.rgb[1], 0x000000u);
-    CHECK_EQ(kDefaultPointerShape.rgb[2], 0xFFFFFFu);
+    CHECK_EQ(kDefaultPointerShape.pixels[0][1], 3u);
+    CHECK_EQ(kDefaultPointerShape.pixels[10][10], 1u);
+    CHECK_EQ(kDefaultPointerShape.rgb[1], 0xE04040u);
+    CHECK_EQ(kDefaultPointerShape.rgb[2], 0x000000u);
+    CHECK_EQ(kDefaultPointerShape.rgb[3], 0xE0E0C0u);
 }
 
 void pointer_is_drawn_over_the_screen_on_refresh() {
@@ -373,10 +376,12 @@ void pointer_is_drawn_over_the_screen_on_refresh() {
     display.set_pointer_visible(guest.machine(), kScreen, true);
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
 
-    // Tip at (10, 10) scaled by 2 is at framebuffer (20, 20), painted black.
-    CHECK_EQ(fb.pixel(20, 20), 0x000000u);
-    // Pixel inside fill area: pointer (1, 2) at logical (11, 12) scaled by 2 is (22, 24), painted white.
-    CHECK_EQ(fb.pixel(22, 24), 0xFFFFFFu);
+    // Tip at (10, 10) scaled by 2 is at framebuffer (20, 20), painted red.
+    CHECK_EQ(fb.pixel(20, 20), 0xE04040u);
+    // Pointer (1, 0) is cream and (1, 2) black, scaled by 2 to (22, 20) and
+    // (22, 24).
+    CHECK_EQ(fb.pixel(22, 20), 0xE0E0C0u);
+    CHECK_EQ(fb.pixel(22, 24), 0x000000u);
     // Pixel outside pointer is screen colour (pen 3: 0x6688BB).
     CHECK_EQ(fb.pixel(18, 18), 0x6688BBu);
     CHECK(fb.guards_intact());
@@ -424,10 +429,10 @@ void published_pointer_shape_is_drawn_offset_by_its_hot_spot_in_its_colours() {
     CHECK_EQ(fb.pixel(60, 80), 0x445566u);
     CHECK(fb.guards_intact());
 
-    // Without a published shape the arrow is back.
+    // Without a published shape the default pointer is back, red at its tip.
     state.pointer = nullptr;
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
-    CHECK_EQ(fb.pixel(60, 80), 0x000000u);
+    CHECK_EQ(fb.pixel(60, 80), 0xE04040u);
     CHECK_EQ(fb.pixel(58, 78), 0x6688BBu);
 }
 
@@ -461,8 +466,8 @@ void move_pointer_restores_the_old_area_and_draws_the_new_one() {
     display.set_pointer_visible(guest.machine(), kScreen, true);
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
 
-    CHECK_EQ(fb.pixel(20, 20), 0x000000u);
-    CHECK_EQ(fb.pixel(22, 24), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(20, 20), 0xE04040u);
+    CHECK_EQ(fb.pixel(22, 24), 0x000000u);
 
     display.move_pointer(guest.machine(), kScreen, 30, 40);
     CHECK_EQ(display.pointer_x(), 30);
@@ -473,8 +478,8 @@ void move_pointer_restores_the_old_area_and_draws_the_new_one() {
     CHECK_EQ(fb.pixel(22, 24), 0x6688BBu);
 
     // New position (30, 40) is drawn: tip (60, 80) is black, fill (62, 84) is white.
-    CHECK_EQ(fb.pixel(60, 80), 0x000000u);
-    CHECK_EQ(fb.pixel(62, 84), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(60, 80), 0xE04040u);
+    CHECK_EQ(fb.pixel(62, 84), 0x000000u);
     CHECK(fb.guards_intact());
 }
 
@@ -489,8 +494,8 @@ void pointer_is_clipped_at_the_screen_edge_and_never_writes_outside_the_framebuf
     display.set_pointer_visible(guest.machine(), kScreen, true);
     display.move_pointer(guest.machine(), kScreen, 635, 395);
 
-    // Tip at (635*2, 395*2) = (1270, 790) is black.
-    CHECK_EQ(fb.pixel(1270, 790), 0x000000u);
+    // Tip at (635*2, 395*2) = (1270, 790) is red.
+    CHECK_EQ(fb.pixel(1270, 790), 0xE04040u);
     CHECK(fb.guards_intact());
 
     Screen small_fb(320, 200, 320 * 4, kBgrx);
@@ -515,15 +520,15 @@ void refresh_of_a_rectangle_not_touching_the_pointer_leaves_it_untouched() {
     display.set_pointer_visible(guest.machine(), kScreen, true);
     refresh(display, guest.machine(), kScreen, Rect{10, 10, 25, 25});
 
-    CHECK_EQ(fb.pixel(20, 20), 0x000000u);
-    CHECK_EQ(fb.pixel(22, 24), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(20, 20), 0xE04040u);
+    CHECK_EQ(fb.pixel(22, 24), 0x000000u);
 
     guest.set_pixel(100, 100, 2);
     refresh(display, guest.machine(), kScreen, Rect{100, 100, 100, 100});
 
     CHECK_EQ(fb.pixel(200, 200), 0xFFFFFFu);
-    CHECK_EQ(fb.pixel(20, 20), 0x000000u);
-    CHECK_EQ(fb.pixel(22, 24), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(20, 20), 0xE04040u);
+    CHECK_EQ(fb.pixel(22, 24), 0x000000u);
     CHECK(fb.guards_intact());
 }
 
@@ -538,8 +543,8 @@ void hiding_the_pointer_erases_it() {
     display.set_pointer_visible(guest.machine(), kScreen, true);
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
 
-    CHECK_EQ(fb.pixel(20, 20), 0x000000u);
-    CHECK_EQ(fb.pixel(22, 24), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(20, 20), 0xE04040u);
+    CHECK_EQ(fb.pixel(22, 24), 0x000000u);
 
     display.set_pointer_visible(guest.machine(), kScreen, false);
     CHECK(!display.pointer_visible());
@@ -565,16 +570,16 @@ void pointer_overlay_respects_scale_and_origin() {
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
 
     // Tip at logical (10, 10) maps to framebuffer (160 + 10 * 2, 100 + 10 * 2) = (180, 120).
-    CHECK_EQ(fb.pixel(180, 120), 0x000000u);
-    CHECK_EQ(fb.pixel(181, 120), 0x000000u);
-    CHECK_EQ(fb.pixel(180, 121), 0x000000u);
-    CHECK_EQ(fb.pixel(181, 121), 0x000000u);
+    CHECK_EQ(fb.pixel(180, 120), 0xE04040u);
+    CHECK_EQ(fb.pixel(181, 120), 0xE04040u);
+    CHECK_EQ(fb.pixel(180, 121), 0xE04040u);
+    CHECK_EQ(fb.pixel(181, 121), 0xE04040u);
 
-    // Fill at logical (11, 12) maps to framebuffer (160 + 11 * 2, 100 + 12 * 2) = (182, 124).
-    CHECK_EQ(fb.pixel(182, 124), 0xFFFFFFu);
-    CHECK_EQ(fb.pixel(183, 124), 0xFFFFFFu);
-    CHECK_EQ(fb.pixel(182, 125), 0xFFFFFFu);
-    CHECK_EQ(fb.pixel(183, 125), 0xFFFFFFu);
+    // The black edge at logical (11, 12) maps to framebuffer (160 + 11 * 2, 100 + 12 * 2) = (182, 124).
+    CHECK_EQ(fb.pixel(182, 124), 0x000000u);
+    CHECK_EQ(fb.pixel(183, 124), 0x000000u);
+    CHECK_EQ(fb.pixel(182, 125), 0x000000u);
+    CHECK_EQ(fb.pixel(183, 125), 0x000000u);
 
     CHECK_EQ(fb.pixel(0, 0), kBorder);
     CHECK(fb.guards_intact());
