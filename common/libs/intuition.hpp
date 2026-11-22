@@ -152,6 +152,7 @@ namespace ndk {
 constexpr u32 IDCMP_IDCMPUPDATE = 0x00800000;
 // IDCMP_VANILLAKEY: a key that types one character, the character its code.
 constexpr u32 IDCMP_VANILLAKEY = 0x00200000;
+constexpr u32 IDCMP_INTUITICKS = 0x00400000;
 
 }
 
@@ -280,6 +281,9 @@ public:
     // Makes the string gadget of the window the one being edited.
     bool activate_string(u32 gadget, u32 window);
     void wheel_event(i32 steps);
+    // Sends the active window an IDCMP_INTUITICKS about ten times a
+    // second when it asks for them, never while its last one is unreplied.
+    void intui_ticks();
 
     // Whether the window asks for key messages: IDCMP_RAWKEY or
     // IDCMP_VANILLAKEY.
@@ -638,6 +642,7 @@ private:
     void post_mouse_button(u16 code);
     // The IDCMPFlags of an open window, 0 for any other.
     u32 window_idcmp(u32 window) const;
+    bool tick_outstanding(u32 window) const;
     static void notify_idcmp_update(void* ctx, u32 window, const u32* tags, u32 count,
                                     u32 flags);
     void post_idcmp_update(u32 window, const u32* tags, u32 count);
@@ -807,6 +812,7 @@ private:
     i32 mouse_y_ = 0;
     u32 dropped_messages_ = 0;
     u32 batch_depth_ = 0;
+    u64 last_tick_us_ = 0;  // when intui_ticks last sent one
     u32 screens_[kMaxScreens]{};
     u32 windows_[kMaxWindows]{};
     u32 messages_[kMaxMessages]{};

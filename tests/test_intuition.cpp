@@ -8173,7 +8173,49 @@ void remember_lists_allocate_and_free() {
     CHECK_EQ(r.exec.free_bytes(), before);
 }
 
+// The active window gets an INTUITICKS every tenth of a second when it
+// asks for them, but never a second one before it replied to the first.
+void intuiticks_reach_the_active_window_one_at_a_time() {
+    GfxRig r;
+    r.intuition.set_clock(fake_clock);
+    g_fake_time_us = 10000000ULL;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_INTUITICKS);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    r.intuition.pointer_event(80, 90, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(80, 90, 0, kMouseLeft, 0, false);
+    CHECK_EQ(r.intuition.active_window(), window);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    g_fake_time_us += 200000;
+    r.intuition.intui_ticks();
+    const u32 first = get_msg(r, port);
+    CHECK(first != 0);
+    CHECK_EQ(r.get32(first + im_Class), IDCMP_INTUITICKS);
+
+    // Unreplied: no second tick, however long it waits.
+    g_fake_time_us += 200000;
+    r.intuition.intui_ticks();
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    // Replied: the next tenth of a second brings another, not sooner.
+    reply_msg(r, first);
+    g_fake_time_us += 50000;
+    r.intuition.intui_ticks();
+    CHECK_EQ(get_msg(r, port), 0u);
+    g_fake_time_us += 100000;
+    r.intuition.intui_ticks();
+    const u32 second = get_msg(r, port);
+    CHECK(second != 0);
+    CHECK_EQ(r.get32(second + im_Class), IDCMP_INTUITICKS);
+    reply_msg(r, second);
+}
+
 int main() {
+    intuiticks_reach_the_active_window_one_at_a_time();
     a_string_gadget_measures_its_own_font();
     a_string_gadget_is_edited_from_the_keyboard();
     a_long_int_gadget_takes_only_numbers_and_keeps_the_value();

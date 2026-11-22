@@ -631,6 +631,7 @@ void task_host_poll(void*) {
     intuition.flush_palette();
     poll_mouse();
     poll_keys();
+    intuition.intui_ticks();
 }
 
 bool hook_trampoline(void*) {

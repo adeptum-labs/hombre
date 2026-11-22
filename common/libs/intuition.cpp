@@ -7013,6 +7013,36 @@ void Intuition::off_gadget(u32 gadget, u32 window) {
     set_gadget_disabled(gadget, window, true);
 }
 
+void Intuition::intui_ticks() {
+    constexpr u64 kTickUs = 100000;
+    if (clock_ == nullptr || machine_ == nullptr) {
+        return;
+    }
+    const u64 now = clock_();
+    if (now - last_tick_us_ < kTickUs) {
+        return;
+    }
+    last_tick_us_ = now;
+    const u32 window = active_window_;
+    if (window == 0 || (window_idcmp(window) & ndk::IDCMP_INTUITICKS) == 0 ||
+        tick_outstanding(window)) {
+        return;
+    }
+    post_intuimessage(window, ndk::IDCMP_INTUITICKS, 0);
+}
+
+bool Intuition::tick_outstanding(u32 window) const {
+    Bus b(*machine_);
+    for (u32 i = 0; i < kMaxMessages; ++i) {
+        const u32 msg = messages_[i];
+        if (msg != 0 && b.r32(msg + ndk::im_Class) == ndk::IDCMP_INTUITICKS &&
+            b.r32(msg + ndk::im_IDCMPWindow) == window) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void Intuition::wheel_event(i32 steps) {
     if (steps == 0 || active_window_ == 0) {
         return;
