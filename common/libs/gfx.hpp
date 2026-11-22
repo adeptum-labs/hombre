@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "../pointer_image.hpp"
 #include "../types.hpp"
 
 namespace hombre {
@@ -65,6 +66,8 @@ struct DisplayState {
     // Changes drawn into any bitmap other than the front screen's go here.
     DamageSink damage{nullptr, nullptr};
     PaletteSource palette{nullptr, nullptr};
+    // The image of the mouse pointer, null for the built-in arrow.
+    const PointerShape* pointer = nullptr;
     // Incremented whenever a ColorMap is modified through graphics.library.
     u32 palette_gen = 0;
     bool palette_dirty = false;

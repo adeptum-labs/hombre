@@ -85,4 +85,36 @@ constexpr u32 pointer_pixel(u32 x, u32 y) {
     return 0;
 }
 
+inline constexpr u32 kMaxPointerWidth = 64;
+inline constexpr u32 kMaxPointerHeight = 64;
+
+// A pointer image the display draws: pixels hold 0 for transparent and 1 to 3
+// for the colours of rgb, 0xRRGGBB. The hot spot is the pixel of the image
+// that lies on the pointer's position.
+struct PointerShape {
+    u16 width;
+    u16 height;
+    i16 hot_x;
+    i16 hot_y;
+    u8 pixels[kMaxPointerHeight][kMaxPointerWidth];
+    u32 rgb[4];
+};
+
+// The arrow: black outline, white fill, tip at the hot spot.
+constexpr PointerShape default_pointer_shape() {
+    PointerShape shape{};
+    shape.width = kPointerWidth;
+    shape.height = kPointerHeight;
+    for (u32 y = 0; y < kPointerHeight; ++y) {
+        for (u32 x = 0; x < kPointerWidth; ++x) {
+            shape.pixels[y][x] = static_cast<u8>(pointer_pixel(x, y));
+        }
+    }
+    shape.rgb[1] = 0x000000;
+    shape.rgb[2] = 0xFFFFFF;
+    return shape;
+}
+
+inline constexpr PointerShape kDefaultPointerShape = default_pointer_shape();
+
 }

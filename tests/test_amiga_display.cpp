@@ -354,6 +354,12 @@ void pointer_image_has_a_tip_at_the_origin() {
     CHECK_EQ(pointer_pixel(0, 15), 0u);
     CHECK_EQ(pointer_pixel(16, 0), 0u);
     CHECK_EQ(pointer_pixel(0, 16), 0u);
+
+    CHECK_EQ(kDefaultPointerShape.hot_x, 0);
+    CHECK_EQ(kDefaultPointerShape.hot_y, 0);
+    CHECK_EQ(kDefaultPointerShape.pixels[2][1], 2u);
+    CHECK_EQ(kDefaultPointerShape.rgb[1], 0x000000u);
+    CHECK_EQ(kDefaultPointerShape.rgb[2], 0xFFFFFFu);
 }
 
 void pointer_is_drawn_over_the_screen_on_refresh() {
@@ -374,6 +380,55 @@ void pointer_is_drawn_over_the_screen_on_refresh() {
     // Pixel outside pointer is screen colour (pen 3: 0x6688BB).
     CHECK_EQ(fb.pixel(18, 18), 0x6688BBu);
     CHECK(fb.guards_intact());
+}
+
+void published_pointer_shape_is_drawn_offset_by_its_hot_spot_in_its_colours() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest;
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    guest.set_all_pixels(3);
+
+    PointerShape shape{};
+    shape.width = 3;
+    shape.height = 3;
+    shape.hot_x = 1;
+    shape.hot_y = 1;
+    shape.pixels[0][0] = 1;
+    shape.pixels[1][1] = 2;
+    shape.pixels[2][2] = 3;
+    shape.rgb[1] = 0x112233;
+    shape.rgb[2] = 0x445566;
+    shape.rgb[3] = 0x778899;
+    DisplayState state;
+    state.pointer = &shape;
+    display.follow_pointer_shape(state);
+
+    display.move_pointer(guest.machine(), kScreen, 10, 10);
+    display.set_pointer_visible(guest.machine(), kScreen, true);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
+
+    // The image starts at (9, 9), the hot spot pixel is on (10, 10); scaled by 2.
+    CHECK_EQ(fb.pixel(18, 18), 0x112233u);
+    CHECK_EQ(fb.pixel(20, 20), 0x445566u);
+    CHECK_EQ(fb.pixel(22, 22), 0x778899u);
+    CHECK_EQ(fb.pixel(20, 18), 0x6688BBu);
+    CHECK_EQ(fb.pixel(16, 16), 0x6688BBu);
+    CHECK_EQ(fb.pixel(24, 24), 0x6688BBu);
+
+    // Moving redraws the old area, including the part left of the position.
+    display.move_pointer(guest.machine(), kScreen, 30, 40);
+    CHECK_EQ(fb.pixel(18, 18), 0x6688BBu);
+    CHECK_EQ(fb.pixel(22, 22), 0x6688BBu);
+    CHECK_EQ(fb.pixel(58, 78), 0x112233u);
+    CHECK_EQ(fb.pixel(60, 80), 0x445566u);
+    CHECK(fb.guards_intact());
+
+    // Without a published shape the arrow is back.
+    state.pointer = nullptr;
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
+    CHECK_EQ(fb.pixel(60, 80), 0x000000u);
+    CHECK_EQ(fb.pixel(58, 78), 0x6688BBu);
 }
 
 void pointer_is_not_drawn_when_hidden() {
@@ -683,6 +738,7 @@ int main() {
     guards_intact();
     pointer_image_has_a_tip_at_the_origin();
     pointer_is_drawn_over_the_screen_on_refresh();
+    published_pointer_shape_is_drawn_offset_by_its_hot_spot_in_its_colours();
     pointer_is_not_drawn_when_hidden();
     move_pointer_restores_the_old_area_and_draws_the_new_one();
     pointer_is_clipped_at_the_screen_edge_and_never_writes_outside_the_framebuffer();

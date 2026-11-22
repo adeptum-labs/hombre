@@ -267,6 +267,7 @@ void show_amiga_screen(const BootInfo& info) {
     pointer.init(640, 400, 320, 200);
     amiga_display.move_pointer(machine, amiga_screen, pointer.x(), pointer.y());
     display.sink = amiga_display.sink();
+    amiga_display.follow_pointer_shape(display);
     intuition.screen_to_front(amiga_screen);
     if (usb_mouse_present()) {
         amiga_display.set_pointer_visible(machine, amiga_screen, true);

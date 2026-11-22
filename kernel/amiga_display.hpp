@@ -79,6 +79,9 @@ public:
 
     DisplaySink sink() { return DisplaySink{&AmigaDisplay::refresh, this}; }
 
+    // Draws the pointer in the shape state publishes; without it, the arrow.
+    void follow_pointer_shape(const DisplayState& state) { state_ = &state; }
+
     // Draws the pixels of dirty, clipped to the screen, as scale x scale
     // blocks. Screen 0 clears the framebuffer to the border colour, and a
     // screen larger than 4096 pixels on a side is ignored.
@@ -180,22 +183,25 @@ public:
             }
         }
         if (display.pointer_visible_) {
-            const i32 ptr_first_x = display.pointer_x_ > first_x ? display.pointer_x_ : first_x;
-            const i32 ptr_first_y = display.pointer_y_ > first_y ? display.pointer_y_ : first_y;
-            const i32 ptr_end_x = display.pointer_x_ + static_cast<i32>(kPointerWidth) - 1;
-            const i32 ptr_end_y = display.pointer_y_ + static_cast<i32>(kPointerHeight) - 1;
+            const PointerShape& shape = display.pointer_shape();
+            const i32 image_x = display.pointer_x_ - shape.hot_x;
+            const i32 image_y = display.pointer_y_ - shape.hot_y;
+            const i32 ptr_first_x = image_x > first_x ? image_x : first_x;
+            const i32 ptr_first_y = image_y > first_y ? image_y : first_y;
+            const i32 ptr_end_x = image_x + static_cast<i32>(shape.width) - 1;
+            const i32 ptr_end_y = image_y + static_cast<i32>(shape.height) - 1;
             const i32 ptr_last_x = ptr_end_x < last_x ? ptr_end_x : last_x;
             const i32 ptr_last_y = ptr_end_y < last_y ? ptr_end_y : last_y;
             if (ptr_first_x <= ptr_last_x && ptr_first_y <= ptr_last_y) {
                 for (i32 y = ptr_first_y; y <= ptr_last_y; ++y) {
-                    const u32 py = static_cast<u32>(y - display.pointer_y_);
+                    const u32 py = static_cast<u32>(y - image_y);
                     for (i32 x = ptr_first_x; x <= ptr_last_x; ++x) {
-                        const u32 px = static_cast<u32>(x - display.pointer_x_);
-                        const u32 pixel = pointer_pixel(px, py);
+                        const u32 px = static_cast<u32>(x - image_x);
+                        const u32 pixel = shape.pixels[py][px];
                         if (pixel == 0) {
                             continue;
                         }
-                        const u32 colour = pixel == 1 ? kPointerOutlineColour : kPointerFillColour;
+                        const u32 colour = shape.rgb[pixel & 3];
                         const u64 left = display.origin_x_ + static_cast<u64>(x) * display.scale_;
                         const u64 top = display.origin_y_ + static_cast<u64>(y) * display.scale_;
                         display.fb_.fill_rect(left, top, display.scale_, display.scale_, colour);
@@ -256,15 +262,20 @@ private:
     static constexpr u32 kMaxPlanes = 8;
     static constexpr u32 kMaxColours = 1u << kMaxPlanes;
     static constexpr u32 kBorder = 0xAAAAAA;
-    static constexpr u32 kPointerOutlineColour = 0x000000;
-    static constexpr u32 kPointerFillColour = 0xFFFFFF;
 
-    // The union of two pointer rectangles clipped to the screen.
-    static Rect pointer_union(i32 x0, i32 y0, i32 x1, i32 y1, u32 width, u32 height) {
-        const i32 min_x = x0 < x1 ? x0 : x1;
-        const i32 min_y = y0 < y1 ? y0 : y1;
-        const i32 max_x = (x0 > x1 ? x0 : x1) + static_cast<i32>(kPointerWidth) - 1;
-        const i32 max_y = (y0 > y1 ? y0 : y1) + static_cast<i32>(kPointerHeight) - 1;
+    // The shape the pointer is drawn in: the one the state publishes, else the arrow.
+    const PointerShape& pointer_shape() const {
+        return state_ != nullptr && state_->pointer != nullptr ? *state_->pointer
+                                                               : kDefaultPointerShape;
+    }
+
+    // The union of the pointer rectangles at two positions clipped to the screen.
+    Rect pointer_union(i32 x0, i32 y0, i32 x1, i32 y1, u32 width, u32 height) const {
+        const PointerShape& shape = pointer_shape();
+        const i32 min_x = (x0 < x1 ? x0 : x1) - shape.hot_x;
+        const i32 min_y = (y0 < y1 ? y0 : y1) - shape.hot_y;
+        const i32 max_x = (x0 > x1 ? x0 : x1) - shape.hot_x + static_cast<i32>(shape.width) - 1;
+        const i32 max_y = (y0 > y1 ? y0 : y1) - shape.hot_y + static_cast<i32>(shape.height) - 1;
         const i32 first_x = min_x > 0 ? min_x : 0;
         const i32 first_y = min_y > 0 ? min_y : 0;
         const i32 last_x = at_most(max_x, width);
@@ -309,6 +320,7 @@ private:
     i32 pointer_x_ = 0;
     i32 pointer_y_ = 0;
     bool pointer_visible_ = false;
+    const DisplayState* state_ = nullptr;
 };
 
 }
