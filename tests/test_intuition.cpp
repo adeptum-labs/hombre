@@ -27,6 +27,7 @@
 #include "libs/chrome_palette.hpp"
 #include "libs/display_modes.hpp"
 #include "libs/keymap_library.hpp"
+#include "libs/raster.hpp"
 #include "libs/utility.hpp"
 
 #include <string>
@@ -73,6 +74,10 @@ struct IntuitionTest {
             }
         }
         return 0;
+    }
+
+    static const Intuition::ScreenModePrefs& screen_mode(const Intuition& g) {
+        return g.wb_mode_;
     }
 };
 
@@ -179,6 +184,7 @@ constexpr u32 WFLG_RMBTRAP = 0x00010000;
 constexpr u32 dri_NumPens = 2;
 constexpr u32 dri_Pens = 4;
 constexpr u32 dri_Font = 8;
+constexpr u32 dri_Depth = 12;
 
 // struct Image
 constexpr u32 img_LeftEdge = 0;
@@ -5894,6 +5900,346 @@ void close_and_open_workbench_follow_the_windows_and_the_pens() {
     CHECK_EQ(hooks.opens, 1u);
 }
 
+constexpr u32 kModeHighRes = 0x8000;
+constexpr u32 kModeEhbHighRes = 0x8080;
+constexpr u32 kModeNtscHiresLace = 0x19004;
+constexpr u32 kModePalHiresLace = 0x29004;
+constexpr u32 kWindowGadgets = WFLG_SIZEGADGET | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET |
+                               WFLG_DRAGBAR;
+
+// A struct ScreenModePrefs, as IPrefs sends it in SetIPrefs type 1.
+void send_screen_mode(GfxRig& r, u32 mode_id, u32 width, u32 height, u32 depth,
+                      u32 control = 3) {
+    r.put32(kIPrefs, mode_id);
+    r.put16(kIPrefs + 4, width);
+    r.put16(kIPrefs + 6, height);
+    r.put16(kIPrefs + 8, depth);
+    r.put16(kIPrefs + 10, control);
+    set_iprefs(r, kIPrefs, 12, 1);
+}
+
+// IPrefs' reset of the Workbench: CloseWorkBench, which has to succeed, and
+// OpenWorkBench.
+u32 reset_workbench(GfxRig& r) {
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseWorkBench), 1u);
+    r.cpu().a[0] = 0;
+    return r.result(Base::Intuition, intuition_lvo::OpenWorkBench);
+}
+
+u32 window_bitmap(GfxRig& r, u32 window) {
+    return r.get32(r.get32(window + wd_RPort) + rp_BitMap);
+}
+
+// The highest pen drawn anywhere on the screen's BitMap.
+u32 highest_pen_on_screen(GfxRig& r, u32 screen) {
+    native::Bus bus(r.machine);
+    raster::Bitmap bitmap{};
+    CHECK(raster::load_bitmap(bus, screen + sc_BitMap, bitmap));
+    u32 highest = 0;
+    for (u32 y = 0; y < bitmap.rows; ++y) {
+        for (u32 x = 0; x < bitmap.bytes_per_row * 8; ++x) {
+            const u32 pen =
+                raster::read_pixel(bus, bitmap, static_cast<i32>(x), static_cast<i32>(y));
+            highest = pen > highest ? pen : highest;
+        }
+    }
+    return highest;
+}
+
+struct SizeHookState {
+    GfxRig* rig = nullptr;
+    u32 calls = 0;
+    u32 width = 0;
+    u32 height = 0;
+};
+
+void record_window_size(void* ctx, u32 window) {
+    SizeHookState& state = *static_cast<SizeHookState*>(ctx);
+    ++state.calls;
+    state.width = state.rig->get16(window + wd_Width);
+    state.height = state.rig->get16(window + wd_Height);
+}
+
+void set_iprefs_type_1_keeps_the_screen_mode_record() {
+    GfxRig r;
+    CHECK(!IntuitionTest::screen_mode(r.intuition).set);
+    send_screen_mode(r, kModePalHiresLace, 0xFFFF, 0xFFFF, 4, 3);
+    const auto& mode = IntuitionTest::screen_mode(r.intuition);
+    CHECK(mode.set);
+    CHECK_EQ(mode.mode_id, kModePalHiresLace);
+    CHECK_EQ(mode.width, 0xFFFFu);
+    CHECK_EQ(mode.height, 0xFFFFu);
+    CHECK_EQ(mode.depth, 4u);
+    CHECK_EQ(mode.control, 3u);
+
+    // A record of fewer than 12 bytes is not taken; a later one replaces it.
+    r.put32(kIPrefs, kModeHiresLace);
+    set_iprefs(r, kIPrefs, 11, 1);
+    CHECK_EQ(mode.mode_id, kModePalHiresLace);
+    send_screen_mode(r, kModeHiresLace, 640, 400, 8, 1);
+    CHECK_EQ(mode.mode_id, kModeHiresLace);
+    CHECK_EQ(mode.width, 640u);
+    CHECK_EQ(mode.height, 400u);
+    CHECK_EQ(mode.depth, 8u);
+    CHECK_EQ(mode.control, 1u);
+}
+
+void close_workbench_does_not_wait_for_a_window_marked_to_stay() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    put_new_window(r, kNewWindow, 80, 60, 200, 100, 0, 0, screen, CUSTOMSCREEN);
+    const u32 marked = open_win(r, kNewWindow);
+    CHECK(marked != 0);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseWorkBench), 0u);
+
+    r.intuition.keep_through_workbench_reset(0);
+    r.intuition.keep_through_workbench_reset(0x1234);
+    r.intuition.keep_through_workbench_reset(marked);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseWorkBench), 1u);
+    CHECK(r.intuition.window_open(marked));
+
+    // An ordinary window still keeps CloseWorkBench from succeeding.
+    put_new_window(r, kNewWindow, 300, 60, 200, 100, 0, 0, screen, CUSTOMSCREEN);
+    CHECK(open_win(r, kNewWindow) != 0);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseWorkBench), 0u);
+}
+
+void open_workbench_rebuilds_the_screen_for_the_mode_of_the_prefs() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 512, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    put_new_window(r, kNewWindow, 20, 30, 600, 450, kWindowGadgets, 0, screen, CUSTOMSCREEN);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    r.intuition.keep_through_workbench_reset(window);
+    r.cpu().a[0] = screen;
+    const u32 info = r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo);
+    CHECK_EQ(r.get16(info + dri_Depth), 8u);
+    const u32 old_planes = r.get32(screen + sc_BitMap + bm_Planes);
+    const u32 old_window_planes = r.get32(window_bitmap(r, window) + bm_Planes);
+
+    send_screen_mode(r, kModePalHiresLace, 0xFFFF, 0xFFFF, 4);
+    CHECK_EQ(reset_workbench(r), screen);
+
+    const u32 vp = screen + sc_ViewPort;
+    CHECK_EQ(r.get16(screen + sc_Width), 640u);
+    CHECK_EQ(r.get16(screen + sc_Height), 512u);
+    CHECK_EQ(r.get8(screen + sc_BitMap + bm_Depth), 4u);
+    CHECK_EQ(r.get16(screen + sc_BitMap + bm_BytesPerRow), 80u);
+    CHECK_EQ(r.get16(screen + sc_BitMap + bm_Rows), 512u);
+    CHECK(r.get32(screen + sc_BitMap + bm_Planes) != old_planes);
+    CHECK_EQ(r.get32(screen + sc_BitMap + bm_Planes + 4 * 4), 0u);
+    CHECK_EQ(r.get16(vp + vp_Modes), kModeHiresLace);
+    CHECK_EQ(r.get16(vp + vp_DWidth), 640u);
+    CHECK_EQ(r.get16(vp + vp_DHeight), 512u);
+    CHECK_EQ(vp_mode_id(r, screen), kModePalHiresLace);
+    CHECK_EQ(r.intuition.screen_mode_id(screen), kModePalHiresLace);
+    CHECK_EQ(r.get16(r.get32(vp + vp_ColorMap) + cm_Count), 16u);
+    CHECK_EQ(r.get16(info + dri_Depth), 4u);
+    CHECK_EQ(r.display.mode_width, 640u);
+    CHECK_EQ(r.display.mode_height, 512u);
+    CHECK_EQ(r.display.mode_flags, display_modes::find(kModePalHiresLace)->flags);
+
+    // The window stays, on planes of the new depth, inside the screen.
+    CHECK(r.intuition.window_open(window));
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 20u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 30u);
+    CHECK_EQ(r.get16(window + wd_Width), 600u);
+    CHECK_EQ(r.get16(window + wd_Height), 450u);
+    CHECK_EQ(r.get8(window_bitmap(r, window) + bm_Depth), 4u);
+    CHECK(r.get32(window_bitmap(r, window) + bm_Planes) != old_window_planes);
+
+    // The screen and the window are drawn again in the classic pens.
+    CHECK_EQ(screen_pixel(r, screen, 20, 30), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 400, 14), 1u);
+    CHECK(highest_pen_on_screen(r, screen) <= 3u);
+    CHECK(logged("intuition: Workbench screen 640x512x4"));
+}
+
+void open_workbench_fits_its_windows_to_a_smaller_screen() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    put_new_window(r, kNewWindow, 20, 30, 600, 350, kWindowGadgets, 0, screen, CUSTOMSCREEN);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    r.intuition.keep_through_workbench_reset(window);
+    SizeHookState hook;
+    hook.rig = &r;
+    r.intuition.set_size_hook(window, record_window_size, &hook);
+
+    send_screen_mode(r, kModeHighRes, 0xFFFF, 0xFFFF, 2);
+    CHECK_EQ(reset_workbench(r), screen);
+
+    CHECK_EQ(r.get16(screen + sc_Width), 640u);
+    CHECK_EQ(r.get16(screen + sc_Height), 200u);
+    CHECK_EQ(r.get8(screen + sc_BitMap + bm_Depth), 2u);
+    CHECK_EQ(r.get16(screen + sc_ViewPort + vp_Modes), kModeHighRes);
+    CHECK_EQ(r.display.mode_height, 200u);
+
+    // Moved up and shrunk to the screen's 200 rows; its width fits as it was.
+    CHECK(r.intuition.window_open(window));
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 20u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 0u);
+    CHECK_EQ(r.get16(window + wd_Width), 600u);
+    CHECK_EQ(r.get16(window + wd_Height), 200u);
+    CHECK_EQ(r.get16(window + wd_MinHeight), 200u);
+    CHECK_EQ(r.get16(window + wd_MaxHeight), 200u);
+    CHECK_EQ(r.get16(window_bitmap(r, window) + bm_Rows), 200u);
+    CHECK_EQ(r.get8(window_bitmap(r, window) + bm_Depth), 2u);
+
+    // The window's own layout ran once, for the size it has now.
+    CHECK_EQ(hook.calls, 1u);
+    CHECK_EQ(hook.width, 600u);
+    CHECK_EQ(hook.height, 200u);
+}
+
+void open_workbench_keeps_a_screen_that_has_the_mode_of_the_prefs() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    put_new_window(r, kNewWindow, 20, 30, 300, 200, 0, 0, screen, CUSTOMSCREEN);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    r.intuition.keep_through_workbench_reset(window);
+    const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+    const u32 backdrop = r.get32(r.intuition.backdrop_rastport(screen) + rp_BitMap);
+    const u32 planes = r.get32(screen + sc_BitMap + bm_Planes);
+    const u32 backdrop_planes = r.get32(backdrop + bm_Planes);
+    const u32 colors = r.get32(map + cm_ColorTable);
+    const u32 window_planes = r.get32(window_bitmap(r, window) + bm_Planes);
+    const auto unchanged = [&] {
+        CHECK_EQ(r.get32(screen + sc_BitMap + bm_Planes), planes);
+        CHECK_EQ(r.get32(backdrop + bm_Planes), backdrop_planes);
+        CHECK_EQ(r.get32(map + cm_ColorTable), colors);
+        CHECK_EQ(r.get32(window_bitmap(r, window) + bm_Planes), window_planes);
+        CHECK_EQ(r.get16(screen + sc_Height), 400u);
+        CHECK_EQ(r.get8(screen + sc_BitMap + bm_Depth), 8u);
+        CHECK_EQ(r.intuition.screen_mode_id(screen), kModeHiresLace);
+    };
+
+    // The default monitor and NTSC are one here, and 0xFFFF is the mode's size.
+    send_screen_mode(r, kModeNtscHiresLace, 0xFFFF, 0xFFFF, 8, 1);
+    CHECK_EQ(reset_workbench(r), screen);
+    unchanged();
+
+    send_screen_mode(r, kModeHiresLace, 640, 400, 8);
+    CHECK_EQ(reset_workbench(r), screen);
+    unchanged();
+}
+
+void open_workbench_keeps_the_screen_for_a_mode_it_cannot_have() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    const u32 planes = r.get32(screen + sc_BitMap + bm_Planes);
+    const auto unchanged = [&] {
+        CHECK_EQ(r.get32(screen + sc_BitMap + bm_Planes), planes);
+        CHECK_EQ(r.get16(screen + sc_Width), 640u);
+        CHECK_EQ(r.get16(screen + sc_Height), 400u);
+        CHECK_EQ(r.get8(screen + sc_BitMap + bm_Depth), 8u);
+    };
+
+    send_screen_mode(r, kModeUnknown, 0xFFFF, 0xFFFF, 8);
+    CHECK_EQ(reset_workbench(r), screen);
+    CHECK(logged("intuition: Workbench screen mode $31004 not usable"));
+    unchanged();
+
+    // Seven planes are more than Extra Half-Brite has, and no planes at all
+    // make no screen.
+    send_screen_mode(r, kModeEhbHighRes, 0xFFFF, 0xFFFF, 7);
+    CHECK_EQ(reset_workbench(r), screen);
+    CHECK(logged("intuition: Workbench screen mode $8080 not usable"));
+    unchanged();
+
+    send_screen_mode(r, kModeHiresLace, 0xFFFF, 0xFFFF, 0);
+    CHECK_EQ(reset_workbench(r), screen);
+    CHECK(logged("intuition: Workbench screen mode $8004 not usable"));
+    unchanged();
+}
+
+void open_workbench_keeps_the_screen_when_memory_runs_out() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    put_new_window(r, kNewWindow, 20, 30, 300, 200, 0, 0, screen, CUSTOMSCREEN);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    r.intuition.keep_through_workbench_reset(window);
+    const u32 planes = r.get32(screen + sc_BitMap + bm_Planes);
+    const u32 window_planes = r.get32(window_bitmap(r, window) + bm_Planes);
+
+    // Room for small blocks stays, none for the planes of a larger screen.
+    std::vector<u32> blocks;
+    for (;;) {
+        const u32 at = r.exec.alloc(4096, MEMF_PUBLIC);
+        if (at == 0) {
+            break;
+        }
+        blocks.push_back(at);
+    }
+    CHECK(blocks.size() > 8);
+    for (u32 i = 0; i < 8; ++i) {
+        r.exec.free(blocks[i], 4096);
+    }
+    send_screen_mode(r, kModePalHiresLace, 0xFFFF, 0xFFFF, 8);
+    CHECK_EQ(reset_workbench(r), screen);
+    CHECK(logged("intuition: no memory for the Workbench screen mode"));
+    CHECK_EQ(r.get16(screen + sc_Height), 400u);
+    CHECK_EQ(r.get32(screen + sc_BitMap + bm_Planes), planes);
+    CHECK_EQ(r.get32(window_bitmap(r, window) + bm_Planes), window_planes);
+    CHECK_EQ(r.intuition.screen_mode_id(screen), kModeHiresLace);
+    for (u32 i = 8; i < blocks.size(); ++i) {
+        r.exec.free(blocks[i], 4096);
+    }
+}
+
+// The window chrome, the title bars and the gadgets of screens of one and
+// four planes use the pens 0 to 3 of the classic look, which a screen of one
+// plane shows as 0 and 1; nothing is drawn in a pen above 3.
+void shallow_screens_draw_the_chrome_in_the_classic_pens() {
+    for (const u32 depth : {1u, 4u}) {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        CHECK_EQ(r.get16(r.get32(screen + sc_ViewPort + vp_ColorMap) + cm_Count), 1u << depth);
+
+        put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+        put_gadget(r, kGad1, 0, 20, 20, 12, 40, 0, 0, GTYP_PROPGADGET, kProp1);
+        r.str(kWinTitle, "H");
+        put_new_window(r, kNewWindow, 20, 20, 200, 100,
+                       WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET, kWinTitle, 0, 0);
+        r.put32(kNewWindow + nw_FirstGadget, kGad1);
+        CHECK(open_win(r, kNewWindow) != 0);
+
+        const u32 mask = (1u << depth) - 1;
+        CHECK_EQ(screen_pixel(r, screen, 20, 20), 1u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 100, 25), 3u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 29, 27), 2u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 25, 27), 0u);
+        CHECK_EQ(screen_pixel(r, screen, 28, 22), 1u);
+        CHECK(highest_pen_on_screen(r, screen) <= 3u);
+    }
+}
+
 void chrome_palette_follows_the_default_screen_pens() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
@@ -8591,6 +8937,14 @@ int main() {
     default_screen_follows_the_screen_font_of_the_prefs();
     menu_bar_and_boxes_follow_the_screen_font();
     close_and_open_workbench_follow_the_windows_and_the_pens();
+    set_iprefs_type_1_keeps_the_screen_mode_record();
+    close_workbench_does_not_wait_for_a_window_marked_to_stay();
+    open_workbench_rebuilds_the_screen_for_the_mode_of_the_prefs();
+    open_workbench_fits_its_windows_to_a_smaller_screen();
+    open_workbench_keeps_a_screen_that_has_the_mode_of_the_prefs();
+    open_workbench_keeps_the_screen_for_a_mode_it_cannot_have();
+    open_workbench_keeps_the_screen_when_memory_runs_out();
+    shallow_screens_draw_the_chrome_in_the_classic_pens();
     chrome_palette_follows_the_default_screen_pens();
     complement_mirrors_follow_the_low_pens_on_eight_planes();
     menu_strip_vectors_write_the_window_field();

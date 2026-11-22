@@ -148,6 +148,22 @@ void write_complement_mirrors(Bus& b, u32 depth, u32 colors, u32 low_colors) {
     }
 }
 
+// Writes the colours of a screen of depth planes: the default palette, with
+// the pens prefs_set names, when there is one, taking their colours from prefs.
+void write_default_palette(Bus& b, u32 depth, u32 colors, u32 low_colors, const bool* prefs_set,
+                           const u32* prefs) {
+    for (u32 i = 0; i < (1u << depth); ++i) {
+        const u32 rgb =
+            prefs_set != nullptr && prefs_set[i] ? prefs[i] : default_palette_rgb24(i);
+        const u32 r8 = (rgb >> 16) & 0xFF;
+        const u32 g8 = (rgb >> 8) & 0xFF;
+        const u32 b8 = rgb & 0xFF;
+        b.w16(colors + i * 2, ((r8 >> 4) << 8) | ((g8 >> 4) << 4) | (b8 >> 4));
+        b.w16(low_colors + i * 2, ((r8 & 0xF) << 8) | ((g8 & 0xF) << 4) | (b8 & 0xF));
+    }
+    write_complement_mirrors(b, depth, colors, low_colors);
+}
+
 // STDSCREENWIDTH and STDSCREENHEIGHT: -1 as a tag value, which a 16-bit
 // NewScreen field holds as 0xFFFF.
 constexpr u32 kStandardSize = 0xFFFFFFFF;
@@ -296,6 +312,35 @@ u32 requested_mode_id(const OpenArgs& a, bool workbench) {
 // The ViewModes bits of the mode: its ID without the monitor part.
 u16 view_modes_of(const display_modes::Mode& mode) {
     return static_cast<u16>(mode.id & ~display_modes::kMonitorIdMask);
+}
+
+// The default monitor is the NTSC one here, so a mode of either names the
+// same screen.
+u32 monitor_of(u32 mode_id) {
+    const u32 monitor = mode_id & display_modes::kMonitorIdMask;
+    return monitor == display_modes::kDefaultMonitorId ? display_modes::kNtscMonitorId : monitor;
+}
+
+bool same_display_mode(u32 a, u32 b) {
+    constexpr u32 kModeKeyMask = ~display_modes::kMonitorIdMask;
+    return monitor_of(a) == monitor_of(b) && (a & kModeKeyMask) == (b & kModeKeyMask);
+}
+
+// Whether a bitmap of that size is one a draw can work on.
+bool fits_a_bitmap(u32 width, u32 height) {
+    return width >= 1 && height >= 1 && width <= raster::kMaxBytesPerRow * 8 &&
+           height <= raster::kMaxRows;
+}
+
+// Writes the size of a screen and what its ViewPort shows of it: as much as
+// the mode's nominal size, in the mode's ViewModes.
+void write_screen_size(Bus& b, u32 screen, u32 width, u32 height, const display_modes::Mode& mode) {
+    const u32 vp = screen + ndk::sc_ViewPort;
+    b.w16(screen + ndk::sc_Width, width);
+    b.w16(screen + ndk::sc_Height, height);
+    b.w16(vp + ndk::vp_DWidth, width < mode.width ? width : mode.width);
+    b.w16(vp + ndk::vp_DHeight, height < mode.height ? height : mode.height);
+    b.w16(vp + ndk::vp_Modes, view_modes_of(mode));
 }
 
 // Tells the display the nominal size and flags of the front screen's mode. A
@@ -687,6 +732,22 @@ Rect unite_rect(Rect a, const Rect& b) {
         a.y1 = b.y1;
     }
     return a;
+}
+
+// One axis of a window kept on a screen that goes from old_room to room
+// pixels along it: the window moves in and then shrinks to fit, never below
+// its minimum, and a limit that reached the old edge reaches the new one.
+struct AxisFit {
+    i32 at;
+    i32 size;
+    i32 min;
+    i32 lim;
+};
+
+AxisFit fit_axis(i32 at, i32 size, i32 min, i32 lim, i32 old_room, i32 room) {
+    const i32 fitted = smaller(size, room);
+    return AxisFit{larger(0, smaller(at, room - fitted)), fitted, smaller(min, room),
+                   lim >= old_room ? room : smaller(lim, room)};
 }
 
 constexpr u8 kTopCornerInsets[3] = {3, 2, 1};
@@ -1249,7 +1310,8 @@ struct IntuitionNatives {
     static void close_window(void* ctx, Machine& m) { of(ctx).close_window(m.cpu.a[0]); }
 
     // CloseWorkBench: the Workbench leaves the default screen so IPrefs can
-    // reset it. Every window still open on it must be the Workbench's own.
+    // reset it. Every window still open on it must be the Workbench's own or
+    // one that stays through the reset.
     static void close_workbench(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         if (in.default_screen_ == 0) {
@@ -1258,7 +1320,7 @@ struct IntuitionNatives {
         }
         for (const Intuition::WindowRecord& window : in.window_records_) {
             if (window.addr != 0 && window.screen == in.default_screen_ &&
-                (window.flags & ndk::WFLG_WBENCHWINDOW) == 0) {
+                (window.flags & ndk::WFLG_WBENCHWINDOW) == 0 && !window.survives_reset) {
                 native::set_result(m, 0);
                 return;
             }
@@ -1273,8 +1335,9 @@ struct IntuitionNatives {
         native::set_result(m, 1);
     }
 
-    // OpenWorkBench: the default screen takes the palette and pens IPrefs
-    // sent, starts over, and the Workbench opens its windows again.
+    // OpenWorkBench: the default screen takes the mode, the palette and the
+    // pens IPrefs sent, starts over, and the Workbench opens its windows
+    // again.
     static void open_workbench(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         const u32 screen = in.default_screen_;
@@ -1284,6 +1347,7 @@ struct IntuitionNatives {
         }
         Intuition::ScreenRecord* rec = in.find_screen_record(screen);
         if (rec != nullptr) {
+            in.apply_screen_mode_prefs(*rec);
             in.apply_font_prefs(screen);
             in.apply_palette_prefs(*rec);
             in.apply_pen_prefs(screen);
@@ -1657,17 +1721,20 @@ struct IntuitionNatives {
         native::set_result(m, from);
     }
 
-    // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: type 2 is
-    // the system and screen fonts, type 7 a pointer image, type 8 the palette
-    // and the pointer colours and type 9 the two DrawInfo pen sets. Other
-    // types are preferences this does not use yet. 0 back, except for type 7,
-    // which answers who owns the image's BitMap.
+    // SetIPrefs(prefs A0, size D0, type D1), private to IPrefs: type 1 is
+    // the Workbench screen mode, type 2 the system and screen fonts, type 7 a
+    // pointer image, type 8 the palette and the pointer colours and type 9
+    // the two DrawInfo pen sets. Other types are preferences this does not use
+    // yet. 0 back, except for type 7, which answers who owns the image's
+    // BitMap.
     static void set_iprefs(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         const u32 prefs = m.cpu.a[0];
         const u32 size = m.cpu.d[0];
         u32 result = 0;
-        if (m.cpu.d[1] == 2) {
+        if (m.cpu.d[1] == 1) {
+            in.store_screen_mode_prefs(prefs, size);
+        } else if (m.cpu.d[1] == 2) {
             in.store_font_prefs(prefs, size);
         } else if (m.cpu.d[1] == 7) {
             result = in.store_pointer_prefs(prefs, size);
@@ -2113,6 +2180,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     for (PenPrefs& prefs : pen_prefs_) {
         prefs = PenPrefs{};
     }
+    wb_mode_ = ScreenModePrefs{};
     for (PointerShape& shape : pointer_shapes_) {
         shape = kDefaultPointerShape;
     }
@@ -2401,6 +2469,192 @@ void Intuition::store_pen_prefs(u32 prefs, u32 size) {
         }
     }
     stored.set = true;
+}
+
+// Type 1: the DisplayID, the Width and Height, the Depth and the Control
+// word of the screenmode.prefs IPrefs read. Nothing changes on the screen
+// until OpenWorkBench.
+void Intuition::store_screen_mode_prefs(u32 prefs, u32 size) {
+    constexpr u32 kRecordBytes = 12;
+    if (prefs == 0 || machine_ == nullptr || size < kRecordBytes) {
+        return;
+    }
+    Bus b(*machine_);
+    const ScreenModePrefs record{true,
+                                 b.r32(prefs),
+                                 b.r16(prefs + 4),
+                                 b.r16(prefs + 6),
+                                 b.r16(prefs + 8),
+                                 b.r16(prefs + 10)};
+    if (b.ok()) {
+        wb_mode_ = record;
+    }
+}
+
+void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
+    // A Width or Height of 0xFFFF is the mode's own size.
+    constexpr u32 kModeOwnSize = 0xFFFF;
+    if (!wb_mode_.set || machine_ == nullptr || exec_ == nullptr || graphics_ == nullptr ||
+        display_ == nullptr) {
+        return;
+    }
+    const display_modes::Mode* mode = display_modes::find(wb_mode_.mode_id);
+    const u32 depth = wb_mode_.depth;
+    const bool known = mode != nullptr;
+    const u32 width = known && wb_mode_.width == kModeOwnSize ? mode->width : wb_mode_.width;
+    const u32 height = known && wb_mode_.height == kModeOwnSize ? mode->height : wb_mode_.height;
+    if (!known || depth == 0 || depth > mode->max_depth || !fits_a_bitmap(width, height)) {
+        LogLine().text("intuition: Workbench screen mode ").hex(wb_mode_.mode_id)
+            .text(" not usable").send();
+        return;
+    }
+    if (same_display_mode(rec.mode_id, mode->id) && rec.width == width &&
+        rec.height == height && rec.depth == depth) {
+        return;
+    }
+
+    // Everything the new screen needs is allocated before anything of the old
+    // one is let go, so that too little memory leaves the screen as it is.
+    struct WindowFit {
+        AxisFit x{};
+        AxisFit y{};
+        u32 bytes_per_row = 0;
+        u32 plane_bytes = 0;
+        u32 planes = 0;
+    };
+    WindowFit fits[kMaxWindows];
+    ScreenBuffers fresh;
+    bool allocated = fresh.size(width, height, depth) && fresh.allocate(*exec_);
+    for (u32 i = 0; allocated && i < kMaxWindows; ++i) {
+        const WindowRecord& w = window_records_[i];
+        if (w.addr == 0 || w.screen != rec.addr) {
+            continue;
+        }
+        WindowFit& fit = fits[i];
+        fit.x = fit_axis(w.left, w.width, w.min_w, w.lim_w, static_cast<i32>(rec.width),
+                         static_cast<i32>(width));
+        fit.y = fit_axis(w.top, w.height, w.min_h, w.lim_h, static_cast<i32>(rec.height),
+                         static_cast<i32>(height));
+        fit.bytes_per_row = (static_cast<u32>(fit.x.lim) + 15) / 16 * 2;
+        fit.plane_bytes = depth * fit.bytes_per_row * static_cast<u32>(fit.y.lim);
+        fit.planes = exec_->alloc(fit.plane_bytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+        allocated = fit.planes != 0;
+    }
+    if (!allocated) {
+        fresh.release(*exec_);
+        for (const WindowFit& fit : fits) {
+            exec_->free(fit.planes, fit.plane_bytes);
+        }
+        LogLine().text("intuition: no memory for the Workbench screen mode").send();
+        return;
+    }
+
+    Bus b(*machine_);
+    const u32 screen = rec.addr;
+    exec_->free(rec.planes, rec.planes_bytes);
+    exec_->free(rec.backdrop_planes, rec.backdrop_planes_bytes);
+    exec_->free(rec.colors, rec.colors_bytes);
+    exec_->free(rec.low_colors, rec.low_colors_bytes);
+    rec.take(fresh);
+    rec.width = width;
+    rec.height = height;
+    rec.depth = depth;
+    rec.mode_id = mode->id;
+    rec.pending = Rect{0, 0, -1, -1};
+    write_screen_size(b, screen, width, height, *mode);
+    fresh.attach(b, screen + ndk::sc_BitMap, rec.backdrop_bitmap, rec.colormap, height, depth);
+    write_default_palette(b, depth, fresh.colors, fresh.low_colors, nullptr, nullptr);
+    graphics_->set_vp_mode_id(screen + ndk::sc_ViewPort, mode->id);
+    ++display_->palette_gen;
+    if (display_->front_screen == screen) {
+        set_front_mode(*display_, mode->id);
+    }
+    if (rec.draw_info != 0) {
+        // The pens that fit the new depth, as a DrawInfo made now would have.
+        const u16* pens = pen_prefs_for(depth);
+        b.w16(rec.draw_info + kDriDepth, depth);
+        for (u32 i = 0; i < kDriPenCount; ++i) {
+            b.w16(rec.draw_info + kDrawInfoPensAt + i * 2,
+                  pens != nullptr ? pens[i] : kDefaultDriPens[i]);
+        }
+    }
+
+    // A window has its own planes in the depth of its screen. Its borders,
+    // gadgets and whatever its size hook draws come back on the cleared ones.
+    begin_batch();
+    for (u32 i = 0; i < kMaxWindows; ++i) {
+        const WindowFit& fit = fits[i];
+        if (fit.planes == 0) {
+            continue;
+        }
+        WindowRecord& wrec = window_records_[i];
+        exec_->free(wrec.planes, wrec.planes_bytes);
+        wrec.planes = fit.planes;
+        wrec.planes_bytes = fit.plane_bytes;
+        wrec.left = fit.x.at;
+        wrec.top = fit.y.at;
+        wrec.width = fit.x.size;
+        wrec.height = fit.y.size;
+        wrec.min_w = fit.x.min;
+        wrec.min_h = fit.y.min;
+        wrec.lim_w = fit.x.lim;
+        wrec.lim_h = fit.y.lim;
+        wrec.max_w = fit.x.lim;
+        wrec.max_h = fit.y.lim;
+        init_planar_bitmap(b, wrec.bitmap, fit.bytes_per_row, static_cast<u32>(fit.y.lim), depth,
+                           wrec.planes);
+        const auto put = [&](u32 at, i32 value) { b.w16(at, static_cast<u32>(value)); };
+        put(wrec.addr + ndk::wd_LeftEdge, wrec.left);
+        put(wrec.addr + ndk::wd_TopEdge, wrec.top);
+        put(wrec.addr + ndk::wd_Width, wrec.width);
+        put(wrec.addr + ndk::wd_Height, wrec.height);
+        put(wrec.addr + ndk::wd_MinWidth, wrec.min_w);
+        put(wrec.addr + ndk::wd_MinHeight, wrec.min_h);
+        put(wrec.addr + ndk::wd_MaxWidth, wrec.lim_w);
+        put(wrec.addr + ndk::wd_MaxHeight, wrec.lim_h);
+        put(wrec.layer + ndk::ly_MinX, wrec.left);
+        put(wrec.layer + ndk::ly_MinY, wrec.top);
+        put(wrec.layer + ndk::ly_MaxX, wrec.left + wrec.width - 1);
+        put(wrec.layer + ndk::ly_MaxY, wrec.top + wrec.height - 1);
+
+        const u32 window = wrec.addr;
+        WindowView w = load_window(b, window);
+        w.rp = wrec.rp;
+        chrome::draw_window_chrome(*graphics_, b, wrec.rp,
+                                   to_chrome(w, active_window_ == window,
+                                             held_bar_button(window), window_metrics(window)));
+        if (w.first_gadget != 0) {
+            draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
+        }
+        if (wrec.size_hook != nullptr) {
+            wrec.size_hook(wrec.size_ctx, window);
+        }
+        // The hook may close the window.
+        WindowRecord* kept = find_window_record(window);
+        if (kept != nullptr && find_window(window) < kMaxWindows) {
+            post_newsize(*kept);
+        }
+    }
+    end_batch();
+    LogLine().text("intuition: Workbench screen ").dec(width).text("x").dec(height).text("x")
+        .dec(depth).send();
+}
+
+void Intuition::keep_through_workbench_reset(u32 window) {
+    if (find_window(window) >= kMaxWindows) {
+        return;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec != nullptr) {
+        rec->survives_reset = true;
+    }
+    // IPrefs looks for windows that would block a reset itself, by the
+    // WFLG_WBENCHWINDOW bit in each window's wd_Flags; the window carries
+    // it there so IPrefs lets the reset go ahead as well.
+    if (machine_ != nullptr) {
+        Bus b(*machine_);
+        b.w32(window + ndk::wd_Flags, b.r32(window + ndk::wd_Flags) | ndk::WFLG_WBENCHWINDOW);
+    }
 }
 
 u32 Intuition::screen_font() const {
@@ -3072,6 +3326,59 @@ void Intuition::refresh_screen(u32 screen) {
     refresh_full(*display_, *machine_, screen, rec->width, rec->height);
 }
 
+bool Intuition::ScreenBuffers::size(u32 width, u32 height, u32 depth) {
+    const u64 row_bytes = (static_cast<u64>(width) + 15) / 16 * 2;
+    const u64 bytes = static_cast<u64>(depth) * row_bytes * height;
+    if (bytes > 0xFFFFFFFF) {
+        return false;
+    }
+    bytes_per_row = static_cast<u32>(row_bytes);
+    plane_bytes = static_cast<u32>(bytes);
+    color_bytes = (1u << depth) * 2;
+    return true;
+}
+
+bool Intuition::ScreenBuffers::allocate(Exec& exec) {
+    constexpr u32 kType = ndk::MEMF_CHIP | ndk::MEMF_CLEAR;
+    planes = exec.alloc(plane_bytes, kType);
+    backdrop_planes = exec.alloc(plane_bytes, kType);
+    colors = exec.alloc(color_bytes, kType);
+    low_colors = exec.alloc(color_bytes, kType);
+    if (planes != 0 && backdrop_planes != 0 && colors != 0 && low_colors != 0) {
+        return true;
+    }
+    release(exec);
+    return false;
+}
+
+void Intuition::ScreenBuffers::release(Exec& exec) {
+    exec.free(planes, plane_bytes);
+    exec.free(backdrop_planes, plane_bytes);
+    exec.free(colors, color_bytes);
+    exec.free(low_colors, color_bytes);
+    *this = ScreenBuffers{};
+}
+
+void Intuition::ScreenBuffers::attach(Bus& b, u32 bitmap, u32 backdrop_bitmap, u32 map,
+                                      u32 height, u32 depth) const {
+    init_planar_bitmap(b, bitmap, bytes_per_row, height, depth, planes);
+    init_planar_bitmap(b, backdrop_bitmap, bytes_per_row, height, depth, backdrop_planes);
+    b.w16(map + ndk::cm_Count, 1u << depth);
+    b.w32(map + ndk::cm_ColorTable, colors);
+    b.w32(map + ndk::cm_LowColorBits, low_colors);
+}
+
+void Intuition::ScreenRecord::take(const ScreenBuffers& buffers) {
+    planes = buffers.planes;
+    planes_bytes = buffers.plane_bytes;
+    backdrop_planes = buffers.backdrop_planes;
+    backdrop_planes_bytes = buffers.plane_bytes;
+    colors = buffers.colors;
+    colors_bytes = buffers.color_bytes;
+    low_colors = buffers.low_colors;
+    low_colors_bytes = buffers.color_bytes;
+}
+
 u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     Bus b(*machine_);
     if (new_screen == 0 && tags == 0) {
@@ -3135,25 +3442,16 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
         return 0;
     }
 
-    const u64 bytes_per_row = (static_cast<u64>(a.width) + 15) / 16 * 2;
-    const u64 planes_bytes = static_cast<u64>(a.depth) * bytes_per_row * a.height;
-    if (planes_bytes > 0xFFFFFFFF) {
+    ScreenBuffers buffers;
+    if (!buffers.size(a.width, a.height, a.depth)) {
         LogLine().text("intuition: screen too large").send();
         return 0;
     }
-    const u32 bpr = static_cast<u32>(bytes_per_row);
-    const u32 pbytes = static_cast<u32>(planes_bytes);
-    const u32 color_count = 1u << a.depth;
-    const u32 color_bytes = color_count * 2;
 
     u32 screen = 0;
-    u32 planes = 0;
     u32 backdrop_bitmap = 0;
-    u32 backdrop_planes = 0;
     u32 backdrop_rp = 0;
     u32 map = 0;
-    u32 colors = 0;
-    u32 low_colors = 0;
     u32 title = 0;
     u32 title_bytes = 0;
     u32 font_attr = 0;
@@ -3164,27 +3462,16 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
         if (title != 0) {
             exec_->free(title, title_bytes);
         }
-        if (low_colors != 0) {
-            exec_->free(low_colors, color_bytes);
-        }
-        if (colors != 0) {
-            exec_->free(colors, color_bytes);
-        }
         if (map != 0) {
             exec_->free(map, ndk::ColorMap_SIZEOF);
         }
         if (backdrop_rp != 0) {
             exec_->free(backdrop_rp, ndk::RastPort_SIZEOF);
         }
-        if (backdrop_planes != 0) {
-            exec_->free(backdrop_planes, pbytes);
-        }
         if (backdrop_bitmap != 0) {
             exec_->free(backdrop_bitmap, ndk::BitMap_SIZEOF);
         }
-        if (planes != 0) {
-            exec_->free(planes, pbytes);
-        }
+        buffers.release(*exec_);
         if (screen != 0) {
             exec_->free(screen, ndk::Screen_SIZEOF);
         }
@@ -3196,16 +3483,11 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     if (screen == 0) {
         return fail();
     }
-    planes = exec_->alloc(pbytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (planes == 0) {
+    if (!buffers.allocate(*exec_)) {
         return fail();
     }
     backdrop_bitmap = exec_->alloc(ndk::BitMap_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
     if (backdrop_bitmap == 0) {
-        return fail();
-    }
-    backdrop_planes = exec_->alloc(pbytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (backdrop_planes == 0) {
         return fail();
     }
     backdrop_rp = exec_->alloc(ndk::RastPort_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
@@ -3214,14 +3496,6 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     }
     map = exec_->alloc(ndk::ColorMap_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
     if (map == 0) {
-        return fail();
-    }
-    colors = exec_->alloc(color_bytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (colors == 0) {
-        return fail();
-    }
-    low_colors = exec_->alloc(color_bytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
-    if (low_colors == 0) {
         return fail();
     }
     if (a.title != 0) {
@@ -3240,8 +3514,6 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     const u32 vp = screen + ndk::sc_ViewPort;
     b.w16(screen + ndk::sc_LeftEdge, a.left);
     b.w16(screen + ndk::sc_TopEdge, a.top);
-    b.w16(screen + ndk::sc_Width, a.width);
-    b.w16(screen + ndk::sc_Height, a.height);
     b.w8(screen + ndk::sc_WBorTop, chrome::kWBorTop);
     b.w8(screen + ndk::sc_WBorLeft, chrome::kBorderLeft);
     b.w8(screen + ndk::sc_WBorRight, chrome::kBorderRight);
@@ -3252,8 +3524,8 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w32(screen + ndk::sc_DefaultTitle, title);
     b.w32(screen + kScNextScreen, 0);
 
-    init_planar_bitmap(b, bitmap, bpr, a.height, a.depth, planes);
-    init_planar_bitmap(b, backdrop_bitmap, bpr, a.height, a.depth, backdrop_planes);
+    write_screen_size(b, screen, a.width, a.height, *mode);
+    buffers.attach(b, bitmap, backdrop_bitmap, map, a.height, a.depth);
 
     graphics_->init_rastport(rp);
     b.w32(rp + ndk::rp_BitMap, bitmap);
@@ -3261,30 +3533,14 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     b.w32(backdrop_rp + ndk::rp_BitMap, backdrop_bitmap);
 
     b.w32(vp + ndk::vp_ColorMap, map);
-    b.w16(vp + ndk::vp_DWidth, a.width < mode->width ? a.width : mode->width);
-    b.w16(vp + ndk::vp_DHeight, a.height < mode->height ? a.height : mode->height);
-    b.w16(vp + ndk::vp_Modes, view_modes_of(*mode));
     b.w8(map + ndk::cm_Flags, 0);
     b.w8(map + ndk::cm_Type, ndk::COLORMAP_TYPE_V39);
-    b.w16(map + ndk::cm_Count, color_count);
-    b.w32(map + ndk::cm_ColorTable, colors);
-    b.w32(map + ndk::cm_LowColorBits, low_colors);
     b.w32(map + ndk::cm_vp, vp);
     // The first screen is the one that becomes the default, so it takes the
     // palette IPrefs sent before it opened; other screens keep the default.
     const bool becomes_default = default_screen_ == 0;
-    for (u32 i = 0; i < color_count; ++i) {
-        const u32 rgb = becomes_default && palette_prefs_set_[i] ? palette_prefs_[i]
-                                                                 : default_palette_rgb24(i);
-        const u32 r8 = (rgb >> 16) & 0xFF;
-        const u32 g8 = (rgb >> 8) & 0xFF;
-        const u32 b8 = rgb & 0xFF;
-        const u32 hi = ((r8 >> 4) << 8) | ((g8 >> 4) << 4) | (b8 >> 4);
-        const u32 lo = ((r8 & 0xF) << 8) | ((g8 & 0xF) << 4) | (b8 & 0xF);
-        b.w16(colors + i * 2, hi);
-        b.w16(low_colors + i * 2, lo);
-    }
-    write_complement_mirrors(b, a.depth, colors, low_colors);
+    write_default_palette(b, a.depth, buffers.colors, buffers.low_colors,
+                          becomes_default ? palette_prefs_set_ : nullptr, palette_prefs_);
 
     for (u32 i = kMaxScreens - 1; i > 0; --i) {
         screens_[i] = screens_[i - 1];
@@ -3298,20 +3554,13 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     rec->addr = screen;
     rec->owner = exec_->this_task();
     rec->screen_bytes = ndk::Screen_SIZEOF;
-    rec->planes = planes;
-    rec->planes_bytes = pbytes;
+    rec->take(buffers);
     rec->backdrop_bitmap = backdrop_bitmap;
     rec->backdrop_bitmap_bytes = ndk::BitMap_SIZEOF;
-    rec->backdrop_planes = backdrop_planes;
-    rec->backdrop_planes_bytes = pbytes;
     rec->backdrop_rp = backdrop_rp;
     rec->backdrop_rp_bytes = ndk::RastPort_SIZEOF;
     rec->colormap = map;
     rec->colormap_bytes = ndk::ColorMap_SIZEOF;
-    rec->colors = colors;
-    rec->colors_bytes = color_bytes;
-    rec->low_colors = low_colors;
-    rec->low_colors_bytes = color_bytes;
     rec->title = title;
     rec->title_bytes = title_bytes;
     rec->font_attr = font_attr;

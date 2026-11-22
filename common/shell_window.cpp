@@ -113,6 +113,7 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     if (window == 0) {
         return false;
     }
+    intuition.keep_through_workbench_reset(window);
     const u32 rp = b.r32(window + ndk::wd_RPort);
     const i32 win_w = static_cast<i16>(b.r16(window + ndk::wd_Width));
     const i32 win_h = static_cast<i16>(b.r16(window + ndk::wd_Height));

@@ -46,8 +46,11 @@ public:
 
     // Opens the "HombreShell" window on intuition's default screen, at left,
     // top and the given size; a top of -1 places it below the screen's title
-    // bar and a zero width or height fills the room there is. False if there
-    // is no default screen or the window cannot be opened.
+    // bar and a zero width or height fills the room there is. The window
+    // stays open through a Workbench reset: it does not keep CloseWorkBench
+    // from succeeding, and is fitted to the screen's new size and depth,
+    // its text laid out again. False if there is no default screen or the
+    // window cannot be opened.
     bool open(m68k::Machine& m, Exec& exec, Graphics& gfx, Intuition& intuition,
               i32 left = 0, i32 top = -1, u32 width = 0, u32 height = 0);
 

@@ -4076,6 +4076,64 @@ void assign_lock_and_remove() {
     CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
 }
 
+// With no Sys drawer in ENV: yet, the seed makes it.
+void assigning_env_without_sys_still_seeds_screenmode_prefs() {
+    Rig r;
+    r.str(kData, "RAM:Env");
+    r.call(dos_lvo::UnLock, r.call(dos_lvo::CreateDir, kData));
+    const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(lock != 0);
+    r.str(kData, "ENV");
+    CHECK_EQ(r.call(dos_lvo::AssignLock, kData, lock), DOSTRUE);
+    u8 data[80] = {};
+    u32 got = 0;
+    u32 error = 0;
+    CHECK(g_dos.read_file("ENV:Sys/screenmode.prefs", data, sizeof data, got, error));
+    CHECK_EQ(got, 62u);
+}
+
+// Assigning ENV: leaves ENV:Sys/screenmode.prefs describing the Workbench
+// screen (NTSC:High Res Laced, its own size, 8 planes) when ENV: has none,
+// and a screenmode.prefs that is there stays as it is.
+void assigning_env_seeds_screenmode_prefs() {
+    Rig r;
+    // As the Startup-Sequence does: ENV:Sys exists before ENV: is assigned.
+    r.str(kData, "RAM:Env/Sys");
+    r.call(dos_lvo::UnLock, r.call(dos_lvo::CreateDir, kData));
+    const auto assign_env = [&r] {
+        r.str(kData, "RAM:Env");
+        const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(lock != 0);
+        r.str(kData, "ENV");
+        CHECK_EQ(r.call(dos_lvo::AssignLock, kData, lock), DOSTRUE);
+    };
+
+    u8 data[80] = {};
+    u32 got = 0;
+    u32 error = 0;
+    CHECK(!g_dos.read_file("ENV:Sys/screenmode.prefs", data, sizeof data, got, error));
+    assign_env();
+    CHECK(g_dos.read_file("ENV:Sys/screenmode.prefs", data, sizeof data, got, error));
+    const std::vector<u8> expected = {
+        'F', 'O', 'R', 'M', 0, 0, 0, 54,                  // the FORM, 54 bytes follow
+        'P', 'R', 'E', 'F',                                // the prefs form
+        'P', 'R', 'H', 'D', 0, 0, 0, 6, 0, 0, 0, 0, 0, 0,  // the header chunk
+        'S', 'C', 'R', 'M', 0, 0, 0, 28,                   // the screen mode chunk
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,    // four reserved longs
+        0x00, 0x01, 0x90, 0x04,                            // DisplayID 0x19004
+        0xFF, 0xFF, 0xFF, 0xFF,                            // Width and Height: its own size
+        0x00, 0x08, 0x00, 0x01,                            // Depth 8, Control: autoscroll
+    };
+    CHECK_EQ(got, 62u);
+    CHECK(std::vector<u8>(data, data + got) == expected);
+
+    const u8 mine[] = {'m', 'i', 'n', 'e'};
+    CHECK(g_dos.write_file("ENV:Sys/screenmode.prefs", mine, sizeof mine, error));
+    assign_env();
+    CHECK(g_dos.read_file("ENV:Sys/screenmode.prefs", data, sizeof data, got, error));
+    CHECK(std::vector<u8>(data, data + got) == std::vector<u8>(mine, mine + sizeof mine));
+}
+
 void assign_add_multi_directory() {
     Rig r;
     const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
@@ -7501,6 +7559,8 @@ int main() {
     compare_dates_sign();
     default_assigns_resolve();
     assign_lock_and_remove();
+    assigning_env_seeds_screenmode_prefs();
+    assigning_env_without_sys_still_seeds_screenmode_prefs();
     assign_add_multi_directory();
     assign_late_and_path();
     dos_list_walk();

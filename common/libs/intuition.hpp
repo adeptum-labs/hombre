@@ -389,6 +389,12 @@ public:
     // that sets them is the one the Workbench windows belong to.
     void set_workbench_hooks(const WorkbenchHooks& hooks);
 
+    // Lets the window stay open through a Workbench reset: CloseWorkBench
+    // does not wait for it, and OpenWorkBench keeps it, moved and sized to
+    // fit the screen it starts over. For the system's own windows, which a
+    // program cannot be asked to close.
+    void keep_through_workbench_reset(u32 window);
+
     // Rewrites the pens of the screen's existing DrawInfo from the set
     // IPrefs sent that fits its depth, when that set has arrived.
     void apply_pen_prefs(u32 screen);
@@ -425,9 +431,47 @@ private:
         u16 pen[chrome::kDrawInfoPens]{};
     };
 
+    // The Workbench screen mode IPrefs sent in a type 1 record: the mode's
+    // DisplayID, the size (0xFFFF for the mode's own), the depth and the
+    // control word. OpenWorkBench starts the screen over in it.
+    struct ScreenModePrefs {
+        bool set = false;
+        u32 mode_id = 0;
+        u32 width = 0;
+        u32 height = 0;
+        u32 depth = 0;
+        u32 control = 0;
+    };
+
+    // The memory the pixels and colours of a screen take, which a screen
+    // started over in another mode gets afresh: the planes of its BitMap and
+    // of its backdrop's, and the two tables of its ColorMap.
+    struct ScreenBuffers {
+        u32 bytes_per_row = 0;
+        u32 plane_bytes = 0;
+        u32 color_bytes = 0;
+        u32 planes = 0;
+        u32 backdrop_planes = 0;
+        u32 colors = 0;
+        u32 low_colors = 0;
+
+        // Works the sizes out for the screen's size and depth. False when
+        // the planes are more bytes than an address reaches.
+        bool size(u32 width, u32 height, u32 depth);
+        // False, with nothing left allocated, when exec is out of memory.
+        bool allocate(Exec& exec);
+        void release(Exec& exec);
+        // Points the screen's BitMap, its backdrop's and its ColorMap at the
+        // buffers.
+        void attach(native::Bus& b, u32 bitmap, u32 backdrop_bitmap, u32 map, u32 height,
+                    u32 depth) const;
+    };
+
     // What a screen owns in guest memory, so that closing it never has to
     // believe a guest field.
     struct ScreenRecord {
+        void take(const ScreenBuffers& buffers);
+
         u32 addr = 0;
         u32 owner = 0;
         u32 screen_bytes = 0;
@@ -508,6 +552,9 @@ private:
         bool newsize_pending = false;
         i32 newsize_w = 0;
         i32 newsize_h = 0;
+        // CloseWorkBench does not wait for the window, and a Workbench
+        // reset keeps it.
+        bool survives_reset = false;
     };
 
     // A requester window EasyRequestArgs or AutoRequest built: the IDCMP
@@ -589,6 +636,13 @@ private:
     // Draws the front screen again, pointer included.
     void redraw_pointer();
     void store_pen_prefs(u32 prefs, u32 size);
+    void store_screen_mode_prefs(u32 prefs, u32 size);
+    // Builds the default screen anew in the mode, size and depth of the
+    // stored screen mode when they are not the screen's own, as OpenWorkBench
+    // starts it over: new planes and colours, its windows kept and fitted to
+    // the new size. A mode that cannot be had, or too little memory, leaves
+    // the screen as it is.
+    void apply_screen_mode_prefs(ScreenRecord& rec);
     void store_font_prefs(u32 prefs, u32 size);
     // What the height of a TextFont makes of a title bar.
     chrome::Metrics font_chrome(u32 font) const;
@@ -773,6 +827,7 @@ private:
     bool palette_prefs_set_[256]{};
     u32 palette_prefs_[256]{};
     PenPrefs pen_prefs_[2];
+    ScreenModePrefs wb_mode_;
     // The pointer images IPrefs sent, the normal one then the busy one, and
     // the BitMaps they came from, which IPrefs gets back to free when
     // a new one replaces them. Only the normal one is shown, through

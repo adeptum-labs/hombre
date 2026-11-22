@@ -4912,6 +4912,85 @@ struct DosOps {
         if (b.ok()) {
             native::set_result(m, DOSTRUE);
         }
+        if (b.ok() && is_env_name(name)) {
+            seed_screenmode_prefs(d);
+        }
+    }
+
+    static bool is_env_name(const char* name) {
+        const auto upper = [](char c) { return c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c; };
+        return upper(name[0]) == 'E' && upper(name[1]) == 'N' && upper(name[2]) == 'V' &&
+               name[3] == '\0';
+    }
+
+    // The Workbench screen opens in NTSC High Res Laced with 256 colours,
+    // not in the High Res, four colours ScreenMode prefs assumes when no
+    // screenmode.prefs exists. Once ENV: is assigned, and if no saved
+    // prefs were copied there, a screenmode.prefs describing the screen as
+    // it is goes in, so ScreenMode and IPrefs see the real mode.
+    static void seed_screenmode_prefs(Dos& d) {
+        constexpr char kPath[] = "ENV:Sys/screenmode.prefs";
+        const u32 saved_error = d.last_error();
+        if (d.examine(kPath).kind != Dos::TargetKind::Missing) {
+            d.set_last_error(saved_error);
+            return;
+        }
+        // FORM PREF: a PRHD header and a SCRM chunk (struct
+        // ScreenModePrefs: four reserved longs, DisplayID, Width, Height,
+        // Depth, Control). Width and Height ~0 are the mode's standard size.
+        constexpr u32 kDisplayId = 0x00019004;
+        constexpr u16 kStandard = 0xFFFF;
+        constexpr u16 kDepth = 8;
+        constexpr u16 kAutoScroll = 1;
+        u8 data[4 + 4 + 4 + 8 + 6 + 8 + 28] = {};
+        u32 at = 0;
+        const auto put8 = [&](u32 v) { data[at++] = static_cast<u8>(v); };
+        const auto put16 = [&](u32 v) {
+            put8(v >> 8);
+            put8(v);
+        };
+        const auto put32 = [&](u32 v) {
+            put16(v >> 16);
+            put16(v & 0xFFFF);
+        };
+        const auto id = [&](const char* four) {
+            for (u32 i = 0; i < 4; ++i) {
+                put8(static_cast<u8>(four[i]));
+            }
+        };
+        id("FORM");
+        put32(sizeof data - 8);
+        id("PREF");
+        id("PRHD");
+        put32(6);
+        at += 6;
+        id("SCRM");
+        put32(28);
+        at += 16;
+        put32(kDisplayId);
+        put16(kStandard);
+        put16(kStandard);
+        put16(kDepth);
+        put16(kAutoScroll);
+        u32 error = 0;
+        if (!d.write_file(kPath, data, sizeof data, error) && error == ERROR_DIR_NOT_FOUND) {
+            // ENV: without a Sys drawer: make it, as the Startup-Sequence would.
+            Bus b(*d.m_);
+            u8 vol = Dos::kVolDf0;
+            char resolved[Dos::kMaxPath];
+            u32 parent_node = RamFs::kNone;
+            u32 sys_node = RamFs::kNone;
+            char parent[Dos::kMaxPath];
+            const char* leaf = nullptr;
+            if (resolve(d, b, "ENV:Sys", vol, resolved, error) && vol == Dos::kVolRam) {
+                split_parent_and_leaf(resolved, parent, leaf);
+                if (d.ram_.find_path(parent, parent_node) == 0 &&
+                    d.ram_.create_dir(parent_node, leaf, sys_node) == 0) {
+                    d.write_file(kPath, data, sizeof data, error);
+                }
+            }
+        }
+        d.set_last_error(saved_error);
     }
 
     static void assign_path_impl(Dos& d, Machine& m, u32 type) {

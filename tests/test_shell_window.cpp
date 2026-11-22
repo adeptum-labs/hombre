@@ -1455,6 +1455,68 @@ void shell_opens_on_the_default_screen_not_the_front_one() {
     CHECK_EQ(r.get32(second + sc_FirstWindow), 0u);
 }
 
+// IPrefs' reset of the Workbench to a mode of the given depth, in the mode's
+// own size: SetIPrefs type 1, CloseWorkBench, which has to succeed, and
+// OpenWorkBench.
+void reset_workbench_to(GfxRig& r, u32 mode_id, u32 depth) {
+    const u32 prefs = kData + 0x900;
+    r.put32(prefs, mode_id);
+    r.put16(prefs + 4, 0xFFFF);
+    r.put16(prefs + 6, 0xFFFF);
+    r.put16(prefs + 8, depth);
+    r.put16(prefs + 10, 3);
+    r.cpu().a[0] = prefs;
+    r.cpu().d[0] = 12;
+    r.cpu().d[1] = 1;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetIPrefs), 0u);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseWorkBench), 1u);
+    r.cpu().a[0] = 0;
+    CHECK(r.result(Base::Intuition, intuition_lvo::OpenWorkBench) != 0);
+}
+
+void shell_stays_through_a_workbench_reset_and_lays_out_its_text_again() {
+    constexpr u32 kHighRes = 0x8000;
+    constexpr u32 kPalHiresLace = 0x29004;
+    GfxRig r;
+    const u32 screen = open_screen(r);
+    CHECK(screen != 0);
+    ShellWindow shell;
+    CHECK(open_shell(r, shell));
+    const u32 window = shell.window();
+    write_str(shell, "reset");
+
+    // High Res has 200 rows, not the 400 the window filled below the bar.
+    reset_workbench_to(r, kHighRes, 2);
+    CHECK(shell.is_open());
+    CHECK_EQ(r.get16(screen + sc_Height), 200u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 0u);
+    CHECK_EQ(r.get16(window + wd_Width), 640u);
+    CHECK_EQ(r.get16(window + wd_Height), 200u);
+    CHECK_EQ(rows(r, window), 22u);
+    CHECK_EQ(shell.rows(), 22u);
+
+    // What it had written is drawn again, and what follows goes after it.
+    raster::Bitmap bm = screen_bitmap(r, screen);
+    CHECK(cell_is(r, bm, inner_x(r, window), inner_y(r, window), 0, 0, 'r'));
+    CHECK(cell_is(r, bm, inner_x(r, window), inner_y(r, window), 4, 0, 't'));
+    write_str(shell, "!");
+    bm = screen_bitmap(r, screen);
+    CHECK(cell_is(r, bm, inner_x(r, window), inner_y(r, window), 5, 0, '!'));
+
+    // A larger screen of four planes: the window keeps its size and may now
+    // grow to the screen's 512 rows.
+    reset_workbench_to(r, kPalHiresLace, 4);
+    CHECK_EQ(r.get16(screen + sc_Height), 512u);
+    CHECK_EQ(r.get16(window + wd_Height), 200u);
+    CHECK_EQ(r.get16(window + wd_MaxHeight), 512u);
+    bm = screen_bitmap(r, screen);
+    CHECK_EQ(bm.depth, 4u);
+    CHECK(cell_is(r, bm, inner_x(r, window), inner_y(r, window), 0, 0, 'r'));
+    r.intuition.size_window_to(window, 640, 500);
+    CHECK_EQ(shell.rows(), 60u);
+}
+
 int main() {
     cursor_back_shows_an_inverse_cell();
     echo_after_cursor_back_puts_the_block_at_the_end();
@@ -1500,5 +1562,6 @@ int main() {
     resize_width_while_scrolled_keeps_top_line();
     scroll_composes_once();
     knob_moves_when_store_is_full();
+    shell_stays_through_a_workbench_reset_and_lays_out_its_text_again();
     return check::finish("test_shell_window");
 }
