@@ -35,6 +35,8 @@
 #include "utility.hpp"
 #include "version.hpp"
 
+#include <algorithm>
+
 namespace hombre {
 
 using m68k::Machine;
@@ -1290,7 +1292,7 @@ struct IntuitionNatives {
             }
             screen = g.front_;
         }
-        if (screen == 0 || g.find_screen(screen) >= Intuition::kMaxScreens) {
+        if (!g.has_screen(screen)) {
             native::set_result(m, 0);
             return;
         }
@@ -1319,7 +1321,7 @@ struct IntuitionNatives {
             return;
         }
         for (const Intuition::WindowRecord& window : in.window_records_) {
-            if (window.addr != 0 && window.screen == in.default_screen_ &&
+            if (window.screen == in.default_screen_ &&
                 (window.flags & ndk::WFLG_WBENCHWINDOW) == 0 && !window.survives_reset) {
                 native::set_result(m, 0);
                 return;
@@ -1593,26 +1595,22 @@ struct IntuitionNatives {
     static void request(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         const u32 window = m.cpu.a[1];
-        if (window == 0 || !in.window_open(window)) {
+        if (!in.window_open(window) || in.blocks_.size() >= Intuition::kMaxBlocks) {
             native::set_result(m, 0);
             return;
         }
-        for (Intuition::Block& block : in.blocks_) {
-            if (block.window == 0) {
-                block = Intuition::Block{window, m.cpu.a[0]};
-                native::set_result(m, 1);
-                return;
-            }
-        }
-        native::set_result(m, 0);
+        in.blocks_.push_back(Intuition::Block{window, m.cpu.a[0]});
+        native::set_result(m, 1);
     }
 
     static void end_request(void* ctx, Machine& m) {
-        for (Intuition::Block& block : of(ctx).blocks_) {
-            if (block.requester == m.cpu.a[0] && block.window == m.cpu.a[1]) {
-                block = Intuition::Block{};
-                return;
-            }
+        std::vector<Intuition::Block>& blocks = of(ctx).blocks_;
+        const auto found =
+            std::find_if(blocks.begin(), blocks.end(), [&](const Intuition::Block& block) {
+                return block.requester == m.cpu.a[0] && block.window == m.cpu.a[1];
+            });
+        if (found != blocks.end()) {
+            blocks.erase(found);
         }
     }
 
@@ -2141,36 +2139,14 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     display.front_screen = 0;
     set_front_mode(display, kInvalidModeId);
     display.palette_dirty = false;
-    for (u32& screen : screens_) {
-        screen = 0;
-    }
-    for (u32& window : windows_) {
-        window = 0;
-    }
-    for (u32& msg : messages_) {
-        msg = 0;
-    }
-    for (u32& owner : message_owners_) {
-        owner = 0;
-    }
-    for (u32& update : message_updates_) {
-        update = 0;
-    }
-    for (u32& bytes : message_update_bytes_) {
-        bytes = 0;
-    }
-    for (ScreenRecord& rec : screen_records_) {
-        rec = ScreenRecord{};
-    }
-    for (WindowRecord& rec : window_records_) {
-        rec = WindowRecord{};
-    }
-    for (Requester& req : requesters_) {
-        req = Requester{};
-    }
-    for (GadgetHookEntry& entry : gadget_hooks_) {
-        entry = GadgetHookEntry{};
-    }
+    screens_.clear();
+    windows_.clear();
+    messages_.clear();
+    screen_records_.clear();
+    window_records_.clear();
+    requesters_.clear();
+    gadget_hooks_.clear();
+    blocks_.clear();
     for (bool& set : palette_prefs_set_) {
         set = false;
     }
@@ -2523,15 +2499,17 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
         u32 plane_bytes = 0;
         u32 planes = 0;
     };
-    WindowFit fits[kMaxWindows];
+    std::vector<WindowFit> fits;
     ScreenBuffers fresh;
     bool allocated = fresh.size(width, height, depth) && fresh.allocate(*exec_);
-    for (u32 i = 0; allocated && i < kMaxWindows; ++i) {
-        const WindowRecord& w = window_records_[i];
-        if (w.addr == 0 || w.screen != rec.addr) {
+    for (const WindowRecord& w : window_records_) {
+        if (!allocated) {
+            break;
+        }
+        if (w.screen != rec.addr) {
             continue;
         }
-        WindowFit& fit = fits[i];
+        WindowFit& fit = fits.emplace_back();
         fit.window = w.addr;
         fit.x = fit_axis(w.left, w.width, w.min_w, w.lim_w, static_cast<i32>(rec.width),
                          static_cast<i32>(width));
@@ -2584,11 +2562,7 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
     // A window has its own planes in the depth of its screen. Its borders,
     // gadgets and whatever its size hook draws come back on the cleared ones.
     begin_batch();
-    for (u32 i = 0; i < kMaxWindows; ++i) {
-        const WindowFit& fit = fits[i];
-        if (fit.planes == 0) {
-            continue;
-        }
+    for (const WindowFit& fit : fits) {
         // A size hook of a window before this one may have closed it.
         WindowRecord* found = find_window_record(fit.window);
         if (found == nullptr) {
@@ -2634,12 +2608,13 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
         if (w.first_gadget != 0) {
             draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
         }
-        if (wrec.size_hook != nullptr) {
-            wrec.size_hook(wrec.size_ctx, window);
-        }
-        // The hook may close the window.
+        // A gadget's own drawing code may close the window, and the hook too.
         WindowRecord* kept = find_window_record(window);
-        if (kept != nullptr && find_window(window) < kMaxWindows) {
+        if (kept != nullptr && kept->size_hook != nullptr) {
+            kept->size_hook(kept->size_ctx, window);
+            kept = find_window_record(window);
+        }
+        if (kept != nullptr && window_open(window)) {
             post_newsize(*kept);
         }
     }
@@ -2649,7 +2624,7 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
 }
 
 void Intuition::keep_through_workbench_reset(u32 window) {
-    if (find_window(window) >= kMaxWindows) {
+    if (!window_open(window)) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
@@ -2680,12 +2655,8 @@ u32 Intuition::screen_font_attr() const {
 }
 
 u32 Intuition::font_of_screen(u32 screen) const {
-    for (const ScreenRecord& rec : screen_records_) {
-        if (rec.addr == screen && screen != 0) {
-            return rec.font;
-        }
-    }
-    return 0;
+    const ScreenRecord* rec = find_screen_record(screen);
+    return rec != nullptr ? rec->font : 0;
 }
 
 chrome::Metrics Intuition::font_chrome(u32 font) const {
@@ -2761,8 +2732,7 @@ void Intuition::apply_font_prefs(u32 screen) {
         return;
     }
     for (const WindowRecord& window : window_records_) {
-        if (window.addr != 0 && window.screen == screen &&
-            (window.flags & ndk::WFLG_WBENCHWINDOW) != 0) {
+        if (window.screen == screen && (window.flags & ndk::WFLG_WBENCHWINDOW) != 0) {
             return;
         }
     }
@@ -2781,7 +2751,7 @@ void Intuition::apply_font_prefs(u32 screen) {
     compose(screen, Rect{0, 0, right, bottom});
     // A window the higher bar would reach under moves down below it.
     for (const WindowRecord& window : window_records_) {
-        if (window.addr != 0 && window.screen == screen && window.top < bar &&
+        if (window.screen == screen && window.top < bar &&
             (window.flags & ndk::WFLG_BACKDROP) == 0) {
             move_window_to(window.addr, window.left, bar);
         }
@@ -2976,8 +2946,7 @@ void Intuition::end_batch() {
         }
     }
     for (ScreenRecord& srec : screen_records_) {
-        if (srec.addr != 0 && srec.pending.x0 <= srec.pending.x1 &&
-            srec.pending.y0 <= srec.pending.y1) {
+        if (srec.pending.x0 <= srec.pending.x1 && srec.pending.y0 <= srec.pending.y1) {
             const Rect r = srec.pending;
             srec.pending = Rect{0, 0, -1, -1};
             compose(srec.addr, r);
@@ -3027,19 +2996,19 @@ void Intuition::compose(u32 screen, Rect r) {
     }
     raster::copy_rect(b, backdrop, r.x0, r.y0, dst, r.x0, r.y0, r.x1 - r.x0 + 1, r.y1 - r.y0 + 1);
 
-    const WindowRecord* order[kMaxWindows]{};
-    u32 count = 0;
+    std::vector<const WindowRecord*> order;
+    order.reserve(window_records_.size());
     u32 win = srec->first_window;
-    while (win != 0 && count < kMaxWindows) {
+    while (win != 0 && order.size() < kMaxWindows) {
         const WindowRecord* wrec = find_window_record(win);
         if (wrec == nullptr) {
             break;
         }
-        order[count++] = wrec;
+        order.push_back(wrec);
         win = wrec->next_window;
     }
-    for (u32 i = count; i > 0; --i) {
-        const WindowRecord* wrec = order[i - 1];
+    for (auto from_back = order.rbegin(); from_back != order.rend(); ++from_back) {
+        const WindowRecord* wrec = *from_back;
         if (has_shadow(srec->depth, wrec->flags) && wrec->width > 0 && wrec->height > 0) {
             const i32 wleft = wrec->left;
             const i32 wtop = wrec->top;
@@ -3099,7 +3068,7 @@ void Intuition::compose(u32 screen, Rect r) {
 }
 
 void Intuition::rebuild_shade_tables(ScreenRecord& srec) {
-    if (machine_ == nullptr || srec.addr == 0 || srec.depth == 0 || srec.depth > 8) {
+    if (machine_ == nullptr || srec.depth == 0 || srec.depth > 8) {
         return;
     }
     const u32 count = 1u << srec.depth;
@@ -3196,12 +3165,8 @@ bool Intuition::shade_tables(u32 screen, const u8*& strong, const u8*& light) {
 }
 
 u32 Intuition::backdrop_rastport(u32 screen) const {
-    for (const ScreenRecord& rec : screen_records_) {
-        if (rec.addr == screen) {
-            return rec.backdrop_rp;
-        }
-    }
-    return 0;
+    const ScreenRecord* rec = find_screen_record(screen);
+    return rec != nullptr ? rec->backdrop_rp : 0;
 }
 
 void Intuition::on_damage(void* ctx, Machine&, u32 bitmap, const Rect& rect) {
@@ -3210,7 +3175,7 @@ void Intuition::on_damage(void* ctx, Machine&, u32 bitmap, const Rect& rect) {
     }
     Intuition& self = *static_cast<Intuition*>(ctx);
     for (const WindowRecord& wrec : self.window_records_) {
-        if (wrec.addr != 0 && wrec.bitmap == bitmap) {
+        if (wrec.bitmap == bitmap) {
             const Rect screen_rect{rect.x0 + wrec.left, rect.y0 + wrec.top,
                                    rect.x1 + wrec.left, rect.y1 + wrec.top};
             self.compose(wrec.screen, screen_rect);
@@ -3218,30 +3183,15 @@ void Intuition::on_damage(void* ctx, Machine&, u32 bitmap, const Rect& rect) {
         }
     }
     for (const ScreenRecord& srec : self.screen_records_) {
-        if (srec.addr != 0 && srec.backdrop_bitmap == bitmap) {
+        if (srec.backdrop_bitmap == bitmap) {
             self.compose(srec.addr, rect);
             return;
         }
     }
 }
 
-u32 Intuition::find_screen(u32 screen) const {
-    if (screen == 0) {
-        return kMaxScreens;
-    }
-    for (u32 i = 0; i < kMaxScreens; ++i) {
-        if (screens_[i] == screen) {
-            return i;
-        }
-    }
-    return kMaxScreens;
-}
-
-void Intuition::remove_at(u32 index) {
-    for (u32 i = index; i + 1 < kMaxScreens; ++i) {
-        screens_[i] = screens_[i + 1];
-    }
-    screens_[kMaxScreens - 1] = 0;
+bool Intuition::has_screen(u32 screen) const {
+    return std::find(screens_.begin(), screens_.end(), screen) != screens_.end();
 }
 
 u32 Intuition::colormap_of_bitmap(u32 bitmap) const {
@@ -3250,15 +3200,12 @@ u32 Intuition::colormap_of_bitmap(u32 bitmap) const {
     }
     u32 screen = 0;
     for (const WindowRecord& rec : window_records_) {
-        if (rec.addr != 0 && rec.bitmap == bitmap) {
+        if (rec.bitmap == bitmap) {
             screen = rec.screen;
             break;
         }
     }
     for (const ScreenRecord& rec : screen_records_) {
-        if (rec.addr == 0) {
-            continue;
-        }
         if (rec.addr == screen || rec.addr + ndk::sc_BitMap == bitmap ||
             rec.backdrop_bitmap == bitmap) {
             return rec.colormap;
@@ -3268,39 +3215,22 @@ u32 Intuition::colormap_of_bitmap(u32 bitmap) const {
 }
 
 Intuition::ScreenRecord* Intuition::find_screen_record(u32 screen) {
-    for (ScreenRecord& rec : screen_records_) {
-        if (rec.addr == screen) {
-            return &rec;
-        }
-    }
-    return nullptr;
+    return screen_records_.find_if([&](const ScreenRecord& rec) { return rec.addr == screen; });
+}
+
+const Intuition::ScreenRecord* Intuition::find_screen_record(u32 screen) const {
+    return screen_records_.find_if([&](const ScreenRecord& rec) { return rec.addr == screen; });
 }
 
 u32 Intuition::screen_mode_id(u32 screen) const {
-    for (const ScreenRecord& rec : screen_records_) {
-        if (rec.addr == screen) {
-            return rec.mode_id;
-        }
-    }
-    return kInvalidModeId;
-}
-
-Intuition::ScreenRecord* Intuition::free_screen_record() {
-    for (ScreenRecord& rec : screen_records_) {
-        if (rec.addr == 0) {
-            return &rec;
-        }
-    }
-    return nullptr;
+    const ScreenRecord* rec = find_screen_record(screen);
+    return rec != nullptr ? rec->mode_id : kInvalidModeId;
 }
 
 void Intuition::write_links() {
     Bus b(*machine_);
-    for (u32 i = 0; i < kMaxScreens; ++i) {
-        if (screens_[i] != 0) {
-            const u32 next = i + 1 < kMaxScreens ? screens_[i + 1] : 0;
-            b.w32(screens_[i] + kScNextScreen, next);
-        }
+    for (usize i = 0; i < screens_.size(); ++i) {
+        b.w32(screens_[i] + kScNextScreen, i + 1 < screens_.size() ? screens_[i + 1] : 0);
     }
 }
 
@@ -3434,18 +3364,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
         a.height = 0xFFFF;
     }
 
-    u32 open = 0;
-    for (u32 screen : screens_) {
-        if (screen != 0) {
-            ++open;
-        }
-    }
-    if (open == kMaxScreens) {
-        LogLine().text("intuition: screen limit reached").send();
-        return 0;
-    }
-    ScreenRecord* rec = free_screen_record();
-    if (rec == nullptr) {
+    if (screen_records_.full()) {
         LogLine().text("intuition: screen limit reached").send();
         return 0;
     }
@@ -3550,15 +3469,13 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     write_default_palette(b, a.depth, buffers.colors, buffers.low_colors,
                           becomes_default ? palette_prefs_set_ : nullptr, palette_prefs_);
 
-    for (u32 i = kMaxScreens - 1; i > 0; --i) {
-        screens_[i] = screens_[i - 1];
-    }
-    screens_[0] = screen;
+    screens_.insert(screens_.begin(), screen);
     front_ = screen;
     display_->front_screen = screen;
     set_front_mode(*display_, mode->id);
     display_->palette_dirty = false;
     write_links();
+    ScreenRecord* rec = screen_records_.add();
     rec->addr = screen;
     rec->owner = exec_->this_task();
     rec->screen_bytes = ndk::Screen_SIZEOF;
@@ -3604,12 +3521,12 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
 }
 
 bool Intuition::close_screen(u32 screen) {
-    const u32 index = find_screen(screen);
-    if (index >= kMaxScreens) {
+    const auto at = std::find(screens_.begin(), screens_.end(), screen);
+    if (at == screens_.end()) {
         return false;
     }
     for (const WindowRecord& window : window_records_) {
-        if (window.addr != 0 && window.screen == screen) {
+        if (window.screen == screen) {
             return false;
         }
     }
@@ -3617,11 +3534,11 @@ bool Intuition::close_screen(u32 screen) {
     if (rec == nullptr) {
         return false;
     }
-    const bool was_front = index == 0;
+    const bool was_front = at == screens_.begin();
     const u32 width = rec->width;
     const u32 height = rec->height;
 
-    remove_at(index);
+    screens_.erase(at);
     write_links();
     if (rec->backdrop_rp != 0) {
         exec_->free(rec->backdrop_rp, rec->backdrop_rp_bytes);
@@ -3656,13 +3573,13 @@ bool Intuition::close_screen(u32 screen) {
     }
     graphics_->clear_vp_mode_id(screen + ndk::sc_ViewPort);
     exec_->free(screen, rec->screen_bytes);
-    *rec = ScreenRecord{};
+    screen_records_.remove(rec);
     if (default_screen_ == screen) {
         default_screen_ = 0;
     }
 
     if (was_front) {
-        front_ = screens_[0];
+        front_ = screens_.empty() ? 0 : screens_.front();
         display_->front_screen = front_;
         set_front_mode(*display_, screen_mode_id(front_));
         display_->palette_dirty = false;
@@ -3676,14 +3593,11 @@ bool Intuition::close_screen(u32 screen) {
 }
 
 void Intuition::screen_to_front(u32 screen) {
-    const u32 index = find_screen(screen);
-    if (index >= kMaxScreens) {
+    const auto at = std::find(screens_.begin(), screens_.end(), screen);
+    if (at == screens_.end()) {
         return;
     }
-    for (u32 i = index; i > 0; --i) {
-        screens_[i] = screens_[i - 1];
-    }
-    screens_[0] = screen;
+    std::rotate(screens_.begin(), at, at + 1);
     front_ = screen;
     display_->front_screen = screen;
     set_front_mode(*display_, screen_mode_id(screen));
@@ -3693,21 +3607,12 @@ void Intuition::screen_to_front(u32 screen) {
 }
 
 void Intuition::screen_to_back(u32 screen) {
-    const u32 index = find_screen(screen);
-    if (index >= kMaxScreens) {
+    const auto at = std::find(screens_.begin(), screens_.end(), screen);
+    if (at == screens_.end()) {
         return;
     }
-    u32 open = 0;
-    for (u32 known : screens_) {
-        if (known != 0) {
-            ++open;
-        }
-    }
-    for (u32 i = index; i + 1 < open; ++i) {
-        screens_[i] = screens_[i + 1];
-    }
-    screens_[open - 1] = screen;
-    front_ = screens_[0];
+    std::rotate(at, at + 1, screens_.end());
+    front_ = screens_.front();
     display_->front_screen = front_;
     set_front_mode(*display_, screen_mode_id(front_));
     display_->palette_dirty = false;
@@ -3715,34 +3620,12 @@ void Intuition::screen_to_back(u32 screen) {
     refresh_screen(front_);
 }
 
-u32 Intuition::find_window(u32 window) const {
-    if (window == 0) {
-        return kMaxWindows;
-    }
-    for (u32 i = 0; i < kMaxWindows; ++i) {
-        if (windows_[i] == window) {
-            return i;
-        }
-    }
-    return kMaxWindows;
-}
-
 Intuition::WindowRecord* Intuition::find_window_record(u32 window) {
-    for (WindowRecord& rec : window_records_) {
-        if (rec.addr == window) {
-            return &rec;
-        }
-    }
-    return nullptr;
+    return window_records_.find_if([&](const WindowRecord& rec) { return rec.addr == window; });
 }
 
 const Intuition::WindowRecord* Intuition::find_window_record(u32 window) const {
-    for (const WindowRecord& rec : window_records_) {
-        if (rec.addr == window) {
-            return &rec;
-        }
-    }
-    return nullptr;
+    return window_records_.find_if([&](const WindowRecord& rec) { return rec.addr == window; });
 }
 
 void Intuition::reply_message(void* ctx, u32 message) {
@@ -3757,12 +3640,8 @@ bool Intuition::is_tracked_message(u32 message) const {
     if (addr == 0) {
         return false;
     }
-    for (u32 slot : messages_) {
-        if (slot == addr) {
-            return true;
-        }
-    }
-    return false;
+    return std::any_of(messages_.begin(), messages_.end(),
+                       [&](const TrackedMessage& tracked) { return tracked.message == addr; });
 }
 
 void Intuition::free_tracked_message(u32 message) {
@@ -3773,36 +3652,34 @@ void Intuition::free_tracked_message(u32 message) {
     if (addr == 0) {
         return;
     }
-    for (u32 i = 0; i < kMaxMessages; ++i) {
-        if (messages_[i] == addr) {
-            messages_[i] = 0;
-            message_owners_[i] = 0;
-            free_message_update(i);
-            Bus b(*machine_);
-            const u32 idcmp_class = b.r32(addr + ndk::im_Class);
-            const u32 window = b.r32(addr + ndk::im_IDCMPWindow);
-            if (b.ok() && idcmp_class == ndk::IDCMP_NEWSIZE && window != 0) {
-                WindowRecord* rec = find_window_record(window);
-                if (rec != nullptr) {
-                    rec->newsize_pending = false;
-                    // A size reached while this NEWSIZE waited for its
-                    // reply is reported now that the window takes one again.
-                    if (drag_ == Drag::None || drag_window_ != window) {
-                        post_newsize(*rec);
-                    }
-                }
+    const auto tracked =
+        std::find_if(messages_.begin(), messages_.end(),
+                     [&](const TrackedMessage& entry) { return entry.message == addr; });
+    if (tracked == messages_.end()) {
+        return;
+    }
+    free_message_update(*tracked);
+    messages_.erase(tracked);
+    Bus b(*machine_);
+    const u32 idcmp_class = b.r32(addr + ndk::im_Class);
+    const u32 window = b.r32(addr + ndk::im_IDCMPWindow);
+    if (b.ok() && idcmp_class == ndk::IDCMP_NEWSIZE && window != 0) {
+        WindowRecord* rec = find_window_record(window);
+        if (rec != nullptr) {
+            rec->newsize_pending = false;
+            // A size reached while this NEWSIZE waited for its
+            // reply is reported now that the window takes one again.
+            if (drag_ == Drag::None || drag_window_ != window) {
+                post_newsize(*rec);
             }
-            exec_->free(addr, ndk::IntuiMessage_SIZEOF);
-            return;
         }
     }
+    exec_->free(addr, ndk::IntuiMessage_SIZEOF);
 }
 
-void Intuition::free_message_update(u32 index) {
-    if (message_updates_[index] != 0) {
-        exec_->free(message_updates_[index], message_update_bytes_[index]);
-        message_updates_[index] = 0;
-        message_update_bytes_[index] = 0;
+void Intuition::free_message_update(const TrackedMessage& tracked) {
+    if (tracked.update != 0) {
+        exec_->free(tracked.update, tracked.update_bytes);
     }
 }
 
@@ -3878,7 +3755,7 @@ void Intuition::remove_window_messages(u32 port, u32 window) {
 
 bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress,
                                   u32 iaddress_bytes, u16 qualifier) {
-    if (window == 0 || find_window(window) >= kMaxWindows) {
+    if (!window_open(window)) {
         return false;
     }
     const WindowRecord* rec = find_window_record(window);
@@ -3890,14 +3767,7 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     if (!b.ok() || (idcmp & idcmp_class) == 0) {
         return false;
     }
-    u32 slot = kMaxMessages;
-    for (u32 i = 0; i < kMaxMessages; ++i) {
-        if (messages_[i] == 0) {
-            slot = i;
-            break;
-        }
-    }
-    if (slot == kMaxMessages) {
+    if (messages_.size() >= kMaxMessages) {
         ++dropped_messages_;
         return false;
     }
@@ -3926,12 +3796,8 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
         exec_->free(msg, ndk::IntuiMessage_SIZEOF);
         return false;
     }
-    messages_[slot] = msg;
-    message_owners_[slot] = rec->owner;
-    if (iaddress_bytes != 0) {
-        message_updates_[slot] = iaddress;
-        message_update_bytes_[slot] = iaddress_bytes;
-    }
+    messages_.push_back(
+        TrackedMessage{msg, rec->owner, iaddress_bytes != 0 ? iaddress : 0, iaddress_bytes});
     return true;
 }
 
@@ -3940,8 +3806,7 @@ void Intuition::post_mouse_button(u16 code) {
 }
 
 void Intuition::redraw_window_bar(u32 window) {
-    if (window == 0 || machine_ == nullptr || graphics_ == nullptr ||
-        find_window(window) >= kMaxWindows) {
+    if (machine_ == nullptr || graphics_ == nullptr || !window_open(window)) {
         return;
     }
     const WindowRecord* rec = find_window_record(window);
@@ -4006,41 +3871,23 @@ u32 Intuition::window_at(i32 x, i32 y) const {
     if (front_ == 0) {
         return 0;
     }
-    for (const ScreenRecord& srec : screen_records_) {
-        if (srec.addr != front_) {
-            continue;
-        }
-        u32 window = srec.first_window;
-        for (u32 step = 0; step < kMaxWindows && window != 0; ++step) {
-            const WindowRecord* rec = find_window_record(window);
-            if (rec == nullptr) {
-                return 0;
-            }
-            if (x >= rec->left && x < rec->left + rec->width && y >= rec->top &&
-                y < rec->top + rec->height) {
-                return window;
-            }
-            window = rec->next_window;
-        }
+    const ScreenRecord* srec = find_screen_record(front_);
+    if (srec == nullptr) {
         return 0;
     }
-    return 0;
-}
-
-Intuition::WindowRecord* Intuition::free_window_record() {
-    for (WindowRecord& rec : window_records_) {
-        if (rec.addr == 0) {
-            return &rec;
+    u32 window = srec->first_window;
+    for (u32 step = 0; step < kMaxWindows && window != 0; ++step) {
+        const WindowRecord* rec = find_window_record(window);
+        if (rec == nullptr) {
+            return 0;
         }
+        if (x >= rec->left && x < rec->left + rec->width && y >= rec->top &&
+            y < rec->top + rec->height) {
+            return window;
+        }
+        window = rec->next_window;
     }
-    return nullptr;
-}
-
-void Intuition::remove_window_at(u32 index) {
-    for (u32 i = index; i + 1 < kMaxWindows; ++i) {
-        windows_[i] = windows_[i + 1];
-    }
-    windows_[kMaxWindows - 1] = 0;
+    return 0;
 }
 
 u32 Intuition::open_window(u32 new_window, u32 tags) {
@@ -4064,7 +3911,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     } else {
         screen = front_;
     }
-    if (screen == 0 || find_screen(screen) >= kMaxScreens) {
+    if (!has_screen(screen)) {
         LogLine().text("intuition: window without a screen").send();
         return 0;
     }
@@ -4075,19 +3922,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         return 0;
     }
 
-    u32 open = 0;
-    for (u32 window : windows_) {
-        if (window != 0) {
-            ++open;
-        }
-    }
-    if (open == kMaxWindows) {
-        LogLine().text("intuition: window limit reached").send();
-        return 0;
-    }
-    WindowRecord* rec = free_window_record();
     ScreenRecord* srec = find_screen_record(screen);
-    if (rec == nullptr || srec == nullptr) {
+    if (window_records_.full() || srec == nullptr) {
         LogLine().text("intuition: window limit reached").send();
         return 0;
     }
@@ -4319,6 +4155,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     b.w32(layer + ndk::ly_SuperBitMap, bitmap);
     b.w32(layer + ndk::ly_Window, window);
 
+    WindowRecord* rec = window_records_.add();
     rec->addr = window;
     // The Workbench's windows stay the Workbench's even when IPrefs' task
     // runs the hook that opens them.
@@ -4360,12 +4197,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         (a.flags & ndk::WFLG_BACKDROP) != 0 ? last_normal_window(*srec) : 0;
     insert_window_after(*srec, *rec, insert_after);
     write_window_links(screen);
-    for (u32& slot : windows_) {
-        if (slot == 0) {
-            slot = window;
-            break;
-        }
-    }
+    windows_.push_back(window);
 
     begin_batch();
     if ((a.flags & ndk::WFLG_ACTIVATE) != 0) {
@@ -4404,8 +4236,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
 }
 
 void Intuition::close_window(u32 window) {
-    const u32 index = find_window(window);
-    if (index >= kMaxWindows) {
+    if (!window_open(window)) {
         return;
     }
     drop_requester(window);
@@ -4415,11 +4246,7 @@ void Intuition::close_window(u32 window) {
     if (string_.window == window) {
         string_ = ActiveString{};
     }
-    for (Block& block : blocks_) {
-        if (block.window == window) {
-            block = Block{};
-        }
-    }
+    std::erase_if(blocks_, [&](const Block& block) { return block.window == window; });
     if (menu_.active && menu_.window == window) {
         leave_menu_mode();
     }
@@ -4440,7 +4267,7 @@ void Intuition::close_window(u32 window) {
     Bus(*machine_).w32(window + ndk::wd_FirstGadget, 0);
     WindowRecord* rec = find_window_record(window);
     if (rec == nullptr) {
-        remove_window_at(index);
+        std::erase(windows_, window);
         return;
     }
     const u32 screen = rec->screen;
@@ -4471,7 +4298,7 @@ void Intuition::close_window(u32 window) {
         write_window_links(screen);
     }
 
-    remove_window_at(index);
+    std::erase(windows_, window);
     if (rec->user_port != 0) {
         if (rec->user_port_owned) {
             flush_window_messages(rec->user_port);
@@ -4498,7 +4325,7 @@ void Intuition::close_window(u32 window) {
         exec_->free(rec->rp, rec->rp_bytes);
     }
     exec_->free(window, rec->window_bytes);
-    *rec = WindowRecord{};
+    window_records_.remove(rec);
 
     if (srec != nullptr) {
         compose(screen, window_damage_rect(srec->depth, left, top, width, height, flags));
@@ -4506,43 +4333,15 @@ void Intuition::close_window(u32 window) {
 }
 
 Intuition::Requester* Intuition::find_requester(u32 window) {
-    if (window == 0) {
-        return nullptr;
-    }
-    for (Requester& req : requesters_) {
-        if (req.window == window) {
-            return &req;
-        }
-    }
-    return nullptr;
+    return requesters_.find_if([&](const Requester& req) { return req.window == window; });
 }
 
 const Intuition::Requester* Intuition::find_requester(u32 window) const {
-    if (window == 0) {
-        return nullptr;
-    }
-    for (const Requester& req : requesters_) {
-        if (req.window == window) {
-            return &req;
-        }
-    }
-    return nullptr;
-}
-
-Intuition::Requester* Intuition::free_requester() {
-    for (Requester& req : requesters_) {
-        if (req.window == 0) {
-            return &req;
-        }
-    }
-    return nullptr;
+    return requesters_.find_if([&](const Requester& req) { return req.window == window; });
 }
 
 void Intuition::drop_requester(u32 window) {
-    Requester* req = find_requester(window);
-    if (req != nullptr) {
-        *req = Requester{};
-    }
+    requesters_.remove_if([&](const Requester& req) { return req.window == window; });
 }
 
 i32 Intuition::requester_line_height(u32 window) {
@@ -4561,8 +4360,7 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     if (machine_ == nullptr || exec_ == nullptr || graphics_ == nullptr) {
         return 0;
     }
-    Requester* slot = free_requester();
-    if (slot == nullptr) {
+    if (requesters_.full()) {
         LogLine().text("intuition: requester limit reached").send();
         return 0;
     }
@@ -4574,7 +4372,7 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     if (screen == 0) {
         screen = default_screen_ != 0 ? default_screen_ : front_;
     }
-    if (screen == 0 || find_screen(screen) >= kMaxScreens) {
+    if (!has_screen(screen)) {
         LogLine().text("intuition: requester without a screen").send();
         return 0;
     }
@@ -4707,7 +4505,7 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     const Rect text_box{inner_x0, inner_y0,
                         smaller(inner_x0 + text_box_w - 1, inner_x1),
                         smaller(inner_y0 + text_box_h - 1, button_y0 - kRequesterGap - 1)};
-    *slot = req;
+    *requesters_.add() = req;
 
     const u32 rp = b.r32(requester + ndk::wd_RPort);
     if (b.ok() && rp != 0) {
@@ -4843,6 +4641,11 @@ i32 Intuition::sys_req_handler(u32 window, u32 idcmp_ptr, bool wait) {
                 return -2;
             }
             if (exec_->wait_for(1u << bit, ~u64(0)) == 0) {
+                return -2;
+            }
+            // Other tasks ran while this one waited, and may have closed the window.
+            req = find_requester(window);
+            if (req == nullptr) {
                 return -2;
             }
             continue;
@@ -5052,7 +4855,7 @@ void Intuition::clear_menu_strip(u32 window) {
 }
 
 bool Intuition::modify_idcmp(u32 window, u32 flags) {
-    if (find_window(window) >= kMaxWindows) {
+    if (!window_open(window)) {
         return false;
     }
     WindowRecord* rec = find_window_record(window);
@@ -5108,8 +4911,7 @@ bool Intuition::modify_idcmp(u32 window, u32 flags) {
 }
 
 void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
-    const u32 index = find_window(window);
-    if (index >= kMaxWindows) {
+    if (!window_open(window)) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
@@ -5174,8 +4976,7 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
 }
 
 void Intuition::refresh_window_frame(u32 window) {
-    if (window == 0 || machine_ == nullptr || graphics_ == nullptr ||
-        find_window(window) >= kMaxWindows) {
+    if (machine_ == nullptr || graphics_ == nullptr || !window_open(window)) {
         return;
     }
     const WindowRecord* rec = find_window_record(window);
@@ -5286,8 +5087,7 @@ bool Intuition::move_window_after(ScreenRecord& srec, WindowRecord& rec, u32 aft
 }
 
 void Intuition::window_to_front(u32 window) {
-    const u32 index = find_window(window);
-    if (index >= kMaxWindows) {
+    if (!window_open(window)) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
@@ -5309,8 +5109,7 @@ void Intuition::window_to_front(u32 window) {
 }
 
 void Intuition::window_to_back(u32 window) {
-    const u32 index = find_window(window);
-    if (index >= kMaxWindows) {
+    if (!window_open(window)) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
@@ -5336,8 +5135,7 @@ void Intuition::window_to_back(u32 window) {
 // is left out, and the ones set are kept inside the screen.
 bool Intuition::window_limits(u32 window, i32 width_min, i32 height_min, u32 width_max,
                               u32 height_max) {
-    const u32 index = find_window(window);
-    WindowRecord* rec = index < kMaxWindows ? find_window_record(window) : nullptr;
+    WindowRecord* rec = window_open(window) ? find_window_record(window) : nullptr;
     const ScreenRecord* srec = rec != nullptr ? find_screen_record(rec->screen) : nullptr;
     if (srec == nullptr) {
         return false;
@@ -5386,7 +5184,7 @@ bool Intuition::window_limits(u32 window, i32 width_min, i32 height_min, u32 wid
 }
 
 void Intuition::set_size_hook(u32 window, WindowHook hook, void* ctx) {
-    if (find_window(window) >= kMaxWindows) {
+    if (!window_open(window)) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
@@ -5831,7 +5629,7 @@ void Intuition::move_window_to(u32 window, i32 left, i32 top) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
-    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+    if (rec == nullptr || !window_open(window)) {
         return;
     }
     const ScreenRecord* srec = find_screen_record(rec->screen);
@@ -5870,7 +5668,7 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
         return;
     }
     WindowRecord* rec = find_window_record(window);
-    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+    if (rec == nullptr || !window_open(window)) {
         return;
     }
     const ScreenRecord* srec = find_screen_record(rec->screen);
@@ -5921,12 +5719,13 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     if (w.first_gadget != 0) {
         draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
     }
-    if (rec->size_hook != nullptr) {
-        rec->size_hook(rec->size_ctx, window);
-    }
-    // The hook may close the window.
+    // A gadget's own drawing code may close the window, and the hook too.
     rec = find_window_record(window);
-    if (rec != nullptr && find_window(window) < kMaxWindows) {
+    if (rec != nullptr && rec->size_hook != nullptr) {
+        rec->size_hook(rec->size_ctx, window);
+        rec = find_window_record(window);
+    }
+    if (rec != nullptr && window_open(window)) {
         post_newsize(*rec);
         compose(rec->screen, old);
         compose(rec->screen,
@@ -6012,7 +5811,7 @@ void Intuition::end_drag() {
         return;
     }
     WindowRecord* rec = find_window_record(window);
-    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+    if (rec == nullptr || !window_open(window)) {
         return;
     }
     if (kind == Drag::Size) {
@@ -6027,12 +5826,8 @@ void Intuition::reclaim_owned_by(u32 task, u32 keep_window, u32 keep_screen) {
 
 void Intuition::reclaim_owned_by(u32 task, const u32* keep_windows, u32 count,
                                  u32 keep_screen) {
-    u32 win_to_close[kMaxWindows]{};
-    u32 win_count = 0;
+    std::vector<u32> win_to_close;
     for (u32 window : windows_) {
-        if (window == 0) {
-            continue;
-        }
         const WindowRecord* rec = find_window_record(window);
         if (rec == nullptr || rec->owner != task) {
             continue;
@@ -6042,28 +5837,27 @@ void Intuition::reclaim_owned_by(u32 task, const u32* keep_windows, u32 count,
             keep = keep_windows[i] == window;
         }
         if (!keep) {
-            win_to_close[win_count++] = window;
+            win_to_close.push_back(window);
         }
     }
-    for (u32 i = 0; i < win_count; ++i) {
-        close_window(win_to_close[i]);
+    for (u32 window : win_to_close) {
+        close_window(window);
     }
 
-    u32 scr_to_close[kMaxScreens]{};
-    u32 scr_count = 0;
+    std::vector<u32> scr_to_close;
     for (u32 screen : screens_) {
-        if (screen == 0 || screen == keep_screen) {
+        if (screen == keep_screen) {
             continue;
         }
         const ScreenRecord* rec = find_screen_record(screen);
         if (rec != nullptr && rec->owner == task) {
-            scr_to_close[scr_count++] = screen;
+            scr_to_close.push_back(screen);
         }
     }
-    for (u32 i = 0; i < scr_count; ++i) {
-        close_screen(scr_to_close[i]);
+    for (u32 screen : scr_to_close) {
+        close_screen(screen);
     }
-    if (keep_screen != 0 && front_ != keep_screen && find_screen(keep_screen) < kMaxScreens) {
+    if (front_ != keep_screen && has_screen(keep_screen)) {
         screen_to_front(keep_screen);
     }
 
@@ -6075,19 +5869,17 @@ void Intuition::reclaim_owned_by(u32 task, const u32* keep_windows, u32 count,
             }
         }
     }
-    for (u32 i = 0; i < kMaxMessages; ++i) {
-        if (messages_[i] != 0 && message_owners_[i] == task) {
-            const u32 msg = messages_[i];
-            messages_[i] = 0;
-            message_owners_[i] = 0;
-            if (exec_ != nullptr) {
-                free_message_update(i);
-                exec_->free(msg, ndk::IntuiMessage_SIZEOF);
+    if (exec_ != nullptr) {
+        for (const TrackedMessage& tracked : messages_) {
+            if (tracked.owner == task) {
+                free_message_update(tracked);
+                exec_->free(tracked.message, ndk::IntuiMessage_SIZEOF);
             }
         }
     }
+    std::erase_if(messages_, [&](const TrackedMessage& tracked) { return tracked.owner == task; });
 
-    if (active_window_ != 0 && find_window(active_window_) >= kMaxWindows) {
+    if (!window_open(active_window_)) {
         active_window_ = 0;
     }
     pressed_gadget_window_ = 0;
@@ -6104,7 +5896,7 @@ u32 Intuition::window_owner(u32 window) const {
 }
 
 bool Intuition::window_open(u32 window) const {
-    return find_window(window) < kMaxWindows;
+    return std::find(windows_.begin(), windows_.end(), window) != windows_.end();
 }
 
 void Intuition::log_unhandled_gadget_type(u32 gtype) {
@@ -6122,9 +5914,6 @@ u32 Intuition::find_gadget_window(u32 gadget) const {
     const u32 target = native::guest_address(*machine_, gadget);
     Bus b(*machine_);
     for (u32 window : windows_) {
-        if (window == 0) {
-            continue;
-        }
         u32 cur = b.r32(window + ndk::wd_FirstGadget);
         for (u32 step = 0; step < kMaxGadgets && cur != 0; ++step) {
             if (native::guest_address(*machine_, cur) == target) {
@@ -6144,11 +5933,9 @@ void Intuition::clear_gadget_hook(u32 gadget) {
         return;
     }
     const u32 target = native::guest_address(*machine_, gadget);
-    for (GadgetHookEntry& entry : gadget_hooks_) {
-        if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == target) {
-            entry = GadgetHookEntry{};
-        }
-    }
+    std::erase_if(gadget_hooks_, [&](const GadgetHookEntry& entry) {
+        return native::guest_address(*machine_, entry.gadget) == target;
+    });
 }
 
 void Intuition::clear_window_gadget_hooks(u32 window) {
@@ -6164,11 +5951,8 @@ void Intuition::clear_window_gadget_hooks(u32 window) {
             break;
         }
     }
-    for (GadgetHookEntry& entry : gadget_hooks_) {
-        if (entry.window == window) {
-            entry = GadgetHookEntry{};
-        }
-    }
+    std::erase_if(gadget_hooks_,
+                  [&](const GadgetHookEntry& entry) { return entry.window == window; });
 }
 
 void Intuition::call_gadget_hook(u32 gadget, u32 vert_pot) {
@@ -6176,12 +5960,14 @@ void Intuition::call_gadget_hook(u32 gadget, u32 vert_pot) {
         return;
     }
     const u32 target = native::guest_address(*machine_, gadget);
-    for (const GadgetHookEntry& entry : gadget_hooks_) {
-        if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == target &&
-            entry.hook != nullptr) {
-            entry.hook(entry.ctx, gadget, vert_pot);
-            return;
-        }
+    const auto entry = std::find_if(gadget_hooks_.begin(), gadget_hooks_.end(),
+                                    [&](const GadgetHookEntry& hooked) {
+                                        return native::guest_address(*machine_, hooked.gadget) ==
+                                                   target &&
+                                               hooked.hook != nullptr;
+                                    });
+    if (entry != gadget_hooks_.end()) {
+        entry->hook(entry->ctx, gadget, vert_pot);
     }
 }
 
@@ -6190,34 +5976,23 @@ void Intuition::set_gadget_hook(u32 gadget, GadgetHook hook, void* ctx) {
         return;
     }
     const u32 target = native::guest_address(*machine_, gadget);
-    GadgetHookEntry* slot = nullptr;
-    for (GadgetHookEntry& entry : gadget_hooks_) {
-        if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == target) {
-            slot = &entry;
-            break;
-        }
-    }
+    const auto slot = std::find_if(gadget_hooks_.begin(), gadget_hooks_.end(),
+                                   [&](const GadgetHookEntry& entry) {
+                                       return native::guest_address(*machine_, entry.gadget) ==
+                                              target;
+                                   });
     if (hook == nullptr) {
-        if (slot != nullptr) {
-            *slot = GadgetHookEntry{};
+        if (slot != gadget_hooks_.end()) {
+            gadget_hooks_.erase(slot);
         }
         return;
     }
-    if (slot == nullptr) {
-        for (GadgetHookEntry& entry : gadget_hooks_) {
-            if (entry.gadget == 0) {
-                slot = &entry;
-                break;
-            }
-        }
+    const GadgetHookEntry entry{gadget, find_gadget_window(gadget), hook, ctx};
+    if (slot != gadget_hooks_.end()) {
+        *slot = entry;
+    } else if (gadget_hooks_.size() < kMaxGadgetHooks) {
+        gadget_hooks_.push_back(entry);
     }
-    if (slot == nullptr) {
-        return;
-    }
-    slot->gadget = gadget;
-    slot->window = find_gadget_window(gadget);
-    slot->hook = hook;
-    slot->ctx = ctx;
 }
 
 void Intuition::report_image_damage(const raster::RastPortView& view, const Rect& rect) {
@@ -6330,7 +6105,7 @@ void Intuition::draw_image_state(u32 rp, u32 image, i32 left, i32 top, u32 state
 }
 
 void Intuition::report_mouse(u32 window, bool on) {
-    if (machine_ == nullptr || find_window(window) >= kMaxWindows) {
+    if (machine_ == nullptr || !window_open(window)) {
         return;
     }
     Bus b(*machine_);
@@ -6567,7 +6342,7 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
         return;
     }
     const WindowRecord* rec = find_window_record(window);
-    if (rec == nullptr || find_window(window) >= kMaxWindows) {
+    if (rec == nullptr || !window_open(window)) {
         return;
     }
     WindowView w = load_window(b, window);
@@ -7046,12 +6821,8 @@ void Intuition::post_prop_message(Bus& b, u32 window, u32 idcmp_class, u32 gadge
 }
 
 bool Intuition::blocked(u32 window) const {
-    for (const Block& block : blocks_) {
-        if (window != 0 && block.window == window) {
-            return true;
-        }
-    }
-    return false;
+    return std::any_of(blocks_.begin(), blocks_.end(),
+                       [&](const Block& block) { return block.window == window; });
 }
 
 void Intuition::drop_custom_gadget() {
@@ -7255,7 +7026,7 @@ u32 Intuition::add_glist(u32 window, u32 gadget, i32 position, i32 count) {
     for (u32 step = 0; step < added && linked != 0; ++step) {
         const u32 masked = native::guest_address(*machine_, linked);
         for (GadgetHookEntry& entry : gadget_hooks_) {
-            if (entry.gadget != 0 && native::guest_address(*machine_, entry.gadget) == masked) {
+            if (native::guest_address(*machine_, entry.gadget) == masked) {
                 entry.window = window;
             }
         }
@@ -7417,14 +7188,10 @@ void Intuition::intui_ticks() {
 
 bool Intuition::tick_outstanding(u32 window) const {
     Bus b(*machine_);
-    for (u32 i = 0; i < kMaxMessages; ++i) {
-        const u32 msg = messages_[i];
-        if (msg != 0 && b.r32(msg + ndk::im_Class) == ndk::IDCMP_INTUITICKS &&
-            b.r32(msg + ndk::im_IDCMPWindow) == window) {
-            return true;
-        }
-    }
-    return false;
+    return std::any_of(messages_.begin(), messages_.end(), [&](const TrackedMessage& tracked) {
+        return b.r32(tracked.message + ndk::im_Class) == ndk::IDCMP_INTUITICKS &&
+               b.r32(tracked.message + ndk::im_IDCMPWindow) == window;
+    });
 }
 
 void Intuition::wheel_event(i32 steps) {
@@ -7442,7 +7209,7 @@ void Intuition::wheel_event(i32 steps) {
 }
 
 u32 Intuition::window_idcmp(u32 window) const {
-    if (find_window(window) >= kMaxWindows) {
+    if (!window_open(window)) {
         return 0;
     }
     Bus b(*machine_);

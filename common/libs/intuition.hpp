@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "../slot_list.hpp"
 #include "../types.hpp"
 #include "boopsi.hpp"
 #include "chrome.hpp"
@@ -30,6 +31,8 @@
 #include "gfx.hpp"
 #include "menu_layout.hpp"
 #include "native.hpp"
+
+#include <vector>
 
 // intuition.library written in C++ for code run by the 68000 translator.
 //
@@ -185,13 +188,13 @@ public:
         void* ctx;
     };
 
-    static constexpr u32 kMaxScreens = 4;
-    static constexpr u32 kMaxWindows = 16;
+    static constexpr u32 kMaxScreens = 16;
+    static constexpr u32 kMaxWindows = 256;
     static constexpr u32 kMaxTagItems = 256;
     static constexpr u32 kInvalidModeId = 0xFFFFFFFF;
-    static constexpr u32 kMaxMessages = 128;
+    static constexpr u32 kMaxMessages = 4096;
     static constexpr u32 kMaxGadgets = 64;
-    static constexpr u32 kMaxGadgetHooks = 8;
+    static constexpr u32 kMaxGadgetHooks = 64;
 
     // The close and depth buttons of a window at left, top whose title
     // bar has the metrics, topaz 8's unless given.
@@ -410,7 +413,7 @@ private:
 
     static constexpr u32 kVectors = intuition_lvo::Last / 6;
 
-    static constexpr u32 kMaxRequesters = 8;
+    static constexpr u32 kMaxRequesters = 64;
     static constexpr u32 kMaxRequesterButtons = 8;
     static constexpr u32 kMaxRequesterLabel = 40;
     static constexpr u32 kMaxRequesterText = 1024;
@@ -592,6 +595,17 @@ private:
         void* ctx = nullptr;
     };
 
+    // An IntuiMessage posted and not yet replied to, with the task that
+    // opened its window.
+    struct TrackedMessage {
+        u32 message = 0;
+        u32 owner = 0;
+        // The attribute list an IDCMP_IDCMPUPDATE's IAddress points at, and its
+        // size, freed with the message.
+        u32 update = 0;
+        u32 update_bytes = 0;
+    };
+
     // The strip shown while the right button is held: which title is open,
     // which items are highlighted, and the layout read from the guest
     // structures.
@@ -668,22 +682,18 @@ private:
     // recomposes every pixel, as OpenWorkBench starts the screen over.
     void reset_screen(u32 screen);
     void compose(u32 screen, Rect r);
-    u32 find_screen(u32 screen) const;
+    bool has_screen(u32 screen) const;
     // The ColorMap of the screen a BitMap is shown on: the screen's own,
     // its backdrop's or one of its windows'. 0 for any other BitMap.
     u32 colormap_of_bitmap(u32 bitmap) const;
     ScreenRecord* find_screen_record(u32 screen);
-    ScreenRecord* free_screen_record();
-    void remove_at(u32 index);
+    const ScreenRecord* find_screen_record(u32 screen) const;
     void write_links();
     void write_window_links(u32 screen);
     void screen_to_back(u32 screen);
     void refresh_screen(u32 screen);
-    u32 find_window(u32 window) const;
     WindowRecord* find_window_record(u32 window);
     const WindowRecord* find_window_record(u32 window) const;
-    WindowRecord* free_window_record();
-    void remove_window_at(u32 index);
     u32 last_normal_window(const ScreenRecord& srec, u32 skip_window = 0) const;
     u32 last_window(const ScreenRecord& srec, u32 skip_window = 0) const;
     void insert_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after);
@@ -705,7 +715,7 @@ private:
     static void notify_idcmp_update(void* ctx, u32 window, const u32* tags, u32 count,
                                     u32 flags);
     void post_idcmp_update(u32 window, const u32* tags, u32 count);
-    void free_message_update(u32 index);
+    void free_message_update(const TrackedMessage& tracked);
     void post_newsize(WindowRecord& rec);
     void route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
     bool menu_strip_ready(native::Bus& b) const;
@@ -772,7 +782,6 @@ private:
                         i32 min_width, i32 min_height);
     Requester* find_requester(u32 window);
     const Requester* find_requester(u32 window) const;
-    Requester* free_requester();
     void drop_requester(u32 window);
     void draw_requester_button(u32 window, const Requester& req, u32 index, bool pressed);
 
@@ -840,8 +849,8 @@ private:
         u32 window = 0;
         u32 requester = 0;
     };
-    static constexpr u32 kMaxBlocks = 16;
-    Block blocks_[kMaxBlocks]{};
+    static constexpr u32 kMaxBlocks = 64;
+    std::vector<Block> blocks_;
     bool blocked(u32 window) const;
     bool bar_button_lit_ = false;  // the held Close or Depth button shows pressed
     u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
@@ -873,18 +882,16 @@ private:
     u32 dropped_messages_ = 0;
     u32 batch_depth_ = 0;
     u64 last_tick_us_ = 0;  // when intui_ticks last sent one
-    u32 screens_[kMaxScreens]{};
-    u32 windows_[kMaxWindows]{};
-    u32 messages_[kMaxMessages]{};
-    u32 message_owners_[kMaxMessages]{};
-    // The attribute list an IDCMP_IDCMPUPDATE's IAddress points at, and its
-    // size, freed with the message.
-    u32 message_updates_[kMaxMessages]{};
-    u32 message_update_bytes_[kMaxMessages]{};
-    ScreenRecord screen_records_[kMaxScreens]{};
-    WindowRecord window_records_[kMaxWindows]{};
-    Requester requesters_[kMaxRequesters]{};
-    GadgetHookEntry gadget_hooks_[kMaxGadgetHooks]{};
+    // The open screens, the front one first.
+    std::vector<u32> screens_;
+    // The open windows in the order they opened; the guest window list of
+    // each screen holds their depth order.
+    std::vector<u32> windows_;
+    std::vector<TrackedMessage> messages_;
+    SlotList<ScreenRecord> screen_records_{kMaxScreens};
+    SlotList<WindowRecord> window_records_{kMaxWindows};
+    SlotList<Requester> requesters_{kMaxRequesters};
+    std::vector<GadgetHookEntry> gadget_hooks_;
     bool unhandled_gadget_types_[8]{};
     NativeVector vectors_[kVectors]{};
     Boopsi boopsi_;

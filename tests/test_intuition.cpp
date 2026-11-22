@@ -68,12 +68,15 @@ struct IntuitionTest {
     }
 
     static u32 requester_window(const Intuition& g) {
-        for (const Intuition::Requester& req : g.requesters_) {
-            if (req.window != 0) {
-                return req.window;
-            }
-        }
-        return 0;
+        return g.requesters_.empty() ? 0 : g.requesters_[0].window;
+    }
+
+    // Everything Intuition keeps for screens, windows, queued messages,
+    // requesters and gadget hooks.
+    static usize records_kept(const Intuition& g) {
+        return g.screens_.size() + g.windows_.size() + g.messages_.size() +
+               g.screen_records_.size() + g.window_records_.size() + g.requesters_.size() +
+               g.gadget_hooks_.size();
     }
 
     static const Intuition::ScreenModePrefs& screen_mode(const Intuition& g) {
@@ -793,15 +796,41 @@ void open_screen_out_of_memory_returns_zero_and_frees() {
 void open_screen_limit_returns_zero() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 64, 64, 2, 0, 1, 0);
-    u32 screens[4] = {0, 0, 0, 0};
-    for (u32& screen : screens) {
-        screen = open_new(r, kNewScreen);
-        CHECK(screen != 0);
+    u32 front = 0;
+    for (u32 i = 0; i < Intuition::kMaxScreens; ++i) {
+        front = open_new(r, kNewScreen);
+        CHECK(front != 0);
     }
-    CHECK_EQ(r.display.front_screen, screens[3]);
+    CHECK_EQ(r.display.front_screen, front);
     CHECK_EQ(open_new(r, kNewScreen), 0u);
     CHECK(logged("intuition: screen limit reached"));
-    CHECK_EQ(r.display.front_screen, screens[3]);
+    CHECK_EQ(r.display.front_screen, front);
+}
+
+void more_than_four_screens_open_in_depth_order() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 64, 64, 2, 0, 1, 0);
+    std::vector<u32> screens;
+    for (u32 i = 0; i < 10; ++i) {
+        screens.push_back(open_new(r, kNewScreen));
+        CHECK(screens.back() != 0);
+    }
+    CHECK_EQ(r.intuition.front_screen(), screens.back());
+    // Each screen opens in front: the one behind it is its NextScreen.
+    for (usize i = 1; i < screens.size(); ++i) {
+        CHECK_EQ(r.get32(screens[i]), screens[i - 1]);
+    }
+    CHECK_EQ(r.get32(screens[0]), 0u);
+
+    r.intuition.screen_to_front(screens[3]);
+    CHECK_EQ(r.intuition.front_screen(), screens[3]);
+    CHECK_EQ(r.get32(screens[3]), screens[9]);
+    CHECK_EQ(r.get32(screens[4]), screens[2]);
+
+    for (u32 screen : screens) {
+        CHECK(r.intuition.close_screen(screen));
+    }
+    CHECK_EQ(r.intuition.front_screen(), 0u);
 }
 
 void close_screen_twice_and_null_are_ignored() {
@@ -1384,6 +1413,37 @@ void open_window_limit_gives_zero() {
         window = r.get32(window + wd_NextWindow);
     }
     CHECK_EQ(count, Intuition::kMaxWindows);
+}
+
+void more_than_sixteen_windows_open_and_close_in_any_order() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 0, 0, 32, 32, 0, 0, 0, 0);
+    std::vector<u32> windows;
+    for (u32 i = 0; i < 40; ++i) {
+        windows.push_back(open_win(r, kNewWindow));
+        CHECK(windows.back() != 0);
+    }
+    // Each window opens in front of the ones before it.
+    u32 behind = r.get32(screen + sc_FirstWindow);
+    for (auto window = windows.rbegin(); window != windows.rend(); ++window) {
+        CHECK_EQ(behind, *window);
+        CHECK(r.intuition.window_open(*window));
+        behind = r.get32(behind + wd_NextWindow);
+    }
+    CHECK_EQ(behind, 0u);
+
+    for (usize i = 0; i < windows.size(); i += 2) {
+        r.intuition.close_window(windows[i]);
+        CHECK(!r.intuition.window_open(windows[i]));
+    }
+    for (usize i = 1; i < windows.size(); i += 2) {
+        CHECK(r.intuition.window_open(windows[i]));
+        r.intuition.close_window(windows[i]);
+    }
+    CHECK_EQ(r.get32(screen + sc_FirstWindow), 0u);
 }
 
 void window_text_goes_into_the_window_only() {
@@ -7497,6 +7557,75 @@ void free_sys_request_ignores_zero_and_one() {
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::FreeSysRequest), ExitReason::Halt);
 }
 
+void more_than_eight_requesters_are_kept_at_once() {
+    GfxRig r;
+    open_requester_screen(r);
+    r.str(kEasyText, "body");
+    r.str(kEasyGadgets, "Ok");
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+    std::vector<u32> windows;
+    for (u32 i = 0; i < 10; ++i) {
+        windows.push_back(build_requester(r, 0, kEasy, 0, 0));
+        CHECK(windows.back() != 0);
+    }
+    for (u32 window : windows) {
+        CHECK_EQ(IntuitionTest::button_count(r.intuition, window), 1u);
+    }
+    for (u32 window : windows) {
+        free_requester(r, window);
+        CHECK_EQ(IntuitionTest::button_count(r.intuition, window), 0u);
+    }
+    CHECK_EQ(IntuitionTest::requester_window(r.intuition), 0u);
+}
+
+void ignore_gadget_hook(void*, u32, u32) {}
+
+void making_intuition_again_clears_everything_it_kept() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    std::vector<u32> screens;
+    for (u32 i = 0; i < 6; ++i) {
+        screens.push_back(open_new(r, kNewScreen));
+        CHECK(screens.back() != 0);
+    }
+    put_new_window(r, kNewWindow, 0, 0, 32, 32, 0, 0, 0, 0);
+    std::vector<u32> windows;
+    for (u32 i = 0; i < 19; ++i) {
+        windows.push_back(open_win(r, kNewWindow));
+        CHECK(windows.back() != 0);
+    }
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_MOUSEBUTTONS);
+    windows.push_back(open_win(r, kNewWindow));
+    CHECK(windows.back() != 0);
+    r.intuition.pointer_event(10, 30, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.set_gadget_hook(kData + 0x400, ignore_gadget_hook, nullptr);
+    r.str(kEasyText, "body");
+    r.str(kEasyGadgets, "Ok");
+    put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+    CHECK(build_requester(r, 0, kEasy, 0, 0) != 0);
+    CHECK(IntuitionTest::requester_window(r.intuition) != 0);
+    CHECK(r.intuition.active_window() != 0);
+    // The screens and their records, the 21 windows and theirs, a queued
+    // message, the requester and the gadget hook.
+    CHECK(IntuitionTest::records_kept(r.intuition) >= 6u + 6u + 21u + 21u + 1u + 1u + 1u);
+
+    CHECK(r.intuition.init(r.machine, r.exec, r.graphics, r.display));
+    CHECK_EQ(IntuitionTest::records_kept(r.intuition), 0u);
+    CHECK_EQ(r.intuition.front_screen(), 0u);
+    CHECK_EQ(r.display.front_screen, 0u);
+    CHECK_EQ(r.intuition.active_window(), 0u);
+    for (u32 window : windows) {
+        CHECK(!r.intuition.window_open(window));
+    }
+
+    const u32 screen = r.intuition.open_screen(kNewScreen, 0);
+    CHECK(screen != 0);
+    const u32 window = r.intuition.open_window(kNewWindow, 0);
+    CHECK(window != 0);
+    CHECK(r.intuition.window_open(window));
+    CHECK_EQ(IntuitionTest::records_kept(r.intuition), 4u);
+}
+
 u64 requester_clock(void*) { return 0; }
 
 struct RequesterClick {
@@ -8828,6 +8957,7 @@ int main() {
     open_screen_null_newscreen_and_taglist_gives_zero_and_faults();
     open_screen_out_of_memory_returns_zero_and_frees();
     open_screen_limit_returns_zero();
+    more_than_four_screens_open_in_depth_order();
     close_screen_twice_and_null_are_ignored();
     close_front_screen_promotes_next();
     reopen_after_close_reuses_memory();
@@ -8845,6 +8975,7 @@ int main() {
     open_window_null_newwindow_gives_zero_and_faults();
     open_window_alloc_failure_gives_zero_and_frees();
     open_window_limit_gives_zero();
+    more_than_sixteen_windows_open_and_close_in_any_order();
     window_text_goes_into_the_window_only();
     text_longer_than_window_is_clipped();
     close_window_repaints_and_unlinks();
@@ -9022,6 +9153,8 @@ int main() {
     requester_title_falls_back_to_the_window_then_the_system();
     requester_formats_text_then_gadgets_from_one_stream();
     free_sys_request_ignores_zero_and_one();
+    more_than_eight_requesters_are_kept_at_once();
+    making_intuition_again_clears_everything_it_kept();
     requester_memory_comes_back_after_easy_request();
     easy_request_ends_on_the_classes_its_idcmp_pointer_holds();
     auto_request_answers_with_the_button_that_was_chosen();
