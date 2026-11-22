@@ -30,12 +30,15 @@
 #include "framebuffer.hpp"
 #include "gdt.hpp"
 #include "idt.hpp"
+#include "kheap.hpp"
 #include "mem_init.hpp"
 #include "mmio.hpp"
 #include "page_alloc.hpp"
 #include "percpu.hpp"
 #include "splash.hpp"
 #include "task_switch.hpp"
+
+#include <vector>
 
 using namespace hombre;
 
@@ -61,6 +64,19 @@ u64 usable_mib(const BootInfo& info) {
         }
     }
     return pages / 256;  // 256 pages of 4 KiB per MiB
+}
+
+bool kernel_heap_works() {
+    constexpr u32 count = 1000;
+    std::vector<u32> values;
+    for (u32 i = 0; i < count; ++i) {
+        values.push_back(i);
+    }
+    u64 sum = 0;
+    for (u32 value : values) {
+        sum += value;
+    }
+    return sum == u64{count} * (count - 1) / 2;
 }
 
 // The loader's identity map is still in the page tables. Clearing the lower
@@ -202,6 +218,12 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write("no framebuffer\n");
     }
     if (mem_init(*info, phys_pages, mmio)) {
+        kheap_init(phys_pages, info->direct_map_base);
+        if (!kernel_heap_works()) {
+            serial::write("kernel heap failed\n");
+            halt();
+        }
+        serial::write("kernel heap ok\n");
 #if defined(HOMBRE_FAULT_TEST) && HOMBRE_FAULT_TEST == 4
         guard_fault_test(phys_pages);
 #endif

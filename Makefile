@@ -68,7 +68,7 @@ LOADER     := $(BUILD)/BOOTX64.EFI
 KCXXEXTRA ?=
 KCXX      := g++
 KLD       := ld.bfd
-KCXXFLAGS := -std=c++23 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector \
+KCXXFLAGS := -std=c++23 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-threadsafe-statics -fno-stack-protector \
              -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mno-sse -mno-mmx -nostdlib \
              -Wall -Wextra -Werror -MMD -MP $(KCXXEXTRA)
 KLDFLAGS  := -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
