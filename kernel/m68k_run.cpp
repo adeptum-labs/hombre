@@ -1329,9 +1329,7 @@ void end_boot_shell(Console& boot) {
     boot.open = false;
     log_line("shell: boot shell ended");
     while (usb_keyboard_status() == UsbStatus::Ready) {
-        intuition.flush_palette();
-        poll_mouse();
-        poll_keys();
+        task_host_poll(nullptr);
         key_queue_clear(boot);
         wait_for_work(boot);
     }
@@ -1350,9 +1348,7 @@ void shell_loop(Console& c) {
     c.line_mode = true;
     while (usb_keyboard_status() == UsbStatus::Ready &&
            (c.index == 0 || c.shell.is_open())) {
-        intuition.flush_palette();
-        poll_mouse();
-        poll_keys();
+        task_host_poll(nullptr);
         u8 queued = 0;
         while (key_queue_pop(c, queued)) {
             if (queued == ctrl_backslash) {
