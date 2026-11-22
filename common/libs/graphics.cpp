@@ -31,6 +31,8 @@
 #include "rom_fonts.hpp"
 #include "version.hpp"
 
+#include <algorithm>
+
 namespace hombre {
 
 using m68k::Machine;
@@ -2645,9 +2647,7 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     topaz_ = 0;
     topaz_name_ = 0;
     topaz_attr_ = 0;
-    for (VpModeId& pair : vp_mode_ids_) {
-        pair = VpModeId{};
-    }
+    vp_mode_ids_.clear();
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -2815,20 +2815,13 @@ void Graphics::set_vp_mode_id(u32 vp, u32 id) {
             return;
         }
     }
-    for (VpModeId& pair : vp_mode_ids_) {
-        if (pair.vp == 0) {
-            pair = VpModeId{vp, id};
-            return;
-        }
+    if (vp_mode_ids_.size() < kVpModeIds) {
+        vp_mode_ids_.push_back(VpModeId{vp, id});
     }
 }
 
 void Graphics::clear_vp_mode_id(u32 vp) {
-    for (VpModeId& pair : vp_mode_ids_) {
-        if (pair.vp == vp) {
-            pair = VpModeId{};
-        }
-    }
+    std::erase_if(vp_mode_ids_, [vp](const VpModeId& pair) { return pair.vp == vp; });
 }
 
 bool Graphics::vp_mode_id(u32 vp, u32& id) const {

@@ -26,6 +26,8 @@
 #include "../types.hpp"
 #include "exec.hpp"
 
+#include <vector>
+
 // timer.device implemented as a native Exec device backed by a host-side
 // deadline-ordered TimerQueue and the monotonic microsecond clock.
 
@@ -76,7 +78,7 @@ constexpr u32 kEClockFrequency = 709379;
 // Holds no guest pointers so it can be unit tested directly on the host.
 class TimerQueue {
 public:
-    static constexpr u32 kCapacity = 64;
+    static constexpr u32 kCapacity = 4096;
 
     struct Entry {
         u64 deadline_us = 0;
@@ -84,51 +86,43 @@ public:
         u32 task = 0;
     };
 
-    void clear() { count_ = 0; }
-    bool empty() const { return count_ == 0; }
-    bool full() const { return count_ >= kCapacity; }
-    u32 count() const { return count_; }
-    u64 next_deadline() const { return count_ > 0 ? entries_[0].deadline_us : 0; }
+    void clear() { entries_.clear(); }
+    bool empty() const { return entries_.empty(); }
+    bool full() const { return entries_.size() >= kCapacity; }
+    u32 count() const { return static_cast<u32>(entries_.size()); }
+    u64 next_deadline() const { return !entries_.empty() ? entries_.front().deadline_us : 0; }
     const Entry& entry(u32 i) const { return entries_[i]; }
 
     // Inserts (deadline_us, request, task) in ascending deadline order (FIFO
     // for equal deadlines). False when the queue is full.
     bool insert(u64 deadline_us, u32 request, u32 task = 0) {
-        if (count_ >= kCapacity) {
+        if (full()) {
             return false;
         }
-        u32 pos = count_;
-        while (pos > 0 && entries_[pos - 1].deadline_us > deadline_us) {
-            entries_[pos] = entries_[pos - 1];
-            --pos;
+        auto at = entries_.begin();
+        while (at != entries_.end() && at->deadline_us <= deadline_us) {
+            ++at;
         }
-        entries_[pos] = Entry{deadline_us, request, task};
-        ++count_;
+        entries_.insert(at, Entry{deadline_us, request, task});
         return true;
     }
 
     // Removes every entry of task.
     void remove_task(u32 task) {
-        for (u32 i = 0; i < count_;) {
-            if (entries_[i].task != task) {
-                ++i;
-                continue;
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (it->task == task) {
+                it = entries_.erase(it);
+            } else {
+                ++it;
             }
-            for (u32 j = i + 1; j < count_; ++j) {
-                entries_[j - 1] = entries_[j];
-            }
-            --count_;
         }
     }
 
     // Removes the entry matching request. False if not present.
     bool remove(u32 request) {
-        for (u32 i = 0; i < count_; ++i) {
-            if (entries_[i].request == request) {
-                for (u32 j = i + 1; j < count_; ++j) {
-                    entries_[j - 1] = entries_[j];
-                }
-                --count_;
+        for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+            if (it->request == request) {
+                entries_.erase(it);
                 return true;
             }
         }
@@ -137,20 +131,16 @@ public:
 
     // Pops the earliest entry if its deadline_us <= now_us.
     bool pop_due(u64 now_us, Entry& out) {
-        if (count_ == 0 || entries_[0].deadline_us > now_us) {
+        if (entries_.empty() || entries_.front().deadline_us > now_us) {
             return false;
         }
-        out = entries_[0];
-        for (u32 i = 1; i < count_; ++i) {
-            entries_[i - 1] = entries_[i];
-        }
-        --count_;
+        out = entries_.front();
+        entries_.erase(entries_.begin());
         return true;
     }
 
 private:
-    Entry entries_[kCapacity]{};
-    u32 count_ = 0;
+    std::vector<Entry> entries_;
 };
 
 class TimerDevice {

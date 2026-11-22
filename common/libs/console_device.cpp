@@ -23,6 +23,8 @@
 
 #include "console_device.hpp"
 
+#include <algorithm>
+
 namespace hombre {
 
 using m68k::Machine;
@@ -256,25 +258,21 @@ struct ConsoleOps {
     static void add_con_snip_hook(void* ctx, Machine& m) {
         ConsoleDevice& d = of(ctx);
         const u32 hook = m.cpu.a[0];
-        for (u32& slot : d.snip_hooks_) {
+        if (hook == 0) {
+            return;
+        }
+        for (const u32 slot : d.snip_hooks_) {
             if (slot == hook) {
                 return;
             }
         }
-        for (u32& slot : d.snip_hooks_) {
-            if (slot == 0) {
-                slot = hook;
-                return;
-            }
+        if (d.snip_hooks_.size() < ConsoleDevice::kMaxSnipHooks) {
+            d.snip_hooks_.push_back(hook);
         }
     }
 
     static void rem_con_snip_hook(void* ctx, Machine& m) {
-        for (u32& slot : of(ctx).snip_hooks_) {
-            if (slot == m.cpu.a[0]) {
-                slot = 0;
-            }
-        }
+        std::erase(of(ctx).snip_hooks_, m.cpu.a[0]);
     }
 
     static void raw_key_convert(void* ctx, Machine& m) {

@@ -27,6 +27,8 @@
 #include "exec.hpp"
 #include "keymap_library.hpp"
 
+#include <vector>
+
 // console.device implemented as a native Exec device, minimal for now: it
 // opens, keeps a KeyMap per opened unit and answers the keymap commands.
 // Requests complete inside BeginIO. Opening unit CONU_LIBRARY gives the
@@ -75,9 +77,11 @@ public:
 
     // The current snip, "" when there is none.
     const char* snip() const { return snip_; }
-    // The hooks AddConSnipHook registered; 0 in unused slots.
-    static constexpr u32 kMaxSnipHooks = 8;
-    u32 snip_hook(u32 index) const { return index < kMaxSnipHooks ? snip_hooks_[index] : 0; }
+    // The hooks AddConSnipHook registered.
+    static constexpr u32 kMaxSnipHooks = 64;
+    u32 snip_hook(u32 index) const {
+        return index < snip_hooks_.size() ? snip_hooks_[index] : 0;
+    }
 
 private:
     friend struct ConsoleOps;
@@ -88,7 +92,7 @@ private:
     KeymapLibrary* keymaps_ = nullptr;
     u32 base_ = 0;
     char snip_[kMaxSnip + 1]{};
-    u32 snip_hooks_[kMaxSnipHooks]{};
+    std::vector<u32> snip_hooks_;
 };
 
 }

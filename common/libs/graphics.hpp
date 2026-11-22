@@ -28,6 +28,8 @@
 #include "native.hpp"
 #include "text_blend.hpp"
 
+#include <vector>
+
 // graphics.library written in C++ for code run by the 68000 translator.
 //
 // It draws on the planar BitMap of a RastPort and has the colour table
@@ -255,15 +257,14 @@ private:
     u32 monitor_ = 0;
     u32 ntsc_monitor_ = 0;
     u32 pal_monitor_ = 0;
-    // The display modes of the ViewPorts registered for GetVPModeID; vp is
-    // 0 for a free pair.
-    static constexpr u32 kVpModeIds = 16;
+    // The display modes of the ViewPorts registered for GetVPModeID.
+    static constexpr u32 kVpModeIds = 256;
     struct VpModeId {
         u32 vp;
         u32 id;
     };
     bool vp_mode_id(u32 vp, u32& id) const;
-    VpModeId vp_mode_ids_[kVpModeIds]{};
+    std::vector<VpModeId> vp_mode_ids_;
     NativeVector vectors_[kVectors]{};
     // Who holds each pen of the screen's colour map, for ObtainPen and
     // ReleasePen: how many share it, and whether one holds it alone. The

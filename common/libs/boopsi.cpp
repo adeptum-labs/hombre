@@ -26,6 +26,8 @@
 #include "gfx.hpp"
 #include "tags.hpp"
 
+#include <algorithm>
+
 namespace hombre {
 
 using m68k::Machine;
@@ -161,12 +163,8 @@ struct Boopsi::Natives {
 bool Boopsi::init(Machine& m, Exec& exec) {
     machine_ = &m;
     exec_ = &exec;
-    for (u32& slot : public_) {
-        slot = 0;
-    }
-    for (IcaEntry& entry : ica_) {
-        entry = IcaEntry{};
-    }
+    public_.clear();
+    ica_.clear();
     notify_depth_ = 0;
     root_ = make_system_class("rootclass", 0, 0, Natives::root);
     root_entry_ = root_ != 0 ? Bus(m).r32(root_ + h_Entry) : 0;
@@ -277,25 +275,19 @@ void Boopsi::add_class(u32 cl) {
     if ((b.r32(cl + cl_Flags) & CLF_INLIST) != 0) {
         return;
     }
-    for (u32& slot : public_) {
-        if (slot == 0) {
-            slot = cl;
-            b.w32(cl + cl_Flags, b.r32(cl + cl_Flags) | CLF_INLIST);
-            return;
-        }
+    if (public_.size() >= kMaxPublicClasses) {
+        LogLine().text("intuition: public class table full").send();
+        return;
     }
-    LogLine().text("intuition: public class table full").send();
+    public_.push_back(cl);
+    b.w32(cl + cl_Flags, b.r32(cl + cl_Flags) | CLF_INLIST);
 }
 
 void Boopsi::remove_class(u32 cl) {
     if (cl == 0) {
         return;
     }
-    for (u32& slot : public_) {
-        if (slot == cl) {
-            slot = 0;
-        }
-    }
+    std::erase(public_, cl);
     Bus b(*machine_);
     b.w32(cl + cl_Flags, b.r32(cl + cl_Flags) & ~CLF_INLIST);
 }
@@ -812,20 +804,17 @@ Boopsi::IcaEntry* Boopsi::ica_slot(u32 object) {
     if (IcaEntry* entry = find_ica(object); entry != nullptr) {
         return entry;
     }
-    for (IcaEntry& entry : ica_) {
-        if (entry.object == 0) {
-            entry.object = object;
-            return &entry;
-        }
+    IcaEntry* entry = ica_.add();
+    if (entry == nullptr) {
+        LogLine().text("intuition: notification table full").send();
+        return nullptr;
     }
-    LogLine().text("intuition: notification table full").send();
-    return nullptr;
+    entry->object = object;
+    return entry;
 }
 
 void Boopsi::drop_ica(u32 object) {
-    if (IcaEntry* entry = find_ica(object); entry != nullptr) {
-        *entry = IcaEntry{};
-    }
+    ica_.remove_if([object](const IcaEntry& entry) { return entry.object == object; });
 }
 
 // The tag a map list renames the tag to: its first occurrence as a source,

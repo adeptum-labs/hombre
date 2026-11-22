@@ -29,6 +29,8 @@
 #include "native.hpp"
 #include "version.hpp"
 
+#include <vector>
+
 // gadtools.library written in C++ for code run by the 68000 translator.
 //
 // It hands out visual info for a screen, makes the context gadget a
@@ -166,8 +168,8 @@ private:
         u32 window;
         u32 gadget;
     };
-    static constexpr u32 kPendingLevels = 8;
-    PendingLevel pending_levels_[kPendingLevels]{};
+    static constexpr u32 kPendingLevels = 256;
+    std::vector<PendingLevel> pending_levels_;
     NativeVector vectors_[kVectors]{};
 };
 

@@ -24,9 +24,12 @@
 #pragma once
 
 #include "../m68k_cpu.hpp"
+#include "../slot_list.hpp"
 #include "../types.hpp"
 #include "exec.hpp"
 #include "native.hpp"
+
+#include <vector>
 
 // BOOPSI, intuition's classes and objects, written in C++.
 //
@@ -227,7 +230,7 @@ constexpr u32 IDS_INACTIVESELECTED = 6;
 
 class Boopsi {
 public:
-    static constexpr u32 kMaxPublicClasses = 64;
+    static constexpr u32 kMaxPublicClasses = 1024;
     // 68000 code one method call may run, at most.
     static constexpr u64 kDispatchBlocks = 1ull << 24;
 
@@ -300,7 +303,7 @@ private:
         u32 map = 0;
     };
 
-    static constexpr u32 kMaxIcaEntries = 128;
+    static constexpr u32 kMaxIcaEntries = 4096;
     static constexpr u32 kMaxNotifyTags = 32;
     static constexpr u32 kMaxNotifyDepth = 8;
 
@@ -336,9 +339,9 @@ private:
     void* sys_image_renderer_ctx_ = nullptr;
     IdcmpUpdateHook idcmp_update_hook_ = nullptr;
     void* idcmp_update_hook_ctx_ = nullptr;
-    IcaEntry ica_[kMaxIcaEntries]{};
+    SlotList<IcaEntry> ica_{kMaxIcaEntries};
     u32 notify_depth_ = 0;
-    u32 public_[kMaxPublicClasses]{};
+    std::vector<u32> public_;
 };
 
 }

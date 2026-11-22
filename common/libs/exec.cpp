@@ -23,6 +23,8 @@
 
 #include "exec.hpp"
 
+#include <algorithm>
+
 namespace hombre {
 
 using m68k::CpuState;
@@ -1697,11 +1699,9 @@ struct ExecOps {
             unload(e, seglist);
             return;
         }
-        for (u32& slot : e.loaded_) {
-            if (slot == 0) {
-                slot = seglist;
-                return;
-            }
+        if (e.loaded_.size() < Exec::kMaxLoaded) {
+            e.loaded_.push_back(seglist);
+            return;
         }
         LogLine().text("exec: loaded library table full, ").text(path)
             .text(" will not be unloaded").send();
@@ -1783,12 +1783,8 @@ struct ExecOps {
             return;
         }
         const u32 seglist = call.d0();
-        for (u32& slot : e.loaded_) {
-            if (seglist != 0 && slot == seglist) {
-                slot = 0;
-                unload(e, seglist);
-                break;
-            }
+        if (seglist != 0 && std::erase(e.loaded_, seglist) != 0) {
+            unload(e, seglist);
         }
         native::set_result(m, seglist);
     }
@@ -2264,8 +2260,7 @@ struct ExecOps {
             return;
         }
         if (Exec::SemWaitQueue* q = e.sem_queue(sem, false)) {
-            q->count = 0;
-            q->addr = 0;
+            e.sem_queues_.remove(q);
         }
     }
 
@@ -2444,7 +2439,7 @@ struct ExecOps {
                 const u32 wid = q->waiters[0].id;
                 pop_waiter(*q);
                 if (q->count == 0) {
-                    q->addr = 0;
+                    e.sem_queues_.remove(q);
                 }
                 b.w32(sem + SS_OWNER, e.tasks_[wid].task_addr);
                 b.w16(sem + SS_NESTCOUNT, 1);
@@ -2470,7 +2465,7 @@ struct ExecOps {
             if (woken > 0) {
                 b.w16(sem + SS_NESTCOUNT, static_cast<u16>(woken));
                 if (q->count == 0) {
-                    q->addr = 0;
+                    e.sem_queues_.remove(q);
                 }
                 if (e.sched_.should_switch_now()) {
                     e.pending_switch_ = true;
@@ -2480,7 +2475,7 @@ struct ExecOps {
         }
         b.w32(sem + SS_OWNER, 0);
         if (q != nullptr) {
-            q->addr = 0;
+            e.sem_queues_.remove(q);
         }
     }
 
@@ -2768,13 +2763,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
     for (TaskContext& tc : tasks_) {
         tc = TaskContext{};
     }
-    for (SemWaitQueue& q : sem_queues_) {
-        q.addr = 0;
-        q.count = 0;
-        for (SemWaitQueue::Waiter& w : q.waiters) {
-            w = SemWaitQueue::Waiter{};
-        }
-    }
+    sem_queues_.clear();
     pending_switch_ = false;
     softint_logged_ = false;
     unknown_signal_addr_ = 0;
@@ -2795,9 +2784,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
         info = LibraryInfo{};
     }
     library_count_ = 0;
-    for (u32& seg : loaded_) {
-        seg = 0;
-    }
+    loaded_.clear();
     if (m.jit == nullptr || m.mem.base == nullptr || free_start < kLowestFree ||
         chip_end <= free_start || fast_end < chip_end || fast_end > m.mem.size) {
         return false;
@@ -3916,14 +3903,12 @@ void Exec::reap_removed() {
 }
 
 void Exec::remove_sem_waiter(u32 task_id) {
-    for (SemWaitQueue& q : sem_queues_) {
-        if (q.addr == 0 || q.count == 0) {
-            continue;
-        }
-        for (u32 i = 0; i < q.count;) {
-            if (q.waiters[i].id == task_id) {
-                for (u32 j = i + 1; j < q.count; ++j) {
-                    q.waiters[j - 1] = q.waiters[j];
+    for (usize i = 0; i < sem_queues_.size();) {
+        SemWaitQueue& q = sem_queues_[i];
+        for (u32 j = 0; j < q.count;) {
+            if (q.waiters[j].id == task_id) {
+                for (u32 k = j + 1; k < q.count; ++k) {
+                    q.waiters[k - 1] = q.waiters[k];
                 }
                 --q.count;
                 if (m_ != nullptr) {
@@ -3933,11 +3918,13 @@ void Exec::remove_sem_waiter(u32 task_id) {
                     }
                 }
             } else {
-                ++i;
+                ++j;
             }
         }
         if (q.count == 0) {
-            q.addr = 0;
+            sem_queues_.remove(&q);
+        } else {
+            ++i;
         }
     }
 }
@@ -3957,21 +3944,17 @@ bool Exec::has_sem_waiter(u32 sem_addr, u32 task_id) const {
 }
 
 Exec::SemWaitQueue* Exec::sem_queue(u32 sem_addr, bool create) {
-    SemWaitQueue* free_slot = nullptr;
-    for (SemWaitQueue& q : sem_queues_) {
-        if (q.addr == sem_addr) {
-            return &q;
-        }
-        if (q.addr == 0 && free_slot == nullptr) {
-            free_slot = &q;
-        }
+    SemWaitQueue* q = sem_queues_.find_if(
+        [sem_addr](const SemWaitQueue& queue) { return queue.addr == sem_addr; });
+    if (q != nullptr || !create) {
+        return q;
     }
-    if (!create || free_slot == nullptr) {
+    q = sem_queues_.add();
+    if (q == nullptr) {
         return nullptr;
     }
-    free_slot->addr = sem_addr;
-    free_slot->count = 0;
-    return free_slot;
+    q->addr = sem_addr;
+    return q;
 }
 
 void Exec::task_main(u32 id) {

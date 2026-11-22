@@ -249,17 +249,17 @@ void timer_queue_ordering_exact_deadline_abort_capacity() {
     CHECK_EQ(e.request, 0x100u);
     CHECK(q.empty());
 
-    // Capacity 64.
+    // Capacity 4096.
     for (u32 i = 0; i < TimerQueue::kCapacity; ++i) {
         CHECK(q.insert(1000 + (TimerQueue::kCapacity - i), 0x1000 + i));
     }
     CHECK(q.full());
     CHECK(!q.insert(500, 0x9999));
     CHECK_EQ(q.count(), TimerQueue::kCapacity);
-    // Earliest inserted (deadline 1001, request 0x1000 + 63) pops first.
+    // Earliest inserted (deadline 1001, request 0x1000 + 4095) pops first.
     CHECK(q.pop_due(1001, e));
     CHECK_EQ(e.deadline_us, 1001u);
-    CHECK_EQ(e.request, 0x1000u + 63u);
+    CHECK_EQ(e.request, 0x1000u + 4095u);
     CHECK(!q.full());
 }
 
@@ -476,7 +476,7 @@ void requests_idle_until_deadline_abort_and_queue_full() {
     CHECK_EQ(r.call_exec(exec_lvo::WaitIO), ExitReason::Returned);
     CHECK_EQ(static_cast<i32>(r.m.cpu.d[0]), IOERR_ABORTED);
 
-    // Queue full at 64 pending requests logs and completes the 65th with -1.
+    // Queue full at 4096 pending requests logs and completes the 4097th with -1.
     std::vector<u32> extra;
     for (u32 i = 0; i < TimerQueue::kCapacity; ++i) {
         r.m.cpu.a[0] = port;

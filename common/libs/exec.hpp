@@ -26,9 +26,12 @@
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
 #include "../sched.hpp"
+#include "../slot_list.hpp"
 #include "../types.hpp"
 #include "native.hpp"
 #include "version.hpp"
+
+#include <vector>
 
 // exec.library written in C++ for code run by the 68000 translator.
 //
@@ -603,8 +606,8 @@ private:
     friend struct ExecTest;
 
     static constexpr u32 kMaxLibraries = 32;
-    static constexpr u32 kMaxLoaded = 32;
-    static constexpr u32 kMaxSemaphores = 64;
+    static constexpr u32 kMaxLoaded = 1024;
+    static constexpr u32 kMaxSemaphores = 4096;
 
     // Context of the native every unimplemented vector of a library runs.
     struct LibraryInfo {
@@ -696,7 +699,7 @@ private:
     void drop_timer_requests_of(u32 task);
     Scheduler sched_{};
     TaskContext tasks_[Scheduler::kMaxTasks]{};
-    SemWaitQueue sem_queues_[kMaxSemaphores]{};
+    SlotList<SemWaitQueue> sem_queues_{kMaxSemaphores};
     bool pending_switch_ = false;
     bool softint_logged_ = false;
     u32 unknown_signal_addr_ = 0;  // the last logged unknown Signal target
@@ -712,7 +715,7 @@ private:
     void* task_end_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;
-    u32 loaded_[kMaxLoaded]{};  // seglists of libraries exec loaded
+    std::vector<u32> loaded_;  // seglists of libraries exec loaded
 };
 
 }

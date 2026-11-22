@@ -29,6 +29,8 @@
 #include "native.hpp"
 #include "version.hpp"
 
+#include <vector>
+
 // icon.library written in C++ for code run by the 68000 translator.
 //
 // GetDiskObject reads a Workbench icon ("<name>.info") from the volumes dos
@@ -104,9 +106,10 @@ public:
 
 private:
     friend struct IconNatives;
+    friend struct IconTest;
 
     static constexpr u32 kVectors = icon_lvo::Last / 6;
-    static constexpr u32 kMaxObjects = 256;
+    static constexpr u32 kMaxObjects = 65536;
     static constexpr u32 kMaxNameChars = 255;
 
     // One DiskObject this library handed out, with the bytes of its block.
@@ -135,7 +138,8 @@ private:
     Exec* exec_ = nullptr;
     Dos* dos_ = nullptr;
     u32 base_ = 0;
-    Block blocks_[kMaxObjects]{};
+    std::vector<Block> blocks_;
+    u32 max_objects_ = kMaxObjects;
     // The raw bytes of the .info file a call is working on.
     u8 file_[kMaxInfoBytes]{};
     NativeVector vectors_[kVectors]{};

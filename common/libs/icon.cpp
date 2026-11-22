@@ -839,9 +839,8 @@ bool Icon::init(Machine& m, Exec& exec, Dos& dos) {
     exec_ = &exec;
     dos_ = &dos;
     base_ = 0;
-    for (Block& block : blocks_) {
-        block = Block{};
-    }
+    blocks_.clear();
+    max_objects_ = kMaxObjects;
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -878,14 +877,11 @@ void Icon::set_io_error(u32 code) {
 }
 
 bool Icon::record(u32 addr, u32 bytes) {
-    for (Block& block : blocks_) {
-        if (block.addr == 0) {
-            block.addr = addr;
-            block.bytes = bytes;
-            return true;
-        }
+    if (blocks_.size() >= max_objects_) {
+        return false;
     }
-    return false;
+    blocks_.push_back(Block{addr, bytes});
+    return true;
 }
 
 void Icon::free_disk_object(u32 addr) {
@@ -893,10 +889,10 @@ void Icon::free_disk_object(u32 addr) {
         return;
     }
     const u32 at = native::guest_address(*machine_, addr);
-    for (Block& block : blocks_) {
-        if (block.addr == at) {
-            exec_->free(block.addr, block.bytes);
-            block = Block{};
+    for (auto it = blocks_.begin(); it != blocks_.end(); ++it) {
+        if (it->addr == at) {
+            exec_->free(it->addr, it->bytes);
+            blocks_.erase(it);
             return;
         }
     }

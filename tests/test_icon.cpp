@@ -39,6 +39,12 @@ using namespace hombre;
 using namespace hombre::m68k;
 using namespace hombre::ndk;
 
+namespace hombre {
+struct IconTest {
+    static void set_max_objects(Icon& icon, u32 cap) { icon.max_objects_ = cap; }
+};
+}
+
 namespace {
 
 constexpr u32 kCall = 0x1800;
@@ -695,6 +701,7 @@ void null_name_gives_an_empty_disk_object() {
 
 void disk_object_table_fills_without_leaking() {
     Rig r;
+    IconTest::set_max_objects(g_icon, 256);
     std::vector<u32> objects;
     for (;;) {
         const u32 obj = r.icon_call(icon_lvo::GetDefDiskObject, 0, 0, kWBTool);

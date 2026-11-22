@@ -2024,16 +2024,17 @@ bool GadTools::prop_moved(u32 window, u32 gadget, u16& code) {
         if (b.r32(gadget + gt_LevelFunc) == 0) {
             draw_slider_level(b, b.r32(window + ndk::wd_RPort), gadget);
         } else {
-            bool queued = false;
+            PendingLevel* queued = nullptr;
             for (PendingLevel& p : pending_levels_) {
-                if (p.gadget == gadget || (!queued && p.gadget == 0)) {
-                    if (!queued) {
-                        p = PendingLevel{window, gadget};
-                        queued = true;
-                    } else {
-                        p = PendingLevel{};
-                    }
+                if (p.gadget == gadget) {
+                    queued = &p;
+                    break;
                 }
+            }
+            if (queued != nullptr) {
+                queued->window = window;
+            } else if (pending_levels_.size() < kPendingLevels) {
+                pending_levels_.push_back(PendingLevel{window, gadget});
             }
         }
     }
@@ -2135,12 +2136,17 @@ bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
 // with the gadget and then the level on the stack, and answers in D0. The
 // level itself shows when there is no function or the call does not return.
 void GadTools::draw_pending_levels(Bus& b, u32 port) {
-    for (PendingLevel& p : pending_levels_) {
-        if (p.gadget == 0 || p.window == 0 || b.r32(p.window + ndk::wd_UserPort) != port) {
+    // Levels queued while one draws wait for the next pass.
+    usize end = pending_levels_.size();
+    for (usize i = 0; i < end;) {
+        const PendingLevel& p = pending_levels_[i];
+        if (b.r32(p.window + ndk::wd_UserPort) != port) {
+            ++i;
             continue;
         }
         const PendingLevel level = p;
-        p = PendingLevel{};
+        pending_levels_.erase(pending_levels_.begin() + i);
+        --end;
         draw_slider_level(b, b.r32(level.window + ndk::wd_RPort), level.gadget);
     }
 }
