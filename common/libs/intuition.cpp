@@ -42,8 +42,9 @@ using i16 = __INT16_TYPE__;
 
 namespace {
 
-// Two clicks this close together make a double click.
-constexpr u64 kDoubleClickUs = 1000000;
+// Two clicks this close together make a double click: 1.02 seconds, as
+// the 3.1 Devs:system-configuration has it.
+constexpr u64 kDoubleClickUs = 1020000;
 
 // struct InputEvent (devices/inputevent.h) and the mouse codes a custom
 // gadget gets.

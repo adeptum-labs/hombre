@@ -8069,16 +8069,16 @@ void a_string_gadget_is_edited_from_the_keyboard() {
     r.intuition.pointer_event(200, 130, 0, 0, 1, false);
     CHECK(!r.intuition.string_active());
 
-    // DoubleClick: within a second.
+    // DoubleClick: within 1.02 seconds.
     r.cpu().d[0] = 10;
     r.cpu().d[1] = 500000;
     r.cpu().d[2] = 11;
-    r.cpu().d[3] = 400000;
+    r.cpu().d[3] = 520000;
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 1u);
     r.cpu().d[0] = 10;
     r.cpu().d[1] = 0;
     r.cpu().d[2] = 11;
-    r.cpu().d[3] = 1;
+    r.cpu().d[3] = 20001;
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::DoubleClick), 0u);
 
     // The double-click time follows SetPrefs: 0.3 seconds makes half a
