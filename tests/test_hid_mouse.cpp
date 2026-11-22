@@ -89,38 +89,39 @@ void decode_masks_the_button_bits() {
 
 void apply_moves_and_reports_moved() {
     PointerState state;
-    state.init(640, 400, 100, 100);
-    CHECK_EQ(state.x(), 100);
-    CHECK_EQ(state.y(), 100);
+    state.init(kPointerGridWidth, kPointerGridHeight, 200, 200);
+    CHECK_EQ(state.x(), 200);
+    CHECK_EQ(state.y(), 200);
 
+    // Every USB count is two units of the grid.
     const MouseSample sample{0, 15, -20};
     const PointerState::Update u = state.apply(sample);
     CHECK(u.moved);
     CHECK_EQ(u.pressed, static_cast<u8>(0));
     CHECK_EQ(u.released, static_cast<u8>(0));
-    CHECK_EQ(state.x(), 115);
-    CHECK_EQ(state.y(), 80);
+    CHECK_EQ(state.x(), 230);
+    CHECK_EQ(state.y(), 160);
 
     const MouseSample zero{0, 0, 0};
     const PointerState::Update u2 = state.apply(zero);
     CHECK(!u2.moved);
-    CHECK_EQ(state.x(), 115);
-    CHECK_EQ(state.y(), 80);
+    CHECK_EQ(state.x(), 230);
+    CHECK_EQ(state.y(), 160);
 }
 
 void apply_clamps_at_every_edge_and_reports_not_moved_when_pinned() {
     PointerState state;
-    state.init(640, 400, 10, 10);
+    state.init(kPointerGridWidth, kPointerGridHeight, 20, 20);
 
     // Left edge
     PointerState::Update u = state.apply(MouseSample{0, -50, 0});
     CHECK(u.moved);
     CHECK_EQ(state.x(), 0);
-    CHECK_EQ(state.y(), 10);
+    CHECK_EQ(state.y(), 20);
     u = state.apply(MouseSample{0, -10, 0});
     CHECK(!u.moved);
     CHECK_EQ(state.x(), 0);
-    CHECK_EQ(state.y(), 10);
+    CHECK_EQ(state.y(), 20);
 
     // Top edge
     u = state.apply(MouseSample{0, 0, -50});
@@ -133,38 +134,64 @@ void apply_clamps_at_every_edge_and_reports_not_moved_when_pinned() {
     CHECK_EQ(state.y(), 0);
 
     // Right edge
-    state.set_position(630, 200);
+    state.set_position(1260, 400);
     u = state.apply(MouseSample{0, 50, 0});
     CHECK(u.moved);
-    CHECK_EQ(state.x(), 639);
-    CHECK_EQ(state.y(), 200);
+    CHECK_EQ(state.x(), 1279);
+    CHECK_EQ(state.y(), 400);
     u = state.apply(MouseSample{0, 10, 0});
     CHECK(!u.moved);
-    CHECK_EQ(state.x(), 639);
-    CHECK_EQ(state.y(), 200);
+    CHECK_EQ(state.x(), 1279);
+    CHECK_EQ(state.y(), 400);
 
     // Bottom edge
-    state.set_position(200, 390);
+    state.set_position(400, 780);
     u = state.apply(MouseSample{0, 0, 50});
     CHECK(u.moved);
-    CHECK_EQ(state.x(), 200);
-    CHECK_EQ(state.y(), 399);
+    CHECK_EQ(state.x(), 400);
+    CHECK_EQ(state.y(), 799);
     u = state.apply(MouseSample{0, 0, 10});
     CHECK(!u.moved);
-    CHECK_EQ(state.x(), 200);
-    CHECK_EQ(state.y(), 399);
+    CHECK_EQ(state.x(), 400);
+    CHECK_EQ(state.y(), 799);
 
     // Bottom-right corner pinned
-    state.set_position(639, 399);
+    state.set_position(1279, 799);
     u = state.apply(MouseSample{0, 5, 5});
     CHECK(!u.moved);
-    CHECK_EQ(state.x(), 639);
-    CHECK_EQ(state.y(), 399);
+    CHECK_EQ(state.x(), 1279);
+    CHECK_EQ(state.y(), 799);
+}
+
+void screen_position_scales_the_grid_to_the_screen() {
+    PointerState state;
+    state.init(kPointerGridWidth, kPointerGridHeight, 640, 400);
+    CHECK_EQ(state.screen_x(640), 320);
+    CHECK_EQ(state.screen_y(400), 200);
+    CHECK_EQ(state.screen_x(1280), 640);
+    CHECK_EQ(state.screen_y(512), 256);
+
+    // The far edge of the grid is the last pixel of any screen.
+    state.set_position(1279, 799);
+    CHECK_EQ(state.screen_x(320), 319);
+    CHECK_EQ(state.screen_y(256), 255);
+    CHECK_EQ(state.screen_x(640), 639);
+    CHECK_EQ(state.screen_y(400), 399);
+    CHECK_EQ(state.screen_x(1280), 1279);
+
+    state.set_position(0, 0);
+    CHECK_EQ(state.screen_x(320), 0);
+    CHECK_EQ(state.screen_y(256), 0);
+
+    // A pointer without an area stays at 0.
+    PointerState empty;
+    CHECK_EQ(empty.screen_x(640), 0);
+    CHECK_EQ(empty.screen_y(400), 0);
 }
 
 void apply_reports_press_and_release_once() {
     PointerState state;
-    state.init(640, 400, 50, 50);
+    state.init(kPointerGridWidth, kPointerGridHeight, 100, 100);
 
     PointerState::Update u1 = state.apply(MouseSample{kMouseLeft, 0, 0});
     CHECK_EQ(u1.pressed, kMouseLeft);
@@ -194,7 +221,7 @@ void apply_reports_press_and_release_once() {
 
 void apply_two_buttons_in_one_sample() {
     PointerState state;
-    state.init(640, 400, 50, 50);
+    state.init(kPointerGridWidth, kPointerGridHeight, 100, 100);
 
     const u8 left_right = static_cast<u8>(kMouseLeft | kMouseRight);
     PointerState::Update u1 = state.apply(MouseSample{left_right, 0, 0});
@@ -347,6 +374,7 @@ int main() {
     decode_masks_the_button_bits();
     apply_moves_and_reports_moved();
     apply_clamps_at_every_edge_and_reports_not_moved_when_pinned();
+    screen_position_scales_the_grid_to_the_screen();
     apply_reports_press_and_release_once();
     apply_two_buttons_in_one_sample();
     init_clamps_a_start_position_outside_the_screen();

@@ -25,6 +25,7 @@
 #include "hid_mouse.hpp"
 #include "libs/chrome.hpp"
 #include "libs/chrome_palette.hpp"
+#include "libs/display_modes.hpp"
 #include "libs/keymap_library.hpp"
 #include "libs/utility.hpp"
 
@@ -667,6 +668,46 @@ void open_screen_display_id_of_a_super_hires_mode() {
     CHECK_EQ(r.get16(screen + sc_Height), 512u);
     CHECK_EQ(r.get16(screen + sc_ViewPort + vp_Modes), 0x8024u);
     CHECK_EQ(vp_mode_id(r, screen), kModePalSuperLace);
+}
+
+void display_mode_geometry_follows_the_front_screen() {
+    GfxRig r;
+    CHECK_EQ(r.display.mode_width, 640u);
+    CHECK_EQ(r.display.mode_height, 400u);
+    CHECK_EQ(r.display.mode_flags, 0u);
+
+    put_new_screen(r, kNewScreen, 0, 0, 2, 0, 1, 0);
+    r.put16(kNewScreen + ns_ViewModes, kViewHires | kViewLace);
+    const u32 hires = open_new(r, kNewScreen);
+    CHECK_EQ(r.display.mode_width, 640u);
+    CHECK_EQ(r.display.mode_height, 400u);
+    CHECK_EQ(r.display.mode_flags, display_modes::find(kModeHiresLace)->flags);
+
+    const u32 tags = r.tags(kTagList, {{SA_DisplayID, kModePalSuperLace}, {SA_Depth, 2},
+                                       {TAG_DONE, 0}});
+    const u32 super = open_tags(r, 0, tags);
+    CHECK(hires != 0 && super != 0);
+    CHECK_EQ(r.display.mode_width, 1280u);
+    CHECK_EQ(r.display.mode_height, 512u);
+    CHECK_EQ(r.display.mode_flags, display_modes::find(kModePalSuperLace)->flags);
+
+    r.intuition.screen_to_front(hires);
+    CHECK_EQ(r.display.mode_width, 640u);
+    CHECK_EQ(r.display.mode_height, 400u);
+
+    r.intuition.screen_to_front(super);
+    CHECK_EQ(r.display.mode_width, 1280u);
+
+    // The mode of the screen that comes to the front when the front one closes.
+    r.cpu().a[0] = super;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseScreen), ExitReason::Halt);
+    CHECK_EQ(r.display.mode_width, 640u);
+    CHECK_EQ(r.display.mode_height, 400u);
+
+    r.cpu().a[0] = hires;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseScreen), ExitReason::Halt);
+    CHECK_EQ(r.display.mode_width, 640u);
+    CHECK_EQ(r.display.mode_flags, 0u);
 }
 
 void open_screen_dclip_sets_the_standard_size() {
@@ -8390,6 +8431,7 @@ int main() {
     open_screen_standard_size_without_view_modes_keeps_workbench_mode();
     open_screen_display_id_gives_the_modes_size();
     open_screen_display_id_of_a_super_hires_mode();
+    display_mode_geometry_follows_the_front_screen();
     open_screen_dclip_sets_the_standard_size();
     open_screen_too_deep_or_unknown_mode_fails_with_an_error_code();
     open_screen_null_newscreen_and_taglist_gives_zero_and_faults();

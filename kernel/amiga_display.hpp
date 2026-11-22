@@ -55,40 +55,61 @@ inline constexpr BitSpreadTable kBitSpread = make_bit_spread_table();
 
 }
 
-// Draws the front screen's bitplanes into the framebuffer: the 640x400
-// logical screen at the largest whole scale that fits, centred, and the rest
-// of the framebuffer in the border colour.
+// Draws the front screen's bitplanes into the framebuffer. The nominal area
+// of the screen's display mode fills the box, the largest 16:10 rectangle the
+// framebuffer holds, centred. Each host pixel shows the screen pixel it falls
+// in, so a mode that does not divide the box evenly has some pixels one host
+// pixel wider than others. The rest of the framebuffer, and the part of the
+// box a smaller screen does not cover, is in the border colour.
 class AmigaDisplay {
 public:
     constexpr AmigaDisplay() = default;
 
-    // Sizes the screen for the framebuffer and clears it to the border
-    // colour.
+    // Fits the box to the framebuffer and clears the framebuffer to the
+    // border colour.
     void init(Framebuffer fb) {
         fb_ = fb;
         const u64 width = fb_.width();
         const u64 height = fb_.height();
-        const u64 fit_x = width / kScreenWidth;
-        const u64 fit_y = height / kScreenHeight;
-        const u64 fit = fit_x < fit_y ? fit_x : fit_y;
-        scale_ = static_cast<u32>(fit > 0 ? fit : 1);
-        origin_x_ = centred(width, kScreenWidth * scale_);
-        origin_y_ = centred(height, kScreenHeight * scale_);
+        u64 box_width = width;
+        u64 box_height = width * kBoxHeightUnits / kBoxWidthUnits;
+        if (box_height > height) {
+            box_height = height;
+            box_width = height * kBoxWidthUnits / kBoxHeightUnits;
+        }
+        if (box_width > kMaxBoxWidth) {
+            box_width = kMaxBoxWidth;
+            box_height = kMaxBoxHeight;
+        }
+        box_width_ = static_cast<u32>(box_width);
+        box_height_ = static_cast<u32>(box_height);
+        box_x_ = centred(width, box_width);
+        box_y_ = centred(height, box_height);
+        pointer_pixel_width_ = at_least_one(box_width_ / kPointerPixelsAcross);
+        pointer_pixel_height_ = at_least_one(box_height_ / kPointerPixelsDown);
+        applied_screen_ = 0;
+        applied_width_ = kDefaultModeWidth;
+        applied_height_ = kDefaultModeHeight;
+        map_mode();
         fb_.fill(kBorder);
     }
 
     DisplaySink sink() { return DisplaySink{&AmigaDisplay::refresh, this}; }
 
-    // Draws the pointer in the shape state publishes; without it, the arrow.
+    // Draws the pointer in the shape state publishes, without it the arrow,
+    // and fits the mode state publishes for the front screen to the box.
     void follow_pointer_shape(const DisplayState& state) { state_ = &state; }
 
-    // Draws the pixels of dirty, clipped to the screen, as scale x scale
-    // blocks. Screen 0 clears the framebuffer to the border colour, and a
-    // screen larger than 4096 pixels on a side is ignored.
+    // Draws the pixels of dirty, clipped to the part of the screen inside its
+    // mode's nominal area. A change of screen or mode first clears the box to
+    // the border colour, so the caller redraws the whole screen then. Screen 0
+    // clears the framebuffer to the border colour, and a screen larger than
+    // 4096 pixels on a side is ignored.
     static void refresh(void* ctx, m68k::Machine& m, u32 screen, const Rect& dirty) {
         AmigaDisplay& display = *static_cast<AmigaDisplay*>(ctx);
         if (screen == 0) {
             display.fb_.fill(kBorder);
+            display.applied_screen_ = 0;
             return;
         }
         native::Bus b(m);
@@ -125,89 +146,52 @@ public:
         if (!b.ok()) {
             return;
         }
-        const i32 last_x = at_most(dirty.x1, width);
-        const i32 last_y = at_most(dirty.y1, height);
+        display.adopt_front(screen);
+        // TODO: scroll a screen larger than its mode's nominal area (autoscroll).
+        const u32 shown_width = width < display.applied_width_ ? width : display.applied_width_;
+        const u32 shown_height =
+            height < display.applied_height_ ? height : display.applied_height_;
+        const i32 last_x = at_most(dirty.x1, shown_width);
+        const i32 last_y = at_most(dirty.y1, shown_height);
         const i32 first_x = dirty.x0 > 0 ? dirty.x0 : 0;
         const i32 first_y = dirty.y0 > 0 ? dirty.y0 : 0;
-        if (first_x <= last_x && first_y <= last_y) {
-            const u32 raw_count = static_cast<u32>(last_x - first_x + 1);
-            const u32 count = raw_count < kScreenWidth ? raw_count : kScreenWidth;
-            const u64 left = display.origin_x_ + static_cast<u64>(first_x) * display.scale_;
-            const u32 first_bx = static_cast<u32>(first_x) >> 3;
-            const u32 last_bx = (static_cast<u32>(first_x) + count - 1) >> 3;
-            const u32 bx_count = last_bx - first_bx + 1;
-            u32 row[kScreenWidth];
-            for (i32 y = first_y; y <= last_y; ++y) {
-                const u32 row_offset = static_cast<u32>(y) * bytes_per_row;
-                const u8* plane_ptrs[kMaxPlanes]{};
-                for (u32 plane = 0; plane < used; ++plane) {
-                    plane_ptrs[plane] =
-                        b.bytes_at(planes[plane] + row_offset + first_bx, bx_count);
-                }
-                if (!b.ok()) {
-                    return;
-                }
-                u32 x = static_cast<u32>(first_x);
-                u32 remaining = count;
-                u32 out_i = 0;
-                for (u32 bi = 0; bi < bx_count; ++bi) {
-                    u64 packed = 0;
-                    for (u32 plane = 0; plane < used; ++plane) {
-                        packed |= detail::kBitSpread.entries[plane_ptrs[plane][bi]] << plane;
-                    }
-                    const u32 bit_off = x & 7;
-                    const u32 avail = 8 - bit_off;
-                    const u32 chunk = remaining < avail ? remaining : avail;
-                    if (chunk == 8) {
-                        row[out_i + 0] = palette[packed & 0xFF];
-                        row[out_i + 1] = palette[(packed >> 8) & 0xFF];
-                        row[out_i + 2] = palette[(packed >> 16) & 0xFF];
-                        row[out_i + 3] = palette[(packed >> 24) & 0xFF];
-                        row[out_i + 4] = palette[(packed >> 32) & 0xFF];
-                        row[out_i + 5] = palette[(packed >> 40) & 0xFF];
-                        row[out_i + 6] = palette[(packed >> 48) & 0xFF];
-                        row[out_i + 7] = palette[(packed >> 56) & 0xFF];
-                    } else {
-                        u64 p = packed >> (bit_off * 8);
-                        for (u32 k = 0; k < chunk; ++k) {
-                            row[out_i + k] = palette[p & 0xFF];
-                            p >>= 8;
-                        }
-                    }
-                    x += chunk;
-                    out_i += chunk;
-                    remaining -= chunk;
-                }
-                const u64 top = display.origin_y_ + static_cast<u64>(y) * display.scale_;
-                display.fb_.put_row(left, top, row, count, display.scale_);
+        if (first_x > last_x || first_y > last_y) {
+            return;
+        }
+        const u32 host_left = display.host_column(first_x);
+        const u32 host_right = display.host_column(last_x + 1);
+        const u32 host_top = display.host_row(first_y);
+        const u32 host_bottom = display.host_row(last_y + 1);
+        if (host_left == host_right || host_top == host_bottom) {
+            return;
+        }
+        const u32 count = static_cast<u32>(last_x - first_x + 1);
+        const u32 first_bx = static_cast<u32>(first_x) >> 3;
+        const u32 last_bx = (static_cast<u32>(first_x) + count - 1) >> 3;
+        const u32 bx_count = last_bx - first_bx + 1;
+        u32 row[kMaxModeWidth];
+        for (i32 y = first_y; y <= last_y; ++y) {
+            const u32 rows_top = display.host_row(y);
+            const u32 rows_bottom = display.host_row(y + 1);
+            if (rows_top == rows_bottom) {
+                continue;
             }
+            const u32 row_offset = static_cast<u32>(y) * bytes_per_row;
+            const u8* plane_ptrs[kMaxPlanes]{};
+            for (u32 plane = 0; plane < used; ++plane) {
+                plane_ptrs[plane] = b.bytes_at(planes[plane] + row_offset + first_bx, bx_count);
+            }
+            if (!b.ok()) {
+                return;
+            }
+            chunky_row(row, plane_ptrs, used, palette, static_cast<u32>(first_x), count);
+            display.fb_.put_mapped_row(display.box_x_ + host_left, display.box_y_ + rows_top,
+                                       rows_bottom - rows_top, row, display.column_x_ + host_left,
+                                       host_right - host_left);
         }
         if (display.pointer_visible_) {
-            const PointerShape& shape = display.pointer_shape();
-            const i32 image_x = display.pointer_x_ - shape.hot_x;
-            const i32 image_y = display.pointer_y_ - shape.hot_y;
-            const i32 ptr_first_x = image_x > first_x ? image_x : first_x;
-            const i32 ptr_first_y = image_y > first_y ? image_y : first_y;
-            const i32 ptr_end_x = image_x + static_cast<i32>(shape.width) - 1;
-            const i32 ptr_end_y = image_y + static_cast<i32>(shape.height) - 1;
-            const i32 ptr_last_x = ptr_end_x < last_x ? ptr_end_x : last_x;
-            const i32 ptr_last_y = ptr_end_y < last_y ? ptr_end_y : last_y;
-            if (ptr_first_x <= ptr_last_x && ptr_first_y <= ptr_last_y) {
-                for (i32 y = ptr_first_y; y <= ptr_last_y; ++y) {
-                    const u32 py = static_cast<u32>(y - image_y);
-                    for (i32 x = ptr_first_x; x <= ptr_last_x; ++x) {
-                        const u32 px = static_cast<u32>(x - image_x);
-                        const u32 pixel = shape.pixels[py][px];
-                        if (pixel == 0) {
-                            continue;
-                        }
-                        const u32 colour = shape.rgb[pixel & 3];
-                        const u64 left = display.origin_x_ + static_cast<u64>(x) * display.scale_;
-                        const u64 top = display.origin_y_ + static_cast<u64>(y) * display.scale_;
-                        display.fb_.fill_rect(left, top, display.scale_, display.scale_, colour);
-                    }
-                }
-            }
+            display.draw_pointer(display.box_x_ + host_left, display.box_y_ + host_top,
+                                 display.box_x_ + host_right, display.box_y_ + host_bottom);
         }
     }
 
@@ -216,15 +200,7 @@ public:
         if (screen == 0) {
             return;
         }
-        native::Bus b(m);
-        const u32 width = b.r16(screen + ndk::sc_Width);
-        const u32 height = b.r16(screen + ndk::sc_Height);
-        if (!b.ok() || width > kMaxSide || height > kMaxSide) {
-            return;
-        }
-        const Rect dirty =
-            pointer_union(pointer_x_, pointer_y_, pointer_x_, pointer_y_, width, height);
-        refresh(this, m, screen, dirty);
+        refresh(this, m, screen, pointer_dirty(pointer_x_, pointer_y_, pointer_x_, pointer_y_));
     }
 
     void set_pointer_visible(bool visible) { pointer_visible_ = visible; }
@@ -241,27 +217,124 @@ public:
         if (!pointer_visible_ || screen == 0) {
             return;
         }
-        native::Bus b(m);
-        const u32 width = b.r16(screen + ndk::sc_Width);
-        const u32 height = b.r16(screen + ndk::sc_Height);
-        if (!b.ok() || width > kMaxSide || height > kMaxSide) {
-            return;
-        }
-        const Rect dirty = pointer_union(old_x, old_y, x, y, width, height);
-        refresh(this, m, screen, dirty);
+        refresh(this, m, screen, pointer_dirty(old_x, old_y, x, y));
     }
 
-    u32 scale() const { return scale_; }
-    u32 origin_x() const { return origin_x_; }
-    u32 origin_y() const { return origin_y_; }
+    u32 box_x() const { return box_x_; }
+    u32 box_y() const { return box_y_; }
+    u32 box_width() const { return box_width_; }
+    u32 box_height() const { return box_height_; }
 
 private:
-    static constexpr u32 kScreenWidth = 640;
-    static constexpr u32 kScreenHeight = 400;
+    static constexpr u32 kBoxWidthUnits = 16;
+    static constexpr u32 kBoxHeightUnits = 10;
+    // The tables below bound the box; framebuffers beyond it get a box of this size.
+    static constexpr u32 kMaxBoxWidth = 4096;
+    static constexpr u32 kMaxBoxHeight = kMaxBoxWidth * kBoxHeightUnits / kBoxWidthUnits;
+    // The widest nominal mode size, which the row buffer holds.
+    static constexpr u32 kMaxModeWidth = 1280;
+    static constexpr u32 kDefaultModeWidth = 640;
+    static constexpr u32 kDefaultModeHeight = 400;
+    // The pointer pixel is a High Res Laced pixel of the box.
+    static constexpr u32 kPointerPixelsAcross = 640;
+    static constexpr u32 kPointerPixelsDown = 400;
     static constexpr u32 kMaxSide = 4096;
     static constexpr u32 kMaxPlanes = 8;
     static constexpr u32 kMaxColours = 1u << kMaxPlanes;
     static constexpr u32 kBorder = 0xAAAAAA;
+
+    static u32 at_least_one(u32 value) { return value > 0 ? value : 1; }
+
+    // The nominal size of the front screen's mode as state publishes it, bounded
+    // so that it fits the row buffer and the tables.
+    u32 mode_width() const {
+        const u32 width = state_ != nullptr ? state_->mode_width : kDefaultModeWidth;
+        return at_least_one(width < kMaxModeWidth ? width : kMaxModeWidth);
+    }
+
+    u32 mode_height() const {
+        const u32 height = state_ != nullptr ? state_->mode_height : kDefaultModeHeight;
+        return at_least_one(height < kMaxSide ? height : kMaxSide);
+    }
+
+    // Makes the box show screen in the mode of the state. A change of either
+    // clears the box to the border colour, and the pointer keeps its place on
+    // the monitor, not its screen pixel.
+    void adopt_front(u32 screen) {
+        const u32 width = mode_width();
+        const u32 height = mode_height();
+        if (screen == applied_screen_ && width == applied_width_ && height == applied_height_) {
+            return;
+        }
+        pointer_x_ = static_cast<i32>(static_cast<i64>(pointer_x_) * width / applied_width_);
+        pointer_y_ = static_cast<i32>(static_cast<i64>(pointer_y_) * height / applied_height_);
+        applied_screen_ = screen;
+        applied_width_ = width;
+        applied_height_ = height;
+        map_mode();
+        fb_.fill_rect(box_x_, box_y_, box_width_, box_height_, kBorder);
+    }
+
+    // Looks up, for every host column and row of the box, the screen pixel it
+    // shows in the applied mode.
+    void map_mode() {
+        for (u32 column = 0; column < box_width_; ++column) {
+            column_x_[column] = static_cast<u16>(column * applied_width_ / box_width_);
+        }
+        for (u32 row = 0; row < box_height_; ++row) {
+            row_y_[row] = static_cast<u16>(row * applied_height_ / box_height_);
+        }
+    }
+
+    // The first host column of the box that shows screen column x, or the
+    // column after the last when x is the screen width. A column no host
+    // column shows has the same value as the next, so that its range is empty.
+    u32 host_column(i32 x) const {
+        return (static_cast<u32>(x) * box_width_ + applied_width_ - 1) / applied_width_;
+    }
+
+    u32 host_row(i32 y) const {
+        return (static_cast<u32>(y) * box_height_ + applied_height_ - 1) / applied_height_;
+    }
+
+    // The position of a screen pixel as host pixels from the top left of the box.
+    static i64 host_offset(i32 screen_pixel, u32 box_side, u32 mode_side) {
+        return static_cast<i64>(screen_pixel) * box_side / mode_side;
+    }
+
+    // Converts count pixels of one screen row, starting at x, into row[x...],
+    // from the bytes of each plane that hold them.
+    static void chunky_row(u32* row, const u8* const* plane_ptrs, u32 used, const u32* palette,
+                           u32 x, u32 count) {
+        u32 remaining = count;
+        for (u32 bi = 0; remaining > 0; ++bi) {
+            u64 packed = 0;
+            for (u32 plane = 0; plane < used; ++plane) {
+                packed |= detail::kBitSpread.entries[plane_ptrs[plane][bi]] << plane;
+            }
+            const u32 bit_off = x & 7;
+            const u32 avail = 8 - bit_off;
+            const u32 chunk = remaining < avail ? remaining : avail;
+            if (chunk == 8) {
+                row[x + 0] = palette[packed & 0xFF];
+                row[x + 1] = palette[(packed >> 8) & 0xFF];
+                row[x + 2] = palette[(packed >> 16) & 0xFF];
+                row[x + 3] = palette[(packed >> 24) & 0xFF];
+                row[x + 4] = palette[(packed >> 32) & 0xFF];
+                row[x + 5] = palette[(packed >> 40) & 0xFF];
+                row[x + 6] = palette[(packed >> 48) & 0xFF];
+                row[x + 7] = palette[(packed >> 56) & 0xFF];
+            } else {
+                u64 p = packed >> (bit_off * 8);
+                for (u32 k = 0; k < chunk; ++k) {
+                    row[x + k] = palette[p & 0xFF];
+                    p >>= 8;
+                }
+            }
+            x += chunk;
+            remaining -= chunk;
+        }
+    }
 
     // The shape the pointer is drawn in: the one the state publishes, else the arrow.
     const PointerShape& pointer_shape() const {
@@ -269,22 +342,71 @@ private:
                                                                : kDefaultPointerShape;
     }
 
-    // The union of the pointer rectangles at two positions clipped to the screen.
-    Rect pointer_union(i32 x0, i32 y0, i32 x1, i32 y1, u32 width, u32 height) const {
+    // The screen pixels under the pointer rectangles at two positions, empty
+    // when the rectangles lie outside the box.
+    Rect pointer_dirty(i32 x0, i32 y0, i32 x1, i32 y1) const {
         const PointerShape& shape = pointer_shape();
-        const i32 min_x = (x0 < x1 ? x0 : x1) - shape.hot_x;
-        const i32 min_y = (y0 < y1 ? y0 : y1) - shape.hot_y;
-        const i32 max_x = (x0 > x1 ? x0 : x1) - shape.hot_x + static_cast<i32>(shape.width) - 1;
-        const i32 max_y = (y0 > y1 ? y0 : y1) - shape.hot_y + static_cast<i32>(shape.height) - 1;
-        const i32 first_x = min_x > 0 ? min_x : 0;
-        const i32 first_y = min_y > 0 ? min_y : 0;
-        const i32 last_x = at_most(max_x, width);
-        const i32 last_y = at_most(max_y, height);
-        return Rect{first_x, first_y, last_x, last_y};
+        const i64 hot_x = static_cast<i64>(shape.hot_x) * pointer_pixel_width_;
+        const i64 hot_y = static_cast<i64>(shape.hot_y) * pointer_pixel_height_;
+        const i64 image_width = static_cast<i64>(shape.width) * pointer_pixel_width_;
+        const i64 image_height = static_cast<i64>(shape.height) * pointer_pixel_height_;
+        const i64 left_a = host_offset(x0, box_width_, applied_width_);
+        const i64 left_b = host_offset(x1, box_width_, applied_width_);
+        const i64 top_a = host_offset(y0, box_height_, applied_height_);
+        const i64 top_b = host_offset(y1, box_height_, applied_height_);
+        const i64 left = (left_a < left_b ? left_a : left_b) - hot_x;
+        const i64 top = (top_a < top_b ? top_a : top_b) - hot_y;
+        const i64 right = (left_a > left_b ? left_a : left_b) - hot_x + image_width - 1;
+        const i64 bottom = (top_a > top_b ? top_a : top_b) - hot_y + image_height - 1;
+        const i64 first_column = left > 0 ? left : 0;
+        const i64 first_row = top > 0 ? top : 0;
+        const i64 box_right = static_cast<i64>(box_width_) - 1;
+        const i64 box_bottom = static_cast<i64>(box_height_) - 1;
+        const i64 last_column = right < box_right ? right : box_right;
+        const i64 last_row = bottom < box_bottom ? bottom : box_bottom;
+        if (first_column > last_column || first_row > last_row) {
+            return Rect{0, 0, -1, -1};
+        }
+        return Rect{column_x_[first_column], row_y_[first_row], column_x_[last_column],
+                    row_y_[last_row]};
     }
 
-    // The offset of a screen that fits wholly in the framebuffer, 0 when it
-    // does not and is clipped at the top left.
+    // Draws the pointer, each of its pixels a block of the pointer pixel size,
+    // where it lies between (left, top) and (right, bottom) of the framebuffer,
+    // the end excluded. The hot spot is at the host position of the pointer's
+    // screen position.
+    void draw_pointer(i64 left, i64 top, i64 right, i64 bottom) {
+        const PointerShape& shape = pointer_shape();
+        const i64 image_left = box_x_ +
+                               host_offset(pointer_x_, box_width_, applied_width_) -
+                               static_cast<i64>(shape.hot_x) * pointer_pixel_width_;
+        const i64 image_top = box_y_ +
+                              host_offset(pointer_y_, box_height_, applied_height_) -
+                              static_cast<i64>(shape.hot_y) * pointer_pixel_height_;
+        for (u32 py = 0; py < shape.height; ++py) {
+            const i64 block_top = image_top + static_cast<i64>(py) * pointer_pixel_height_;
+            const i64 y0 = block_top > top ? block_top : top;
+            const i64 y1 = block_top + pointer_pixel_height_ < bottom
+                               ? block_top + pointer_pixel_height_
+                               : bottom;
+            for (u32 px = 0; px < shape.width && y0 < y1; ++px) {
+                const u32 pixel = shape.pixels[py][px];
+                const i64 block_left = image_left + static_cast<i64>(px) * pointer_pixel_width_;
+                const i64 x0 = block_left > left ? block_left : left;
+                const i64 x1 = block_left + pointer_pixel_width_ < right
+                                   ? block_left + pointer_pixel_width_
+                                   : right;
+                if (pixel != 0 && x0 < x1) {
+                    fb_.fill_rect(static_cast<u64>(x0), static_cast<u64>(y0),
+                                  static_cast<u64>(x1 - x0), static_cast<u64>(y1 - y0),
+                                  shape.rgb[pixel & 3]);
+                }
+            }
+        }
+    }
+
+    // The offset of a box that fits wholly in the framebuffer, 0 when it
+    // does not.
     static u32 centred(u64 framebuffer_side, u64 screen_side) {
         return screen_side < framebuffer_side
                    ? static_cast<u32>((framebuffer_side - screen_side) / 2)
@@ -314,9 +436,20 @@ private:
     }
 
     Framebuffer fb_{};
-    u32 scale_ = 1;
-    u32 origin_x_ = 0;
-    u32 origin_y_ = 0;
+    u32 box_x_ = 0;
+    u32 box_y_ = 0;
+    u32 box_width_ = 0;
+    u32 box_height_ = 0;
+    u32 pointer_pixel_width_ = 1;
+    u32 pointer_pixel_height_ = 1;
+    // What the box shows: the front screen and its mode's nominal size, and
+    // the screen pixel under each host column and row of the box.
+    u32 applied_screen_ = 0;
+    u32 applied_width_ = kDefaultModeWidth;
+    u32 applied_height_ = kDefaultModeHeight;
+    u16 column_x_[kMaxBoxWidth]{};
+    u16 row_y_[kMaxBoxHeight]{};
+    // The pointer position in pixels of the applied mode.
     i32 pointer_x_ = 0;
     i32 pointer_y_ = 0;
     bool pointer_visible_ = false;

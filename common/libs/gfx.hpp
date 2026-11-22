@@ -63,6 +63,11 @@ struct DisplayState {
     };
     DisplaySink sink{nullptr, nullptr};
     u32 front_screen = 0;
+    // The nominal size and the display_modes flags of the front screen's mode;
+    // the display fits that area to the monitor. 640x400 without a screen.
+    u16 mode_width = 640;
+    u16 mode_height = 400;
+    u32 mode_flags = 0;
     // Changes drawn into any bitmap other than the front screen's go here.
     DamageSink damage{nullptr, nullptr};
     PaletteSource palette{nullptr, nullptr};

@@ -298,6 +298,15 @@ u16 view_modes_of(const display_modes::Mode& mode) {
     return static_cast<u16>(mode.id & ~display_modes::kMonitorIdMask);
 }
 
+// Tells the display the nominal size and flags of the front screen's mode. A
+// mode the table does not know, or no screen, is 640x400 without flags.
+void set_front_mode(DisplayState& display, u32 mode_id) {
+    const display_modes::Mode* mode = display_modes::find(mode_id);
+    display.mode_width = mode != nullptr ? mode->width : 640;
+    display.mode_height = mode != nullptr ? mode->height : 400;
+    display.mode_flags = mode != nullptr ? mode->flags : 0;
+}
+
 // The standard size of a screen: the extent of the DClip rectangle if one
 // was given and is not empty, otherwise the mode's nominal size.
 u32 standard_extent(Bus& b, u32 dclip, u32 nominal, u32 min_offset, u32 max_offset) {
@@ -2063,6 +2072,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     dropped_messages_ = 0;
     batch_depth_ = 0;
     display.front_screen = 0;
+    set_front_mode(display, kInvalidModeId);
     display.palette_dirty = false;
     for (u32& screen : screens_) {
         screen = 0;
@@ -3282,6 +3292,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     screens_[0] = screen;
     front_ = screen;
     display_->front_screen = screen;
+    set_front_mode(*display_, mode->id);
     display_->palette_dirty = false;
     write_links();
     rec->addr = screen;
@@ -3396,6 +3407,7 @@ bool Intuition::close_screen(u32 screen) {
     if (was_front) {
         front_ = screens_[0];
         display_->front_screen = front_;
+        set_front_mode(*display_, screen_mode_id(front_));
         display_->palette_dirty = false;
         if (front_ != 0) {
             refresh_screen(front_);
@@ -3417,6 +3429,7 @@ void Intuition::screen_to_front(u32 screen) {
     screens_[0] = screen;
     front_ = screen;
     display_->front_screen = screen;
+    set_front_mode(*display_, screen_mode_id(screen));
     display_->palette_dirty = false;
     write_links();
     refresh_screen(screen);
@@ -3439,6 +3452,7 @@ void Intuition::screen_to_back(u32 screen) {
     screens_[open - 1] = screen;
     front_ = screens_[0];
     display_->front_screen = front_;
+    set_front_mode(*display_, screen_mode_id(front_));
     display_->palette_dirty = false;
     write_links();
     refresh_screen(front_);

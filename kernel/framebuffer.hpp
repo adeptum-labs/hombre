@@ -122,6 +122,28 @@ public:
         }
     }
 
+    // Draws count pixels starting at (left, top), rows high, clipped to the
+    // screen. Pixel i takes the colour rgb[columns[i]], so a source pixel is
+    // repeated as often as columns names it, which need not be the same for
+    // every pixel.
+    void put_mapped_row(u64 left, u64 top, u64 rows, const u32* rgb, const u16* columns,
+                        u32 count) {
+        if (rgb == nullptr || columns == nullptr || count == 0 || rows == 0 || left >= width_ ||
+            top >= height_) {
+            return;
+        }
+        const u64 span = count > width_ - left ? width_ - left : count;
+        const u64 bottom = rows > height_ - top ? height_ : top + rows;
+        u8* first_row = base_ + top * pitch_ + left * 4;
+        for (u64 i = 0; i < span; ++i) {
+            const u32 value = pixel_value(rgb[columns[i]]);
+            __builtin_memcpy(first_row + i * 4, &value, sizeof(value));
+        }
+        for (u64 y = top + 1; y < bottom; ++y) {
+            __builtin_memcpy(base_ + y * pitch_ + left * 4, first_row, span * 4);
+        }
+    }
+
 private:
     // The pixel value whose little endian bytes are in the framebuffer's order.
     u32 pixel_value(u32 rgb) const {

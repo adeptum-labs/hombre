@@ -337,7 +337,7 @@ void out_of_range_char_draws_question_mark() {
     question.framebuffer().draw_text(0, 0, "?", kWhite, 1);
     CHECK(shows_glyph(question, kGlyphQuestion, 0, 0, 1, kWhite, kBlack));
 
-    const char out_of_range[] = {'\x01', '\x1F', '\x7F', '\x80', '\xFF', '\n'};
+    const char out_of_range[] = {'\x01', '\x1F', '\x7F', '\x80', '\x9F', '\n'};
     for (char c : out_of_range) {
         Screen s(8, 8, 32, kBgrx);
         s.framebuffer().fill(kBlack);
@@ -414,6 +414,38 @@ void put_row_scales_and_clips() {
     CHECK(clipped.guards_intact());
 }
 
+void put_mapped_row_repeats_source_pixels_by_column_and_clips() {
+    const u32 row[3] = {0x112233, 0x445566, 0x778899};
+    // Source pixel 0 is shown once, 1 three times and 2 twice.
+    const u16 columns[6] = {0, 1, 1, 1, 2, 2};
+
+    Screen screen(8, 5, 40, kBgrx);
+    screen.framebuffer().fill(kBlack);
+    screen.framebuffer().put_mapped_row(1, 1, 2, row, columns, 6);
+    for (u32 y = 0; y < 5; ++y) {
+        for (u32 x = 0; x < 8; ++x) {
+            const bool inside = x >= 1 && x < 7 && y >= 1 && y < 3;
+            const u32 expected = inside ? row[columns[x - 1]] : kBlack;
+            CHECK_EQ(screen.pixel(x, y), expected);
+        }
+    }
+    CHECK(screen.padding_is(0x11));
+    CHECK(screen.guards_intact());
+
+    // A row running off the right and bottom edges is clipped.
+    Screen clipped(4, 3, 24, kBgrx);
+    clipped.framebuffer().fill(kBlack);
+    clipped.framebuffer().put_mapped_row(2, 2, 5, row, columns, 6);
+    for (u32 y = 0; y < 3; ++y) {
+        for (u32 x = 0; x < 4; ++x) {
+            const u32 expected = (y == 2 && x >= 2) ? row[columns[x - 2]] : kBlack;
+            CHECK_EQ(clipped.pixel(x, y), expected);
+        }
+    }
+    CHECK(clipped.padding_is(0x11));
+    CHECK(clipped.guards_intact());
+}
+
 void font_has_the_hombre_letters() {
     CHECK(glyph_is('H', kGlyphH));
     CHECK(glyph_is('O', kGlyphO));
@@ -453,7 +485,8 @@ void font_glyphs_are_present_and_distinct() {
     }
     CHECK(glyph('\x7F') == kFont8x8['?' - 0x20]);
     CHECK(glyph('\x1F') == kFont8x8['?' - 0x20]);
-    CHECK(glyph('\xFF') == kFont8x8['?' - 0x20]);
+    CHECK(glyph('\x9F') == kFont8x8['?' - 0x20]);
+    CHECK(glyph('\xFF') == kFont8x8ExtLatin1[0xFF - 0xA0]);
 }
 
 }
@@ -470,6 +503,7 @@ int main() {
     out_of_range_char_draws_question_mark();
     pitch_larger_than_width_is_respected();
     put_row_scales_and_clips();
+    put_mapped_row_repeats_source_pixels_by_column_and_clips();
     font_has_the_hombre_letters();
     font_glyphs_are_present_and_distinct();
     return check::finish("test_framebuffer");

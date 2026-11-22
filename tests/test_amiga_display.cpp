@@ -99,11 +99,18 @@ private:
     std::vector<u8> memory_;
 };
 
-// Guest memory holding a Screen, its BitMap, a ColorMap and up to 8 640x400
-// bitmap planes, and a Machine without a Jit.
+// Guest memory holding a Screen, its BitMap, a ColorMap and the bitmap planes
+// of a screen of up to 8 planes (640x400 unless the size is given), and a
+// Machine without a Jit.
 class Guest {
 public:
-    explicit Guest(u32 depth = kPlanes) : depth_(depth), memory_(kMemoryBytes, kGuardByte) {
+    explicit Guest(u32 depth = kPlanes, u32 width = kScreenWidth, u32 height = kScreenHeight)
+        : depth_(depth),
+          width_(width),
+          height_(height),
+          bytes_per_row_(width / 8),
+          plane_bytes_(bytes_per_row_ * height),
+          memory_(kMemoryBytes, kGuardByte) {
         m_.cpu = CpuState{};
         m_.mem = GuestMemory{memory_.data(), kMemoryBytes};
         m_.jit = nullptr;
@@ -113,21 +120,21 @@ public:
 
     Machine& machine() { return m_; }
 
-    void clear_planes() { std::memset(memory_.data() + kPlaneBase, 0, depth_ * kPlaneBytes); }
+    void clear_planes() { std::memset(memory_.data() + kPlaneBase, 0, depth_ * plane_bytes_); }
 
     // Gives every pixel of the screen the pen.
     void set_all_pixels(u32 pen) {
         for (u32 plane = 0; plane < depth_; ++plane) {
-            std::memset(memory_.data() + kPlaneBase + plane * kPlaneBytes,
-                        ((pen >> plane) & 1) != 0 ? 0xFF : 0x00, kPlaneBytes);
+            std::memset(memory_.data() + kPlaneBase + plane * plane_bytes_,
+                        ((pen >> plane) & 1) != 0 ? 0xFF : 0x00, plane_bytes_);
         }
     }
 
     void set_pixel(u32 x, u32 y, u32 pen) {
         const u32 mask = 0x80 >> (x & 7);
-        const u32 at = y * kBytesPerRow + (x >> 3);
+        const u32 at = y * bytes_per_row_ + (x >> 3);
         for (u32 plane = 0; plane < depth_; ++plane) {
-            u8& byte = memory_[kPlaneBase + plane * kPlaneBytes + at];
+            u8& byte = memory_[kPlaneBase + plane * plane_bytes_ + at];
             if (((pen >> plane) & 1) != 0) {
                 byte = static_cast<u8>(byte | mask);
             } else {
@@ -161,13 +168,13 @@ private:
 
     // Pen 0 is 0xAAAAAA, pen 1 black, pen 2 white and pen 3 0x6688BB.
     void write_screen() {
-        put16(kScreen + ndk::sc_Width, kScreenWidth);
-        put16(kScreen + ndk::sc_Height, kScreenHeight);
-        put16(kScreen + ndk::sc_BitMap + ndk::bm_BytesPerRow, kBytesPerRow);
+        put16(kScreen + ndk::sc_Width, width_);
+        put16(kScreen + ndk::sc_Height, height_);
+        put16(kScreen + ndk::sc_BitMap + ndk::bm_BytesPerRow, bytes_per_row_);
         put8(kScreen + ndk::sc_BitMap + ndk::bm_Depth, depth_);
         for (u32 plane = 0; plane < 8; ++plane) {
             put32(kScreen + ndk::sc_BitMap + ndk::bm_Planes + plane * 4,
-                  plane < depth_ ? kPlaneBase + plane * kPlaneBytes : 0);
+                  plane < depth_ ? kPlaneBase + plane * plane_bytes_ : 0);
         }
         put32(kScreen + ndk::sc_ViewPort + ndk::vp_ColorMap, kColourMap);
         put8(kColourMap + ndk::cm_Flags, 0);
@@ -183,6 +190,10 @@ private:
     }
 
     u32 depth_;
+    u32 width_;
+    u32 height_;
+    u32 bytes_per_row_;
+    u32 plane_bytes_;
     std::vector<u8> memory_;
     Machine m_;
 };
@@ -197,9 +208,10 @@ void scale_two_at_1280x800_and_no_border() {
     Guest guest;
     AmigaDisplay display;
     display.init(fb.framebuffer());
-    CHECK_EQ(display.scale(), 2u);
-    CHECK_EQ(display.origin_x(), 0u);
-    CHECK_EQ(display.origin_y(), 0u);
+    CHECK_EQ(display.box_width(), 1280u);
+    CHECK_EQ(display.box_height(), 800u);
+    CHECK_EQ(display.box_x(), 0u);
+    CHECK_EQ(display.box_y(), 0u);
 
     guest.set_all_pixels(1);
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
@@ -212,43 +224,66 @@ void scale_two_at_1280x800_and_no_border() {
     CHECK(fb.guards_intact());
 }
 
-void larger_framebuffer_is_centred_with_border_colour() {
-    Screen fb(1600, 1000, 1600 * 4, kBgrx);
+void wide_framebuffer_gets_a_centred_box_with_border_colour_beside_it() {
+    Screen fb(1920, 1000, 1920 * 4, kBgrx);
     Guest guest;
     AmigaDisplay display;
     display.init(fb.framebuffer());
-    CHECK_EQ(display.scale(), 2u);
-    CHECK_EQ(display.origin_x(), 160u);
-    CHECK_EQ(display.origin_y(), 100u);
+    CHECK_EQ(display.box_width(), 1600u);
+    CHECK_EQ(display.box_height(), 1000u);
+    CHECK_EQ(display.box_x(), 160u);
+    CHECK_EQ(display.box_y(), 0u);
 
     guest.set_all_pixels(1);
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
 
-    // The screen covers x 160 to 1439 and y 100 to 899.
-    CHECK_EQ(fb.pixel(160, 100), 0u);
-    CHECK_EQ(fb.pixel(1439, 899), 0u);
+    // The box covers x 160 to 1759.
+    CHECK_EQ(fb.pixel(160, 0), 0u);
+    CHECK_EQ(fb.pixel(1759, 999), 0u);
     CHECK_EQ(fb.pixel(0, 0), kBorder);
-    CHECK_EQ(fb.pixel(159, 100), kBorder);
-    CHECK_EQ(fb.pixel(160, 99), kBorder);
-    CHECK_EQ(fb.pixel(1440, 100), kBorder);
-    CHECK_EQ(fb.pixel(160, 900), kBorder);
+    CHECK_EQ(fb.pixel(159, 0), kBorder);
+    CHECK_EQ(fb.pixel(1760, 0), kBorder);
+    CHECK_EQ(fb.pixel(1919, 999), kBorder);
     CHECK(fb.guards_intact());
 }
 
-void below_1x_clips_top_left() {
+void tall_framebuffer_gets_a_centred_box_with_border_colour_above_and_below_it() {
+    Screen fb(1600, 1200, 1600 * 4, kBgrx);
+    Guest guest;
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    CHECK_EQ(display.box_width(), 1600u);
+    CHECK_EQ(display.box_height(), 1000u);
+    CHECK_EQ(display.box_x(), 0u);
+    CHECK_EQ(display.box_y(), 100u);
+
+    guest.set_all_pixels(1);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
+
+    CHECK_EQ(fb.pixel(0, 100), 0u);
+    CHECK_EQ(fb.pixel(1599, 1099), 0u);
+    CHECK_EQ(fb.pixel(0, 99), kBorder);
+    CHECK_EQ(fb.pixel(0, 1100), kBorder);
+    CHECK(fb.guards_intact());
+}
+
+void framebuffer_smaller_than_the_screen_shows_all_of_it_downscaled() {
     Screen fb(320, 200, 320 * 4, kBgrx);
     Guest guest;
     AmigaDisplay display;
     display.init(fb.framebuffer());
-    CHECK_EQ(display.scale(), 1u);
-    CHECK_EQ(display.origin_x(), 0u);
-    CHECK_EQ(display.origin_y(), 0u);
+    CHECK_EQ(display.box_width(), 320u);
+    CHECK_EQ(display.box_height(), 200u);
 
     guest.set_all_pixels(1);
+    guest.set_pixel(2, 0, 2);
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
 
     CHECK_EQ(fb.pixel(0, 0), 0u);
     CHECK_EQ(fb.pixel(319, 199), 0u);
+    // Host column 1 shows screen column 2.
+    CHECK_EQ(fb.pixel(1, 0), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(2, 0), 0u);
     CHECK(fb.guards_intact());
 }
 
@@ -304,12 +339,12 @@ void dirty_rect_is_clipped_to_the_screen() {
     refresh(display, guest.machine(), kScreen, Rect{600, 380, 10000, 10000});
 
     // Only screen x 600 to 639 and y 380 to 399 are drawn: framebuffer
-    // x 1360 to 1439 and y 860 to 899.
-    CHECK_EQ(fb.pixel(1360, 860), 0u);
-    CHECK_EQ(fb.pixel(1439, 899), 0u);
-    CHECK_EQ(fb.pixel(1359, 860), kBorder);
-    CHECK_EQ(fb.pixel(1440, 860), kBorder);
-    CHECK_EQ(fb.pixel(1500, 950), kBorder);
+    // x 1500 to 1599 and y 950 to 999, at 2.5 host pixels per screen pixel.
+    CHECK_EQ(fb.pixel(1500, 950), 0u);
+    CHECK_EQ(fb.pixel(1599, 999), 0u);
+    CHECK_EQ(fb.pixel(1499, 950), kBorder);
+    CHECK_EQ(fb.pixel(1500, 949), kBorder);
+    CHECK_EQ(fb.pixel(1000, 500), kBorder);
     CHECK(fb.guards_intact());
 }
 
@@ -554,14 +589,13 @@ void hiding_the_pointer_erases_it() {
     CHECK(fb.guards_intact());
 }
 
-void pointer_overlay_respects_scale_and_origin() {
-    Screen fb(1600, 1000, 1600 * 4, kBgrx);
+void pointer_overlay_respects_the_box_position_and_its_pixel_size() {
+    Screen fb(1600, 1200, 1600 * 4, kBgrx);
     Guest guest;
     AmigaDisplay display;
     display.init(fb.framebuffer());
-    CHECK_EQ(display.scale(), 2u);
-    CHECK_EQ(display.origin_x(), 160u);
-    CHECK_EQ(display.origin_y(), 100u);
+    CHECK_EQ(display.box_x(), 0u);
+    CHECK_EQ(display.box_y(), 100u);
 
     guest.set_all_pixels(3);
 
@@ -569,19 +603,22 @@ void pointer_overlay_respects_scale_and_origin() {
     display.set_pointer_visible(guest.machine(), kScreen, true);
     refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
 
-    // Tip at logical (10, 10) maps to framebuffer (160 + 10 * 2, 100 + 10 * 2) = (180, 120).
-    CHECK_EQ(fb.pixel(180, 120), 0xE04040u);
-    CHECK_EQ(fb.pixel(181, 120), 0xE04040u);
-    CHECK_EQ(fb.pixel(180, 121), 0xE04040u);
-    CHECK_EQ(fb.pixel(181, 121), 0xE04040u);
+    // The box is 1600x1000, so a pointer pixel is 2x2 host pixels. The tip at
+    // screen (10, 10) maps to framebuffer (10 * 2.5, 100 + 10 * 2.5) = (25, 125).
+    CHECK_EQ(fb.pixel(25, 125), 0xE04040u);
+    CHECK_EQ(fb.pixel(26, 125), 0xE04040u);
+    CHECK_EQ(fb.pixel(25, 126), 0xE04040u);
+    CHECK_EQ(fb.pixel(26, 126), 0xE04040u);
+    CHECK_EQ(fb.pixel(27, 125), 0xE0E0C0u);
 
-    // The black edge at logical (11, 12) maps to framebuffer (160 + 11 * 2, 100 + 12 * 2) = (182, 124).
-    CHECK_EQ(fb.pixel(182, 124), 0x000000u);
-    CHECK_EQ(fb.pixel(183, 124), 0x000000u);
-    CHECK_EQ(fb.pixel(182, 125), 0x000000u);
-    CHECK_EQ(fb.pixel(183, 125), 0x000000u);
+    // The black edge at pointer pixel (1, 2) is 2 pointer pixels down and 1 across.
+    CHECK_EQ(fb.pixel(27, 129), 0x000000u);
+    CHECK_EQ(fb.pixel(28, 129), 0x000000u);
+    CHECK_EQ(fb.pixel(27, 130), 0x000000u);
+    CHECK_EQ(fb.pixel(28, 130), 0x000000u);
 
     CHECK_EQ(fb.pixel(0, 0), kBorder);
+    CHECK_EQ(fb.pixel(800, 600), 0x6688BBu);
     CHECK(fb.guards_intact());
 }
 
@@ -590,7 +627,7 @@ void refresh_matches_pixel_reference() {
     Guest guest;
     AmigaDisplay display;
     display.init(fb.framebuffer());
-    CHECK_EQ(display.scale(), 2u);
+    CHECK_EQ(display.box_width(), 1280u);
 
     u8* mem = guest.machine().mem.base;
     u32 rng = 0x13579BDFu;
@@ -652,7 +689,7 @@ void depth8_pens_show_24bit_colours_at_scale_1_and_2() {
     Screen fb1(640, 400, 640 * 4, kBgrx);
     AmigaDisplay d1;
     d1.init(fb1.framebuffer());
-    CHECK_EQ(d1.scale(), 1u);
+    CHECK_EQ(d1.box_width(), 640u);
     refresh(d1, guest.machine(), kScreen, Rect{0, 0, 15, 0});
     CHECK_EQ(fb1.pixel(0, 0), c0);
     CHECK_EQ(fb1.pixel(1, 0), c5);
@@ -663,7 +700,7 @@ void depth8_pens_show_24bit_colours_at_scale_1_and_2() {
     Screen fb2(1280, 800, 1280 * 4, kBgrx);
     AmigaDisplay d2;
     d2.init(fb2.framebuffer());
-    CHECK_EQ(d2.scale(), 2u);
+    CHECK_EQ(d2.box_width(), 1280u);
     refresh(d2, guest.machine(), kScreen, Rect{0, 0, 15, 0});
     CHECK_EQ(fb2.pixel(0, 0), c0);
     CHECK_EQ(fb2.pixel(1, 1), c0);
@@ -681,7 +718,7 @@ void depth8_dirty_rect_matches_pixel_reference() {
     Guest guest(8);
     AmigaDisplay display;
     display.init(fb.framebuffer());
-    CHECK_EQ(display.scale(), 2u);
+    CHECK_EQ(display.box_width(), 1280u);
 
     u8* mem = guest.machine().mem.base;
     u32 rng = 0xCAFEBABEu;
@@ -730,12 +767,185 @@ void depth8_dirty_rect_matches_pixel_reference() {
     CHECK(fb.guards_intact());
 }
 
+DisplayState mode_state(u16 width, u16 height) {
+    DisplayState state;
+    state.mode_width = width;
+    state.mode_height = height;
+    return state;
+}
+
+void low_res_screen_is_drawn_four_by_four() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest(kPlanes, 320, 200);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    const DisplayState state = mode_state(320, 200);
+    display.follow_pointer_shape(state);
+
+    guest.set_all_pixels(1);
+    guest.set_pixel(1, 0, 2);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 319, 199});
+
+    for (u32 y = 0; y < 4; ++y) {
+        for (u32 x = 4; x < 8; ++x) {
+            CHECK_EQ(fb.pixel(x, y), 0xFFFFFFu);
+        }
+    }
+    CHECK_EQ(fb.pixel(3, 0), 0u);
+    CHECK_EQ(fb.pixel(8, 0), 0u);
+    CHECK_EQ(fb.pixel(4, 4), 0u);
+    CHECK_EQ(fb.pixel(1279, 799), 0u);
+    CHECK(fb.guards_intact());
+}
+
+void pal_low_res_screen_rows_are_three_or_four_host_rows_covering_the_box() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest(kPlanes, 320, 256);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    const DisplayState state = mode_state(320, 256);
+    display.follow_pointer_shape(state);
+
+    // Even screen rows are black and odd rows white in the first column, so
+    // every run of one colour down the first host column is one screen row.
+    guest.set_all_pixels(1);
+    for (u32 y = 1; y < 256; y += 2) {
+        guest.set_pixel(0, y, 2);
+    }
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 319, 255});
+
+    u32 runs = 0;
+    u32 run_length = 0;
+    for (u32 y = 0; y < 800; ++y) {
+        const u32 colour = fb.pixel(0, y);
+        CHECK(colour == 0u || colour == 0xFFFFFFu);
+        if (y > 0 && colour != fb.pixel(0, y - 1)) {
+            CHECK(run_length == 3 || run_length == 4);
+            run_length = 0;
+        }
+        if (run_length == 0) {
+            ++runs;
+        }
+        ++run_length;
+    }
+    CHECK(run_length == 3 || run_length == 4);
+    CHECK_EQ(runs, 256u);
+    CHECK(fb.guards_intact());
+}
+
+void super_high_res_laced_screen_is_one_by_two() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest(kPlanes, 1280, 400);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    const DisplayState state = mode_state(1280, 400);
+    display.follow_pointer_shape(state);
+
+    guest.set_all_pixels(1);
+    guest.set_pixel(1, 0, 2);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 1279, 399});
+
+    CHECK_EQ(fb.pixel(1, 0), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(1, 1), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(0, 0), 0u);
+    CHECK_EQ(fb.pixel(2, 0), 0u);
+    CHECK_EQ(fb.pixel(1, 2), 0u);
+    CHECK_EQ(fb.pixel(1279, 799), 0u);
+    CHECK(fb.guards_intact());
+}
+
+void screen_smaller_than_its_mode_leaves_the_rest_of_the_box_in_border_colour() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest(kPlanes, 160, 100);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    const DisplayState state = mode_state(320, 200);
+    display.follow_pointer_shape(state);
+
+    guest.set_all_pixels(1);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 159, 99});
+
+    CHECK_EQ(fb.pixel(0, 0), 0u);
+    CHECK_EQ(fb.pixel(639, 399), 0u);
+    CHECK_EQ(fb.pixel(640, 0), kBorder);
+    CHECK_EQ(fb.pixel(0, 400), kBorder);
+    CHECK_EQ(fb.pixel(1279, 799), kBorder);
+    CHECK(fb.guards_intact());
+}
+
+void changing_the_mode_clears_the_box_and_a_larger_screen_shows_its_top_left() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest;
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    DisplayState state = mode_state(640, 400);
+    display.follow_pointer_shape(state);
+
+    guest.set_all_pixels(1);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
+    CHECK_EQ(fb.pixel(1279, 799), 0u);
+
+    // Only the first screen pixel is redrawn, so the rest of the box shows
+    // that the mode change cleared it.
+    state.mode_width = 320;
+    state.mode_height = 200;
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 0, 0});
+    CHECK_EQ(fb.pixel(3, 3), 0u);
+    CHECK_EQ(fb.pixel(4, 0), kBorder);
+    CHECK_EQ(fb.pixel(1279, 799), kBorder);
+
+    // The 640x400 screen shows its top left 320x200 pixels in the box.
+    guest.set_pixel(319, 199, 2);
+    guest.set_pixel(320, 0, 2);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 639, 399});
+    CHECK_EQ(fb.pixel(1276, 796), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(1279, 799), 0xFFFFFFu);
+    CHECK_EQ(fb.pixel(1279, 0), 0u);
+    CHECK(fb.guards_intact());
+}
+
+void pointer_keeps_its_host_size_in_a_low_res_mode_and_its_place_when_the_mode_changes() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest guest(kPlanes, 320, 200);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    DisplayState state = mode_state(320, 200);
+    display.follow_pointer_shape(state);
+    guest.set_all_pixels(3);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 319, 199});
+
+    display.move_pointer(guest.machine(), kScreen, 10, 10);
+    display.set_pointer_visible(guest.machine(), kScreen, true);
+
+    // Screen (10, 10) is host (40, 40); a pointer pixel is still 2x2 host pixels.
+    CHECK_EQ(fb.pixel(40, 40), 0xE04040u);
+    CHECK_EQ(fb.pixel(41, 41), 0xE04040u);
+    CHECK_EQ(fb.pixel(42, 40), 0xE0E0C0u);
+    CHECK_EQ(fb.pixel(43, 41), 0xE0E0C0u);
+    CHECK_EQ(fb.pixel(44, 40), 0x6688BBu);
+    CHECK_EQ(fb.pixel(39, 39), 0x6688BBu);
+
+    // Moving restores the screen under the old position.
+    display.move_pointer(guest.machine(), kScreen, 160, 100);
+    CHECK_EQ(fb.pixel(40, 40), 0x6688BBu);
+    CHECK_EQ(fb.pixel(640, 400), 0xE04040u);
+
+    // A 640x400 mode puts the pointer on the same place of the monitor.
+    state.mode_width = 640;
+    state.mode_height = 400;
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 0, 0});
+    CHECK_EQ(display.pointer_x(), 320);
+    CHECK_EQ(display.pointer_y(), 200);
+    CHECK(fb.guards_intact());
+}
+
 }
 
 int main() {
     scale_two_at_1280x800_and_no_border();
-    larger_framebuffer_is_centred_with_border_colour();
-    below_1x_clips_top_left();
+    wide_framebuffer_gets_a_centred_box_with_border_colour_beside_it();
+    tall_framebuffer_gets_a_centred_box_with_border_colour_above_and_below_it();
+    framebuffer_smaller_than_the_screen_shows_all_of_it_downscaled();
     refresh_draws_pens_through_the_palette();
     dirty_rect_only_touches_its_blocks();
     dirty_rect_is_clipped_to_the_screen();
@@ -749,9 +959,15 @@ int main() {
     pointer_is_clipped_at_the_screen_edge_and_never_writes_outside_the_framebuffer();
     refresh_of_a_rectangle_not_touching_the_pointer_leaves_it_untouched();
     hiding_the_pointer_erases_it();
-    pointer_overlay_respects_scale_and_origin();
+    pointer_overlay_respects_the_box_position_and_its_pixel_size();
     refresh_matches_pixel_reference();
     depth8_pens_show_24bit_colours_at_scale_1_and_2();
     depth8_dirty_rect_matches_pixel_reference();
+    low_res_screen_is_drawn_four_by_four();
+    pal_low_res_screen_rows_are_three_or_four_host_rows_covering_the_box();
+    super_high_res_laced_screen_is_one_by_two();
+    screen_smaller_than_its_mode_leaves_the_rest_of_the_box_in_border_colour();
+    changing_the_mode_clears_the_box_and_a_larger_screen_shows_its_top_left();
+    pointer_keeps_its_host_size_in_a_low_res_mode_and_its_place_when_the_mode_changes();
     return check::finish("test_amiga_display");
 }

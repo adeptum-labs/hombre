@@ -57,7 +57,16 @@ inline bool decode_mouse_report(const u8* report, usize length, MouseSample& out
     return true;
 }
 
-// Tracks pointer position and button state within a bounded screen area.
+// The grid the pointer moves on: the picture box of the display, whatever
+// screen mode is in front. A High Res Laced screen of 640x400 pixels is two
+// units per pixel, so a USB count moves it one pixel.
+inline constexpr u32 kPointerGridWidth = 1280;
+inline constexpr u32 kPointerGridHeight = 800;
+inline constexpr i32 kPointerUnitsPerCount = 2;
+
+// Tracks pointer position and button state within a bounded area. The area
+// is the pointer grid when the pointer drives a display; a screen of any size
+// then reads the position through screen_x and screen_y.
 class PointerState {
 public:
     struct Update {
@@ -79,9 +88,19 @@ public:
     u32 width() const { return width_; }
     u32 height() const { return height_; }
 
+    // The position in the pixels of a screen screen_width x screen_height
+    // that fills the area.
+    i32 screen_x(u32 screen_width) const { return scaled(x_, screen_width, width_); }
+    i32 screen_y(u32 screen_height) const { return scaled(y_, screen_height, height_); }
+
     void set_position(i32 x, i32 y);
 
 private:
+    static i32 scaled(i32 position, u32 screen_side, u32 area_side) {
+        const i64 scaled_position = static_cast<i64>(position) * screen_side;
+        return area_side == 0 ? 0 : static_cast<i32>(scaled_position / area_side);
+    }
+
     i32 clamp_x(i64 v) const;
     i32 clamp_y(i64 v) const;
 
@@ -105,8 +124,8 @@ inline void PointerState::init(u32 width, u32 height, i32 x, i32 y) {
 }
 
 inline PointerState::Update PointerState::apply(const MouseSample& sample) {
-    const i32 new_x = clamp_x(static_cast<i64>(x_) + sample.dx);
-    const i32 new_y = clamp_y(static_cast<i64>(y_) + sample.dy);
+    const i32 new_x = clamp_x(static_cast<i64>(x_) + sample.dx * kPointerUnitsPerCount);
+    const i32 new_y = clamp_y(static_cast<i64>(y_) + sample.dy * kPointerUnitsPerCount);
     const bool moved = (new_x != x_) || (new_y != y_);
     x_ = new_x;
     y_ = new_y;

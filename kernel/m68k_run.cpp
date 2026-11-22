@@ -256,6 +256,15 @@ void open_amiga_screen(const BootInfo& info) {
     splash_progress(9, kSplashKernelSteps);
 }
 
+// The pointer in pixels of the front screen, whatever size its mode has.
+i32 pointer_screen_x() {
+    return pointer.screen_x(display.mode_width);
+}
+
+i32 pointer_screen_y() {
+    return pointer.screen_y(display.mode_height);
+}
+
 // Hands the framebuffer to the Amiga screen: the kernel's text console stops
 // and the screen is painted in full.
 void show_amiga_screen(const BootInfo& info) {
@@ -264,8 +273,9 @@ void show_amiga_screen(const BootInfo& info) {
     splash_progress(kSplashKernelSteps, kSplashKernelSteps);
     splash_end();
     amiga_display.init(make_framebuffer(info));
-    pointer.init(640, 400, 320, 200);
-    amiga_display.move_pointer(machine, amiga_screen, pointer.x(), pointer.y());
+    pointer.init(kPointerGridWidth, kPointerGridHeight, kPointerGridWidth / 2,
+                 kPointerGridHeight / 2);
+    amiga_display.move_pointer(machine, amiga_screen, pointer_screen_x(), pointer_screen_y());
     display.sink = amiga_display.sink();
     amiga_display.follow_pointer_shape(display);
     intuition.screen_to_front(amiga_screen);
@@ -290,8 +300,9 @@ void log_mouse_buttons(const char* prefix, u8 mask, i32 x, i32 y) {
 }
 
 void flush_mouse_move() {
-    amiga_display.move_pointer(machine, intuition.front_screen(), pointer.x(), pointer.y());
-    intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), 0, 0, true);
+    amiga_display.move_pointer(machine, intuition.front_screen(), pointer_screen_x(),
+                               pointer_screen_y());
+    intuition.pointer_event(pointer_screen_x(), pointer_screen_y(), pointer.buttons(), 0, 0, true);
 }
 
 void on_shell_view(void*, u32 view) {
@@ -339,7 +350,7 @@ void flush_wheel(i32 wheel) {
     if (wheel == 0) {
         return;
     }
-    const u32 win = intuition.window_under(pointer.x(), pointer.y());
+    const u32 win = intuition.window_under(pointer_screen_x(), pointer_screen_y());
     for (Console& c : consoles) {
         if (win != 0 && c.open && c.shell.is_open() && c.shell.window() == win) {
             c.shell.scroll_by(3 * wheel);
@@ -372,10 +383,12 @@ void poll_mouse() {
                 flush_wheel(wheel);
                 wheel = 0;
             }
-            intuition.pointer_event(pointer.x(), pointer.y(), pointer.buttons(), update.pressed,
-                                    update.released, false);
-            log_mouse_buttons("mouse: down ", update.pressed, pointer.x(), pointer.y());
-            log_mouse_buttons("mouse: up ", update.released, pointer.x(), pointer.y());
+            intuition.pointer_event(pointer_screen_x(), pointer_screen_y(), pointer.buttons(),
+                                    update.pressed, update.released, false);
+            log_mouse_buttons("mouse: down ", update.pressed, pointer_screen_x(),
+                              pointer_screen_y());
+            log_mouse_buttons("mouse: up ", update.released, pointer_screen_x(),
+                              pointer_screen_y());
         }
     }
     if (moved) {
