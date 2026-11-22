@@ -85,6 +85,7 @@
 // design, do not gate.
 
 #include "m68k_jit.hpp"
+#include "test_guest.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -428,7 +429,7 @@ bool stopped_as_expected(const Case& c, ExitReason why) {
 
 class Harness {
 public:
-    Harness() : memory_(kGuestBytes) {
+    Harness() : memory_(kTestGuestBytes) {
         const int fd = memfd_create("m68k-suite", 0);
         if (fd < 0 || ftruncate(fd, kRegionBytes) != 0) {
             std::perror("memfd");
@@ -440,7 +441,7 @@ public:
             std::perror("mmap");
             std::exit(2);
         }
-        m_.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m_.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         if (!jit_.init(CodeRegion{static_cast<u8*>(rw), static_cast<const u8*>(rx), kRegionBytes},
                        m_)) {
             std::fprintf(stderr, "jit init failed\n");
@@ -514,12 +515,12 @@ public:
         }
     }
 
-    // The first byte of guest memory that is not zero, or kGuestBytes. All
+    // The first byte of guest memory that is not zero, or kTestGuestBytes. All
     // of it is zero between cases unless a store went where no case
     // expects one.
     u32 dirty_byte() const {
         static const u8 zeroes[1 << 16]{};
-        for (u32 at = 0; at < kGuestBytes; at += sizeof zeroes) {
+        for (u32 at = 0; at < kTestGuestBytes; at += sizeof zeroes) {
             if (std::memcmp(memory_.data() + at, zeroes, sizeof zeroes) != 0) {
                 while (memory_[at] == 0) {
                     ++at;
@@ -527,10 +528,10 @@ public:
                 return at;
             }
         }
-        return kGuestBytes;
+        return kTestGuestBytes;
     }
 
-    bool clean() const { return dirty_byte() == kGuestBytes; }
+    bool clean() const { return dirty_byte() == kTestGuestBytes; }
 
     static std::string hex(u32 v) {
         char text[16];
@@ -587,7 +588,7 @@ private:
         const auto near = [&](u32 addr, u32 reach) {
             addr &= kBusMask;
             spans_.emplace_back(addr < reach ? 0 : addr - reach,
-                                std::min<u32>(addr + reach + 1, kGuestBytes));
+                                std::min<u32>(addr + reach + 1, kTestGuestBytes));
         };
         for (const auto& [addr, want] : expected_) {
             near(addr, kStrayReach);
@@ -693,7 +694,7 @@ Outcome judge(Harness& h, const Case& c, bool full_scan) {
     std::vector<std::string> strays;
     const ExitReason why = h.run(c, quirk, diffs, strays);
     h.clear(false);
-    if (const u32 at = full_scan ? h.dirty_byte() : kGuestBytes; at != kGuestBytes) {
+    if (const u32 at = full_scan ? h.dirty_byte() : kTestGuestBytes; at != kTestGuestBytes) {
         strays.push_back("stray byte " + Harness::hex(at) + ", away from the case's bytes");
     }
     const std::string reason = non_gating_reason(c);

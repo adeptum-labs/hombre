@@ -27,6 +27,7 @@
 #include "libs/icon.hpp"
 #include "check.hpp"
 #include "ofs_writer.hpp"
+#include "test_guest.hpp"
 
 #include <string>
 #include <sys/mman.h>
@@ -44,7 +45,6 @@ constexpr u32 kCall = 0x1800;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures and strings up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 
 constexpr u8 kWBDisk = 1;
 constexpr u8 kWBDrawer = 2;
@@ -352,7 +352,7 @@ std::vector<AdfFile> test_files() {
 class Rig {
 public:
     explicit Rig(const std::vector<AdfFile>& files = test_files())
-        : memory_(kGuestBytes), image_(build_adf("TestDisk", false, files)) {
+        : memory_(kTestGuestBytes), image_(build_adf("TestDisk", false, files)) {
         fd_ = memfd_create("icon", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -363,12 +363,12 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_lines.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
         CHECK(g_icon.init(m, g_exec, g_dos));
@@ -976,7 +976,9 @@ void put_disk_object_writes_every_tool_type() {
     // An array without an end that a file could hold is refused.
     const u32 big = get_disk_object(r, "Tools/Tool");
     CHECK(big != 0);
-    const u32 endless = 0x500000;  // above the memory exec hands out
+    const u32 scratch = g_exec.alloc(16 + 20000 * 4, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(scratch != 0);
+    const u32 endless = scratch + 16;
     const u32 word = r.str(endless - 16, "X");
     for (u32 i = 0; i < 20000; ++i) {
         r.put32(endless + i * 4, word);

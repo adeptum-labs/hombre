@@ -24,6 +24,7 @@
 #include "check.hpp"
 #include "log.hpp"
 #include "m68k_jit.hpp"
+#include "test_guest.hpp"
 
 #include <initializer_list>
 #include <string>
@@ -61,7 +62,7 @@ Jit g_jit;
 // memory, with the JIT initialised over both.
 class Rig {
 public:
-    explicit Rig(usize region_bytes = 1 << 20) : bytes_(region_bytes), memory_(kGuestBytes) {
+    explicit Rig(usize region_bytes = 1 << 20) : bytes_(region_bytes), memory_(kTestGuestBytes) {
         fd_ = memfd_create("m68k-jit", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(bytes_)) == 0);
@@ -73,7 +74,7 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, bytes_}, m));
         CHECK(m.jit == &g_jit);
@@ -346,10 +347,10 @@ void movem_round_trip() {
 void bus_and_address_errors() {
     Rig r;
     r.program(kCode, {0x2010});  // MOVE.L (A0),D0
-    r.cpu().a[0] = kGuestBytes - 2;
+    r.cpu().a[0] = kTestGuestBytes - 2;
     r.cpu().d[0] = 0x5555;
     CHECK_EQ(r.go(), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes - 2);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes - 2);
     CHECK_EQ(r.cpu().pc, kCode);
     CHECK_EQ(r.cpu().d[0], 0x5555u);
 
@@ -360,7 +361,7 @@ void bus_and_address_errors() {
     CHECK_EQ(r.cpu().pc, 0x1100u);
 
     // No guest address reaches past the end of guest memory.
-    const u32 wild[] = {kGuestBytes, kGuestBytes - 1, 0x7FFFFFFE, 0xFFFFFFFC, 0xFFFFFFFE};
+    const u32 wild[] = {kTestGuestBytes, kTestGuestBytes - 1, 0x7FFFFFFE, 0xFFFFFFFC, 0xFFFFFFFE};
     for (u32 a : wild) {
         r.cpu().a[0] = a;
         const ExitReason want = (a & 1) != 0 ? ExitReason::AddressError : ExitReason::BusError;
@@ -373,9 +374,9 @@ void bus_and_address_errors() {
     r.cpu().a[0] = 0xFFFFFFFF;
     CHECK_EQ(r.go(store_b), ExitReason::BusError);
     CHECK_EQ(r.cpu().fault_addr, 0xFFFFFFFFu);
-    r.cpu().a[0] = kGuestBytes - 1;
+    r.cpu().a[0] = kTestGuestBytes - 1;
     CHECK_EQ(r.go(store_b), ExitReason::Halt);
-    CHECK_EQ(r.get8(kGuestBytes - 1), r.cpu().d[0] & 0xFF);
+    CHECK_EQ(r.get8(kTestGuestBytes - 1), r.cpu().d[0] & 0xFF);
     r.cpu().a[0] = 0x4003;
     CHECK_EQ(r.go(store_l), ExitReason::AddressError);
     CHECK_EQ(r.cpu().fault_addr, 0x4003u);
@@ -383,13 +384,13 @@ void bus_and_address_errors() {
     // A fetch from an odd address or past the end of memory.
     CHECK_EQ(r.go(0x1001), ExitReason::AddressError);
     CHECK_EQ(r.cpu().fault_addr, 0x1001u);
-    CHECK_EQ(r.go(kGuestBytes), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.go(kTestGuestBytes), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
     // MOVE.L #imm,D0 whose immediate runs off the end.
-    r.put16(kGuestBytes - 4, 0x203C);
-    r.put16(kGuestBytes - 2, 0x1234);
-    CHECK_EQ(r.go(kGuestBytes - 4), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    r.put16(kTestGuestBytes - 4, 0x203C);
+    r.put16(kTestGuestBytes - 2, 0x1234);
+    CHECK_EQ(r.go(kTestGuestBytes - 4), ExitReason::BusError);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
 }
 
 void endless_loop_runs_out_of_budget() {
@@ -1283,7 +1284,7 @@ void exits_and_privilege() {
     r.cpu().a[0] = 1;
     CHECK_EQ(r.go(fault), ExitReason::AddressError);
     CHECK_EQ(r.cpu().trap_number, 3u);
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.go(fault), ExitReason::BusError);
     CHECK_EQ(r.cpu().trap_number, 2u);
     CHECK_EQ(r.go(0x1001), ExitReason::AddressError);
@@ -1509,7 +1510,7 @@ void bcd_matches_the_reference() {
     CHECK_EQ(r.go(post), ExitReason::Halt);
     CHECK_EQ(r.get8(0x4000), 0x99u);
     CHECK_EQ(r.cpu().a[0], 0x4001u);
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.go(post), ExitReason::BusError);
 }
 
@@ -1706,7 +1707,7 @@ void test_and_set() {
     CHECK_EQ(r.get8(0x4000), 0xFFu);
     CHECK_EQ(r.cpu().a[0], 0x4001u);
     CHECK_EQ(r.cpu().sr, kX);
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.go(mem), ExitReason::BusError);
 }
 
@@ -1739,9 +1740,9 @@ void move_peripheral() {
     r.cpu().a[0] = 0x4005;
     CHECK_EQ(r.go(from_l), ExitReason::Halt);
     CHECK_EQ(r.cpu().d[1], 0x11223344u);
-    r.cpu().a[0] = kGuestBytes - 3;
+    r.cpu().a[0] = kTestGuestBytes - 3;
     CHECK_EQ(r.go(to_l), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes + 1);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes + 1);
 }
 
 void block_limit_hook() {
@@ -1788,9 +1789,9 @@ void address_mask_hook() {
     // A masked access still faults past the end of guest memory, and an
     // odd one still raises an address error.
     g_jit.set_address_mask(0x01FFFFFF);
-    r.cpu().a[0] = 0xFF000000 | kGuestBytes;
+    r.cpu().a[0] = 0xFF000000 | kTestGuestBytes;
     CHECK_EQ(r.go(seq), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, 0xFF000000u | kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, 0xFF000000u | kTestGuestBytes);
     r.cpu().a[0] = 0xFF004001;
     CHECK_EQ(r.go(seq), ExitReason::AddressError);
 

@@ -26,6 +26,7 @@
 #include "libs/timer_device.hpp"
 #include "ofs_writer.hpp"
 #include "shell_commands.hpp"
+#include "test_guest.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -41,7 +42,6 @@ using namespace hombre::ndk;
 namespace {
 
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 
 Jit g_jit;
 Exec g_exec;
@@ -71,7 +71,7 @@ std::vector<u8> rts_hunk() {
 class Rig {
 public:
     Rig()
-        : memory_(kGuestBytes),
+        : memory_(kTestGuestBytes),
           image_(build_adf("HombreTest", false,
                            {
                                {"C/Echo", {'x'}},
@@ -89,10 +89,10 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m_.cpu = CpuState{};
-        m_.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m_.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m_.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m_));
-        CHECK(g_exec.init(m_, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m_, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_timer.init(m_, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume_) == FsError::Ok);
         CHECK(g_dos.init(m_, g_exec, volume_, nullptr, nullptr));

@@ -25,6 +25,7 @@
 #include "libs/timer_device.hpp"
 #include "check.hpp"
 #include "ofs_writer.hpp"
+#include "test_guest.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -53,7 +54,6 @@ constexpr u32 kArray = 0xC000;   // ReadArgs result arrays
 constexpr u32 kOut = 0xC800;     // what test commands store
 constexpr u32 kTemplate = 0xD000;
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 constexpr u64 kBlocks = 1000000;
 
 // Static storage, as the kernel keeps them.
@@ -392,11 +392,12 @@ public:
 
     // The first image in DF0:, the second in drive second_drive.
     Rig(std::vector<u8> image, std::vector<u8> second, u32 second_drive)
-        : Rig(std::move(image), kFreeEnd, std::move(second), second_drive) {}
+        : Rig(std::move(image), kTestGuestBytes, std::move(second), second_drive) {}
 
-    explicit Rig(std::vector<u8> image, u32 free_end = kFreeEnd, std::vector<u8> second = {},
-                 u32 second_drive = 1)
-        : memory_(kGuestBytes), image_(std::move(image)), second_image_(std::move(second)) {
+    // A free_end below the chip memory's end leaves no fast memory.
+    explicit Rig(std::vector<u8> image, u32 free_end = kTestGuestBytes,
+                 std::vector<u8> second = {}, u32 second_drive = 1)
+        : memory_(kTestGuestBytes), image_(std::move(image)), second_image_(std::move(second)) {
         fd_ = memfd_create("dos", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -407,13 +408,13 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_lines.clear();
         g_console.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, free_end));
+        CHECK(g_exec.init(m, kFreeStart, std::min(kTestChipEnd, free_end), free_end));
         CHECK(g_timer.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         if (second_image_.empty()) {
@@ -1342,18 +1343,18 @@ void output_to_bad_handles() {
     // A bad buffer ends the run.
     r.put32(r.proc() + pr_COS, r.get32(r.proc() + pr_CIS));
     r.cpu().d[1] = r.call(dos_lvo::Output);
-    r.cpu().d[2] = kGuestBytes - 2;
+    r.cpu().d[2] = kTestGuestBytes - 2;
     r.cpu().d[3] = 4;
     CHECK_EQ(r.dos(dos_lvo::Write), ExitReason::BusError);
     // A negative length writes nothing.
     CHECK_EQ(as_signed(r.call(dos_lvo::Write, r.call(dos_lvo::Output), kData, 0xFFFFFFFF)), -1);
     // A string that runs to the end of memory is printed up to there.
     g_console.clear();
-    r.str(kGuestBytes - 3, "ab");
-    r.put8(kGuestBytes - 1, 'c');
-    r.cpu().d[1] = kGuestBytes - 3;
+    r.str(kTestGuestBytes - 3, "ab");
+    r.put8(kTestGuestBytes - 1, 'c');
+    r.cpu().d[1] = kTestGuestBytes - 3;
     CHECK_EQ(r.dos(dos_lvo::PutStr), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
     CHECK(g_console == "abc");
 }
 
@@ -1403,11 +1404,11 @@ void io_err_and_faults() {
     // Bad pointers end the run.
     r.cpu().d[1] = 205;
     r.cpu().d[2] = 0;
-    r.cpu().d[3] = kGuestBytes - 4;
+    r.cpu().d[3] = kTestGuestBytes - 4;
     r.cpu().d[4] = 80;
     CHECK_EQ(r.dos(dos_lvo::Fault), ExitReason::BusError);
     r.cpu().d[1] = 205;
-    r.cpu().d[2] = kGuestBytes;
+    r.cpu().d[2] = kTestGuestBytes;
     CHECK_EQ(r.dos(dos_lvo::PrintFault), ExitReason::BusError);
 }
 
@@ -1551,11 +1552,11 @@ void variable_arguments_are_checked() {
     // Bad pointers end the run.
     r.str(kData, "Name");
     r.cpu().d[1] = kData;
-    r.cpu().d[2] = kGuestBytes - 2;
+    r.cpu().d[2] = kTestGuestBytes - 2;
     r.cpu().d[3] = 4;
     r.cpu().d[4] = 0;
     CHECK_EQ(r.dos(dos_lvo::SetVar), ExitReason::BusError);
-    r.cpu().d[1] = kGuestBytes;
+    r.cpu().d[1] = kTestGuestBytes;
     r.cpu().d[2] = kData + 0x100;
     r.cpu().d[3] = 32;
     CHECK_EQ(r.dos(dos_lvo::GetVar), ExitReason::BusError);
@@ -1589,8 +1590,8 @@ void str_to_long() {
     r.cpu().d[1] = kData;
     r.cpu().d[2] = kData + 0x101;
     CHECK_EQ(r.dos(dos_lvo::StrToLong), ExitReason::AddressError);
-    r.put8(kGuestBytes - 1, '5');
-    r.cpu().d[1] = kGuestBytes - 1;
+    r.put8(kTestGuestBytes - 1, '5');
+    r.cpu().d[1] = kTestGuestBytes - 1;
     r.cpu().d[2] = kData + 0x100;
     CHECK_EQ(r.dos(dos_lvo::StrToLong), ExitReason::BusError);
 }
@@ -1635,7 +1636,7 @@ void open_read_seek_close() {
     // Reads past the end give 0.
     CHECK_EQ(r.call(dos_lvo::Read, fh, kData + 0x100, 100), 0u);
     CHECK_EQ(r.call(dos_lvo::Seek, fh, 1000, OFFSET_BEGINNING), 1000u);
-    CHECK_EQ(r.call(dos_lvo::Read, fh, kGuestBytes - 1, 100), 0u);  // nothing to read: no fault
+    CHECK_EQ(r.call(dos_lvo::Read, fh, kTestGuestBytes - 1, 100), 0u);  // nothing to read: no fault
     // A position outside the file fails and stays where it was.
     CHECK_EQ(as_signed(r.call(dos_lvo::Seek, fh, 1001, OFFSET_BEGINNING)), -1);
     CHECK_EQ(r.io_err(), ERROR_SEEK_ERROR);
@@ -1645,7 +1646,7 @@ void open_read_seek_close() {
     // A read into memory that ends before the bytes do.
     r.call(dos_lvo::Seek, fh, 0, OFFSET_BEGINNING);
     r.cpu().d[1] = fh;
-    r.cpu().d[2] = kGuestBytes - 2;
+    r.cpu().d[2] = kTestGuestBytes - 2;
     r.cpu().d[3] = 4;
     CHECK_EQ(r.dos(dos_lvo::Read), ExitReason::BusError);
     // The volume is read-only.
@@ -1731,7 +1732,7 @@ void paths_resolve_like_amigados() {
     CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
     CHECK_EQ(r.io_err(), ERROR_INVALID_COMPONENT_NAME);
     // A name pointer out of reach.
-    r.cpu().d[1] = kGuestBytes;
+    r.cpu().d[1] = kTestGuestBytes;
     r.cpu().d[2] = MODE_OLDFILE;
     CHECK_EQ(r.dos(dos_lvo::Open), ExitReason::BusError);
 }
@@ -1785,10 +1786,10 @@ void high_byte_pointers_reach_their_24_bit_alias() {
     // byte outside, as the pointer was given.
     r.str(kData, "C:Echo");
     r.cpu().d[1] = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
-    r.cpu().d[2] = 0x80000000 | (kGuestBytes - 2);
+    r.cpu().d[2] = 0x80000000 | (kTestGuestBytes - 2);
     r.cpu().d[3] = 8;
     CHECK_EQ(r.dos(dos_lvo::Read), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | kTestGuestBytes);
 }
 
 void file_table_is_bounded() {
@@ -2018,7 +2019,7 @@ void examine_and_ex_next() {
     CHECK_EQ(r.call(dos_lvo::Examine, 0x777, fib), DOSFALSE);
     CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
     r.cpu().d[1] = dir;
-    r.cpu().d[2] = kGuestBytes - 8;
+    r.cpu().d[2] = kTestGuestBytes - 8;
     CHECK_EQ(r.dos(dos_lvo::Examine), ExitReason::BusError);
     r.cpu().d[1] = dir;
     r.cpu().d[2] = fib + 1;
@@ -2200,7 +2201,7 @@ void info_on_the_volume() {
     CHECK_EQ(r.call(dos_lvo::Info, 0x777, id), DOSFALSE);
     CHECK_EQ(r.io_err(), ERROR_INVALID_LOCK);
     r.cpu().d[1] = c;
-    r.cpu().d[2] = kGuestBytes - 2;
+    r.cpu().d[2] = kTestGuestBytes - 2;
     CHECK_EQ(r.dos(dos_lvo::Info), ExitReason::BusError);
 }
 
@@ -2655,7 +2656,7 @@ void read_args_templates_and_limits() {
     CHECK_EQ(r.get32(kData + 0x800 + CS_CurChr), 3u);
 
     // Bad pointers end the run.
-    r.cpu().d[1] = kGuestBytes;
+    r.cpu().d[1] = kTestGuestBytes;
     r.cpu().d[2] = kArray;
     r.cpu().d[3] = 0;
     CHECK_EQ(r.dos(dos_lvo::ReadArgs), ExitReason::BusError);
@@ -2670,14 +2671,14 @@ void read_args_templates_and_limits() {
     CHECK_EQ(r.dos(dos_lvo::ReadArgs), ExitReason::AddressError);
     r.put32(rda + CS_CurChr, 0);
     r.cpu().d[1] = kTemplate;
-    r.cpu().d[2] = kGuestBytes - 2;
+    r.cpu().d[2] = kTestGuestBytes - 2;
     r.cpu().d[3] = rda;
     CHECK_EQ(r.dos(dos_lvo::ReadArgs), ExitReason::BusError);
     r.cpu().d[1] = kTemplate;
     r.cpu().d[2] = kArray;
-    r.cpu().d[3] = kGuestBytes - 4;
+    r.cpu().d[3] = kTestGuestBytes - 4;
     CHECK_EQ(r.dos(dos_lvo::ReadArgs), ExitReason::BusError);
-    r.put32(rda + CS_Buffer, kGuestBytes - 1);
+    r.put32(rda + CS_Buffer, kTestGuestBytes - 1);
     r.put32(rda + CS_Length, 10);
     r.cpu().d[1] = kTemplate;
     r.cpu().d[2] = kArray;
@@ -2685,9 +2686,9 @@ void read_args_templates_and_limits() {
     CHECK_EQ(r.dos(dos_lvo::ReadArgs), ExitReason::BusError);
     // A template that runs to the end of memory.
     for (u32 i = 0; i < 16; ++i) {
-        r.put8(kGuestBytes - 16 + i, 'A');
+        r.put8(kTestGuestBytes - 16 + i, 'A');
     }
-    r.cpu().d[1] = kGuestBytes - 16;
+    r.cpu().d[1] = kTestGuestBytes - 16;
     r.cpu().d[2] = kArray;
     r.cpu().d[3] = 0;
     CHECK_EQ(r.dos(dos_lvo::ReadArgs), ExitReason::BusError);
@@ -3341,7 +3342,7 @@ void parse_and_match_pattern_lvos() {
     CHECK_EQ(r.io_err(), ERROR_BAD_TEMPLATE);
 
     // Bad pointer faults.
-    r.cpu().d[1] = kGuestBytes;
+    r.cpu().d[1] = kTestGuestBytes;
     r.cpu().d[2] = tok;
     r.cpu().d[3] = 64;
     CHECK_EQ(r.dos(dos_lvo::ParsePattern), ExitReason::BusError);

@@ -23,6 +23,7 @@
 
 #include "libs/utility.hpp"
 #include "check.hpp"
+#include "test_guest.hpp"
 
 #include <cstring>
 #include <initializer_list>
@@ -43,7 +44,6 @@ constexpr u32 kCall = 0x1800;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 constexpr u32 kTagUser = 0x80000000;
 
 // Static storage, as the kernel keeps them.
@@ -82,7 +82,7 @@ u16 disp(u32 offset) {
 // Jit, exec and utility initialised over them, the log captured.
 class Rig {
 public:
-    Rig() : memory_(kGuestBytes) {
+    Rig() : memory_(kTestGuestBytes) {
         fd_ = memfd_create("utility", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -93,12 +93,12 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_lines.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_utility.init(m, g_exec));
         m.cpu.a[7] = kStack;
     }
@@ -327,7 +327,8 @@ void tag_walks_are_bounded() {
     // The whole walk of one search shares one budget: a loop of control
     // tags around a tag that does not match ends after kMaxTagItems items,
     // not after kMaxTagItems for every item found.
-    constexpr u32 kLong = 0x500000;  // above exec's memory
+    const u32 kLong = g_exec.alloc(1u << 20, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(kLong != 0);
     constexpr u32 kIgnores = 1000;
     u32 at = kLong;
     for (u32 i = 0; i < kIgnores; ++i, at += ti_SIZEOF) {
@@ -359,11 +360,11 @@ void tag_walks_are_bounded() {
     CHECK(logged_containing("has no end"));
 
     // A list that leaves guest memory ends the run.
-    CHECK_EQ(r.find_tag_item(kTagUser + 1, kGuestBytes - 4), 0u);
+    CHECK_EQ(r.find_tag_item(kTagUser + 1, kTestGuestBytes - 4), 0u);
     r.cpu().d[0] = kTagUser + 1;
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.call(utility_lvo::FindTagItem), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
     r.cpu().d[0] = kTagUser + 1;
     r.cpu().a[0] = kData + 1;
     CHECK_EQ(r.call(utility_lvo::GetTagData), ExitReason::AddressError);
@@ -406,7 +407,7 @@ void dates() {
         CHECK_EQ(r.get16(kData + cd_wday), c.wday);
         CHECK_EQ(r.date2amiga(c.y, c.mo, c.d, c.h, c.mi, c.s), c.seconds);
     }
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.call(utility_lvo::Date2Amiga), ExitReason::BusError);
 }
 
@@ -441,11 +442,11 @@ void strings_without_regard_to_case() {
     }
 
     // A string that runs off the end of guest memory ends the run.
-    r.put8(kGuestBytes - 1, 'x');
-    r.cpu().a[0] = kGuestBytes - 1;
-    r.cpu().a[1] = kGuestBytes - 1;
+    r.put8(kTestGuestBytes - 1, 'x');
+    r.cpu().a[0] = kTestGuestBytes - 1;
+    r.cpu().a[1] = kTestGuestBytes - 1;
     CHECK_EQ(r.call(utility_lvo::Stricmp), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
 }
 
 }

@@ -24,6 +24,7 @@
 #include "libs/exec.hpp"
 #include "libs/timer_device.hpp"
 #include "check.hpp"
+#include "test_guest.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -46,7 +47,6 @@ constexpr u32 kSub = 0x3000;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 
 // Static storage, as the kernel keeps them.
 Jit g_jit;
@@ -83,7 +83,7 @@ u16 disp(u32 offset) {
 // Jit and exec initialised over them, the log captured.
 class Rig {
 public:
-    Rig() : memory_(kGuestBytes) {
+    Rig() : memory_(kTestGuestBytes) {
         fd_ = memfd_create("exec", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -94,12 +94,12 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_lines.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         m.cpu.a[7] = kStack;
     }
 
@@ -179,7 +179,20 @@ public:
 
     ExitReason exec(u32 offset) { return call(base(), offset); }
 
-    // The free chunks of exec's memory header as (address, bytes).
+    // The bytes between MH_LOWER and MH_UPPER of the memory headers whose
+    // attributes contain every bit of attributes.
+    u32 region_bytes(u32 attributes) const {
+        u32 total = 0;
+        for (u32 header : walk(g_exec.exec_base() + MemList)) {
+            if ((get16(header + MH_ATTRIBUTES) & attributes) == attributes) {
+                total += get32(header + MH_UPPER) - get32(header + MH_LOWER);
+            }
+        }
+        return total;
+    }
+
+    // The free chunks of exec's first memory header, the fast memory, as
+    // (address, bytes).
     std::vector<std::pair<u32, u32>> chunks() const {
         const u32 header = get32(g_exec.exec_base() + MemList + LH_HEAD);
         std::vector<std::pair<u32, u32>> out;
@@ -420,7 +433,7 @@ void layout_matches_the_ndk() {
 void exec_base_is_built() {
     Rig r;
     const u32 base = r.base();
-    CHECK(base >= kFreeStart && base < kFreeEnd);
+    CHECK(base >= kTestChipEnd && base < kTestGuestBytes);  // fast memory comes first
     CHECK_EQ(base & 3, 0u);
     CHECK_EQ(r.get32(4), base);
     CHECK_EQ(r.get8(base + LN_TYPE), NT_LIBRARY);
@@ -435,15 +448,26 @@ void exec_base_is_built() {
     CHECK_EQ(r.get32(base + ThisTask), 0u);
     CHECK(r.read_str(r.get32(base + LIB_IDSTRING)) == "exec 60.0 (Hombre)\r\n");
 
-    // exec is on its own library list, the memory header on the memory list.
+    // exec is on its own library list, the memory headers on the memory list
+    // by priority: fast memory, then chip memory.
     CHECK(r.walk(base + LibList) == std::vector<u32>{base});
     const std::vector<u32> headers = r.walk(base + MemList);
-    CHECK_EQ(headers.size(), 1u);
-    const u32 header = headers[0];
-    CHECK_EQ(r.get8(header + LN_TYPE), NT_MEMORY);
-    CHECK_EQ(r.get32(header + MH_UPPER), kFreeEnd);
-    CHECK(r.get32(header + MH_LOWER) >= kFreeStart);
-    CHECK(base > r.get32(header + MH_LOWER));
+    CHECK_EQ(headers.size(), 2u);
+    const u32 fast = headers[0];
+    CHECK_EQ(r.get8(fast + LN_TYPE), NT_MEMORY);
+    CHECK_EQ(r.get8(fast + LN_PRI), 0u);
+    CHECK_EQ(r.get16(fast + MH_ATTRIBUTES), MEMF_FAST | MEMF_PUBLIC);
+    CHECK(r.read_str(r.get32(fast + LN_NAME)) == "expansion memory");
+    CHECK_EQ(r.get32(fast + MH_UPPER), kTestGuestBytes);
+    CHECK(r.get32(fast + MH_LOWER) >= kTestChipEnd);
+    CHECK(base > r.get32(fast + MH_LOWER));
+    const u32 chip = headers[1];
+    CHECK_EQ(r.get8(chip + LN_TYPE), NT_MEMORY);
+    CHECK_EQ(r.get8(chip + LN_PRI), 0xF6u);
+    CHECK_EQ(r.get16(chip + MH_ATTRIBUTES), MEMF_CHIP | MEMF_PUBLIC);
+    CHECK(r.read_str(r.get32(chip + LN_NAME)) == "chip memory");
+    CHECK_EQ(r.get32(chip + MH_UPPER), kTestChipEnd);
+    CHECK(r.get32(chip + MH_LOWER) >= kFreeStart);
     // The other lists are empty.
     for (u32 list : {ResourceList, DeviceList, IntrList, PortList,
                      TaskReady, TaskWait, SemaphoreList}) {
@@ -466,15 +490,24 @@ void exec_base_is_built() {
 
 void init_rejects_bad_ranges() {
     Rig r;
-    CHECK(!g_exec.init(r.m, 0x100, 0x100000));         // over page 0 and the stubs
-    CHECK(!g_exec.init(r.m, 0x20000, 0x10000));        // reversed
-    CHECK(!g_exec.init(r.m, 0x20000, kGuestBytes + 8));  // past guest memory
-    CHECK(!g_exec.init(r.m, 0x20000, 0x21000));        // too small for ExecBase
+    CHECK(!g_exec.init(r.m, 0x100, 0x100000, 0x200000));  // over page 0 and the stubs
+    CHECK(!g_exec.init(r.m, 0x20000, 0x10000, 0x200000));  // chip memory reversed
+    CHECK(!g_exec.init(r.m, 0x20000, 0x100000, 0x80000));  // fast memory reversed
+    CHECK(!g_exec.init(r.m, 0x20000, 0x100000, kTestGuestBytes + 8));  // past guest memory
+    CHECK(!g_exec.init(r.m, 0x20000, kTestGuestBytes + 8, kTestGuestBytes + 8));
+    CHECK(!g_exec.init(r.m, 0x20000, 0x21000, 0x21000));  // too small for ExecBase
+    CHECK(!g_exec.init(r.m, 0x20000, 0x100000, 0x100010));  // fast too small for a header
     Machine bare{};
-    CHECK(!g_exec.init(bare, 0x20000, 0x100000));      // no Jit
-    CHECK(g_exec.init(r.m, 0x20003, 0x200000));
-    CHECK(r.base() > 0x20003);
+    CHECK(!g_exec.init(bare, 0x20000, 0x100000, 0x200000));  // no Jit
+    CHECK(g_exec.init(r.m, 0x20003, 0x100003, 0x200000));
+    CHECK(r.base() > 0x100003);
     CHECK_EQ(r.get32(4), r.base());
+    CHECK_EQ(g_exec.type_of_mem(0x100100), MEMF_FAST | MEMF_PUBLIC);
+    CHECK(g_exec.init(r.m, 0x20000, 0x100000, 0x100000));  // chip memory only
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), 0u);
+    CHECK(g_exec.free_bytes(MEMF_CHIP) > 0);
+    CHECK(r.base() < 0x100000);
+    CHECK_EQ(r.walk(r.base() + MemList).size(), 1u);
 }
 
 // --- memory -------------------------------------------------------------
@@ -482,17 +515,20 @@ void init_rejects_bad_ranges() {
 void alloc_is_aligned_and_disjoint() {
     Rig r;
     const u32 a = g_exec.alloc(100, MEMF_ANY);
-    const u32 b = g_exec.alloc(100, MEMF_PUBLIC | MEMF_CHIP | MEMF_FAST);
+    const u32 b = g_exec.alloc(100, MEMF_PUBLIC);
     CHECK(a != 0);
     CHECK(b != 0);
     CHECK_EQ(a & 7, 0u);
     CHECK_EQ(b & 7, 0u);
     CHECK(a + 100 <= b || b + 100 <= a);
-    CHECK(a >= kFreeStart && a + 100 <= kFreeEnd);
+    CHECK(a >= kTestChipEnd && a + 100 <= kTestGuestBytes);
+    // No region is both chip and fast memory, as on an Amiga.
+    CHECK_EQ(g_exec.alloc(100, MEMF_PUBLIC | MEMF_CHIP | MEMF_FAST), 0u);
+    CHECK_EQ(g_exec.alloc(100, MEMF_CHIP | MEMF_FAST), 0u);
     CHECK_EQ(g_exec.alloc(0, MEMF_ANY), 0u);
     CHECK_EQ(g_exec.alloc(0xFFFFFFFF, MEMF_ANY), 0u);
     CHECK_EQ(g_exec.alloc(0xFFFFFFF9, MEMF_ANY), 0u);
-    CHECK_EQ(g_exec.alloc(kFreeEnd, MEMF_ANY), 0u);  // more than the free space
+    CHECK_EQ(g_exec.alloc(kTestGuestBytes, MEMF_ANY), 0u);  // more than any region holds
     const u32 header = r.get32(r.base() + MemList);
     u32 total = 0;
     for (auto [at, bytes] : r.chunks()) {
@@ -542,8 +578,8 @@ void free_coalesces_and_survives_double_free() {
     g_lines.clear();
     g_exec.free(c + 3, 8);
     g_exec.free(0x100, 8);
-    g_exec.free(kFreeEnd - 8, 16);
-    g_exec.free(kFreeEnd + 0x1000, 8);
+    g_exec.free(kTestGuestBytes - 8, 16);
+    g_exec.free(kTestGuestBytes + 0x1000, 8);
     g_exec.free(c, 0xFFFFFFFF);
     CHECK_EQ(g_lines.size(), 5u);
     CHECK(r.chunks() == before);
@@ -557,17 +593,17 @@ void corrupt_free_list_fails_safely() {
     const u32 a = g_exec.alloc(64, MEMF_ANY);
     g_exec.alloc(64, MEMF_ANY);
     g_exec.free(a, 64);
-    // The guest points the first chunk at itself.
+    // The guest points the first chunk of the fast list at itself.
     r.put32(a + MC_NEXT, a);
-    CHECK_EQ(g_exec.alloc(4096, MEMF_ANY), 0u);
+    CHECK_EQ(g_exec.alloc(4096, MEMF_FAST), 0u);
     CHECK(logged_containing("exec: memory list"));
     g_exec.free(a + 128, 8);  // walks the same list
     // Odd and out of range links.
     r.put32(a + MC_NEXT, 0x00FFFFF1);
-    CHECK_EQ(g_exec.alloc(4096, MEMF_ANY), 0u);
+    CHECK_EQ(g_exec.alloc(4096, MEMF_FAST), 0u);
     r.put32(a + MC_NEXT, 0);
     r.put32(a + MC_BYTES, 0xFFFFFFF8);  // runs past the region
-    CHECK_EQ(g_exec.alloc(128, MEMF_ANY), 0u);
+    CHECK_EQ(g_exec.alloc(128, MEMF_FAST), 0u);
     r.put32(a + MC_BYTES, 64);
     CHECK_EQ(g_exec.alloc(64, MEMF_ANY), a);  // repaired
 }
@@ -587,7 +623,7 @@ void memory_functions_through_vectors() {
     const u32 avail = r.cpu().d[0];
     r.cpu().d[1] = MEMF_TOTAL;
     CHECK_EQ(r.exec(exec_lvo::AvailMem), ExitReason::Halt);
-    CHECK_EQ(r.cpu().d[0], kFreeEnd - r.get32(r.get32(r.base() + MemList) + MH_LOWER));
+    CHECK_EQ(r.cpu().d[0], r.region_bytes(MEMF_ANY));
     r.cpu().d[1] = MEMF_LARGEST;
     CHECK_EQ(r.exec(exec_lvo::AvailMem), ExitReason::Halt);
     CHECK(r.cpu().d[0] <= avail && r.cpu().d[0] > 0);
@@ -632,6 +668,156 @@ void memory_functions_through_vectors() {
     r.cpu().a[1] = 2;
     CHECK_EQ(r.exec(exec_lvo::FreeVec), ExitReason::Halt);
     CHECK(logged_containing("exec: FreeMem"));
+}
+
+// --- chip and fast memory -----------------------------------------------
+
+bool in_chip(u32 at, u32 bytes) {
+    return at >= kFreeStart && at + bytes <= kTestChipEnd;
+}
+
+bool in_fast(u32 at, u32 bytes) {
+    return at >= kTestChipEnd && at + bytes <= kTestGuestBytes;
+}
+
+u32 avail_through_vector(Rig& r, u32 flags) {
+    r.cpu().d[1] = flags;
+    CHECK_EQ(r.exec(exec_lvo::AvailMem), ExitReason::Halt);
+    return r.cpu().d[0];
+}
+
+u32 type_through_vector(Rig& r, u32 address) {
+    r.cpu().a[1] = address;
+    CHECK_EQ(r.exec(exec_lvo::TypeOfMem), ExitReason::Halt);
+    return r.cpu().d[0];
+}
+
+void requirements_choose_the_region() {
+    Rig r;
+    const u32 chip = g_exec.alloc(100, MEMF_CHIP);
+    const u32 fast = g_exec.alloc(100, MEMF_FAST);
+    const u32 any = g_exec.alloc(100, MEMF_ANY);
+    const u32 pub = g_exec.alloc(100, MEMF_PUBLIC | MEMF_CLEAR);
+    const u32 chip_pub = g_exec.alloc(100, MEMF_PUBLIC | MEMF_CHIP);
+    CHECK(in_chip(chip, 100));
+    CHECK(in_fast(fast, 100));
+    CHECK(in_fast(any, 100));  // fast memory has the higher priority
+    CHECK(in_fast(pub, 100));
+    CHECK(in_chip(chip_pub, 100));
+    CHECK_EQ(g_exec.alloc(100, MEMF_CHIP | MEMF_FAST), 0u);
+    CHECK_EQ(g_exec.alloc(100, MEMF_PUBLIC | MEMF_CHIP | MEMF_FAST), 0u);
+}
+
+void full_fast_memory_falls_back_to_chip() {
+    Rig r;
+    const u32 fast_bytes = g_exec.free_bytes(MEMF_FAST);
+    const u32 chip_bytes = g_exec.free_bytes(MEMF_CHIP);
+    const u32 all_fast = g_exec.alloc(fast_bytes, MEMF_FAST);
+    CHECK(in_fast(all_fast, fast_bytes));
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), 0u);
+    CHECK_EQ(g_exec.alloc(100, MEMF_FAST), 0u);
+    const u32 any = g_exec.alloc(100, MEMF_ANY);
+    const u32 pub = g_exec.alloc(100, MEMF_PUBLIC);
+    CHECK(in_chip(any, 100));
+    CHECK(in_chip(pub, 100));
+    CHECK(in_chip(g_exec.alloc(100, MEMF_CHIP), 100));
+    CHECK_EQ(g_exec.free_bytes(MEMF_CHIP), chip_bytes - 3 * 104);
+
+    // Freed fast memory is preferred again.
+    g_exec.free(all_fast, fast_bytes);
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), fast_bytes);
+    CHECK(in_fast(g_exec.alloc(100, MEMF_ANY), 100));
+}
+
+void avail_mem_counts_the_matching_regions() {
+    Rig r;
+    const u32 chip_free = avail_through_vector(r, MEMF_CHIP);
+    const u32 fast_free = avail_through_vector(r, MEMF_FAST);
+    CHECK(chip_free > 0);
+    CHECK(fast_free > 0);
+    CHECK_EQ(avail_through_vector(r, MEMF_ANY), chip_free + fast_free);
+    CHECK_EQ(avail_through_vector(r, MEMF_PUBLIC), chip_free + fast_free);
+    CHECK_EQ(avail_through_vector(r, MEMF_CHIP | MEMF_FAST), 0u);
+    CHECK_EQ(g_exec.free_bytes(), chip_free + fast_free);
+    CHECK_EQ(g_exec.free_bytes(MEMF_CHIP), chip_free);
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), fast_free);
+
+    CHECK_EQ(avail_through_vector(r, MEMF_CHIP | MEMF_TOTAL), r.region_bytes(MEMF_CHIP));
+    CHECK_EQ(avail_through_vector(r, MEMF_FAST | MEMF_TOTAL), r.region_bytes(MEMF_FAST));
+    CHECK_EQ(avail_through_vector(r, MEMF_TOTAL), r.region_bytes(MEMF_ANY));
+    CHECK_EQ(avail_through_vector(r, MEMF_CHIP | MEMF_LARGEST), chip_free);
+    CHECK_EQ(avail_through_vector(r, MEMF_FAST | MEMF_LARGEST), fast_free);
+    const u32 largest = chip_free > fast_free ? chip_free : fast_free;
+    CHECK_EQ(avail_through_vector(r, MEMF_LARGEST), largest);
+
+    // The largest block shrinks when a block splits the free list in two.
+    const u32 first = g_exec.alloc(64, MEMF_CHIP);
+    const u32 second = g_exec.alloc(64, MEMF_CHIP);
+    CHECK(g_exec.alloc(64, MEMF_CHIP) != 0);
+    g_exec.free(first, 64);
+    CHECK_EQ(avail_through_vector(r, MEMF_CHIP), chip_free - 128);
+    CHECK_EQ(avail_through_vector(r, MEMF_CHIP | MEMF_LARGEST), chip_free - 192);
+    CHECK_EQ(avail_through_vector(r, MEMF_FAST), fast_free);
+    g_exec.free(second, 64);
+    CHECK_EQ(avail_through_vector(r, MEMF_CHIP), chip_free - 64);
+}
+
+void type_of_mem_names_the_region() {
+    Rig r;
+    const u32 chip = g_exec.alloc(64, MEMF_CHIP);
+    const u32 fast = g_exec.alloc(64, MEMF_FAST);
+    const u32 chip_type = MEMF_CHIP | MEMF_PUBLIC;
+    const u32 fast_type = MEMF_FAST | MEMF_PUBLIC;
+    CHECK_EQ(type_through_vector(r, chip), chip_type);
+    CHECK_EQ(type_through_vector(r, fast), fast_type);
+    CHECK_EQ(g_exec.type_of_mem(chip + 63), chip_type);
+    CHECK_EQ(g_exec.type_of_mem(fast + 63), fast_type);
+    CHECK_EQ(g_exec.type_of_mem(r.base()), fast_type);
+    CHECK_EQ(g_exec.type_of_mem(kTestChipEnd - 8), chip_type);
+    CHECK_EQ(g_exec.type_of_mem(kTestChipEnd + MH_SIZE), fast_type);
+    CHECK_EQ(g_exec.type_of_mem(kTestGuestBytes - 8), fast_type);
+
+    // Page 0, the memory headers, and what lies past the guest are in no region.
+    CHECK_EQ(type_through_vector(r, 0), 0u);
+    CHECK_EQ(g_exec.type_of_mem(kCode), 0u);
+    CHECK_EQ(g_exec.type_of_mem(kFreeStart), 0u);
+    CHECK_EQ(g_exec.type_of_mem(kTestChipEnd), 0u);
+    CHECK_EQ(type_through_vector(r, kTestGuestBytes), 0u);
+    CHECK_EQ(g_exec.type_of_mem(0xFFFFFFFF), 0u);
+}
+
+void free_mem_returns_blocks_to_their_region() {
+    Rig r;
+    const std::vector<u32> headers = r.walk(r.base() + MemList);
+    const u32 chip_free = g_exec.free_bytes(MEMF_CHIP);
+    const u32 fast_free = g_exec.free_bytes(MEMF_FAST);
+    const u32 chip = g_exec.alloc(100, MEMF_CHIP);
+    const u32 fast = g_exec.alloc(100, MEMF_FAST);
+    CHECK_EQ(g_exec.free_bytes(MEMF_CHIP), chip_free - 104);
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), fast_free - 104);
+    CHECK_EQ(r.get32(headers[0] + MH_FREE), fast_free - 104);
+    CHECK_EQ(r.get32(headers[1] + MH_FREE), chip_free - 104);
+
+    r.cpu().a[1] = chip;
+    r.cpu().d[0] = 100;
+    CHECK_EQ(r.exec(exec_lvo::FreeMem), ExitReason::Halt);
+    CHECK_EQ(g_exec.free_bytes(MEMF_CHIP), chip_free);
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), fast_free - 104);
+    CHECK_EQ(r.get32(headers[1] + MH_FREE), chip_free);
+
+    r.cpu().a[1] = fast;
+    r.cpu().d[0] = 100;
+    CHECK_EQ(r.exec(exec_lvo::FreeMem), ExitReason::Halt);
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), fast_free);
+    CHECK_EQ(r.get32(headers[0] + MH_FREE), fast_free);
+    CHECK(g_lines.empty());
+
+    // A block that spans two regions, or lies between them, is refused.
+    g_exec.free(kTestChipEnd - 8, 16);
+    g_exec.free(kTestChipEnd + 8, 8);
+    CHECK_EQ(g_lines.size(), 2u);
+    CHECK_EQ(g_exec.free_bytes(MEMF_CHIP), chip_free);
+    CHECK_EQ(g_exec.free_bytes(MEMF_FAST), fast_free);
 }
 
 // --- lists --------------------------------------------------------------
@@ -783,9 +969,9 @@ void list_functions_on_bad_pointers() {
     CHECK_EQ(r.exec(exec_lvo::AddTail), ExitReason::BusError);
     CHECK_EQ(r.cpu().trap_number, 2u);
 
-    r.cpu().a[1] = kGuestBytes - 2;
+    r.cpu().a[1] = kTestGuestBytes - 2;
     CHECK_EQ(r.exec(exec_lvo::Remove), ExitReason::BusError);
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::RemHead), ExitReason::BusError);
 
     // A name that runs off the end of guest memory.
@@ -794,14 +980,14 @@ void list_functions_on_bad_pointers() {
     r.cpu().a[1] = kNodeA;
     CHECK_EQ(r.exec(exec_lvo::AddTail), ExitReason::Halt);
     for (u32 i = 0; i < 16; ++i) {
-        r.put8(kGuestBytes - 16 + i, 'a');
+        r.put8(kTestGuestBytes - 16 + i, 'a');
     }
-    r.put32(kNodeA + LN_NAME, kGuestBytes - 16);
+    r.put32(kNodeA + LN_NAME, kTestGuestBytes - 16);
     r.str(kNames + 0x200, "aaaaaaaaaaaaaaaaaaaa");
     r.cpu().a[0] = kList;
     r.cpu().a[1] = kNames + 0x200;
     CHECK_EQ(r.exec(exec_lvo::FindName), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
 
     // A list whose node points back at itself ends the walk.
     r.put32(kNodeA + LN_NAME, kNames);
@@ -860,7 +1046,7 @@ void open_exec_library() {
     CHECK_EQ(r.get16(r.base() + LIB_OPENCNT), 3u);
 
     // A name out of reach.
-    r.cpu().a[1] = kGuestBytes + 100;
+    r.cpu().a[1] = kTestGuestBytes + 100;
     CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::BusError);
 }
 
@@ -1319,8 +1505,8 @@ void init_resident_and_make_library_through_vectors() {
     CHECK(logged_containing("exec: InitStruct"));
 
     // A vector table that runs off the end of guest memory.
-    r.put32(kGuestBytes - 4, 0x1000);
-    r.cpu().a[0] = kGuestBytes - 4;
+    r.put32(kTestGuestBytes - 4, 0x1000);
+    r.cpu().a[0] = kTestGuestBytes - 4;
     r.cpu().a[1] = 0;
     r.cpu().a[2] = 0;
     r.cpu().d[0] = 40;
@@ -1363,7 +1549,7 @@ void task_set_before_init_is_kept() {
         r.put8(task + i, 0);
     }
     g_exec.set_this_task(task);
-    CHECK(g_exec.init(r.m, kFreeStart, kFreeEnd));
+    CHECK(g_exec.init(r.m, kFreeStart, kTestChipEnd, kTestGuestBytes));
     CHECK_EQ(r.get32(r.base() + ThisTask), task);
     r.cpu().a[1] = 0;
     CHECK_EQ(r.exec(exec_lvo::FindTask), ExitReason::Halt);
@@ -1460,7 +1646,7 @@ void tasks_and_signals() {
     CHECK(logged("exec: Wait with no signals pending"));
 
     // A task whose name is out of reach.
-    r.put32(task + LN_NAME, kGuestBytes);
+    r.put32(task + LN_NAME, kTestGuestBytes);
     r.cpu().a[1] = r.str(kNames + 0x20, "shell");
     CHECK_EQ(r.exec(exec_lvo::FindTask), ExitReason::BusError);
 }
@@ -1512,11 +1698,11 @@ void copy_mem() {
     CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::Halt);
 
     // Out of reach on either side, and lengths that wrap.
-    r.cpu().a[0] = kGuestBytes - 8;
+    r.cpu().a[0] = kTestGuestBytes - 8;
     r.cpu().a[1] = kData;
     r.cpu().d[0] = 16;
     CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
     r.cpu().a[0] = kData;
     r.cpu().a[1] = 0xFFFFFFF0;
     r.cpu().d[0] = 0x20;
@@ -1584,11 +1770,11 @@ void high_byte_pointers_reach_their_24_bit_alias() {
 
     // A range whose masked start is in memory but which runs past the end
     // still faults, at the first byte outside, as the pointer was given.
-    r.cpu().a[0] = 0x80000000 | (kGuestBytes - 8);
+    r.cpu().a[0] = 0x80000000 | (kTestGuestBytes - 8);
     r.cpu().a[1] = kData;
     r.cpu().d[0] = 16;
     CHECK_EQ(r.exec(exec_lvo::CopyMem), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, 0x80000000 | kTestGuestBytes);
 
     // Under a wider mask the high bits it keeps still fault cleanly.
     g_jit.set_address_mask(0x0FFFFFFF);
@@ -1715,20 +1901,20 @@ void raw_do_fmt_on_bad_input() {
     CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::AddressError);
     CHECK_EQ(r.cpu().fault_addr, kData + 0x201);
     // A format string out of reach.
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     r.cpu().a[1] = kData + 0x200;
     r.cpu().a[3] = kData + 0x400;
     CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::BusError);
     // A buffer that runs off the end of memory.
     r.cpu().a[0] = r.str(kData, "hello");
-    r.cpu().a[3] = kGuestBytes - 2;
+    r.cpu().a[3] = kTestGuestBytes - 2;
     CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
     // A character routine that faults.
     r.code(kSub, {0x16C0, 0x4E75});  // MOVE.B D0,(A3)+ ; RTS
     r.cpu().a[0] = r.str(kData, "hello");
     r.cpu().a[2] = kSub;
-    r.cpu().a[3] = kGuestBytes - 1;
+    r.cpu().a[3] = kTestGuestBytes - 1;
     CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::BusError);
     // A character routine that calls RawDoFmt again, without end.
     r.code(kSub, {0x2C78, 0x0004, 0x4EAE, disp(exec_lvo::RawDoFmt), 0x4E75});
@@ -1773,8 +1959,9 @@ void calls_from_natives_share_the_block_budget() {
 // characters, and the buffer gets the first MiB of them and no NUL.
 void raw_do_fmt_output_is_capped() {
     Rig r;
-    constexpr u32 kBuffer = 0x500000;  // above exec's memory
     constexpr u32 kCap = 1u << 20;
+    const u32 kBuffer = g_exec.alloc(kCap + 8, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(kBuffer != 0);
     std::string fmt;
     for (u32 i = 0; i < 12; ++i) {
         fmt += "%99999d";
@@ -2423,7 +2610,7 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     r.cpu().a[1] = msg;
     CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::BusError);
 
@@ -2432,7 +2619,7 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::GetMsg), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
@@ -2440,7 +2627,7 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::WaitPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
@@ -2448,7 +2635,7 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[1] = kGuestBytes;
+    r.cpu().a[1] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::ReplyMsg), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
@@ -2456,7 +2643,7 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[1] = kGuestBytes;
+    r.cpu().a[1] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
@@ -2464,7 +2651,7 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     CHECK_EQ(r.exec(exec_lvo::RemPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[1] = kGuestBytes;
+    r.cpu().a[1] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::RemPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
@@ -2472,11 +2659,11 @@ void null_and_unreadable_port_pointers_fault_cleanly() {
     CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[1] = kGuestBytes;
+    r.cpu().a[1] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
-    r.cpu().a[0] = kGuestBytes;
+    r.cpu().a[0] = kTestGuestBytes;
     CHECK_EQ(r.exec(exec_lvo::DeleteMsgPort), ExitReason::BusError);
 
     r.cpu().exit = ExitReason::None;
@@ -4299,6 +4486,11 @@ int main() {
     free_coalesces_and_survives_double_free();
     corrupt_free_list_fails_safely();
     memory_functions_through_vectors();
+    requirements_choose_the_region();
+    full_fast_memory_falls_back_to_chip();
+    avail_mem_counts_the_matching_regions();
+    type_of_mem_names_the_region();
+    free_mem_returns_blocks_to_their_region();
     lists_through_vectors();
     resources_are_added_found_and_removed();
     list_functions_on_bad_pointers();

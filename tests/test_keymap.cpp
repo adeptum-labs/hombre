@@ -24,6 +24,7 @@
 #include "libs/exec.hpp"
 #include "libs/keymap_library.hpp"
 #include "check.hpp"
+#include "test_guest.hpp"
 
 #include <string>
 #include <sys/mman.h>
@@ -45,7 +46,6 @@ constexpr u32 kText = kData + 0x100;
 constexpr u32 kOther = kData + 0x400;
 constexpr u32 kOut = 0x9800;
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 
 // Static storage, as the kernel keeps them.
 Jit g_jit;
@@ -55,7 +55,7 @@ KeymapLibrary g_keymap;
 // 16 MiB of guest memory, the Jit, exec and keymap.library over them.
 class Rig {
 public:
-    Rig() : memory_(kGuestBytes) {
+    Rig() : memory_(kTestGuestBytes) {
         fd_ = memfd_create("keymap", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -66,11 +66,11 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_log = nullptr;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_keymap.init(m, g_exec));
         m.cpu.a[7] = kStack;
     }

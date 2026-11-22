@@ -103,6 +103,7 @@ constexpr u32 AddResource = 486;
 constexpr u32 RemResource = 492;
 constexpr u32 OpenResource = 498;
 constexpr u32 RawDoFmt = 522;
+constexpr u32 TypeOfMem = 534;
 constexpr u32 OpenLibrary = 552;
 constexpr u32 InitSemaphore = 558;
 constexpr u32 ObtainSemaphore = 564;
@@ -386,24 +387,32 @@ public:
     // Builds ExecBase and exec's memory list in guest memory, stores the
     // ExecBase address at guest address 4 and registers exec's natives with
     // the machine's Jit, which must be initialised. The free memory is
-    // [free_start, free_end); it must lie above the Jit stubs (0x408) and
-    // inside guest memory. False if it does not, or if it is too small.
-    bool init(m68k::Machine& m, u32 free_start, u32 free_end);
+    // [free_start, fast_end) in two regions: chip memory up to chip_end, and
+    // from there fast memory, which is left out when fast_end equals
+    // chip_end. It must lie above the Jit stubs (0x408) and inside guest
+    // memory. False if it does not, or if it is too small.
+    bool init(m68k::Machine& m, u32 free_start, u32 chip_end, u32 fast_end);
 
     u32 exec_base() const { return base_; }
 
-    // The bytes no allocation holds, for the free memory a title bar
-    // reports.
-    u32 free_bytes() const { return free_bytes_; }
+    // The bytes no allocation holds in the regions whose attributes contain
+    // every MEMF_PUBLIC, MEMF_CHIP and MEMF_FAST bit of attributes; all free
+    // memory for MEMF_ANY, as a title bar reports it.
+    u32 free_bytes(u32 attributes = ndk::MEMF_ANY) const;
 
-    // Allocates from the free list, first fit, 8-byte aligned. Every MEMF_
-    // attribute is accepted; MEMF_CLEAR zeroes the block. 0 on failure.
+    // Allocates from the free list of the first region, fast before chip,
+    // whose attributes contain every MEMF_PUBLIC, MEMF_CHIP and MEMF_FAST
+    // bit of flags. First fit, 8-byte aligned; MEMF_CLEAR zeroes the block,
+    // other options are ignored. 0 on failure.
     u32 alloc(u32 bytes, u32 flags);
 
-    // Returns a block to the free list and merges it with its neighbours.
-    // A block exec did not hand out, or one already free, is logged and
-    // left alone.
+    // Returns a block to the free list of the region that holds it and
+    // merges it with its neighbours. A block exec did not hand out, or one
+    // already free, is logged and left alone.
     void free(u32 addr, u32 bytes);
+
+    // The attributes of the region that holds addr, 0 if none does.
+    u32 type_of_mem(u32 addr) const;
 
     // AddResource: puts the resource node at node on ResourceList by its
     // priority, as AddResource does.
@@ -643,12 +652,27 @@ private:
     bool has_sem_waiter(u32 sem_addr, u32 task_id) const;
     SemWaitQueue* sem_queue(u32 sem_addr, bool create);
 
+    // One MemHeader and the free chunks within [lower, upper).
+    struct Region {
+        u32 header = 0;
+        u32 lower = 0;
+        u32 upper = 0;
+        u32 free_bytes = 0;
+        u32 attributes = 0;
+    };
+
+    static bool accepts(const Region& region, u32 flags);
+    bool make_region(native::Bus& b, u32 from, u32 until, u32 attributes, u8 priority);
+    u32 alloc_from(Region& region, u32 size);
+    u32 largest_free(const Region& region) const;
+    // The index of the region that holds [addr, addr + bytes), region_count_
+    // if none does.
+    u32 region_holding(u32 addr, u32 bytes) const;
+
     m68k::Machine* m_ = nullptr;
     u32 base_ = 0;
-    u32 header_ = 0;  // the MemHeader
-    u32 lower_ = 0;
-    u32 upper_ = 0;
-    u32 free_bytes_ = 0;
+    Region regions_[2]{};  // in MemList order
+    u32 region_count_ = 0;
     u32 task_ = 0;
     u32 sig_alloc_ = 0x0000FFFF;  // while no task is set
     u32 signals_ = 0;             // while no task is set

@@ -1955,9 +1955,12 @@ void Workbench::refresh_title() {
         }
     };
     put("Hombre Workbench  ");
-    format_u64(digits, sizeof digits, exec_->free_bytes(), 10);
+    format_u64(digits, sizeof digits, exec_->free_bytes(ndk::MEMF_CHIP), 10);
     put(digits);
-    put(" graphics mem  0 other mem");
+    put(" graphics mem  ");
+    format_u64(digits, sizeof digits, exec_->free_bytes(ndk::MEMF_FAST), 10);
+    put(digits);
+    put(" other mem");
     text[at] = '\0';
     Bus b(*machine_);
     for (u32 i = 0; i <= at; ++i) {

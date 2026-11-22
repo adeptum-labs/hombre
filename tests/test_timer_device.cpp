@@ -23,6 +23,7 @@
 
 #include "libs/timer_device.hpp"
 #include "check.hpp"
+#include "test_guest.hpp"
 
 #include <cstring>
 #include <string>
@@ -41,7 +42,6 @@ constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;
 constexpr u32 kNames = 0x9800;
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 constexpr usize kRegion = 1 << 20;
 
 Jit g_jit;
@@ -93,7 +93,7 @@ u64 fake_now_us(void* ctx) { return static_cast<FakeTimerHost*>(ctx)->now_us; }
 
 class Rig {
 public:
-    Rig() : memory_(kGuestBytes) {
+    Rig() : memory_(kTestGuestBytes) {
         fd_ = memfd_create("timer_device", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -104,14 +104,14 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_lines.clear();
         g_log = capture;
         g_exec.set_task_host(TaskHost{fake_create, fake_switch, fake_destroy, fake_slice_over,
                                       fake_poll, fake_idle, fake_now_us, &host});
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_timer.init(m, g_exec));
         m.cpu.a[7] = kStack;
         make_task();
@@ -665,7 +665,7 @@ void an_unreadable_reply_port_is_logged_and_dropped() {
     u32 port = 0;
     const u32 req = make_timer_request(r, port);
     send_timer_request(r, req, 1000);
-    r.put32(req + mn_ReplyPort, kGuestBytes + 0x100);
+    r.put32(req + mn_ReplyPort, kTestGuestBytes + 0x100);
 
     const ExitReason ended = r.m.cpu.exit;
     g_lines.clear();

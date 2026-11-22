@@ -757,7 +757,7 @@ void open_screen_null_newscreen_and_taglist_gives_zero_and_faults() {
     r.cpu().a[0] = 0;
     r.cpu().a[1] = 0;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::OpenScreenTagList), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
     CHECK_EQ(r.intuition.front_screen(), 0u);
 }
 
@@ -1247,14 +1247,14 @@ void open_window_null_newwindow_gives_zero_and_faults() {
     GfxRig r;
     r.cpu().a[0] = 0;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::OpenWindow), ExitReason::BusError);
-    CHECK_EQ(r.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(r.cpu().fault_addr, kTestGuestBytes);
 
     GfxRig other;
     other.cpu().a[0] = 0;
     other.cpu().a[1] = 0;
     CHECK_EQ(other.call(Base::Intuition, intuition_lvo::OpenWindowTagList),
              ExitReason::BusError);
-    CHECK_EQ(other.cpu().fault_addr, kGuestBytes);
+    CHECK_EQ(other.cpu().fault_addr, kTestGuestBytes);
 }
 
 void open_window_alloc_failure_gives_zero_and_frees() {

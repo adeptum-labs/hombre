@@ -30,6 +30,7 @@
 #include "libs/workbench.hpp"
 #include "check.hpp"
 #include "ofs_writer.hpp"
+#include "test_guest.hpp"
 
 #include <cstring>
 #include <string>
@@ -47,7 +48,6 @@ constexpr u32 kCall = 0x1800;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures and strings up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 
 constexpr u8 kWBDisk = 1;
 constexpr u8 kWBDrawer = 2;
@@ -296,7 +296,7 @@ class Rig {
 public:
     explicit Rig(const std::vector<AdfFile>& files = test_files(),
                  std::vector<u8> second = {}, u32 second_drive = 1)
-        : memory_(kGuestBytes),
+        : memory_(kTestGuestBytes),
           image_(build_adf("HombreTest", false, files)),
           second_image_(std::move(second)) {
         fd_ = memfd_create("workbench", 0);
@@ -309,12 +309,12 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_lines.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         if (second_image_.empty()) {
             CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
@@ -804,9 +804,22 @@ void desktop_shows_the_volumes_and_their_menus() {
     CHECK_EQ(r.get32(backdrop.window + 28), r.workbench.menu());  // wd_MenuStrip
 
     const std::string title = r.str(r.get32(r.screen + sc_Title));
-    CHECK(title.rfind("Hombre Workbench", 0) == 0);
-    CHECK(title.find("graphics mem") != std::string::npos);
-    CHECK(title.find("other mem") != std::string::npos);
+    // "<free chip> graphics mem  <free fast> other mem", each a share of its region.
+    const std::string prefix = "Hombre Workbench  ";
+    const std::string chip_label = " graphics mem  ";
+    const std::string fast_label = " other mem";
+    CHECK(title.rfind(prefix, 0) == 0);
+    const usize chip_end = title.find(chip_label);
+    CHECK(chip_end != std::string::npos);
+    const usize fast_begin = chip_end + chip_label.size();
+    const usize fast_end = title.find(fast_label, fast_begin);
+    CHECK(fast_end != std::string::npos);
+    CHECK_EQ(fast_end + fast_label.size(), title.size());
+    const usize chip_begin = prefix.size();
+    const u32 chip = static_cast<u32>(std::stoul(title.substr(chip_begin, chip_end - chip_begin)));
+    const u32 fast = static_cast<u32>(std::stoul(title.substr(fast_begin, fast_end - fast_begin)));
+    CHECK(chip > 0 && chip <= kTestChipEnd - kFreeStart);
+    CHECK(fast > 0 && fast <= kTestGuestBytes - kTestChipEnd);
 }
 
 void drawer_icons_keep_their_positions_and_use_the_grid() {

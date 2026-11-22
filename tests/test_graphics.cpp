@@ -1586,9 +1586,9 @@ void superbitmap_bad_pointer_is_bus_error() {
     r.put16(kLayer + ly_MinY, 50);
     r.put16(kLayer + ly_MaxX, 199);
     r.put16(kLayer + ly_MaxY, 99);
-    r.put32(kLayer + ly_SuperBitMap, kGuestBytes);
+    r.put32(kLayer + ly_SuperBitMap, kTestGuestBytes);
     r.put32(kRastPort + rp_Layer, kLayer);
-    r.put32(kRastPort + rp_BitMap, kGuestBytes);
+    r.put32(kRastPort + rp_BitMap, kTestGuestBytes);
 
     r.cpu().a[1] = kRastPort;
     r.cpu().d[0] = 0;

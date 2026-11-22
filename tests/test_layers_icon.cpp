@@ -28,6 +28,7 @@
 #include "libs/version_library.hpp"
 #include "check.hpp"
 #include "ofs_writer.hpp"
+#include "test_guest.hpp"
 
 #include <string>
 #include <sys/mman.h>
@@ -44,7 +45,6 @@ constexpr u32 kCall = 0x1800;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 
 constexpr u32 do_Type = 48;
 constexpr u8 kWBProject = 4;
@@ -74,7 +74,7 @@ bool logged_containing(const std::string& text) {
 class Rig {
 public:
     Rig()
-        : memory_(kGuestBytes), image_(build_adf("LayersIcon", false,
+        : memory_(kTestGuestBytes), image_(build_adf("LayersIcon", false,
                                                  {{"Readme", std::vector<u8>{'h', 'i'}}})) {
         fd_ = memfd_create("layers-icon", 0);
         CHECK(fd_ >= 0);
@@ -86,12 +86,12 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_lines.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_layers.init(m, g_exec));
         CHECK(g_version.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);

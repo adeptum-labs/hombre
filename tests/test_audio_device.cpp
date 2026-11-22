@@ -23,6 +23,7 @@
 
 #include "libs/audio_device.hpp"
 #include "check.hpp"
+#include "test_guest.hpp"
 
 #include <cstring>
 #include <initializer_list>
@@ -47,7 +48,6 @@ constexpr u32 kRequests = 0x9400;
 constexpr u32 kRequestStride = 0x80;
 constexpr u32 kMasks = 0x9E00;
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 constexpr usize kRegion = 1 << 20;
 
 constexpr u32 kPeriod = 428;
@@ -59,7 +59,7 @@ AudioDevice g_audio;
 
 class Rig {
 public:
-    Rig() : memory_(kGuestBytes) {
+    Rig() : memory_(kTestGuestBytes) {
         fd_ = memfd_create("audio_device", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -70,11 +70,11 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_log = nullptr;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_audio.init(m, g_exec));
         make_task();
         port = g_exec.create_port();

@@ -27,6 +27,7 @@
 #include "libs/graphics.hpp"
 #include "libs/intuition.hpp"
 #include "check.hpp"
+#include "test_guest.hpp"
 
 #include <cstring>
 #include <initializer_list>
@@ -58,7 +59,6 @@ using hombre::m68k::CpuState;
 using hombre::m68k::ExitReason;
 using hombre::m68k::GuestMemory;
 using hombre::m68k::Jit;
-using hombre::m68k::kGuestBytes;
 using hombre::m68k::Machine;
 using hombre::native::Bus;
 
@@ -66,7 +66,6 @@ constexpr u32 kCall = 0x1800;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 
 enum class Base { Exec, Graphics, Intuition };
 
@@ -85,7 +84,7 @@ inline bool logged(const std::string& text) {
 
 class GfxRig {
 public:
-    GfxRig() : memory_(kGuestBytes) {
+    GfxRig() : memory_(kTestGuestBytes) {
         fd_ = memfd_create("graphics", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -96,12 +95,12 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         machine.cpu = CpuState{};
-        machine.mem = GuestMemory{memory_.data(), kGuestBytes};
+        machine.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         machine.jit = nullptr;
         CHECK(jit.init(CodeRegion{rw_, rx_, kRegion}, machine));
         g_lines.clear();
         hombre::g_log = capture;
-        CHECK(exec.init(machine, kFreeStart, kFreeEnd));
+        CHECK(exec.init(machine, kFreeStart, kTestChipEnd, kTestGuestBytes));
         display.sink = DisplaySink{record, this};
         display.front_screen = 0;
         CHECK(graphics.init(machine, exec, display));

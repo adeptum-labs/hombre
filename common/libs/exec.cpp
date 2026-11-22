@@ -52,7 +52,11 @@ constexpr u32 kMaxInitCommands = 1u << 16;
 constexpr u32 kMaxQueued = 4096;
 constexpr char kExecName[] = "exec.library";
 constexpr char kExecIdString[] = "exec 60.0 (Hombre)\r\n";
-constexpr char kMemoryName[] = "memory";
+constexpr char kChipName[] = "chip memory";
+constexpr char kFastName[] = "expansion memory";
+constexpr u32 kMemoryTypes = MEMF_PUBLIC | MEMF_CHIP | MEMF_FAST;
+constexpr u8 kChipPriority = static_cast<u8>(-10);
+constexpr u8 kFastPriority = 0;
 
 constexpr u32 round8(u32 v) {
     return (v + 7) & ~7u;
@@ -369,30 +373,26 @@ struct ExecOps {
     static void avail_mem(void* ctx, Machine& m) {
         Exec& e = of(ctx);
         const u32 flags = m.cpu.d[1];
-        if ((flags & MEMF_TOTAL) != 0) {
-            native::set_result(m, e.upper_ - e.lower_);
-            return;
-        }
-        if ((flags & MEMF_LARGEST) == 0) {
-            native::set_result(m, e.free_bytes_);
-            return;
-        }
-        u32 largest = 0;
-        u32 chunk = 0;
-        u32 floor = e.lower_;
-        m.mem.read32(e.header_ + MH_FIRST, chunk);
-        while (chunk != 0) {
-            u32 next = 0;
-            u32 bytes = 0;
-            if (!read_chunk(m.mem, chunk, floor, e.upper_, next, bytes)) {
-                log_corrupt_memory_list();
-                break;
+        u32 result = 0;
+        for (u32 i = 0; i < e.region_count_; ++i) {
+            const Exec::Region& region = e.regions_[i];
+            if (!Exec::accepts(region, flags)) {
+                continue;
             }
-            largest = bytes > largest ? bytes : largest;
-            floor = chunk + bytes;
-            chunk = next;
+            if ((flags & MEMF_TOTAL) != 0) {
+                result += region.upper - region.lower;
+            } else if ((flags & MEMF_LARGEST) != 0) {
+                const u32 largest = e.largest_free(region);
+                result = largest > result ? largest : result;
+            } else {
+                result += region.free_bytes;
+            }
         }
-        native::set_result(m, largest);
+        native::set_result(m, result);
+    }
+
+    static void type_of_mem(void* ctx, Machine& m) {
+        native::set_result(m, of(ctx).type_of_mem(m.cpu.a[1]));
     }
 
     // AllocVec keeps the size of the whole block, its 8-byte header
@@ -2674,6 +2674,7 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::AllocMem, ExecOps::alloc_mem, "AllocMem"},
     {exec_lvo::FreeMem, ExecOps::free_mem, "FreeMem"},
     {exec_lvo::AvailMem, ExecOps::avail_mem, "AvailMem"},
+    {exec_lvo::TypeOfMem, ExecOps::type_of_mem, "TypeOfMem"},
     {exec_lvo::Insert, ExecOps::insert_node, "Insert"},
     {exec_lvo::AddHead, ExecOps::add_head_node, "AddHead"},
     {exec_lvo::AddTail, ExecOps::add_tail_node, "AddTail"},
@@ -2743,16 +2744,16 @@ constexpr ExecFunction kExecFunctions[] = {
 
 }
 
-bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
+bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
     // The task, the segment loader, the idle hook and the task host may be
     // set before init; reset the remaining state in place so the kernel
     // stack never holds a full Exec temporary.
     m_ = nullptr;
     base_ = 0;
-    header_ = 0;
-    lower_ = 0;
-    upper_ = 0;
-    free_bytes_ = 0;
+    for (Region& region : regions_) {
+        region = Region{};
+    }
+    region_count_ = 0;
     sig_alloc_ = 0x0000FFFF;
     signals_ = 0;
     port_signals_ = 0;
@@ -2798,32 +2799,17 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
         seg = 0;
     }
     if (m.jit == nullptr || m.mem.base == nullptr || free_start < kLowestFree ||
-        free_end <= free_start || free_end > m.mem.size) {
-        return false;
-    }
-    const u64 start = (static_cast<u64>(free_start) + 7) & ~static_cast<u64>(7);
-    const u32 end = free_end & ~7u;
-    if (start + MH_SIZE + kExecBlock + MC_SIZE > end) {
+        chip_end <= free_start || fast_end < chip_end || fast_end > m.mem.size) {
         return false;
     }
     m_ = &m;
-    header_ = static_cast<u32>(start);
-    lower_ = header_ + MH_SIZE;
-    upper_ = end;
-    free_bytes_ = upper_ - lower_;
-
     Bus b(m);
-    for (u32 i = 0; i < MH_SIZE; ++i) {
-        b.w8(header_ + i, 0);
+    if ((fast_end > chip_end &&
+         !make_region(b, chip_end, fast_end, MEMF_FAST | MEMF_PUBLIC, kFastPriority)) ||
+        !make_region(b, free_start, chip_end, MEMF_CHIP | MEMF_PUBLIC, kChipPriority)) {
+        m_ = nullptr;
+        return false;
     }
-    b.w8(header_ + LN_TYPE, NT_MEMORY);
-    b.w16(header_ + MH_ATTRIBUTES, MEMF_PUBLIC | MEMF_CHIP | MEMF_FAST);
-    b.w32(header_ + MH_FIRST, lower_);
-    b.w32(header_ + MH_LOWER, lower_);
-    b.w32(header_ + MH_UPPER, upper_);
-    b.w32(header_ + MH_FREE, free_bytes_);
-    b.w32(lower_ + MC_NEXT, 0);
-    b.w32(lower_ + MC_BYTES, free_bytes_);
 
     const u32 block = alloc(kExecBlock, MEMF_PUBLIC | MEMF_CLEAR);
     if (block == 0 || !b.ok()) {
@@ -2862,11 +2848,13 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
 
     const u32 name = base_ + SYSBASESIZE;
     const u32 id_string = name + sizeof kExecName;
-    const u32 memory_name = id_string + sizeof kExecIdString;
-    task_exit_stub_ = (memory_name + sizeof kMemoryName + 1) & ~1u;
+    const u32 chip_name = id_string + sizeof kExecIdString;
+    const u32 fast_name = chip_name + sizeof kChipName;
+    task_exit_stub_ = (fast_name + sizeof kFastName + 1) & ~1u;
     put_string(b, name, kExecName);
     put_string(b, id_string, kExecIdString);
-    put_string(b, memory_name, kMemoryName);
+    put_string(b, chip_name, kChipName);
+    put_string(b, fast_name, kFastName);
     const u16 exit_id = jit.add_native(ExecOps::task_exit_stub, this, "TaskExit");
     if (exit_id == 0) {
         LogLine().text("exec: no native ids left for ").text(kExecName).send();
@@ -2901,8 +2889,11 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     new_list(b, base_ + TaskWait, NT_TASK);
     new_list(b, base_ + SemaphoreList, 0);
 
-    b.w32(header_ + LN_NAME, memory_name);
-    add_tail(b, base_ + MemList, header_);
+    for (u32 i = 0; i < region_count_; ++i) {
+        const u32 header = regions_[i].header;
+        b.w32(header + LN_NAME, (regions_[i].attributes & MEMF_CHIP) != 0 ? chip_name : fast_name);
+        enqueue(b, base_ + MemList, header);
+    }
     ExecOps::add_library(*this, b, base_);
     b.w32(base_ + ThisTask, task_);
     b.w32(4, base_);
@@ -2922,20 +2913,116 @@ bool Exec::init(Machine& m, u32 free_start, u32 free_end) {
     return true;
 }
 
-u32 Exec::alloc(u32 bytes, u32 flags) {
-    if (m_ == nullptr || bytes == 0 || bytes > upper_ - lower_) {
+bool Exec::accepts(const Region& region, u32 flags) {
+    return (region.attributes & flags & kMemoryTypes) == (flags & kMemoryTypes);
+}
+
+bool Exec::make_region(Bus& b, u32 from, u32 until, u32 attributes, u8 priority) {
+    const u64 start = (static_cast<u64>(from) + 7) & ~static_cast<u64>(7);
+    const u32 end = until & ~7u;
+    if (start + MH_SIZE + MC_SIZE > end) {
+        return false;
+    }
+    Region& region = regions_[region_count_++];
+    region.header = static_cast<u32>(start);
+    region.lower = region.header + MH_SIZE;
+    region.upper = end;
+    region.free_bytes = end - region.lower;
+    region.attributes = attributes;
+    for (u32 i = 0; i < MH_SIZE; ++i) {
+        b.w8(region.header + i, 0);
+    }
+    b.w8(region.header + LN_TYPE, NT_MEMORY);
+    b.w8(region.header + LN_PRI, priority);
+    b.w16(region.header + MH_ATTRIBUTES, static_cast<u16>(attributes));
+    b.w32(region.header + MH_FIRST, region.lower);
+    b.w32(region.header + MH_LOWER, region.lower);
+    b.w32(region.header + MH_UPPER, region.upper);
+    b.w32(region.header + MH_FREE, region.free_bytes);
+    b.w32(region.lower + MC_NEXT, 0);
+    b.w32(region.lower + MC_BYTES, region.free_bytes);
+    return b.ok();
+}
+
+u32 Exec::region_holding(u32 addr, u32 bytes) const {
+    for (u32 i = 0; i < region_count_; ++i) {
+        const Region& region = regions_[i];
+        if (bytes <= region.upper - region.lower && addr >= region.lower &&
+            static_cast<u64>(addr) + round8(bytes) <= region.upper) {
+            return i;
+        }
+    }
+    return region_count_;
+}
+
+u32 Exec::free_bytes(u32 attributes) const {
+    u32 total = 0;
+    for (u32 i = 0; i < region_count_; ++i) {
+        total += accepts(regions_[i], attributes) ? regions_[i].free_bytes : 0;
+    }
+    return total;
+}
+
+u32 Exec::type_of_mem(u32 addr) const {
+    if (m_ == nullptr) {
         return 0;
     }
-    const u32 size = round8(bytes);
-    GuestMemory& mem = m_->mem;
-    u32 link = header_ + MH_FIRST;
+    const u32 i = region_holding(native::guest_address(*m_, addr), 1);
+    return i < region_count_ ? regions_[i].attributes : 0;
+}
+
+u32 Exec::largest_free(const Region& region) const {
+    u32 largest = 0;
     u32 chunk = 0;
-    u32 floor = lower_;
+    u32 floor = region.lower;
+    m_->mem.read32(region.header + MH_FIRST, chunk);
+    while (chunk != 0) {
+        u32 next = 0;
+        u32 bytes = 0;
+        if (!read_chunk(m_->mem, chunk, floor, region.upper, next, bytes)) {
+            log_corrupt_memory_list();
+            break;
+        }
+        largest = bytes > largest ? bytes : largest;
+        floor = chunk + bytes;
+        chunk = next;
+    }
+    return largest;
+}
+
+u32 Exec::alloc(u32 bytes, u32 flags) {
+    if (m_ == nullptr || bytes == 0) {
+        return 0;
+    }
+    for (u32 i = 0; i < region_count_; ++i) {
+        if (!accepts(regions_[i], flags) || bytes > regions_[i].upper - regions_[i].lower) {
+            continue;
+        }
+        const u32 size = round8(bytes);
+        const u32 block = alloc_from(regions_[i], size);
+        if (block == 0) {
+            continue;
+        }
+        if ((flags & MEMF_CLEAR) != 0) {
+            for (u32 j = 0; j < size; ++j) {
+                m_->mem.base[block + j] = 0;
+            }
+        }
+        return block;
+    }
+    return 0;
+}
+
+u32 Exec::alloc_from(Region& region, u32 size) {
+    GuestMemory& mem = m_->mem;
+    u32 link = region.header + MH_FIRST;
+    u32 chunk = 0;
+    u32 floor = region.lower;
     mem.read32(link, chunk);
     while (chunk != 0) {
         u32 next = 0;
         u32 avail = 0;
-        if (!read_chunk(mem, chunk, floor, upper_, next, avail)) {
+        if (!read_chunk(mem, chunk, floor, region.upper, next, avail)) {
             log_corrupt_memory_list();
             return 0;
         }
@@ -2948,13 +3035,8 @@ u32 Exec::alloc(u32 bytes, u32 flags) {
                 mem.write32(rest + MC_BYTES, avail - size);
                 mem.write32(link, rest);
             }
-            free_bytes_ = free_bytes_ >= size ? free_bytes_ - size : 0;
-            mem.write32(header_ + MH_FREE, free_bytes_);
-            if ((flags & MEMF_CLEAR) != 0) {
-                for (u32 i = 0; i < size; ++i) {
-                    mem.base[chunk + i] = 0;
-                }
-            }
+            region.free_bytes = region.free_bytes >= size ? region.free_bytes - size : 0;
+            mem.write32(region.header + MH_FREE, region.free_bytes);
             return chunk;
         }
         floor = chunk + avail;
@@ -2972,26 +3054,27 @@ void Exec::free(u32 addr, u32 bytes) {
     if (addr == 0 || bytes == 0) {
         return;
     }
-    if ((addr & 7) != 0 || bytes > upper_ - lower_ || addr < lower_ ||
-        static_cast<u64>(addr) + round8(bytes) > upper_) {
+    const u32 held_by = region_holding(addr, bytes);
+    if ((addr & 7) != 0 || held_by == region_count_) {
         LogLine().text("exec: FreeMem of a bad block at ").hex(addr).text(", ").dec(bytes)
             .text(" bytes").send();
         return;
     }
+    Region& region = regions_[held_by];
     const u32 size = round8(bytes);
     GuestMemory& mem = m_->mem;
 
     // The last free chunk below the block (prev) and the first at or above it.
-    u32 link = header_ + MH_FIRST;
+    u32 link = region.header + MH_FIRST;
     u32 prev = 0;
     u32 prev_bytes = 0;
     u32 chunk = 0;
     u32 chunk_next = 0;
     u32 chunk_bytes = 0;
-    u32 floor = lower_;
+    u32 floor = region.lower;
     mem.read32(link, chunk);
     while (chunk != 0) {
-        if (!read_chunk(mem, chunk, floor, upper_, chunk_next, chunk_bytes)) {
+        if (!read_chunk(mem, chunk, floor, region.upper, chunk_next, chunk_bytes)) {
             log_corrupt_memory_list();
             return;
         }
@@ -3023,8 +3106,8 @@ void Exec::free(u32 addr, u32 bytes) {
         mem.write32(addr + MC_BYTES, merged);
         mem.write32(link, addr);
     }
-    free_bytes_ += size;
-    mem.write32(header_ + MH_FREE, free_bytes_);
+    region.free_bytes += size;
+    mem.write32(region.header + MH_FREE, region.free_bytes);
 }
 
 void Exec::add_resource(u32 node) {

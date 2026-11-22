@@ -34,6 +34,7 @@
 #include "check.hpp"
 #include "dms.hpp"
 #include "ofs_writer.hpp"
+#include "test_guest.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -50,7 +51,6 @@ namespace {
 
 constexpr u32 kStack = 0x8000;
 constexpr u32 kFreeStart = 0x10000;
-constexpr u32 kFreeEnd = 0x400000;
 constexpr u64 kBlocks = 1000000;
 constexpr usize kRegion = 1 << 20;
 constexpr usize kMaxImage = 80u * 22528u;  // an HD disk
@@ -110,7 +110,7 @@ std::vector<u8> file_bytes(const AdfVolume& volume, const char* path) {
 // console captured.
 class Rig {
 public:
-    explicit Rig(const std::vector<u8>& image) : memory_(kGuestBytes), image_(image) {
+    explicit Rig(const std::vector<u8>& image) : memory_(kTestGuestBytes), image_(image) {
         fd_ = memfd_create("testdisk", 0);
         CHECK(fd_ >= 0);
         CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
@@ -121,14 +121,14 @@ public:
         rw_ = static_cast<u8*>(rw);
         rx_ = static_cast<const u8*>(rx);
         m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kGuestBytes};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
         m.jit = nullptr;
         CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
         g_jit.set_address_mask(0x00FFFFFF);  // the 68000's 24-bit bus, as the kernel runs it
         g_lines.clear();
         g_console.clear();
         g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, kFreeEnd));
+        CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_timer.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         CHECK(g_dos.init(m, g_exec, volume, console, nullptr));
