@@ -469,6 +469,18 @@ constexpr ArtBox kGarbageArt[] = {
 };
 constexpr Art kGarbage{54, 23, kGarbageArt, sizeof kGarbageArt / sizeof kGarbageArt[0]};
 
+constexpr ArtBox kRamDiskArt[] = {
+    {0, 0, 35, 13, 1}, {1, 1, 34, 12, 3}, {3, 3, 8, 9, 1}, {4, 4, 4, 4, 2},
+    {11, 3, 16, 9, 1}, {12, 4, 12, 4, 2}, {19, 3, 24, 9, 1}, {20, 4, 20, 4, 2},
+    {27, 3, 32, 9, 1}, {28, 4, 28, 4, 2}, {1, 14, 34, 17, 1}, {2, 14, 3, 16, 2},
+    {5, 14, 6, 16, 2}, {8, 14, 9, 16, 2}, {11, 14, 12, 16, 2}, {14, 14, 15, 16, 2},
+    {20, 14, 21, 16, 2}, {23, 14, 24, 16, 2}, {26, 14, 27, 16, 2}, {29, 14, 30, 16, 2},
+    {32, 14, 33, 16, 2}, {16, 11, 19, 17, 0},
+};
+// The Ram Disk: a memory module, four chips on a board above its contacts,
+// with the key notch between them.
+constexpr Art kRamDisk{36, 18, kRamDiskArt, sizeof kRamDiskArt / sizeof kRamDiskArt[0]};
+
 const Art* default_art(u32 type) {
     switch (type) {
     case kWBDisk:
@@ -1050,6 +1062,13 @@ u32 Icon::get_default_disk_object(u32 type) {
         set_io_error(ndk::ERROR_OBJECT_WRONG_TYPE);
         return 0;
     }
+    return object_from_art(type, art);
+}
+
+u32 Icon::ram_disk_object() { return object_from_art(kWBDisk, &kRamDisk); }
+
+u32 Icon::object_from_art(u32 type, const void* art_ptr) {
+    const Art* art = static_cast<const Art*>(art_ptr);
     icon_detail::IconFile info;
     info.left = 0;
     info.top = 0;

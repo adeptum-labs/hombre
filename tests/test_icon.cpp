@@ -1119,6 +1119,14 @@ void default_icons_cover_the_types() {
         CHECK_EQ(r.get32(obj + do_DrawerData) != 0, want.drawer);
         CHECK_EQ(free_disk_object(r, obj), 0u);
     }
+    // The Ram Disk's own picture: a disk object the size of its module.
+    const u32 ram = g_icon.ram_disk_object();
+    CHECK(ram != 0);
+    CHECK_EQ(r.get8(ram + do_Type), kWBDisk);
+    CHECK_EQ(r.get16(ram + do_Gadget + gg_Width), 36u);
+    CHECK_EQ(r.get16(ram + do_Gadget + gg_Height), 18u);
+    CHECK(r.get32(ram + do_DrawerData) != 0);
+    CHECK_EQ(free_disk_object(r, ram), 0u);
     for (u32 type : {0u, 6u, 8u, 99u}) {  // WBDEVICE and WBAPPICON have no default
         CHECK_EQ(r.icon_call(icon_lvo::GetDefDiskObject, 0, 0, type), 0u);
         CHECK_EQ(r.io_err(), ERROR_OBJECT_WRONG_TYPE);

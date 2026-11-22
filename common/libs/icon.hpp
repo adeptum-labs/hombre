@@ -93,6 +93,8 @@ public:
     // type. Both return a block free_object gives back.
     u32 load_object(const char* path);
     u32 default_object(u32 type);
+    // The Ram Disk's icon when RAM: has no Disk.info of its own.
+    u32 ram_disk_object();
     void free_object(u32 object) { free_disk_object(object); }
 
     // PutDiskObject for code that is not the guest's: writes the object as
@@ -122,6 +124,8 @@ private:
     u32 write_object(native::Bus& bus, const char* name, u32 disk_object, u32& error);
     u32 delete_disk_object(native::Bus& bus, u32 name);
     u32 get_default_disk_object(u32 type);
+    // A disk object of type drawn from one of the built-in pictures.
+    u32 object_from_art(u32 type, const void* art);
     u32 find_tool_type(native::Bus& bus, u32 array, u32 name);
     u32 match_tool_value(native::Bus& bus, u32 types, u32 value);
     u32 bump_revision(native::Bus& bus, u32 new_name, u32 old_name);

@@ -904,7 +904,7 @@ void Workbench::add_volume(const char* label, const char* icon_path, u8 drive) {
         icon->owned = icon->object != 0;
     }
     if (icon->object == 0) {
-        icon->object = icon_->default_object(kDisk);
+        icon->object = drive == kNoDrive ? icon_->ram_disk_object() : icon_->default_object(kDisk);
         icon->owned = icon->object != 0;
     }
     copy_text(icon->name, sizeof icon->name, label);
