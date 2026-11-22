@@ -30,11 +30,14 @@
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
 #include "../ram_fs.hpp"
+#include "../slot_list.hpp"
 #include "../types.hpp"
 #include "exec.hpp"
 #include "native.hpp"
 #include "utility.hpp"
 #include "version.hpp"
+
+#include <vector>
 
 // dos.library written in C++ for code run by the 68000 translator, over one
 // read-only volume.
@@ -727,15 +730,15 @@ public:
     static constexpr u32 kMaxFiles = 16;    // files and console streams a program opens
     static constexpr u32 kMaxLocks = 128;
     static constexpr u32 kMaxPathDirs = 16;  // directories in the CLI command search path
-    static constexpr u32 kMaxAssigns = 32;
+    static constexpr u32 kMaxAssigns = 1024;
     static constexpr u32 kMaxAssignDirs = 4;
     static constexpr u32 kMaxAssignLocks = 64;
-    static constexpr u32 kMaxArgBlocks = 16;  // ReadArgs results not yet freed
-    static constexpr u32 kMaxAnchors = 8;     // active MatchFirst/MatchNext anchors
+    static constexpr u32 kMaxArgBlocks = 4096;  // ReadArgs results not yet freed
+    static constexpr u32 kMaxAnchors = 1024;    // active MatchFirst/MatchNext anchors
     static constexpr u32 kMaxAnchorDepth = 8;
     static constexpr u32 kMaxLoggedActions = 32;
     static constexpr u32 kMaxProcs = 8;  // processes and their CLI numbers
-    static constexpr u32 kMaxNotifies = 64;  // active StartNotify requests
+    static constexpr u32 kMaxNotifies = 4096;  // active StartNotify requests
 
     // Makes dos.library over the volumes in the drives, which must stay
     // mounted, with its structures and the shell Process, registers the
@@ -1075,7 +1078,12 @@ private:
         bool background = true;   // cli_Background
         u32 parent = 0;           // the context to inherit from, 0 = the current
     };
-    static constexpr u32 kMaxDeferred = kMaxProcs * 2;
+    static constexpr u32 kMaxDeferred = 1024;
+
+    struct DeferredFree {
+        u32 addr;
+        u32 bytes;
+    };
 
     u32 free_proc_slot() const;
     u32 free_cli_number() const;
@@ -1114,7 +1122,7 @@ private:
 
     struct ArgBlock {
         u32 rdargs;
-        u32 block;  // 0 marks a free slot
+        u32 block;
         u32 bytes;
         bool owns_rdargs;
     };
@@ -1122,7 +1130,6 @@ private:
     // A StartNotify request that has not been ended yet, with the name it
     // watches resolved to a volume and a path from that volume's root.
     struct NotifySlot {
-        bool used;
         u32 request;
         u8 vol;
         u32 full_name_bytes;
@@ -1142,7 +1149,6 @@ private:
     };
 
     struct AnchorSlot {
-        bool used;
         u8 owner;
         u32 anchor_addr;  // masked guest AnchorPath address
         bool is_wild;
@@ -1155,7 +1161,6 @@ private:
     };
 
     struct AssignEntry {
-        bool used;
         u32 type;
         char name[32];
         u32 locks[kMaxAssignDirs];
@@ -1193,13 +1198,13 @@ private:
     FileSlot files_[kHandles]{};
     FileClosed file_closed_ = nullptr;
     void* file_closed_ctx_ = nullptr;
-    NotifySlot notifies_[kMaxNotifies]{};
+    SlotList<NotifySlot> notifies_{kMaxNotifies};
     u32 notify_reply_port_ = 0;  // dos's reply port for notification messages
     LockSlot lock_slots_[kMaxLocks]{};
     LockSlot assign_lock_slots_[kMaxAssignLocks]{};
-    AssignEntry assigns_[kMaxAssigns]{};
-    ArgBlock arg_blocks_[kMaxArgBlocks]{};
-    AnchorSlot anchors_[kMaxAnchors]{};
+    SlotList<AssignEntry> assigns_{kMaxAssigns};
+    SlotList<ArgBlock> arg_blocks_{kMaxArgBlocks};
+    SlotList<AnchorSlot> anchors_{kMaxAnchors};
     u32 unknown_pkt_actions_[kMaxLoggedActions]{};
     u32 unknown_pkt_count_ = 0;
     NativeVector vectors_[kVectors]{};
@@ -1210,9 +1215,7 @@ private:
 
     // Memory of processes that ended themselves, freed once nothing runs on
     // it any more.
-    u32 deferred_addr_[kMaxDeferred]{};
-    u32 deferred_bytes_[kMaxDeferred]{};
-    u32 deferred_count_ = 0;
+    std::vector<DeferredFree> deferred_;
 };
 
 }

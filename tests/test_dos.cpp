@@ -2739,7 +2739,7 @@ void free_args_returns_the_memory() {
     p = read_args(r, "X", "a\n");
     CHECK_EQ(p.rdargs, 0u);
     CHECK_EQ(p.error, ERROR_NO_FREE_STORE);
-    CHECK(logged("dos: ReadArgs result table full, 16 entries in use"));
+    CHECK(logged("dos: ReadArgs result table full, 4096 entries in use"));
     r.call(dos_lvo::FreeArgs, kData + 0x800);
     CHECK(r.chunks() == before);
 }
@@ -3467,22 +3467,26 @@ void match_end_releases_anchor() {
         r.call(dos_lvo::MatchEnd, anchor);
     }
 
-    // Holding kMaxAnchors active anchors fills the table until one is ended.
-    for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
-        const u32 anchor = kData + 0x200 + i * 0x200;
+    // Each active anchor holds a user lock, and the lock table is smaller
+    // than the anchor table, so it is the lock table that fills first. The
+    // anchors sit at the top of guest memory, away from exec's allocations.
+    constexpr u32 kAnchorBase = kTestGuestBytes - 0x1000;
+    constexpr u32 kAnchorStride = 0x400;
+    for (u32 i = 0; i < Dos::kMaxLocks; ++i) {
+        const u32 anchor = kAnchorBase - i * kAnchorStride;
         clear_anchor(r, anchor, 32);
         CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
     }
-    const u32 extra = kData + 0x200 + Dos::kMaxAnchors * 0x200;
+    const u32 extra = kAnchorBase - Dos::kMaxLocks * kAnchorStride;
     clear_anchor(r, extra, 32);
     CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, extra), ERROR_NO_FREE_STORE);
 
     // Reusing an active anchor resets its slot.
-    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, kData + 0x200), 0u);
-    r.call(dos_lvo::MatchEnd, kData + 0x200);
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, kAnchorBase), 0u);
+    r.call(dos_lvo::MatchEnd, kAnchorBase);
     CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, extra), 0u);
-    for (u32 i = 1; i < Dos::kMaxAnchors; ++i) {
-        r.call(dos_lvo::MatchEnd, kData + 0x200 + i * 0x200);
+    for (u32 i = 1; i < Dos::kMaxLocks; ++i) {
+        r.call(dos_lvo::MatchEnd, kAnchorBase - i * kAnchorStride);
     }
     r.call(dos_lvo::MatchEnd, extra);
 }

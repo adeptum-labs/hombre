@@ -1419,25 +1419,17 @@ struct DosOps {
         if (colon == 0 || is_volume_or_device(d, name, colon)) {
             return true;
         }
-        return find_assign(d, name, colon) >= 0 || same_name(name, colon, kRomFontsName);
+        return find_assign(d, name, colon) != nullptr || same_name(name, colon, kRomFontsName);
     }
 
-    static i64 find_assign(const Dos& d, const char* name, u32 count) {
-        for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
-            if (d.assigns_[i].used && same_name(name, count, d.assigns_[i].name)) {
-                return static_cast<i64>(i);
-            }
-        }
-        return -1;
+    static Dos::AssignEntry* find_assign(Dos& d, const char* name, u32 count) {
+        return d.assigns_.find_if(
+            [name, count](const Dos::AssignEntry& e) { return same_name(name, count, e.name); });
     }
 
-    static i64 free_assign_slot(const Dos& d) {
-        for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
-            if (!d.assigns_[i].used) {
-                return static_cast<i64>(i);
-            }
-        }
-        return -1;
+    static const Dos::AssignEntry* find_assign(const Dos& d, const char* name, u32 count) {
+        return d.assigns_.find_if(
+            [name, count](const Dos::AssignEntry& e) { return same_name(name, count, e.name); });
     }
 
     static void release_lock(Dos& d, u32 bptr) {
@@ -1509,10 +1501,10 @@ struct DosOps {
             link(d.device_node_[i]);
         }
         link(d.ram_device_node_);
-        for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
-            if (d.assigns_[i].used && d.assigns_[i].node != 0) {
-                b.w32(prev + dol_Next, d.assigns_[i].node >> 2);
-                prev = d.assigns_[i].node;
+        for (const Dos::AssignEntry& e : d.assigns_) {
+            if (e.node != 0) {
+                b.w32(prev + dol_Next, e.node >> 2);
+                prev = e.node;
             }
         }
         b.w32(prev + dol_Next, 0);
@@ -1577,24 +1569,23 @@ struct DosOps {
     static bool add_default_assign(Dos& d, Bus& b, const char* name, const char* lock_path,
                                    const DirEntry& entry, bool& table_full_out) {
         table_full_out = false;
-        const i64 idx = free_assign_slot(d);
-        if (idx < 0) {
+        Dos::AssignEntry* e = d.assigns_.add();
+        if (e == nullptr) {
             table_full_out = true;
             return false;
         }
         u32 lock_bptr = 0;
         if (!alloc_assign_lock(d, b, lock_path, entry, lock_bptr)) {
+            d.assigns_.remove(e);
             return false;
         }
-        Dos::AssignEntry& e = d.assigns_[idx];
-        e.used = true;
-        e.type = DLT_DIRECTORY;
-        copy_cstr(e.name, name, sizeof e.name);
-        e.dir_count = 1;
-        e.locks[0] = lock_bptr;
-        if (!build_assign_node(d, b, e)) {
+        e->type = DLT_DIRECTORY;
+        copy_cstr(e->name, name, sizeof e->name);
+        e->dir_count = 1;
+        e->locks[0] = lock_bptr;
+        if (!build_assign_node(d, b, *e)) {
             release_lock(d, lock_bptr);
-            e = Dos::AssignEntry{};
+            d.assigns_.remove(e);
             return false;
         }
         return true;
@@ -2022,16 +2013,16 @@ struct DosOps {
                 vol = Dos::kVolRam;
                 return apply_relative_path("", rest, out, error);
             }
-            const i64 idx = find_assign(d, name, colon);
-            if (idx < 0 && same_name(name, colon, kRomFontsName)) {
+            Dos::AssignEntry* assign = find_assign(d, name, colon);
+            if (assign == nullptr && same_name(name, colon, kRomFontsName)) {
                 vol = Dos::kVolRomFonts;
                 return apply_relative_path("", rest, out, error);
             }
-            if (idx < 0) {
+            if (assign == nullptr) {
                 error = ERROR_DEVICE_NOT_MOUNTED;
                 return false;
             }
-            Dos::AssignEntry& e = d.assigns_[idx];
+            Dos::AssignEntry& e = *assign;
             if (e.type == DLT_LATE) {
                 if (!resolve_late_assign(d, b, e, error, depth + 1, process)) {
                     return false;
@@ -2504,7 +2495,7 @@ struct DosOps {
     // Tells every request that watches the changed path.
     static void notify_changed(Dos& d, u8 vol, const char* path) {
         for (Dos::NotifySlot& slot : d.notifies_) {
-            if (slot.used && slot.vol == vol && notify_path_matches(slot.path, path)) {
+            if (slot.vol == vol && notify_path_matches(slot.path, path)) {
                 send_notification(d, slot);
             }
         }
@@ -2523,7 +2514,7 @@ struct DosOps {
             return;
         }
         for (Dos::NotifySlot& slot : d.notifies_) {
-            if (slot.used && slot.request == request) {
+            if (slot.request == request) {
                 const u32 count = b.r32(request + nr_MsgCount);
                 if (b.ok() && count > 0) {
                     b.w32(request + nr_MsgCount, count - 1);
@@ -2568,32 +2559,27 @@ struct DosOps {
             }
             return;
         }
-        Dos::NotifySlot* slot = nullptr;
-        for (Dos::NotifySlot& candidate : d.notifies_) {
-            if (!candidate.used) {
-                slot = &candidate;
-                break;
-            }
-        }
+        Dos::NotifySlot* slot = d.notifies_.add();
         if (slot == nullptr) {
             fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
             return;
         }
         char full[Dos::kMaxPath + 32];
         if (!format_volume_path(volume_name(d, vol), resolved, full, sizeof full)) {
+            d.notifies_.remove(slot);
             fail(d, b, ERROR_INVALID_COMPONENT_NAME, DOSFALSE);
             return;
         }
         const u32 bytes = length_of(full) + 1;
         const u32 full_name = d.exec_->alloc(bytes, MEMF_PUBLIC);
         if (full_name == 0) {
+            d.notifies_.remove(slot);
             fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
             return;
         }
         for (u32 i = 0; i < bytes; ++i) {
             b.w8(full_name + i, static_cast<u8>(full[i]));
         }
-        slot->used = true;
         slot->request = request;
         slot->vol = vol;
         slot->full_name_bytes = bytes;
@@ -2601,8 +2587,8 @@ struct DosOps {
         b.w32(request + nr_FullName, full_name);
         b.w32(request + nr_MsgCount, 0);
         if (!b.ok()) {
-            slot->used = false;
             d.exec_->free(full_name, bytes);
+            d.notifies_.remove(slot);
             return;
         }
         if ((b.r32(request + nr_Flags) & NRF_NOTIFY_INITIAL) != 0) {
@@ -2617,18 +2603,17 @@ struct DosOps {
         Dos& d = of(ctx);
         Bus b(m);
         const u32 request = native::guest_address(m, m.cpu.d[1]);
-        for (Dos::NotifySlot& slot : d.notifies_) {
-            if (!slot.used || slot.request != request) {
-                continue;
-            }
-            slot.used = false;
-            const u32 full_name = b.r32(request + nr_FullName);
-            if (b.ok() && full_name != 0) {
-                d.exec_->free(full_name, slot.full_name_bytes);
-            }
-            b.w32(request + nr_FullName, 0);
+        Dos::NotifySlot* slot = d.notifies_.find_if(
+            [request](const Dos::NotifySlot& s) { return s.request == request; });
+        if (slot == nullptr) {
             return;
         }
+        const u32 full_name = b.r32(request + nr_FullName);
+        if (b.ok() && full_name != 0) {
+            d.exec_->free(full_name, slot->full_name_bytes);
+        }
+        b.w32(request + nr_FullName, 0);
+        d.notifies_.remove(slot);
     }
 
     // Close(0) does nothing; the console streams stay open whatever is
@@ -4851,17 +4836,16 @@ struct DosOps {
         }
         const u32 lock_bptr = m.cpu.d[2];
         const u32 name_len = length_of(name);
-        const i64 existing = find_assign(d, name, name_len);
+        Dos::AssignEntry* existing = find_assign(d, name, name_len);
         if (lock_bptr == 0) {
-            if (existing >= 0) {
-                Dos::AssignEntry& e = d.assigns_[existing];
-                for (u32 i = 0; i < e.dir_count; ++i) {
-                    release_lock(d, e.locks[i]);
+            if (existing != nullptr) {
+                for (u32 i = 0; i < existing->dir_count; ++i) {
+                    release_lock(d, existing->locks[i]);
                 }
-                if (e.node != 0) {
-                    d.exec_->free(e.node, e.node_bytes);
+                if (existing->node != 0) {
+                    d.exec_->free(existing->node, existing->node_bytes);
                 }
-                e = Dos::AssignEntry{};
+                d.assigns_.remove(existing);
                 relink_dos_list(d, b);
             }
             if (b.ok()) {
@@ -4882,21 +4866,27 @@ struct DosOps {
             fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
             return;
         }
-        const i64 target_idx = existing >= 0 ? existing : free_assign_slot(d);
-        if (target_idx < 0) {
-            table_full(d, b, "assign", Dos::kMaxAssigns);
-            return;
+        Dos::AssignEntry* target = existing;
+        if (target == nullptr) {
+            target = d.assigns_.add();
+            if (target == nullptr) {
+                table_full(d, b, "assign", Dos::kMaxAssigns);
+                return;
+            }
         }
-        Dos::AssignEntry& e = d.assigns_[target_idx];
+        Dos::AssignEntry& e = *target;
         const Dos::AssignEntry saved = e;
-        e.used = true;
         e.type = DLT_DIRECTORY;
         copy_cstr(e.name, name, sizeof e.name);
         e.dir_count = 1;
         e.locks[0] = lock_bptr;
         e.path[0] = '\0';
         if (!build_assign_node(d, b, e)) {
-            e = saved;
+            if (existing != nullptr) {
+                e = saved;
+            } else {
+                d.assigns_.remove(&e);
+            }
             fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
             return;
         }
@@ -4904,7 +4894,7 @@ struct DosOps {
         if (user_lock >= 0) {
             d.lock_slots_[user_lock].owner = 0;
         }
-        if (saved.used) {
+        if (existing != nullptr) {
             for (u32 i = 0; i < saved.dir_count; ++i) {
                 if (saved.locks[i] != lock_bptr) {
                     release_lock(d, saved.locks[i]);
@@ -5019,25 +5009,31 @@ struct DosOps {
             fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
             return;
         }
-        const i64 existing = find_assign(d, name, name_len);
-        const i64 target_idx = existing >= 0 ? existing : free_assign_slot(d);
-        if (target_idx < 0) {
-            table_full(d, b, "assign", Dos::kMaxAssigns);
-            return;
+        Dos::AssignEntry* existing = find_assign(d, name, name_len);
+        Dos::AssignEntry* target = existing;
+        if (target == nullptr) {
+            target = d.assigns_.add();
+            if (target == nullptr) {
+                table_full(d, b, "assign", Dos::kMaxAssigns);
+                return;
+            }
         }
-        Dos::AssignEntry& e = d.assigns_[target_idx];
+        Dos::AssignEntry& e = *target;
         const Dos::AssignEntry saved = e;
-        e.used = true;
         e.type = type;
         copy_cstr(e.name, name, sizeof e.name);
         e.dir_count = 0;
         copy_cstr(e.path, path, sizeof e.path);
         if (!build_assign_node(d, b, e)) {
-            e = saved;
+            if (existing != nullptr) {
+                e = saved;
+            } else {
+                d.assigns_.remove(&e);
+            }
             fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
             return;
         }
-        if (saved.used) {
+        if (existing != nullptr) {
             for (u32 i = 0; i < saved.dir_count; ++i) {
                 release_lock(d, saved.locks[i]);
             }
@@ -5073,12 +5069,12 @@ struct DosOps {
             fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
             return;
         }
-        const i64 idx = find_assign(d, name, length_of(name));
-        if (idx < 0) {
+        Dos::AssignEntry* found = find_assign(d, name, length_of(name));
+        if (found == nullptr) {
             fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
             return;
         }
-        Dos::AssignEntry& e = d.assigns_[idx];
+        Dos::AssignEntry& e = *found;
         if (e.type == DLT_LATE) {
             u32 error = 0;
             if (!resolve_late_assign(d, b, e, error, 1)) {
@@ -5132,12 +5128,12 @@ struct DosOps {
         }
         const u32 target_key = target->entry.header_block;
         const u8 target_vol = target->entry.volume;
-        const i64 idx = find_assign(d, name, length_of(name));
-        if (idx < 0) {
+        Dos::AssignEntry* found = find_assign(d, name, length_of(name));
+        if (found == nullptr) {
             fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
             return;
         }
-        Dos::AssignEntry& e = d.assigns_[idx];
+        Dos::AssignEntry& e = *found;
         if (e.type != DLT_DIRECTORY) {
             fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
             return;
@@ -5161,7 +5157,7 @@ struct DosOps {
             if (e.node != 0) {
                 d.exec_->free(e.node, e.node_bytes);
             }
-            e = Dos::AssignEntry{};
+            d.assigns_.remove(&e);
             relink_dos_list(d, b);
             if (b.ok()) {
                 native::set_result(m, DOSTRUE);
@@ -5218,9 +5214,8 @@ struct DosOps {
                 return;
             }
             if ((flags & DVPF_ASSIGN) != 0) {
-                for (u32 i = 0; i < Dos::kMaxAssigns; ++i) {
-                    const Dos::AssignEntry& e = d.assigns_[i];
-                    if (!e.used || e.node != dev_node || e.type != DLT_DIRECTORY) {
+                for (const Dos::AssignEntry& e : d.assigns_) {
+                    if (e.node != dev_node || e.type != DLT_DIRECTORY) {
                         continue;
                     }
                     for (u32 k = 0; k + 1 < e.dir_count; ++k) {
@@ -5312,7 +5307,7 @@ struct DosOps {
         } else if (same_name(name, colon, "RAM")) {
             dvp_port = d.ram_port_;
             dvp_node = d.ram_device_node_;
-        } else if (find_assign(d, name, colon) < 0 && same_name(name, colon, kRomFontsName)) {
+        } else if (find_assign(d, name, colon) == nullptr && same_name(name, colon, kRomFontsName)) {
             // No file system port serves the ROM's FONTS:, so the lock on
             // its directory tells whoever sends packets where they go.
             if (!alloc_assign_lock(d, b, "", rom_fonts_root(), dvp_lock)) {
@@ -5322,12 +5317,12 @@ struct DosOps {
             dvp_port = port_for_volume(d, Dos::kVolRomFonts);
             dvp_flags = DVPF_UNLOCK;
         } else {
-            const i64 idx = find_assign(d, name, colon);
-            if (idx < 0) {
+            Dos::AssignEntry* found = find_assign(d, name, colon);
+            if (found == nullptr) {
                 fail(d, b, ERROR_DEVICE_NOT_MOUNTED, 0);
                 return;
             }
-            Dos::AssignEntry& e = d.assigns_[idx];
+            Dos::AssignEntry& e = *found;
             if (e.type == DLT_LATE) {
                 u32 error = 0;
                 if (!resolve_late_assign(d, b, e, error, 1)) {
@@ -5781,22 +5776,9 @@ struct DosOps {
         }
     };
 
-    static i64 find_anchor_slot(const Dos& d, u32 key) {
-        for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
-            if (d.anchors_[i].used && d.anchors_[i].anchor_addr == key) {
-                return static_cast<i64>(i);
-            }
-        }
-        return -1;
-    }
-
-    static i64 free_anchor_slot(const Dos& d) {
-        for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
-            if (!d.anchors_[i].used) {
-                return static_cast<i64>(i);
-            }
-        }
-        return -1;
+    static Dos::AnchorSlot* find_anchor_slot(Dos& d, u32 key) {
+        return d.anchors_.find_if(
+            [key](const Dos::AnchorSlot& s) { return s.anchor_addr == key; });
     }
 
     static bool check_anchor_break(Dos& d, Bus& b, u32 anchor) {
@@ -5975,18 +5957,16 @@ struct DosOps {
         lvl.lock_bptr = 0;
     }
 
-    static void release_anchor_slot(Dos& d, u32 slot_idx) {
-        Dos::AnchorSlot& s = d.anchors_[slot_idx];
+    static void release_anchor_slot(Dos& d, Dos::AnchorSlot& s) {
         for (u32 i = 0; i < s.depth && i < Dos::kMaxAnchorDepth; ++i) {
             free_achain_level(d, s.levels[i]);
         }
         s.depth = 0;
-        s.used = false;
-        s.owner = 0;
     }
 
-    static void cleanup_anchor(Dos& d, Bus& b, u32 slot_idx, u32 anchor) {
-        release_anchor_slot(d, slot_idx);
+    static void cleanup_anchor(Dos& d, Bus& b, Dos::AnchorSlot* slot, u32 anchor) {
+        release_anchor_slot(d, *slot);
+        d.anchors_.remove(slot);
         if (anchor != 0) {
             b.w32(anchor + ap_Base, 0);
             b.w32(anchor + ap_Current, 0);
@@ -6020,9 +6000,8 @@ struct DosOps {
             return;
         }
         const u32 key = native::guest_address(m, anchor);
-        const i64 existing = find_anchor_slot(d, key);
-        if (existing >= 0) {
-            cleanup_anchor(d, b, static_cast<u32>(existing), anchor);
+        if (Dos::AnchorSlot* existing = find_anchor_slot(d, key); existing != nullptr) {
+            cleanup_anchor(d, b, existing, anchor);
         }
         b.w32(anchor + ap_Base, 0);
         b.w32(anchor + ap_Current, 0);
@@ -6068,16 +6047,15 @@ struct DosOps {
             return;
         }
 
-        const i64 slot_idx = free_anchor_slot(d);
-        if (slot_idx < 0) {
+        Dos::AnchorSlot* slot = d.anchors_.add();
+        if (slot == nullptr) {
             LogLine().text("dos: anchor table full, ").dec(Dos::kMaxAnchors)
                 .text(" entries in use").send();
             fail(d, b, ERROR_NO_FREE_STORE, ERROR_NO_FREE_STORE);
             return;
         }
 
-        Dos::AnchorSlot& s = d.anchors_[slot_idx];
-        s = Dos::AnchorSlot{};
+        Dos::AnchorSlot& s = *slot;
         copy_cstr(s.prefix, prefix, sizeof s.prefix);
 
         if (wild == 0) {
@@ -6095,6 +6073,7 @@ struct DosOps {
                 if (b.ok()) {
                     fail(d, b, error, error);
                 }
+                cleanup_anchor(d, b, slot, anchor);
                 return;
             }
             char parent_path[Dos::kMaxPath];
@@ -6102,6 +6081,7 @@ struct DosOps {
             DirEntry parent_entry{};
             const u32 p_err = fs_find(d, vol, parent_path, parent_entry);
             if (p_err != 0) {
+                cleanup_anchor(d, b, slot, anchor);
                 fail(d, b, p_err, p_err);
                 return;
             }
@@ -6109,6 +6089,7 @@ struct DosOps {
             const u8 an_flags = static_cast<u8>(DDF_ExaminedBit | DDF_Single);
             if (!alloc_achain_node(d, b, 0, parent_path, parent_entry, an_flags, "",
                                    s.levels[0], oom)) {
+                d.anchors_.remove(slot);
                 fail_achain_alloc(d, b, anchor, flags, oom);
                 return;
             }
@@ -6130,10 +6111,9 @@ struct DosOps {
                 join_path(prefix, entry.name, full, sizeof full);
             }
             if (!write_anchor_match(d, b, anchor, full, entry)) {
-                cleanup_anchor(d, b, static_cast<u32>(slot_idx), anchor);
+                cleanup_anchor(d, b, slot, anchor);
                 return;
             }
-            s.used = true;
             s.owner = d.cur_owner();
             s.anchor_addr = key;
             set_io_err(d, b, 0);
@@ -6152,25 +6132,30 @@ struct DosOps {
                 }
                 fail(d, b, error, error);
             }
+            cleanup_anchor(d, b, slot, anchor);
             return;
         }
         if (!dir_entry.is_dir) {
+            d.anchors_.remove(slot);
             fail(d, b, ERROR_DIR_NOT_FOUND, ERROR_DIR_NOT_FOUND);
             return;
         }
         MatchVisitor mv{0, true, false, false, tokens, DirEntry{}};
         const u32 list_err = fs_list(d, vol, dir_path, MatchVisitor::visit, &mv);
         if (list_err != 0) {
+            d.anchors_.remove(slot);
             fail(d, b, list_err, list_err);
             return;
         }
         if (!mv.found) {
+            d.anchors_.remove(slot);
             fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
             return;
         }
         bool oom = false;
         const u8 an_flags = static_cast<u8>(DDF_PatternBit | DDF_ExaminedBit);
         if (!alloc_achain_node(d, b, 0, dir_path, dir_entry, an_flags, "", s.levels[0], oom)) {
+            d.anchors_.remove(slot);
             fail_achain_alloc(d, b, anchor, flags, oom);
             return;
         }
@@ -6192,10 +6177,9 @@ struct DosOps {
         char full[detail::kDosPatMaxPat + 32 + 1];
         join_path(prefix, mv.entry.name, full, sizeof full);
         if (!write_anchor_match(d, b, anchor, full, mv.entry)) {
-            cleanup_anchor(d, b, static_cast<u32>(slot_idx), anchor);
+            cleanup_anchor(d, b, slot, anchor);
             return;
         }
-        s.used = true;
         s.owner = d.cur_owner();
         s.anchor_addr = key;
         set_io_err(d, b, 0);
@@ -6227,12 +6211,12 @@ struct DosOps {
         if (check_anchor_break(d, b, anchor) || !b.ok()) {
             return;
         }
-        const i64 slot_idx = find_anchor_slot(d, native::guest_address(m, anchor));
-        if (slot_idx < 0) {
+        Dos::AnchorSlot* slot = find_anchor_slot(d, native::guest_address(m, anchor));
+        if (slot == nullptr) {
             fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
             return;
         }
-        Dos::AnchorSlot& s = d.anchors_[slot_idx];
+        Dos::AnchorSlot& s = *slot;
         if (s.depth == 0 || s.depth > Dos::kMaxAnchorDepth) {
             fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
             return;
@@ -6367,10 +6351,10 @@ struct DosOps {
         if (anchor == 0) {
             return;
         }
-        const i64 slot_idx = find_anchor_slot(d, native::guest_address(m, anchor));
-        if (slot_idx >= 0) {
+        Dos::AnchorSlot* slot = find_anchor_slot(d, native::guest_address(m, anchor));
+        if (slot != nullptr) {
             Bus b(m);
-            cleanup_anchor(d, b, static_cast<u32>(slot_idx), anchor);
+            cleanup_anchor(d, b, slot, anchor);
         }
     }
 
@@ -6729,9 +6713,6 @@ struct DosOps {
             }
         }
         for (Dos::AnchorSlot& a : d.anchors_) {
-            if (!a.used) {
-                continue;
-            }
             for (u32 i = 0; i < a.depth && i < Dos::kMaxAnchorDepth; ++i) {
                 Dos::AnchorLevel& lvl = a.levels[i];
                 if (lvl.dir.volume == Dos::kVolRam && lvl.dir.header_block > 0) {
@@ -7546,15 +7527,6 @@ struct DosOps {
         return n == i + 1 && line.text[i] == '?';
     }
 
-    static i64 free_arg_block(const Dos& d) {
-        for (u32 i = 0; i < Dos::kMaxArgBlocks; ++i) {
-            if (d.arg_blocks_[i].block == 0) {
-                return i;
-            }
-        }
-        return -1;
-    }
-
     // ReadArgs(template, array, rdargs). The line is the RDArgs' CSource
     // when it has a buffer, otherwise the next line of the console. The
     // strings, numbers and /M lists go into one block from exec that
@@ -7689,8 +7661,8 @@ struct DosOps {
             }
         }
 
-        const i64 table = free_arg_block(d);
-        if (table < 0) {
+        Dos::ArgBlock* result = d.arg_blocks_.add();
+        if (result == nullptr) {
             table_full(d, b, "ReadArgs result", Dos::kMaxArgBlocks);
             return;
         }
@@ -7698,6 +7670,7 @@ struct DosOps {
         if (make_rdargs) {
             rdargs = d.exec_->alloc(RDA_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
             if (rdargs == 0) {
+                d.arg_blocks_.remove(result);
                 fail(d, b, ERROR_NO_FREE_STORE, 0);
                 return;
             }
@@ -7712,6 +7685,7 @@ struct DosOps {
             if (make_rdargs) {
                 d.exec_->free(rdargs, RDA_SIZEOF);
             }
+            d.arg_blocks_.remove(result);
             fail(d, b, ERROR_NO_FREE_STORE, 0);
             return;
         }
@@ -7761,9 +7735,10 @@ struct DosOps {
             if (make_rdargs) {
                 d.exec_->free(rdargs, RDA_SIZEOF);
             }
+            d.arg_blocks_.remove(result);
             return;
         }
-        d.arg_blocks_[table] = Dos::ArgBlock{rdargs, block, bytes, make_rdargs};
+        *result = Dos::ArgBlock{rdargs, block, bytes, make_rdargs};
         native::set_result(m, rdargs);
     }
 
@@ -7773,17 +7748,17 @@ struct DosOps {
         if (rdargs == 0) {
             return;
         }
-        bool found = false;
         bool owned = false;
-        for (Dos::ArgBlock& a : d.arg_blocks_) {
-            if (a.block != 0 && a.rdargs == rdargs) {
-                d.exec_->free(a.block, a.bytes);
-                owned = owned || a.owns_rdargs;
-                a = Dos::ArgBlock{0, 0, 0, false};
-                found = true;
+        const usize before = d.arg_blocks_.size();
+        d.arg_blocks_.remove_if([&](Dos::ArgBlock& a) {
+            if (a.rdargs != rdargs) {
+                return false;
             }
-        }
-        if (!found) {
+            d.exec_->free(a.block, a.bytes);
+            owned = owned || a.owns_rdargs;
+            return true;
+        });
+        if (d.arg_blocks_.size() == before) {
             LogLine().text("dos: FreeArgs of ").hex(rdargs)
                 .text(", which ReadArgs did not return").send();
             return;
@@ -8454,11 +8429,13 @@ struct DosOps {
                 d.m_->mem.write32(process + pr_COS, saved_cos);
             }
         }
-        for (u32 i = 0; i < Dos::kMaxAnchors; ++i) {
-            if (d.anchors_[i].used && d.anchors_[i].owner == owner) {
-                release_anchor_slot(d, i);
+        d.anchors_.remove_if([&d, owner](Dos::AnchorSlot& a) {
+            if (a.owner != owner) {
+                return false;
             }
-        }
+            release_anchor_slot(d, a);
+            return true;
+        });
         for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
             if (d.files_[i].stream != Dos::Stream::Closed && d.files_[i].owner == owner) {
                 release_entry(d, d.files_[i].entry);
@@ -8765,22 +8742,20 @@ bool Dos::open_console_handles(u8 console, u32& in_fh, u32& out_fh) {
 }
 
 void Dos::defer_free(u32 at, u32 bytes) {
-    if (deferred_count_ >= kMaxDeferred) {
+    if (deferred_.size() >= kMaxDeferred) {
         LogLine().text("dos: deferred free list full").send();
         return;
     }
-    deferred_addr_[deferred_count_] = at;
-    deferred_bytes_[deferred_count_] = bytes;
-    ++deferred_count_;
+    deferred_.push_back(DeferredFree{at, bytes});
 }
 
 void Dos::drain_deferred() {
-    for (u32 i = 0; i < deferred_count_; ++i) {
-        if (exec_ != nullptr && deferred_addr_[i] != 0) {
-            exec_->free(deferred_addr_[i], deferred_bytes_[i]);
+    for (const DeferredFree& entry : deferred_) {
+        if (exec_ != nullptr && entry.addr != 0) {
+            exec_->free(entry.addr, entry.bytes);
         }
     }
-    deferred_count_ = 0;
+    deferred_.clear();
 }
 
 bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_number) {
@@ -9298,25 +9273,17 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
         l.used = false;
         l.owner = 0;
     }
-    for (AssignEntry& a : assigns_) {
-        a = AssignEntry{};
-    }
-    for (ArgBlock& a : arg_blocks_) {
-        a = ArgBlock{0, 0, 0, false};
-    }
-    for (AnchorSlot& a : anchors_) {
-        a = AnchorSlot{};
-    }
+    assigns_.clear();
+    arg_blocks_.clear();
+    anchors_.clear();
     for (u32& act : unknown_pkt_actions_) {
         act = 0;
     }
     unknown_pkt_count_ = 0;
-    for (NotifySlot& n : notifies_) {
-        n = NotifySlot{};
-    }
+    notifies_.clear();
     notify_reply_port_ = 0;
     now_ticks_ = nullptr;
-    deferred_count_ = 0;
+    deferred_.clear();
     if (m.jit == nullptr || m.mem.base == nullptr || !drives_[0].has_disk) {
         return false;
     }
