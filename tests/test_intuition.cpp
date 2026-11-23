@@ -9486,6 +9486,452 @@ void intuiticks_reach_the_active_window_one_at_a_time() {
     reply_msg(r, second);
 }
 
+// The four WORDs a WA_Zoom tag points to.
+constexpr u32 kZoomBox = kData + 0x2600;
+
+void put_zoom_box(GfxRig& r, i32 left, i32 top, i32 width, i32 height) {
+    r.put16(kZoomBox, static_cast<u32>(left));
+    r.put16(kZoomBox + 2, static_cast<u32>(top));
+    r.put16(kZoomBox + 4, static_cast<u32>(width));
+    r.put16(kZoomBox + 6, static_cast<u32>(height));
+}
+
+// A 300 by 150 window at 100, 80 on a fresh 640 by 400 screen of depth
+// planes, which can be sized from 100 by 40 up to the screen. WA_Zoom gives
+// it a zoom gadget whose other box is the one put_zoom_box stored.
+u32 open_zoom_window(GfxRig& r, u32 depth, u32 idcmp = 0, u32 title = 0,
+                     u32 depth_gadget = 1) {
+    put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 tags = r.tags(
+        kTagList, {{WA_Left, 100}, {WA_Top, 80}, {WA_Width, 300}, {WA_Height, 150},
+                   {WA_DepthGadget, depth_gadget}, {WA_CloseGadget, 1}, {WA_DragBar, 1},
+                   {WA_Activate, 1}, {WA_IDCMP, idcmp}, {WA_Title, title}, {WA_MinWidth, 100},
+                   {WA_MinHeight, 40}, {WA_MaxWidth, ~0u}, {WA_MaxHeight, ~0u},
+                   {WA_Zoom, kZoomBox}, {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, 0, tags);
+    CHECK(window != 0);
+    return window;
+}
+
+Rect zoom_button_of(GfxRig& r, u32 window) {
+    return Intuition::zoom_box_rect(static_cast<i16>(r.get16(window + wd_LeftEdge)),
+                                    static_cast<i16>(r.get16(window + wd_TopEdge)),
+                                    static_cast<i16>(r.get16(window + wd_Width)),
+                                    r.get32(window + wd_Flags));
+}
+
+// A click on the middle of the window's zoom button.
+void click_zoom(GfxRig& r, u32 window) {
+    const Rect box = zoom_button_of(r, window);
+    press(r, (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2);
+    release(r, (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2);
+}
+
+void check_window_box(GfxRig& r, u32 window, i32 left, i32 top, i32 width, i32 height) {
+    CHECK_EQ(static_cast<i32>(r.get16(window + wd_LeftEdge)), left);
+    CHECK_EQ(static_cast<i32>(r.get16(window + wd_TopEdge)), top);
+    CHECK_EQ(static_cast<i32>(r.get16(window + wd_Width)), width);
+    CHECK_EQ(static_cast<i32>(r.get16(window + wd_Height)), height);
+}
+
+// The classes queued on the window's port, in order, each message replied to.
+std::vector<u32> drained_classes(GfxRig& r, u32 window) {
+    std::vector<u32> messages;
+    const std::vector<u32> classes = queued_classes(r, window, &messages);
+    for (const u32 msg : messages) {
+        reply_msg(r, msg);
+    }
+    return classes;
+}
+
+bool screen_has_pen(GfxRig& r, u32 screen, const Rect& area, u32 pen) {
+    for (i32 y = area.y0; y <= area.y1; ++y) {
+        for (i32 x = area.x0; x <= area.x1; ++x) {
+            if (screen_pixel(r, screen, x, y) == pen) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void wa_zoom_gives_the_window_a_zoom_gadget_beside_the_depth_gadget() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 2);
+    const u32 flags = r.get32(window + wd_Flags);
+    CHECK_EQ(flags & WFLG_HASZOOM, WFLG_HASZOOM);
+
+    // As large as the depth button, ending in the depth button's first
+    // column.
+    const Rect zoom = Intuition::zoom_box_rect(100, 80, 300, flags);
+    const Rect depth = Intuition::depth_box_rect(100, 80, 300);
+    CHECK_EQ(zoom.x1, depth.x0);
+    CHECK_EQ(zoom.x1 - zoom.x0, depth.x1 - depth.x0);
+    CHECK_EQ(zoom.y0, depth.y0);
+    CHECK_EQ(zoom.y1, depth.y1);
+    // Without a depth gadget it takes the depth button's place.
+    const Rect alone = Intuition::zoom_box_rect(100, 80, 300, WFLG_HASZOOM);
+    CHECK_EQ(alone.x0, depth.x0);
+    CHECK_EQ(alone.x1, depth.x1);
+    CHECK_EQ(alone.y0, depth.y0);
+    CHECK_EQ(alone.y1, depth.y1);
+}
+
+void a_window_without_a_depth_gadget_has_the_zoom_button_in_its_place() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 2, IDCMP_NEWSIZE, 0, 0);
+    const u32 flags = r.get32(window + wd_Flags);
+    CHECK_EQ(flags & (WFLG_HASZOOM | WFLG_DEPTHGADGET), WFLG_HASZOOM);
+    const Rect box = Intuition::zoom_box_rect(100, 80, 300, flags);
+    const Rect depth = Intuition::depth_box_rect(100, 80, 300);
+    CHECK_EQ(box.x0, depth.x0);
+    CHECK_EQ(box.x1, depth.x1);
+    click_zoom(r, window);
+    check_window_box(r, window, 20, 40, 120, 60);
+}
+
+void a_window_without_wa_zoom_has_no_zoom_gadget() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    // The flag is Intuition's to set: the NewWindow's is dropped.
+    put_new_window(r, kNewWindow, 100, 80, 300, 150,
+                   WFLG_ACTIVATE | WFLG_DEPTHGADGET | WFLG_HASZOOM, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW | IDCMP_MOUSEBUTTONS);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_HASZOOM, 0u);
+
+    // Nothing is drawn where the zoom button would be, and a click there
+    // is the window's like any other.
+    const Rect box = Intuition::zoom_box_rect(100, 80, 300, WFLG_DEPTHGADGET | WFLG_HASZOOM);
+    const i32 cx = (box.x0 + box.x1) / 2;
+    const i32 cy = (box.y0 + box.y1) / 2;
+    CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), 3u);
+    press(r, cx, cy);
+    release(r, cx, cy);
+    const std::vector<u32> mouse{IDCMP_MOUSEBUTTONS, IDCMP_MOUSEBUTTONS};
+    CHECK(drained_classes(r, window) == mouse);
+    check_window_box(r, window, 100, 80, 300, 150);
+
+    // ZipWindow has no other box to take it to.
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ZipWindow), ExitReason::Halt);
+    check_window_box(r, window, 100, 80, 300, 150);
+    CHECK_EQ(drained_classes(r, window).size(), 0u);
+
+    // A WA_Zoom without a box gives no gadget either.
+    const u32 tags = r.tags(kTagList, {{WA_Left, 20}, {WA_Top, 20}, {WA_Width, 100},
+                                       {WA_Height, 60}, {WA_Zoom, 0}, {TAG_DONE, 0}});
+    const u32 plain = open_win_tags(r, 0, tags);
+    CHECK(plain != 0);
+    CHECK_EQ(r.get32(plain + wd_Flags) & WFLG_HASZOOM, 0u);
+}
+
+void the_classic_zoom_button_sits_left_of_the_depth_button() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 2);
+    const u32 screen = r.get32(window + wd_WScreen);
+    const Rect zoom = zoom_button_of(r, window);
+    const Rect depth = Intuition::depth_box_rect(100, 80, 300);
+    const i32 cx = (zoom.x0 + zoom.x1) / 2;
+    const i32 cy = (zoom.y0 + zoom.y1) / 2;
+
+    // Flat as the depth button is: the window's light edge along the top,
+    // its dark line under the buttons and the bar's FILLPEN (3) between.
+    CHECK_EQ(screen_pixel(r, screen, cx, zoom.y0), 2u);
+    CHECK_EQ(screen_pixel(r, screen, cx, zoom.y1), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), 3u);
+    // A dark outlined sheet with a light one in its top left corner.
+    CHECK_EQ(screen_pixel(r, screen, cx - 3, cy - 3), 1u);
+    CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), 2u);
+    CHECK_EQ(screen_pixel(r, screen, cx + 2, cy + 2), 0u);
+    CHECK_EQ(screen_pixel(r, screen, cx + 3, cy + 3), 1u);
+    // The depth button keeps the window's dark right edge.
+    CHECK_EQ(screen_pixel(r, screen, depth.x1, cy), 1u);
+}
+
+void the_modern_zoom_button_sits_left_of_the_depth_button() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 8);
+    const u32 screen = r.get32(window + wd_WScreen);
+    const Rect zoom = zoom_button_of(r, window);
+    const Rect depth = Intuition::depth_box_rect(100, 80, 300);
+    const i32 cx = (zoom.x0 + zoom.x1) / 2;
+    const i32 cy = (zoom.y0 + zoom.y1) / 2;
+
+    // Its own shaded body between outlines, the right one being the depth
+    // button's left.
+    CHECK_EQ(zoom.x1, depth.x0);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), static_cast<u32>(chrome::kFrameDark));
+    CHECK(knob_shade(screen_pixel(r, screen, zoom.x0 + 1, cy)));
+    CHECK(knob_shade(screen_pixel(r, screen, depth.x0 + 1, cy)));
+    // A shaded sheet with a light one in its top left corner, both outlined.
+    CHECK_EQ(screen_pixel(r, screen, cx - 3, cy - 3), static_cast<u32>(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, cx - 2, cy - 2), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), static_cast<u32>(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, cx + 2, cy + 2), static_cast<u32>(chrome::kKnob2));
+    CHECK_EQ(screen_pixel(r, screen, cx + 3, cy + 3), static_cast<u32>(chrome::kFrameDark));
+}
+
+void the_title_ends_before_the_zoom_button() {
+    for (const u32 depth : {2u, 8u}) {
+        GfxRig r;
+        put_zoom_box(r, 20, 40, 120, 60);
+        r.str(kWinTitle, "A title much too long to fit between the bar buttons");
+        const u32 window = open_zoom_window(r, depth, 0, kWinTitle);
+        const u32 screen = r.get32(window + wd_WScreen);
+        const u32 flags = r.get32(window + wd_Flags);
+        const Rect zoom = zoom_button_of(r, window);
+        const i32 first = 100 + chrome::title_left(flags);
+        const i32 last = 100 + chrome::title_right(300, flags);
+        CHECK_EQ(last, zoom.x0 - chrome::kTitleGapRight);
+        // The title's ink: FILLTEXTPEN on the classic screen.
+        const u32 ink = depth == 2 ? 1u : static_cast<u32>(chrome::kTitleActive);
+        CHECK(screen_has_pen(r, screen, Rect{first, 83, last, 90}, ink));
+        CHECK(!screen_has_pen(r, screen, Rect{last + 1, 83, zoom.x0 - 1, 90}, ink));
+    }
+}
+
+void a_click_on_the_zoom_button_swaps_the_box_both_ways() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(
+        r, 2, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW | IDCMP_MOUSEBUTTONS);
+    const u32 layer = r.get32(window + wd_WLayer);
+    const std::vector<u32> resized{IDCMP_NEWSIZE, IDCMP_CHANGEWINDOW};
+
+    // The press and the release are the gadget's: the window gets no
+    // MOUSEBUTTONS for them.
+    click_zoom(r, window);
+    check_window_box(r, window, 20, 40, 120, 60);
+    CHECK_EQ(r.get16(layer + ly_MinX), 20u);
+    CHECK_EQ(r.get16(layer + ly_MinY), 40u);
+    CHECK_EQ(r.get16(layer + ly_MaxX), 139u);
+    CHECK_EQ(r.get16(layer + ly_MaxY), 99u);
+    CHECK(drained_classes(r, window) == resized);
+
+    // The box it had is the other one now.
+    click_zoom(r, window);
+    check_window_box(r, window, 100, 80, 300, 150);
+    CHECK_EQ(r.get16(layer + ly_MinX), 100u);
+    CHECK_EQ(r.get16(layer + ly_MaxX), 399u);
+    CHECK_EQ(r.get16(layer + ly_MaxY), 229u);
+    CHECK(drained_classes(r, window) == resized);
+
+    click_zoom(r, window);
+    check_window_box(r, window, 20, 40, 120, 60);
+    CHECK(drained_classes(r, window) == resized);
+}
+
+void a_zoom_that_only_moves_the_window_posts_changewindow_alone() {
+    GfxRig r;
+    put_zoom_box(r, 300, 200, 300, 150);
+    const u32 window = open_zoom_window(r, 2, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW);
+    click_zoom(r, window);
+    check_window_box(r, window, 300, 200, 300, 150);
+    const std::vector<u32> moved{IDCMP_CHANGEWINDOW};
+    CHECK(drained_classes(r, window) == moved);
+}
+
+void a_left_and_top_of_minus_one_keep_the_place() {
+    {
+        GfxRig r;
+        put_zoom_box(r, -1, -1, 150, 70);
+        const u32 window = open_zoom_window(r, 2, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW);
+        click_zoom(r, window);
+        check_window_box(r, window, 100, 80, 150, 70);
+        click_zoom(r, window);
+        check_window_box(r, window, 100, 80, 300, 150);
+    }
+    {
+        // The place it keeps is the one the window is at when it zooms.
+        GfxRig r;
+        put_zoom_box(r, -1, -1, 150, 70);
+        const u32 window = open_zoom_window(r, 2, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW);
+        r.intuition.move_window_to(window, 200, 120);
+        click_zoom(r, window);
+        check_window_box(r, window, 200, 120, 150, 70);
+        click_zoom(r, window);
+        check_window_box(r, window, 200, 120, 300, 150);
+    }
+}
+
+void the_other_box_is_held_to_the_screen_and_to_the_limits() {
+    {
+        GfxRig r;
+        put_zoom_box(r, 600, 380, 200, 100);
+        const u32 window = open_zoom_window(r, 2);
+        click_zoom(r, window);
+        check_window_box(r, window, 440, 300, 200, 100);
+    }
+    {
+        GfxRig r;
+        put_zoom_box(r, 20, 40, 50, 10);
+        const u32 window = open_zoom_window(r, 2);
+        click_zoom(r, window);
+        check_window_box(r, window, 20, 40, 100, 40);
+    }
+    {
+        GfxRig r;
+        put_zoom_box(r, 20, 40, 700, 500);
+        const u32 window = open_zoom_window(r, 2);
+        click_zoom(r, window);
+        check_window_box(r, window, 0, 0, 640, 400);
+    }
+}
+
+void a_held_zoom_button_sinks_on_a_four_colour_screen() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 2, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW);
+    const u32 screen = r.get32(window + wd_WScreen);
+    const Rect zoom = zoom_button_of(r, window);
+    const Rect depth = Intuition::depth_box_rect(100, 80, 300);
+    const i32 cx = (zoom.x0 + zoom.x1) / 2;
+    const i32 cy = (zoom.y0 + zoom.y1) / 2;
+
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 3u);
+    press(r, cx, cy);
+    // Held, it is sunken: dark on the left, after the dark line that ends
+    // its neighbour, and light on the right, over the flat depth button's.
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1 - 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, depth.x1, cy), 1u);
+
+    // Off the button it rises, and let go there it does nothing.
+    move_to(r, cx, zoom.y1 + 40);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 3u);
+    release(r, cx, zoom.y1 + 40);
+    check_window_box(r, window, 100, 80, 300, 150);
+    CHECK_EQ(drained_classes(r, window).size(), 0u);
+
+    // Let go over it, the window zooms and the button rises with it.
+    press(r, cx, cy);
+    release(r, cx, cy);
+    check_window_box(r, window, 20, 40, 120, 60);
+    const Rect zoomed = zoom_button_of(r, window);
+    CHECK_EQ(screen_pixel(r, screen, zoomed.x0 + 1, (zoomed.y0 + zoomed.y1) / 2), 3u);
+}
+
+void a_held_zoom_button_shows_pressed_on_a_modern_screen() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 8);
+    const u32 screen = r.get32(window + wd_WScreen);
+    const Rect zoom = zoom_button_of(r, window);
+    const Rect depth = Intuition::depth_box_rect(100, 80, 300);
+    const i32 cx = (zoom.x0 + zoom.x1) / 2;
+    const i32 cy = (zoom.y0 + zoom.y1) / 2;
+
+    CHECK(knob_shade(screen_pixel(r, screen, zoom.x0 + 1, cy)));
+    press(r, cx, cy);
+    CHECK(held_shade(screen_pixel(r, screen, zoom.x0 + 1, cy)));
+    // The sheet's outline turns light and lets the body show through.
+    CHECK_EQ(screen_pixel(r, screen, cx + 3, cy + 3), static_cast<u32>(chrome::kFrameLight));
+    CHECK(held_shade(screen_pixel(r, screen, cx + 2, cy + 2)));
+    CHECK(knob_shade(screen_pixel(r, screen, depth.x0 + 1, cy)));
+    // Let go off the button, it rises and the window stays.
+    move_to(r, cx, zoom.y1 + 40);
+    release(r, cx, zoom.y1 + 40);
+    CHECK(knob_shade(screen_pixel(r, screen, zoom.x0 + 1, cy)));
+    check_window_box(r, window, 100, 80, 300, 150);
+}
+
+void zipwindow_and_changewindowbox_move_and_size_through_the_vectors() {
+    GfxRig r;
+    CHECK_EQ(intuition_lvo::MoveWindow, 168u);
+    CHECK_EQ(intuition_lvo::SizeWindow, 288u);
+    CHECK_EQ(intuition_lvo::ChangeWindowBox, 486u);
+    CHECK_EQ(intuition_lvo::ZipWindow, 504u);
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 2, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW);
+    const std::vector<u32> resized{IDCMP_NEWSIZE, IDCMP_CHANGEWINDOW};
+    const std::vector<u32> moved{IDCMP_CHANGEWINDOW};
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ZipWindow), ExitReason::Halt);
+    check_window_box(r, window, 20, 40, 120, 60);
+    CHECK(drained_classes(r, window) == resized);
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ZipWindow), ExitReason::Halt);
+    check_window_box(r, window, 100, 80, 300, 150);
+    CHECK(drained_classes(r, window) == resized);
+
+    auto change = [&](i32 left, i32 top, i32 width, i32 height) {
+        r.cpu().a[0] = window;
+        r.cpu().d[0] = static_cast<u32>(left);
+        r.cpu().d[1] = static_cast<u32>(top);
+        r.cpu().d[2] = static_cast<u32>(width);
+        r.cpu().d[3] = static_cast<u32>(height);
+        CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ChangeWindowBox), ExitReason::Halt);
+    };
+    change(10, 20, 200, 90);
+    check_window_box(r, window, 10, 20, 200, 90);
+    CHECK(drained_classes(r, window) == resized);
+    // A move alone, and a call that changes nothing.
+    change(30, 50, 200, 90);
+    check_window_box(r, window, 30, 50, 200, 90);
+    CHECK(drained_classes(r, window) == moved);
+    change(30, 50, 200, 90);
+    CHECK_EQ(drained_classes(r, window).size(), 0u);
+    // A box that moves and grows at once, and one that moves and shrinks,
+    // ends where it was asked to, held to the screen.
+    change(600, 380, 300, 100);
+    check_window_box(r, window, 340, 300, 300, 100);
+    CHECK(drained_classes(r, window) == resized);
+    change(0, 0, 600, 380);
+    check_window_box(r, window, 0, 0, 600, 380);
+    CHECK(drained_classes(r, window) == resized);
+    change(500, 300, 100, 60);
+    check_window_box(r, window, 500, 300, 100, 60);
+    CHECK(drained_classes(r, window) == resized);
+
+    change(100, 100, 200, 90);
+    drained_classes(r, window);
+    r.cpu().a[0] = window;
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = static_cast<u32>(-4);
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::MoveWindow), ExitReason::Halt);
+    check_window_box(r, window, 110, 96, 200, 90);
+    CHECK(drained_classes(r, window) == moved);
+    r.cpu().a[0] = window;
+    r.cpu().d[0] = 20;
+    r.cpu().d[1] = static_cast<u32>(-10);
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SizeWindow), ExitReason::Halt);
+    check_window_box(r, window, 110, 96, 220, 80);
+    CHECK(drained_classes(r, window) == resized);
+}
+
+void sizing_by_zoom_leaves_a_pending_newsize_alone_until_it_is_replied_to() {
+    GfxRig r;
+    put_zoom_box(r, 20, 40, 120, 60);
+    const u32 window = open_zoom_window(r, 2, IDCMP_NEWSIZE | IDCMP_CHANGEWINDOW);
+    click_zoom(r, window);
+    std::vector<u32> messages;
+    CHECK_EQ(queued_classes(r, window, &messages).size(), 2u);
+    // The program has not replied to the NEWSIZE when the window zooms back:
+    // the reply brings the one the new size needs.
+    click_zoom(r, window);
+    const std::vector<u32> moved{IDCMP_CHANGEWINDOW};
+    CHECK(queued_classes(r, window) == moved);
+    for (const u32 msg : messages) {
+        reply_msg(r, msg);
+    }
+    const std::vector<u32> again{IDCMP_NEWSIZE};
+    CHECK(queued_classes(r, window) == again);
+}
+
 int main() {
     intuiticks_reach_the_active_window_one_at_a_time();
     a_string_gadget_measures_its_own_font();
@@ -9735,5 +10181,19 @@ int main() {
     auto_request_without_a_positive_button_only_has_the_negative();
     auto_request_uses_the_windows_screen_and_the_default_one();
     auto_request_answers_by_the_flag_class_that_came();
+    wa_zoom_gives_the_window_a_zoom_gadget_beside_the_depth_gadget();
+    a_window_without_a_depth_gadget_has_the_zoom_button_in_its_place();
+    a_window_without_wa_zoom_has_no_zoom_gadget();
+    the_classic_zoom_button_sits_left_of_the_depth_button();
+    the_modern_zoom_button_sits_left_of_the_depth_button();
+    the_title_ends_before_the_zoom_button();
+    a_click_on_the_zoom_button_swaps_the_box_both_ways();
+    a_zoom_that_only_moves_the_window_posts_changewindow_alone();
+    a_left_and_top_of_minus_one_keep_the_place();
+    the_other_box_is_held_to_the_screen_and_to_the_limits();
+    a_held_zoom_button_sinks_on_a_four_colour_screen();
+    a_held_zoom_button_shows_pressed_on_a_modern_screen();
+    zipwindow_and_changewindowbox_move_and_size_through_the_vectors();
+    sizing_by_zoom_leaves_a_pending_newsize_alone_until_it_is_replied_to();
     return check::finish("test_intuition");
 }

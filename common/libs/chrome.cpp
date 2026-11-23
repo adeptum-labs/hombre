@@ -45,9 +45,6 @@ namespace {
 
 constexpr u32 kMaxTitleChars = 255;
 constexpr i32 kBarButtonRadius = 2;
-// The gaps between a bar button and the first and last pixel of the title.
-constexpr i32 kTitleGapLeft = 4;
-constexpr i32 kTitleGapRight = 3;
 
 struct RpState {
     u8 fg = 0;
@@ -245,6 +242,24 @@ void draw_depth_button(Graphics& graphics, u32 rp, const Look& look, i32 width,
     draw_frame_box(graphics, rp, Rect{cx - 1, cy - 1, cx + 3, cy + 3}, look(kFrameLight), line);
 }
 
+// The zoom button: a large sheet with a small light one in its top left
+// corner.
+void draw_zoom_button(Graphics& graphics, u32 rp, const Look& look, const Rect& box, bool active,
+                      bool pressed) {
+    draw_bar_button_body(graphics, rp, look, box, pressed);
+    const u8 line = look(pressed ? kFrameLight : (active ? kFrameDark : kTitleInactive));
+    const i32 cx = (box.x0 + box.x1) / 2;
+    const i32 cy = (box.y0 + box.y1) / 2;
+    const Rect sheet{cx - 3, cy - 3, cx + 3, cy + 3};
+    if (pressed) {
+        // The sheet lets the held body's shading show through.
+        draw_outline_box(graphics, rp, sheet.x0, sheet.y0, sheet.x1, sheet.y1, line);
+    } else {
+        draw_frame_box(graphics, rp, sheet, look(kKnob2), line);
+    }
+    draw_frame_box(graphics, rp, Rect{sheet.x0, sheet.y0, cx, cy}, look(kFrameLight), line);
+}
+
 void draw_knob(Graphics& graphics, u32 rp, const Look& look, const Rect& knob, u16 pflags,
                u16 gflags) {
     const i32 kw = knob.x1 - knob.x0 + 1;
@@ -355,14 +370,9 @@ void draw_classic_knob(Graphics& graphics, u32 rp, const Rect& knob, bool select
 // The title between the bar buttons, or the frame where a button is missing.
 void draw_bar_title(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, u32 pen) {
     const Metrics& metrics = w.metrics;
-    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0
-                           ? close_button_box(metrics).x1 + kTitleGapLeft
-                           : 4;
-    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0
-                            ? depth_button_box(w.width, metrics).x0 - kTitleGapRight
-                            : w.width - 4;
     graphics.set_pens(rp, pen, 0, ndk::JAM1);
-    draw_title(graphics, b, rp, w.title, text_x, text_x1, metrics);
+    draw_title(graphics, b, rp, w.title, title_left(w.flags, metrics),
+               title_right(w.width, w.flags, metrics), metrics);
 }
 
 // How the system images show a gadget of a window that is active or not,
@@ -400,9 +410,25 @@ void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
         sysimage::draw(graphics, b, rp, ndk::CLOSEIMAGE, close_button_box(w.metrics),
                        gadget_state(w.active, w.pressed == BarButton::Close), pens);
     }
+    // The zoom and depth gadgets share a column, so the one held is drawn
+    // last for its sunken edge to show.
+    const bool zoom_held = w.pressed == BarButton::Zoom;
+    const auto draw_zoom = [&] {
+        if ((w.flags & ndk::WFLG_HASZOOM) != 0) {
+            sysimage::draw(graphics, b, rp, ndk::ZOOMIMAGE,
+                           zoom_button_box(w.width, w.flags, w.metrics),
+                           gadget_state(w.active, zoom_held), pens);
+        }
+    };
+    if (!zoom_held) {
+        draw_zoom();
+    }
     if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
         sysimage::draw(graphics, b, rp, ndk::DEPTHIMAGE, depth_button_box(w.width, w.metrics),
                        gadget_state(w.active, w.pressed == BarButton::Depth), pens);
+    }
+    if (zoom_held) {
+        draw_zoom();
     }
     if ((w.flags & ndk::WFLG_SIZEGADGET) != 0 && w.width >= static_cast<i32>(kSizeBorderRight) &&
         w.height >= static_cast<i32>(kSizeBorderBottom)) {
@@ -811,6 +837,10 @@ void draw_modern_bar(Graphics& graphics, Bus& b, u32 rp, const Look& look,
 
     if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
         draw_close_button(graphics, rp, look, metrics, w.active, w.pressed == BarButton::Close);
+    }
+    if ((w.flags & ndk::WFLG_HASZOOM) != 0) {
+        draw_zoom_button(graphics, rp, look, zoom_button_box(w.width, w.flags, metrics), w.active,
+                         w.pressed == BarButton::Zoom);
     }
     if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
         draw_depth_button(graphics, rp, look, w.width, metrics, w.active,

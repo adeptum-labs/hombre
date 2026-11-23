@@ -2673,6 +2673,98 @@ void several_programs_run_at_once() {
     CHECK(r.workbench.tools().empty());
 }
 
+// The pens of the window's inner area, row by row.
+std::vector<u32> inner_pens(Rig& r, u32 window_index) {
+    const Workbench::DrawerWindow& w = r.workbench.window(window_index);
+    std::vector<u32> pens;
+    for (i32 y = w.inner_top; y < w.inner_top + w.inner_height; ++y) {
+        for (i32 x = w.inner_left; x < w.inner_left + w.inner_width; ++x) {
+            pens.push_back(r.window_pixel(w.window, x, y));
+        }
+    }
+    return pens;
+}
+
+// A click on the middle of the window's zoom button, and the desktop's
+// answer to what it sets going.
+void click_zoom(Rig& r, u32 window) {
+    const Rect box = Intuition::zoom_box_rect(
+        static_cast<i16>(r.get16(window + wd_LeftEdge)),
+        static_cast<i16>(r.get16(window + wd_TopEdge)),
+        static_cast<i16>(r.get16(window + wd_Width)), r.get32(window + wd_Flags));
+    click_at(r, {(box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2});
+}
+
+void a_drawer_zooms_to_a_small_box_and_back_with_its_icons_in_place() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon_in(root, "Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kNoWindow);
+    const u32 window = r.workbench.window(tools).window;
+    const u32 flags = r.get32(window + wd_Flags);
+    CHECK_EQ(flags & WFLG_HASZOOM, WFLG_HASZOOM);
+    const u32 tool = r.find_icon("Tool");
+    const u32 put = r.find_icon("Put");
+    const Workbench::DrawerWindow before = r.workbench.window(tools);
+    const std::vector<u32> shown = inner_pens(r, tools);
+
+    // The small box is at the drawer's place, wide enough for its title and
+    // the bar buttons and no higher than the drawer's smallest size and the
+    // title bar and bottom border need.
+    click_zoom(r, window);
+    const i32 small_width = static_cast<i32>(r.get16(window + wd_Width));
+    const i32 small_height = static_cast<i32>(r.get16(window + wd_Height));
+    const u8 title[] = {'T', 'o', 'o', 'l', 's'};
+    const i32 fit = chrome::title_bar_width(
+        static_cast<i32>(g_graphics.text_width(g_intuition.font_of_screen(r.screen), title, 5)),
+        flags);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 30u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 50u);
+    CHECK(small_width >= fit && small_width < 300);
+    CHECK(small_height >= chrome::Metrics{}.border_top() +
+                              static_cast<i32>(chrome::kSizeBorderBottom) &&
+          small_height < 120);
+    // The desktop measured it again and kept every icon where it was.
+    const Workbench::DrawerWindow& zoomed = r.workbench.window(tools);
+    CHECK_EQ(zoomed.inner_width, small_width - zoomed.inner_left -
+                                     static_cast<i32>(r.get8(window + wd_BorderRight)));
+    CHECK(zoomed.inner_width < before.inner_width);
+    CHECK(zoomed.inner_height < before.inner_height);
+    CHECK_EQ(r.workbench.icon(tool).left, 100);
+    CHECK_EQ(r.workbench.icon(tool).top, 40);
+    CHECK_EQ(r.workbench.icon(put).left, 20);
+    CHECK_EQ(r.workbench.icon(put).top, 100);
+
+    // Back in the box it had, the window shows what it showed.
+    click_zoom(r, window);
+    CHECK_EQ(r.get16(window + wd_LeftEdge), 30u);
+    CHECK_EQ(r.get16(window + wd_TopEdge), 50u);
+    CHECK_EQ(r.get16(window + wd_Width), 300u);
+    CHECK_EQ(r.get16(window + wd_Height), 120u);
+    CHECK_EQ(r.workbench.window(tools).inner_width, before.inner_width);
+    CHECK_EQ(r.workbench.window(tools).inner_height, before.inner_height);
+    CHECK_EQ(r.workbench.icon(tool).left, 100);
+    CHECK_EQ(r.workbench.icon(tool).top, 40);
+    CHECK_EQ(r.workbench.icon(put).left, 20);
+    CHECK_EQ(r.workbench.icon(put).top, 100);
+    CHECK(inner_pens(r, tools) == shown);
+}
+
+void the_root_window_has_a_zoom_gadget_only_when_it_is_not_a_backdrop() {
+    Rig r;
+    r.workbench.open_desktop();
+    CHECK(r.workbench.backdrop());
+    CHECK_EQ(r.get32(r.workbench.window(Workbench::kRootWindow).window + wd_Flags) & WFLG_HASZOOM,
+             0u);
+    r.workbench.set_backdrop(false);
+    CHECK(!r.workbench.backdrop());
+    CHECK_EQ(r.get32(r.workbench.window(Workbench::kRootWindow).window + wd_Flags) & WFLG_HASZOOM,
+             WFLG_HASZOOM);
+}
+
 int main() {
     resets_give_back_their_memory();
     the_backdrop_shows_a_wbpattern_picture();
@@ -2722,5 +2814,7 @@ int main() {
     a_drawer_shows_more_icons_than_the_old_table_held();
     more_applications_register_than_the_old_table_held();
     several_programs_run_at_once();
+    a_drawer_zooms_to_a_small_box_and_back_with_its_icons_in_place();
+    the_root_window_has_a_zoom_gadget_only_when_it_is_not_a_backdrop();
     return check::finish("test_workbench");
 }

@@ -147,6 +147,9 @@ constexpr i32 kCascadeStep = 20;
 constexpr u32 kCascadeSlots = 7;
 constexpr u32 kMaxWindowTitle = 64;
 constexpr u32 kClipBytes = ndk::Region_SIZEOF + ndk::RegionRectangle_SIZEOF;
+// The WA_Zoom tag and the end of the list, then the four WORDs of the box it
+// points to.
+constexpr u32 kZoomTagBytes = 2 * ndk::ti_SIZEOF + 8;
 
 // The scroll gadgets in the borders WFLG_SIZEBRIGHT and WFLG_SIZEBBOTTOM
 // make (14 pixels on the right and at the bottom), around the size gadget
@@ -656,12 +659,49 @@ void Workbench::release_window(DrawerWindow& w) {
     windows_.remove(&w);
 }
 
+// The tags that give the NewWindow's window a zoom gadget, in a block of
+// kZoomTagBytes the caller frees, or 0 when there is no memory for them. The
+// window zooms to where it is, as wide as the title and the bar buttons need
+// and as high as the title bar and the bottom border. Intuition holds that box
+// to the drawer's smallest size, so no drawer zooms to less than that.
+u32 Workbench::make_zoom_tags(u32 new_window, const char* title) {
+    const u32 block = exec_->alloc(kZoomTagBytes, ndk::MEMF_PUBLIC);
+    if (block == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    // The bar buttons are as large as the screen's font makes its bar.
+    chrome::Metrics metrics;
+    metrics.font_height =
+        static_cast<i32>(b.r8(screen_ + ndk::sc_BarHeight)) - static_cast<i32>(chrome::kWBorTop);
+    const u32 flags = b.r32(new_window + ndk::nw_Flags) | ndk::WFLG_HASZOOM;
+    const i32 text_width = static_cast<i32>(graphics_->text_width(
+        intuition_->font_of_screen(screen_), reinterpret_cast<const u8*>(title),
+        text_length(title)));
+    const u32 box = block + 2 * ndk::ti_SIZEOF;
+    b.w32(block + ndk::ti_Tag, ndk::WA_Zoom);
+    b.w32(block + ndk::ti_Data, box);
+    b.w32(block + ndk::ti_SIZEOF + ndk::ti_Tag, ndk::TAG_DONE);
+    b.w32(block + ndk::ti_SIZEOF + ndk::ti_Data, 0);
+    b.w16(box, 0xFFFF);
+    b.w16(box + 2, 0xFFFF);
+    b.w16(box + 4, static_cast<u32>(chrome::title_bar_width(text_width, flags, metrics)));
+    b.w16(box + 6, static_cast<u32>(metrics.border_top()) + chrome::kSizeBorderBottom);
+    return block;
+}
+
 // The Workbench's windows share one message port, as the Amiga Workbench's
 // do, so a desktop of many windows takes one signal bit: a window opens
 // without IDCMP, adopts the port and then asks for its messages. Closing it
-// takes its queued messages off the port again and leaves the port alone.
-u32 Workbench::open_window_on_port(u32 new_window, u32 idcmp) {
-    const u32 window = intuition_->open_window(new_window, 0);
+// takes its queued messages off the port again and leaves the port alone. A
+// window opened with a zoom_title gets a zoom gadget whose other box is made
+// for that title.
+u32 Workbench::open_window_on_port(u32 new_window, u32 idcmp, const char* zoom_title) {
+    const u32 tags = zoom_title != nullptr ? make_zoom_tags(new_window, zoom_title) : 0;
+    const u32 window = intuition_->open_window(new_window, tags);
+    if (tags != 0) {
+        exec_->free(tags, kZoomTagBytes);
+    }
     if (window == 0) {
         return 0;
     }
@@ -750,7 +790,8 @@ void Workbench::open_root() {
     b.w32(new_window + ndk::nw_Title, title);
     b.w32(new_window + ndk::nw_Screen, screen_);
     b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
-    const u32 window = b.ok() ? open_window_on_port(new_window, idcmp) : 0;
+    const u32 window =
+        b.ok() ? open_window_on_port(new_window, idcmp, backdrop_ ? nullptr : kBackdropName) : 0;
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, sizeof kBackdropName);
     if (window == 0) {
@@ -1231,7 +1272,7 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
                       kIdcmpMenuPick | kIdcmpRefreshWindow;
     // The window keeps a copy of its title, so the one built here goes
     // back with the NewWindow.
-    const u32 window = b.ok() ? open_window_on_port(new_window, idcmp) : 0;
+    const u32 window = b.ok() ? open_window_on_port(new_window, idcmp, name) : 0;
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, title_bytes);
     if (window == 0) {

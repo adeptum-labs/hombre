@@ -434,7 +434,8 @@ private:
                                 u32 gadgets);
     void measure_window(DrawerWindow& w);
     void release_window(DrawerWindow& w);
-    u32 open_window_on_port(u32 new_window, u32 idcmp);
+    u32 open_window_on_port(u32 new_window, u32 idcmp, const char* zoom_title = nullptr);
+    u32 make_zoom_tags(u32 new_window, const char* title);
     void open_drawer_window(const char* path, const char* name, u32 object,
                             const DrawerBox* box = nullptr);
     void release_tool(RunningTool& tool);

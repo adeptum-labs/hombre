@@ -562,6 +562,8 @@ struct WindowArgs {
     u32 inner_height = 0;
     u32 gadgets = 0;
     bool custom_screen = false;
+    bool has_zoom = false;  // WA_Zoom gave the window a zoom gadget and its other box
+    Intuition::WindowBox zoom_box{};
 };
 
 void read_new_window(Bus& b, u32 nw, WindowArgs& a) {
@@ -594,7 +596,7 @@ void set_window_flag(u32& flags, u32 bit, u32 data) {
     }
 }
 
-void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
+void apply_window_tag(Bus& b, WindowArgs& a, u32 tag, u32 data) {
     switch (tag) {
     case ndk::WA_Left:
         a.left = static_cast<i16>(data);
@@ -678,6 +680,15 @@ void apply_window_tag(WindowArgs& a, u32 tag, u32 data) {
     case ndk::WA_SizeBBottom:
         set_window_flag(a.flags, ndk::WFLG_SIZEBBOTTOM, data);
         break;
+    case ndk::WA_Zoom:
+        a.has_zoom = data != 0;
+        if (a.has_zoom) {
+            a.zoom_box = Intuition::WindowBox{static_cast<i16>(b.r16(data)),
+                                              static_cast<i16>(b.r16(data + 2)),
+                                              static_cast<i32>(b.r16(data + 4)),
+                                              static_cast<i32>(b.r16(data + 6))};
+        }
+        break;
     default:
         break;
     }
@@ -706,7 +717,7 @@ void read_window_tags(Bus& b, u32 tags, WindowArgs& a) {
             item += ndk::ti_SIZEOF * (data + 1);
             break;
         default:
-            apply_window_tag(a, tag, data);
+            apply_window_tag(b, a, tag, data);
             item += ndk::ti_SIZEOF;
             break;
         }
@@ -1523,6 +1534,26 @@ struct IntuitionNatives {
                                   : 0);
     }
 
+    // MoveWindow, SizeWindow and ChangeWindowBox take WORD values, signed.
+    static i32 signed_word(const Machine& m, u32 reg) {
+        return static_cast<i16>(m.cpu.d[reg] & 0xFFFF);
+    }
+
+    static void move_window(void* ctx, Machine& m) {
+        of(ctx).offset_window_box(m.cpu.a[0], signed_word(m, 0), signed_word(m, 1), 0, 0);
+    }
+
+    static void size_window(void* ctx, Machine& m) {
+        of(ctx).offset_window_box(m.cpu.a[0], 0, 0, signed_word(m, 0), signed_word(m, 1));
+    }
+
+    static void change_window_box(void* ctx, Machine& m) {
+        of(ctx).change_window_box(m.cpu.a[0], signed_word(m, 0), signed_word(m, 1),
+                                  signed_word(m, 2), signed_word(m, 3));
+    }
+
+    static void zip_window(void* ctx, Machine& m) { of(ctx).zip_window(m.cpu.a[0]); }
+
     static void add_gadget(void* ctx, Machine& m) {
         native::set_result(
             m, of(ctx).add_glist(m.cpu.a[0], m.cpu.a[1],
@@ -2062,6 +2093,10 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::WindowToBack, IntuitionNatives::window_to_back, "WindowToBack"},
     {intuition_lvo::WindowToFront, IntuitionNatives::window_to_front, "WindowToFront"},
     {intuition_lvo::WindowLimits, IntuitionNatives::window_limits, "WindowLimits"},
+    {intuition_lvo::MoveWindow, IntuitionNatives::move_window, "MoveWindow"},
+    {intuition_lvo::SizeWindow, IntuitionNatives::size_window, "SizeWindow"},
+    {intuition_lvo::ChangeWindowBox, IntuitionNatives::change_window_box, "ChangeWindowBox"},
+    {intuition_lvo::ZipWindow, IntuitionNatives::zip_window, "ZipWindow"},
     {intuition_lvo::LockIBase, IntuitionNatives::lock_i_base, "LockIBase"},
     {intuition_lvo::UnlockIBase, IntuitionNatives::unlock_i_base, "UnlockIBase"},
     {intuition_lvo::GetScreenData, IntuitionNatives::get_screen_data, "GetScreenData"},
@@ -2111,6 +2146,12 @@ Rect Intuition::close_box_rect(i32 left, i32 top, const chrome::Metrics& metrics
 
 Rect Intuition::depth_box_rect(i32 left, i32 top, i32 width, const chrome::Metrics& metrics) {
     const Rect box = chrome::depth_button_box(width, metrics);
+    return Rect{left + box.x0, top + box.y0, left + box.x1, top + box.y1};
+}
+
+Rect Intuition::zoom_box_rect(i32 left, i32 top, i32 width, u32 flags,
+                              const chrome::Metrics& metrics) {
+    const Rect box = chrome::zoom_button_box(width, flags, metrics);
     return Rect{left + box.x0, top + box.y0, left + box.x1, top + box.y1};
 }
 
@@ -3899,6 +3940,9 @@ chrome::BarButton Intuition::held_bar_button(u32 window) const {
     if (pressed_gadget_ == GadgetKind::Close) {
         return chrome::BarButton::Close;
     }
+    if (pressed_gadget_ == GadgetKind::Zoom) {
+        return chrome::BarButton::Zoom;
+    }
     return pressed_gadget_ == GadgetKind::Depth ? chrome::BarButton::Depth
                                                 : chrome::BarButton::None;
 }
@@ -3964,6 +4008,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     if (!b.ok()) {
         return 0;
     }
+    // Only WA_Zoom gives a window its zoom gadget, whatever the flags say.
+    a.flags = a.has_zoom ? a.flags | ndk::WFLG_HASZOOM : a.flags & ~ndk::WFLG_HASZOOM;
 
     u32 screen = 0;
     if (a.custom_screen && a.screen != 0) {
@@ -4255,6 +4301,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     rec->newsize_pending = false;
     rec->newsize_w = width;
     rec->newsize_h = height;
+    rec->zoom_box = a.zoom_box;
     const u32 insert_after =
         (a.flags & ndk::WFLG_BACKDROP) != 0 ? last_normal_window(*srec) : 0;
     insert_window_after(*srec, *rec, insert_after);
@@ -5590,6 +5637,12 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     pressed_gadget_ = GadgetKind::Depth;
                     light_bar_button(true);
                     left_press_consumed = true;
+                } else if (bordered && (w.flags & ndk::WFLG_HASZOOM) != 0 &&
+                           in_rect(zoom_box_rect(w.left, w.top, w.width, w.flags, bar), x, y)) {
+                    pressed_gadget_window_ = hit;
+                    pressed_gadget_ = GadgetKind::Zoom;
+                    light_bar_button(true);
+                    left_press_consumed = true;
                 } else if (!dragging && blocked(hit)) {
                     left_press_consumed = true;
                 } else if (!dragging && hit_string_gadget(b, hit, x, y)) {
@@ -5612,13 +5665,16 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
     }
 
     // A held bar button shows pressed only while the pointer is over it.
-    if (pressed_gadget_ == GadgetKind::Close || pressed_gadget_ == GadgetKind::Depth) {
+    if (pressed_gadget_ == GadgetKind::Close || pressed_gadget_ == GadgetKind::Depth ||
+        pressed_gadget_ == GadgetKind::Zoom) {
         bool over = false;
         if (hit == pressed_gadget_window_) {
             const WindowView w = load_window(b, hit);
             const chrome::Metrics& bar = window_metrics(hit);
             const Rect box = pressed_gadget_ == GadgetKind::Close
                                  ? close_box_rect(w.left, w.top, bar)
+                             : pressed_gadget_ == GadgetKind::Zoom
+                                 ? zoom_box_rect(w.left, w.top, w.width, w.flags, bar)
                                  : depth_box_rect(w.left, w.top, w.width, bar);
             over = w.ok && in_rect(box, x, y);
         }
@@ -5649,6 +5705,9 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     } else {
                         window_to_front(gad_window);
                     }
+                } else if (gad_kind == GadgetKind::Zoom && (w.flags & ndk::WFLG_HASZOOM) != 0 &&
+                           in_rect(zoom_box_rect(w.left, w.top, w.width, w.flags, bar), x, y)) {
+                    zip_window(gad_window);
                 }
             }
         }
@@ -5805,6 +5864,57 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
                 window_damage_rect(srec->depth, rec->left, rec->top, width, height, rec->flags));
     }
     end_batch();
+}
+
+void Intuition::change_window_box(u32 window, i32 left, i32 top, i32 width, i32 height) {
+    const WindowRecord* rec = window_open(window) ? find_window_record(window) : nullptr;
+    const ScreenRecord* srec = rec != nullptr ? find_screen_record(rec->screen) : nullptr;
+    if (srec == nullptr) {
+        return;
+    }
+    const WindowBox before{rec->left, rec->top, rec->width, rec->height};
+    // The box is worked out whole first: move_window_to and size_window_to
+    // each keep the window on the screen as it is, so a box that moves and
+    // grows at once could be clamped by whichever of them runs first.
+    const i32 screen_w = static_cast<i32>(srec->width);
+    const i32 screen_h = static_cast<i32>(srec->height);
+    width = std::max(rec->min_w, std::min(width, std::min(rec->lim_w, screen_w)));
+    height = std::max(rec->min_h, std::min(height, std::min(rec->lim_h, screen_h)));
+    left = std::max(0, std::min(left, screen_w - width));
+    top = std::max(0, std::min(top, screen_h - height));
+    begin_batch();
+    // Shrinking before the move and growing after it keeps the window on
+    // the screen at every step.
+    size_window_to(window, std::min(width, before.width), std::min(height, before.height));
+    move_window_to(window, left, top);
+    size_window_to(window, width, height);
+    rec = window_open(window) ? find_window_record(window) : nullptr;
+    if (rec != nullptr && (rec->left != before.left || rec->top != before.top ||
+                           rec->width != before.width || rec->height != before.height)) {
+        post_intuimessage(window, ndk::IDCMP_CHANGEWINDOW, 0);
+    }
+    end_batch();
+}
+
+void Intuition::zip_window(u32 window) {
+    WindowRecord* rec = window_open(window) ? find_window_record(window) : nullptr;
+    if (rec == nullptr || (rec->flags & ndk::WFLG_HASZOOM) == 0) {
+        return;
+    }
+    const WindowBox here{rec->left, rec->top, rec->width, rec->height};
+    const WindowBox there = rec->zoom_box;
+    rec->zoom_box = here;
+    const bool keeps_place = there.left == -1 && there.top == -1;
+    change_window_box(window, keeps_place ? here.left : there.left,
+                      keeps_place ? here.top : there.top, there.width, there.height);
+}
+
+void Intuition::offset_window_box(u32 window, i32 dleft, i32 dtop, i32 dwidth, i32 dheight) {
+    const WindowRecord* rec = window_open(window) ? find_window_record(window) : nullptr;
+    if (rec != nullptr) {
+        change_window_box(window, rec->left + dleft, rec->top + dtop, rec->width + dwidth,
+                          rec->height + dheight);
+    }
 }
 
 void Intuition::post_newsize(WindowRecord& rec) {

@@ -88,6 +88,10 @@ constexpr u32 SetWindowTitles = 276;
 constexpr u32 WindowToBack = 306;
 constexpr u32 WindowToFront = 312;
 constexpr u32 WindowLimits = 318;
+constexpr u32 MoveWindow = 168;
+constexpr u32 SizeWindow = 288;
+constexpr u32 ChangeWindowBox = 486;
+constexpr u32 ZipWindow = 504;
 constexpr u32 AutoRequest = 348;
 constexpr u32 BeginRefresh = 354;
 constexpr u32 EndRefresh = 366;
@@ -157,6 +161,9 @@ constexpr u32 IDCMP_IDCMPUPDATE = 0x00800000;
 // IDCMP_VANILLAKEY: a key that types one character, the character its code.
 constexpr u32 IDCMP_VANILLAKEY = 0x00200000;
 constexpr u32 IDCMP_INTUITICKS = 0x00400000;
+// WA_Zoom: ti_Data points to four WORDs, the left, top, width and height of
+// the box a window's zoom gadget swaps it with, and gives it that gadget.
+constexpr u32 WA_Zoom = 0x8000007D;
 
 }
 
@@ -188,6 +195,15 @@ public:
         void* ctx;
     };
 
+    // A window's left edge, top edge, width and height. The other box of a
+    // zoom gadget has a left and top of -1 for the place the window is at.
+    struct WindowBox {
+        i32 left;
+        i32 top;
+        i32 width;
+        i32 height;
+    };
+
     static constexpr u32 kMaxScreens = 16;
     static constexpr u32 kMaxWindows = 256;
     static constexpr u32 kMaxTagItems = 256;
@@ -196,11 +212,14 @@ public:
     static constexpr u32 kMaxGadgets = 64;
     static constexpr u32 kMaxGadgetHooks = 64;
 
-    // The close and depth buttons of a window at left, top whose title
-    // bar has the metrics, topaz 8's unless given.
+    // The close, depth and zoom buttons of a window at left, top whose title
+    // bar has the metrics, topaz 8's unless given. The zoom button's place
+    // depends on the window's flags.
     static Rect close_box_rect(i32 left, i32 top, const chrome::Metrics& metrics = {});
     static Rect depth_box_rect(i32 left, i32 top, i32 width,
                                const chrome::Metrics& metrics = {});
+    static Rect zoom_box_rect(i32 left, i32 top, i32 width, u32 flags,
+                              const chrome::Metrics& metrics = {});
     static Rect size_box_rect(i32 left, i32 top, i32 width, i32 height, u32 flags = 0);
 
     // Makes intuition.library over graphics, which must be initialised.
@@ -363,6 +382,17 @@ public:
     // size hook runs and IDCMP_NEWSIZE is posted when the window asked for
     // it and has no NEWSIZE waiting for a reply.
     void size_window_to(u32 window, i32 width, i32 height);
+
+    // Moves and sizes the window in one go, as ChangeWindowBox does, within
+    // its limits and its screen. A window that ends up with another box gets
+    // IDCMP_CHANGEWINDOW, and IDCMP_NEWSIZE as size_window_to posts it.
+    void change_window_box(u32 window, i32 left, i32 top, i32 width, i32 height);
+
+    // ZipWindow, which the zoom gadget does too: the window takes the other
+    // box of its zoom gadget and that box becomes the one it had. A window
+    // opened without WA_Zoom has none and stays as it is.
+    void zip_window(u32 window);
+
     // Closes the windows and screens task opened, except keep_window and
     // keep_screen, and frees the IntuiMessages it posted. Windows, screens
     // and messages of other tasks stay.
@@ -559,6 +589,8 @@ private:
         // CloseWorkBench does not wait for the window, and a Workbench
         // reset keeps it.
         bool survives_reset = false;
+        // The box its zoom gadget swaps it with.
+        WindowBox zoom_box{};
     };
 
     // A requester window EasyRequestArgs or AutoRequest built: the IDCMP
@@ -629,7 +661,7 @@ private:
         menu_layout::Geometry geometry{};
     };
 
-    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2, Prop = 3, Bool = 4 };
+    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2, Prop = 3, Bool = 4, Zoom = 5 };
     enum class Drag : u8 { None = 0, Move = 1, Size = 2, Prop = 3 };
 
     static void reply_message(void* ctx, u32 message);
@@ -721,6 +753,9 @@ private:
     void post_idcmp_update(u32 window, const u32* tags, u32 count);
     void free_message_update(const TrackedMessage& tracked);
     void post_newsize(WindowRecord& rec);
+    // MoveWindow and SizeWindow: the window's box, each of its four values
+    // changed by the delta.
+    void offset_window_box(u32 window, i32 dleft, i32 dtop, i32 dwidth, i32 dheight);
     void route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved);
     bool menu_strip_ready(native::Bus& b) const;
     bool enter_menu_mode(native::Bus& b, i32 x, i32 y);
@@ -862,7 +897,7 @@ private:
     static constexpr u32 kMaxBlocks = 64;
     std::vector<Block> blocks_;
     bool blocked(u32 window) const;
-    bool bar_button_lit_ = false;  // the held Close or Depth button shows pressed
+    bool bar_button_lit_ = false;  // the held Close, Depth or Zoom button shows pressed
     u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
     GadgetRenderer gadget_renderer_ = nullptr;
     void* gadget_renderer_ctx_ = nullptr;

@@ -34,6 +34,14 @@ namespace hombre {
 
 class Graphics;
 
+namespace ndk {
+
+// WFLG_HASZOOM (intuition/intuition.h): the window has a zoom gadget, which
+// only Intuition sets, for a window opened with WA_Zoom.
+constexpr u32 WFLG_HASZOOM = 0x20000000;
+
+}
+
 namespace chrome {
 
 // The two looks of the window frames, the screen title bar, the border
@@ -81,17 +89,20 @@ struct Metrics {
     // The title's first row and its baseline.
     constexpr i32 title_top() const { return 3; }
     constexpr i32 title_baseline() const { return title_top() + font_baseline; }
-    // The close and depth buttons: both the same size and centred in the
-    // bar, a row clear of its frame and its line.
+    // The close, depth and zoom buttons: all the same size and centred in
+    // the bar, a row clear of its frame and its line.
     constexpr i32 button_top() const { return 2; }
     constexpr i32 button_height() const { return bar_height() - 3; }
     constexpr i32 button_width() const { return button_height() + 2; }
 };
 
-// How far in from the window's left and right edges the two buttons are.
+// How far in from the window's left and right edges the outer buttons are.
 constexpr i32 kBarButtonInset = 3;
+// The gaps between a bar button and the first and last pixel of the title.
+constexpr i32 kTitleGapLeft = 4;
+constexpr i32 kTitleGapRight = 3;
 
-enum class BarButton : u8 { None = 0, Close = 1, Depth = 2 };
+enum class BarButton : u8 { None = 0, Close = 1, Depth = 2, Zoom = 3 };
 
 // The box of the close button, in window coordinates.
 constexpr Rect close_button_box(const Metrics& m = {}) {
@@ -105,6 +116,41 @@ constexpr Rect depth_button_box(i32 width, const Metrics& m = {}) {
     const i32 x1 = width - 1 - kBarButtonInset;
     return Rect{x1 - m.button_width() + 1, m.button_top(), x1,
                 m.button_top() + m.button_height() - 1};
+}
+
+// The box of the zoom button of a window `width` pixels wide with the given
+// flags, in window coordinates. It is as large as the depth button and ends
+// in the depth button's first column, so the two share one; without a depth
+// button it takes the depth button's place.
+constexpr Rect zoom_button_box(i32 width, u32 flags, const Metrics& m = {}) {
+    const Rect depth = depth_button_box(width, m);
+    if ((flags & ndk::WFLG_DEPTHGADGET) == 0) {
+        return depth;
+    }
+    return Rect{depth.x0 - m.button_width() + 1, depth.y0, depth.x0, depth.y1};
+}
+
+// The first column of a title: after the close button, or near the left
+// edge when there is none.
+constexpr i32 title_left(u32 flags, const Metrics& m = {}) {
+    return (flags & ndk::WFLG_CLOSEGADGET) != 0 ? close_button_box(m).x1 + kTitleGapLeft : 4;
+}
+
+// The last column of a title in a window `width` pixels wide: before the
+// leftmost of the zoom and depth buttons, or near the right edge when there
+// is none.
+constexpr i32 title_right(i32 width, u32 flags, const Metrics& m = {}) {
+    if ((flags & ndk::WFLG_HASZOOM) != 0) {
+        return zoom_button_box(width, flags, m).x0 - kTitleGapRight;
+    }
+    return (flags & ndk::WFLG_DEPTHGADGET) != 0 ? depth_button_box(width, m).x0 - kTitleGapRight
+                                                 : width - 4;
+}
+
+// The narrowest window with the flags' buttons whose title bar holds a
+// title text_width pixels wide.
+constexpr i32 title_bar_width(i32 text_width, u32 flags, const Metrics& m = {}) {
+    return title_left(flags, m) + text_width - 1 - title_right(0, flags, m);
 }
 
 struct WindowChrome {
