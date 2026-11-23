@@ -55,6 +55,7 @@ constinit VirtioBlk drive_devices[kFloppyDrives];
 constinit VirtioBlk hard_disk_devices[kMaxHardDisks];
 constinit Disk hard_disks[kMaxHardDisks]{};
 constinit HardVolume hard_volumes[kMaxHardVolumes]{};
+constinit DiskUnits disk_units{};
 
 // The virtio-blk device in PCI slot kFirstDriveSlot + n is drive n; the one
 // in slot kFirstHardDiskSlot + n is hard disk n. The rest of the hard disk
@@ -449,7 +450,8 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
                         kMaxHardDisks - hard_disk_slots);
     }
     const u32 hard_count =
-        hard_disks_mount(hard_disks, kMaxHardDisks, phys_pages, hard_volumes, kMaxHardVolumes);
+        hard_disks_mount(hard_disks, kMaxHardDisks, phys_pages, hard_volumes, kMaxHardVolumes,
+                         disk_units);
     bool hard_boot = false;
     for (u32 i = 0; i < hard_count; ++i) {
         hard_boot = hard_boot || hard_volumes[i].bootable;
@@ -483,6 +485,7 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
 
     // DF1: to DF3: are empty unless their disk reads and mounts.
     Drives drives;
+    drives.units = &disk_units;
     if (df0) {
         drives.volume[0] = &drive_volumes[0];
     }
@@ -510,6 +513,7 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
         drive.bootable = hard.bootable;
         __builtin_memcpy(drive.env, hard.env, sizeof drive.env);
         drive.has_env = true;
+        drive.unit = hard.unit;
     }
     m68k_run_command(info, phys_pages, drives, "C:Version", "");
 }

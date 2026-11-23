@@ -26,6 +26,7 @@
 #include "../amiga_fs.hpp"
 #include "../dos_date.hpp"
 #include "../dos_errors.hpp"
+#include "../disk_unit.hpp"
 #include "../dos_pattern.hpp"
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
@@ -724,6 +725,8 @@ struct DriveInfo {
     bool bootable = false;
     u32 env[envec::longs]{};
     bool has_env = false;
+    // The scsi.device unit of a hard disk partition, ~0u for none.
+    u32 unit = ~0u;
 };
 
 // The volume in each drive at boot; null for a drive without a disk. A slot
@@ -732,6 +735,8 @@ struct DriveInfo {
 struct Drives {
     const AdfVolume* volume[kDriveSlots]{};
     DriveInfo info[kDriveSlots]{};
+    // The units scsi.device offers, null for none.
+    const DiskUnits* units = nullptr;
 };
 
 class Dos {

@@ -29,6 +29,7 @@
 #include "../common/dos_date.hpp"
 #include "../common/format.hpp"
 #include "../common/libs/audio_device.hpp"
+#include "../common/libs/scsi_device.hpp"
 #include "../common/libs/console_device.hpp"
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
@@ -103,6 +104,7 @@ constinit m68k::Jit jit{};
 constinit Exec exec{};
 constinit TimerDevice timer_device{};
 constinit AudioDevice audio_device{};
+constinit ScsiDevice scsi_device{};
 constinit TaskStacks task_stacks{};
 constinit Utility utility{};
 constinit Dos dos{};
@@ -867,6 +869,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     }
     if (!audio_device.init(machine, exec)) {
         fail("audio device init failed");
+        return false;
+    }
+    if (!scsi_device.init(machine, exec, drives.units)) {
+        fail("scsi device init failed");
         return false;
     }
     if (!exec.add_timer_drop_hook(&reclaim_after_task, nullptr)) {

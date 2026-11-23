@@ -2259,6 +2259,7 @@ DriveInfo partition_info(const char* device, i32 boot_pri, bool bootable) {
     info.boot_pri = boot_pri;
     info.bootable = bootable;
     info.has_env = true;
+    info.unit = 3;
     info.env[envec::table_size] = envec::dos_type;
     info.env[envec::size_block] = 128;
     info.env[envec::surfaces] = 2;
@@ -2532,8 +2533,8 @@ void the_dos_list_has_the_hard_disk_partitions() {
     CHECK_EQ(r.get32(device + dol_Type), DLT_DEVICE);
     const u32 startup = r.get32(device + dol_Startup) << 2;
     CHECK(startup != 0);
-    CHECK_EQ(r.get32(startup + fssm_Unit), 0u);
-    CHECK(r.read_bstr(r.get32(startup + fssm_Device)) == "hombre.disk");
+    CHECK_EQ(r.get32(startup + fssm_Unit), 3u);
+    CHECK(r.read_bstr(r.get32(startup + fssm_Device)) == "scsi.device");
     CHECK_EQ(r.get32(startup + fssm_Flags), 0u);
     const u32 env = r.get32(startup + fssm_Environ) << 2;
     CHECK(env != 0);

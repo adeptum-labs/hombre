@@ -24,6 +24,7 @@
 #pragma once
 
 #include "../common/amiga_fs.hpp"
+#include "../common/disk_unit.hpp"
 #include "../common/rdb.hpp"
 #include "disk.hpp"
 #include "page_alloc.hpp"
@@ -39,6 +40,8 @@ struct HardVolume {
     bool bootable;
     bool writable;
     u32 env[envec::longs];
+    // The scsi.device unit that holds the partition, ~0u for none.
+    u32 unit;
 };
 
 constexpr u32 kMaxHardDisks = 8;
@@ -47,10 +50,12 @@ constexpr u32 kMaxHardVolumes = 8;
 // Scans each disk for Amiga partitions, reads them through a sector cache
 // and mounts their volumes, logging what it finds. At most `max` volumes, and
 // never more than kMaxHardVolumes, are stored in `out`; the disk's caches
-// stay allocated for as long as the volumes are used. Disk entries without a
-// read device, such as slots that hold no disk, are skipped. Returns the
-// number of volumes mounted.
+// stay allocated for as long as the volumes are used. Each stretch of a disk
+// that belongs to the Amiga becomes a scsi.device unit in `units`, read and
+// written through the same cache. Disk entries without a read device, such
+// as slots that hold no disk, are skipped. Returns the number of volumes
+// mounted.
 u32 hard_disks_mount(const Disk* disks, u32 disk_count, PhysAllocator& pages, HardVolume* out,
-                     u32 max);
+                     u32 max, DiskUnits& units);
 
 }

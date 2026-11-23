@@ -85,8 +85,8 @@ constexpr u32 kDeviceBytes = DosList_SIZEOF + 32;
 constexpr u32 kRamDeviceAt = kDeviceAt + Dos::kMaxDrives * kDeviceBytes;
 constexpr u32 kRamDeviceNameAt = kRamDeviceAt + DosList_SIZEOF;  // "RAM" BSTR
 // Per hard disk partition a FileSysStartupMsg followed by its copy of the
-// DosEnvec; all of them name the same device, "hombre.disk", as a BSTR.
-constexpr char kStartupDevice[] = "hombre.disk";
+// DosEnvec; all of them name scsi.device, as a BSTR, and their own unit.
+constexpr char kStartupDevice[] = "scsi.device";
 constexpr u32 kStartupAt = kRamDeviceNameAt + 8;
 constexpr u32 kStartupBytes = FileSysStartupMsg_SIZEOF + envec::longs * 4;
 constexpr u32 kStartupDeviceAt = kStartupAt + kHardVolumes * kStartupBytes;
@@ -9948,6 +9948,7 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
             if (i >= kFloppyDrives && drives_[i].info.has_env) {
                 const u32 startup = block_ + kStartupAt + (i - kFloppyDrives) * kStartupBytes;
                 const u32 env_at = startup + FileSysStartupMsg_SIZEOF;
+                b.w32(startup + fssm_Unit, drives_[i].info.unit);
                 b.w32(startup + fssm_Device, (block_ + kStartupDeviceAt) >> 2);
                 b.w32(startup + fssm_Environ, env_at >> 2);
                 for (u32 k = 0; k < envec::longs; ++k) {

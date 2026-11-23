@@ -52,6 +52,15 @@ struct PartitionWindow {
 
 constinit PartitionWindow partition_sources[kMaxHardVolumes]{};
 
+// A scsi.device unit: a stretch of one disk, through the disk's cache.
+struct UnitWindow {
+    BlockCache* cache;
+    u64 base;
+    u64 count;
+};
+
+constinit UnitWindow unit_windows[DiskUnits::kMax]{};
+
 struct CacheMemory {
     BlockCache::Entry* entries;
     u32* buckets;
@@ -102,6 +111,34 @@ bool write_partition(void* ctx, u32 block, const u8* data) {
 // share its cache and its device.
 bool flush_partition(void* ctx) {
     return static_cast<PartitionWindow*>(ctx)->cache->flush();
+}
+
+bool read_unit(void* ctx, u64 sector, u8* out) {
+    const UnitWindow& unit = *static_cast<UnitWindow*>(ctx);
+    return sector < unit.count && unit.cache->read(unit.base + sector, out);
+}
+
+// Only set on units that may be written.
+bool write_unit(void* ctx, u64 sector, const u8* data) {
+    const UnitWindow& unit = *static_cast<UnitWindow*>(ctx);
+    return sector < unit.count && unit.cache->write(unit.base + sector, data);
+}
+
+bool flush_unit(void* ctx) {
+    return static_cast<UnitWindow*>(ctx)->cache->flush();
+}
+
+// "AHCI DISK" and the like, as SCSI INQUIRY names the product.
+void unit_product(const char* kind, char* out) {
+    u32 n = 0;
+    for (; kind[n] != '\0' && n < 11; ++n) {
+        const char c = kind[n];
+        out[n] = c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c;
+    }
+    const char tail[] = " DISK";
+    for (u32 i = 0; i < sizeof tail; ++i) {
+        out[n + i] = tail[i];
+    }
 }
 
 void write_name(const char* name, usize max) {
@@ -217,7 +254,8 @@ void assign_device(const HardVolume* volumes, u32 count, const char* name, char*
 }
 
 u32 hard_disks_mount(const Disk* disks, u32 disk_count, PhysAllocator& pages, HardVolume* out,
-                     u32 max) {
+                     u32 max, DiskUnits& units) {
+    units.count = 0;
     const u32 limit = max < kMaxHardVolumes ? max : kMaxHardVolumes;
     const u32 count = disk_count < kMaxHardDisks ? disk_count : kMaxHardDisks;
     u32 mounted = 0;
@@ -252,6 +290,26 @@ u32 hard_disks_mount(const Disk* disks, u32 disk_count, PhysAllocator& pages, Ha
             serial::write("scan error: ");
             serial::write(rdb_error_name(scan));
             serial::write_char('\n');
+        }
+
+        // The disk's units, numbered on from those of the disks before it.
+        const u32 first_unit = units.count;
+        for (u32 c = 0; c < partitions.container_count && units.count < DiskUnits::kMax; ++c) {
+            const AmigaContainer& container = partitions.containers[c];
+            UnitWindow& window = unit_windows[units.count];
+            window = UnitWindow{&cache, container.first, container.sectors};
+            DiskUnit& unit = units.unit[units.count];
+            const bool writable = !disk.read_only && disk.dev.write != nullptr;
+            unit = DiskUnit{&window, read_unit, writable ? write_unit : nullptr, flush_unit,
+                            container.sectors, {}};
+            unit_product(disk.kind, unit.product);
+            write_prefix(n);
+            serial::write("scsi.device unit ");
+            serial::write_dec(units.count);
+            serial::write(", ");
+            serial::write_dec(container.sectors);
+            serial::write(writable ? " sectors\n" : " sectors, read-only\n");
+            ++units.count;
         }
 
         for (u32 i = 0; i < partitions.count; ++i) {
@@ -290,6 +348,15 @@ u32 hard_disks_mount(const Disk* disks, u32 disk_count, PhysAllocator& pages, Ha
             volume.bootable = part.part.bootable;
             volume.writable = block_source.write != nullptr;
             __builtin_memcpy(volume.env, part.part.env, sizeof(volume.env));
+            // No unit when the units ran out before this disk's.
+            volume.unit = ~0u;
+            for (u32 u = first_unit; u < units.count; ++u) {
+                const UnitWindow& window = unit_windows[u];
+                if (part.disk_first_sector >= window.base &&
+                    part.disk_first_sector - window.base < window.count) {
+                    volume.unit = u;
+                }
+            }
             log_volume(n, volume);
             ++mounted;
         }
