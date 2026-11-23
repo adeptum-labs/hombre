@@ -35,6 +35,8 @@ OVMF         := /usr/share/OVMF
 # slot 0x10 + n, which is how the kernel tells the drives apart.
 TEST_DISK := $(BUILD)/test-disk.dms
 PIC_DISK  := $(BUILD)/pic-disk.adf
+# A hard disk image whose one partition, DH0:, holds the test disk's volume.
+TEST_HDF  := $(BUILD)/test.hdf
 DISK      ?= $(TEST_DISK)
 export DISK DISK1 DISK2 DISK3
 DISK_IMG  := $(BUILD)/disk.img
@@ -226,7 +228,7 @@ run: image disk-image
 
 # The boots attach the generated test disk whatever DISK says, so they stay
 # hermetic. The main boot expects its size in 512-byte sectors, rounded up.
-check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DISK) $(CORRUPT_DISK)
+check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(ZERO_DISK) $(CORRUPT_DISK)
 	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
 	tools/boot_check.sh --disk $(TEST_DISK) "Hombre loader" \
 	    "kernel loaded: entry=0xffffffff8010" "Hombre kernel booted" "usable memory:" \
@@ -245,6 +247,15 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(ZERO_DI
 	    "drive 1: virtio-blk: $$sectors sectors" "drive 1: virtio-blk: read ok" \
 	    "drive 1: disk: DMS SIMPLE, 80 tracks" "drive 1: volume: HombreTest (OFS)" \
 	    "drive 2: no disk" "drive 3: no disk" "m68k: C:Version returned 0"
+	cp $(TEST_HDF) $(BUILD)/check.hdf
+	tools/boot_check.sh --disk $(TEST_DISK) --hdf $(BUILD)/check.hdf \
+	    "hd0: virtio 1824 sectors" "hd0: table none, 1 partitions" \
+	    "hd0: DH0: HombreTest (OFS), 1760 blocks, bootpri 0, bootable" \
+	    "m68k: C:Version returned 0"
+	tools/boot_check.sh --no-disk --hdf $(BUILD)/check.hdf \
+	    "hd0: DH0: HombreTest (OFS), 1760 blocks, bootpri 0, bootable" \
+	    "startup: running S:Startup-Sequence" "m68k: C:Version returned 0" \
+	    "startup: ended, returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "v e r s i o n ret z z z ret bracket_left apostrophe semicolon ret" \
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
@@ -467,6 +478,15 @@ $(ADFTOOL): tools/adftool.cpp $(COMMON_HOBJ)
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
+MKHDF := $(BUILD)/tools/mkhdf
+
+$(MKHDF): tools/mkhdf.cpp $(COMMON_HOBJ)
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
+
+$(TEST_HDF): $(MKHDF) $(TEST_DISK)
+	$(MKHDF) $@ $(TEST_DISK)
+
 MKDISK    := $(BUILD)/tools/mkdisk
 
 $(MKDISK): tools/mkdisk.cpp $(COMMON_HOBJ)
@@ -592,6 +612,7 @@ clean:
 -include $(KERNEL_OBJ:.o=.d)
 -include $(TEST_BIN:%=%.d)
 -include $(ADFTOOL).d
+-include $(MKHDF).d
 -include $(MKDISK).d
 -include $(MKPICDISK).d
 -include $(ELF2HUNK).d

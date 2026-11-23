@@ -22,6 +22,8 @@
  */
 
 #include "boot_disk.hpp"
+#include "disk.hpp"
+#include "hard_disks.hpp"
 #include "hda.hpp"
 #include "usb_keyboard.hpp"
 
@@ -35,6 +37,7 @@
 #include "pci.hpp"
 #include "splash.hpp"
 #include "virtio_blk.hpp"
+#include "virtio_disk.hpp"
 
 namespace hombre {
 
@@ -44,8 +47,19 @@ namespace {
 // the floppy drives DF0: to DF3:.
 constinit VirtioBlk drive_devices[kFloppyDrives];
 
-// The virtio-blk device in PCI slot kFirstDriveSlot + n is drive n.
+// The hard disks, opened into disks indexed by their slot, and the volumes
+// they carry, which stay mounted for dos as the floppy volumes do.
+constinit VirtioBlk hard_disk_devices[kMaxHardDisks];
+constinit Disk hard_disks[kMaxHardDisks]{};
+constinit HardVolume hard_volumes[kMaxHardVolumes]{};
+
+// The virtio-blk device in PCI slot kFirstDriveSlot + n is drive n; the one
+// in slot kFirstHardDiskSlot + n is hard disk n. The rest of the hard disk
+// range stays clear of the floppy fallback, although no disk is opened
+// above kFirstHardDiskSlot + kMaxHardDisks - 1.
 constexpr u8 kFirstDriveSlot = 0x10;
+constexpr u8 kFirstHardDiskSlot = 0x18;
+constexpr u8 kLastHardDiskSlot = 0x1F;
 
 constexpr u64 page_size = 4096;
 constexpr u64 max_drive_bytes = 8ull << 20;
@@ -348,6 +362,13 @@ u32 drive_of(PciAddress address) {
     return address.device - kFirstDriveSlot;
 }
 
+// True for the device slots that hold hard disks, which the floppy
+// discovery leaves alone.
+bool in_hard_disk_slot(PciAddress address) {
+    return address.bus == 0 && address.device >= kFirstHardDiskSlot &&
+           address.device <= kLastHardDiskSlot;
+}
+
 bool same_address(PciAddress a, PciAddress b) {
     return a.bus == b.bus && a.device == b.device && a.function == b.function;
 }
@@ -362,8 +383,8 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
     pci_scan(&log_pci_function, nullptr);
     splash_progress(3, kSplashKernelSteps);
 
-    // Each drive by its slot; a single device elsewhere is DF0: as before
-    // drives had slots.
+    // Each floppy by its slot; a single device elsewhere is DF0: as before
+    // drives had slots. The hard disks are found from the same scan.
     PciAddress found[kFloppyDrives * 2];
     const u32 count = virtio_blk_find_all(found, kFloppyDrives * 2);
     PciAddress addresses[kFloppyDrives]{};
@@ -375,7 +396,8 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
             present[drive] = true;
         }
     }
-    if (!present[0] && count == 1 && drive_of(found[0]) == kFloppyDrives) {
+    if (!present[0] && count == 1 && drive_of(found[0]) == kFloppyDrives &&
+        !in_hard_disk_slot(found[0])) {
         addresses[0] = found[0];
         present[0] = true;
     }
@@ -384,34 +406,70 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
         for (u32 n = 0; n < kFloppyDrives; ++n) {
             used = used || (present[n] && same_address(addresses[n], found[i]));
         }
-        if (!used) {
+        if (!used && !in_hard_disk_slot(found[i])) {
             serial::write("virtio-blk: device in no drive slot ignored\n");
         }
     }
-    if (!present[0]) {
+
+    // Hard disks by their slot. Their lines are logged before the boot disk
+    // is looked for, so a machine with only hard disks still says what it
+    // found.
+    bool disk_present[kMaxHardDisks]{};
+    for (u32 i = 0; i < count; ++i) {
+        if (!in_hard_disk_slot(found[i]) || found[i].function != 0) {
+            continue;
+        }
+        const u32 disk = found[i].device - kFirstHardDiskSlot;
+        if (disk >= kMaxHardDisks || disk_present[disk]) {
+            continue;
+        }
+        disk_present[disk] = true;
+        char prefix[] = "hd0: ";
+        prefix[2] = static_cast<char>('0' + disk);
+        if (!virtio_disk_open(hard_disk_devices[disk], found[i], mmio, phys_pages,
+                              hard_disks[disk])) {
+            serial::write(prefix);
+            serial::write("virtio-blk: init failed\n");
+        }
+    }
+    const u32 hard_count =
+        hard_disks_mount(hard_disks, kMaxHardDisks, phys_pages, hard_volumes, kMaxHardVolumes);
+    bool hard_boot = false;
+    for (u32 i = 0; i < hard_count; ++i) {
+        hard_boot = hard_boot || hard_volumes[i].bootable;
+    }
+
+    // DF0: or a bootable hard disk partition holds the boot volume; without
+    // either nothing starts. dos picks between them by boot priority.
+    if (!present[0] && !hard_boot) {
         serial::write("no boot disk\n");
         return;
     }
-
-    // DF0: holds the boot volume; without it nothing starts.
     Image boot;
-    if (!load_disk(phys_pages, mmio, drive_devices[0], addresses[0], "", boot)) {
+    const bool boot_loaded =
+        present[0] && load_disk(phys_pages, mmio, drive_devices[0], addresses[0], "", boot);
+    if (!boot_loaded && !hard_boot) {
         return;
     }
     splash_progress(4, kSplashKernelSteps);
     usb_keyboard_start(mmio, phys_pages);
     hda_init(mmio, phys_pages);
     splash_progress(5, kSplashKernelSteps);
-    if (!mount_disk(boot, "", drive_volumes[0])) {
+    const bool df0 = boot_loaded && mount_disk(boot, "", drive_volumes[0]);
+    if (!df0 && !hard_boot) {
         return;
     }
     splash_progress(6, kSplashKernelSteps);
-    print_root(drive_volumes[0]);
-    print_startup_sequence(drive_volumes[0]);
+    if (df0) {
+        print_root(drive_volumes[0]);
+        print_startup_sequence(drive_volumes[0]);
+    }
 
     // DF1: to DF3: are empty unless their disk reads and mounts.
     Drives drives;
-    drives.volume[0] = &drive_volumes[0];
+    if (df0) {
+        drives.volume[0] = &drive_volumes[0];
+    }
     for (u32 n = 1; n < kFloppyDrives; ++n) {
         char prefix[] = "drive 0: ";
         prefix[6] = static_cast<char>('0' + n);
@@ -425,6 +483,17 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
             mount_disk(image, prefix, drive_volumes[n])) {
             drives.volume[n] = &drive_volumes[n];
         }
+    }
+    // The hard disk partitions follow the floppy drives.
+    for (u32 i = 0; i < hard_count && i < kHardVolumes; ++i) {
+        const HardVolume& hard = hard_volumes[i];
+        DriveInfo& drive = drives.info[kFloppyDrives + i];
+        drives.volume[kFloppyDrives + i] = &hard.volume;
+        __builtin_memcpy(drive.device, hard.device, sizeof drive.device);
+        drive.boot_pri = hard.boot_pri;
+        drive.bootable = hard.bootable;
+        __builtin_memcpy(drive.env, hard.env, sizeof drive.env);
+        drive.has_env = true;
     }
     m68k_run_command(info, phys_pages, drives, "C:Version", "");
 }
