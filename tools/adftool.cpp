@@ -28,12 +28,15 @@
 //   adftool ls <image> [path]           list a directory, one entry per line
 //   adftool cat <image> <path>          write a file to standard output
 //
-// An image is a DMS archive or a raw .adf. A listing line is the size in ten
+// An image is a DMS archive, a raw .adf, or a hard disk image, whose first
+// Amiga partition is the volume read (an RDB disk, a bare DOS volume, or an
+// RDB in an MBR or GPT partition). A listing line is the size in ten
 // columns ("<dir>" for a directory), two blanks and the name, with a slash
 // after the name of a directory.
 
 #include "amiga_fs.hpp"
 #include "dms.hpp"
+#include "pc_partitions.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -127,14 +130,57 @@ bool load_image(const char* path, std::vector<u8>& image) {
         return true;
     }
     case DiskFormat::Unknown:
+        // Anything else is taken for a hard disk image.
+        if (in.size() >= 4 * 512 && in.size() % 512 == 0) {
+            image = std::move(in);
+            return true;
+        }
         break;
     }
-    std::fprintf(stderr, "%s: neither a DMS archive nor a floppy image\n", path);
+    std::fprintf(stderr, "%s: neither a DMS archive nor a disk image\n", path);
     return false;
 }
 
+// The hard disk image a partition is read from, and where the partition starts.
+struct HardDisk {
+    const std::vector<u8>* image;
+    u64 first;
+};
+
+HardDisk hard_disk{};
+
+bool read_disk(void* ctx, u64 sector, u8* out) {
+    const std::vector<u8>& image = *static_cast<const std::vector<u8>*>(ctx);
+    if ((sector + 1) * 512 > image.size()) {
+        return false;
+    }
+    std::memcpy(out, image.data() + sector * 512, 512);
+    return true;
+}
+
+bool read_partition(void* ctx, u32 block, u8* out) {
+    const HardDisk& disk = *static_cast<const HardDisk*>(ctx);
+    return read_disk(const_cast<std::vector<u8>*>(disk.image), disk.first + block, out);
+}
+
+// Mounts the first Amiga partition of a hard disk image.
+FsError mount_hard_disk(const std::vector<u8>& image, AdfVolume& volume) {
+    AmigaPartitions parts{};
+    const RdbError error = find_amiga_partitions(
+        read_disk, const_cast<std::vector<u8>*>(&image), image.size() / 512, parts);
+    if (error != RdbError::Ok || parts.count == 0) {
+        return FsError::NotDos;
+    }
+    const RdbPartition& part = parts.list[0].part;
+    hard_disk = HardDisk{&image, parts.list[0].disk_first_sector};
+    const BlockSource source{&hard_disk, read_partition, nullptr};
+    return adf_mount_partition(source, 0, part.block_count, part.reserved, volume);
+}
+
 bool mount(const char* path, const std::vector<u8>& image, AdfVolume& volume) {
-    const FsError error = adf_mount(image.data(), image.size(), volume);
+    const FsError error = detect_disk_format(image.data(), image.size()) == DiskFormat::Adf
+                              ? adf_mount(image.data(), image.size(), volume)
+                              : mount_hard_disk(image, volume);
     if (error != FsError::Ok) {
         std::fprintf(stderr, "%s: %s\n", path, fs_error_name(error));
         return false;

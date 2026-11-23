@@ -27,11 +27,13 @@
 //   mkhdf <out.hdf> <adf> [<adf>...]
 //
 // Each ADF or DMS floppy image becomes a partition of its own, DH0: on, the
-// first one bootable, laid out on one surface of 32 blocks a track. A
-// partition of exactly a floppy's blocks keeps the floppy's root block where
-// a partition puts it, so the floppy's volume mounts unchanged.
+// first one bootable, laid out on one surface of 32 blocks a track. Each
+// partition is formatted with the floppy's file system and volume name, is
+// at least 8 MiB, and gets a copy of the floppy's files, so it has a valid
+// bitmap and room to write to.
 
 #include "amiga_fs.hpp"
+#include "amiga_fs_write.hpp"
 #include "dms.hpp"
 #include "rdb_writer.hpp"
 
@@ -47,6 +49,66 @@ namespace {
 
 constexpr u32 kSectorsPerTrack = 32;
 constexpr u32 kRdbCylinders = 2;
+constexpr u32 kMinPartitionBlocks = 16384;
+
+// A partition of the disk image being built, read and written in place.
+struct Window {
+    std::vector<u8>* disk;
+    u32 first;
+};
+
+bool window_read(void* ctx, u32 block, u8* out) {
+    const Window& w = *static_cast<Window*>(ctx);
+    std::memcpy(out, w.disk->data() + (static_cast<usize>(w.first) + block) * 512, 512);
+    return true;
+}
+
+bool window_write(void* ctx, u32 block, const u8* data) {
+    const Window& w = *static_cast<Window*>(ctx);
+    std::memcpy(w.disk->data() + (static_cast<usize>(w.first) + block) * 512, data, 512);
+    return true;
+}
+
+void collect(void* ctx, const DirEntry& entry) {
+    static_cast<std::vector<DirEntry>*>(ctx)->push_back(entry);
+}
+
+// Copies the directory at `path` of the floppy into the directory block
+// `dir` of the partition, and everything below it.
+bool copy_tree(const AdfVolume& from, const std::string& path, const AdfVolume& to, u32 dir) {
+    std::vector<DirEntry> entries;
+    if (adf_list(from, path.c_str(), collect, &entries) != FsError::Ok) {
+        std::fprintf(stderr, "cannot list %s\n", path.c_str());
+        return false;
+    }
+    const AmigaDate now{0, 0, 0};
+    for (const DirEntry& e : entries) {
+        const std::string child = path.empty() ? e.name : path + "/" + e.name;
+        DirEntry made;
+        if (e.is_dir) {
+            if (adf_create_dir(to, dir, e.name, now, made) != FsError::Ok ||
+                !copy_tree(from, child, to, made.header_block)) {
+                std::fprintf(stderr, "cannot copy %s\n", child.c_str());
+                return false;
+            }
+            continue;
+        }
+        std::vector<u8> data(e.size);
+        u32 got = 0;
+        if (adf_read(from, e, 0, data.data(), e.size, got) != FsError::Ok || got != e.size) {
+            std::fprintf(stderr, "cannot read %s\n", child.c_str());
+            return false;
+        }
+        u32 written = 0;
+        if (adf_create_file(to, dir, e.name, now, made) != FsError::Ok ||
+            adf_write(to, made.header_block, 0, data.data(), e.size, now, written) !=
+                FsError::Ok) {
+            std::fprintf(stderr, "cannot write %s\n", child.c_str());
+            return false;
+        }
+    }
+    return true;
+}
 
 bool read_file(const char* path, std::vector<u8>& data) {
     std::FILE* f = std::fopen(path, "rb");
@@ -119,7 +181,10 @@ int main(int argc, char** argv) {
     std::vector<RdbPartitionSpec> parts;
     u32 cylinder = kRdbCylinders;
     for (usize i = 0; i < floppies.size(); ++i) {
-        const u32 blocks = static_cast<u32>(floppies[i].size() / 512);
+        u32 blocks = static_cast<u32>(floppies[i].size() / 512);
+        if (blocks < kMinPartitionBlocks) {
+            blocks = kMinPartitionBlocks;
+        }
         const u32 cylinders = blocks / kSectorsPerTrack;
         RdbPartitionSpec spec;
         spec.name = "DH" + std::to_string(i);
@@ -133,8 +198,22 @@ int main(int argc, char** argv) {
     geometry.cylinders = cylinder;
     std::vector<u8> disk = build_rdb_disk(geometry, parts);
     for (usize i = 0; i < floppies.size(); ++i) {
-        const usize at = static_cast<usize>(parts[i].low_cyl) * kSectorsPerTrack * 512;
-        std::memcpy(disk.data() + at, floppies[i].data(), floppies[i].size());
+        AdfVolume from{};
+        if (adf_mount(floppies[i].data(), floppies[i].size(), from) != FsError::Ok) {
+            std::fprintf(stderr, "%s: cannot mount\n", argv[2 + i]);
+            return 1;
+        }
+        Window window{&disk, parts[i].low_cyl * kSectorsPerTrack};
+        const BlockSource source{&window, window_read, window_write};
+        const u32 blocks = (parts[i].high_cyl - parts[i].low_cyl + 1) * kSectorsPerTrack;
+        AdfVolume to{};
+        if (adf_format(source, 0, blocks, 2, from.dos_type, from.name, AmigaDate{0, 0, 0}) !=
+                FsError::Ok ||
+            adf_mount_partition(source, 0, blocks, 2, to) != FsError::Ok ||
+            !copy_tree(from, "", to, to.root_block)) {
+            std::fprintf(stderr, "%s: cannot build its partition\n", argv[2 + i]);
+            return 1;
+        }
     }
     std::FILE* f = std::fopen(argv[1], "wb");
     if (f == nullptr) {
