@@ -402,8 +402,9 @@ public:
     // IPrefs sent that fits its depth, when that set has arrived.
     void apply_pen_prefs(u32 screen);
     // Returns pointers to the screen's native 256-entry strong/light shade
-    // tables, rebuilding them if the palette changed. False for unknown or
-    // shallow (< 8 plane) screens.
+    // tables, which map each of the screen's pens to the nearest pen of its
+    // own palette, rebuilding them if the palette changed. False for unknown
+    // screens and those of the classic look.
     bool shade_tables(u32 screen, const u8*& strong, const u8*& light);
     u32 backdrop_rastport(u32 screen) const;
 
@@ -634,6 +635,8 @@ private:
     static void reply_message(void* ctx, u32 message);
     static void on_damage(void* ctx, m68k::Machine& m, u32 bitmap, const Rect& rect);
 
+    // Maps each of the screen's 2^depth pens to the darker pen of those whose
+    // colour is nearest to its own colour at 70% and at 85%.
     void rebuild_shade_tables(ScreenRecord& srec);
     // The screen is the default one, or the front one while none has been
     // made default yet.
@@ -676,7 +679,8 @@ private:
     // palette and marks the palette changed.
     void apply_palette_prefs(ScreenRecord& srec);
     // Works the menu and chrome colours out of the screen's DrawInfo pens
-    // and writes them into its ColorMap, then recomposes.
+    // and writes them into its ColorMap, at the pens the screen's depth gives
+    // the chrome, then recomposes. Screens of the classic look have none.
     void update_chrome_palette(u32 screen);
     // Clears the screen to its BACKGROUNDPEN, draws its title bar again and
     // recomposes every pixel, as OpenWorkBench starts the screen over.

@@ -39,10 +39,11 @@ namespace chrome {
 // The two looks of the window frames, the screen title bar, the border
 // scroll gadgets and the menus. Classic is the AmigaOS 3.1 look, drawn in
 // the pens of the screen's DrawInfo. Modern is the shaded look, drawn in the
-// pens that screens of eight planes have beyond the base palette.
+// chrome pens of chrome_palette.hpp, which a screen of five or more planes
+// has at physical_pen.
 enum class Style : u8 { Classic, Modern };
 
-constexpr Style style_for_depth(u32 depth) { return depth >= 8 ? Style::Modern : Style::Classic; }
+constexpr Style style_for_depth(u32 depth) { return depth >= 5 ? Style::Modern : Style::Classic; }
 
 // The pens of a DrawInfo, DETAILPEN through BARTRIMPEN, indexed as
 // sysimage.hpp has them. Only the classic look draws in them.
@@ -132,8 +133,7 @@ struct PropChrome {
 // One menu strip in menu mode: the bar titles, the open title's drop-down
 // box and the submenu box, with the indices of the open title and the
 // highlighted items. The shade tables darken the drop shadows of the modern
-// look and are null on screens of fewer than eight planes, whose classic
-// menus have none.
+// look and are null on screens of the classic look, whose menus have none.
 struct MenuChrome {
     i32 width = 0;
     const menu_layout::Title* titles = nullptr;
@@ -187,7 +187,8 @@ constexpr i32 arrow_rows(i32 across, i32 along) {
 // A scroll arrow button as width x height pens, row by row, in the look of
 // the sliders' knobs: rounded, shaded and outlined, with a triangle
 // pointing the arrow's way; pressed, it takes the shading of a held knob.
-// On screens of fewer than eight planes it uses the four 3.1 pens.
+// With high_color it uses the chrome pens of an eight-plane screen, without it
+// the four 3.1 pens.
 void paint_arrow_button(u8* pens, i32 width, i32 height, Arrow arrow, bool pressed,
                         bool high_color);
 

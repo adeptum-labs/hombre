@@ -87,6 +87,130 @@ constexpr u8 mirror_pen(u8 pen) {
     return static_cast<u8>(kComplementMirrorBase + pen);
 }
 
+// The chrome pens above, kScreenBar0 to 255, are the pens of a screen of
+// eight planes. A screen of fewer planes draws them through physical_pen,
+// which gives each its place in the screen's 2^planes pens. Seven and six
+// planes keep the whole range at the top of the ColorMap. Five have room for
+// the four mirrors there, as the complement of 0x1F, and 12 pens below them,
+// which the 32 other chrome pens share. The pens below kScreenBar0 are the
+// base palette's and stay where they are.
+constexpr u32 kChromePens = 256 - kScreenBar0;
+
+namespace five_planes {
+
+// The 12 pens: the two halves of the screen bar; the menu's paper, which the
+// frame's light edge shares, and its ink, which the dark edge and every title
+// share; the menu's ghost; three of the active bar and two of the inactive
+// one, which the track shares; the light and the plain knob.
+constexpr u8 kBarLight = 16;
+constexpr u8 kBarDark = 17;
+constexpr u8 kPaper = 18;
+constexpr u8 kInk = 19;
+constexpr u8 kGhost = 20;
+constexpr u8 kActive0 = 21;
+constexpr u8 kActive1 = 22;
+constexpr u8 kActive2 = 23;
+constexpr u8 kInactive0 = 24;
+constexpr u8 kInactive1 = 25;
+constexpr u8 kKnobLight = 26;
+constexpr u8 kKnobBase = 27;
+constexpr u32 kFirstPen = kBarLight;
+constexpr u32 kPens = kKnobBase - kFirstPen + 1;
+
+// The pen of each chrome pen from kScreenBar0 to kTitleInactive. The screen
+// bar goes two and two, the active bar by 3, 2 and 3 steps, the inactive bar
+// by 3 and 3, and the knob by 2 and 1.
+constexpr u8 kPen[kComplementMirrorBase - kScreenBar0] = {
+    // The screen bar.
+    kBarLight, kBarLight, kBarDark, kBarDark,
+    // The menu's paper, label, lit and ghost.
+    kPaper, kInk, kInk, kGhost,
+    // The active bar.
+    kActive0, kActive0, kActive0, kActive1, kActive1, kActive2, kActive2, kActive2,
+    // The inactive bar.
+    kInactive0, kInactive0, kInactive0, kInactive1, kInactive1, kInactive1,
+    // The frame's dark and light edges, the close button's fill and ring.
+    kInk, kPaper, kPaper, kInk,
+    // The knob, the track and the active and inactive titles.
+    kKnobLight, kKnobLight, kKnobBase, kInactive1, kInk, kInk,
+};
+
+// The chrome pen whose colour each pen takes: the middle one of the pens it
+// stands for, the later of two, or the only one of a menu's.
+constexpr u8 kSource[kPens] = {
+    kScreenBar1, kScreenBar3, kMenuPaperPen, kMenuLabelPen, kMenuGhostPen, kActiveBar1,
+    kActiveBar4, kActiveBar6, kInactiveBar1, kInactiveBar4, kKnob1, kKnob2,
+};
+
+}
+
+// The pen of the chrome pen logical on a screen of depth planes.
+constexpr u8 physical_pen(u8 logical, u32 depth) {
+    if (logical < kScreenBar0 || depth < 5) {
+        return logical;
+    }
+    if (depth == 5 && logical < kComplementMirrorBase) {
+        return five_planes::kPen[logical - kScreenBar0];
+    }
+    const u32 pens = depth < 8 ? 1u << depth : 256;
+    return static_cast<u8>(logical - (256 - pens));
+}
+
+// The chrome pen whose colour the pen physical holds on a screen of depth
+// planes; 0 for a pen below the chrome range, where the screen keeps its base
+// and colour cube palette.
+constexpr u32 logical_pen(u32 physical, u32 depth) {
+    if (depth < 5 || depth > 8 || physical >= (1u << depth)) {
+        return 0;
+    }
+    const u32 pens = 1u << depth;
+    const bool mirror = physical + kComplementMirrorPens >= pens;
+    if (mirror || (depth >= 6 && physical + kChromePens >= pens)) {
+        return physical + (256 - pens);
+    }
+    if (depth == 5 && physical >= five_planes::kFirstPen) {
+        return five_planes::kSource[physical - five_planes::kFirstPen];
+    }
+    return 0;
+}
+
+namespace detail {
+
+constexpr bool pen_map_holds() {
+    for (u32 depth = 5; depth <= 8; ++depth) {
+        const u32 pens = 1u << depth;
+        const u32 first = depth == 5 ? five_planes::kFirstPen : pens - kChromePens;
+        for (u32 logical = kScreenBar0; logical < 256; ++logical) {
+            const u32 physical = physical_pen(static_cast<u8>(logical), depth);
+            // Every chrome pen lands in the chrome range of the screen, the
+            // mirrors on its top four pens, and takes the colour of a chrome
+            // pen that lands on the same pen.
+            const bool mirror = logical >= kComplementMirrorBase;
+            if (physical < first || physical >= pens ||
+                (physical + kComplementMirrorPens >= pens) != mirror ||
+                physical_pen(static_cast<u8>(logical_pen(physical, depth)), depth) != physical) {
+                return false;
+            }
+        }
+        for (u32 pen = 0; pen < kComplementMirrorPens; ++pen) {
+            if (physical_pen(mirror_pen(static_cast<u8>(pen)), depth) !=
+                pens - kComplementMirrorPens + pen) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+}
+
+static_assert(detail::pen_map_holds());
+static_assert(physical_pen(kScreenBar0, 7) == 92 && physical_pen(255, 7) == 127);
+static_assert(physical_pen(kScreenBar0, 6) == 28 && physical_pen(255, 6) == 63);
+static_assert(physical_pen(kScreenBar0, 8) == kScreenBar0 && physical_pen(255, 8) == 255);
+static_assert(physical_pen(mirror_pen(0), 5) == 28 && physical_pen(mirror_pen(3), 5) == 31);
+static_assert(physical_pen(3, 5) == 3 && physical_pen(15, 8) == 15);
+
 namespace detail {
 
 constexpr u32 lerp_channel(u32 a, u32 b, u32 step, u32 steps) {

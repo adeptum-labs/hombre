@@ -109,40 +109,42 @@ constexpr u32 kBasePalette[8] = {
 };
 constexpr u32 kCubeLevels[6] = {0x00, 0x33, 0x66, 0x99, 0xCC, 0xFF};
 
-constexpr u32 default_palette_rgb24(u32 pen) {
-    if (pen < 8) {
-        return kBasePalette[pen];
-    }
-    if (pen < Graphics::kHighSystemPen) {
+// The colour pen has on a screen of depth planes unless a program changes it:
+// the base palette, then the colour cube, and from where the screen's chrome
+// pens start the colour of the chrome pen each holds.
+constexpr u32 default_palette_rgb24(u32 pen, u32 depth) {
+    const u32 chrome_pen = chrome::logical_pen(pen, depth);
+    if (chrome_pen == 0) {
+        if (pen < 8) {
+            return kBasePalette[pen];
+        }
         const u32 idx = pen - 8;
         const u32 r = idx / 36;
         const u32 g = (idx / 6) % 6;
         const u32 b = idx % 6;
         return (kCubeLevels[r] << 16) | (kCubeLevels[g] << 8) | kCubeLevels[b];
     }
-    if (pen < chrome::kMenuPaperPen) {
-        return chrome::screen_bar_rgb(kBasePalette[2], pen - chrome::kScreenBar0);
+    if (chrome_pen < chrome::kMenuPaperPen) {
+        return chrome::screen_bar_rgb(kBasePalette[2], chrome_pen - chrome::kScreenBar0);
     }
-    if (pen < chrome::kChromeBase) {
-        return chrome::kMenuPalette[pen - chrome::kMenuPaperPen];
+    if (chrome_pen < chrome::kChromeBase) {
+        return chrome::kMenuPalette[chrome_pen - chrome::kMenuPaperPen];
     }
-    if (pen < chrome::kComplementMirrorBase) {
-        return chrome::kChromePalette[pen - chrome::kChromeBase];
+    if (chrome_pen < chrome::kComplementMirrorBase) {
+        return chrome::kChromePalette[chrome_pen - chrome::kChromeBase];
     }
-    if (pen < 256) {
-        return kBasePalette[pen - chrome::kComplementMirrorBase];
-    }
-    return 0;
+    return kBasePalette[chrome_pen - chrome::kComplementMirrorBase];
 }
 
-// Keeps the top four pens the colours of 0..3. Only eight planes complement
-// through 0xFF; a shallower screen keeps whatever its top pens held.
+// Keeps the top four pens of a screen of the modern look the colours of 0..3:
+// COMPLEMENT turns pen n into the pen 2^depth - 1 - n, which for 0..3 is one
+// of them.
 void write_complement_mirrors(Bus& b, u32 depth, u32 colors, u32 low_colors) {
-    if (depth != 8 || colors == 0) {
+    if (chrome::style_for_depth(depth) != chrome::Style::Modern || colors == 0) {
         return;
     }
     for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-        const u32 mirror = chrome::mirror_pen(static_cast<u8>(pen));
+        const u32 mirror = chrome::physical_pen(chrome::mirror_pen(static_cast<u8>(pen)), depth);
         b.w16(colors + mirror * 2, b.r16(colors + pen * 2));
         if (low_colors != 0) {
             b.w16(low_colors + mirror * 2, b.r16(low_colors + pen * 2));
@@ -156,7 +158,7 @@ void write_default_palette(Bus& b, u32 depth, u32 colors, u32 low_colors, const 
                            const u32* prefs) {
     for (u32 i = 0; i < (1u << depth); ++i) {
         const u32 rgb =
-            prefs_set != nullptr && prefs_set[i] ? prefs[i] : default_palette_rgb24(i);
+            prefs_set != nullptr && prefs_set[i] ? prefs[i] : default_palette_rgb24(i, depth);
         const u32 r8 = (rgb >> 16) & 0xFF;
         const u32 g8 = (rgb >> 8) & 0xFF;
         const u32 b8 = rgb & 0xFF;
@@ -458,8 +460,10 @@ struct RequesterPens {
 
 RequesterPens requester_pens(u32 depth, const chrome::DrawInfoPens& drawinfo) {
     if (chrome::style_for_depth(depth) == chrome::Style::Modern) {
-        return RequesterPens{chrome::kFrameLight, chrome::kFrameDark, chrome::kInactiveBar0,
-                             chrome::kFrameDark};
+        return RequesterPens{chrome::physical_pen(chrome::kFrameLight, depth),
+                             chrome::physical_pen(chrome::kFrameDark, depth),
+                             chrome::physical_pen(chrome::kInactiveBar0, depth),
+                             chrome::physical_pen(chrome::kFrameDark, depth)};
     }
     const u16* pens = drawinfo.pen;
     return RequesterPens{static_cast<u8>(pens[sysimage::ShinePen]),
@@ -761,12 +765,12 @@ constexpr u8 kTopCornerInsets[3] = {3, 2, 1};
 constexpr i32 kShadowSize = 4;
 
 constexpr bool has_rounded_corners(u32 screen_depth, u32 window_flags) {
-    return screen_depth >= 8 &&
+    return chrome::style_for_depth(screen_depth) == chrome::Style::Modern &&
            (window_flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0;
 }
 
 constexpr bool has_shadow(u32 screen_depth, u32 window_flags) {
-    return screen_depth >= 8 &&
+    return chrome::style_for_depth(screen_depth) == chrome::Style::Modern &&
            (window_flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0;
 }
 
@@ -2233,7 +2237,7 @@ void Intuition::flush_palette() {
     }
     const ScreenRecord* srec = find_screen_record(screen);
     if (srec != nullptr) {
-        if (srec->depth >= 8) {
+        if (chrome::style_for_depth(srec->depth) == chrome::Style::Modern) {
             compose(screen, Rect{0, 0, static_cast<i32>(srec->width) - 1,
                                  static_cast<i32>(srec->height) - 1});
         } else {
@@ -2890,7 +2894,8 @@ void Intuition::apply_palette_prefs(ScreenRecord& rec) {
 
 void Intuition::update_chrome_palette(u32 screen) {
     ScreenRecord* rec = find_screen_record(screen);
-    if (rec == nullptr || rec->depth < 8 || machine_ == nullptr || graphics_ == nullptr) {
+    if (rec == nullptr || chrome::style_for_depth(rec->depth) != chrome::Style::Modern ||
+        machine_ == nullptr || graphics_ == nullptr) {
         return;
     }
     const u32 info = screen_draw_info(screen);
@@ -2923,8 +2928,14 @@ void Intuition::update_chrome_palette(u32 screen) {
     }
     u32 palette[chrome::kDerivedCount]{};
     chrome::palette_from_pens(pen_rgb, palette);
-    for (u32 i = 0; i < chrome::kDerivedCount; ++i) {
-        write_colormap_rgb(*rec, chrome::kDerivedBase + i, palette[i]);
+    // A pen shared by several chrome pens has the colour of the one it takes
+    // its colour from.
+    for (u32 chrome_pen = chrome::kDerivedBase; chrome_pen < chrome::kComplementMirrorBase;
+         ++chrome_pen) {
+        const u32 pen = chrome::physical_pen(static_cast<u8>(chrome_pen), rec->depth);
+        if (chrome::logical_pen(pen, rec->depth) == chrome_pen) {
+            write_colormap_rgb(*rec, pen, palette[chrome_pen - chrome::kDerivedBase]);
+        }
     }
     write_complement_mirrors(b, rec->depth, rec->colors, rec->low_colors);
     if (display_ != nullptr) {
@@ -2965,9 +2976,10 @@ void Intuition::end_batch() {
     }
     if (display_ != nullptr && display_->palette_dirty) {
         ScreenRecord* front = find_screen_record(display_->front_screen);
-        if (front != nullptr && (front->depth >= 8 ||
-                                 (front->pending.x0 <= front->pending.x1 &&
-                                  front->pending.y0 <= front->pending.y1))) {
+        if (front != nullptr &&
+            (chrome::style_for_depth(front->depth) == chrome::Style::Modern ||
+             (front->pending.x0 <= front->pending.x1 &&
+              front->pending.y0 <= front->pending.y1))) {
             display_->palette_dirty = false;
             front->pending = Rect{0, 0, static_cast<i32>(front->width) - 1,
                                   static_cast<i32>(front->height) - 1};
@@ -3012,7 +3024,8 @@ void Intuition::compose(u32 screen, Rect r) {
         srec->pending = unite_rect(srec->pending, r);
         return;
     }
-    if (srec->depth >= 8 && display_ != nullptr && srec->palette_gen != display_->palette_gen) {
+    if (chrome::style_for_depth(srec->depth) == chrome::Style::Modern && display_ != nullptr &&
+        srec->palette_gen != display_->palette_gen) {
         rebuild_shade_tables(*srec);
     }
     Bus b(*machine_);
@@ -3181,7 +3194,7 @@ void Intuition::rebuild_shade_tables(ScreenRecord& srec) {
 
 bool Intuition::shade_tables(u32 screen, const u8*& strong, const u8*& light) {
     ScreenRecord* srec = find_screen_record(screen);
-    if (srec == nullptr || srec->depth < 8) {
+    if (srec == nullptr || chrome::style_for_depth(srec->depth) != chrome::Style::Modern) {
         return false;
     }
     if (display_ != nullptr && srec->palette_gen != display_->palette_gen) {
@@ -3524,7 +3537,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     graphics_->set_vp_mode_id(vp, mode->id);
     rec->first_window = 0;
     rec->pending = Rect{0, 0, -1, -1};
-    if (a.depth >= 8) {
+    if (chrome::style_for_depth(a.depth) == chrome::Style::Modern) {
         rebuild_shade_tables(*rec);
     }
     // SA_SysFont 1 asks for the screen font of the preferences, which the
@@ -3544,7 +3557,7 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
                             rec->metrics);
     compose(screen, Rect{0, 0, right, bottom});
     end_batch();
-    if (becomes_default && a.depth >= 8) {
+    if (becomes_default && chrome::style_for_depth(a.depth) == chrome::Style::Modern) {
         update_chrome_palette(screen);
     }
     return screen;
@@ -5283,7 +5296,7 @@ Rect Intuition::menu_overlay(const ScreenRecord& srec) const {
     Rect r{0, 0, static_cast<i32>(srec.width) - 1, srec.metrics.bar_height()};
     Rect box = menu_.item_count != 0 ? menu_.geometry.box : menu_layout::empty_rect();
     Rect sub = menu_.sub_count != 0 ? menu_.geometry.sub_box : menu_layout::empty_rect();
-    if (srec.depth >= 8) {
+    if (chrome::style_for_depth(srec.depth) == chrome::Style::Modern) {
         if (menu_layout::valid(box)) {
             box.x1 += kShadowSize;
             box.y1 += kShadowSize;
@@ -5475,7 +5488,7 @@ void Intuition::draw_menu_overlay(Bus& b, raster::Bitmap& bitmap, const Rect& cl
     m.sub_item_count = menu_.sub_count;
     m.selected_sub = menu_.sub;
     m.depth = srec->depth;
-    if (srec->depth >= 8) {
+    if (chrome::style_for_depth(srec->depth) == chrome::Style::Modern) {
         m.strong_shade = srec->strong_shade;
         m.light_shade = srec->light_shade;
     }

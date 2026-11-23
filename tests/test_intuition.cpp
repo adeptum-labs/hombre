@@ -4946,8 +4946,9 @@ void depth2_fallback_chrome_pens() {
 void the_look_follows_the_number_of_planes() {
     CHECK(chrome::style_for_depth(1) == chrome::Style::Classic);
     CHECK(chrome::style_for_depth(4) == chrome::Style::Classic);
-    CHECK(chrome::style_for_depth(7) == chrome::Style::Classic);
-    CHECK(chrome::style_for_depth(8) == chrome::Style::Modern);
+    for (u32 depth = 5; depth <= 8; ++depth) {
+        CHECK(chrome::style_for_depth(depth) == chrome::Style::Modern);
+    }
 }
 
 // The classic chrome is drawn in the pens of the screen's DrawInfo once one is
@@ -5354,6 +5355,239 @@ void moving_and_closing_window_removes_old_shadow() {
     CHECK(refreshed(r, screen, 300, 200, 403, 263));
     CHECK_EQ(screen_pixel(r, screen, 401, 210), 5u);
     CHECK_EQ(screen_pixel(r, screen, 340, 263), 5u);
+}
+
+u32 chrome_pen_on(u32 logical, u32 depth) {
+    return chrome::physical_pen(static_cast<u8>(logical), depth);
+}
+
+// The chrome pens of an eight-plane screen reach a screen of fewer planes at
+// physical_pen: all of them at the top of the ColorMap on seven and six planes,
+// the mirrors there and 12 shared pens below them on five.
+void chrome_pens_find_their_place_on_every_depth() {
+    for (u32 logical = chrome::kScreenBar0; logical < 256; ++logical) {
+        CHECK_EQ(chrome_pen_on(logical, 8), logical);
+        CHECK_EQ(chrome_pen_on(logical, 7), logical - 128);
+        CHECK_EQ(chrome_pen_on(logical, 6), logical - 192);
+        CHECK_EQ(chrome_pen_on(logical, 4), logical);
+    }
+    CHECK_EQ(chrome_pen_on(15, 5), 15u);
+    CHECK_EQ(chrome_pen_on(15, 8), 15u);
+
+    bool used[32]{};
+    for (u32 logical = chrome::kScreenBar0; logical < chrome::kComplementMirrorBase; ++logical) {
+        const u32 pen = chrome_pen_on(logical, 5);
+        CHECK(pen >= 16 && pen <= 27);
+        used[pen] = true;
+    }
+    for (u32 pen = 16; pen <= 27; ++pen) {
+        CHECK(used[pen]);
+    }
+    for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
+        CHECK_EQ(chrome_pen_on(chrome::mirror_pen(static_cast<u8>(pen)), 5), 28 + pen);
+    }
+
+    const auto same = [](u32 a, u32 b) { return chrome_pen_on(a, 5) == chrome_pen_on(b, 5); };
+    // The active bar's 8 steps go 3, 2 and 3, the inactive bar's 6 by 3, the
+    // screen bar's 4 two and two and the knob's 3 by 2 and 1.
+    CHECK(same(chrome::kActiveBar0, chrome::kActiveBar2));
+    CHECK(!same(chrome::kActiveBar2, chrome::kActiveBar3));
+    CHECK(same(chrome::kActiveBar3, chrome::kActiveBar4));
+    CHECK(!same(chrome::kActiveBar4, chrome::kActiveBar5));
+    CHECK(same(chrome::kActiveBar5, chrome::kActiveBar7));
+    CHECK(same(chrome::kInactiveBar0, chrome::kInactiveBar2));
+    CHECK(!same(chrome::kInactiveBar2, chrome::kInactiveBar3));
+    CHECK(same(chrome::kInactiveBar3, chrome::kInactiveBar5));
+    CHECK(same(chrome::kScreenBar0, chrome::kScreenBar1));
+    CHECK(!same(chrome::kScreenBar1, chrome::kScreenBar2));
+    CHECK(same(chrome::kScreenBar2, chrome::kScreenBar3));
+    CHECK(same(chrome::kKnob0, chrome::kKnob1));
+    CHECK(!same(chrome::kKnob1, chrome::kKnob2));
+    // The menu's label and lit text share the dark pen with the frame's dark
+    // edge and the titles, its paper the light pen with the frame's light edge,
+    // the ghost has its own, and the track is the inactive bar's darker pen.
+    CHECK(same(chrome::kMenuLabelPen, chrome::kMenuLitPen));
+    CHECK(same(chrome::kMenuLabelPen, chrome::kFrameDark));
+    CHECK(same(chrome::kMenuLabelPen, chrome::kTitleActive));
+    CHECK(same(chrome::kMenuLabelPen, chrome::kTitleInactive));
+    CHECK(same(chrome::kMenuPaperPen, chrome::kFrameLight));
+    CHECK(!same(chrome::kMenuGhostPen, chrome::kMenuPaperPen));
+    CHECK(!same(chrome::kMenuGhostPen, chrome::kMenuLabelPen));
+    CHECK(same(chrome::kTrack, chrome::kInactiveBar5));
+
+    // A shared pen has the colour of the middle one of the pens it stands for.
+    CHECK_EQ(chrome::logical_pen(chrome_pen_on(chrome::kActiveBar0, 5), 5),
+             static_cast<u32>(chrome::kActiveBar1));
+    CHECK_EQ(chrome::logical_pen(chrome_pen_on(chrome::kActiveBar3, 5), 5),
+             static_cast<u32>(chrome::kActiveBar4));
+    CHECK_EQ(chrome::logical_pen(chrome_pen_on(chrome::kActiveBar7, 5), 5),
+             static_cast<u32>(chrome::kActiveBar6));
+    CHECK_EQ(chrome::logical_pen(chrome_pen_on(chrome::kInactiveBar5, 5), 5),
+             static_cast<u32>(chrome::kInactiveBar4));
+    CHECK_EQ(chrome::logical_pen(chrome_pen_on(chrome::kFrameDark, 5), 5),
+             static_cast<u32>(chrome::kMenuLabelPen));
+    // The pens below the chrome range have no chrome pen.
+    CHECK_EQ(chrome::logical_pen(15, 5), 0u);
+    CHECK_EQ(chrome::logical_pen(27, 6), 0u);
+    CHECK_EQ(chrome::logical_pen(91, 7), 0u);
+    CHECK_EQ(chrome::logical_pen(219, 8), 0u);
+    CHECK_EQ(chrome::logical_pen(220, 8), static_cast<u32>(chrome::kScreenBar0));
+}
+
+// What a 5, 6 or 7 plane screen draws of a window: the modern look in the pens
+// physical_pen gives the chrome there.
+void check_modern_window_chrome(u32 depth) {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const auto pen = [depth](u32 logical) { return chrome_pen_on(logical, depth); };
+
+    // The screen bar is shaded from top to bottom, over the label pen's line.
+    CHECK_EQ(screen_pixel(r, screen, 100, 0), pen(chrome::kScreenBar0));
+    CHECK_EQ(screen_pixel(r, screen, 100, 13), pen(chrome::kScreenBar3));
+    CHECK_EQ(screen_pixel(r, screen, 100, 14), pen(chrome::kMenuLabelPen));
+
+    r.str(kWinTitle, "H");
+    put_new_window(r, kNewWindow, 40, 30, 220, 120,
+                   WFLG_ACTIVATE | WFLG_CLOSEGADGET | WFLG_DEPTHGADGET | WFLG_SIZEGADGET,
+                   kWinTitle, 0, 0);
+    CHECK(open_win(r, kNewWindow) != 0);
+
+    // The cut corner shows the backdrop, the outline is dark, the left border
+    // light and the others the inactive bar's pen.
+    CHECK_EQ(screen_pixel(r, screen, 40, 30), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 43, 30), pen(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 40, 149), pen(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 41, 60), pen(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 258, 60), pen(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 100, 148), pen(chrome::kInactiveBar5));
+    CHECK_EQ(screen_pixel(r, screen, 42, 45), 0u);
+
+    // The active title bar: a light line, the bar from its first step to its
+    // last, and a dark line.
+    CHECK_EQ(screen_pixel(r, screen, 120, 31), pen(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 120, 32), pen(chrome::kActiveBar0));
+    CHECK_EQ(screen_pixel(r, screen, 120, 43), pen(chrome::kActiveBar7));
+    CHECK_EQ(screen_pixel(r, screen, 120, 44), pen(chrome::kFrameDark));
+
+    // The buttons, the title and the size gadget.
+    CHECK_EQ(screen_pixel(r, screen, 49, 32), pen(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 45, 33), pen(chrome::kKnob0));
+    CHECK_EQ(screen_pixel(r, screen, 45, 41), pen(chrome::kKnob2));
+    CHECK_EQ(screen_pixel(r, screen, 49, 37), pen(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 248, 35), pen(chrome::kKnob2));
+    CHECK_EQ(screen_pixel(r, screen, 250, 37), pen(chrome::kFrameLight));
+    CHECK_EQ(screen_pixel(r, screen, 59, 33), pen(chrome::kTitleActive));
+    CHECK_EQ(screen_pixel(r, screen, 256, 146), pen(chrome::kFrameDark));
+    CHECK_EQ(screen_pixel(r, screen, 255, 145), pen(chrome::kFrameLight));
+
+    // A pen of the modern look is not one of the classic look's.
+    CHECK(screen_pixel(r, screen, 120, 32) > 3u);
+}
+
+void shallow_modern_screens_draw_the_window_chrome_in_the_mapped_pens() {
+    for (const u32 depth : {5u, 6u, 7u}) {
+        check_modern_window_chrome(depth);
+    }
+}
+
+void shallow_modern_screens_draw_prop_gadgets_in_the_mapped_pens() {
+    for (const u32 depth : {5u, 6u, 7u}) {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+        CHECK(open_new(r, kNewScreen) != 0);
+        const auto pen = [depth](u32 logical) { return chrome_pen_on(logical, depth); };
+
+        put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+        put_gadget(r, kGad1, 0, 20, 20, 12, 40, 0, 0, GTYP_PROPGADGET, kProp1);
+        put_new_window(r, kNewWindow, 50, 50, 220, 140, WFLG_ACTIVATE, 0, 0, 0);
+        r.put32(kNewWindow + nw_FirstGadget, kGad1);
+        const u32 window = open_win(r, kNewWindow);
+        r.put32(kNewWindow + nw_FirstGadget, 0);
+        CHECK(window != 0);
+
+        // The container's dark edge and track, the knob's first and last steps.
+        CHECK_EQ(window_pixel(r, window, 20, 20), pen(chrome::kFrameDark));
+        CHECK_EQ(window_pixel(r, window, 25, 50), pen(chrome::kTrack));
+        CHECK_EQ(window_pixel(r, window, 21, 21), pen(chrome::kTrack));
+        CHECK_EQ(window_pixel(r, window, 25, 22), pen(chrome::kKnob0));
+        CHECK_EQ(window_pixel(r, window, 25, 28), pen(chrome::kKnob2));
+
+        // Dragged, the knob takes the active bar's pens.
+        press(r, 75, 75);
+        const u32 held = window_pixel(r, window, 25, 25);
+        CHECK(held >= pen(chrome::kActiveBar2) && held <= pen(chrome::kActiveBar5));
+        release(r, 75, 75);
+        const u32 plain = window_pixel(r, window, 25, 25);
+        CHECK(plain >= pen(chrome::kKnob0) && plain <= pen(chrome::kKnob2));
+    }
+}
+
+// Each pen of the chrome range holds the colour of the chrome pen it stands
+// for on an eight-plane screen, the pens below it keep the base palette and
+// the colour cube, and the top four pens keep the colours of 0 to 3.
+void shallow_modern_screens_hold_the_chrome_colours_at_the_mapped_pens() {
+    GfxRig full;
+    put_new_screen(full, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 full_screen = open_new(full, kNewScreen);
+    CHECK(full_screen != 0);
+    const u32 full_map = full.get32(full_screen + sc_ViewPort + vp_ColorMap);
+
+    for (const u32 depth : {5u, 6u, 7u}) {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
+        const u32 pens = 1u << depth;
+        CHECK_EQ(r.get16(map + cm_Count), pens);
+
+        CHECK_EQ(colormap_rgb24(r, map, 0), 0xA0A6B0u);
+        CHECK_EQ(colormap_rgb24(r, map, 3), 0x3D6FB6u);
+        CHECK_EQ(colormap_rgb24(r, map, 8), 0x000000u);
+        CHECK_EQ(colormap_rgb24(r, map, 9), 0x000033u);
+
+        const u32 first = depth == 5 ? 16 : pens - chrome::kChromePens;
+        CHECK(first > 15);
+        for (u32 pen = first; pen < pens; ++pen) {
+            const u32 logical = chrome::logical_pen(pen, depth);
+            CHECK(logical >= chrome::kScreenBar0);
+            CHECK_EQ(chrome_pen_on(logical, depth), pen);
+            CHECK_EQ(colormap_rgb24(r, map, pen), colormap_rgb24(full, full_map, logical));
+        }
+        for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
+            CHECK_EQ(colormap_rgb24(r, map, pens - chrome::kComplementMirrorPens + pen),
+                     colormap_rgb24(r, map, pen));
+        }
+    }
+}
+
+// Shadows pick the nearest of the screen's own 2^depth colours.
+void shallow_modern_screens_cast_shadows_in_their_own_palette() {
+    for (const u32 depth : {5u, 6u, 7u}) {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        fill_backdrop_rect(r, screen, 0, 15, 639, 399, 5);
+
+        const u8* strong = nullptr;
+        const u8* light = nullptr;
+        CHECK(r.intuition.shade_tables(screen, strong, light));
+        for (u32 pen = 0; pen < (1u << depth); ++pen) {
+            CHECK(strong[pen] < (1u << depth));
+            CHECK(light[pen] < (1u << depth));
+        }
+        CHECK(strong[5] != 5u && light[5] != 5u);
+
+        put_new_window(r, kNewWindow, 60, 50, 120, 80, WFLG_ACTIVATE, 0, 0, 0);
+        CHECK(open_win(r, kNewWindow) != 0);
+        CHECK_EQ(screen_pixel(r, screen, 180, 60), static_cast<u32>(strong[5]));
+        CHECK_EQ(screen_pixel(r, screen, 182, 60), static_cast<u32>(light[5]));
+        CHECK_EQ(screen_pixel(r, screen, 59, 60), 5u);
+        CHECK_EQ(screen_pixel(r, screen, 184, 60), 5u);
+    }
 }
 
 void depth2_screen_has_no_corners_and_no_shadow() {
@@ -7143,6 +7377,54 @@ void menu_on_a_chrome_screen_highlights_ghosts_and_restores() {
     CHECK(screen_planes(r, screen) == before);
 }
 
+// A menu on a 5, 6 or 7 plane screen has the modern look in the pens
+// physical_pen gives the chrome there.
+void menu_on_a_shallow_modern_screen_highlights_ghosts_and_restores() {
+    for (const u32 depth : {5u, 6u, 7u}) {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        const auto pen = [depth](u32 logical) { return chrome_pen_on(logical, depth); };
+        put_two_title_strip(r);
+        r.put16(kItemA1 + mi_Flags, ITEMTEXT | HIGHCOMP);
+        const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+        set_strip(r, window, kMenuA);
+        const std::vector<u8> before = screen_planes(r, screen);
+        const u32 shadowed = screen_pixel(r, screen, 79, 40);
+
+        menu_press(r, 10, 5);
+        menu_move(r, 10, 21);
+        CHECK_EQ(screen_pixel(r, screen, 300, 0), pen(chrome::kScreenBar0));
+        CHECK_EQ(screen_pixel(r, screen, 300, 14), pen(chrome::kMenuLabelPen));
+        const u32 title = screen_pixel(r, screen, 6, 7);
+        CHECK(title >= pen(chrome::kActiveBar0) && title <= pen(chrome::kActiveBar7));
+        const u32 lit = screen_pixel(r, screen, 9, 21);
+        CHECK(lit >= pen(chrome::kActiveBar0) && lit <= pen(chrome::kActiveBar7));
+        CHECK_EQ(screen_pixel(r, screen, 5, 30), pen(chrome::kMenuPaperPen));
+        CHECK_EQ(screen_pixel(r, screen, 4, 30), pen(chrome::kFrameDark));
+        // The disabled item's label is the ghost pen, never the label pen.
+        u32 grey = 0;
+        u32 dark = 0;
+        for (i32 y = 26; y <= 34; ++y) {
+            for (i32 x = 8; x <= 72; ++x) {
+                const u32 at = screen_pixel(r, screen, x, y);
+                grey += at == pen(chrome::kMenuGhostPen) ? 1 : 0;
+                dark += at == pen(chrome::kMenuLabelPen) ? 1 : 0;
+            }
+        }
+        CHECK(grey > 0);
+        CHECK_EQ(dark, 0u);
+        CHECK(screen_pixel(r, screen, 79, 40) != shadowed);
+
+        menu_release(r, 300, 200);
+        const u32 msg = window_message(r, window);
+        CHECK(msg != 0);
+        reply_msg(r, msg);
+        CHECK(screen_planes(r, screen) == before);
+    }
+}
+
 void menu_rmbtrap_window_still_gets_menudown_and_menuup() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -7624,6 +7906,29 @@ void requester_release_outside_raises_the_button_again() {
     CHECK_EQ(handle_requester(r, window, 0, false), -2);
     CHECK(requester_button_pixels(r, window, 0) == raised);
     free_requester(r, window);
+}
+
+// The buttons of a requester on a 5, 6 or 7 plane screen are raised in the
+// modern look's pens.
+void requester_buttons_on_a_shallow_modern_screen_use_the_mapped_pens() {
+    for (const u32 depth : {5u, 6u, 7u}) {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        r.intuition.set_default_screen(screen);
+        r.str(kEasyText, "body");
+        r.str(kEasyGadgets, "Ok");
+        put_easy(r, kEasy, 0, 0, kEasyText, kEasyGadgets);
+        const u32 window = build_requester(r, 0, kEasy, 0, 0);
+        CHECK(window != 0);
+        const Rect box = IntuitionTest::button(r.intuition, window, 0);
+        const auto pen = [depth](u32 logical) { return chrome_pen_on(logical, depth); };
+        CHECK_EQ(window_pixel(r, window, box.x0, box.y0), pen(chrome::kFrameLight));
+        CHECK_EQ(window_pixel(r, window, box.x1, box.y1), pen(chrome::kFrameDark));
+        CHECK_EQ(window_pixel(r, window, box.x0 + 2, box.y0 + 2), pen(chrome::kInactiveBar0));
+        free_requester(r, window);
+    }
 }
 
 void requester_caller_idcmp_class_returns_minus_one() {
@@ -9244,6 +9549,11 @@ int main() {
     rounded_top_corners_on_depth8_show_backdrop_and_chrome();
     drop_shadow_darkens_backdrop_and_behind_window_only();
     moving_and_closing_window_removes_old_shadow();
+    chrome_pens_find_their_place_on_every_depth();
+    shallow_modern_screens_draw_the_window_chrome_in_the_mapped_pens();
+    shallow_modern_screens_draw_prop_gadgets_in_the_mapped_pens();
+    shallow_modern_screens_hold_the_chrome_colours_at_the_mapped_pens();
+    shallow_modern_screens_cast_shadows_in_their_own_palette();
     depth2_screen_has_no_corners_and_no_shadow();
     shade_table_darkens_default_pen0_and_updates_on_setrgb32();
     flush_palette_recomposes_8plane_shadows_and_end_batch_flushes();
@@ -9287,6 +9597,7 @@ int main() {
     menu_disabled_title_never_opens();
     classic_menu_boxes_are_framed_square_and_cast_no_shadow();
     menu_on_a_chrome_screen_highlights_ghosts_and_restores();
+    menu_on_a_shallow_modern_screen_highlights_ghosts_and_restores();
     menu_rmbtrap_window_still_gets_menudown_and_menuup();
     menu_mode_ends_without_a_pick_when_the_strip_or_window_goes();
     open_window_logs_the_title();
@@ -9301,6 +9612,7 @@ int main() {
     requester_handler_without_input_returns_minus_two();
     requester_buttons_answer_with_their_numbers();
     requester_release_outside_raises_the_button_again();
+    requester_buttons_on_a_shallow_modern_screen_use_the_mapped_pens();
     requester_caller_idcmp_class_returns_minus_one();
     requester_title_falls_back_to_the_window_then_the_system();
     requester_formats_text_then_gadgets_from_one_stream();
