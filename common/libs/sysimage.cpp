@@ -423,21 +423,38 @@ void draw(Graphics& graphics, native::Bus&, u32 rp, u32 which, const Rect& box_r
     }
     case DEPTHIMAGE:
     case ZOOMIMAGE: {
-        // The gadgets at the right of a title bar overlap by a column:
-        // each starts with the dark line that ends its neighbour on the
-        // left, and its own raised edges follow. The depth gadget's right
-        // edge is the window's.
+        // The gadgets at the right of a title bar overlap by a column. Held
+        // down, each starts with the dark line that ends its neighbour on
+        // the left, and its own sunken edges follow. Otherwise it is flat:
+        // only the window's edges run through it, the light top, the line
+        // under the bar and, for the depth gadget, the window's right edge.
         const Area cell{outer.x0 + 1, outer.y0, outer.x1, outer.y1};
-        edges(graphics, rp, cell, Edges{light, dark, which == DEPTHIMAGE, true});
-        line(graphics, rp, pens[ShinePen], outer.x0, outer.y0, outer.x0, outer.y0);
-        line(graphics, rp, pens[ShadowPen], outer.x0, outer.y0 + 1, outer.x0, outer.y1);
+        if (down) {
+            edges(graphics, rp, cell, Edges{light, dark, which == DEPTHIMAGE, true});
+            line(graphics, rp, pens[ShinePen], outer.x0, outer.y0, outer.x0, outer.y0);
+            line(graphics, rp, pens[ShadowPen], outer.x0, outer.y0 + 1, outer.x0, outer.y1);
+        } else {
+            line(graphics, rp, light, outer.x0, outer.y0, outer.x1, outer.y0);
+            line(graphics, rp, dark, outer.x0, outer.y1, outer.x1, outer.y1);
+            if (which == DEPTHIMAGE) {
+                line(graphics, rp, dark, outer.x1, outer.y0, outer.x1, outer.y1);
+            }
+        }
         draw_glyph(graphics, rp, which, shrink(cell, 1, 1),
                    GlyphPens{pens[ShadowPen], pens[ShinePen], pens[BackgroundPen]});
         break;
     }
     case CLOSEIMAGE:
-        // The close gadget's left edge is the window's.
-        edges(graphics, rp, outer, Edges{light, dark, false, false});
+        // The close gadget's left edge is the window's. Held down it is
+        // sunken; otherwise flat, with the window's light top and left
+        // edges and the line under the bar running through it.
+        if (down) {
+            edges(graphics, rp, outer, Edges{light, dark, false, false});
+        } else {
+            line(graphics, rp, light, outer.x0, outer.y0, outer.x1, outer.y0);
+            line(graphics, rp, light, outer.x0, outer.y0, outer.x0, outer.y1);
+            line(graphics, rp, dark, outer.x0 + 1, outer.y1, outer.x1, outer.y1);
+        }
         draw_glyph(graphics, rp, which, shrink(outer, 1, 1),
                    GlyphPens{pens[ShadowPen], pens[ShinePen], pens[BackgroundPen]});
         break;

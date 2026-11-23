@@ -2419,18 +2419,19 @@ void hit_rectangles_match_the_drawn_boxes() {
     const i32 depth_cx = (depth_box.x0 + depth_box.x1) / 2;
     const i32 depth_cy = (depth_box.y0 + depth_box.y1) / 2;
 
-    // The raised edge of an image: SHINEPEN (2) along the top and left,
-    // SHADOWPEN (1) along the bottom and right.
+    // The window's edges through the flat buttons: SHINEPEN (2) along the
+    // top and the left, SHADOWPEN (1) along the bottom and the right, and
+    // the face where the buttons meet the title.
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0), 2u);
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y1), 1u);
     CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_cy), 2u);
-    CHECK_EQ(screen_pixel(r, screen, close_box.x1, close_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x1, close_cy), 0u);
     CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_box.y0), 2u);
 
     CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y0), 2u);
     CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y1), 1u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_cy), 0u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1, depth_cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_box.y0), 2u);
@@ -5137,7 +5138,7 @@ void held_bar_button_shows_pressed_while_the_pointer_is_over_it() {
     CHECK_EQ(get_msg(r, port), 0u);
 }
 
-void held_bar_button_swaps_its_edges_on_a_four_colour_screen() {
+void held_bar_button_sinks_on_a_four_colour_screen() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
@@ -5150,20 +5151,20 @@ void held_bar_button_swaps_its_edges_on_a_four_colour_screen() {
     const Rect depth_box = Intuition::depth_box_rect(50, 60, 200);
     const i32 cx = (depth_box.x0 + depth_box.x1) / 2;
     const i32 cy = (depth_box.y0 + depth_box.y1) / 2;
-    // The image's SHINEPEN edge on the left, SHADOWPEN on the right and
-    // FILLPEN (3) between.
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 2u);
+    // Flat: FILLPEN (3) on the left, the window's SHADOWPEN edge on the
+    // right.
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 3u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1 - 1, cy), 3u);
     press(r, cx, cy);
-    // Held, the edges swap their pens; the left one is the dark line that ends
-    // the neighbour, which stays.
+    // Held, it is sunken: dark on the left, after the dark line that ends
+    // the neighbour, and light on the right.
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0, cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1 - 1, cy), 3u);
     release(r, cx, cy);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 3u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 1u);
 }
 
@@ -9006,25 +9007,33 @@ void border_images_carry_the_frame_lines_they_cover() {
         CHECK(all(15, 1, 15, 9, shadow));
     }
 
-    // The close gadget, 20 by 11: the window's light edges along its top
-    // and left, the title bar's dark line along its bottom.
+    // The close gadget, 20 by 11: flat, the window's light edges along its
+    // top and left, the title bar's dark line along its bottom and no edge
+    // of its own on the right. Held down it is sunken.
     draw(CLOSEIMAGE, IDS_NORMAL);
     CHECK(all(0, 0, 19, 0, shine));
     CHECK(all(0, 0, 0, 10, shine));
     CHECK(all(1, 10, 19, 10, shadow));
-    CHECK(all(19, 1, 19, 10, shadow));
+    CHECK(all(19, 1, 19, 9, fill));
+    draw(CLOSEIMAGE, IDS_SELECTED);
+    CHECK(all(0, 0, 19, 0, shadow));
+    CHECK(all(19, 1, 19, 10, shine));
 
-    // The depth and zoom gadgets, 23 by 11, start with the dark line that
-    // ends the gadget on their left. Only the depth gadget's right edge is
-    // the window's, dark to the top.
+    // The depth and zoom gadgets, 23 by 11, are flat: the window's light
+    // top, the title bar's dark line and, for the depth gadget, the
+    // window's dark right edge. Held down, they start with the dark line
+    // that ends the gadget on their left and are sunken.
     for (const u32 which : {ZOOMIMAGE, DEPTHIMAGE}) {
         draw(which, IDS_NORMAL);
         CHECK(all(0, 0, 21, 0, shine));
-        CHECK(all(0, 1, 0, 10, shadow));
-        CHECK(all(1, 1, 1, 9, shine));
+        CHECK(all(0, 1, 1, 9, fill));
         CHECK(all(0, 10, 22, 10, shadow));
-        CHECK(all(22, 1, 22, 10, shadow));
+        CHECK(all(22, 1, 22, 9, which == DEPTHIMAGE ? shadow : fill));
         CHECK_EQ(window_pixel(r, window, left + 22, top), which == DEPTHIMAGE ? shadow : shine);
+        draw(which, IDS_SELECTED);
+        CHECK(all(0, 1, 0, 10, shadow));
+        CHECK(all(1, 1, 1, 9, shadow));
+        CHECK(all(22, 1, 22, 10, shine));
     }
 
     // The screen's depth gadget takes the screen bar's pens: a line of the
@@ -9644,7 +9653,7 @@ int main() {
     activation_switch_redraws_both_bars();
     bar_buttons_are_centred_and_mirror_each_other();
     held_bar_button_shows_pressed_while_the_pointer_is_over_it();
-    held_bar_button_swaps_its_edges_on_a_four_colour_screen();
+    held_bar_button_sinks_on_a_four_colour_screen();
     rounded_top_corners_on_depth8_show_backdrop_and_chrome();
     drop_shadow_darkens_backdrop_and_behind_window_only();
     moving_and_closing_window_removes_old_shadow();
