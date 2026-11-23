@@ -24,11 +24,13 @@
 #pragma once
 
 // Host only: lays a Rigid Disk Block and its partition blocks out at the
-// start of a hard disk image, for tests and tools. The kernel never
-// includes this file.
+// start of a hard disk image, and writes the MBR and GPT tables that point at
+// them, for tests and tools. The kernel never includes this file.
 
+#include "pc_partitions.hpp"
 #include "types.hpp"
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -54,10 +56,30 @@ struct RdbGeometry {
     u32 rdb_cylinders = 2; // cylinders kept for the RDB, before any partition
 };
 
+// A primary or extended partition table entry: only the fields needed to
+// place an image.
+struct MbrPartitionSpec {
+    u8 type = 0;
+    u32 first_lba = 0;
+    u32 sectors = 0;
+    bool bootable = false;
+};
+
+struct GptPartitionSpec {
+    u64 first_lba = 0;
+    u64 last_lba = 0;
+    bool used = true;
+};
+
 namespace rdb_writer_detail {
 
 inline constexpr u32 sector_bytes = 512;
 inline constexpr u32 summed_longs = 64;
+inline constexpr u32 mbr_entry_base = 446;
+inline constexpr u32 mbr_entry_bytes = 16;
+inline constexpr u32 mbr_entries = 4;
+inline constexpr u32 gpt_entry_bytes = 128;
+inline constexpr u32 gpt_header_bytes = 92;
 
 inline void put32(std::vector<u8>& image, u32 block, u32 index, u32 value) {
     u8* p = image.data() + static_cast<usize>(block) * sector_bytes + index * 4;
@@ -70,6 +92,18 @@ inline void put32(std::vector<u8>& image, u32 block, u32 index, u32 value) {
 inline u32 get32(const std::vector<u8>& image, u32 block, u32 index) {
     const u8* p = image.data() + static_cast<usize>(block) * sector_bytes + index * 4;
     return (u32{p[0]} << 24) | (u32{p[1]} << 16) | (u32{p[2]} << 8) | u32{p[3]};
+}
+
+inline void store_le32(u8* p, u32 value) {
+    p[0] = static_cast<u8>(value);
+    p[1] = static_cast<u8>(value >> 8);
+    p[2] = static_cast<u8>(value >> 16);
+    p[3] = static_cast<u8>(value >> 24);
+}
+
+inline void store_le64(u8* p, u64 value) {
+    store_le32(p, static_cast<u32>(value));
+    store_le32(p + 4, static_cast<u32>(value >> 32));
 }
 
 // Stores the checksum that makes the block's first summed_longs longs add up
@@ -158,6 +192,111 @@ inline std::vector<u8> build_rdb_disk(const RdbGeometry& g,
         seal(image, block);
     }
     return image;
+}
+
+// Writes up to four partition entries and the 0x55AA signature at the end of
+// the given sector, for a master boot record or an extended boot record.
+inline void write_mbr_sector(std::vector<u8>& image, u64 lba,
+                             const std::vector<MbrPartitionSpec>& entries) {
+    using namespace rdb_writer_detail;
+    if (entries.size() > usize{mbr_entries}) {
+        throw std::runtime_error("too many MBR entries");
+    }
+    const usize base = static_cast<usize>(lba) * sector_bytes;
+    if (base + sector_bytes > image.size()) {
+        throw std::runtime_error("MBR sector outside the image");
+    }
+    for (u32 slot = 0; slot < mbr_entries; ++slot) {
+        u8* entry = image.data() + base + mbr_entry_base + slot * mbr_entry_bytes;
+        for (u32 b = 0; b < mbr_entry_bytes; ++b) {
+            entry[b] = 0;
+        }
+        if (slot >= entries.size()) {
+            continue;
+        }
+        const MbrPartitionSpec& spec = entries[slot];
+        entry[0] = spec.bootable ? 0x80 : 0x00;
+        entry[4] = spec.type;
+        store_le32(entry + 8, spec.first_lba);
+        store_le32(entry + 12, spec.sectors);
+    }
+    image[base + 510] = 0x55;
+    image[base + 511] = 0xAA;
+}
+
+inline void write_mbr(std::vector<u8>& image, const std::vector<MbrPartitionSpec>& entries) {
+    write_mbr_sector(image, 0, entries);
+}
+
+inline void write_gpt_header(std::vector<u8>& image, u64 lba, u64 entries_lba,
+                             u32 entry_count, u32 entries_crc, u64 my_lba,
+                             u64 alternate_lba) {
+    using namespace rdb_writer_detail;
+    const usize base = static_cast<usize>(lba) * sector_bytes;
+    if (base + sector_bytes > image.size()) {
+        throw std::runtime_error("GPT header outside the image");
+    }
+    for (usize i = 0; i < sector_bytes; ++i) {
+        image[base + i] = 0;
+    }
+    const char signature[8] = {'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T'};
+    for (u32 i = 0; i < 8; ++i) {
+        image[base + i] = static_cast<u8>(signature[i]);
+    }
+    store_le32(image.data() + base + 8, 0x00010000u);
+    store_le32(image.data() + base + 12, gpt_header_bytes);
+    store_le64(image.data() + base + 24, my_lba);
+    store_le64(image.data() + base + 32, alternate_lba);
+    store_le64(image.data() + base + 72, entries_lba);
+    store_le32(image.data() + base + 80, entry_count);
+    store_le32(image.data() + base + 84, gpt_entry_bytes);
+    store_le32(image.data() + base + 88, entries_crc);
+    store_le32(image.data() + base + 16,
+               pc_partitions_detail::crc32(image.data() + base, gpt_header_bytes));
+}
+
+// A protective MBR and both GPT headers with their entry arrays: the primary
+// header at LBA 1 and its array at LBA 2, the backup header in the last
+// sector and its array in the one before it. The entries must fit the first
+// entry array sector.
+inline void write_gpt(std::vector<u8>& image, const std::vector<GptPartitionSpec>& entries) {
+    using namespace rdb_writer_detail;
+    const u64 sectors = image.size() / sector_bytes;
+    if (sectors < 8) {
+        throw std::runtime_error("disk too small for a GPT");
+    }
+    if (entries.size() > usize{4}) {
+        throw std::runtime_error("too many GPT entries");
+    }
+    MbrPartitionSpec protective;
+    protective.type = 0xEE;
+    protective.first_lba = 1;
+    protective.sectors =
+        static_cast<u32>(sectors - 1 > 0xFFFFFFFFu ? 0xFFFFFFFFu : sectors - 1);
+    write_mbr(image, {protective});
+
+    std::vector<u8> array(entries.size() * gpt_entry_bytes, 0);
+    for (usize i = 0; i < entries.size(); ++i) {
+        if (!entries[i].used) {
+            continue;
+        }
+        u8* entry = array.data() + i * gpt_entry_bytes;
+        entry[0] = 0x01;  // Any non-zero type GUID marks the entry as used.
+        store_le64(entry + 32, entries[i].first_lba);
+        store_le64(entry + 40, entries[i].last_lba);
+    }
+    const u32 array_crc = pc_partitions_detail::crc32(array.data(), array.size());
+    const u64 backup_header = sectors - 1;
+    const u64 backup_array = sectors - 2;
+    if (!array.empty()) {
+        std::memcpy(image.data() + 2 * sector_bytes, array.data(), array.size());
+        std::memcpy(image.data() + static_cast<usize>(backup_array) * sector_bytes,
+                    array.data(), array.size());
+    }
+    write_gpt_header(image, 1, 2, static_cast<u32>(entries.size()), array_crc, 1,
+                     backup_header);
+    write_gpt_header(image, backup_header, backup_array,
+                     static_cast<u32>(entries.size()), array_crc, backup_header, 1);
 }
 
 }
