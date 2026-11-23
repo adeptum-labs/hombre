@@ -200,14 +200,20 @@ inline bool read_partition(const u8* block, u32 index, u32 disk_sectors, RdbPart
     const u64 cylinder = u64{env[envec::surfaces]} * env[envec::blocks_per_track];
     const u32 low = env[envec::low_cyl];
     const u32 high = env[envec::high_cyl];
-    if (cylinder == 0 || high < low) {
+    if (cylinder == 0 || cylinder > disk_sectors || high < low) {
+        return false;
+    }
+    // Each product is checked against the disk before the next is formed, so
+    // nothing wraps: a cylinder is at most 2^32 sectors and the disk too.
+    if (low >= disk_sectors / cylinder + 1) {
         return false;
     }
     const u64 first = u64{low} * cylinder;
-    const u64 count = u64{high - low + 1} * cylinder;
-    if (first + count > disk_sectors) {
+    const u64 cylinders = u64{high - low} + 1;
+    if (first >= disk_sectors || cylinders > (disk_sectors - first) / cylinder) {
         return false;
     }
+    const u64 count = cylinders * cylinder;
     const u32 dos_type = env[envec::dos_type];
     if ((dos_type & 0xFFFFFF00u) != dos_type_ofs) {
         return false;

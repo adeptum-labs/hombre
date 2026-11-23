@@ -182,6 +182,26 @@ void a_larger_block_size_is_skipped() {
     CHECK_EQ(disk.skipped, 1u);
 }
 
+void geometry_that_wraps_is_skipped() {
+    Disk d{build_rdb_disk(geometry(), {RdbPartitionSpec{"DH0", 2, 99}})};
+    // Products that wrap 64 bits and would otherwise pass the size check.
+    put32(d.image, 512 + (32 + 3) * 4, 3);
+    put32(d.image, 512 + (32 + 5) * 4, 2007567422u);
+    put32(d.image, 512 + (32 + 9) * 4, 1);
+    put32(d.image, 512 + (32 + 10) * 4, 3062868336u);
+    put32(d.image, 512 + 8, 0);
+    u32 sum = 0;
+    for (u32 i = 0; i < 64; ++i) {
+        const u8* p = d.image.data() + 512 + i * 4;
+        sum += (u32{p[0]} << 24) | (u32{p[1]} << 16) | (u32{p[2]} << 8) | p[3];
+    }
+    put32(d.image, 512 + 8, 0u - sum);
+    RdbDisk disk;
+    CHECK_EQ(scan(d, disk), RdbError::Ok);
+    CHECK_EQ(disk.count, 0u);
+    CHECK_EQ(disk.skipped, 1u);
+}
+
 void unusable_names_become_dh_and_the_index() {
     RdbPartitionSpec a{"", 2, 50};
     RdbPartitionSpec b{"Bad:Name", 51, 99};
@@ -237,6 +257,7 @@ int main() {
     unmountable_partitions_are_skipped();
     a_partition_past_the_end_of_the_disk_is_skipped();
     a_larger_block_size_is_skipped();
+    geometry_that_wraps_is_skipped();
     unusable_names_become_dh_and_the_index();
     a_bare_dos_volume_is_one_partition();
     a_blank_disk_has_no_partitions();
