@@ -39,6 +39,19 @@ DISK      ?= $(TEST_DISK)
 export DISK DISK1 DISK2 DISK3
 DISK_IMG  := $(BUILD)/disk.img
 
+# Hard disk images make run attaches after the floppies: HDF and the
+# optional HDF1 to HDF3, each an RDB-partitioned image or a bare DOS volume,
+# whose partitions become DH0: and on. Hard disk n sits in PCI slot 0x18 + n.
+# They are attached as they are and written to; HDF_SNAPSHOT=1 keeps every
+# write in QEMU instead. With HDF given and DISK not, DF0: stays empty and
+# Hombre boots from the hard disk.
+export HDF HDF1 HDF2 HDF3 HDF_SNAPSHOT
+ifneq ($(HDF),)
+ifeq ($(origin DISK),file)
+NO_DF0 := 1
+endif
+endif
+
 # Drives for the negative boots: 1000 zero bytes, and the test disk with one
 # byte changed inside the packed data of its first track.
 ZERO_DISK    := $(BUILD)/zero-disk.bin
@@ -182,20 +195,32 @@ AUDIODEV ?= pa
 run: image disk-image
 	cp $(OVMF)/OVMF_VARS_4M.fd $(BUILD)/OVMF_VARS-run.fd
 	extra=; \
+	if [ -z "$(NO_DF0)" ]; then \
+	    extra="-drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG)"; \
+	    extra="$$extra -device virtio-blk-pci,disable-legacy=on,drive=disk0,addr=0x10"; \
+	fi; \
 	for n in 1 2 3; do \
 	    if [ -f $(BUILD)/disk$$n.img ]; then \
 	        extra="$$extra -drive if=none,id=disk$$n,format=raw,readonly=on,file=$(BUILD)/disk$$n.img"; \
 	        extra="$$extra -device virtio-blk-pci,disable-legacy=on,drive=disk$$n,addr=0x1$$n"; \
 	    fi; \
 	done; \
+	snap=; if [ -n "$$HDF_SNAPSHOT" ]; then snap=",snapshot=on"; fi; \
+	set --; n=0; \
+	for f in "$$HDF" "$$HDF1" "$$HDF2" "$$HDF3"; do \
+	    if [ -n "$$f" ]; then \
+	        [ -f "$$f" ] || { echo "missing hard disk image $$f" >&2; exit 1; }; \
+	        set -- "$$@" -drive "if=none,id=hd$$n,format=raw$$snap,file=$$(echo "$$f" | sed 's/,/,,/g')"; \
+	        set -- "$$@" -device virtio-blk-pci,disable-legacy=on,drive=hd$$n,addr=0x1$$((8 + n)); \
+	    fi; \
+	    n=$$((n + 1)); \
+	done; \
 	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G -no-reboot \
 	    -serial stdio \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF)/OVMF_CODE_4M.fd \
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS-run.fd \
 	    -drive format=raw,snapshot=on,file=$(IMAGE) \
-	    -drive if=none,id=disk0,format=raw,readonly=on,file=$(DISK_IMG) \
-	    -device virtio-blk-pci,disable-legacy=on,drive=disk0,addr=0x10 \
-	    $$extra \
+	    $$extra "$$@" \
 	    -device qemu-xhci -device usb-kbd -device usb-mouse \
 	    -audiodev $(AUDIODEV),id=snd0 -device ich9-intel-hda -device hda-output,audiodev=snd0
 

@@ -28,7 +28,8 @@
 # virtio-blk drive. --disk <file> attaches a copy of that file padded to
 # whole sectors instead, and --no-disk attaches no drive.
 # --disk1 <file> and --disk2 <file> attach copies of more disks as DF1:
-# and DF2:.
+# and DF2:. --hdf <file> attaches that hard disk image itself, writable, as
+# the first hard disk, so what the boot writes stays in the file.
 #
 # --usb-kbd attaches an xHCI controller with a USB keyboard. --keys "<names>"
 # implies it and, once "shell: ready" shows on the serial console, types the
@@ -51,7 +52,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--hdf <file>] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -70,6 +71,7 @@ disk_mode=default
 disk_source=
 disk1_source=
 disk2_source=
+hdf=
 no_startup=false
 while [[ ${1:-} == --* ]]; do
     case $1 in
@@ -88,6 +90,11 @@ while [[ ${1:-} == --* ]]; do
         --disk2)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
             disk2_source=$2
+            shift
+            ;;
+        --hdf)
+            [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
+            hdf=$2
             shift
             ;;
         --usb-kbd) usb_kbd=true ;;
@@ -173,6 +180,12 @@ if [[ -n $disk2_source ]]; then
     "$tools_dir/make_disk.sh" "$disk2_source" "$disk2"
     disk_args+=(-drive "if=none,id=disk2,format=raw,readonly=on,file=$disk2"
                 -device virtio-blk-pci,disable-legacy=on,drive=disk2,addr=0x12)
+fi
+# Hard disk n sits in PCI slot 0x18 + n.
+if [[ -n $hdf ]]; then
+    [[ -f $hdf ]] || { echo "missing hard disk image $hdf" >&2; exit 1; }
+    disk_args+=(-drive "if=none,id=hd0,format=raw,file=${hdf//,/,,}"
+                -device virtio-blk-pci,disable-legacy=on,drive=hd0,addr=0x18)
 fi
 
 serial_log=$build_dir/serial.log
