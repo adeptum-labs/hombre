@@ -206,13 +206,14 @@ constexpr u32 kPropInfoAt = Workbench::kScrollGadgets * ndk::Gadget_SIZEOF;
 constexpr u32 kKnobAt = kPropInfoAt + kSliders * ndk::PropInfo_SIZEOF;
 constexpr u32 kScrollBlockBytes = kKnobAt + kSliders * Image_SIZEOF;
 
-// The fuel gauge of a volume window: a column in its left border, two
-// pixels below the window's inner top and clear of its inner bottom.
-constexpr i32 kGaugeLeft = 4;
-constexpr i32 kGaugeWidth = 8;
+// The fuel gauge of a volume window: a column in its left border, from two
+// pixels below the window's inner top to its inner bottom, as wide as the
+// look of the screen has it and never more than a word of image data.
 constexpr i32 kGaugeInset = 2;
 constexpr u32 kGaugeRowBytes = 2;
 constexpr i32 kGaugeMinHeight = 3;
+static_assert(chrome::fuel_gauge_width(chrome::Style::Classic) <= 16 &&
+              chrome::fuel_gauge_width(chrome::Style::Modern) <= 16);
 
 // The arrow images, each plain and pressed, as deep as the screen.
 constexpr u32 kArrowImages = 8;
@@ -1285,14 +1286,15 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     // gadget list before the window opens, for the border it needs.
     u32 gauge = 0;
     if (is_volume_root(path)) {
-        const i32 gauge_top = bar_height + 3;  // the bar, its line and two pixels
+        const i32 gauge_top = bar_height + 1 + kGaugeInset;  // below the bar and its line
         gauge = make_volume_gauge(
-            gadgets, gauge_top,
-            height - gauge_top - static_cast<i32>(chrome::kSizeBorderBottom) - 4);
+            gadgets, gauge_top, height - gauge_top - static_cast<i32>(chrome::kSizeBorderBottom));
     }
+    // The gauge's face is the border's, which follows the window's state.
     const u32 idcmp = ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
                       ndk::IDCMP_NEWSIZE | ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP |
-                      kIdcmpMenuPick | kIdcmpRefreshWindow;
+                      kIdcmpMenuPick | kIdcmpRefreshWindow |
+                      (gauge != 0 ? ndk::IDCMP_ACTIVEWINDOW | ndk::IDCMP_INACTIVEWINDOW : 0u);
     // The window keeps a copy of its title, so the one built here goes
     // back with the NewWindow.
     const u32 window = b.ok() ? open_window_on_port(new_window, idcmp, name) : 0;
@@ -1644,7 +1646,8 @@ u32 Workbench::make_scroll_gadgets() {
 
 // The fuel gauge gadget of a volume window, linked after the scroll
 // gadgets before the window opens so that Intuition makes the left border
-// wide enough for it. Its image is made once the window's size is known.
+// wide enough for it. Its box across the border is that of the screen's
+// look. Its image is made once the window's size is known.
 u32 Workbench::make_volume_gauge(u32 gadgets, i32 top, i32 height) {
     const u32 gauge = exec_->alloc(ndk::Gadget_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (gauge == 0) {
@@ -1654,14 +1657,16 @@ u32 Workbench::make_volume_gauge(u32 gadgets, i32 top, i32 height) {
         height = kGaugeMinHeight;
     }
     Bus b(*machine_);
+    const chrome::Style style =
+        chrome::style_for_depth(b.r8(screen_ + ndk::sc_BitMap + ndk::bm_Depth));
     u32 last = gadgets;
     for (u32 i = 1; i < kScrollGadgets; ++i) {
         last = b.r32(last + ndk::gg_NextGadget);
     }
     b.w32(last + ndk::gg_NextGadget, gauge);
-    b.w16(gauge + ndk::gg_LeftEdge, static_cast<u32>(kGaugeLeft));
+    b.w16(gauge + ndk::gg_LeftEdge, static_cast<u32>(chrome::fuel_gauge_left(style)));
     b.w16(gauge + ndk::gg_TopEdge, static_cast<u32>(top));
-    b.w16(gauge + ndk::gg_Width, static_cast<u32>(kGaugeWidth));
+    b.w16(gauge + ndk::gg_Width, static_cast<u32>(chrome::fuel_gauge_width(style)));
     b.w16(gauge + ndk::gg_Height, static_cast<u32>(height));
     b.w16(gauge + ndk::gg_Flags, ndk::GFLG_GADGIMAGE | ndk::GFLG_GADGHNONE);
     b.w16(gauge + ndk::gg_Activation, ndk::GACT_LEFTBORDER);
@@ -1675,8 +1680,8 @@ u32 Workbench::make_volume_gauge(u32 gadgets, i32 top, i32 height) {
 
 namespace {
 
-// Where the gauge of a volume window sits: two pixels below the window's
-// inner top, its height short of the inner bottom.
+// Where the gauge of a volume window sits: from two pixels below the
+// window's inner top to its inner bottom.
 struct GaugeBox {
     i32 top;
     i32 height;
@@ -1688,7 +1693,7 @@ GaugeBox gauge_box(Bus& b, u32 window) {
     const i32 window_height = static_cast<i16>(b.r16(window + ndk::wd_Height));
     GaugeBox box;
     box.top = border_top + kGaugeInset;
-    box.height = window_height - box.top - border_bottom - 2 * kGaugeInset;
+    box.height = window_height - box.top - border_bottom;
     if (box.height < kGaugeMinHeight) {
         box.height = kGaugeMinHeight;
     }
@@ -1697,103 +1702,92 @@ GaugeBox gauge_box(Bus& b, u32 window) {
 
 }
 
-// Fits the gauge to the window, gives it the share of the volume that is
-// used and draws it.
+// Asks the volume how full it is, fits the gauge to the window and draws
+// it.
 void Workbench::layout_gauge(DrawerWindow& w) {
     if (w.gauge == 0) {
         return;
     }
+    if (!dos_->volume_usage(w.path, w.gauge_total, w.gauge_used)) {
+        w.gauge_total = 1;
+        w.gauge_used = 1;
+    }
+    w.gauge_percent = w.gauge_total != 0
+                          ? static_cast<u32>((static_cast<u64>(w.gauge_used) * 100) /
+                                             w.gauge_total)
+                          : 100;
+    if (fit_gauge(w)) {
+        intuition_->refresh_glist(w.gauge, w.window, 1);
+    }
+}
+
+// Gives the gauge's gadget and image the rows the window has for them and
+// paints the image for the share of the volume last asked for. A gauge that
+// shrinks keeps its image's memory, so this takes none then. False when the
+// window has no room for a gauge, whose gadget of no rows is not drawn.
+bool Workbench::fit_gauge(DrawerWindow& w) {
     Bus b(*machine_);
     const u32 depth = b.r8(screen_ + ndk::sc_BitMap + ndk::bm_Depth);
     if (!b.ok() || depth == 0 || depth > 8) {
-        return;
+        return false;
     }
     const GaugeBox box = gauge_box(b, w.window);
     const u32 bytes = Image_SIZEOF + kGaugeRowBytes * static_cast<u32>(box.height) * depth;
-    if (w.gauge_image == 0 || w.gauge_height != box.height || w.gauge_depth != depth) {
+    if (box.height != 0 && (w.gauge_image == 0 || bytes > w.gauge_bytes)) {
         const u32 image = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (image == 0) {
-            return;
+            return false;
         }
-        b.w16(image + im_Width, static_cast<u32>(kGaugeWidth));
-        b.w16(image + im_Height, static_cast<u32>(box.height));
-        b.w16(image + im_Depth, depth);
-        b.w32(image + im_ImageData, image + Image_SIZEOF);
-        b.w8(image + im_PlanePick, (1u << depth) - 1);
         if (w.gauge_image != 0) {
             exec_->free(w.gauge_image, w.gauge_bytes);
         }
         w.gauge_image = image;
         w.gauge_bytes = bytes;
-        w.gauge_height = box.height;
-        w.gauge_depth = depth;
+        b.w32(image + im_ImageData, image + Image_SIZEOF);
         b.w32(w.gauge + ndk::gg_GadgetRender, image);
     }
+    w.gauge_height = box.height;
+    w.gauge_depth = depth;
     b.w16(w.gauge + ndk::gg_TopEdge, static_cast<u32>(box.top));
     b.w16(w.gauge + ndk::gg_Height, static_cast<u32>(box.height));
-    u32 total = 0;
-    u32 used = 0;
-    if (!dos_->volume_usage(w.path, total, used)) {
-        total = 1;
-        used = 1;
+    if (box.height == 0) {
+        return false;
     }
-    w.gauge_percent = total != 0
-                          ? static_cast<u32>((static_cast<u64>(used) * 100) / total)
-                          : 100;
-    fill_gauge_image(w, used, total);
-    intuition_->refresh_glist(w.gauge, w.window, 1);
+    b.w16(w.gauge_image + im_Width, b.r16(w.gauge + ndk::gg_Width));
+    b.w16(w.gauge_image + im_Height, static_cast<u32>(box.height));
+    b.w16(w.gauge_image + im_Depth, depth);
+    b.w8(w.gauge_image + im_PlanePick, (1u << depth) - 1);
+    fill_gauge_image(w);
+    return b.ok();
 }
 
-// The gauge's image: a sunken box in the screen's pens, filled from the
-// bottom with the rows the used blocks cover.
-void Workbench::fill_gauge_image(DrawerWindow& w, u32 used, u32 total) {
+// The gauge's image in the look of the screen's depth, for the window as it
+// is now, active or not.
+void Workbench::fill_gauge_image(DrawerWindow& w) {
     Bus b(*machine_);
-    const u32 height = static_cast<u32>(w.gauge_height);
     const u32 data = b.r32(w.gauge_image + im_ImageData);
-    const u32 draw_info = intuition_->screen_draw_info(screen_);
-    chrome::DrawInfoPens pens;
-    sysimage::read_pens(b, draw_info, pens.pen);
-    const u32 inner = height > 2 ? height - 2 : 0;
-    u32 filled = total != 0
-                     ? static_cast<u32>((static_cast<u64>(used) * inner + total / 2) / total)
-                     : inner;
-    if (used != 0 && filled == 0) {
-        filled = 1;
-    }
-    if (filled > inner) {
-        filled = inner;
-    }
+    chrome::FuelGauge gauge;
+    gauge.width = static_cast<i32>(b.r16(w.gauge_image + im_Width));
+    gauge.height = w.gauge_height;
+    gauge.filled = chrome::fuel_gauge_filled(w.gauge_height, w.gauge_used, w.gauge_total);
+    gauge.active = intuition_->active_window() == w.window;
+    gauge.style = chrome::style_for_depth(w.gauge_depth);
+    gauge.depth = w.gauge_depth;
+    sysimage::read_pens(b, intuition_->screen_draw_info(screen_), gauge.pens.pen);
+    const u32 height = static_cast<u32>(w.gauge_height);
     const u32 plane_bytes = kGaugeRowBytes * height;
     for (u32 y = 0; y < height; ++y) {
-        u8 row[kGaugeWidth];
-        for (i32 x = 0; x < kGaugeWidth; ++x) {
-            u8 pen = static_cast<u8>(pens.pen[sysimage::BackgroundPen]);
-            if (y == 0 && x < kGaugeWidth - 1) {
-                pen = static_cast<u8>(pens.pen[sysimage::ShadowPen]);
-            }
-            if (x == 0) {
-                pen = static_cast<u8>(pens.pen[sysimage::ShadowPen]);
-            }
-            if (x == kGaugeWidth - 1) {
-                pen = static_cast<u8>(pens.pen[sysimage::ShinePen]);
-            }
-            if (y + 1 == height && x > 0) {
-                pen = static_cast<u8>(pens.pen[sysimage::ShinePen]);
-            }
-            if (x > 0 && x < kGaugeWidth - 1 && y > 0 && y + 1 < height &&
-                y + 1 + filled >= height) {
-                pen = static_cast<u8>(pens.pen[sysimage::FillPen]);
-            }
-            row[x] = pen;
-        }
-        for (u32 plane = 0; plane < w.gauge_depth; ++plane) {
-            u32 bits = 0;
-            for (i32 x = 0; x < kGaugeWidth; ++x) {
-                if ((row[x] & (1u << plane)) != 0) {
-                    bits |= 0x8000u >> x;
+        u32 bits[8]{};
+        for (i32 x = 0; x < gauge.width; ++x) {
+            const u32 pen = chrome::fuel_gauge_pen(gauge, x, static_cast<i32>(y));
+            for (u32 plane = 0; plane < w.gauge_depth; ++plane) {
+                if ((pen & (1u << plane)) != 0) {
+                    bits[plane] |= 0x8000u >> x;
                 }
             }
-            b.w16(data + plane * plane_bytes + y * kGaugeRowBytes, bits);
+        }
+        for (u32 plane = 0; plane < w.gauge_depth; ++plane) {
+            b.w16(data + plane * plane_bytes + y * kGaugeRowBytes, bits[plane]);
         }
     }
 }
@@ -3028,6 +3022,12 @@ void Workbench::handle_message(u32 message) {
             layout_gauge(*w);
         }
         draw_window(window_id);
+    } else if (idcmp_class == ndk::IDCMP_ACTIVEWINDOW ||
+               idcmp_class == ndk::IDCMP_INACTIVEWINDOW) {
+        // The border changed its face under the gauge.
+        if (DrawerWindow* w = find_window(window_id); w != nullptr) {
+            layout_gauge(*w);
+        }
     } else if (scroll_id != 0 &&
                (idcmp_class == ndk::IDCMP_GADGETDOWN || idcmp_class == ndk::IDCMP_GADGETUP ||
                 idcmp_class == ndk::IDCMP_MOUSEMOVE)) {

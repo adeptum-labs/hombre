@@ -1852,9 +1852,122 @@ std::vector<u8> gauge_disk(const char* name, u32 used_blocks) {
     return image;
 }
 
-// A volume window carries a fuel gauge in its left border: the used share
-// of the disk filled from the bottom in FILLPEN, BACKGROUNDPEN above it.
-// A drawer below the volume has no gauge.
+// The gauge a volume window shows when used of its volume's total blocks are
+// in use: in the look of the screen's depth and the screen's pens, as high as
+// its gadget and for the window as it is, active or not.
+chrome::FuelGauge gauge_of(Rig& r, u32 drawer, u32 used, u32 total) {
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    chrome::FuelGauge gauge;
+    gauge.depth = r.get8(r.screen + sc_BitMap + bm_Depth);
+    gauge.style = chrome::style_for_depth(gauge.depth);
+    gauge.width = chrome::fuel_gauge_width(gauge.style);
+    gauge.height = static_cast<i32>(r.get16(w.gauge + gg_Height));
+    gauge.filled = chrome::fuel_gauge_filled(gauge.height, used, total);
+    gauge.active = g_intuition.active_window() == w.window;
+    native::Bus bus(r.m);
+    sysimage::read_pens(bus, g_intuition.screen_draw_info(r.screen), gauge.pens.pen);
+    return gauge;
+}
+
+// The window's gauge gadget is in the left border, from two pixels below the
+// inner top to the inner bottom, and its image and the window's border show
+// the gauge pixel for pixel. The image's pens, row by row.
+std::vector<u8> check_gauge_shown(Rig& r, u32 drawer, const chrome::FuelGauge& gauge) {
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    const u32 window = w.window;
+    const i32 left = chrome::fuel_gauge_left(gauge.style);
+    const i32 top = static_cast<i32>(r.get8(window + wd_BorderTop)) + 2;
+    CHECK_EQ(r.get16(w.gauge + gg_LeftEdge), static_cast<u32>(left));
+    CHECK_EQ(r.get16(w.gauge + gg_Width), static_cast<u32>(gauge.width));
+    CHECK_EQ(r.get16(w.gauge + gg_TopEdge), static_cast<u32>(top));
+    CHECK_EQ(gauge.height, static_cast<i16>(r.get16(window + wd_Height)) - top -
+                               static_cast<i32>(r.get8(window + wd_BorderBottom)));
+    CHECK_EQ(r.get8(window + wd_BorderLeft), static_cast<u32>(left + gauge.width + 2));
+    CHECK_EQ(w.inner_left, left + gauge.width + 2);
+    const u32 image = r.get32(w.gauge + gg_GadgetRender);
+    CHECK_EQ(r.get16(image + kImageWidth), static_cast<u32>(gauge.width));
+    CHECK_EQ(r.get16(image + kImageHeight), static_cast<u32>(gauge.height));
+    CHECK_EQ(r.get16(image + kImageDepth), gauge.depth);
+    const std::vector<u8> pens = image_pens(r, image);
+    for (i32 y = 0; y < gauge.height; ++y) {
+        for (i32 x = 0; x < gauge.width; ++x) {
+            const u32 pen = chrome::fuel_gauge_pen(gauge, x, y);
+            CHECK_EQ(static_cast<u32>(pens[static_cast<usize>(y * gauge.width + x)]), pen);
+            CHECK_EQ(r.window_pixel(window, left + x, top + y), pen);
+        }
+    }
+    return pens;
+}
+
+// The rows a gauge fills follow the used share of the volume: none of an
+// empty volume, every row inside the track's edge of a full one or one whose
+// size is unknown, and at least two as soon as anything is stored.
+void the_fuel_gauge_fills_by_the_used_share() {
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 0, 1000), 0);
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 250, 1000), 25);
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 500, 1000), 50);
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 1000, 1000), 100);
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 2000, 1000), 100);
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 7, 0), 100);
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 1, 1000), 2);
+    CHECK_EQ(chrome::fuel_gauge_filled(102, 0xFFFFFFF0u, 0xFFFFFFFFu), 100);
+    CHECK_EQ(chrome::fuel_gauge_filled(3, 1, 1000), 1);
+    CHECK_EQ(chrome::fuel_gauge_filled(2, 1, 2), 0);
+
+    // The classic gauge of an empty volume has no box, that of a full one a
+    // box over the whole inside of its track, whose marks it covers.
+    chrome::FuelGauge gauge;
+    gauge.width = chrome::fuel_gauge_width(chrome::Style::Classic);
+    gauge.height = 102;
+    gauge.depth = 2;
+    gauge.pens.pen[sysimage::ShinePen] = 2;
+    gauge.pens.pen[sysimage::ShadowPen] = 1;
+    gauge.pens.pen[sysimage::FillPen] = 3;
+    const i32 mark = chrome::fuel_gauge_mark_row(gauge.height, 9);
+    CHECK_EQ(mark, 91);
+    CHECK_EQ(chrome::fuel_gauge_pen(gauge, 1, mark), 1u);
+    CHECK_EQ(chrome::fuel_gauge_pen(gauge, 1, mark + 1), 2u);
+    for (i32 y = mark + 2; y <= 100; ++y) {
+        CHECK_EQ(chrome::fuel_gauge_pen(gauge, 1, y), 0u);
+    }
+    gauge.filled = 100;
+    CHECK_EQ(chrome::fuel_gauge_pen(gauge, 1, 1), 2u);
+    CHECK_EQ(chrome::fuel_gauge_pen(gauge, 9, 100), 1u);
+    for (i32 y = 2; y < 100; ++y) {
+        CHECK_EQ(chrome::fuel_gauge_pen(gauge, 1, y), 2u);
+        CHECK_EQ(chrome::fuel_gauge_pen(gauge, 4, y), 0u);
+        CHECK_EQ(chrome::fuel_gauge_pen(gauge, 9, y), 1u);
+    }
+    // A gauge too short for a scale has none, and one of any size, however
+    // small, is drawn in the look's pens only.
+    gauge.filled = 0;
+    gauge.height = 40;
+    for (i32 y = 1; y < 39; ++y) {
+        CHECK_EQ(chrome::fuel_gauge_pen(gauge, 1, y), 0u);
+    }
+    for (const chrome::Style style : {chrome::Style::Classic, chrome::Style::Modern}) {
+        gauge.style = style;
+        gauge.depth = style == chrome::Style::Modern ? 8 : 2;
+        gauge.width = chrome::fuel_gauge_width(style);
+        for (i32 height = 1; height <= 12; ++height) {
+            gauge.height = height;
+            gauge.filled = chrome::fuel_gauge_filled(height, 1, 2);
+            for (i32 y = 0; y < height; ++y) {
+                for (i32 x = 0; x < gauge.width; ++x) {
+                    const u32 pen = chrome::fuel_gauge_pen(gauge, x, y);
+                    CHECK(style == chrome::Style::Modern ? pen >= chrome::kScreenBar0 : pen < 4);
+                }
+            }
+        }
+    }
+    CHECK_EQ(chrome::fuel_gauge_pen(gauge, -1, 0), 0u);
+    CHECK_EQ(chrome::fuel_gauge_pen(gauge, 0, gauge.height), 0u);
+}
+
+// A volume window of the classic look carries the gauge of the 3.2 Workbench
+// in a left border of 19 pixels: a sunken track on the border's face with a
+// scale of long and short marks, and the used share of the disk as a raised
+// box at its bottom. A drawer below the volume has no gauge.
 void volume_windows_show_a_fuel_gauge() {
     constexpr u32 kUsed = 440;
     Rig r(test_files(), gauge_disk("Second", kUsed), 1);
@@ -1867,8 +1980,8 @@ void volume_windows_show_a_fuel_gauge() {
     CHECK(drawer != Workbench::kNoWindow);
     const Workbench::DrawerWindow& w = r.workbench.window(drawer);
     const u32 window = w.window;
-    CHECK_EQ(r.get8(window + wd_BorderLeft), 14u);
-    CHECK_EQ(w.inner_left, 14);
+    CHECK_EQ(r.get8(window + wd_BorderLeft), 19u);
+    CHECK_EQ(w.inner_left, 19);
     CHECK(w.gauge != 0);
 
     // The gauge follows the scroll gadgets in the window's list.
@@ -1881,37 +1994,65 @@ void volume_windows_show_a_fuel_gauge() {
     CHECK_EQ(r.get16(gadget + gg_Activation), GACT_LEFTBORDER);
     CHECK_EQ(r.get16(gadget + gg_Flags), GFLG_GADGIMAGE | GFLG_GADGHNONE);
     CHECK_EQ(r.get16(gadget + gg_LeftEdge), 4u);
-    CHECK_EQ(r.get16(gadget + gg_Width), 8u);
+    CHECK_EQ(r.get16(gadget + gg_Width), 13u);
     CHECK_EQ(r.get32(gadget + gg_NextGadget), 0u);
-    const i32 top = static_cast<i32>(r.get8(window + wd_BorderTop)) + 2;
-    const i32 height = static_cast<i16>(r.get16(window + wd_Height)) - top -
-                       static_cast<i32>(r.get8(window + wd_BorderBottom)) - 4;
-    CHECK_EQ(r.get16(gadget + gg_TopEdge), static_cast<u32>(top));
-    CHECK_EQ(r.get16(gadget + gg_Height), static_cast<u32>(height));
 
-    const u32 image = r.get32(gadget + gg_GadgetRender);
-    CHECK_EQ(r.get16(image + kImageWidth), 8u);
-    CHECK_EQ(r.get16(image + kImageHeight), static_cast<u32>(height));
-    CHECK_EQ(r.get16(image + kImageDepth), 2u);
-    const std::vector<u8> pens = image_pens(r, image);
-    native::Bus bus(r.m);
-    chrome::DrawInfoPens drawinfo;
-    sysimage::read_pens(bus, g_intuition.screen_draw_info(r.screen), drawinfo.pen);
     const u32 total = r.second_volume.block_count - 2;
-    const u32 inner = static_cast<u32>(height) - 2;
-    const u32 filled = (kUsed * inner + total / 2) / total;
-    CHECK(filled > 0 && filled < inner);
+    const chrome::FuelGauge gauge = gauge_of(r, drawer, kUsed, total);
+    CHECK(gauge.active);
+    CHECK(gauge.style == chrome::Style::Classic);
+    const i32 height = gauge.height;
+    const i32 filled = gauge.filled;
+    CHECK_EQ(filled, static_cast<i32>((kUsed * static_cast<u32>(height - 2) + total / 2) / total));
+    CHECK(filled > 3 && filled < height / 2);
+    const std::vector<u8> pens = check_gauge_shown(r, drawer, gauge);
     const auto pen_at = [&](i32 x, i32 y) {
-        return static_cast<u32>(pens[static_cast<usize>(y) * 8 + static_cast<usize>(x)]);
+        return static_cast<u32>(pens[static_cast<usize>(y) * 13 + static_cast<usize>(x)]);
     };
-    CHECK_EQ(pen_at(4, 1), static_cast<u32>(drawinfo.pen[sysimage::BackgroundPen]));
-    CHECK_EQ(pen_at(4, height - 2), static_cast<u32>(drawinfo.pen[sysimage::FillPen]));
-    CHECK_EQ(pen_at(4, height - 1 - static_cast<i32>(filled)),
-             static_cast<u32>(drawinfo.pen[sysimage::FillPen]));
-    CHECK_EQ(pen_at(4, height - 2 - static_cast<i32>(filled)),
-             static_cast<u32>(drawinfo.pen[sysimage::BackgroundPen]));
-    CHECK_EQ(pen_at(0, 1), static_cast<u32>(drawinfo.pen[sysimage::ShadowPen]));
-    CHECK_EQ(pen_at(7, 1), static_cast<u32>(drawinfo.pen[sysimage::ShinePen]));
+    const u32 face = gauge.pens.pen[sysimage::FillPen];
+    const u32 shine = gauge.pens.pen[sysimage::ShinePen];
+    const u32 shadow = gauge.pens.pen[sysimage::ShadowPen];
+    // The track is 11 columns, dark at its top and left and light at its
+    // bottom and right, with two columns of the border's face beside it.
+    CHECK_EQ(pen_at(0, 0), shadow);
+    CHECK_EQ(pen_at(9, 0), shadow);
+    CHECK_EQ(pen_at(10, 0), face);
+    CHECK_EQ(pen_at(0, height - 2), shadow);
+    CHECK_EQ(pen_at(0, height - 1), face);
+    CHECK_EQ(pen_at(1, height - 1), shine);
+    CHECK_EQ(pen_at(10, height - 1), shine);
+    CHECK_EQ(pen_at(10, 1), shine);
+    CHECK_EQ(pen_at(11, 1), face);
+    CHECK_EQ(pen_at(12, height - 1), face);
+    CHECK_EQ(pen_at(5, 1), face);
+    // The scale starts with a long mark of four pixels, a dark row over a
+    // light one, and goes on with a short one of two.
+    const i32 long_mark = chrome::fuel_gauge_mark_row(height, 1);
+    const i32 short_mark = chrome::fuel_gauge_mark_row(height, 2);
+    CHECK_EQ(long_mark, 1 + (height - 1) / 10);
+    CHECK(short_mark + 1 < height - 1 - filled);
+    for (i32 x = 1; x <= 4; ++x) {
+        CHECK_EQ(pen_at(x, long_mark - 1), face);
+        CHECK_EQ(pen_at(x, long_mark), shadow);
+        CHECK_EQ(pen_at(x, long_mark + 1), shine);
+        CHECK_EQ(pen_at(x, long_mark + 2), face);
+        CHECK_EQ(pen_at(x, short_mark), x <= 2 ? shadow : face);
+        CHECK_EQ(pen_at(x, short_mark + 1), x <= 2 ? shine : face);
+    }
+    CHECK_EQ(pen_at(5, long_mark), face);
+    // The box of the used share is as wide as the track's inside, light at
+    // its top and left and dark at its bottom and right.
+    const i32 box_top = height - 1 - filled;
+    CHECK_EQ(pen_at(1, box_top - 1), face);
+    CHECK_EQ(pen_at(1, box_top), shine);
+    CHECK_EQ(pen_at(8, box_top), shine);
+    CHECK_EQ(pen_at(9, box_top), face);
+    CHECK_EQ(pen_at(1, box_top + 1), shine);
+    CHECK_EQ(pen_at(5, box_top + 1), face);
+    CHECK_EQ(pen_at(9, box_top + 1), shadow);
+    CHECK_EQ(pen_at(1, height - 2), face);
+    CHECK_EQ(pen_at(2, height - 2), shadow);
+    CHECK_EQ(pen_at(9, height - 2), shadow);
 
     // A drawer below the volume keeps the default border and has no gauge.
     r.workbench.open_icon(drawer, r.find_icon_in(drawer, "Sub"));
@@ -1934,6 +2075,168 @@ void volume_windows_show_a_fuel_gauge() {
     CHECK(again != Workbench::kNoWindow);
     r.workbench.close_drawer(again);
     CHECK_EQ(r.free_bytes(), before);
+}
+
+// A click on the desktop beside every drawer, which makes the root window
+// the active one.
+void click_desktop(Rig& r) {
+    const Workbench::DrawerWindow& root = r.workbench.window(0);
+    r.click(0, 4 - root.inner_left, 380 - root.inner_top);
+    CHECK_EQ(g_intuition.active_window(), root.window);
+}
+
+// The classic gauge's face is the border's: the fill pen while its window is
+// active and the background pen while it is not. The gauge is painted again
+// and stays shown over the frame each time the window's state changes.
+void the_classic_fuel_gauge_follows_its_window_state() {
+    constexpr u32 kUsed = 600;
+    Rig r(test_files(), gauge_disk("Second", kUsed), 1);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("Second"));
+    const u32 drawer = r.find_window("Second:");
+    CHECK(drawer != Workbench::kNoWindow);
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    const u32 window = w.window;
+    const u32 total = r.second_volume.block_count - 2;
+    const u32 image = r.get32(w.gauge + gg_GadgetRender);
+    const i32 top = static_cast<i32>(r.get16(w.gauge + gg_TopEdge));
+    CHECK_EQ(g_intuition.active_window(), window);
+    const chrome::FuelGauge active = gauge_of(r, drawer, kUsed, total);
+    CHECK(active.active);
+    const u32 fill = active.pens.pen[sysimage::FillPen];
+    const u32 background = active.pens.pen[sysimage::BackgroundPen];
+    CHECK(fill != background);
+    const std::vector<u8> lit = check_gauge_shown(r, drawer, active);
+    CHECK_EQ(static_cast<u32>(lit[13 + 5]), fill);
+    CHECK_EQ(r.window_pixel(window, 2, top + 1), fill);
+
+    const u32 before = r.free_bytes();
+    click_desktop(r);
+    const chrome::FuelGauge inactive = gauge_of(r, drawer, kUsed, total);
+    CHECK(!inactive.active);
+    const std::vector<u8> dim = check_gauge_shown(r, drawer, inactive);
+    CHECK_EQ(static_cast<u32>(dim[13 + 5]), background);
+    CHECK_EQ(static_cast<u32>(dim[13 + 12]), background);
+    CHECK_EQ(r.window_pixel(window, 2, top + 1), background);
+    // The edges, the marks and the box are where they were.
+    CHECK_EQ(lit.size(), dim.size());
+    for (usize i = 0; i < lit.size(); ++i) {
+        CHECK_EQ(lit[i] == fill, dim[i] == background);
+        CHECK(lit[i] == fill || lit[i] == dim[i]);
+    }
+
+    // A click in the window makes it active again.
+    r.click(drawer, 150, 50);
+    CHECK_EQ(g_intuition.active_window(), window);
+    CHECK(check_gauge_shown(r, drawer, active) == lit);
+    // The image is the one the window opened with, painted in place.
+    CHECK_EQ(r.get32(w.gauge + gg_GadgetRender), image);
+    CHECK_EQ(r.free_bytes(), before);
+}
+
+// A click on the middle of the window's zoom button, and the desktop's
+// answer to what it sets going.
+void click_zoom(Rig& r, u32 window) {
+    const Rect box = Intuition::zoom_box_rect(
+        static_cast<i16>(r.get16(window + wd_LeftEdge)),
+        static_cast<i16>(r.get16(window + wd_TopEdge)),
+        static_cast<i16>(r.get16(window + wd_Width)), r.get32(window + wd_Flags));
+    click_at(r, {(box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2});
+}
+
+// A volume window of the modern look carries a gauge in the look of the
+// sliders, in a left border of 15 pixels: a rounded, outlined track as wide
+// as a slider's knob with short marks, and the used share shaded from its top
+// to the track's bottom under a line of the outline's pen. It looks the same
+// in an active and an inactive window.
+void the_modern_fuel_gauge_is_in_the_look_of_the_sliders() {
+    for (const u32 depth : {5u, 8u}) {
+        constexpr u32 kUsed = 700;
+        Rig r(test_files(), gauge_disk("Second", kUsed), 1, depth);
+        r.workbench.open_desktop();
+        const u32 volume = r.find_icon("Second");
+        r.workbench.open_icon(0, volume);
+        const u32 drawer = r.find_window("Second:");
+        CHECK(drawer != Workbench::kNoWindow);
+        const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+        const u32 window = w.window;
+        CHECK_EQ(r.get8(window + wd_BorderLeft), 15u);
+        CHECK_EQ(r.get16(w.gauge + gg_LeftEdge), 3u);
+        CHECK_EQ(r.get16(w.gauge + gg_Width), 10u);
+        const u32 total = r.second_volume.block_count - 2;
+        const chrome::FuelGauge gauge = gauge_of(r, drawer, kUsed, total);
+        CHECK(gauge.style == chrome::Style::Modern);
+        CHECK(gauge.active);
+        const i32 height = gauge.height;
+        const i32 filled = gauge.filled;
+        CHECK_EQ(filled,
+                 static_cast<i32>((kUsed * static_cast<u32>(height - 2) + total / 2) / total));
+        CHECK(filled > 8 && filled < height / 2);
+        const std::vector<u8> pens = check_gauge_shown(r, drawer, gauge);
+        const auto pen_at = [&](i32 x, i32 y) {
+            return static_cast<u32>(pens[static_cast<usize>(y) * 10 + static_cast<usize>(x)]);
+        };
+        const auto pen = [&](u8 chrome_pen) {
+            return static_cast<u32>(chrome::physical_pen(chrome_pen, depth));
+        };
+        // The outline is rounded as a knob's, on the border's face.
+        CHECK_EQ(pen_at(0, 0), pen(chrome::kInactiveBar5));
+        CHECK_EQ(pen_at(1, 0), pen(chrome::kInactiveBar5));
+        CHECK_EQ(pen_at(2, 0), pen(chrome::kFrameDark));
+        CHECK_EQ(pen_at(7, 0), pen(chrome::kFrameDark));
+        CHECK_EQ(pen_at(9, 0), pen(chrome::kInactiveBar5));
+        CHECK_EQ(pen_at(1, 1), pen(chrome::kFrameDark));
+        CHECK_EQ(pen_at(0, 2), pen(chrome::kFrameDark));
+        CHECK_EQ(pen_at(9, height / 2), pen(chrome::kFrameDark));
+        CHECK_EQ(pen_at(0, height - 1), pen(chrome::kInactiveBar5));
+        CHECK_EQ(pen_at(4, height - 1), pen(chrome::kFrameDark));
+        // The empty part is the sliders' track with a mark of three pixels
+        // and one of two in turn.
+        CHECK_EQ(pen_at(4, 2), pen(chrome::kTrack));
+        const i32 long_mark = chrome::fuel_gauge_mark_row(height, 1);
+        const i32 short_mark = chrome::fuel_gauge_mark_row(height, 2);
+        CHECK(short_mark < height - 2 - filled);
+        for (i32 x = 1; x <= 4; ++x) {
+            CHECK_EQ(pen_at(x, long_mark - 1), pen(chrome::kTrack));
+            CHECK_EQ(pen_at(x, long_mark), pen(x <= 3 ? chrome::kKnob2 : chrome::kTrack));
+            CHECK_EQ(pen_at(x, long_mark + 1), pen(chrome::kTrack));
+            CHECK_EQ(pen_at(x, short_mark), pen(x <= 2 ? chrome::kKnob2 : chrome::kTrack));
+        }
+        // The used share is shaded as a held knob, from its top to the
+        // track's bottom, under a line across the track.
+        const i32 fill_top = height - 1 - filled;
+        CHECK_EQ(pen_at(4, fill_top - 2), pen(chrome::kTrack));
+        for (i32 x = 1; x <= 8; ++x) {
+            CHECK_EQ(pen_at(x, fill_top - 1), pen(chrome::kFrameDark));
+            CHECK_EQ(pen_at(x, fill_top), pen(chrome::kActiveBar2));
+            CHECK_EQ(pen_at(x, fill_top + (filled + 1) / 2), pen(chrome::kActiveBar4));
+        }
+        CHECK_EQ(pen_at(4, height - 2), pen(chrome::kActiveBar5));
+        CHECK_EQ(pen_at(0, fill_top), pen(chrome::kFrameDark));
+
+        // An inactive window shows the same gauge.
+        click_desktop(r);
+        CHECK(!gauge_of(r, drawer, kUsed, total).active);
+        CHECK(check_gauge_shown(r, drawer, gauge) == pens);
+
+        // The gauge follows the window to the small box of the zoom gadget
+        // and back, and all its memory goes back when the window closes.
+        r.workbench.close_drawer(drawer);
+        const u32 before = r.free_bytes();
+        r.workbench.open_icon(0, volume);
+        const u32 again = r.find_window("Second:");
+        CHECK(again != Workbench::kNoWindow);
+        const Workbench::DrawerWindow& zoomed = r.workbench.window(again);
+        click_zoom(r, zoomed.window);
+        CHECK(static_cast<i32>(r.get16(zoomed.gauge + gg_Height)) < height);
+        CHECK_EQ(r.get16(r.get32(zoomed.gauge + gg_GadgetRender) + kImageHeight),
+                 r.get16(zoomed.gauge + gg_Height));
+        click_zoom(r, zoomed.window);
+        CHECK(check_gauge_shown(r, again, gauge_of(r, again, kUsed, total)) == pens);
+        click_desktop(r);
+        r.workbench.close_drawer(again);
+        CHECK_EQ(r.free_bytes(), before);
+    }
 }
 
 // The arrow buttons of the drawer are as deep as depth and in the look of
@@ -2819,16 +3122,6 @@ std::vector<u32> inner_pens(Rig& r, u32 window_index) {
     return pens;
 }
 
-// A click on the middle of the window's zoom button, and the desktop's
-// answer to what it sets going.
-void click_zoom(Rig& r, u32 window) {
-    const Rect box = Intuition::zoom_box_rect(
-        static_cast<i16>(r.get16(window + wd_LeftEdge)),
-        static_cast<i16>(r.get16(window + wd_TopEdge)),
-        static_cast<i16>(r.get16(window + wd_Width)), r.get32(window + wd_Flags));
-    click_at(r, {(box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2});
-}
-
 void a_drawer_zooms_to_a_small_box_and_back_with_its_icons_in_place() {
     Rig r;
     r.workbench.open_desktop();
@@ -2933,7 +3226,10 @@ int main() {
     a_disk_icon_inside_a_drawer_is_no_volume();
     a_resized_drawer_clips_its_icons_and_keeps_their_places();
     drawers_have_scroll_gadgets_in_their_borders();
+    the_fuel_gauge_fills_by_the_used_share();
     volume_windows_show_a_fuel_gauge();
+    the_classic_fuel_gauge_follows_its_window_state();
+    the_modern_fuel_gauge_is_in_the_look_of_the_sliders();
     drawer_arrows_take_the_look_of_the_screen();
     drawer_arrows_follow_the_screen_through_a_reset();
     border_gadgets_stay_when_a_drawer_turns_inactive();

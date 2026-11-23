@@ -240,6 +240,67 @@ constexpr i32 arrow_rows(i32 across, i32 along) {
 void paint_arrow_button(u8* out, i32 width, i32 height, Arrow arrow, bool pressed, Style style,
                         u32 depth, const DrawInfoPens& drawinfo);
 
+// The gadget box of a fuel gauge across a window's left border, which
+// Intuition makes two pixels wider than the box's right edge. The classic
+// box is the track of 11 columns and two of the border's face, in a border
+// of 19 as on the 3.2 Workbench; the modern one is the track alone, as wide
+// as a slider's knob.
+constexpr i32 kFuelGaugeMargin = 2;
+constexpr i32 fuel_gauge_left(Style style) { return style == Style::Modern ? 3 : 4; }
+constexpr i32 fuel_gauge_width(Style style) {
+    return style == Style::Modern ? 10 : 11 + kFuelGaugeMargin;
+}
+
+// The marks of a fuel gauge's scale part its inside in this many shares.
+constexpr i32 kFuelGaugeShares = 10;
+
+// The fuel gauge of a volume window: a column of width x height pens in the
+// window's left border, whose track has `filled` of its inner rows taken by
+// the used share of the volume, counted from the bottom.
+struct FuelGauge {
+    i32 width = 0;
+    i32 height = 0;
+    i32 filled = 0;
+    bool active = false;
+    Style style = Style::Classic;
+    u32 depth = 0;
+    DrawInfoPens pens{};
+};
+
+// The rows of a gauge height rows high that used of total blocks fill: their
+// share of the rows inside the track's edge, rounded, never more than those
+// rows and at least two for a volume that holds anything, the fewest that
+// show.
+constexpr i32 fuel_gauge_filled(i32 height, u32 used, u32 total) {
+    const i32 inner = height > 2 ? height - 2 : 0;
+    if (total == 0 || used >= total) {
+        return inner;
+    }
+    const i32 rows = static_cast<i32>(
+        (static_cast<u64>(used) * static_cast<u64>(inner) + total / 2) / total);
+    const i32 shown = used != 0 && rows < 2 ? 2 : rows;
+    return shown < inner ? shown : inner;
+}
+
+// The row of mark `share`, 1 to kFuelGaugeShares - 1 from the top, of the
+// scale of a gauge height rows high. The classic mark has a second row below
+// it.
+constexpr i32 fuel_gauge_mark_row(i32 height, i32 share) {
+    return 1 + (share * (height - 1)) / kFuelGaugeShares;
+}
+
+// The pen of the gauge's pixel at column x and row y. The classic look is the
+// gauge of the 3.2 Workbench in the DrawInfo pens: the border's face, the
+// fill pen of an active window and the background pen of an inactive one,
+// with a sunken track, a scale of long and short marks down the track's left
+// side and the used share as a raised box that rises from the track's bottom
+// and covers the marks it reaches. The modern look is that of the sliders in
+// the chrome pens at physical_pen(depth), the same in an active and an
+// inactive window: a track as wide as the gauge, rounded and outlined as a
+// knob is, with the used share shaded from top to bottom as a held knob and
+// short marks on the empty part.
+u8 fuel_gauge_pen(const FuelGauge& gauge, i32 x, i32 y);
+
 }
 
 }

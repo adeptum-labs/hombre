@@ -1234,4 +1234,118 @@ void paint_arrow_button(u8* out, i32 width, i32 height, Arrow arrow, bool presse
     }
 }
 
+namespace {
+
+// The classic gauge's marks: long and short ones in turn, each a dark row
+// over a light one.
+constexpr i32 kLongMark = 4;
+constexpr i32 kShortMark = 2;
+// The modern gauge's marks, a single row each.
+constexpr i32 kModernLongMark = 3;
+constexpr i32 kModernShortMark = 2;
+// The fewest rows from one mark to the next for a scale to be drawn.
+constexpr i32 kMarkPitch = 4;
+
+// The length of the scale's mark whose first row is y, in a gauge whose marks
+// are `rows` rows each and end above row `limit`; 0 where y is not on a mark.
+// second tells the mark's second row from its first.
+i32 mark_length(const FuelGauge& g, i32 y, i32 rows, i32 limit, i32 long_mark, i32 short_mark,
+                bool& second) {
+    if ((g.height - 1) / kFuelGaugeShares < kMarkPitch) {
+        return 0;
+    }
+    for (i32 share = 1; share < kFuelGaugeShares; ++share) {
+        const i32 row = fuel_gauge_mark_row(g.height, share);
+        if (row + rows > limit) {
+            break;
+        }
+        if (y >= row && y < row + rows) {
+            second = y != row;
+            return (share & 1) != 0 ? long_mark : short_mark;
+        }
+    }
+    return 0;
+}
+
+// The classic gauge. Both the track's sunken edge and the box's raised one
+// leave their top right and bottom left corners the face's.
+u8 classic_gauge_pen(const FuelGauge& g, i32 x, i32 y) {
+    const u16* pens = g.pens.pen;
+    const u8 face = static_cast<u8>(pens[g.active ? FillPen : BackgroundPen]);
+    const u8 shine = static_cast<u8>(pens[ShinePen]);
+    const u8 shadow = static_cast<u8>(pens[ShadowPen]);
+    const i32 x1 = g.width - 1 - kFuelGaugeMargin;
+    const i32 y1 = g.height - 1;
+    if (x > x1 || x1 < 1 || y1 < 1) {
+        return face;
+    }
+    if (y == 0 || x == 0) {
+        return (y == 0 ? x < x1 : y < y1) ? shadow : face;
+    }
+    if (y == y1 || x == x1) {
+        return shine;
+    }
+    // The box of the used share, as wide as the track's inside.
+    const i32 box_top = y1 - g.filled;
+    const i32 box_bottom = y1 - 1;
+    if (y >= box_top) {
+        if (y == box_top || x == 1) {
+            return (y == box_top ? x < x1 - 1 : y < box_bottom) ? shine : face;
+        }
+        return y == box_bottom || x == x1 - 1 ? shadow : face;
+    }
+    bool second = false;
+    const i32 length = mark_length(g, y, 2, box_top, kLongMark, kShortMark, second);
+    if (x <= length && x < x1) {
+        return second ? shine : shadow;
+    }
+    return face;
+}
+
+// The modern gauge: the track with its outline rounded as a knob's, the
+// border's face outside its corners. The used share ends in a line of the
+// outline's pen across the track.
+u8 modern_gauge_pen(const FuelGauge& g, i32 x, i32 y) {
+    const Look look{g.depth};
+    const u8 face = look(kInactiveBar5);
+    const i32 x1 = g.width - 1;
+    const i32 y1 = g.height - 1;
+    if (x1 < 2 || y1 < 2) {
+        return face;
+    }
+    const i32 radius = min_i32(2, min_i32(x1 / 2, y1 / 2));
+    const i32 dx = min_i32(x, x1 - x);
+    const i32 dy = min_i32(y, y1 - y);
+    const i32 inset = rounded_inset(dy, radius);
+    if (dx < inset) {
+        return face;
+    }
+    const u8 line = look(kFrameDark);
+    if (dy == 0 || dx <= max_i32(inset, rounded_inset(dy - 1, radius) - 1)) {
+        return line;
+    }
+    const i32 fill_top = y1 - g.filled;
+    if (y >= fill_top) {
+        constexpr i32 kShades = 4;
+        return look(static_cast<u8>(kActiveBar2 + ((y - fill_top) * kShades) / g.filled));
+    }
+    if (g.filled > 0 && y == fill_top - 1) {
+        return line;
+    }
+    bool second = false;
+    const i32 length =
+        mark_length(g, y, 1, fill_top - 1, kModernLongMark, kModernShortMark, second);
+    return x <= length ? look(kKnob2) : look(kTrack);
+}
+
+}
+
+u8 fuel_gauge_pen(const FuelGauge& gauge, i32 x, i32 y) {
+    if (x < 0 || y < 0 || x >= gauge.width || y >= gauge.height) {
+        return 0;
+    }
+    return gauge.style == Style::Modern ? modern_gauge_pen(gauge, x, y)
+                                        : classic_gauge_pen(gauge, x, y);
+}
+
 }
