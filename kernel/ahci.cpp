@@ -25,6 +25,7 @@
 
 #include "../common/printable.hpp"
 #include "../common/serial.hpp"
+#include "clock.hpp"
 #include "pci.hpp"
 
 namespace hombre {
@@ -56,11 +57,13 @@ constexpr u32 kPortCmd = 0x18;
 constexpr u32 kPortTfd = 0x20;
 constexpr u32 kPortSig = 0x24;
 constexpr u32 kPortSsts = 0x28;
+constexpr u32 kPortSctl = 0x2C;
 constexpr u32 kPortSerr = 0x30;
 constexpr u32 kPortCi = 0x38;
 
 constexpr u32 kCapPortsMask = 0x1Fu;
 constexpr u32 kCap64Bit = 1u << 31;
+constexpr u32 kCapStaggeredSpinUp = 1u << 27;
 constexpr u32 kCap2Boh = 1u << 0;
 constexpr u32 kBohcBiosOwned = 1u << 0;
 constexpr u32 kBohcOsOwned = 1u << 1;
@@ -68,7 +71,8 @@ constexpr u32 kBohcBiosBusy = 1u << 2;
 constexpr u32 kGhcInterruptEnable = 1u << 1;
 constexpr u32 kGhcAhciEnable = 1u << 31;
 constexpr u32 kCmdStart = 1u << 0;
-constexpr u32 kCmdPowerOn = 1u << 1;
+constexpr u32 kCmdSpinUp = 1u << 1;
+constexpr u32 kCmdPowerOn = 1u << 2;
 constexpr u32 kCmdFisReceive = 1u << 4;
 constexpr u32 kCmdFisReceiveRunning = 1u << 14;
 constexpr u32 kCmdListRunning = 1u << 15;
@@ -76,28 +80,69 @@ constexpr u32 kCmdListRunning = 1u << 15;
 // host bus data and interface fatal errors.
 constexpr u32 kIsCommandErrors = (1u << 30) | (1u << 29) | (1u << 28) | (1u << 27);
 constexpr u32 kTfdError = 1u << 0;
+constexpr u32 kTfdDrq = 1u << 3;
 constexpr u32 kTfdBusy = 1u << 7;
 constexpr u32 kSstsDetMask = 0x0Fu;
 constexpr u32 kSstsDetPresent = 1;
 constexpr u32 kSstsDetPhy = 2;
 constexpr u32 kSstsDetReady = 3;
 constexpr u32 kSstsDetOffline = 4;
+constexpr u32 kSctlDetMask = 0x0Fu;
+constexpr u32 kSctlDetReset = 1;
+// Interface power management: partial and slumber states not allowed.
+constexpr u32 kSctlIpmMask = 0x0Fu << 8;
+constexpr u32 kSctlIpmNone = 3u << 8;
+// One FIS receive area per port while the ports are probed.
+constexpr u32 kProbeFisPages = kPortCount * kAhciFisReceiveBytes / kAhciPageBytes;
 
-// How long to spin on the controller. One pause takes roughly 10 to 150
-// cycles depending on the CPU, so 2^29 rounds is about 2 to 25 seconds at
-// 3 GHz: far beyond any request a working disk needs, short enough that a
-// dead one does not hang the boot for good. The port waits are shorter, as
-// the specifications bound them in time.
-constexpr u64 kPollLimit = 1ull << 29;
-constexpr u64 kPortLimit = 1ull << 28;
-constexpr u64 kHandoffLimit = 1ull << 29;
-constexpr u64 kDetectLimit = 1ull << 26;
+// How long to wait on the controller and the disks, in milliseconds.
+constexpr u32 kCommandMs = 30000;  // a disk may spin up or empty a large cache
+constexpr u32 kPortMs = 500;       // PxCMD.CR and FR, bounded by the specification
+constexpr u32 kHandoffMs = 3000;   // the BIOS may stay busy for 2 s
+constexpr u32 kResetHoldMs = 2;    // COMRESET is held for at least 1 ms
+constexpr u32 kPresenceMs = 20;    // a device answers a COMRESET within 10 ms
+constexpr u32 kLinkMs = 1000;      // PHY communication once a device is present
+constexpr u32 kReadyMs = 10000;    // a hard disk clears BSY once spun up
+// Without a calibrated clock a millisecond is counted as 2^16 pauses, which
+// take 0.2 to 3 ms depending on the CPU.
+constexpr u64 kSpinsPerMs = 1ull << 16;
 
 constexpr u64 kFourGiB = 1ull << 32;
 constexpr u32 kMaxAhciDisks = 8;
 
 void cpu_pause() {
     asm volatile("pause");
+}
+
+// A wait bounded in time once the clock is calibrated, and by a pause count
+// that stands in for the time before.
+class Wait {
+public:
+    explicit Wait(u32 ms)
+        : timed_(clock_us() != 0), end_(deadline_in_us(u64{ms} * 1000)),
+          limit_(u64{ms} * kSpinsPerMs) {}
+
+    // True once the time is up; pauses once otherwise.
+    bool over() {
+        if (timed_ ? expired(end_) : spins_ >= limit_) {
+            return true;
+        }
+        ++spins_;
+        cpu_pause();
+        return false;
+    }
+
+private:
+    bool timed_;
+    Deadline end_;
+    u64 limit_;
+    u64 spins_ = 0;
+};
+
+void hold_ms(u32 ms) {
+    Wait wait(ms);
+    while (!wait.over()) {
+    }
 }
 
 // Orders the command and the data it names before the command issue write.
@@ -120,14 +165,14 @@ void write_address(volatile u8* base, u32 offset, u64 value) {
     write32(base, offset + 4, static_cast<u32>(value >> 32));
 }
 
-bool wait_bits(const volatile u8* base, u32 offset, u32 mask, u32 value, u64 limit) {
-    for (u64 i = 0; i < limit; ++i) {
-        if ((read32(base, offset) & mask) == value) {
-            return true;
+bool wait_bits(const volatile u8* base, u32 offset, u32 mask, u32 value, u32 ms) {
+    Wait wait(ms);
+    while ((read32(base, offset) & mask) != value) {
+        if (wait.over()) {
+            return (read32(base, offset) & mask) == value;
         }
-        cpu_pause();
     }
-    return false;
+    return true;
 }
 
 void write_controller_prefix(PciAddress address) {
@@ -215,14 +260,14 @@ bool stop_port(volatile u8* port) {
     if ((cmd & kCmdStart) != 0) {
         write32(port, kPortCmd, cmd & ~kCmdStart);
     }
-    if (!wait_bits(port, kPortCmd, kCmdListRunning, 0, kPortLimit)) {
+    if (!wait_bits(port, kPortCmd, kCmdListRunning, 0, kPortMs)) {
         return false;
     }
     cmd = read32(port, kPortCmd);
     if ((cmd & kCmdFisReceive) != 0) {
         write32(port, kPortCmd, cmd & ~kCmdFisReceive);
     }
-    if (!wait_bits(port, kPortCmd, kCmdFisReceiveRunning, 0, kPortLimit)) {
+    if (!wait_bits(port, kPortCmd, kCmdFisReceiveRunning, 0, kPortMs)) {
         return false;
     }
     write32(port, kPortIe, 0);
@@ -235,12 +280,12 @@ bool start_port(volatile u8* port, u64 page_phys) {
     write_address(port, kPortClb, page_phys + kAhciCmdListOffset);
     write_address(port, kPortFb, page_phys + kAhciFisOffset);
     const u32 cmd = read32(port, kPortCmd);
-    write32(port, kPortCmd, (cmd & ~kCmdStart) | kCmdFisReceive | kCmdPowerOn);
-    if (!wait_bits(port, kPortCmd, kCmdFisReceiveRunning, kCmdFisReceiveRunning, kPortLimit)) {
+    write32(port, kPortCmd, (cmd & ~kCmdStart) | kCmdFisReceive | kCmdSpinUp | kCmdPowerOn);
+    if (!wait_bits(port, kPortCmd, kCmdFisReceiveRunning, kCmdFisReceiveRunning, kPortMs)) {
         return false;
     }
     write32(port, kPortCmd, read32(port, kPortCmd) | kCmdStart);
-    return wait_bits(port, kPortCmd, kCmdListRunning, kCmdListRunning, kPortLimit);
+    return wait_bits(port, kPortCmd, kCmdListRunning, kCmdListRunning, kPortMs);
 }
 
 // Stops and restarts the command engine without clearing the FIS receive
@@ -250,7 +295,7 @@ bool restart_port(volatile u8* port) {
     if ((cmd & kCmdStart) != 0) {
         write32(port, kPortCmd, cmd & ~kCmdStart);
     }
-    if (!wait_bits(port, kPortCmd, kCmdListRunning, 0, kPortLimit)) {
+    if (!wait_bits(port, kPortCmd, kCmdListRunning, 0, kPortMs)) {
         return false;
     }
     // PxCI is cleared by the controller when start goes off; writing it
@@ -258,7 +303,7 @@ bool restart_port(volatile u8* port) {
     write32(port, kPortIs, 0xFFFFFFFFu);
     write32(port, kPortSerr, 0xFFFFFFFFu);
     write32(port, kPortCmd, read32(port, kPortCmd) | kCmdStart);
-    return wait_bits(port, kPortCmd, kCmdListRunning, kCmdListRunning, kPortLimit);
+    return wait_bits(port, kPortCmd, kCmdListRunning, kCmdListRunning, kPortMs);
 }
 
 bool run_command(AhciDisk& disk, u8 command, bool write, u64 lba, u16 count, u32 bytes) {
@@ -283,18 +328,18 @@ bool run_command(AhciDisk& disk, u8 command, bool write, u64 lba, u16 count, u32
     // CI stays set when the command fails, so the error bits end the wait
     // too. An error leaves the port restarted for the next command; a
     // timeout leaves the disk unused.
-    for (u64 spins = 0; (read32(port, kPortCi) & 1u) != 0; ++spins) {
+    Wait wait(kCommandMs);
+    while ((read32(port, kPortCi) & 1u) != 0) {
         if ((read32(port, kPortIs) & kIsCommandErrors) != 0) {
             restart_port(port);
             return false;
         }
-        if (spins == kPollLimit) {
+        if (wait.over() && (read32(port, kPortCi) & 1u) != 0) {
             disk.failed = true;
             serial::write("ahci: command timed out, disk no longer used\n");
             restart_port(port);
             return false;
         }
-        cpu_pause();
     }
     // The command is complete: the data the device wrote is visible before
     // the caller reads the bounce page.
@@ -341,8 +386,8 @@ bool flush_disk(void* ctx) {
 
 bool take_ownership(volatile u8* regs) {
     write32(regs, kBohc, read32(regs, kBohc) | kBohcOsOwned);
-    return wait_bits(regs, kBohc, kBohcBiosOwned, 0, kHandoffLimit) &&
-           wait_bits(regs, kBohc, kBohcBiosBusy, 0, kHandoffLimit);
+    return wait_bits(regs, kBohc, kBohcBiosOwned, 0, kHandoffMs) &&
+           wait_bits(regs, kBohc, kBohcBiosBusy, 0, kHandoffMs);
 }
 
 void set_command(PciAddress address, u32 set, u32 clear) {
@@ -363,52 +408,134 @@ volatile u8* map_registers(PciAddress address, MmioMapper& mmio) {
     return static_cast<volatile u8*>(mmio.map(bar.phys, kRegisterWindow));
 }
 
-// Walks the implemented ports and collects those with an ATA disk behind
-// them. Ports with another kind of device and ports whose PHY never comes
-// up are logged and left alone.
-u32 find_ata_ports(volatile u8* regs, u8* candidates) {
-    const u32 implemented = read32(regs, kPi);
-    u32 count = 0;
+u32 link_state(const volatile u8* port) {
+    return read32(port, kPortSsts) & kSstsDetMask;
+}
+
+// Waits while a device is present but its PHY link is not up yet.
+u32 wait_link(const volatile u8* port, u32 ms) {
+    Wait wait(ms);
+    u32 det = link_state(port);
+    while ((det == kSstsDetPresent || det == kSstsDetPhy) && !wait.over()) {
+        det = link_state(port);
+    }
+    return det;
+}
+
+// Sends a COMRESET on a stopped port, as for a disk the firmware did not
+// bring up: DET 1 held for over a millisecond, then 0, with low power
+// states kept off. Returns the link state once a device answered and its
+// link came up, or once none answered.
+u32 reset_link(volatile u8* port) {
+    const u32 sctl = read32(port, kPortSctl) & ~(kSctlDetMask | kSctlIpmMask);
+    write32(port, kPortSctl, sctl | kSctlIpmNone | kSctlDetReset);
+    hold_ms(kResetHoldMs);
+    write32(port, kPortSctl, sctl | kSctlIpmNone);
+    Wait presence(kPresenceMs);
+    while (link_state(port) == 0 && !presence.over()) {
+    }
+    return wait_link(port, kLinkMs);
+}
+
+// Brings up the link of one port and reads what is behind it. Logs every
+// device it skips; an empty port is skipped silently. The port is stopped
+// with FIS receive on, so the device's first register FIS can arrive.
+bool probe_port(volatile u8* port, u32 p) {
+    u32 det = wait_link(port, kLinkMs);
+    if (det == kSstsDetOffline) {
+        log_port(p, "PHY offline, skipped");
+        return false;
+    }
+    if (det != kSstsDetReady) {
+        det = reset_link(port);
+    }
+    if (det != kSstsDetReady) {
+        if (det != 0) {
+            log_port(p, "device not ready, skipped");
+        }
+        return false;
+    }
+    write32(port, kPortSerr, 0xFFFFFFFFu);
+    if (!wait_bits(port, kPortTfd, kTfdBusy | kTfdDrq, 0, kReadyMs)) {
+        log_port(p, "device stays busy, skipped");
+        return false;
+    }
+    const u32 signature = read32(port, kPortSig);
+    switch (ahci_classify_signature(signature)) {
+    case AhciSignature::Ata: return true;
+    case AhciSignature::Atapi: log_port(p, "ATAPI, skipped"); break;
+    case AhciSignature::PortMultiplier: log_port(p, "port multiplier, skipped"); break;
+    case AhciSignature::Enclosure: log_port(p, "enclosure bridge, skipped"); break;
+    case AhciSignature::Other: log_unknown_signature(p, signature); break;
+    }
+    return false;
+}
+
+// Stops every implemented port; false when one will not stop.
+bool stop_ports(volatile u8* regs, u32 implemented) {
+    for (u32 p = 0; p < kPortCount; ++p) {
+        if ((implemented & (1u << p)) != 0 && !stop_port(regs + kPortBase + p * kPortBytes)) {
+            log_port(p, "will not stop, controller not used");
+            return false;
+        }
+    }
+    return true;
+}
+
+// Points every implemented port's FIS receive area into `fis_phys` and
+// turns FIS receive on; false when a port's receive engine does not start.
+bool receive_fises(volatile u8* regs, u32 implemented, u64 fis_phys) {
     for (u32 p = 0; p < kPortCount; ++p) {
         if ((implemented & (1u << p)) == 0) {
             continue;
         }
         volatile u8* port = regs + kPortBase + p * kPortBytes;
-        u32 det = read32(port, kPortSsts) & kSstsDetMask;
-        for (u64 spins = 0; (det == kSstsDetPresent || det == kSstsDetPhy) && spins < kDetectLimit;
-             ++spins) {
-            cpu_pause();
-            det = read32(port, kPortSsts) & kSstsDetMask;
-        }
-        if (det != kSstsDetReady) {
-            if (det == kSstsDetPresent || det == kSstsDetPhy) {
-                log_port(p, "device not ready, skipped");
-            } else if (det == kSstsDetOffline) {
-                log_port(p, "PHY offline, skipped");
-            }
-            continue;
-        }
-        const u32 signature = read32(port, kPortSig);
-        switch (ahci_classify_signature(signature)) {
-        case AhciSignature::Ata:
-            candidates[count] = static_cast<u8>(p);
-            ++count;
-            break;
-        case AhciSignature::Atapi:
-            log_port(p, "ATAPI, skipped");
-            break;
-        case AhciSignature::PortMultiplier:
-            log_port(p, "port multiplier, skipped");
-            break;
-        case AhciSignature::Enclosure:
-            log_port(p, "enclosure bridge, skipped");
-            break;
-        case AhciSignature::Other:
-            log_unknown_signature(p, signature);
-            break;
+        write_address(port, kPortFb, fis_phys + u64{p} * kAhciFisReceiveBytes);
+        write32(port, kPortCmd, read32(port, kPortCmd) | kCmdFisReceive);
+        if (!wait_bits(port, kPortCmd, kCmdFisReceiveRunning, kCmdFisReceiveRunning, kPortMs)) {
+            log_port(p, "FIS receive will not start, controller not used");
+            return false;
         }
     }
-    return count;
+    return true;
+}
+
+// Probes the implemented ports and collects those with an ATA disk behind
+// them. The ports must be stopped. Each gets a FIS receive area in a scratch
+// area while it is probed, and is stopped again before that area goes back.
+// Returns false, with bus mastering off and the scratch area kept, when a
+// port does not obey; the controller is then not used.
+bool find_ata_ports(PciAddress address, volatile u8* regs, u32 implemented, bool wide,
+                    PhysAllocator& pages, u8* candidates, u32& count) {
+    count = 0;
+    const u64 fis_phys = pages.alloc_pages(kProbeFisPages);
+    if (fis_phys == 0 || (!wide && fis_phys + kProbeFisPages * kAhciPageBytes > kFourGiB)) {
+        if (fis_phys != 0) {
+            pages.free_pages(fis_phys, kProbeFisPages);
+        }
+        log_controller(address, "no memory below 4 GiB to probe with");
+        return false;
+    }
+    // The ports are stopped, so bus mastering can come on: the controller
+    // fetches nothing, and FIS receive needs it to reach the scratch area.
+    set_command(address, kPciCommandBusMaster, 0);
+    if (!receive_fises(regs, implemented, fis_phys)) {
+        stop_ports(regs, implemented);
+        set_command(address, 0, kPciCommandBusMaster);
+        return false;
+    }
+    for (u32 p = 0; p < kPortCount; ++p) {
+        if ((implemented & (1u << p)) != 0 && probe_port(regs + kPortBase + p * kPortBytes, p)) {
+            candidates[count] = static_cast<u8>(p);
+            ++count;
+        }
+    }
+    if (!stop_ports(regs, implemented)) {
+        set_command(address, 0, kPciCommandBusMaster);
+        return false;
+    }
+    pages.free_pages(fis_phys, kProbeFisPages);
+    return true;
 }
 
 // Allocates one page for the command list, FIS area and command table, and
@@ -484,10 +611,32 @@ u32 open_controller(PciAddress address, MmioMapper& mmio, PhysAllocator& pages, 
     }
     write32(regs, kGhc, (read32(regs, kGhc) | kGhcAhciEnable) & ~kGhcInterruptEnable);
 
+    // Every implemented port stops before bus mastering comes on: a port the
+    // firmware left running would otherwise receive FISes into memory the
+    // kernel has since handed out. A port that will not stop keeps bus
+    // mastering off for the whole controller.
+    const u32 implemented = read32(regs, kPi);
+    if (!stop_ports(regs, implemented)) {
+        return 0;
+    }
+    // With staggered spin-up the disks wait for their port to tell them.
+    if ((cap & kCapStaggeredSpinUp) != 0) {
+        for (u32 p = 0; p < kPortCount; ++p) {
+            if ((implemented & (1u << p)) != 0) {
+                volatile u8* port = regs + kPortBase + p * kPortBytes;
+                write32(port, kPortCmd, read32(port, kPortCmd) | kCmdSpinUp | kCmdPowerOn);
+            }
+        }
+    }
+
     u8 candidates[kPortCount]{};
-    const u32 found = find_ata_ports(regs, candidates);
+    u32 found = 0;
+    if (!find_ata_ports(address, regs, implemented, wide, pages, candidates, found)) {
+        return 0;
+    }
     const u32 wanted = found < max ? found : max;
     if (wanted == 0) {
+        set_command(address, 0, kPciCommandBusMaster);
         return 0;
     }
 
@@ -495,21 +644,9 @@ u32 open_controller(PciAddress address, MmioMapper& mmio, PhysAllocator& pages, 
     const char* error = nullptr;
     if (!alloc_port_memory(pages, wide, wanted, memory, error)) {
         log_controller(address, error);
+        set_command(address, 0, kPciCommandBusMaster);
         return 0;
     }
-
-    // Every implemented port stops before bus mastering comes on: a port the
-    // firmware left running would otherwise receive FISes into memory the
-    // kernel has since handed out. A port that will not stop keeps bus
-    // mastering off for the whole controller.
-    const u32 implemented = read32(regs, kPi);
-    for (u32 p = 0; p < kPortCount; ++p) {
-        if ((implemented & (1u << p)) != 0 && !stop_port(regs + kPortBase + p * kPortBytes)) {
-            log_port(p, "will not stop, controller not used");
-            return 0;
-        }
-    }
-    set_command(address, kPciCommandBusMaster, 0);
 
     u32 opened = 0;
     for (u32 i = 0; i < wanted; ++i) {
