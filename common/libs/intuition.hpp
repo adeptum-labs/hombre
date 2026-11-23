@@ -322,9 +322,9 @@ public:
     void free_gadget_info(u32 info);
     void draw_image(u32 rp, u32 image, i32 left, i32 top);
 
-    // The same image with every pen of its box complemented, as a
-    // complement highlight over the drawn image leaves it: the look of a
-    // selected icon without a SelectRender image.
+    // The same image with its pens complemented in the planes it has, so
+    // they stay among its own on a deeper screen: the look of a selected
+    // icon without a SelectRender image.
     void draw_image_complemented(u32 rp, u32 image, i32 left, i32 top);
 
     // DrawImageState: the image as its state shows it, with draw_info over
@@ -766,8 +766,11 @@ private:
     void draw_image_mode(u32 rp, u32 image, i32 left, i32 top, u32 state, u32 draw_info);
     static void draw_sys_image(void* ctx, u32 rp, u32 which, i32 left, i32 top, i32 width,
                                i32 height, u32 state, u32 draw_info);
+    // How draw_image_view complements an image: not, in every plane of the
+    // bitmap, or in the planes the image has.
+    enum class Complement { None, Bitmap, ImagePlanes };
     void draw_image_view(native::Bus& b, const raster::RastPortView& view, u32 image, i32 left,
-                         i32 top, bool complement, bool damage);
+                         i32 top, Complement complement, bool damage);
     Rect icon_drag_rect(native::Bus& b) const;
     void clear_gadget_hook(u32 gadget);
     void clear_window_gadget_hooks(u32 window);

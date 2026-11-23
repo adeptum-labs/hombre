@@ -3099,7 +3099,8 @@ void Intuition::compose(u32 screen, Rect r) {
         view.bitmap = dst;
         view.clip = raster::Clip{r.x0, r.y0, r.x1, r.y1};
         view.ok = true;
-        draw_image_view(b, view, icon_drag_.image, icon_drag_.x, icon_drag_.y, false, false);
+        draw_image_view(b, view, icon_drag_.image, icon_drag_.x, icon_drag_.y,
+                        Complement::None, false);
     }
     if (b.ok() && menu_.active && menu_.screen == screen) {
         draw_menu_overlay(b, dst, r);
@@ -6153,8 +6154,22 @@ void Intuition::draw_image(u32 rp, u32 image, i32 left, i32 top) {
     draw_image_mode(rp, image, left, top, ndk::IDS_NORMAL, 0);
 }
 
+// A selected icon without an image of its own: its image with the pens
+// complemented in the image's planes, as the Workbench shows it.
 void Intuition::draw_image_complemented(u32 rp, u32 image, i32 left, i32 top) {
-    draw_image_mode(rp, image, left, top, ndk::IDS_SELECTED, 0);
+    if (machine_ == nullptr || rp == 0 || image == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    if (static_cast<u16>(b.r16(image + image::Depth)) == ndk::CUSTOMIMAGEDEPTH &&
+        boopsi_.is_object(image)) {
+        draw_image_mode(rp, image, left, top, ndk::IDS_SELECTED, 0);
+        return;
+    }
+    const raster::RastPortView view = raster::load_rastport(b, rp);
+    if (view.ok) {
+        draw_image_view(b, view, image, left, top, Complement::ImagePlanes, true);
+    }
 }
 
 void Intuition::draw_image_state(u32 rp, u32 image, i32 left, i32 top, u32 state,
@@ -6261,11 +6276,12 @@ void Intuition::draw_image_mode(u32 rp, u32 image, i32 left, i32 top, u32 state,
     if (!view.ok) {
         return;
     }
-    draw_image_view(b, view, image, left, top, complement, true);
+    draw_image_view(b, view, image, left, top,
+                    complement ? Complement::Bitmap : Complement::None, true);
 }
 
 void Intuition::draw_image_view(Bus& b, const raster::RastPortView& view, u32 image, i32 left,
-                                i32 top, bool complement, bool damage) {
+                                i32 top, Complement complement, bool damage) {
     const i64 origin_x = static_cast<i64>(left) + view.origin_x;
     const i64 origin_y = static_cast<i64>(top) + view.origin_y;
     u32 current = image;
@@ -6292,7 +6308,8 @@ void Intuition::draw_image_view(Bus& b, const raster::RastPortView& view, u32 im
             if (data == 0 || depth == 0) {
                 const Rect filled =
                     raster::fill_rect(b, view.bitmap, view.clip, area,
-                                      complement ? ~plane_on_off & pen_mask : plane_on_off);
+                                      complement != Complement::None ? ~plane_on_off & pen_mask
+                                                                     : plane_on_off);
                 if (b.ok() && damage) {
                     report_image_damage(view, filled);
                 }
@@ -6314,6 +6331,21 @@ void Intuition::draw_image_view(Bus& b, const raster::RastPortView& view, u32 im
                                 fixed |= 1u << bit;
                             }
                         }
+                    }
+                    // The image's own planes, and at least the two of the
+                    // four colours icons are drawn in; a complement in only
+                    // those keeps an image's pens among its own, so a
+                    // selected icon of four colours looks the same on every
+                    // depth.
+                    u32 flip = pen_mask;
+                    if (complement == Complement::ImagePlanes) {
+                        flip = 3;
+                        for (u32 bit = 0; bit < 8; ++bit) {
+                            if (plane_of_bit[bit] >= 0 && plane_of_bit[bit] < depth) {
+                                flip |= 1u << bit;
+                            }
+                        }
+                        flip &= pen_mask;
                     }
                     const i64 image_x = origin_x + img_left;
                     const i64 image_y = origin_y + img_top;
@@ -6343,8 +6375,8 @@ void Intuition::draw_image_view(Bus& b, const raster::RastPortView& view, u32 im
                                                  static_cast<i32>(y))) {
                                 continue;
                             }
-                            if (complement) {
-                                pen = ~pen & pen_mask;
+                            if (complement != Complement::None) {
+                                pen = (pen ^ flip) & pen_mask;
                             }
                             raster::write_pixel(b, view.bitmap, static_cast<i32>(x),
                                                 static_cast<i32>(y), pen);

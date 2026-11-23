@@ -7767,45 +7767,53 @@ void draw_image_clips_at_the_window_edge() {
     CHECK_EQ(window_pixel(r, window, 6, 5), 0u);
 }
 
-void draw_image_complemented_inverts_every_pen_of_the_image_box() {
+void draw_image_complemented_inverts_the_pens_in_the_image_planes() {
     GfxRig r;
-    put_new_screen(r, kNewScreen, 100, 50, 2, 0, 1, 0);
+    put_new_screen(r, kNewScreen, 100, 50, 3, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
     const u32 rp = screen + sc_RastPort;
 
-    // A four-pixel image whose bits are 1010 on a cleared row and on a row
-    // of pen 2: what lay under the image makes no difference, and the
-    // image's clear pixels show as much as its set ones.
+    // A four-pixel image of two planes in pens 0, 1, 2 and 3, on a cleared
+    // row and on a row of pen 5: what lay under the image makes no
+    // difference, and on eight colours it keeps to its own four pens,
+    // 0 and 3 swapped and 1 and 2, as on a screen of two planes.
     r.graphics.set_pens(rp, 0, 0, JAM1);
     r.graphics.rect_fill(rp, 10, 10, 13, 10);
-    r.graphics.set_pens(rp, 2, 0, JAM1);
+    r.graphics.set_pens(rp, 5, 0, JAM1);
     r.graphics.rect_fill(rp, 10, 12, 13, 12);
     const u32 data = kData + 0x1800;
-    r.put8(data, 0xA0);
-    const u32 image = put_image(r, kData + 0x1000, 0, 0, 4, 1, 1, data, 1, 0);
+    r.put16(data, 0x5000);      // plane 0: 0101
+    r.put16(data + 2, 0x3000);  // plane 1: 0011
+    const u32 image = put_image(r, kData + 0x1000, 0, 0, 4, 1, 2, data, 3, 0);
     for (i32 y : {10, 12}) {
         r.intuition.draw_image_complemented(rp, image, 10, y);
-        CHECK_EQ(screen_pixel(r, screen, 10, y), 2u);
-        CHECK_EQ(screen_pixel(r, screen, 11, y), 3u);
-        CHECK_EQ(screen_pixel(r, screen, 12, y), 2u);
-        CHECK_EQ(screen_pixel(r, screen, 13, y), 3u);
-        CHECK_EQ(screen_pixel(r, screen, 14, y), 2u);
+        CHECK_EQ(screen_pixel(r, screen, 10, y), 3u);
+        CHECK_EQ(screen_pixel(r, screen, 11, y), 2u);
+        CHECK_EQ(screen_pixel(r, screen, 12, y), 1u);
+        CHECK_EQ(screen_pixel(r, screen, 13, y), 0u);
     }
 
     // The same image drawn plainly writes its own pens.
     r.intuition.draw_image(rp, image, 10, 10);
-    CHECK_EQ(screen_pixel(r, screen, 10, 10), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 11, 10), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 12, 10), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 13, 10), 0u);
+    for (u32 x = 0; x < 4; ++x) {
+        CHECK_EQ(screen_pixel(r, screen, 10 + static_cast<i32>(x), 10), x);
+    }
 
-    // An image without data is its PlaneOnOff pen, complemented too.
+    // An image of one plane is complemented in the first two, as on a
+    // screen of four colours.
+    r.put8(data + 0x40, 0xA0);
+    const u32 flat = put_image(r, kData + 0x1080, 0, 0, 4, 1, 1, data + 0x40, 1, 0);
+    r.intuition.draw_image_complemented(rp, flat, 10, 14);
+    CHECK_EQ(screen_pixel(r, screen, 10, 14), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 11, 14), 3u);
+
+    // An image without data is its PlaneOnOff pen, complemented in every
+    // plane.
     const u32 solid = put_image(r, kData + 0x1100, 0, 0, 4, 1, 0, 0, 0, 1);
     r.intuition.draw_image_complemented(rp, solid, 20, 10);
-    CHECK_EQ(screen_pixel(r, screen, 20, 10), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 23, 10), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 24, 10), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 20, 10), 6u);
+    CHECK_EQ(screen_pixel(r, screen, 23, 10), 6u);
 }
 
 }
@@ -9698,7 +9706,7 @@ int main() {
     erase_image_clears_the_image_box();
     draw_image_takes_word_offsets_and_follows_the_chain();
     draw_image_leaves_out_what_it_cannot_draw();
-    draw_image_complemented_inverts_every_pen_of_the_image_box();
+    draw_image_complemented_inverts_the_pens_in_the_image_planes();
     draw_image_clips_at_the_window_edge();
     requester_builds_on_the_default_screen_with_its_title_and_buttons();
     requester_is_laid_out_in_the_font_of_its_screen();
