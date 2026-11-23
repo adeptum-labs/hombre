@@ -1156,18 +1156,23 @@ void open_window_draws_chrome() {
     CHECK_EQ(screen_pixel(r, screen, 51, 100), 1u);
     CHECK_EQ(screen_pixel(r, screen, 248, 100), 2u);
     CHECK_EQ(screen_pixel(r, screen, 100, 158), 2u);
-    // The close image: its raised edge, its body and the outlined square in
-    // the middle.
-    CHECK_EQ(screen_pixel(r, screen, 59, 62), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 55, 67), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 56, 67), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 59, 67), 2u);
-    // The depth image: its raised edge, the sheet behind and the one in front.
-    CHECK_EQ(screen_pixel(r, screen, 240, 62), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 237, 64), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 238, 65), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 239, 66), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 240, 67), 2u);
+    // The close image: the groove that ends its raised cell, its body and
+    // the square etched in the middle, dark on the left and light on the
+    // right.
+    CHECK_EQ(screen_pixel(r, screen, 65, 67), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 66, 67), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 53, 67), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 54, 67), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 57, 67), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 60, 67), 2u);
+    // The depth image: the groove that starts its raised cell, the dark
+    // sheet behind and the light one in front, the body inside both.
+    CHECK_EQ(screen_pixel(r, screen, 234, 67), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 235, 67), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 239, 64), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 240, 65), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 66), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 242, 67), 0u);
     CHECK_EQ(screen_pixel(r, screen, 69, 63), 1u);
 
     // Without the close gadget the bar has no button in that corner.
@@ -1662,10 +1667,11 @@ void open_window_reads_32_bit_flags() {
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
     CHECK_EQ(r.get32(window + wd_Flags), flags);
-    CHECK_EQ(screen_pixel(r, screen, 58, 62), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 58, 67), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 62), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 240, 67), 2u);
+    // The close gadget's groove and glyph, and the depth gadget's.
+    CHECK_EQ(screen_pixel(r, screen, 66, 67), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 60, 67), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 235, 67), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 66), 2u);
 
     put_new_window(r, kNewWindow, 300, 60, 100, 50, WFLG_BORDERLESS, 0, 0, 0);
     const u32 borderless = open_win(r, kNewWindow);
@@ -1678,7 +1684,7 @@ void open_window_reads_32_bit_flags() {
     const u32 tagged = open_win_tags(r, 0, tags);
     CHECK(tagged != 0);
     CHECK_EQ(r.get32(tagged + wd_Flags), flags);
-    CHECK_EQ(screen_pixel(r, screen, 18, 22), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 20, 27), 2u);
     CHECK_EQ(screen_pixel(r, screen, 11, 21), 3u);
 }
 
@@ -2403,7 +2409,12 @@ void gadget_press_is_consumed_without_a_mousebuttons_message() {
     CHECK_EQ(get_msg(r, port), 0u);
 }
 
-void hit_rectangles_match_the_drawn_boxes() {
+// On a four colour screen the bar gadgets are cells as high as the bar that
+// reach the window's edges, each parted from the title by a groove: a
+// SHADOWPEN (1) line, then a SHINEPEN (2) one. The glyphs are etched on the
+// bar's face, here the BACKGROUNDPEN (0) of an inactive window, and lie
+// inside the hit rectangles.
+void hit_rectangles_hold_the_drawn_glyphs() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
@@ -2414,29 +2425,55 @@ void hit_rectangles_match_the_drawn_boxes() {
 
     const Rect close_box = Intuition::close_box_rect(50, 60);
     const Rect depth_box = Intuition::depth_box_rect(50, 60, 200);
-    const i32 close_cx = (close_box.x0 + close_box.x1) / 2;
-    const i32 close_cy = (close_box.y0 + close_box.y1) / 2;
-    const i32 depth_cx = (depth_box.x0 + depth_box.x1) / 2;
-    const i32 depth_cy = (depth_box.y0 + depth_box.y1) / 2;
+    const i32 left = 50;
+    const i32 right = 249;
+    const i32 top = 60;
+    const i32 under = top + chrome::Metrics{}.bar_height();
+    const i32 cy = (top + under) / 2;
+    CHECK_EQ(cy, (close_box.y0 + close_box.y1) / 2);
 
-    // The window's edges through the flat buttons: SHINEPEN (2) along the
-    // top and the left, SHADOWPEN (1) along the bottom and the right, and
-    // the face where the buttons meet the title.
-    CHECK_EQ(screen_pixel(r, screen, close_cx, close_cy), 2u);
-    CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0), 2u);
-    CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y1), 1u);
-    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_cy), 2u);
-    CHECK_EQ(screen_pixel(r, screen, close_box.x1, close_cy), 0u);
-    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_box.y0), 2u);
+    // The close cell: the window's light left and top edges, the dark line
+    // under the bar, and the groove where the hit rectangle ends.
+    CHECK_EQ(screen_pixel(r, screen, left, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, left + 5, top), 2u);
+    CHECK_EQ(screen_pixel(r, screen, left + 5, under), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x1 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x1 + 2, cy), 0u);
+    // Its glyph, 7 by 5 in the middle of the cell: dark along the top and
+    // left, light along the bottom and right, the face inside.
+    const i32 close_cx = (left + 1 + close_box.x1 - 1) / 2;
+    CHECK(close_cx - 3 >= close_box.x0 && close_cx + 3 <= close_box.x1);
+    CHECK_EQ(screen_pixel(r, screen, close_cx, cy - 2), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx - 3, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx, cy + 2), 2u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx + 3, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx, cy), 0u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx - 4, cy), 0u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx + 4, cy), 0u);
 
-    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y0), 2u);
-    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y1), 1u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_cy), 0u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, depth_cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_cy), 2u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_box.y0), 2u);
-    CHECK_EQ(screen_pixel(r, screen, close_box.x1 + 1, close_box.y0), 0u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 - 1, depth_box.y0), 0u);
+    // The depth cell: the groove where the hit rectangle starts, and the
+    // window's dark right edge.
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 - 1, cy), 0u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, top), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 5, top), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 5, under), 1u);
+    CHECK_EQ(screen_pixel(r, screen, right, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, right - 1, cy), 0u);
+    // Its glyph: a dark sheet at the back and a light one in front, lower
+    // and to the right, with the face inside both.
+    const i32 depth_cx = (depth_box.x0 + 2 + right - 1) / 2;
+    CHECK(depth_cx - 3 >= depth_box.x0 && depth_cx + 3 <= depth_box.x1);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx - 3, cy - 3), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx + 1, cy - 3), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx - 3, cy + 1), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx - 2, cy - 2), 0u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx - 1, cy - 1), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx + 3, cy + 3), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx + 1, cy + 1), 0u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx, cy), 0u);
 }
 
 void messages_carry_the_clock_time() {
@@ -4925,11 +4962,14 @@ void depth2_fallback_chrome_pens() {
     CHECK_EQ(screen_pixel(r, screen, 20, 20), 2u);
     CHECK_EQ(screen_pixel(r, screen, 100, 25), 3u);
     CHECK_EQ(screen_pixel(r, screen, 39, 23), 1u);
-    // The close image: the light box of its glyph, the fill pen round it and
-    // its SHINEPEN top edge.
-    CHECK_EQ(screen_pixel(r, screen, 29, 27), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 25, 27), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 28, 22), 2u);
+    // The close image: its glyph etched in SHADOWPEN and SHINEPEN, the fill
+    // pen inside and round it, and the groove that ends its cell.
+    CHECK_EQ(screen_pixel(r, screen, 24, 27), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 30, 27), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 27, 27), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 22, 27), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 35, 27), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 36, 27), 2u);
     // The knob: SHINEPEN on top, BACKGROUNDPEN inside its edges and in the container.
     CHECK_EQ(window_pixel(r, active, 25, 21), 2u);
     CHECK_EQ(window_pixel(r, active, 25, 25), 0u);
@@ -5151,21 +5191,35 @@ void held_bar_button_sinks_on_a_four_colour_screen() {
     const Rect depth_box = Intuition::depth_box_rect(50, 60, 200);
     const i32 cx = (depth_box.x0 + depth_box.x1) / 2;
     const i32 cy = (depth_box.y0 + depth_box.y1) / 2;
-    // Flat: FILLPEN (3) on the left, the window's SHADOWPEN edge on the
-    // right.
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 3u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x1 - 1, cy), 3u);
-    press(r, cx, cy);
-    // Held, it is sunken: dark on the left, after the dark line that ends
-    // the neighbour, and light on the right.
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 2u);
+    const i32 right = 50 + 200 - 1;
+    const i32 top = 60;
+    const i32 under = top + chrome::Metrics{}.bar_height();
+    // Raised: after the SHADOWPEN line that ends the title, the button's
+    // SHINEPEN edge on the left and along the top, the window's SHADOWPEN
+    // edge on the right and the line under the bar, and FILLPEN (3)
+    // between.
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0, cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x1 - 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 2, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, right, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, right - 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, cx, top), 2u);
+    CHECK_EQ(screen_pixel(r, screen, cx, under), 1u);
+    press(r, cx, cy);
+    // Held, it is sunken: its edges swap their pens, and the dark line that
+    // ends the title stays.
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 2, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, right, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, right - 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, cx, top), 1u);
+    CHECK_EQ(screen_pixel(r, screen, cx, under), 2u);
     release(r, cx, cy);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 3u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, right, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, cx, top), 2u);
+    CHECK_EQ(screen_pixel(r, screen, cx, under), 1u);
 }
 
 void fill_backdrop_rect(GfxRig& r, u32 screen, i32 x0, i32 y0, i32 x1, i32 y1, u8 pen) {
@@ -6772,9 +6826,12 @@ void shallow_screens_draw_the_chrome_in_the_classic_pens() {
         const u32 mask = (1u << depth) - 1;
         CHECK_EQ(screen_pixel(r, screen, 20, 20), 2u & mask);
         CHECK_EQ(screen_pixel(r, screen, 100, 25), 3u & mask);
-        CHECK_EQ(screen_pixel(r, screen, 29, 27), 2u & mask);
-        CHECK_EQ(screen_pixel(r, screen, 25, 27), 3u & mask);
-        CHECK_EQ(screen_pixel(r, screen, 28, 22), 2u & mask);
+        // The close glyph's dark and light edges, the face round it and
+        // the light line of the groove that ends its cell.
+        CHECK_EQ(screen_pixel(r, screen, 24, 27), 1u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 30, 27), 2u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 22, 27), 3u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 36, 27), 2u & mask);
         CHECK(highest_pen_on_screen(r, screen) <= 3u);
     }
 }
@@ -9007,37 +9064,103 @@ void border_images_carry_the_frame_lines_they_cover() {
         CHECK(all(15, 1, 15, 9, shadow));
     }
 
-    // The close gadget, 20 by 11: flat, the window's light edges along its
-    // top and left, the title bar's dark line along its bottom and no edge
-    // of its own on the right. Held down it is sunken.
+    // The close gadget, 20 by 11, is a raised button: the window's light
+    // edges along its top and left, the title bar's dark line along its
+    // bottom and a dark edge on its right, before the light line that
+    // starts the title.
     draw(CLOSEIMAGE, IDS_NORMAL);
     CHECK(all(0, 0, 19, 0, shine));
     CHECK(all(0, 0, 0, 10, shine));
     CHECK(all(1, 10, 19, 10, shadow));
-    CHECK(all(19, 1, 19, 9, fill));
+    CHECK(all(18, 1, 18, 10, shadow));
+    CHECK(all(19, 0, 19, 9, shine));
+    // Its glyph is a square of 7 by 5 etched into the face: dark along the
+    // top and left, light along the bottom and right, the face inside and
+    // around it.
+    const auto close_glyph = [&all, shine, shadow](u32 face) {
+        return all(6, 3, 11, 3, shadow) && all(6, 3, 6, 7, shadow) &&
+               all(12, 3, 12, 7, shine) && all(7, 7, 12, 7, shine) && all(7, 4, 11, 6, face) &&
+               all(1, 1, 5, 9, face) && all(13, 1, 17, 9, face) && all(6, 1, 12, 2, face) &&
+               all(6, 8, 12, 9, face);
+    };
+    CHECK(close_glyph(fill));
+    // Held down its edges swap their pens; the title's light line and the
+    // glyph stay.
     draw(CLOSEIMAGE, IDS_SELECTED);
-    CHECK(all(0, 0, 19, 0, shadow));
-    CHECK(all(19, 1, 19, 10, shine));
+    CHECK(all(0, 0, 18, 0, shadow));
+    CHECK(all(0, 0, 0, 10, shadow));
+    CHECK(all(1, 10, 17, 10, shine));
+    CHECK(all(18, 1, 18, 10, shine));
+    CHECK(all(19, 0, 19, 9, shine));
+    CHECK_EQ(window_pixel(r, window, left + 19, top + 10), shadow);
+    CHECK(close_glyph(fill));
+    // In an inactive window the face is the background.
+    draw(CLOSEIMAGE, IDS_INACTIVENORMAL);
+    CHECK(all(18, 1, 18, 10, shadow));
+    CHECK(close_glyph(background));
 
-    // The depth and zoom gadgets, 23 by 11, are flat: the window's light
-    // top, the title bar's dark line and, for the depth gadget, the
-    // window's dark right edge. Held down, they start with the dark line
-    // that ends the gadget on their left and are sunken.
+    // The depth and zoom gadgets, 23 by 11, start with the dark line that
+    // ends the gadget on their left, and a raised button follows. Only the
+    // depth gadget's right edge is the window's, dark to the top. Held
+    // down, the button's edges swap their pens and the first line stays.
     for (const u32 which : {ZOOMIMAGE, DEPTHIMAGE}) {
         draw(which, IDS_NORMAL);
         CHECK(all(0, 0, 21, 0, shine));
-        CHECK(all(0, 1, 1, 9, fill));
+        CHECK(all(0, 1, 0, 10, shadow));
+        CHECK(all(1, 1, 1, 9, shine));
         CHECK(all(0, 10, 22, 10, shadow));
-        CHECK(all(22, 1, 22, 9, which == DEPTHIMAGE ? shadow : fill));
+        CHECK(all(22, 1, 22, 10, shadow));
         CHECK_EQ(window_pixel(r, window, left + 22, top), which == DEPTHIMAGE ? shadow : shine);
+        CHECK(all(2, 1, 7, 9, fill));
+        CHECK(all(15, 1, 21, 9, fill));
         draw(which, IDS_SELECTED);
+        CHECK(all(1, 0, 21, 0, shadow));
         CHECK(all(0, 1, 0, 10, shadow));
         CHECK(all(1, 1, 1, 9, shadow));
+        CHECK(all(2, 10, 21, 10, shine));
         CHECK(all(22, 1, 22, 10, shine));
+    }
+    // The zoom glyph is a square of 7 by 7 etched like the close gadget's,
+    // with a small light sheet outlined in the dark pen in its top left
+    // corner.
+    for (const u32 state : {IDS_NORMAL, IDS_INACTIVENORMAL}) {
+        const u32 face = state == IDS_NORMAL ? fill : background;
+        draw(ZOOMIMAGE, state);
+        CHECK(all(8, 2, 13, 2, shadow));
+        CHECK(all(8, 2, 8, 8, shadow));
+        CHECK(all(14, 2, 14, 8, shine));
+        CHECK(all(9, 8, 14, 8, shine));
+        CHECK(all(11, 2, 11, 5, shadow));
+        CHECK(all(8, 5, 11, 5, shadow));
+        CHECK(all(9, 3, 10, 4, shine));
+        CHECK(all(12, 3, 13, 7, face));
+        CHECK(all(9, 6, 13, 7, face));
+    }
+    // The depth glyph is two sheets of 5 by 5 on the face: a dark outline
+    // at the back and a light one in front, lower and to the right, which
+    // covers the corner of the first.
+    for (const u32 state : {IDS_NORMAL, IDS_INACTIVENORMAL}) {
+        const u32 face = state == IDS_NORMAL ? fill : background;
+        draw(DEPTHIMAGE, state);
+        CHECK(all(8, 2, 12, 2, shadow));
+        CHECK(all(8, 2, 8, 6, shadow));
+        CHECK(all(12, 2, 12, 3, shadow));
+        CHECK(all(8, 6, 9, 6, shadow));
+        CHECK(all(9, 3, 11, 3, face));
+        CHECK(all(9, 4, 9, 5, face));
+        CHECK(all(10, 4, 14, 4, shine));
+        CHECK(all(10, 8, 14, 8, shine));
+        CHECK(all(10, 4, 10, 8, shine));
+        CHECK(all(14, 4, 14, 8, shine));
+        CHECK(all(11, 5, 13, 7, face));
+        CHECK(all(13, 2, 14, 3, face));
+        CHECK(all(8, 7, 9, 8, face));
     }
 
     // The screen's depth gadget takes the screen bar's pens: a line of the
     // detail pen down its left and the bar's trim line along its bottom.
+    // Its sheets are both outlined in the detail pen: a background one
+    // behind a light one.
     const u32 bar_detail = 1;
     const u32 bar_block = 2;
     const u32 bar_trim = 1;
@@ -9045,6 +9168,11 @@ void border_images_carry_the_frame_lines_they_cover() {
     CHECK(all(0, 0, 0, 10, bar_detail));
     CHECK(all(0, 10, 22, 10, bar_trim));
     CHECK(all(1, 0, 22, 0, bar_block));
+    CHECK(all(8, 1, 12, 1, bar_detail));
+    CHECK(all(9, 2, 11, 2, background));
+    CHECK(all(10, 3, 14, 3, bar_detail));
+    CHECK(all(10, 7, 14, 7, bar_detail));
+    CHECK(all(11, 4, 13, 6, shine));
 }
 
 // An IntuiText is measured and printed in the font its ITextFont names:
@@ -9589,6 +9717,17 @@ void a_window_without_a_depth_gadget_has_the_zoom_button_in_its_place() {
     const Rect depth = Intuition::depth_box_rect(100, 80, 300);
     CHECK_EQ(box.x0, depth.x0);
     CHECK_EQ(box.x1, depth.x1);
+    // Its cell starts with the groove that ends the title and reaches the
+    // window's dark right edge, which keeps the top right corner.
+    const u32 screen = r.get32(window + wd_WScreen);
+    const i32 right = 100 + 300 - 1;
+    const i32 cy = (box.y0 + box.y1) / 2;
+    CHECK_EQ(screen_pixel(r, screen, box.x0, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, box.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, right - 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, right, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, right - 1, 80), 2u);
+    CHECK_EQ(screen_pixel(r, screen, right, 80), 1u);
     click_zoom(r, window);
     check_window_box(r, window, 20, 40, 120, 60);
 }
@@ -9642,19 +9781,32 @@ void the_classic_zoom_button_sits_left_of_the_depth_button() {
     const i32 cx = (zoom.x0 + zoom.x1) / 2;
     const i32 cy = (zoom.y0 + zoom.y1) / 2;
 
-    // Flat as the depth button is: the window's light edge along the top,
-    // its dark line under the buttons and the bar's FILLPEN (3) between.
-    CHECK_EQ(screen_pixel(r, screen, cx, zoom.y0), 2u);
-    CHECK_EQ(screen_pixel(r, screen, cx, zoom.y1), 1u);
-    CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), 3u);
-    CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), 3u);
-    // A dark outlined sheet with a light one in its top left corner.
+    // A raised cell as the depth button's is: the window's light edge along
+    // the top and its dark line under the bar, a groove of a dark and a
+    // light line on its left, and on its right the one it shares with the
+    // depth button.
+    const i32 top = 80;
+    const i32 under = top + chrome::Metrics{}.bar_height();
+    CHECK_EQ(screen_pixel(r, screen, cx, top), 2u);
+    CHECK_EQ(screen_pixel(r, screen, cx, under), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 - 2, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 - 1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 3u);
+    CHECK_EQ(zoom.x1, depth.x0);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1 - 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1 + 1, cy), 2u);
+    // A square etched into the bar's FILLPEN (3), dark at the top left and
+    // light at the bottom right, with a small light sheet outlined in the
+    // dark pen in its top left corner.
     CHECK_EQ(screen_pixel(r, screen, cx - 3, cy - 3), 1u);
     CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), 2u);
-    CHECK_EQ(screen_pixel(r, screen, cx + 2, cy + 2), 0u);
-    CHECK_EQ(screen_pixel(r, screen, cx + 3, cy + 3), 1u);
+    CHECK_EQ(screen_pixel(r, screen, cx, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, cx + 2, cy + 2), 3u);
+    CHECK_EQ(screen_pixel(r, screen, cx + 3, cy + 3), 2u);
     // The depth button keeps the window's dark right edge.
-    CHECK_EQ(screen_pixel(r, screen, depth.x1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 100 + 300 - 1, cy), 1u);
 }
 
 void the_modern_zoom_button_sits_left_of_the_depth_button() {
@@ -9697,7 +9849,13 @@ void the_title_ends_before_the_zoom_button() {
         // The title's ink: FILLTEXTPEN on the classic screen.
         const u32 ink = depth == 2 ? 1u : static_cast<u32>(chrome::kTitleActive);
         CHECK(screen_has_pen(r, screen, Rect{first, 83, last, 90}, ink));
-        CHECK(!screen_has_pen(r, screen, Rect{last + 1, 83, zoom.x0 - 1, 90}, ink));
+        // On the classic screen the column before the button is the dark
+        // line that ends the title, in the pen of the ink.
+        const i32 gap_end = depth == 2 ? zoom.x0 - 2 : zoom.x0 - 1;
+        CHECK(!screen_has_pen(r, screen, Rect{last + 1, 83, gap_end, 90}, ink));
+        if (depth == 2) {
+            CHECK_EQ(screen_pixel(r, screen, zoom.x0 - 1, 83), 1u);
+        }
     }
 }
 
@@ -9799,19 +9957,30 @@ void a_held_zoom_button_sinks_on_a_four_colour_screen() {
     const i32 cx = (zoom.x0 + zoom.x1) / 2;
     const i32 cy = (zoom.y0 + zoom.y1) / 2;
 
+    const i32 right = 100 + 300 - 1;
+    // Raised: light on the left, after the dark line that ends the title,
+    // and on the right the dark line that starts the depth button.
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 - 1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), 1u);
     press(r, cx, cy);
     // Held, it is sunken: dark on the left, after the dark line that ends
-    // its neighbour, and light on the right, over the flat depth button's.
+    // the title, and light on the right, over the line that starts the
+    // depth button, which stays raised.
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 - 1, cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 3u);
     CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, zoom.x1 - 1, cy), 3u);
-    CHECK_EQ(screen_pixel(r, screen, depth.x1, cy), 1u);
+    CHECK_EQ(zoom.x1, depth.x0);
+    CHECK_EQ(screen_pixel(r, screen, depth.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, right, cy), 1u);
 
     // Off the button it rises, and let go there it does nothing.
     move_to(r, cx, zoom.y1 + 40);
-    CHECK_EQ(screen_pixel(r, screen, zoom.x0 + 1, cy), 3u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x0, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, zoom.x1, cy), 1u);
     release(r, cx, zoom.y1 + 40);
     check_window_box(r, window, 100, 80, 300, 150);
     CHECK_EQ(drained_classes(r, window).size(), 0u);
@@ -10018,7 +10187,7 @@ int main() {
     close_gadget_without_idcmp_does_nothing();
     depth_gadget_toggles_front_and_back();
     gadget_press_is_consumed_without_a_mousebuttons_message();
-    hit_rectangles_match_the_drawn_boxes();
+    hit_rectangles_hold_the_drawn_glyphs();
     messages_carry_the_clock_time();
     full_message_table_drops_events_without_leaking();
     events_for_windows_of_other_screens_are_ignored();

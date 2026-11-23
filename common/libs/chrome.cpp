@@ -387,7 +387,9 @@ u32 gadget_state(bool active, bool pressed) {
 // The frame of a window as on 3.1: the title bar and the borders in the
 // fill pen of an active window and the background pen of an inactive one, a
 // raised edge round the window and a sunken one round its inside, whose top
-// line is the one under the bar. The gadgets are the system images.
+// line is the one under the bar. The gadgets are the system images, each in
+// a cell as high as the bar, from the window's top line to the line under
+// the bar. An outer cell reaches the window's edge.
 void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) {
     const u16* pens = w.pens.pen;
     const i32 right = w.width - 1;
@@ -406,8 +408,13 @@ void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
     draw_bevel(graphics, rp, Rect{inside_x0 - 1, inside_y0 - 1, inside_x1 + 1, inside_y1 + 1},
                pens[ShadowPen], pens[ShinePen]);
 
+    const i32 bar = w.metrics.bar_height();
+    const bool has_depth = (w.flags & ndk::WFLG_DEPTHGADGET) != 0;
     if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        sysimage::draw(graphics, b, rp, ndk::CLOSEIMAGE, close_button_box(w.metrics),
+        // The close cell's last column is the light line that starts the
+        // title.
+        const Rect cell{0, 0, close_button_box(w.metrics).x1 + 1, bar};
+        sysimage::draw(graphics, b, rp, ndk::CLOSEIMAGE, cell,
                        gadget_state(w.active, w.pressed == BarButton::Close), pens);
     }
     // The zoom and depth gadgets share a column, so the one held is drawn
@@ -415,16 +422,28 @@ void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
     const bool zoom_held = w.pressed == BarButton::Zoom;
     const auto draw_zoom = [&] {
         if ((w.flags & ndk::WFLG_HASZOOM) != 0) {
-            sysimage::draw(graphics, b, rp, ndk::ZOOMIMAGE,
-                           zoom_button_box(w.width, w.flags, w.metrics),
+            // Beside a depth gadget the zoom cell takes a column of the
+            // title's gap for the dark line that ends the title; in the
+            // depth gadget's place it reaches the window's edge.
+            const Rect box = zoom_button_box(w.width, w.flags, w.metrics);
+            const Rect cell = has_depth ? Rect{box.x0 - 1, 0, box.x1, bar}
+                                        : Rect{box.x0, 0, right, bar};
+            sysimage::draw(graphics, b, rp, ndk::ZOOMIMAGE, cell,
                            gadget_state(w.active, zoom_held), pens);
+            if (!has_depth) {
+                // The image's top line ends in its last column; at the
+                // window's edge that corner is the right edge's.
+                graphics.set_pens(rp, pens[zoom_held ? ShinePen : ShadowPen], 0, ndk::JAM2);
+                graphics.rect_fill(rp, right, 0, right, 0);
+            }
         }
     };
     if (!zoom_held) {
         draw_zoom();
     }
-    if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
-        sysimage::draw(graphics, b, rp, ndk::DEPTHIMAGE, depth_button_box(w.width, w.metrics),
+    if (has_depth) {
+        const Rect cell{depth_button_box(w.width, w.metrics).x0, 0, right, bar};
+        sysimage::draw(graphics, b, rp, ndk::DEPTHIMAGE, cell,
                        gadget_state(w.active, w.pressed == BarButton::Depth), pens);
     }
     if (zoom_held) {

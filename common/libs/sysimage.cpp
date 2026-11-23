@@ -146,42 +146,57 @@ i32 mid(i32 a, i32 b) {
     return (a + b) / 2;
 }
 
-// The pens of a title bar button's glyph: its outlines, its light sheets
-// and the sheet behind on a depth button.
+// The pens of a title bar gadget's glyph: the dark and the light line it is
+// etched in and the face of the bar it lies on.
 struct GlyphPens {
-    u32 edge;
+    u32 dark;
     u32 light;
-    u32 back;
+    u32 face;
 };
 
-// Close: a light square outlined in the dark pen, 7 by 5 as on the window
-// chrome.
+// A sheet of a depth gadget: the pen of its outline and the pen inside it.
+struct Sheet {
+    u32 edge;
+    u32 inside;
+};
+
+// Close: a square etched into the bar, dark along its top and left and
+// light along its bottom and right, 7 by 5 as on the window chrome.
 void draw_close(Graphics& graphics, u32 rp, const Area& area, const GlyphPens& g) {
     const i32 cx = mid(area.x0, area.x1);
     const i32 cy = mid(area.y0, area.y1);
-    box(graphics, rp, g.edge, g.light, Area{cx - 3, cy - 2, cx + 3, cy + 2});
+    bevel(graphics, rp, Area{cx - 3, cy - 2, cx + 3, cy + 2}, g.dark, g.light);
 }
 
-// Depth: a sheet at the back and a light one in front, lower and to the
-// right, each 5 by 5.
-void draw_depth(Graphics& graphics, u32 rp, const Area& area, const GlyphPens& g) {
+// Depth: a sheet at the back and one in front, lower and to the right,
+// which covers the corner of the first; each is 5 by 5.
+void draw_depth(Graphics& graphics, u32 rp, const Area& area, const Sheet& back,
+                const Sheet& front) {
     const i32 cx = mid(area.x0, area.x1);
     const i32 cy = mid(area.y0, area.y1);
-    box(graphics, rp, g.edge, g.back, Area{cx - 3, cy - 3, cx + 1, cy + 1});
-    box(graphics, rp, g.edge, g.light, Area{cx - 1, cy - 1, cx + 3, cy + 3});
+    box(graphics, rp, back.edge, back.inside, Area{cx - 3, cy - 3, cx + 1, cy + 1});
+    box(graphics, rp, front.edge, front.inside, Area{cx - 1, cy - 1, cx + 3, cy + 3});
 }
 
-// Zoom: a 7 by 7 sheet with a light one in its top left corner.
+// Zoom: a 7 by 7 square etched like the close gadget's, with a small light
+// sheet outlined in the dark pen in its top left corner.
 void draw_zoom(Graphics& graphics, u32 rp, const Area& area, const GlyphPens& g) {
     const i32 cx = mid(area.x0, area.x1);
     const i32 cy = mid(area.y0, area.y1);
-    box(graphics, rp, g.edge, g.back, Area{cx - 3, cy - 3, cx + 3, cy + 3});
-    box(graphics, rp, g.edge, g.light, Area{cx - 3, cy - 3, cx, cy});
+    bevel(graphics, rp, Area{cx - 3, cy - 3, cx + 3, cy + 3}, g.dark, g.light);
+    box(graphics, rp, g.dark, g.light, Area{cx - 3, cy - 3, cx, cy});
 }
 
-// The glyph of a title bar gadget in the middle of area, where it fits.
+// True when the glyph of a title bar gadget fits the area.
+bool glyph_fits(u32 which, const Area& area) {
+    return area.width() >= 7 && area.height() >= (which == CLOSEIMAGE ? 5 : 7);
+}
+
+// The glyph of a window's title bar gadget in the middle of area, where it
+// fits. The depth gadget's sheets are outlines on the bar's face: the one
+// at the back dark, the one in front light.
 void draw_glyph(Graphics& graphics, u32 rp, u32 which, const Area& area, const GlyphPens& g) {
-    if (area.width() < 7 || area.height() < (which == CLOSEIMAGE ? 5 : 7)) {
+    if (!glyph_fits(which, area)) {
         return;
     }
     if (which == CLOSEIMAGE) {
@@ -189,7 +204,7 @@ void draw_glyph(Graphics& graphics, u32 rp, u32 which, const Area& area, const G
     } else if (which == ZOOMIMAGE) {
         draw_zoom(graphics, rp, area, g);
     } else {
-        draw_depth(graphics, rp, area, g);
+        draw_depth(graphics, rp, area, Sheet{g.dark, g.face}, Sheet{g.light, g.face});
     }
 }
 
@@ -416,48 +431,46 @@ void draw(Graphics& graphics, native::Bus&, u32 rp, u32 which, const Rect& box_r
         fill(graphics, rp, block, outer);
         line(graphics, rp, pens[BarDetailPen], outer.x0, outer.y0, outer.x0, outer.y1);
         line(graphics, rp, pens[BarTrimPen], outer.x0, outer.y1, outer.x1, outer.y1);
+        // Its glyph keeps the bar's pens too: both sheets outlined in the
+        // detail pen, a background one behind a light one.
         const Area inside{outer.x0 + 1, outer.y0, outer.x1, outer.y1 - 1};
-        draw_glyph(graphics, rp, which, inside,
-                   GlyphPens{detail, down ? block : pens[ShinePen], pens[BackgroundPen]});
+        if (glyph_fits(which, inside)) {
+            draw_depth(graphics, rp, inside, Sheet{detail, pens[BackgroundPen]},
+                       Sheet{detail, down ? block : pens[ShinePen]});
+        }
         break;
     }
     case DEPTHIMAGE:
     case ZOOMIMAGE: {
-        // The gadgets at the right of a title bar overlap by a column. Held
-        // down, each starts with the dark line that ends its neighbour on
-        // the left, and its own sunken edges follow. Otherwise it is flat:
-        // only the window's edges run through it, the light top, the line
-        // under the bar and, for the depth gadget, the window's right edge.
+        // The gadgets at the right of a title bar are raised buttons that
+        // overlap by a column: each starts with the dark line that ends its
+        // neighbour on the left, and that line and the button's own light
+        // edge make the groove between the two. The window's light top and
+        // the dark line under the bar are the button's top and bottom, and
+        // the depth gadget's right edge is the window's. Held down, the
+        // button's edges swap their pens and the groove's dark line stays.
         const Area cell{outer.x0 + 1, outer.y0, outer.x1, outer.y1};
-        if (down) {
-            edges(graphics, rp, cell, Edges{light, dark, which == DEPTHIMAGE, true});
-            line(graphics, rp, pens[ShinePen], outer.x0, outer.y0, outer.x0, outer.y0);
-            line(graphics, rp, pens[ShadowPen], outer.x0, outer.y0 + 1, outer.x0, outer.y1);
-        } else {
-            line(graphics, rp, light, outer.x0, outer.y0, outer.x1, outer.y0);
-            line(graphics, rp, dark, outer.x0, outer.y1, outer.x1, outer.y1);
-            if (which == DEPTHIMAGE) {
-                line(graphics, rp, dark, outer.x1, outer.y0, outer.x1, outer.y1);
-            }
-        }
+        edges(graphics, rp, cell, Edges{light, dark, which == DEPTHIMAGE, true});
+        line(graphics, rp, pens[ShinePen], outer.x0, outer.y0, outer.x0, outer.y0);
+        line(graphics, rp, pens[ShadowPen], outer.x0, outer.y0 + 1, outer.x0, outer.y1);
         draw_glyph(graphics, rp, which, shrink(cell, 1, 1),
-                   GlyphPens{pens[ShadowPen], pens[ShinePen], pens[BackgroundPen]});
+                   GlyphPens{pens[ShadowPen], pens[ShinePen], face});
         break;
     }
-    case CLOSEIMAGE:
-        // The close gadget's left edge is the window's. Held down it is
-        // sunken; otherwise flat, with the window's light top and left
-        // edges and the line under the bar running through it.
-        if (down) {
-            edges(graphics, rp, outer, Edges{light, dark, false, false});
-        } else {
-            line(graphics, rp, light, outer.x0, outer.y0, outer.x1, outer.y0);
-            line(graphics, rp, light, outer.x0, outer.y0, outer.x0, outer.y1);
-            line(graphics, rp, dark, outer.x0 + 1, outer.y1, outer.x1, outer.y1);
-        }
-        draw_glyph(graphics, rp, which, shrink(outer, 1, 1),
-                   GlyphPens{pens[ShadowPen], pens[ShinePen], pens[BackgroundPen]});
+    case CLOSEIMAGE: {
+        // The close gadget is a raised button whose left edge is the
+        // window's. Its last column is the light line that starts the title
+        // beside it, and the button's dark right edge and that line make
+        // the groove between the two. Held down, the button's edges swap
+        // their pens and the title's light line stays.
+        const Area cell{outer.x0, outer.y0, outer.x1 - 1, outer.y1};
+        edges(graphics, rp, cell, Edges{light, dark, false, false});
+        line(graphics, rp, pens[ShinePen], outer.x1, outer.y0, outer.x1, outer.y1 - 1);
+        line(graphics, rp, pens[ShadowPen], outer.x1, outer.y1, outer.x1, outer.y1);
+        draw_glyph(graphics, rp, which, shrink(cell, 1, 1),
+                   GlyphPens{pens[ShadowPen], pens[ShinePen], face});
         break;
+    }
     case SIZEIMAGE:
         // The size gadget fills the window's bottom right corner.
         edges(graphics, rp, outer, Edges{light, dark, true, true});
