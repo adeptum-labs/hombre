@@ -9381,6 +9381,83 @@ void intuitext_borders_and_blocking_requests() {
     reply_msg(r, msg);
 }
 
+// Request shows the requester in the window: its backfill, and its
+// gadgets placed from its own corner and size. Its end gadget reports
+// GADGETUP, ends it with REQCLEAR and gives back what it covered, and the
+// window's own gadgets answer again.
+void a_requester_shows_and_ends_with_its_gadget() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    put_gadget(r, gad, 0, 20, 20, 40, 14, GFLG_GADGHCOMP, GACT_RELVERIFY, GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    constexpr u32 kReqSet = 0x80;
+    constexpr u32 kReqClear = 0x1000;
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | kReqSet | kReqClear);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    CHECK_EQ(window_pixel(r, window, 12, 17), 0u);
+
+    // A 120 by 60 requester at 10,15 filled with pen 1, its end gadget 20
+    // pixels up from its bottom.
+    const u32 req_gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    put_gadget(r, req_gad, 0, 10, -20, 40, 14, GFLG_GADGHCOMP | GFLG_RELBOTTOM,
+               GACT_RELVERIFY | GACT_ENDGADGET, GTYP_BOOLGADGET | 0x1000, 0);
+    const u32 req = kBuffer + 0x100;
+    r.cpu().a[0] = req;
+    r.call(Base::Intuition, intuition_lvo::InitRequester);
+    r.put16(req + 4, 10);
+    r.put16(req + 6, 15);
+    r.put16(req + 8, 120);
+    r.put16(req + 10, 60);
+    r.put32(req + 16, req_gad);
+    r.put8(req + 30, 1);
+    r.cpu().a[0] = req;
+    r.cpu().a[1] = window;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::Request), 1u);
+    CHECK_EQ(window_pixel(r, window, 12, 17), 1u);
+    CHECK_EQ(window_pixel(r, window, 131, 17), 0u);
+    CHECK_EQ(r.get32(window + 36), req);
+    CHECK_EQ(r.get16(window + 44), 1u);
+    CHECK_EQ(r.get32(req + 72), window);
+    u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), kReqSet);
+    reply_msg(r, msg);
+
+    // The window's gadget under the requester takes no click.
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    // The end gadget sits at 20,54 in the window: 10,15 plus 10,39.
+    r.intuition.pointer_event(50 + 25, 50 + 58, 1, 1, 0, true);
+    r.intuition.pointer_event(50 + 25, 50 + 58, 0, 0, 1, false);
+    msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    CHECK_EQ(r.get32(msg + im_IAddress), req_gad);
+    reply_msg(r, msg);
+    msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), kReqClear);
+    reply_msg(r, msg);
+    CHECK_EQ(window_pixel(r, window, 12, 17), 0u);
+    CHECK_EQ(r.get32(window + 36), 0u);
+    CHECK_EQ(r.get16(window + 44), 0u);
+
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+    CHECK_EQ(r.get32(msg + im_IAddress), gad);
+    reply_msg(r, msg);
+}
+
 // A string gadget places its cursor by the widths of its font: the one of
 // its StringExtend, or the font its window's titles are in. Here both are
 // hasklig 13, whose cells are 7 wide where topaz's are 8.
@@ -10180,6 +10257,7 @@ int main() {
     a_long_int_gadget_takes_only_numbers_and_keeps_the_value();
     intuitext_is_measured_and_printed_in_its_font();
     intuitext_borders_and_blocking_requests();
+    a_requester_shows_and_ends_with_its_gadget();
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();
     a_boopsi_gadget_draws_itself_and_takes_the_click();

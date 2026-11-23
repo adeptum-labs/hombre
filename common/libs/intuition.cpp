@@ -1621,12 +1621,12 @@ struct IntuitionNatives {
     // chain at its place from left, top, the top of its text at that line,
     // in its own font or else in the RastPort's.
     static void print_itext(void* ctx, Machine& m) {
-        Intuition& in = of(ctx);
         Bus b(m);
-        const u32 rp = m.cpu.a[0];
-        const i32 left = static_cast<i16>(m.cpu.d[0] & 0xFFFF);
-        const i32 top = static_cast<i16>(m.cpu.d[1] & 0xFFFF);
-        u32 it = m.cpu.a[1];
+        itext_chain(of(ctx), b, m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF),
+                    static_cast<i16>(m.cpu.d[1] & 0xFFFF));
+    }
+
+    static void itext_chain(Intuition& in, Bus& b, u32 rp, u32 it, i32 left, i32 top) {
         for (u32 step = 0; rp != 0 && it != 0 && step < kItChain; ++step) {
             u8 buffer[kItMaxChars];
             const u32 chars = read_itext(b, it, buffer);
@@ -1651,28 +1651,14 @@ struct IntuitionNatives {
         }
     }
 
-    // Request(requester A0, window A1): the window takes no clicks on its
-    // gadgets until EndRequest. The requester itself is not drawn.
+    // Request(requester A0, window A1): the requester shows in the window,
+    // whose own gadgets take no clicks until EndRequest or an end gadget.
     static void request(void* ctx, Machine& m) {
-        Intuition& in = of(ctx);
-        const u32 window = m.cpu.a[1];
-        if (!in.window_open(window) || in.blocks_.size() >= Intuition::kMaxBlocks) {
-            native::set_result(m, 0);
-            return;
-        }
-        in.blocks_.push_back(Intuition::Block{window, m.cpu.a[0]});
-        native::set_result(m, 1);
+        native::set_result(m, of(ctx).begin_request(m.cpu.a[0], m.cpu.a[1]) ? 1 : 0);
     }
 
     static void end_request(void* ctx, Machine& m) {
-        std::vector<Intuition::Block>& blocks = of(ctx).blocks_;
-        const auto found =
-            std::find_if(blocks.begin(), blocks.end(), [&](const Intuition::Block& block) {
-                return block.requester == m.cpu.a[0] && block.window == m.cpu.a[1];
-            });
-        if (found != blocks.end()) {
-            blocks.erase(found);
-        }
+        of(ctx).end_request(m.cpu.a[0], m.cpu.a[1]);
     }
 
     // SetPointer, ClearPointer and SetWindowPointerA: a window's own
@@ -1829,12 +1815,12 @@ struct IntuitionNatives {
     // DrawBorder(rp A0, border A1, left D0, top D1): each Border of the
     // chain as lines through its points from left, top.
     static void draw_border(void* ctx, Machine& m) {
-        Intuition& in = of(ctx);
         Bus b(m);
-        const u32 rp = m.cpu.a[0];
-        const i32 left = static_cast<i16>(m.cpu.d[0] & 0xFFFF);
-        const i32 top = static_cast<i16>(m.cpu.d[1] & 0xFFFF);
-        u32 border = m.cpu.a[1];
+        border_chain(of(ctx), b, m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0] & 0xFFFF),
+                     static_cast<i16>(m.cpu.d[1] & 0xFFFF));
+    }
+
+    static void border_chain(Intuition& in, Bus& b, u32 rp, u32 border, i32 left, i32 top) {
         for (u32 step = 0; rp != 0 && border != 0 && step < kItChain; ++step) {
             const i32 x = left + static_cast<i16>(b.r16(border));
             const i32 y = top + static_cast<i16>(b.r16(border + 2));
@@ -4439,6 +4425,7 @@ void Intuition::close_window(u32 window) {
         write_window_links(screen);
     }
 
+    drop_requests(window);
     std::erase(windows_, window);
     if (rec->user_port != 0) {
         if (rec->user_port_owned) {
@@ -5675,6 +5662,7 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                     light_bar_button(true);
                     left_press_consumed = true;
                 } else if (!dragging && blocked(hit)) {
+                    hit_requester_gadget(b, hit, x, y);
                     left_press_consumed = true;
                 } else if (!dragging && hit_string_gadget(b, hit, x, y)) {
                     left_press_consumed = true;
@@ -5720,6 +5708,8 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
         left_release_consumed = true;
         if (gad_kind == GadgetKind::Bool) {
             release_bool_gadget(b, gad_window, x, y);
+        } else if (gad_kind == GadgetKind::Requester) {
+            release_requester_gadget(b, gad_window, x, y);
         } else if (gad_window != 0 && hit == gad_window && gad_kind != GadgetKind::Prop) {
             const WindowView w = load_window(b, gad_window);
             if (w.ok && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
@@ -7076,6 +7066,358 @@ void Intuition::post_prop_message(Bus& b, u32 window, u32 idcmp_class, u32 gadge
 bool Intuition::blocked(u32 window) const {
     return std::any_of(blocks_.begin(), blocks_.end(),
                        [&](const Block& block) { return block.window == window; });
+}
+
+// --- requesters -------------------------------------------------------------
+
+namespace {
+
+constexpr u32 rq_OlderRequest = 0;
+constexpr u32 rq_LeftEdge = 4;
+constexpr u32 rq_TopEdge = 6;
+constexpr u32 rq_Width = 8;
+constexpr u32 rq_Height = 10;
+constexpr u32 rq_RelLeft = 12;
+constexpr u32 rq_RelTop = 14;
+constexpr u32 rq_ReqGadget = 16;
+constexpr u32 rq_ReqBorder = 20;
+constexpr u32 rq_ReqText = 24;
+constexpr u32 rq_Flags = 28;
+constexpr u32 rq_BackFill = 30;
+constexpr u32 rq_ReqLayer = 32;
+constexpr u32 rq_ImageBMap = 68;
+constexpr u32 rq_RWindow = 72;
+constexpr u32 rq_ReqImage = 76;
+constexpr u32 kReqPointRel = 0x0001;
+constexpr u32 kReqPredrawn = 0x0002;
+constexpr u32 kReqUseImage = 0x0020;
+constexpr u32 kReqNoBackFill = 0x0040;
+constexpr u32 kReqActive = 0x2000;
+constexpr u32 wd_MouseY = 12;
+constexpr u32 wd_MouseX = 14;
+constexpr u32 wd_FirstRequest = 36;
+constexpr u32 wd_ReqCount = 44;
+constexpr u32 kIdcmpReqSet = 0x00000080;
+constexpr u32 kIdcmpReqClear = 0x00001000;
+
+}
+
+// Request: the requester's box is placed in the window, at its own place
+// or, with POINTREL, at the pointer moved by RelLeft and RelTop, and kept
+// inside the window. What it covers is kept, to come back when it ends.
+// It draws its backfill, border, texts and image, or its own BitMap when
+// PREDRAWN, then its gadgets, joins the window's list of requesters and
+// tells the window with REQSET.
+bool Intuition::begin_request(u32 requester, u32 window) {
+    WindowRecord* rec = find_window_record(window);
+    if (requester == 0 || rec == nullptr || !window_open(window) || blocks_.size() >= kMaxBlocks) {
+        return false;
+    }
+    Bus b(*machine_);
+    const WindowView w = load_window(b, window);
+    const i32 width = static_cast<i16>(b.r16(requester + rq_Width));
+    const i32 height = static_cast<i16>(b.r16(requester + rq_Height));
+    const u32 flags = b.r16(requester + rq_Flags);
+    i32 left = static_cast<i16>(b.r16(requester + rq_LeftEdge));
+    i32 top = static_cast<i16>(b.r16(requester + rq_TopEdge));
+    if ((flags & kReqPointRel) != 0) {
+        left = static_cast<i16>(b.r16(window + wd_MouseX)) +
+               static_cast<i16>(b.r16(requester + rq_RelLeft));
+        top = static_cast<i16>(b.r16(window + wd_MouseY)) +
+              static_cast<i16>(b.r16(requester + rq_RelTop));
+    }
+    if (!b.ok() || !w.ok) {
+        return false;
+    }
+    // A requester without a size shows nothing but still blocks.
+    Block block{window, requester};
+    if (width > 0 && height > 0) {
+        left = std::max(0, std::min(left, w.width - width));
+        top = std::max(0, std::min(top, w.height - height));
+        block.box = Rect{left, top, left + std::min(width, w.width) - 1,
+                         top + std::min(height, w.height) - 1};
+    }
+    const bool shown = block.box.x1 >= block.box.x0 && block.box.y1 >= block.box.y0;
+
+    // What the box covers, in a BitMap of the window's depth.
+    const u32 depth = rec->bitmap != 0 ? b.r8(rec->bitmap + ndk::bm_Depth) : 0;
+    const i32 box_w = block.box.x1 - block.box.x0 + 1;
+    const i32 box_h = block.box.y1 - block.box.y0 + 1;
+    const u32 bpr = static_cast<u32>((box_w + 15) / 16 * 2);
+    const u32 bytes = ndk::BitMap_SIZEOF + bpr * static_cast<u32>(box_h) * depth;
+    if (shown && depth != 0 && depth <= 8) {
+        block.saved = exec_->alloc(bytes, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    }
+    if (block.saved != 0) {
+        block.saved_bytes = bytes;
+        init_planar_bitmap(b, block.saved, bpr, static_cast<u32>(box_h), depth,
+                           block.saved + ndk::BitMap_SIZEOF);
+        graphics_->blt_bitmap(rec->bitmap, block.box.x0, block.box.y0, block.saved, 0, 0, box_w,
+                              box_h, 0xC0, 0xFF);
+    }
+
+    b.w32(requester + rq_OlderRequest, b.r32(window + wd_FirstRequest));
+    b.w32(window + wd_FirstRequest, requester);
+    b.w16(window + wd_ReqCount, b.r16(window + wd_ReqCount) + 1);
+    b.w32(requester + rq_RWindow, window);
+    b.w32(requester + rq_ReqLayer, 0);
+    b.w16(requester + rq_Flags, flags | kReqActive);
+    if (!b.ok()) {
+        if (block.saved != 0) {
+            exec_->free(block.saved, block.saved_bytes);
+        }
+        return false;
+    }
+    blocks_.push_back(block);
+    if (shown) {
+        draw_requester(b, blocks_.back());
+    }
+    post_intuimessage(window, kIdcmpReqSet, 0);
+    return true;
+}
+
+void Intuition::draw_requester(Bus& b, const Block& block) {
+    const WindowRecord* rec = find_window_record(block.window);
+    if (rec == nullptr || rec->rp == 0) {
+        return;
+    }
+    const u32 rp = rec->rp;
+    const u32 rq = block.requester;
+    const u32 flags = b.r16(rq + rq_Flags);
+    const u32 fg = b.r8(rp + ndk::rp_FgPen);
+    const u32 bg = b.r8(rp + ndk::rp_BgPen);
+    const u32 mode = b.r8(rp + ndk::rp_DrawMode);
+    const Rect& box = block.box;
+    const u32 image_bmap = b.r32(rq + rq_ImageBMap);
+    if ((flags & kReqPredrawn) != 0 && image_bmap != 0) {
+        graphics_->blt_bitmap_rastport(image_bmap, 0, 0, rp, box.x0, box.y0,
+                                       box.x1 - box.x0 + 1, box.y1 - box.y0 + 1, 0xC0);
+    } else {
+        if ((flags & kReqNoBackFill) == 0) {
+            graphics_->set_pens(rp, b.r8(rq + rq_BackFill), 0, ndk::JAM1);
+            graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+        }
+        IntuitionNatives::border_chain(*this, b, rp, b.r32(rq + rq_ReqBorder), box.x0, box.y0);
+        IntuitionNatives::itext_chain(*this, b, rp, b.r32(rq + rq_ReqText), box.x0, box.y0);
+        const u32 image = b.r32(rq + rq_ReqImage);
+        if ((flags & kReqUseImage) != 0 && image != 0) {
+            draw_image(rp, image, box.x0, box.y0);
+        }
+    }
+    u32 gadget = b.r32(rq + rq_ReqGadget);
+    for (u32 step = 0; step < kMaxGadgets && gadget != 0 && b.ok(); ++step) {
+        draw_requester_gadget(b, block, gadget);
+        gadget = b.r32(gadget + ndk::gg_NextGadget);
+    }
+    graphics_->set_pens(rp, fg, bg, mode);
+}
+
+// A requester gadget's box in the window: its place counts from the
+// requester's corner, and its relative edges from the requester's size.
+Rect Intuition::requester_gadget_box(Bus& b, const Block& block, u32 gadget) {
+    WindowView frame{};
+    frame.width = block.box.x1 - block.box.x0 + 1;
+    frame.height = block.box.y1 - block.box.y0 + 1;
+    const Rect box = resolve_gadget_box(b, frame, gadget);
+    if (box.x1 < box.x0 || box.y1 < box.y0) {
+        return box;
+    }
+    return Rect{box.x0 + block.box.x0, box.y0 + block.box.y0, box.x1 + block.box.x0,
+                box.y1 + block.box.y0};
+}
+
+// A boolean requester gadget: its image or border, the select one while
+// selected with GFLG_GADGHIMAGE, its text, and its box complemented while
+// selected with GFLG_GADGHCOMP. Gadgets of other kinds are not drawn.
+void Intuition::draw_requester_gadget(Bus& b, const Block& block, u32 gadget) {
+    const WindowRecord* rec = find_window_record(block.window);
+    const u32 type = b.r16(gadget + ndk::gg_GadgetType);
+    const u32 flags = b.r16(gadget + ndk::gg_Flags);
+    const Rect box = requester_gadget_box(b, block, gadget);
+    if (rec == nullptr || !b.ok() || (type & ndk::GTYP_GTYPEMASK) != ndk::GTYP_BOOLGADGET ||
+        box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
+    const u32 rp = rec->rp;
+    const bool selected = (flags & ndk::GFLG_SELECTED) != 0;
+    const u32 highlight = flags & ndk::GFLG_GADGHIGHBITS;
+    const u32 select = b.r32(gadget + ndk::gg_SelectRender);
+    const u32 render =
+        selected && highlight == ndk::GFLG_GADGHIMAGE && select != 0
+            ? select
+            : b.r32(gadget + ndk::gg_GadgetRender);
+    if (render != 0) {
+        if ((flags & ndk::GFLG_GADGIMAGE) != 0) {
+            draw_image(rp, render, box.x0, box.y0);
+        } else {
+            IntuitionNatives::border_chain(*this, b, rp, render, box.x0, box.y0);
+        }
+    }
+    IntuitionNatives::itext_chain(*this, b, rp, b.r32(gadget + ndk::gg_GadgetText), box.x0,
+                                  box.y0);
+    if (selected && highlight == ndk::GFLG_GADGHCOMP) {
+        graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
+        graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+    }
+}
+
+// The newest requester of the window, which takes its clicks.
+Intuition::Block* Intuition::top_request(u32 window) {
+    for (auto it = blocks_.rbegin(); it != blocks_.rend(); ++it) {
+        if (it->window == window) {
+            return &*it;
+        }
+    }
+    return nullptr;
+}
+
+// A press in a blocked window: a boolean gadget of its newest requester
+// is held, drawn selected and, with GACT_IMMEDIATE, reported.
+bool Intuition::hit_requester_gadget(Bus& b, u32 window, i32 x, i32 y) {
+    const Block* block = top_request(window);
+    const WindowView w = load_window(b, window);
+    if (block == nullptr || !w.ok) {
+        return false;
+    }
+    const i32 wx = x - w.left;
+    const i32 wy = y - w.top;
+    u32 gadget = b.r32(block->requester + rq_ReqGadget);
+    for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
+        const u32 gflags = b.r16(gadget + ndk::gg_Flags);
+        const u32 activation = b.r16(gadget + ndk::gg_Activation);
+        const u32 type = b.r16(gadget + ndk::gg_GadgetType);
+        const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return false;
+        }
+        if ((type & ndk::GTYP_GTYPEMASK) != ndk::GTYP_BOOLGADGET ||
+            (gflags & ndk::GFLG_DISABLED) != 0 ||
+            !in_rect(requester_gadget_box(b, *block, gadget), wx, wy)) {
+            gadget = next;
+            continue;
+        }
+        b.w16(gadget + ndk::gg_Flags, gflags | ndk::GFLG_SELECTED);
+        draw_requester_gadget(b, *block, gadget);
+        pressed_gadget_window_ = window;
+        pressed_gadget_ = GadgetKind::Requester;
+        pressed_bool_gadget_ = gadget;
+        if ((activation & ndk::GACT_IMMEDIATE) != 0) {
+            post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+        }
+        return true;
+    }
+    return false;
+}
+
+// The held requester gadget let go: drawn unselected; let go over it, it
+// reports GADGETUP with GACT_RELVERIFY and ends the requester with
+// GACT_ENDGADGET.
+void Intuition::release_requester_gadget(Bus& b, u32 window, i32 x, i32 y) {
+    const u32 gadget = pressed_bool_gadget_;
+    pressed_bool_gadget_ = 0;
+    Block* block = top_request(window);
+    const WindowView w = load_window(b, window);
+    if (gadget == 0 || block == nullptr || !w.ok) {
+        return;
+    }
+    const u32 activation = b.r16(gadget + ndk::gg_Activation);
+    const bool inside = window_at(x, y) == window &&
+                        in_rect(requester_gadget_box(b, *block, gadget), x - w.left, y - w.top);
+    const u32 requester = block->requester;
+    b.w16(gadget + ndk::gg_Flags, b.r16(gadget + ndk::gg_Flags) & ~ndk::GFLG_SELECTED);
+    if (!b.ok()) {
+        return;
+    }
+    const WindowRecord* rec = find_window_record(window);
+    if (rec != nullptr) {
+        // A complemented box is put back by drawing the gadget over what the
+        // requester showed there.
+        const u32 fg = b.r8(rec->rp + ndk::rp_FgPen);
+        const u32 bg = b.r8(rec->rp + ndk::rp_BgPen);
+        const u32 mode = b.r8(rec->rp + ndk::rp_DrawMode);
+        if ((b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_GADGHIGHBITS) == ndk::GFLG_GADGHCOMP) {
+            const Rect box = requester_gadget_box(b, *block, gadget);
+            graphics_->set_pens(rec->rp, 0xFF, 0, ndk::COMPLEMENT);
+            graphics_->rect_fill(rec->rp, box.x0, box.y0, box.x1, box.y1);
+        } else {
+            draw_requester_gadget(b, *block, gadget);
+        }
+        graphics_->set_pens(rec->rp, fg, bg, mode);
+    }
+    if (!inside) {
+        return;
+    }
+    if ((activation & ndk::GACT_RELVERIFY) != 0) {
+        post_intuimessage(window, ndk::IDCMP_GADGETUP, 0, gadget);
+    }
+    if ((activation & ndk::GACT_ENDGADGET) != 0) {
+        end_request(requester, window);
+    }
+}
+
+// EndRequest: what the requester covered comes back, it leaves the
+// window's list and the window hears REQCLEAR.
+void Intuition::end_request(u32 requester, u32 window) {
+    const auto found = std::find_if(blocks_.begin(), blocks_.end(), [&](const Block& block) {
+        return block.requester == requester && block.window == window;
+    });
+    if (found == blocks_.end()) {
+        return;
+    }
+    const Block block = *found;
+    blocks_.erase(found);
+    if (pressed_gadget_ == GadgetKind::Requester && pressed_gadget_window_ == window) {
+        pressed_gadget_ = GadgetKind::None;
+        pressed_gadget_window_ = 0;
+        pressed_bool_gadget_ = 0;
+    }
+    Bus b(*machine_);
+    const WindowRecord* rec = find_window_record(window);
+    if (block.saved != 0) {
+        if (rec != nullptr && rec->rp != 0) {
+            graphics_->blt_bitmap_rastport(block.saved, 0, 0, rec->rp, block.box.x0, block.box.y0,
+                                           block.box.x1 - block.box.x0 + 1,
+                                           block.box.y1 - block.box.y0 + 1, 0xC0);
+        }
+        exec_->free(block.saved, block.saved_bytes);
+    }
+    // Out of the chain that runs from wd_FirstRequest through OlderRequest.
+    u32 link = window + wd_FirstRequest;
+    for (u32 step = 0; step < kMaxBlocks + 1; ++step) {
+        const u32 current = step == 0 ? b.r32(link) : b.r32(link + rq_OlderRequest);
+        if (current == 0 || !b.ok()) {
+            break;
+        }
+        if (current == requester) {
+            b.w32(step == 0 ? link : link + rq_OlderRequest,
+                  b.r32(requester + rq_OlderRequest));
+            break;
+        }
+        link = current;
+    }
+    const u32 count = b.r16(window + wd_ReqCount);
+    b.w16(window + wd_ReqCount, count != 0 ? count - 1 : 0);
+    b.w16(requester + rq_Flags, b.r16(requester + rq_Flags) & ~kReqActive);
+    post_intuimessage(window, kIdcmpReqClear, 0);
+}
+
+// A window that closes takes its requesters with it, unreplied.
+void Intuition::drop_requests(u32 window) {
+    for (auto it = blocks_.begin(); it != blocks_.end();) {
+        if (it->window != window) {
+            ++it;
+            continue;
+        }
+        if (it->saved != 0) {
+            exec_->free(it->saved, it->saved_bytes);
+        }
+        it = blocks_.erase(it);
+    }
+    if (pressed_gadget_ == GadgetKind::Requester && pressed_gadget_window_ == window) {
+        pressed_gadget_ = GadgetKind::None;
+        pressed_gadget_window_ = 0;
+        pressed_bool_gadget_ = 0;
+    }
 }
 
 void Intuition::drop_custom_gadget() {

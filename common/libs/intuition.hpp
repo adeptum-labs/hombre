@@ -666,7 +666,15 @@ private:
         menu_layout::Geometry geometry{};
     };
 
-    enum class GadgetKind : u8 { None = 0, Close = 1, Depth = 2, Prop = 3, Bool = 4, Zoom = 5 };
+    enum class GadgetKind : u8 {
+        None = 0,
+        Close = 1,
+        Depth = 2,
+        Prop = 3,
+        Bool = 4,
+        Zoom = 5,
+        Requester = 6,  // a boolean gadget of a requester
+    };
     enum class Drag : u8 { None = 0, Move = 1, Size = 2, Prop = 3 };
 
     static void reply_message(void* ctx, u32 message);
@@ -894,14 +902,28 @@ private:
     PointerShape pointer_shapes_[2]{};
     u32 pointer_bitmaps_[2]{};
     // The windows a Request() blocks, with its Requester, until EndRequest:
-    // a press in one reaches none of its gadgets.
+    // a press in one reaches only the gadgets of its newest requester. The
+    // box is where the requester shows in the window, and saved a BitMap of
+    // what it covers, saved_bytes long with its planes.
     struct Block {
         u32 window = 0;
         u32 requester = 0;
+        Rect box{0, 0, -1, -1};
+        u32 saved = 0;
+        u32 saved_bytes = 0;
     };
     static constexpr u32 kMaxBlocks = 64;
     std::vector<Block> blocks_;
     bool blocked(u32 window) const;
+    bool begin_request(u32 requester, u32 window);
+    void end_request(u32 requester, u32 window);
+    void drop_requests(u32 window);
+    void draw_requester(native::Bus& b, const Block& block);
+    Rect requester_gadget_box(native::Bus& b, const Block& block, u32 gadget);
+    void draw_requester_gadget(native::Bus& b, const Block& block, u32 gadget);
+    Block* top_request(u32 window);
+    bool hit_requester_gadget(native::Bus& b, u32 window, i32 x, i32 y);
+    void release_requester_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     bool bar_button_lit_ = false;  // the held Close, Depth or Zoom button shows pressed
     u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
     GadgetRenderer gadget_renderer_ = nullptr;
