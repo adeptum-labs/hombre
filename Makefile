@@ -278,6 +278,20 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "hd1: DH0: HombreTest (OFS), 16384 blocks, bootpri 0, bootable" \
 	    "startup: ended, returned 0" "shell: builtin why returned 0"
 	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "hej"
+	cp $(TEST_HDF) $(BUILD)/check.hdf
+	tools/boot_check.sh --no-disk --hdf $(BUILD)/check.hdf --hdf-bus nvme \
+	    --keys "e c h o spc h e j spc shift-less d h 0 shift-dot n o t e ret w h y ret" \
+	    "nvme: ns 1: 16448 sectors, 512-byte sectors" \
+	    "hd1: DH0: HombreTest (OFS), 16384 blocks, bootpri 0, bootable" \
+	    "startup: ended, returned 0" "shell: builtin why returned 0"
+	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "hej"
+	cp $(TEST_HDF) $(BUILD)/check.hdf
+	tools/boot_check.sh --no-disk --hdf $(BUILD)/check.hdf --hdf-bus nvme4k \
+	    --keys "e c h o spc h e j spc shift-less d h 0 shift-dot n o t e ret w h y ret" \
+	    "nvme: ns 1: 2056 sectors, 4096-byte sectors" \
+	    "hd1: DH0: HombreTest (OFS), 16384 blocks, bootpri 0, bootable" \
+	    "startup: ended, returned 0" "shell: builtin why returned 0"
+	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "hej"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "v e r s i o n ret z z z ret bracket_left apostrophe semicolon ret" \
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \

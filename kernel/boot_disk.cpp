@@ -26,6 +26,7 @@
 #include "disk.hpp"
 #include "hard_disks.hpp"
 #include "hda.hpp"
+#include "nvme.hpp"
 #include "usb_keyboard.hpp"
 
 #include "../common/amiga_fs.hpp"
@@ -48,9 +49,9 @@ namespace {
 // the floppy drives DF0: to DF3:.
 constinit VirtioBlk drive_devices[kFloppyDrives];
 
-// The hard disks, the virtio ones indexed by their slot and the SATA ones
-// after them, and the volumes they carry, which stay mounted for dos as the
-// floppy volumes do.
+// The hard disks, the virtio ones indexed by their slot and the SATA and
+// NVMe ones after them, and the volumes they carry, which stay mounted for
+// dos as the floppy volumes do.
 constinit VirtioBlk hard_disk_devices[kMaxHardDisks];
 constinit Disk hard_disks[kMaxHardDisks]{};
 constinit HardVolume hard_volumes[kMaxHardVolumes]{};
@@ -438,9 +439,13 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
             serial::write("virtio-blk: init failed\n");
         }
     }
-    // SATA disks take the slots after the virtio ones.
+    // SATA and NVMe disks take the slots after the virtio ones.
     if (hard_disk_slots < kMaxHardDisks) {
-        ahci_open_disks(mmio, phys_pages, hard_disks + hard_disk_slots,
+        hard_disk_slots += ahci_open_disks(mmio, phys_pages, hard_disks + hard_disk_slots,
+                                           kMaxHardDisks - hard_disk_slots);
+    }
+    if (hard_disk_slots < kMaxHardDisks) {
+        nvme_open_disks(mmio, phys_pages, hard_disks + hard_disk_slots,
                         kMaxHardDisks - hard_disk_slots);
     }
     const u32 hard_count =
