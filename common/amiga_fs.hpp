@@ -65,6 +65,11 @@ enum class FsError : u32 {
     Loop,           // a hash or extension chain that never ends
     NameTooLong,    // a path component of more than 30 characters
     Io,             // the block source failed to read or write
+    ReadOnly,       // a write to a volume that cannot be written
+    Exists,         // a name already taken in the directory
+    DiskFull,       // no free block left
+    NotEmpty,       // a delete of a directory that still has entries
+    BadName,        // a name or comment that cannot be stored, or a change the root cannot take
 };
 
 inline const char* fs_error_name(FsError error) {
@@ -81,6 +86,11 @@ inline const char* fs_error_name(FsError error) {
     case FsError::Loop: return "chain loops";
     case FsError::NameTooLong: return "name too long";
     case FsError::Io: return "i/o error";
+    case FsError::ReadOnly: return "volume is read-only";
+    case FsError::Exists: return "object exists";
+    case FsError::DiskFull: return "disk full";
+    case FsError::NotEmpty: return "directory not empty";
+    case FsError::BadName: return "bad name";
     }
     return "unknown";
 }
