@@ -136,15 +136,17 @@ constexpr u32 default_palette_rgb24(u32 pen, u32 depth) {
     return kBasePalette[chrome_pen - chrome::kComplementMirrorBase];
 }
 
-// Keeps the top four pens of a screen of the modern look the colours of 0..3:
-// COMPLEMENT turns pen n into the pen 2^depth - 1 - n, which for 0..3 is one
-// of them.
+// Keeps the top four pens of a screen of 16 colours or more the colours of
+// 0..3: COMPLEMENT turns pen n into the pen 2^depth - 1 - n, which for 0..3
+// is one of them, so a selected icon of four colours looks as on two planes.
+// Eight colours have no pens to spare for them.
 void write_complement_mirrors(Bus& b, u32 depth, u32 colors, u32 low_colors) {
-    if (chrome::style_for_depth(depth) != chrome::Style::Modern || colors == 0) {
+    if (depth < 4 || depth > 8 || colors == 0) {
         return;
     }
+    const u32 first = (1u << depth) - chrome::kComplementMirrorPens;
     for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-        const u32 mirror = chrome::physical_pen(chrome::mirror_pen(static_cast<u8>(pen)), depth);
+        const u32 mirror = first + pen;
         b.w16(colors + mirror * 2, b.r16(colors + pen * 2));
         if (low_colors != 0) {
             b.w16(low_colors + mirror * 2, b.r16(low_colors + pen * 2));
