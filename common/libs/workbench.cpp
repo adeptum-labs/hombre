@@ -1590,13 +1590,16 @@ bool Workbench::build_arrow_images() {
         return false;
     }
     const u32 data_at = block + kArrowImages * Image_SIZEOF;
+    chrome::DrawInfoPens drawinfo;
+    sysimage::read_pens(b, draw_info, drawinfo.pen);
     u8 pens[kArrowWidth * kArrowMaxHeight];
     for (u32 i = 0; i < kArrowImages; ++i) {
         const chrome::Arrow arrow = static_cast<chrome::Arrow>(i / 2);
         const bool pressed = (i & 1) != 0;
         const bool vertical = arrow == chrome::Arrow::Up || arrow == chrome::Arrow::Down;
         const i32 height = vertical ? 10 : kArrowMaxHeight;
-        chrome::paint_arrow_button(pens, kArrowWidth, height, arrow, pressed, depth >= 8);
+        chrome::paint_arrow_button(pens, kArrowWidth, height, arrow, pressed,
+                                   chrome::style_for_depth(depth), depth, drawinfo);
         const u32 image = block + i * Image_SIZEOF;
         const u32 data = data_at + i * data_bytes;
         b.w16(image + im_Width, static_cast<u32>(kArrowWidth));

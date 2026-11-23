@@ -23,6 +23,7 @@
 
 #include "../common/font.hpp"
 #include "gfx_rig.hpp"
+#include "libs/chrome_palette.hpp"
 #include "libs/rom_fonts.hpp"
 #include "libs/text_blend.hpp"
 #include "libs/utility.hpp"
@@ -1896,7 +1897,7 @@ void obtain_pen_shares_and_reserves_pens() {
     };
     constexpr u32 kExclusive = 1;
     const u32 pen = obtain(0xFFFFFFFF, kExclusive);
-    CHECK(pen >= 8 && pen < Graphics::kHighSystemPen);
+    CHECK(pen >= 8 && pen < chrome::kScreenBar0);
     CHECK_EQ(r.get16(color_table + pen * 2), 0x0F00u);
     CHECK_EQ(obtain(pen, 0), 0xFFFFFFFFu);
     CHECK_EQ(obtain(1, kExclusive), 0xFFFFFFFFu);
@@ -1906,6 +1907,64 @@ void obtain_pen_shares_and_reserves_pens() {
     r.cpu().d[0] = pen;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::ReleasePen), ExitReason::Halt);
     CHECK_EQ(obtain(pen, kExclusive), pen);
+}
+
+// The system keeps the chrome's pens of a screen of 5, 6 or 7 planes where
+// they lie at chrome::physical_pen: ObtainPen hands none out free or alone and
+// the pens below them stay free, while ObtainBestPen may still share one as
+// the nearest colour.
+void obtain_pen_keeps_the_chrome_pens_of_shallow_screens() {
+    constexpr u32 kExclusive = 1;
+    for (const u32 depth : {4u, 5u, 6u, 7u}) {
+        GfxRig r;
+        const u32 pens = 1u << depth;
+        const u32 color_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+        const u32 low_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+        r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+        r.put16(kColorMap + cm_Count, pens);
+        r.put32(kColorMap + cm_ColorTable, color_table);
+        r.put32(kColorMap + cm_LowColorBits, low_table);
+        const auto obtain = [&](u32 n, u32 flags) {
+            r.cpu().a[0] = kColorMap;
+            r.cpu().d[0] = n;
+            r.cpu().d[1] = 0xFFFFFFFF;
+            r.cpu().d[2] = 0;
+            r.cpu().d[3] = 0;
+            r.cpu().d[4] = flags;
+            return r.result(Base::Graphics, graphics_lvo::ObtainPen);
+        };
+        const auto best = [&](u32 red, u32 green, u32 blue) {
+            r.cpu().a[0] = kColorMap;
+            r.cpu().d[1] = red;
+            r.cpu().d[2] = green;
+            r.cpu().d[3] = blue;
+            r.cpu().a[1] = 0;
+            return r.result(Base::Graphics, graphics_lvo::ObtainBestPenA);
+        };
+        // Four planes have no chrome: every pen above the system's first
+        // is free, the top one first.
+        const u32 first = depth == 4 ? pens : (depth == 5 ? 16 : pens - chrome::kChromePens);
+        const u32 pen = obtain(0xFFFFFFFF, kExclusive);
+        CHECK_EQ(pen, first - 1);
+        for (u32 chrome_pen = first; chrome_pen < pens; ++chrome_pen) {
+            CHECK_EQ(obtain(chrome_pen, kExclusive), 0xFFFFFFFFu);
+        }
+        if (depth == 4) {
+            continue;
+        }
+        // Shared, the system's pen is the program's too, with its colour as
+        // it was.
+        CHECK_EQ(obtain(first, 0), first);
+        CHECK_EQ(r.get16(color_table + first * 2), 0u);
+        CHECK_EQ(obtain(first - 2, kExclusive), first - 2);
+
+        // A colour a chrome pen has exactly is that pen, shared; one no pen
+        // has takes a free pen below the chrome.
+        r.put16(color_table + (first + 3) * 2, 0x0F00);
+        CHECK_EQ(best(0xF0000000u, 0, 0), first + 3);
+        CHECK_EQ(best(0, 0xF0000000u, 0), first - 3);
+        CHECK_EQ(r.get16(color_table + (first - 3) * 2), 0x00F0u);
+    }
 }
 
 void area_outline_uses_the_outline_pen() {
@@ -2791,6 +2850,92 @@ void text_blends_on_an_eight_plane_palette() {
     CHECK(changed > 0);
 }
 
+// The same on a bitmap of 5, 6 or 7 planes: the ramps are those of its own
+// 2^depth colours, written into its own planes. With 4 planes text keeps
+// its 1-bit glyphs, palette or not.
+void text_blends_on_a_five_to_seven_plane_palette() {
+    for (const u32 depth : {4u, 5u, 6u, 7u}) {
+        GfxRig r;
+        constexpr u32 kWidthN = 64;
+        constexpr u32 kHeightN = 32;
+        const u32 pens = 1u << depth;
+        const u32 plane_bytes = (kWidthN + 15) / 16 * 2 * kHeightN;
+        r.cpu().a[0] = kBitmap;
+        r.cpu().d[0] = depth;
+        r.cpu().d[1] = kWidthN;
+        r.cpu().d[2] = kHeightN;
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitBitMap), ExitReason::Halt);
+        for (u32 plane = 0; plane < depth; ++plane) {
+            const u32 at = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
+            CHECK(at != 0);
+            r.put32(kBitmap + bm_Planes + plane * 4, at);
+        }
+        r.cpu().a[1] = kRastPort;
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitRastPort), ExitReason::Halt);
+        r.put32(kRastPort + rp_BitMap, kBitmap);
+
+        // The greys of the palette, from black to white over its pens.
+        u8 palette[256][3]{};
+        const u32 color_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+        const u32 low_table = r.exec.alloc(256 * 2, MEMF_CHIP | MEMF_CLEAR);
+        CHECK(color_table != 0 && low_table != 0);
+        for (u32 pen = 0; pen < pens; ++pen) {
+            const u32 grey = pen * 255 / (pens - 1);
+            for (u32 gun = 0; gun < 3; ++gun) {
+                palette[pen][gun] = static_cast<u8>(grey);
+            }
+            r.put16(color_table + pen * 2, ((grey >> 4) << 8) | ((grey >> 4) << 4) | (grey >> 4));
+            r.put16(low_table + pen * 2,
+                    ((grey & 0xF) << 8) | ((grey & 0xF) << 4) | (grey & 0xF));
+        }
+        r.put8(kColorMap + cm_Type, COLORMAP_TYPE_V39);
+        r.put16(kColorMap + cm_Count, pens);
+        r.put32(kColorMap + cm_ColorTable, color_table);
+        r.put32(kColorMap + cm_LowColorBits, low_table);
+        MapHook hook{kBitmap, kColorMap};
+        r.display.palette = DisplayState::PaletteSource{map_of, &hook};
+
+        r.str(kStrings + 0x40, "hasklig.font");
+        r.put32(kTextAttr + ta_Name, kStrings + 0x40);
+        r.put16(kTextAttr + ta_YSize, 13);
+        r.cpu().a[0] = kTextAttr;
+        const u32 font = r.result(Base::Graphics, graphics_lvo::OpenFont);
+        CHECK(font != 0);
+        set_font(r, kRastPort, font);
+        const u32 width = r.get16(font + tf_XSize);
+        const u32 baseline = r.get16(font + tf_Baseline);
+        const u32 height = r.get16(font + tf_YSize);
+        const u8 fg = static_cast<u8>(pens - 8);
+        const u8 bg = 4;
+        r.graphics.set_pens(kRastPort, fg, bg, JAM2);
+        move(r, kRastPort, 3, 20);
+        draw_text(r, kRastPort, "H");
+
+        text_blend::Cache expected;
+        expected.set_palette(palette, pens);
+        const u8* ramp = expected.ramp(fg, bg);
+        CHECK(ramp != nullptr);
+        const i32 top = 20 - static_cast<i32>(baseline);
+        u32 intermediate = 0;
+        for (u32 row = 0; row < height; ++row) {
+            for (u32 col = 0; col < width; ++col) {
+                const u32 pen = read_pixel(r, kRastPort, 3 + static_cast<i32>(col),
+                                           top + static_cast<i32>(row));
+                bool known = false;
+                for (u32 level = 0; level < text_blend::kLevels; ++level) {
+                    known = known || pen == static_cast<u32>(ramp[level]);
+                }
+                CHECK(known);
+                if (pen != static_cast<u32>(fg) && pen != static_cast<u32>(bg)) {
+                    ++intermediate;
+                }
+            }
+        }
+        // Four planes keep to the two pens, the others have shades between.
+        CHECK_EQ(intermediate > 0, text_blend::blends_on(depth));
+    }
+}
+
 // OpenMonitor hands out the default and the NTSC monitor's MonitorSpecs,
 // counting their opens; CloseMonitor counts them down again.
 void monitors_open_and_close() {
@@ -2990,6 +3135,7 @@ int main() {
     plain_text_fits_and_holds_a_font();
     rom_fonts_carry_their_coverage_plane();
     text_blends_on_an_eight_plane_palette();
+    text_blends_on_a_five_to_seven_plane_palette();
     extend_font_and_strip_font();
     weigh_ta_match_rates_by_size_style_and_flags();
     text_fit_pens_and_bitmaps_of_v39();
@@ -3031,6 +3177,7 @@ int main() {
     area_ellipse_fills_symmetrically_about_the_centre();
     area_ellipses_fill_together_as_a_ring();
     obtain_pen_shares_and_reserves_pens();
+    obtain_pen_keeps_the_chrome_pens_of_shallow_screens();
     area_outline_uses_the_outline_pen();
     draw_ellipse_outline_has_no_gaps_and_leaves_the_inside_clear();
     init_tmp_ras_records_the_buffer_and_wait_blit_is_a_no_op();

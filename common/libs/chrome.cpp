@@ -1069,36 +1069,34 @@ void draw_prop_gadget(Graphics& graphics, Bus& b, u32 rp, const PropChrome& g) {
     restore_rp(b, rp, saved);
 }
 
-void paint_arrow_button(u8* pens, i32 width, i32 height, Arrow arrow, bool pressed,
-                        bool high_color) {
-    if (pens == nullptr || width <= 0 || height <= 0) {
-        return;
+namespace {
+
+void put_arrow_pen(u8* out, i32 width, i32 height, i32 x, i32 y, u8 pen) {
+    if (x >= 0 && x < width && y >= 0 && y < height) {
+        out[y * width + x] = pen;
     }
-    auto put = [&](i32 x, i32 y, u8 pen) {
-        if (x >= 0 && x < width && y >= 0 && y < height) {
-            pens[y * width + x] = pen;
-        }
-    };
-    const u8 back = high_color ? kTrack : 0;
+}
+
+// The body of the modern look's button: rounded, outlined and shaded from top
+// to bottom as a vertical knob is, on the track. The pen of the triangle.
+u8 paint_modern_arrow_body(u8* out, i32 width, i32 height, bool pressed, const Look& look) {
+    const auto put = [&](i32 x, i32 y, u8 pen) { put_arrow_pen(out, width, height, x, y, pen); };
     for (i32 i = 0; i < width * height; ++i) {
-        pens[i] = back;
+        out[i] = look(kTrack);
     }
     const i32 radius = min_i32(2, min_i32((width - 1) / 2, (height - 1) / 2));
-    // The body, shaded from top to bottom as a vertical knob is.
     const u8 shade = pressed ? kActiveBar2 : kKnob0;
     const i32 steps = pressed ? 4 : 3;
     const i32 inner_h = height - 2;
     for (i32 y = 1; y < height - 1; ++y) {
         const i32 dy = min_i32(y, height - 1 - y);
         const i32 ins = max_i32(1, rounded_inset(dy, radius));
-        const u8 pen = high_color ? static_cast<u8>(shade + ((y - 1) * steps) / inner_h)
-                                  : (pressed ? 3 : 0);
+        const u8 pen = look(static_cast<u8>(shade + ((y - 1) * steps) / inner_h));
         for (i32 x = ins; x <= width - 1 - ins; ++x) {
             put(x, y, pen);
         }
     }
-    // The rounded outline.
-    const u8 line = high_color ? kFrameDark : 1;
+    const u8 line = look(kFrameDark);
     for (i32 y = 0; y < height; ++y) {
         const i32 dy = min_i32(y, height - 1 - y);
         const i32 ins = rounded_inset(dy, radius);
@@ -1114,10 +1112,57 @@ void paint_arrow_button(u8* pens, i32 width, i32 height, Arrow arrow, bool press
             put(width - 1 - x, y, line);
         }
     }
+    return look(pressed ? kFrameLight : kFrameDark);
+}
+
+// The body of the classic button, as sysimage draws an arrow image of an
+// active window's border: the fill pen with a raised edge, light along the
+// top and left and dark along the bottom and right, which a held button has
+// the other way round. The window's edge runs on past the right side of a
+// vertical arrow and the bottom of a horizontal one. The pen of the triangle.
+u8 paint_classic_arrow_body(u8* out, i32 width, i32 height, bool vertical, bool pressed,
+                            const DrawInfoPens& drawinfo) {
+    const u16* pens = drawinfo.pen;
+    const auto put = [&](i32 x, i32 y, u16 pen) {
+        put_arrow_pen(out, width, height, x, y, static_cast<u8>(pen));
+    };
+    for (i32 i = 0; i < width * height; ++i) {
+        out[i] = static_cast<u8>(pens[FillPen]);
+    }
+    if (width >= 2 && height >= 2) {
+        const u16 light = pens[pressed ? ShadowPen : ShinePen];
+        const u16 dark = pens[pressed ? ShinePen : ShadowPen];
+        for (i32 x = 0; x < width; ++x) {
+            put(x, 0, light);
+        }
+        for (i32 y = 0; y < height; ++y) {
+            put(0, y, light);
+        }
+        for (i32 y = vertical ? 0 : 1; y < height; ++y) {
+            put(width - 1, y, dark);
+        }
+        for (i32 x = vertical ? 1 : 0; x < width; ++x) {
+            put(x, height - 1, dark);
+        }
+    }
+    return static_cast<u8>(pens[ShadowPen]);
+}
+
+}
+
+void paint_arrow_button(u8* out, i32 width, i32 height, Arrow arrow, bool pressed, Style style,
+                        u32 depth, const DrawInfoPens& drawinfo) {
+    if (out == nullptr || width <= 0 || height <= 0) {
+        return;
+    }
+    const bool vertical = arrow == Arrow::Up || arrow == Arrow::Down;
+    const u8 mark = style == Style::Modern
+                        ? paint_modern_arrow_body(out, width, height, pressed, Look{depth})
+                        : paint_classic_arrow_body(out, width, height, vertical, pressed,
+                                                   drawinfo);
+    const auto put = [&](i32 x, i32 y, u8 pen) { put_arrow_pen(out, width, height, x, y, pen); };
     // The triangle, centred: three rows, two to six pixels across, on a
     // small button, more on a larger one.
-    const u8 mark = high_color ? (pressed ? kFrameLight : kFrameDark) : (pressed ? 2 : 1);
-    const bool vertical = arrow == Arrow::Up || arrow == Arrow::Down;
     const i32 rows = arrow_rows(vertical ? width : height, vertical ? height : width);
     const i32 mid_x0 = (width - 1) / 2;
     const i32 mid_x1 = width / 2;

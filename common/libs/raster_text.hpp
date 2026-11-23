@@ -372,10 +372,13 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
     const bool inverse = (pens.mode & ndk::INVERSVID) != 0;
     const bool underlined = (style.algo & ndk::FSF_UNDERLINED) != 0;
     const u32 mode = pens.mode & ~ndk::INVERSVID;
-    // Only an eight-plane palette through a cache can take the coverage
-    // levels; every other mode keeps the font's 1-bit glyphs.
-    const bool can_blend = f.coverage != nullptr && blend != nullptr && bitmap.depth == 8 &&
-                           !inverse && (mode == ndk::JAM1 || mode == ndk::JAM2);
+    // Only the palette of a bitmap of text_blend::kMinPlanes planes or more
+    // through a cache can take the coverage levels; every other mode keeps
+    // the font's 1-bit glyphs.
+    const bool can_blend = f.coverage != nullptr && blend != nullptr &&
+                           text_blend::blends_on(bitmap.depth) && !inverse &&
+                           (mode == ndk::JAM1 || mode == ndk::JAM2);
+    const u32 planes_used = bitmap.depth;
     const u8* bg_ramp = can_blend && mode == ndk::JAM2 ? blend->ramp(pens.fg, pens.bg) : nullptr;
     const bool antialiased = can_blend && (mode == ndk::JAM1 || bg_ramp != nullptr);
     for (i64 y = y0; y <= y1; ++y) {
@@ -413,7 +416,7 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
             }
             const u32 row_offset = static_cast<u32>(y) * bitmap.bytes_per_row + first;
             u8* planes[8];
-            for (u32 plane = 0; plane < 8; ++plane) {
+            for (u32 plane = 0; plane < planes_used; ++plane) {
                 planes[plane] = bus.bytes_at(bitmap.planes[plane] + row_offset, bytes);
                 if (planes[plane] == nullptr) {
                     return dirty;
@@ -426,7 +429,7 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
                 const u32 base = first * 8 + i * 8;
                 u8 old[8];
                 u8 result[8];
-                for (u32 plane = 0; plane < 8; ++plane) {
+                for (u32 plane = 0; plane < planes_used; ++plane) {
                     old[plane] = planes[plane][i];
                     result[plane] = old[plane];
                 }
@@ -448,7 +451,7 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
                         } else {
                             const u8 bit_mask = static_cast<u8>(0x80u >> bit);
                             u32 under = 0;
-                            for (u32 plane = 0; plane < 8; ++plane) {
+                            for (u32 plane = 0; plane < planes_used; ++plane) {
                                 if ((old[plane] & bit_mask) != 0) {
                                     under |= 1u << plane;
                                 }
@@ -466,7 +469,7 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
                         rightmost = at_x;
                     }
                     const u8 bit_mask = static_cast<u8>(0x80u >> bit);
-                    for (u32 plane = 0; plane < 8; ++plane) {
+                    for (u32 plane = 0; plane < planes_used; ++plane) {
                         if (((pixel_pen >> plane) & 1) != 0) {
                             result[plane] |= bit_mask;
                         } else {
@@ -474,7 +477,7 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
                         }
                     }
                 }
-                for (u32 plane = 0; plane < 8; ++plane) {
+                for (u32 plane = 0; plane < planes_used; ++plane) {
                     planes[plane][i] = result[plane];
                 }
             }
@@ -596,9 +599,9 @@ inline TextSpan measure_text(const Font& f, const TextStyle& style, const u8* ch
 // text's rectangle in the background pen as well under JAM2, the set bits
 // turned over through the foreground pen under COMPLEMENT. INVERSVID swaps
 // set and clear bits throughout the rectangle. A font with a coverage plane
-// drawn through blend on an eight-plane bitmap takes the pen of each
-// pixel's level instead of its 1-bit glyph. advance is how far the pen
-// moves; the answer is the rectangle that changed.
+// drawn through blend on a bitmap of text_blend::kMinPlanes planes or more
+// takes the pen of each pixel's level instead of its 1-bit glyph. advance is
+// how far the pen moves; the answer is the rectangle that changed.
 inline Rect draw_text(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
                       const Font& f, const TextStyle& style, i32 x, i32 baseline_y,
                       const u8* chars, u32 count, u32& advance,

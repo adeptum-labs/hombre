@@ -37,6 +37,17 @@ namespace hombre::text_blend {
 
 constexpr u32 kLevels = 16;
 
+// The planes a bitmap has for text to be blended in its palette: from 32
+// pens, which have shades enough between a text and its background; a
+// screen of fewer keeps the font's 1-bit glyphs, as on 3.1. The pens are
+// bytes and the cache holds 256 colours, which eight planes fill.
+constexpr u32 kMinPlanes = 5;
+constexpr u32 kMaxPlanes = 8;
+
+constexpr bool blends_on(u32 planes) {
+    return planes >= kMinPlanes && planes <= kMaxPlanes;
+}
+
 // The pen of the first count colours of rgb nearest to r, g, b by the sum
 // of their squared channel differences, the lower pen when two are as
 // near. 0 when there are no colours.

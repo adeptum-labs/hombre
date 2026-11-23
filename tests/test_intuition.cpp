@@ -5590,6 +5590,93 @@ void shallow_modern_screens_cast_shadows_in_their_own_palette() {
     }
 }
 
+// The arrow button of a scroll gadget on a classic screen is the system's
+// arrow image of an active window's border, in whatever DrawInfo pens: what
+// sysimage draws for UP, DOWN, LEFT and RIGHTIMAGE, held down or not.
+void classic_arrow_buttons_are_the_system_images() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    native::Bus bus(r.machine);
+    const u32 rp = screen + sc_RastPort;
+    const u32 images[4] = {UPIMAGE, DOWNIMAGE, LEFTIMAGE, RIGHTIMAGE};
+    const u16 pen_sets[2][12] = {{0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1},
+                                 {0, 1, 2, 3, 2, 1, 0, 3, 2, 1, 2, 1}};
+    const i32 sizes[4][2] = {{14, 10}, {14, 14}, {16, 10}, {20, 12}};
+    for (const u16* pen_set : {&pen_sets[0][0], &pen_sets[1][0]}) {
+        chrome::DrawInfoPens drawinfo;
+        for (u32 i = 0; i < sysimage::kPenCount; ++i) {
+            drawinfo.pen[i] = pen_set[i];
+        }
+        for (const i32* size : sizes) {
+            for (u32 arrow = 0; arrow < 4; ++arrow) {
+                for (const bool pressed : {false, true}) {
+                    u8 pens[20 * 14];
+                    chrome::paint_arrow_button(pens, size[0], size[1],
+                                               static_cast<chrome::Arrow>(arrow), pressed,
+                                               chrome::Style::Classic, 2, drawinfo);
+                    sysimage::draw(r.graphics, bus, rp, images[arrow],
+                                   Rect{20, 60, 20 + size[0] - 1, 60 + size[1] - 1},
+                                   pressed ? IDS_SELECTED : IDS_NORMAL, drawinfo.pen);
+                    for (i32 y = 0; y < size[1]; ++y) {
+                        for (i32 x = 0; x < size[0]; ++x) {
+                            CHECK_EQ(static_cast<u32>(pens[y * size[0] + x]),
+                                     screen_pixel(r, screen, 20 + x, 60 + y));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // With the 3.1 pens an up arrow on the fill pen has SHINEPEN along its
+    // top and left and SHADOWPEN along its bottom and right, and held down
+    // the two the other way round; its triangle is SHADOWPEN.
+    const chrome::DrawInfoPens defaults{{0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1}};
+    u8 up[14 * 10];
+    chrome::paint_arrow_button(up, 14, 10, chrome::Arrow::Up, false, chrome::Style::Classic, 2,
+                               defaults);
+    CHECK_EQ(static_cast<u32>(up[0]), 2u);
+    CHECK_EQ(static_cast<u32>(up[13]), 1u);
+    CHECK_EQ(static_cast<u32>(up[9 * 14]), 2u);
+    CHECK_EQ(static_cast<u32>(up[9 * 14 + 13]), 1u);
+    CHECK_EQ(static_cast<u32>(up[5 * 14 + 3]), 3u);
+    CHECK_EQ(static_cast<u32>(up[3 * 14 + 6]), 1u);
+    chrome::paint_arrow_button(up, 14, 10, chrome::Arrow::Up, true, chrome::Style::Classic, 2,
+                               defaults);
+    CHECK_EQ(static_cast<u32>(up[0]), 1u);
+    CHECK_EQ(static_cast<u32>(up[13]), 2u);
+    CHECK_EQ(static_cast<u32>(up[5 * 14 + 3]), 3u);
+}
+
+// On a screen of 5, 6 or 7 planes an arrow button is the modern look's, the
+// pens of an eight-plane screen's at their place on that screen.
+void shallow_modern_arrow_buttons_use_the_mapped_pens() {
+    const chrome::DrawInfoPens drawinfo;
+    const i32 sizes[3][2] = {{14, 10}, {14, 14}, {16, 10}};
+    for (const u32 depth : {5u, 6u, 7u}) {
+        for (const i32* size : sizes) {
+            for (u32 arrow = 0; arrow < 4; ++arrow) {
+                for (const bool pressed : {false, true}) {
+                    u8 full[16 * 14];
+                    u8 shallow[16 * 14];
+                    const chrome::Arrow which = static_cast<chrome::Arrow>(arrow);
+                    chrome::paint_arrow_button(full, size[0], size[1], which, pressed,
+                                               chrome::Style::Modern, 8, drawinfo);
+                    chrome::paint_arrow_button(shallow, size[0], size[1], which, pressed,
+                                               chrome::Style::Modern, depth, drawinfo);
+                    for (i32 i = 0; i < size[0] * size[1]; ++i) {
+                        CHECK(full[i] >= chrome::kScreenBar0);
+                        CHECK_EQ(static_cast<u32>(shallow[i]), chrome_pen_on(full[i], depth));
+                        CHECK(shallow[i] != full[i]);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void depth2_screen_has_no_corners_and_no_shadow() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -9554,6 +9641,8 @@ int main() {
     shallow_modern_screens_draw_prop_gadgets_in_the_mapped_pens();
     shallow_modern_screens_hold_the_chrome_colours_at_the_mapped_pens();
     shallow_modern_screens_cast_shadows_in_their_own_palette();
+    classic_arrow_buttons_are_the_system_images();
+    shallow_modern_arrow_buttons_use_the_mapped_pens();
     depth2_screen_has_no_corners_and_no_shadow();
     shade_table_darkens_default_pen0_and_updates_on_setrgb32();
     flush_palette_recomposes_8plane_shadows_and_end_batch_flushes();

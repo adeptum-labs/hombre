@@ -158,10 +158,6 @@ constexpr u32 Last = 1056;
 
 class Graphics {
 public:
-    // The pen from which a screen's ColorMap is the system's own: the grey
-    // ramp and the window chrome. A program may not take these pens.
-    static constexpr u32 kHighSystemPen = 220;
-
     // Makes graphics.library with its vectors and its list of the fonts in
     // memory: topaz 8, then the fonts of rom_fonts.hpp. exec must be
     // initialised. False if exec runs out of memory or native ids.
@@ -267,14 +263,13 @@ private:
     std::vector<VpModeId> vp_mode_ids_;
     NativeVector vectors_[kVectors]{};
     // Who holds each pen of the screen's colour map, for ObtainPen and
-    // ReleasePen: how many share it, and whether one holds it alone. The
-    // first kSystemPens, and the grey ramp and window chrome from
-    // kHighSystemPen up, are the system's and stay shared.
+    // ReleasePen: how many programs share it, and whether one holds it alone.
+    // Besides them the system holds the first kSystemPens and the chrome's
+    // pens of a screen of that many planes, which stay shared.
     static constexpr u32 kPens = 256;
     static constexpr u32 kSystemPens = 8;
     u16 pen_users_[kPens]{};
     bool pen_exclusive_[kPens]{};
-    bool pens_ready_ = false;
     // The palettes text has blended through lately: four ColorMaps by
     // their guest address, each with the palette_gen its cache holds, the
     // least recently used one reused first.
@@ -309,8 +304,9 @@ private:
     // One tf_Accessor more or fewer, as OpenFont and CloseFont count them.
     void acquire_font(native::Bus& b, u32 font);
     void release_font(native::Bus& b, u32 font);
-    // The ramp cache of an eight-plane bitmap's palette, or nullptr when
-    // Intuition knows no ColorMap for it.
+    // The ramp cache of the palette of a bitmap of depth planes, which holds
+    // the colours of its 2^depth pens, or nullptr when it has too few planes
+    // for text to be blended or Intuition knows no ColorMap for it.
     text_blend::Cache* blend_for(u32 bitmap_addr, u32 depth);
     u32 blit(native::Bus& b, u32 src, i32 sx, i32 sy, const raster::RastPortView& v,
              const raster::Clip* clip, i32 dx, i32 dy, i32 width, i32 height, u32 minterm,

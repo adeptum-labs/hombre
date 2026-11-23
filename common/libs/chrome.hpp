@@ -184,13 +184,15 @@ constexpr i32 arrow_rows(i32 across, i32 along) {
     return rows > 3 ? rows : 3;
 }
 
-// A scroll arrow button as width x height pens, row by row, in the look of
-// the sliders' knobs: rounded, shaded and outlined, with a triangle
-// pointing the arrow's way; pressed, it takes the shading of a held knob.
-// With high_color it uses the chrome pens of an eight-plane screen, without it
-// the four 3.1 pens.
-void paint_arrow_button(u8* pens, i32 width, i32 height, Arrow arrow, bool pressed,
-                        bool high_color);
+// A scroll arrow button as width x height pens of a screen of depth planes
+// in out, row by row, with a triangle pointing the arrow's way. The modern
+// look is that of the sliders' knobs: rounded, shaded and outlined, in the
+// chrome pens at physical_pen(depth); pressed, it takes the shading of a held
+// knob. The classic look is the 3.1 arrow image of an active window's border
+// in the DrawInfo pens: the fill pen with a raised edge, a sunken one when
+// pressed.
+void paint_arrow_button(u8* out, i32 width, i32 height, Arrow arrow, bool pressed, Style style,
+                        u32 depth, const DrawInfoPens& drawinfo);
 
 }
 

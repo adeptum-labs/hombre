@@ -23,6 +23,7 @@
 
 #include "graphics.hpp"
 
+#include "chrome_palette.hpp"
 #include "display_modes.hpp"
 #include "tags.hpp"
 
@@ -1874,27 +1875,47 @@ struct GraphicsNatives {
         }
     }
 
-    static void ready_pens(Graphics& g) {
-        if (g.pens_ready_) {
-            return;
+    // The planes of a screen whose colour map has this many colours, 0 when
+    // the count is not a power of two.
+    static u32 planes_of(u32 colors) {
+        u32 planes = 0;
+        while ((1u << planes) < colors) {
+            ++planes;
         }
-        for (u32 i = 0; i < Graphics::kPens; ++i) {
-            g.pen_users_[i] =
-                i < Graphics::kSystemPens || i >= Graphics::kHighSystemPen ? 1 : 0;
-            g.pen_exclusive_[i] = false;
+        return (1u << planes) == colors ? planes : 0;
+    }
+
+    // How many hold pen of a colour map of this many colours: the programs
+    // that obtained it, and the system, which keeps the first kSystemPens
+    // and the chrome's pens of a screen of that many planes. Programs may
+    // share those but never hold one alone.
+    static u32 pen_holders(const Graphics& g, u32 pen, u32 colors) {
+        const bool system = pen < Graphics::kSystemPens ||
+                            chrome::logical_pen(pen, planes_of(colors)) != 0;
+        return g.pen_users_[pen] + (system ? 1u : 0u);
+    }
+
+    // The highest pen of a colour map of this many colours that nobody
+    // holds, -1 when there is none.
+    static i32 free_pen(const Graphics& g, u32 colors) {
+        for (u32 pen = colors < Graphics::kPens ? colors : Graphics::kPens;
+             pen-- > Graphics::kSystemPens;) {
+            if (pen_holders(g, pen, colors) == 0) {
+                return static_cast<i32>(pen);
+            }
         }
-        g.pens_ready_ = true;
+        return -1;
     }
 
     // The pen of the colour map closest to r, g, b (32-bit components),
-    // among the first count pens and those that may be shared when
-    // shared_only.
-    static i32 nearest_pen(Graphics& g, u32 map, u32 count, u32 r, u32 gr, u32 bl,
+    // among the first limit pens of its colors and those that may be shared
+    // when shared_only.
+    static i32 nearest_pen(Graphics& g, u32 map, u32 colors, u32 limit, u32 r, u32 gr, u32 bl,
                            bool shared_only) {
         i32 best = -1;
         u32 best_distance = 0xFFFFFFFF;
-        for (u32 pen = 0; pen < count && pen < Graphics::kPens; ++pen) {
-            if (shared_only && (g.pen_exclusive_[pen] || g.pen_users_[pen] == 0)) {
+        for (u32 pen = 0; pen < limit && pen < Graphics::kPens; ++pen) {
+            if (shared_only && (g.pen_exclusive_[pen] || pen_holders(g, pen, colors) == 0)) {
                 continue;
             }
             u8 pr = 0;
@@ -1921,7 +1942,6 @@ struct GraphicsNatives {
     static void obtain_pen(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
-        ready_pens(g);
         constexpr u32 kExclusive = 1;
         constexpr u32 kNoSetColor = 2;
         const u32 map = m.cpu.a[0];
@@ -1932,22 +1952,16 @@ struct GraphicsNatives {
         i32 pen = -1;
         const u32 wanted = m.cpu.d[0];
         if (wanted == 0xFFFFFFFF) {
-            for (u32 i = count < Graphics::kHighSystemPen ? count : Graphics::kHighSystemPen;
-                 i-- > Graphics::kSystemPens;) {
-                if (g.pen_users_[i] == 0) {
-                    pen = static_cast<i32>(i);
-                    break;
-                }
-            }
+            pen = free_pen(g, count);
         } else if (wanted < count && !g.pen_exclusive_[wanted] &&
-                   (g.pen_users_[wanted] == 0 || !exclusive)) {
+                   (pen_holders(g, wanted, count) == 0 || !exclusive)) {
             pen = static_cast<i32>(wanted);
         }
         if (pen < 0) {
             native::set_result(m, 0xFFFFFFFF);
             return;
         }
-        const bool fresh = g.pen_users_[pen] == 0;
+        const bool fresh = pen_holders(g, static_cast<u32>(pen), count) == 0;
         ++g.pen_users_[pen];
         g.pen_exclusive_[pen] = exclusive;
         if (fresh && (flags & kNoSetColor) == 0 &&
@@ -1961,7 +1975,6 @@ struct GraphicsNatives {
     // ReleasePen(cm A0, n D0): one user fewer of pen n.
     static void release_pen(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
-        ready_pens(g);
         const u32 pen = m.cpu.d[0];
         if (pen < Graphics::kPens && g.pen_users_[pen] > 0) {
             if (--g.pen_users_[pen] == 0) {
@@ -1975,30 +1988,24 @@ struct GraphicsNatives {
     static void obtain_best_pen(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
-        ready_pens(g);
         const u32 map = m.cpu.a[0];
         const ColorMapTables t = colormap_tables(b, map);
         const u32 count = t.limit < Graphics::kPens ? t.limit : Graphics::kPens;
         const u32 r = m.cpu.d[1];
         const u32 gr = m.cpu.d[2];
         const u32 bl = m.cpu.d[3];
-        i32 pen = nearest_pen(g, map, count, r, gr, bl, true);
+        i32 pen = nearest_pen(g, map, count, count, r, gr, bl, true);
         u8 pr = 0;
         u8 pg = 0;
         u8 pb = 0;
         const bool exact = pen >= 0 && g.color_of(map, static_cast<u32>(pen), pr, pg, pb) &&
                            pr == (r >> 24) && pg == (gr >> 24) && pb == (bl >> 24);
         if (!exact) {
-            for (u32 i = count < Graphics::kHighSystemPen ? count : Graphics::kHighSystemPen;
-                 i-- > Graphics::kSystemPens;) {
-                if (g.pen_users_[i] == 0) {
-                    if (write_rgb32_entry(b, t, i, r, gr, bl)) {
-                        bump_palette(g.display_);
-                        mark_colormap_dirty(g.display_, m, map);
-                        pen = static_cast<i32>(i);
-                    }
-                    break;
-                }
+            const i32 spare = free_pen(g, count);
+            if (spare >= 0 && write_rgb32_entry(b, t, static_cast<u32>(spare), r, gr, bl)) {
+                bump_palette(g.display_);
+                mark_colormap_dirty(g.display_, m, map);
+                pen = spare;
             }
         }
         if (pen < 0) {
@@ -2021,7 +2028,8 @@ struct GraphicsNatives {
         if (max_pen != 0xFFFFFFFF && max_pen + 1 < count) {
             count = max_pen + 1;
         }
-        const i32 pen = nearest_pen(g, map, count, m.cpu.d[1], m.cpu.d[2], m.cpu.d[3], false);
+        const i32 pen =
+            nearest_pen(g, map, t.limit, count, m.cpu.d[1], m.cpu.d[2], m.cpu.d[3], false);
         native::set_result(m, pen < 0 ? 0 : static_cast<u32>(pen));
     }
 
@@ -3003,8 +3011,8 @@ bool Graphics::color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue) {
 }
 
 text_blend::Cache* Graphics::blend_for(u32 bitmap_addr, u32 depth) {
-    if (depth != 8 || bitmap_addr == 0 || machine_ == nullptr || display_ == nullptr ||
-        display_->palette.colormap_of == nullptr) {
+    if (!text_blend::blends_on(depth) || bitmap_addr == 0 || machine_ == nullptr ||
+        display_ == nullptr || display_->palette.colormap_of == nullptr) {
         return nullptr;
     }
     const u32 map = display_->palette.colormap_of(display_->palette.ctx, bitmap_addr);

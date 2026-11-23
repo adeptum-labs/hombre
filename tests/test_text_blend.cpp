@@ -24,6 +24,8 @@
 #include "libs/text_blend.hpp"
 #include "check.hpp"
 
+#include <initializer_list>
+
 using namespace hombre;
 using hombre::text_blend::Cache;
 using hombre::text_blend::kLevels;
@@ -171,6 +173,36 @@ void nearest_breaks_ties_towards_the_lower_pen() {
     CHECK_EQ(text_blend::nearest(duplicate, 2, 5, 5, 5), 0);
 }
 
+// Text is blended from 32 pens, the five planes of the modern look, to 256;
+// the cache of a palette of that size ramps between its own pens only.
+void blending_needs_between_five_and_eight_planes() {
+    for (u32 planes = 0; planes <= 9; ++planes) {
+        CHECK_EQ(text_blend::blends_on(planes), planes >= 5 && planes <= 8);
+    }
+    for (const u32 planes : {5u, 6u, 7u}) {
+        const u32 pens = 1u << planes;
+        u8 palette[128][3];
+        for (u32 i = 0; i < pens; ++i) {
+            const u8 grey = static_cast<u8>(i * 255 / (pens - 1));
+            palette[i][0] = grey;
+            palette[i][1] = grey;
+            palette[i][2] = grey;
+        }
+        Cache cache;
+        cache.set_palette(palette, pens);
+        const u8* ramp = cache.ramp(static_cast<u8>(pens - 1), 0);
+        CHECK(ramp != nullptr);
+        CHECK_EQ(static_cast<u32>(ramp[0]), 0u);
+        CHECK_EQ(static_cast<u32>(ramp[kLevels - 1]), pens - 1);
+        for (u32 level = 1; level < kLevels; ++level) {
+            CHECK(ramp[level - 1] <= ramp[level]);
+            CHECK(static_cast<u32>(ramp[level]) < pens);
+        }
+        CHECK(cache.ramp(static_cast<u8>(pens), 0) == nullptr);
+        CHECK(cache.ramp(0, static_cast<u8>(pens)) == nullptr);
+    }
+}
+
 }
 
 int main() {
@@ -183,5 +215,6 @@ int main() {
     invalidate_keeps_the_palette();
     ramp_keeps_the_hue_of_its_pens();
     nearest_breaks_ties_towards_the_lower_pen();
+    blending_needs_between_five_and_eight_planes();
     return check::finish("test_text_blend");
 }

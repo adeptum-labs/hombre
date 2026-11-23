@@ -21,6 +21,8 @@
  * Contact: info@adeptum.se
  */
 
+#include "libs/chrome.hpp"
+#include "libs/chrome_palette.hpp"
 #include "libs/dos.hpp"
 #include "libs/exec.hpp"
 #include "libs/gadtools.hpp"
@@ -295,7 +297,7 @@ std::vector<AdfFile> test_files() {
 class Rig {
 public:
     explicit Rig(const std::vector<AdfFile>& files = test_files(),
-                 std::vector<u8> second = {}, u32 second_drive = 1)
+                 std::vector<u8> second = {}, u32 second_drive = 1, u32 depth = 2)
         : memory_(kTestGuestBytes),
           image_(build_adf("HombreTest", false, files)),
           second_image_(std::move(second)) {
@@ -333,7 +335,7 @@ public:
         CHECK(g_gadtools.init(m, g_exec, g_graphics));
         CHECK(workbench.init(m, g_exec, g_dos, g_graphics, g_intuition, g_gadtools, g_icon));
         m.cpu.a[7] = kStack;
-        screen = open_screen();
+        screen = open_screen(depth);
         g_intuition.set_default_screen(screen);
     }
 
@@ -382,10 +384,10 @@ public:
         return s;
     }
 
-    u32 open_screen() {
+    u32 open_screen(u32 depth) {
         put16(kData + ns_Width, 640);
         put16(kData + ns_Height, 400);
-        put16(kData + ns_Depth, 2);
+        put16(kData + ns_Depth, depth);
         put16(kData + ns_Type, CUSTOMSCREEN);
         const u32 opened = g_intuition.open_screen(kData, 0);
         CHECK(opened != 0);
@@ -1775,6 +1777,73 @@ void drawers_have_scroll_gadgets_in_their_borders() {
     CHECK_EQ(r.workbench.scroll_gadget(0, Workbench::kScrollVert), 0u);
 }
 
+// The pens of an Image's planes, row by row, as Workbench's arrow images
+// hold them: one word to a row of a plane.
+// struct Image: Width, Height, Depth and ImageData.
+constexpr u32 kImageWidth = 4;
+constexpr u32 kImageHeight = 6;
+constexpr u32 kImageDepth = 8;
+constexpr u32 kImageData = 10;
+
+std::vector<u8> image_pens(const Rig& r, u32 image) {
+    const u32 width = r.get16(image + kImageWidth);
+    const u32 height = r.get16(image + kImageHeight);
+    const u32 depth = r.get16(image + kImageDepth);
+    const u32 data = r.get32(image + kImageData);
+    std::vector<u8> pens(width * height);
+    for (u32 y = 0; y < height; ++y) {
+        for (u32 x = 0; x < width; ++x) {
+            for (u32 plane = 0; plane < depth; ++plane) {
+                const u32 row = r.get16(data + (plane * height + y) * 2);
+                pens[y * width + x] |= static_cast<u8>(((row >> (15 - x)) & 1u) << plane);
+            }
+        }
+    }
+    return pens;
+}
+
+// The arrow buttons in a drawer's borders are as deep as the screen and in
+// the look of its depth: the 3.1 arrow image in the screen's DrawInfo pens on
+// 2 and 4 planes, the modern button in the chrome pens of that depth on 5, 6
+// and 7.
+void drawer_arrows_take_the_look_of_the_screen() {
+    for (const u32 depth : {2u, 4u, 5u, 6u, 7u}) {
+        Rig r(test_files(), {}, 1, depth);
+        r.workbench.open_desktop();
+        r.workbench.open_icon(0, r.find_icon("HombreTest"));
+        const u32 drawer = r.find_window("HombreTest:");
+        CHECK(drawer != Workbench::kNoWindow);
+        native::Bus bus(r.m);
+        chrome::DrawInfoPens drawinfo;
+        sysimage::read_pens(bus, g_intuition.screen_draw_info(r.screen), drawinfo.pen);
+        for (u16 id = Workbench::kScrollUp; id <= Workbench::kScrollRight; ++id) {
+            const u32 gadget = r.workbench.scroll_gadget(drawer, id);
+            const auto arrow = static_cast<chrome::Arrow>(id - Workbench::kScrollUp);
+            for (const bool pressed : {false, true}) {
+                const u32 image = r.get32(gadget + (pressed ? gg_SelectRender : gg_GadgetRender));
+                const i32 width = static_cast<i32>(r.get16(image + kImageWidth));
+                const i32 height = static_cast<i32>(r.get16(image + kImageHeight));
+                CHECK_EQ(r.get16(image + kImageDepth), depth);
+                std::vector<u8> expected(static_cast<size_t>(width * height));
+                chrome::paint_arrow_button(expected.data(), width, height, arrow, pressed,
+                                           chrome::style_for_depth(depth), depth, drawinfo);
+                const std::vector<u8> pens = image_pens(r, image);
+                CHECK(pens == expected);
+                if (chrome::style_for_depth(depth) == chrome::Style::Classic) {
+                    const u32 light = pressed ? sysimage::ShadowPen : sysimage::ShinePen;
+                    CHECK_EQ(static_cast<u32>(pens[0]), static_cast<u32>(drawinfo.pen[light]));
+                } else {
+                    CHECK_EQ(static_cast<u32>(pens[0]),
+                             static_cast<u32>(chrome::physical_pen(chrome::kTrack, depth)));
+                    for (const u8 pen : pens) {
+                        CHECK(pen >= chrome::physical_pen(chrome::kScreenBar0, depth));
+                    }
+                }
+            }
+        }
+    }
+}
+
 void the_arrows_and_sliders_scroll_a_drawer() {
     Rig r(scroll_files());
     const u32 drawer = open_long(r);
@@ -2549,6 +2618,7 @@ int main() {
     a_disk_icon_inside_a_drawer_is_no_volume();
     a_resized_drawer_clips_its_icons_and_keeps_their_places();
     drawers_have_scroll_gadgets_in_their_borders();
+    drawer_arrows_take_the_look_of_the_screen();
     the_arrows_and_sliders_scroll_a_drawer();
     a_window_snapshot_keeps_its_scroll();
     drawers_open_below_the_screen_bar();

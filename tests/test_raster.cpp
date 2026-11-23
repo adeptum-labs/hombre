@@ -1207,6 +1207,70 @@ void coverage_modes_and_depth_keep_the_one_bit_result() {
     CHECK(fast.memory() == slow.memory());
 }
 
+// A bitmap of 5, 6 or 7 planes takes the blended pens of its own palette, in
+// its own planes only.
+void coverage_blends_into_a_bitmap_of_five_to_seven_planes() {
+    for (const u32 depth : {5u, 6u, 7u}) {
+        const u32 pens = 1u << depth;
+        u8 palette[256][3]{};
+        for (u32 i = 0; i < pens; ++i) {
+            for (u32 gun = 0; gun < 3; ++gun) {
+                palette[i][gun] = static_cast<u8>(i * 255 / (pens - 1));
+            }
+        }
+        text_blend::Cache cache;
+        cache.set_palette(palette, pens);
+        const u8 fg = static_cast<u8>(pens - 8);
+        const u8 bg = 4;
+        const u8* ramp = cache.ramp(fg, bg);
+        CHECK(ramp != nullptr);
+        CoverageFont cf;
+        const u8 text[] = {'A', 'B'};
+        u32 advance = 0;
+
+        Rig r;
+        r.clear_planes();
+        const raster::Bitmap bm = r.bitmap_at(kPlaneBase, depth);
+        native::Bus b = r.bus();
+        raster::draw_text(b, bm, kFullClip, raster::Pens{fg, bg, ndk::JAM2}, cf.font,
+                          raster::TextStyle{}, 4, 0, text, 2, advance, &cache);
+        CHECK(b.ok());
+        for (u32 i = 0; i < 8; ++i) {
+            CHECK_EQ(raster::read_pixel(b, bm, 4 + static_cast<i32>(i), 0),
+                     static_cast<u32>(ramp[kCoverageLevels[i]]));
+        }
+        for (u32 plane = depth; plane < 8; ++plane) {
+            for (u32 byte = 0; byte < kBytesPerRow; ++byte) {
+                CHECK_EQ(r.plane_byte(plane, 0, byte), 0u);
+            }
+        }
+
+        // Over a background JAM1 blends against the pen under each pixel.
+        r.clear_planes();
+        const u8 under[8] = {bg, fg, bg, fg, bg, fg, bg, fg};
+        for (u32 i = 0; i < 8; ++i) {
+            raster::write_pixel(b, bm, 4 + static_cast<i32>(i), 0, under[i]);
+        }
+        raster::draw_text(b, bm, kFullClip, raster::Pens{fg, 0, ndk::JAM1}, cf.font,
+                          raster::TextStyle{}, 4, 0, text, 2, advance, &cache);
+        CHECK(b.ok());
+        for (u32 i = 0; i < 8; ++i) {
+            u32 expected = under[i];
+            if (kCoverageLevels[i] == 15) {
+                expected = fg;
+            } else if (kCoverageLevels[i] != 0) {
+                expected = cache.ramp(fg, under[i])[kCoverageLevels[i]];
+            }
+            CHECK_EQ(raster::read_pixel(b, bm, 4 + static_cast<i32>(i), 0), expected);
+        }
+        for (u32 plane = depth; plane < 8; ++plane) {
+            for (u32 byte = 0; byte < kBytesPerRow; ++byte) {
+                CHECK_EQ(r.plane_byte(plane, 0, byte), 0u);
+            }
+        }
+    }
+}
+
 int main() {
     write_then_read_pixel_roundtrips_every_pen();
     read_outside_gives_all_ones();
@@ -1240,5 +1304,6 @@ int main() {
     coverage_clip_cuts_columns();
     coverage_bold_and_underline();
     coverage_modes_and_depth_keep_the_one_bit_result();
+    coverage_blends_into_a_bitmap_of_five_to_seven_planes();
     return check::finish("test_raster");
 }

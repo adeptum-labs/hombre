@@ -22,6 +22,8 @@
  */
 
 #include "gfx_rig.hpp"
+#include "libs/chrome.hpp"
+#include "libs/chrome_palette.hpp"
 #include "libs/gadtools.hpp"
 #include "libs/utility.hpp"
 
@@ -237,22 +239,21 @@ u32 visual_info(GfxRig& r, GadTools& g, u32 screen) {
     return vi;
 }
 
-u32 make_surface(GfxRig& r) {
+u32 make_surface(GfxRig& r, u32 depth = 2) {
     constexpr u32 kWidth = 640;
     constexpr u32 kHeight = 400;
     const u32 row_bytes = (kWidth + 15) / 16 * 2;
     const u32 plane_bytes = row_bytes * kHeight;
-    const u32 plane0 = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
-    const u32 plane1 = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
-    CHECK(plane0 != 0);
-    CHECK(plane1 != 0);
     r.cpu().a[0] = kBitmap;
-    r.cpu().d[0] = 2;
+    r.cpu().d[0] = depth;
     r.cpu().d[1] = kWidth;
     r.cpu().d[2] = kHeight;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitBitMap), ExitReason::Halt);
-    r.put32(kBitmap + bm_Planes, plane0);
-    r.put32(kBitmap + bm_Planes + 4, plane1);
+    for (u32 plane = 0; plane < depth; ++plane) {
+        const u32 at = r.exec.alloc(plane_bytes, MEMF_CHIP | MEMF_CLEAR);
+        CHECK(at != 0);
+        r.put32(kBitmap + bm_Planes + plane * 4, at);
+    }
     r.cpu().a[1] = kRastPort;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::InitRastPort), ExitReason::Halt);
     r.put32(kRastPort + rp_BitMap, kBitmap);
@@ -1427,6 +1428,68 @@ void a_list_view_draws_its_rows_and_arrows() {
     gt_result(r, g, gadtools_lvo::FreeGadgets);
 }
 
+// The arrows of a list view take the look of the surface's depth. On 2 and 4
+// planes they are the 3.1 arrow image in the default pens: the fill pen, the
+// shine pen along the top and left, the shadow pen along the bottom and right
+// and in the triangle, the edges the other way round when held down. On 5, 6
+// and 7 planes they are the modern look's button in the chrome pens of that
+// depth.
+void list_arrows_take_the_look_of_the_surface() {
+    for (const u32 depth : {2u, 4u, 5u, 6u, 7u}) {
+        GfxRig r;
+        GadTools g;
+        init_gadtools(r, g);
+        const u32 rp = make_surface(r, depth);
+        r.cpu().a[0] = kList;
+        const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+        put_list(r, kHead, kNodes, kEightNames, 3);
+        put_new_gadget(r, 20, 20, 100, 40, 0, 1, 0, 0);
+        const u32 list = create_gadget(r, g, LISTVIEW_KIND, context,
+                                       r.tags(kTags, {{GTLV_Labels, kHead}, {TAG_DONE, 0}}));
+        CHECK(list != 0);
+        const u32 scroller = r.get32(context + gg_NextGadget);
+        const u32 up = r.get32(scroller + gg_NextGadget);
+        const u32 down = r.get32(up + gg_NextGadget);
+        CHECK(g.render(0, rp, up));
+        CHECK(g.render(0, rp, down));
+
+        // The arrows are 16 by 10 at (104,36) and (104,46).
+        if (chrome::style_for_depth(depth) == chrome::Style::Classic) {
+            for (const i32 top : {36, 46}) {
+                CHECK_EQ(read_pixel(r, rp, 104, top), kShinePen);
+                CHECK_EQ(read_pixel(r, rp, 119, top), kShadowPen);
+                CHECK_EQ(read_pixel(r, rp, 104, top + 9), kShinePen);
+                CHECK_EQ(read_pixel(r, rp, 119, top + 9), kShadowPen);
+                CHECK_EQ(read_pixel(r, rp, 106, top + 5), kFillPen);
+            }
+            CHECK_EQ(read_pixel(r, rp, 111, 39), kShadowPen);
+            CHECK_EQ(read_pixel(r, rp, 111, 50), kShadowPen);
+            r.put16(up + gg_Flags, r.get16(up + gg_Flags) | GFLG_SELECTED);
+            CHECK(g.render(0, rp, up));
+            CHECK_EQ(read_pixel(r, rp, 104, 36), kShadowPen);
+            CHECK_EQ(read_pixel(r, rp, 119, 36), kShinePen);
+            CHECK_EQ(read_pixel(r, rp, 106, 41), kFillPen);
+            continue;
+        }
+        const auto pen = [depth](u8 chrome_pen) {
+            return static_cast<u32>(chrome::physical_pen(chrome_pen, depth));
+        };
+        CHECK_EQ(read_pixel(r, rp, 104, 36), pen(chrome::kTrack));
+        CHECK_EQ(read_pixel(r, rp, 104, 46), pen(chrome::kTrack));
+        CHECK(box_has_pen(r, rp, 104, 36, 119, 45, pen(chrome::kFrameDark)));
+        CHECK(box_has_pen(r, rp, 104, 46, 119, 55, pen(chrome::kFrameDark)));
+        for (i32 y = 36; y <= 55; ++y) {
+            for (i32 x = 104; x <= 119; ++x) {
+                CHECK(read_pixel(r, rp, x, y) >= pen(chrome::kScreenBar0));
+            }
+        }
+        r.put16(up + gg_Flags, r.get16(up + gg_Flags) | GFLG_SELECTED);
+        CHECK(g.render(0, rp, up));
+        CHECK(box_has_pen(r, rp, 104, 36, 119, 45, pen(chrome::kFrameLight)));
+        CHECK(!box_has_pen(r, rp, 104, 46, 119, 55, pen(chrome::kFrameLight)));
+    }
+}
+
 u32 get_msg(GfxRig& r, u32 port) {
     r.cpu().a[0] = port;
     return r.result(Base::Exec, exec_lvo::GetMsg);
@@ -1751,6 +1814,7 @@ int main() {
     a_slider_in_a_window_draws_its_level_again_when_it_changes();
     list_views_lay_out_their_parts_and_show_the_selected_label();
     a_list_view_draws_its_rows_and_arrows();
+    list_arrows_take_the_look_of_the_surface();
     a_list_view_in_a_window_reports_rows_and_scrolls_by_itself();
     checkboxes_toggle_and_report_their_state();
     sliders_carry_levels_and_list_views_pick_rows();

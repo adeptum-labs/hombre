@@ -1837,24 +1837,25 @@ void GadTools::draw_list(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 righ
     }
 }
 
-// One of a list view's two arrows, in the look of the sliders' knobs; an
-// arrow too large for that takes the system image's.
+// One of a list view's two arrows, in the look of the sliders' knobs on a
+// screen of the modern look and the system image's on a classic one, in the
+// default pens; an arrow too large for that takes the system image's too.
 void GadTools::draw_list_arrow(Bus& b, u32 rp, i32 left, i32 top, i32 width, i32 height,
                                bool down, bool pressed) {
     Graphics& gfx = *graphics_;
+    chrome::DrawInfoPens drawinfo;
+    sysimage::read_pens(b, 0, drawinfo.pen);
     if (static_cast<u32>(width) * static_cast<u32>(height) > kMaxArrowPixels) {
-        u16 pens[sysimage::kPenCount];
-        sysimage::read_pens(b, 0, pens);
         sysimage::draw(gfx, b, rp, down ? ndk::DOWNIMAGE : ndk::UPIMAGE,
                        Rect{left, top, left + width - 1, top + height - 1},
-                       pressed ? ndk::IDS_SELECTED : ndk::IDS_NORMAL, pens);
+                       pressed ? ndk::IDS_SELECTED : ndk::IDS_NORMAL, drawinfo.pen);
         return;
     }
     const u32 bitmap = b.r32(rp + ndk::rp_BitMap);
     const u32 depth = bitmap != 0 ? b.r8(bitmap + ndk::bm_Depth) : 0;
     u8 pens[kMaxArrowPixels];
     chrome::paint_arrow_button(pens, width, height, down ? chrome::Arrow::Down : chrome::Arrow::Up,
-                               pressed, depth >= 8);
+                               pressed, chrome::style_for_depth(depth), depth, drawinfo);
     // Row by row, each run of one pen a line.
     for (i32 y = 0; y < height; ++y) {
         for (i32 x = 0; x < width;) {
