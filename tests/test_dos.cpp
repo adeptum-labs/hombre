@@ -426,24 +426,7 @@ public:
     explicit Rig(std::vector<u8> image, u32 free_end = kTestGuestBytes,
                  std::vector<u8> second = {}, u32 second_drive = 1)
         : memory_(kTestGuestBytes), image_(std::move(image)), second_image_(std::move(second)) {
-        fd_ = memfd_create("dos", 0);
-        CHECK(fd_ >= 0);
-        CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
-        void* rw = mmap(nullptr, kRegion, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
-        void* rx = mmap(nullptr, kRegion, PROT_READ | PROT_EXEC, MAP_SHARED, fd_, 0);
-        CHECK(rw != MAP_FAILED);
-        CHECK(rx != MAP_FAILED);
-        rw_ = static_cast<u8*>(rw);
-        rx_ = static_cast<const u8*>(rx);
-        m.cpu = CpuState{};
-        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
-        m.jit = nullptr;
-        CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
-        g_lines.clear();
-        g_console.clear();
-        g_log = capture;
-        CHECK(g_exec.init(m, kFreeStart, std::min(kTestChipEnd, free_end), free_end));
-        CHECK(g_timer.init(m, g_exec));
+        start(free_end);
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         if (second_image_.empty()) {
             CHECK(g_dos.init(m, g_exec, volume, console, &g_console));
@@ -455,6 +438,14 @@ public:
             drives.volume[second_drive] = &second_volume;
             CHECK(g_dos.init(m, g_exec, drives, console, &g_console));
         }
+        m.cpu.a[7] = kStack;
+    }
+
+    // Dos over drives the test mounted itself, which must stay mounted;
+    // booted tells whether dos found a volume to boot from.
+    explicit Rig(const Drives& drives) : memory_(kTestGuestBytes) {
+        start(kTestGuestBytes);
+        booted = g_dos.init(m, g_exec, drives, console, &g_console);
         m.cpu.a[7] = kStack;
     }
 
@@ -474,6 +465,7 @@ public:
     Machine m;
     AdfVolume volume{};
     AdfVolume second_volume{};
+    bool booted = false;
 
     CpuState& cpu() { return m.cpu; }
     u32 base() const { return g_dos.dos_base(); }
@@ -579,6 +571,28 @@ public:
 
 private:
     static constexpr usize kRegion = 1 << 20;
+
+    void start(u32 free_end) {
+        fd_ = memfd_create("dos", 0);
+        CHECK(fd_ >= 0);
+        CHECK(ftruncate(fd_, static_cast<off_t>(kRegion)) == 0);
+        void* rw = mmap(nullptr, kRegion, PROT_READ | PROT_WRITE, MAP_SHARED, fd_, 0);
+        void* rx = mmap(nullptr, kRegion, PROT_READ | PROT_EXEC, MAP_SHARED, fd_, 0);
+        CHECK(rw != MAP_FAILED);
+        CHECK(rx != MAP_FAILED);
+        rw_ = static_cast<u8*>(rw);
+        rx_ = static_cast<const u8*>(rx);
+        m.cpu = CpuState{};
+        m.mem = GuestMemory{memory_.data(), kTestGuestBytes};
+        m.jit = nullptr;
+        CHECK(g_jit.init(CodeRegion{rw_, rx_, kRegion}, m));
+        g_lines.clear();
+        g_console.clear();
+        g_log = capture;
+        CHECK(g_exec.init(m, kFreeStart, std::min(kTestChipEnd, free_end), free_end));
+        CHECK(g_timer.init(m, g_exec));
+    }
+
     std::vector<u8> memory_;
     std::vector<u8> image_;
     std::vector<u8> second_image_;
@@ -2210,6 +2224,317 @@ void the_first_disk_wins_a_shared_name() {
     Rig named_ram(build_adf("HombreTest", false, standard_files()), second_disk("RAM"), 3);
     CHECK(read_whole(named_ram, "RAM:Notes") == "notes");
     CHECK(read_whole(named_ram, "DF3:Docs/Readme") == "on the second disk");
+}
+
+// --- hard disk partitions -----------------------------------------------------
+
+bool read_partition_block(void* ctx, u32 block, u8* out) {
+    const std::vector<u8>& image = *static_cast<const std::vector<u8>*>(ctx);
+    const usize at = static_cast<usize>(block) * 512;
+    if (at + 512 > image.size()) {
+        return false;
+    }
+    std::memcpy(out, image.data() + at, 512);
+    return true;
+}
+
+// A floppy image mounted as the disk in a floppy drive.
+struct Floppy {
+    explicit Floppy(std::vector<u8> disk) : image(std::move(disk)) {
+        CHECK(adf_mount(image.data(), image.size(), volume) == FsError::Ok);
+    }
+    Floppy(const Floppy&) = delete;
+    Floppy& operator=(const Floppy&) = delete;
+
+    std::vector<u8> image;
+    AdfVolume volume{};
+};
+
+// A floppy image read through a BlockSource as a hard disk partition is,
+// with a device name, a boot priority and the DosEnvec of a partition block.
+struct Partition {
+    Partition(std::vector<u8> disk, const char* device, i32 boot_pri = 0, bool bootable = true)
+        : image(std::move(disk)) {
+        const BlockSource source{&image, read_partition_block, nullptr};
+        CHECK(adf_mount_partition(source, 0, static_cast<u32>(image.size() / 512), 2, volume) ==
+              FsError::Ok);
+        std::snprintf(info.device, sizeof info.device, "%s", device);
+        info.boot_pri = boot_pri;
+        info.bootable = bootable;
+        info.has_env = true;
+        info.env[envec::table_size] = envec::dos_type;
+        info.env[envec::size_block] = 128;
+        info.env[envec::surfaces] = 2;
+        info.env[envec::sectors_per_block] = 1;
+        info.env[envec::blocks_per_track] = 11;
+        info.env[envec::reserved] = 2;
+        info.env[envec::high_cyl] = 79;
+        info.env[envec::num_buffers] = 30;
+        info.env[envec::boot_pri] = static_cast<u32>(boot_pri);
+        info.env[envec::dos_type] = ID_DOS_DISK | 1;
+    }
+    Partition(const Partition&) = delete;
+    Partition& operator=(const Partition&) = delete;
+
+    std::vector<u8> image;
+    AdfVolume volume{};
+    DriveInfo info{};
+};
+
+// df0 in DF0: (none when null) and the partitions in the hard disk slots.
+Drives with_partitions(const AdfVolume* df0, std::initializer_list<const Partition*> partitions) {
+    Drives drives;
+    drives.volume[0] = df0;
+    u32 slot = kFloppyDrives;
+    for (const Partition* p : partitions) {
+        drives.volume[slot] = &p->volume;
+        drives.info[slot++] = p->info;
+    }
+    return drives;
+}
+
+std::vector<AdfFile> work_files() {
+    return {{"Docs/Readme", text("on the partition")}, {"Notes", text("notes")}};
+}
+
+// The drive dos boots from, Dos::kMaxDrives when none can.
+u32 boot_volume_of(const Drives& drives) {
+    Rig r(drives);
+    return r.booted ? g_dos.boot_volume() : Dos::kMaxDrives;
+}
+
+void a_hard_disk_partition_is_a_volume() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    Partition part(build_adf("Work", true, work_files()), "DH0");
+    Rig r(with_partitions(&df0.volume, {&part}));
+    CHECK(r.booted);
+
+    // By device name, whatever its case, and by volume name.
+    CHECK(read_whole(r, "DH0:Docs/Readme") == "on the partition");
+    CHECK(read_whole(r, "dh0:Notes") == "notes");
+    CHECK(read_whole(r, "Work:Notes") == "notes");
+    CHECK(read_whole(r, "DF0:S/Startup-Sequence") == "echo hello\n");
+
+    // Locks carry the partition's own port, which GetDeviceProc finds.
+    r.str(kData + 0x80, "DH0:");
+    const u32 dp = r.call(dos_lvo::GetDeviceProc, kData + 0x80, 0);
+    CHECK(dp != 0);
+    const u32 port = r.get32(dp + dvp_Port);
+    CHECK(r.read_bstr(r.get32(r.get32(dp + dvp_DevNode) + dol_Name)) == "DH0");
+    r.call(dos_lvo::FreeDeviceProc, dp);
+    const u32 default_port = r.call(dos_lvo::GetFileSysTask);
+    CHECK(port != 0);
+    CHECK(port != default_port);
+    r.str(kData, "DH0:Docs");
+    const u32 docs = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(docs != 0);
+    CHECK_EQ(r.get32((docs << 2) + fl_Task), port);
+
+    // The directory lists the partition's entries.
+    const u32 fib = kData + 0x800;
+    r.str(kData, "Work:");
+    const u32 root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK_EQ(r.call(dos_lvo::Examine, root, fib), DOSTRUE);
+    CHECK(r.read_str(fib + fib_FileName) == "Work");
+    std::vector<std::string> names;
+    for (u32 i = 0; i < 10 && r.call(dos_lvo::ExNext, root, fib) == DOSTRUE; ++i) {
+        names.push_back(r.read_str(fib + fib_FileName));
+    }
+    std::sort(names.begin(), names.end());
+    CHECK(names == (std::vector<std::string>{"Docs", "Notes"}));
+
+    // Info gives its real blocks, as does a packet to its port.
+    const u32 id = kData + 0x400;
+    CHECK_EQ(r.call(dos_lvo::Info, root, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_DiskState), ID_WRITE_PROTECTED);
+    CHECK_EQ(r.get32(id + id_NumBlocks), 1758u);
+    CHECK_EQ(r.get32(id + id_BytesPerBlock), 512u);
+    CHECK_EQ(r.get32(id + id_DiskType), ID_DOS_DISK | 1);
+    const u32 volume = r.get32(id + id_VolumeNode);
+    CHECK(r.read_bstr(r.get32((volume << 2) + dol_Name)) == "Work");
+    CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_DISK_INFO, id >> 2), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_NumBlocks), 1758u);
+    CHECK_EQ(r.get32(id + id_VolumeNode), volume);
+
+    // Nothing is written to it.
+    r.str(kData, "DH0:New");
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    r.str(kData, "DH0:Notes");
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    r.str(kData, "DH0:Sub");
+    CHECK_EQ(r.call(dos_lvo::CreateDir, kData), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+}
+
+void a_partition_answers_to_any_device_name() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    Partition part(build_adf("Data", true, work_files()), "Work");
+    Rig r(with_partitions(&df0.volume, {&part}));
+    CHECK(read_whole(r, "Work:Notes") == "notes");
+    CHECK(read_whole(r, "WORK:Docs/Readme") == "on the partition");
+    CHECK(read_whole(r, "Data:Notes") == "notes");
+    r.str(kData, "DH0:");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+}
+
+void a_hard_disk_slot_needs_a_device_name() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    Partition nameless(build_adf("Work", true, work_files()), "");
+    {
+        Rig r(with_partitions(&df0.volume, {&nameless}));
+        CHECK(r.booted);
+        CHECK(!g_dos.has_disk(kFloppyDrives));
+        CHECK(std::string(g_dos.device_name(kFloppyDrives)).empty());
+        r.str(kData, "Work:");
+        CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+        CHECK_EQ(r.io_err(), ERROR_DEVICE_NOT_MOUNTED);
+    }
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {&nameless})), Dos::kMaxDrives);
+}
+
+void the_boot_volume_follows_the_boot_priority() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    Floppy df1(build_adf("Second", false, standard_files()));
+    Partition low(build_adf("Low", true, standard_files()), "DH0", 1);
+    Partition other_low(build_adf("OtherLow", true, standard_files()), "DH1", 1);
+    Partition as_df0(build_adf("AsDf0", true, standard_files()), "DH2", 5);
+    Partition high(build_adf("High", true, standard_files()), "DH3", 7);
+    Partition off(build_adf("Off", true, standard_files()), "DH4", 100, false);
+
+    // DF0: counts as priority 5, and wins a tie.
+    CHECK_EQ(boot_volume_of(with_partitions(&df0.volume, {})), 0u);
+    CHECK_EQ(boot_volume_of(with_partitions(&df0.volume, {&low})), 0u);
+    CHECK_EQ(boot_volume_of(with_partitions(&df0.volume, {&as_df0})), 0u);
+    CHECK_EQ(boot_volume_of(with_partitions(&df0.volume, {&low, &high})), kFloppyDrives + 1);
+
+    // Without a disk in DF0: the bootable partitions decide, the first of
+    // equals wins and a partition that is not bootable never does.
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {&low})), kFloppyDrives);
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {&low, &high})), kFloppyDrives + 1);
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {&high, &low})), kFloppyDrives);
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {&low, &other_low})), kFloppyDrives);
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {&off, &low})), kFloppyDrives + 1);
+    CHECK_EQ(boot_volume_of(with_partitions(&df0.volume, {&off})), 0u);
+
+    // No volume qualifies: a partition that is not bootable alone, or a
+    // disk in DF1: only.
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {&off})), Dos::kMaxDrives);
+    CHECK_EQ(boot_volume_of(with_partitions(nullptr, {})), Dos::kMaxDrives);
+    Drives only_df1;
+    only_df1.volume[1] = &df1.volume;
+    CHECK_EQ(boot_volume_of(only_df1), Dos::kMaxDrives);
+}
+
+void the_default_assigns_follow_the_boot_volume() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Prefs/Env-Archive/greeting", text("hello from envarc")});
+    Partition boot(build_adf("Work", true, files), "DH0");
+    DirEntry greeting{};
+    CHECK(adf_find(boot.volume, "Prefs/Env-Archive/greeting", greeting) == FsError::Ok);
+    put_block32(boot.image, greeting.header_block, 80, 0x03);  // protection
+    adf_fix_checksum(boot.image, greeting.header_block);
+    Rig r(with_partitions(nullptr, {&boot}));
+    CHECK(r.booted);
+    CHECK(g_lines.empty());
+    CHECK_EQ(g_dos.boot_volume(), kFloppyDrives);
+
+    // SYS: and the standard directories are the partition's, and so are
+    // names with no device and ":" with no current directory.
+    CHECK(read_whole(r, "SYS:S/Startup-Sequence") == "echo hello\n");
+    CHECK(read_whole(r, "S:Startup-Sequence") == "echo hello\n");
+    CHECK(read_whole(r, ":S/Startup-Sequence") == "echo hello\n");
+    CHECK(read_whole(r, "S/Startup-Sequence") == "echo hello\n");
+    r.str(kData, "C:");
+    const u32 c = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(c != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, c, kData + 0x200, 64), DOSTRUE);
+    CHECK(r.read_str(kData + 0x200) == "Work:C");
+
+    // ENVARC: is there and copied into ENV: with what the partition holds.
+    CHECK(read_whole(r, "ENVARC:greeting") == "hello from envarc");
+    CHECK(read_whole(r, "ENV:greeting") == "hello from envarc");
+    r.str(kData, "ENV:greeting");
+    const u32 greeting_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    const u32 fib = kData + 0x800;
+    CHECK_EQ(r.call(dos_lvo::Examine, greeting_lock, fib), DOSTRUE);
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x03u);
+
+    // A zero lock is the partition's root, the Process's file system is
+    // the partition's, and the CLI is set to it.
+    const u32 id = kData + 0x400;
+    CHECK_EQ(r.call(dos_lvo::Info, 0, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_BytesPerBlock), 512u);
+    CHECK(r.read_bstr(r.get32((r.get32(id + id_VolumeNode) << 2) + dol_Name)) == "Work");
+    r.str(kData + 0x80, "DH0:");
+    const u32 dp = r.call(dos_lvo::GetDeviceProc, kData + 0x80, 0);
+    CHECK(dp != 0);
+    CHECK_EQ(r.call(dos_lvo::GetFileSysTask), r.get32(dp + dvp_Port));
+    r.call(dos_lvo::FreeDeviceProc, dp);
+    const u32 cli = r.get32(r.proc() + pr_CLI) << 2;
+    CHECK(r.read_bstr(r.get32(cli + cli_SetName)) == "Work:");
+}
+
+void the_dos_list_has_the_hard_disk_partitions() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    Partition part(build_adf("Work", true, work_files()), "DH0");
+    Partition bare(build_adf("Bare", true, work_files()), "DH1");
+    bare.info.has_env = false;
+    Rig r(with_partitions(&df0.volume, {&part, &bare}));
+
+    // Floppy volumes, hard volumes and the Ram Disk, then the floppy
+    // devices, the hard devices and RAM:.
+    const u32 head = r.call(dos_lvo::LockDosList, LDF_ALL | LDF_READ);
+    std::vector<std::pair<u32, std::string>> entries;
+    u32 cur = head;
+    for (u32 i = 0; i < 64; ++i) {
+        cur = r.call(dos_lvo::NextDosEntry, cur, LDF_VOLUMES | LDF_DEVICES);
+        if (cur == 0) {
+            break;
+        }
+        entries.emplace_back(r.get32(cur + dol_Type), r.read_bstr(r.get32(cur + dol_Name)));
+    }
+    CHECK(entries == (std::vector<std::pair<u32, std::string>>{
+                         {DLT_VOLUME, "HombreTest"},
+                         {DLT_VOLUME, "Work"},
+                         {DLT_VOLUME, "Bare"},
+                         {DLT_VOLUME, "Ram Disk"},
+                         {DLT_DEVICE, "DF0"},
+                         {DLT_DEVICE, "DF1"},
+                         {DLT_DEVICE, "DF2"},
+                         {DLT_DEVICE, "DF3"},
+                         {DLT_DEVICE, "DH0"},
+                         {DLT_DEVICE, "DH1"},
+                         {DLT_DEVICE, "RAM"},
+                     }));
+
+    // The partition's device has a FileSysStartupMsg whose DosEnvec is a
+    // copy of the partition's.
+    r.str(kData, "DH0");
+    const u32 device = r.call(dos_lvo::FindDosEntry, head, kData, LDF_DEVICES);
+    CHECK(device != 0);
+    CHECK_EQ(r.get32(device + dol_Type), DLT_DEVICE);
+    const u32 startup = r.get32(device + dol_Startup) << 2;
+    CHECK(startup != 0);
+    CHECK_EQ(r.get32(startup + fssm_Unit), 0u);
+    CHECK(r.read_bstr(r.get32(startup + fssm_Device)) == "hombre.disk");
+    CHECK_EQ(r.get32(startup + fssm_Flags), 0u);
+    const u32 env = r.get32(startup + fssm_Environ) << 2;
+    CHECK(env != 0);
+    for (u32 k = 0; k < envec::longs; ++k) {
+        CHECK_EQ(r.get32(env + k * 4), part.info.env[k]);
+    }
+
+    // A partition without a DosEnvec and the floppy drives have none.
+    for (const char* name : {"DH1", "DF0"}) {
+        r.str(kData, name);
+        const u32 plain = r.call(dos_lvo::FindDosEntry, head, kData, LDF_DEVICES);
+        CHECK(plain != 0);
+        CHECK_EQ(r.get32(plain + dol_Startup), 0u);
+    }
+    r.call(dos_lvo::UnLockDosList, LDF_ALL | LDF_READ);
 }
 
 void info_on_the_volume() {
@@ -7575,6 +7900,12 @@ int main() {
     a_second_drive_is_its_own_volume();
     a_drive_without_a_disk_says_so();
     the_first_disk_wins_a_shared_name();
+    a_hard_disk_partition_is_a_volume();
+    a_partition_answers_to_any_device_name();
+    a_hard_disk_slot_needs_a_device_name();
+    the_boot_volume_follows_the_boot_priority();
+    the_default_assigns_follow_the_boot_volume();
+    the_dos_list_has_the_hard_disk_partitions();
     layout_matches_the_ndk();
     dos_library_is_built();
     command_writes_to_the_console();

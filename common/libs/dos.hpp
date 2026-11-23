@@ -30,6 +30,7 @@
 #include "../m68k_cpu.hpp"
 #include "../m68k_jit.hpp"
 #include "../ram_fs.hpp"
+#include "../rdb.hpp"
 #include "../slot_list.hpp"
 #include "../types.hpp"
 #include "exec.hpp"
@@ -39,13 +40,13 @@
 
 #include <vector>
 
-// dos.library written in C++ for code run by the 68000 translator, over one
-// read-only volume.
+// dos.library written in C++ for code run by the 68000 translator, over the
+// read-only volumes of the floppy drives and of the hard disk partitions.
 //
 // dos keeps its structures in guest memory with the AmigaOS layout: the
-// DosLibrary with its RootNode and DosInfo, a volume node, a Process with
-// its CommandLineInterface for each command process, the file handles and
-// the locks. Each Process is exec's task. run_command runs the shell's
+// DosLibrary with its RootNode and DosInfo, a volume node and a device node
+// for each drive, a Process with its CommandLineInterface for each command
+// process, the file handles and the locks. Each Process is exec's task. run_command runs the shell's
 // command on the shell Process, on a 4 KiB stack: it loads it, gives it its
 // argument line and the console, and calls it. CreateProc, CreateNewProc,
 // RunCommand, SystemTagList and Execute give a program Processes of its own,
@@ -63,12 +64,13 @@
 // Variables can be local (LocalVar nodes on pr_LocalVars, as SetVar
 // creates by default) or global (files under ENV: on the RAM volume).
 //
-// Paths are AmigaDOS paths: DF0: to DF3:, RAM:, T:, ENV:, C:, LIBS:, S:,
-// SYS:, the name of a volume in a drive, ":" and any active assign; any
-// other device is not mounted, and a drive without a disk gives
-// ERROR_NO_DISK. The default assigns point into DF0:. A path without a
-// device is relative to the current directory, a leading or doubled '/'
-// goes up one level, and names compare without regard to case.
+// Paths are AmigaDOS paths: DF0: to DF3:, the device name of a hard disk
+// partition, RAM:, T:, ENV:, C:, LIBS:, S:, SYS:, the name of a volume in a
+// drive, ":" and any active assign; any other device is not mounted, and a
+// drive without a disk gives ERROR_NO_DISK. The default assigns point into
+// the boot volume. A path without a device is relative to the current
+// directory, a leading or doubled '/' goes up one level, and names compare
+// without regard to case.
 //
 // Every guest pointer a native takes goes through native::Bus, so a bad
 // one ends the run with BusError or AddressError; walks over guest strings
@@ -405,6 +407,13 @@ constexpr u32 DLT_VOLUME = 2;
 constexpr u32 DLT_LATE = 3;
 constexpr u32 DLT_NONBINDING = 4;
 
+// struct FileSysStartupMsg, which dol_Startup of a disk's device node points to
+constexpr u32 fssm_Unit = 0;
+constexpr u32 fssm_Device = 4;
+constexpr u32 fssm_Environ = 8;
+constexpr u32 fssm_Flags = 12;
+constexpr u32 FileSysStartupMsg_SIZEOF = 16;
+
 // struct AssignList
 constexpr u32 al_Next = 0;
 constexpr u32 al_Lock = 4;
@@ -697,9 +706,28 @@ using ConsoleReady = bool (*)(void* ctx, u32 timeout_us);
 // The floppy drives dos serves as DF0: to DF3:.
 constexpr u32 kFloppyDrives = 4;
 
-// The volume in each drive at boot; null for a drive without a disk.
+// The hard disk partitions dos serves after them, each under its own device
+// name.
+constexpr u32 kHardVolumes = 8;
+constexpr u32 kDriveSlots = kFloppyDrives + kHardVolumes;
+
+// What dos knows of a drive besides its volume: the device name it answers
+// to, without the colon (a floppy drive's empty name means "DF<n>"), whether
+// it may boot and with which priority, and the DosEnvec of a partition.
+struct DriveInfo {
+    char device[32]{};
+    i32 boot_pri = 0;
+    bool bootable = false;
+    u32 env[envec::longs]{};
+    bool has_env = false;
+};
+
+// The volume in each drive at boot; null for a drive without a disk. A slot
+// after the floppy drives is a hard disk partition and counts only with a
+// device name.
 struct Drives {
-    const AdfVolume* volume[kFloppyDrives]{};
+    const AdfVolume* volume[kDriveSlots]{};
+    DriveInfo info[kDriveSlots]{};
 };
 
 class Dos {
@@ -709,8 +737,9 @@ public:
     using ConsoleReady = hombre::ConsoleReady;
 
     // Volume ids: the floppy drives DF0: to DF3: are 0 to 3, so a
-    // DirEntry's zero volume is DF0:, and RAM: comes after them.
-    static constexpr u32 kMaxDrives = kFloppyDrives;
+    // DirEntry's zero volume is DF0:, the hard disk partitions are 4 to 11,
+    // and RAM: comes after them.
+    static constexpr u32 kMaxDrives = kDriveSlots;
     static constexpr u8 kVolDf0 = 0;
     static constexpr u8 kVolRam = static_cast<u8>(kMaxDrives);
     // The ROM's stand-in for the Fonts disk. The 3.1 Startup-Sequence
@@ -742,10 +771,13 @@ public:
 
     // Makes dos.library over the volumes in the drives, which must stay
     // mounted, with its structures and the shell Process, registers the
-    // Process as exec's task and dos as exec's segment loader. DF0: must
-    // hold a disk: it is the boot volume the default assigns point into.
-    // DF1: to DF3: may be empty. exec must be initialised. The boot
-    // console's output goes to out with ctx; out may be null. False if exec
+    // Process as exec's task and dos as exec's segment loader. One drive
+    // must boot: the default assigns point into the boot volume, which is
+    // the drive with a disk of the highest boot priority, the lowest drive
+    // among equals. DF0: counts as priority 5, a hard disk partition only
+    // when it is bootable, with its own priority; DF1: to DF3: never boot
+    // and may be empty. exec must be initialised. The boot console's output
+    // goes to out with ctx; out may be null. False if no drive boots or exec
     // runs out of memory or native ids.
     bool init(m68k::Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, void* ctx);
 
@@ -825,15 +857,20 @@ public:
     // a file on RAM: protected from reading is not.
     bool read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error);
 
-    // The name of the volume in DF0:, the boot volume.
-    const char* volume_name() const { return drives_[0].volume.name; }
+    // The drive of the boot volume.
+    u32 boot_volume() const { return boot_vol_; }
 
-    // The drives DF0: to DF3:, whether one holds a disk and the name of its
-    // volume ("" for an empty drive).
+    // The drives, the floppy drives first, then the hard disk partitions:
+    // whether one holds a disk, the name of its volume ("" for an empty
+    // drive) and the device name it answers to, without the colon ("" for a
+    // hard disk slot in no use).
     u32 drive_count() const { return kMaxDrives; }
     bool has_disk(u32 drive) const { return drive < kMaxDrives && drives_[drive].has_disk; }
     const char* volume_name(u32 drive) const {
         return has_disk(drive) ? drives_[drive].volume.name : "";
+    }
+    const char* device_name(u32 drive) const {
+        return drive < kMaxDrives ? drives_[drive].info.device : "";
     }
 
     // Visits every entry of the directory name, in the order ExNext gives
@@ -1177,12 +1214,15 @@ private:
 
     m68k::Machine* m_ = nullptr;
     Exec* exec_ = nullptr;
-    // A floppy drive and the volume of the disk in it.
+    // A drive and the volume of the disk in it. A hard disk slot in no use
+    // has no device name.
     struct Drive {
         bool has_disk = false;
         AdfVolume volume{};
+        DriveInfo info{};
     };
     Drive drives_[kMaxDrives]{};
+    u8 boot_vol_ = kVolDf0;
     RamFs ram_{};
     ConsoleBinding consoles_[kMaxConsoles]{};
 

@@ -1011,7 +1011,8 @@ void Workbench::add_volume(const char* label, const char* icon_path, u8 drive) {
     LogLine().text("workbench: volume ").text(label).send();
 }
 
-// A disk in every drive that holds one, DF0: first, then the Ram Disk.
+// A disk in every drive that holds one, the floppy drives first, then the
+// hard disk partitions, then the Ram Disk.
 void Workbench::add_volume_icons() {
     for (u32 n = 0; n < dos_->drive_count(); ++n) {
         if (!dos_->has_disk(n)) {
@@ -1031,7 +1032,8 @@ void Workbench::add_volume_icons() {
 }
 
 // The root of the disk an icon stands for: "Name:" by its volume's name,
-// or "DFn:" when another drive holds a disk of the same name.
+// or "<device>:" of its drive when another drive holds a disk of the same
+// name.
 bool Workbench::volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) const {
     bool shared = false;
     if (icon.drive != kNoDrive) {
@@ -1040,16 +1042,12 @@ bool Workbench::volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) c
                                 same_ci(dos_->volume_name(n), icon.name));
         }
     }
-    if (shared) {
-        const char device[] = {'D', 'F', static_cast<char>('0' + icon.drive), ':', '\0'};
-        copy_text(out, sizeof out, device);
-        return true;
-    }
-    const u32 length = text_length(icon.name);
+    const char* name = shared ? dos_->device_name(icon.drive) : icon.name;
+    const u32 length = text_length(name);
     if (length + 2 > sizeof out) {
         return false;
     }
-    copy_text(out, sizeof out, icon.name);
+    copy_text(out, sizeof out, name);
     out[length] = ':';
     out[length + 1] = '\0';
     return true;
@@ -2593,9 +2591,9 @@ void Workbench::open_selected(u32 window_id) {
 
 namespace {
 
-// The volume a path is on: a floppy's by its drive ("DFn"), whether the
-// path names the drive or the disk's volume, and RAM: by the Ram Disk's
-// name.
+// The volume a path is on: a disk's by the device name of its drive ("DF0",
+// "DH0"), whether the path names the drive or the disk's volume, and RAM: by
+// the Ram Disk's name.
 void volume_of(const Dos& dos, const char* path, char (&out)[Dos::kMaxPath]) {
     copy_text(out, sizeof out, path);
     for (u32 i = 0; out[i] != '\0'; ++i) {
@@ -2609,7 +2607,7 @@ void volume_of(const Dos& dos, const char* path, char (&out)[Dos::kMaxPath]) {
         return;
     }
     for (u32 n = 0; n < dos.drive_count(); ++n) {
-        const char device[] = {'D', 'F', static_cast<char>('0' + n), '\0'};
+        const char* device = dos.device_name(n);
         if (same_ci(out, device) || (dos.has_disk(n) && same_ci(out, dos.volume_name(n)))) {
             copy_text(out, sizeof out, device);
             return;

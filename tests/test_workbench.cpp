@@ -291,9 +291,21 @@ std::vector<AdfFile> test_files() {
     };
 }
 
+// Reads one block of the disk image a hard disk partition is served from.
+bool read_image_block(void* ctx, u32 block, u8* out) {
+    const std::vector<u8>& image = *static_cast<const std::vector<u8>*>(ctx);
+    const usize at = static_cast<usize>(block) * 512;
+    if (at + 512 > image.size()) {
+        return false;
+    }
+    std::memcpy(out, image.data() + at, 512);
+    return true;
+}
+
 // One memfd mapped twice for the code region, 16 MiB of guest memory, the
 // Jit and the native libraries over them, with the Workbench's screen open
-// and made the default one.
+// and made the default one. A second drive after the floppy drives holds
+// its image as a hard disk partition.
 class Rig {
 public:
     explicit Rig(const std::vector<AdfFile>& files = test_files(),
@@ -321,11 +333,20 @@ public:
         if (second_image_.empty()) {
             CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
         } else {
-            CHECK(adf_mount(second_image_.data(), second_image_.size(), second_volume) ==
-                  FsError::Ok);
             Drives drives;
             drives.volume[0] = &volume;
             drives.volume[second_drive] = &second_volume;
+            if (second_drive < kFloppyDrives) {
+                CHECK(adf_mount(second_image_.data(), second_image_.size(), second_volume) ==
+                      FsError::Ok);
+            } else {
+                const BlockSource source{&second_image_, read_image_block, nullptr};
+                CHECK(adf_mount_partition(source, 0, static_cast<u32>(second_image_.size() / 512),
+                                          2, second_volume) == FsError::Ok);
+                char* device = drives.info[second_drive].device;
+                std::strcpy(device, "DH0");
+                device[2] = static_cast<char>('0' + second_drive - kFloppyDrives);
+            }
             CHECK(g_dos.init(m, g_exec, drives, nullptr, nullptr));
         }
         CHECK(g_icon.init(m, g_exec, g_dos));
@@ -2725,6 +2746,52 @@ void every_disk_in_a_drive_gets_an_icon() {
     CHECK(twins.window_title(twins.workbench.window(df1).window) == "HombreTest");
 }
 
+void a_hard_disk_partition_gets_an_icon_after_the_floppies() {
+    {
+        const i32 nowhere = static_cast<i32>(kNoIconPosition);
+        const std::vector<AdfFile> work_files = {
+            {"Docs.info", drawer_icon_info(nowhere, nowhere, 30, 50, 300, 120)},
+            {"Docs/Readme", text("on the partition")},
+        };
+        Rig r(test_files(), build_adf("Work", true, work_files), kFloppyDrives);
+        r.workbench.open_desktop();
+        const u32 floppy = r.find_icon_in(0, "HombreTest");
+        const u32 hard = r.find_icon_in(0, "Work");
+        const u32 ram = r.find_icon_in(0, "Ram Disk");
+        CHECK(floppy != Workbench::kNoIcon);
+        CHECK(hard != Workbench::kNoIcon);
+        CHECK(ram != Workbench::kNoIcon);
+        CHECK(floppy < hard && hard < ram);
+        CHECK(logged("workbench: volume Work"));
+        r.workbench.open_icon(0, hard);
+        const u32 window = r.find_window("Work:");
+        CHECK(window != Workbench::kNoWindow);
+        CHECK(r.find_icon_in(window, "Docs") != Workbench::kNoIcon);
+    }
+
+    // Two disks of one name open their own drives, by device name.
+    const std::vector<AdfFile> twin_files = {{"Only.info", icon_info(kWBTool, 10, 10)}};
+    Rig twins(test_files(), build_adf("HombreTest", true, twin_files), kFloppyDrives);
+    twins.workbench.open_desktop();
+    u32 disks[2] = {Workbench::kNoIcon, Workbench::kNoIcon};
+    u32 found = 0;
+    for (const Workbench::IconEntry& icon : twins.workbench.icons()) {
+        if (found < 2 && icon.owner == Workbench::kRootWindow &&
+            std::string(icon.name) == "HombreTest") {
+            disks[found++] = icon.id;
+        }
+    }
+    CHECK_EQ(found, 2u);
+    twins.workbench.open_icon(0, disks[0]);
+    twins.workbench.open_icon(0, disks[1]);
+    const u32 df0 = twins.find_window("DF0:");
+    const u32 dh0 = twins.find_window("DH0:");
+    CHECK(df0 != Workbench::kNoWindow);
+    CHECK(dh0 != Workbench::kNoWindow);
+    CHECK(twins.find_icon_in(dh0, "Only") != Workbench::kNoIcon);
+    CHECK(twins.find_icon_in(df0, "Tools") != Workbench::kNoIcon);
+}
+
 void snapshot_and_unsnapshot_store_the_icon_place() {
     Rig r;
     put_ram_project("Note");
@@ -3376,6 +3443,7 @@ int main() {
     a_window_snapshot_keeps_its_scroll();
     drawers_open_below_the_screen_bar();
     every_disk_in_a_drive_gets_an_icon();
+    a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();
     a_reset_closes_and_reopens_the_windows();

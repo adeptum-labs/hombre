@@ -41,13 +41,14 @@
 //
 // StartWorkbench starts the Workbench as a native task with a dos Process
 // of its own: a root window on the default screen with the icons of the
-// disks in the floppy drives and of the Ram Disk, and a drawer window for
-// every icon opened. The root window is a backdrop until the Workbench menu's Backdrop
-// item turns it into an ordinary window. A drawer shows the "<name>.info"
-// files of its directory; opening an icon starts its program with a
-// WBStartup message. An icon dragged within its window takes the new
-// place; dropped on another drawer, or a drawer's or disk's icon, its file
-// moves there on the same volume and is copied to another. A window with
+// disks in the floppy drives and hard disk partitions and of the Ram Disk,
+// and a drawer window for every icon opened. The root window is a backdrop
+// until the Workbench menu's Backdrop item turns it into an ordinary window.
+// A drawer shows the "<name>.info" files of its directory; opening an icon
+// starts its program with a WBStartup message. An icon dragged within its
+// window takes the new place; dropped on another drawer, or a drawer's or
+// disk's icon, its file moves there on the same volume and is copied to
+// another. A window with
 // borders scrolls over its icons with the sliders and arrows in its right
 // and bottom borders. Snapshot keeps an icon's place, or a drawer window's
 // box and scroll, in the .info. The other
@@ -127,7 +128,8 @@ public:
         u32 tool_window = 0;  // the guest string of the DiskObject
         char name[32]{};      // the label under the icon
         char file[32]{};      // the file the icon stands for
-        // A floppy's disk icon: the drive it is in; kNoDrive otherwise.
+        // A disk icon of a floppy or a hard disk partition: the drive it is
+        // in; kNoDrive otherwise.
         u8 drive = kNoDrive;
     };
 
