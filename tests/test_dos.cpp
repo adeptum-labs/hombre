@@ -231,6 +231,34 @@ std::vector<u8> text(const std::string& s) {
     return std::vector<u8>(s.begin(), s.end());
 }
 
+void put_block32(std::vector<u8>& image, u32 block, u32 index, u32 value) {
+    u8* p = image.data() + static_cast<usize>(block) * 512 + index * 4;
+    p[0] = static_cast<u8>(value >> 24);
+    p[1] = static_cast<u8>(value >> 16);
+    p[2] = static_cast<u8>(value >> 8);
+    p[3] = static_cast<u8>(value);
+}
+
+// The bitmap of the test disk, which the writer leaves out: block 881,
+// named by the root at 880, with every block used until free_block frees
+// one.
+void add_bitmap(std::vector<u8>& image) {
+    constexpr u32 root = 880;
+    constexpr u32 bitmap = 881;
+    put_block32(image, root, 78, 0xFFFFFFFFu);
+    put_block32(image, root, 79, bitmap);
+    adf_fix_checksum(image, root);
+}
+
+void free_block(std::vector<u8>& image, u32 block, bool is_free) {
+    constexpr u32 bitmap = 881;
+    const u32 bit = block - 2;
+    u8* word = image.data() + static_cast<usize>(bitmap) * 512 + 4 + (bit / 32) * 4;
+    u8& byte = word[3 - (bit % 32) / 8];
+    const u8 mask = static_cast<u8>(1u << (bit % 8));
+    byte = is_free ? static_cast<u8>(byte | mask) : static_cast<u8>(byte & ~mask);
+}
+
 // The bytes of C/Echo on the test volume: more than one OFS data block.
 std::vector<u8> echo_bytes() {
     std::vector<u8> out;
@@ -5969,6 +5997,29 @@ void ram_exclusive_locks_and_dopkt() {
     r.call(dos_lvo::UnLock, ram_root);
 }
 
+void adf_info_reports_the_used_blocks() {
+    auto image = build_adf("HombreTest", false, standard_files());
+    add_bitmap(image);
+    // Blocks 2 to 9 stay used, as do the root and the bitmap block; every
+    // other block is free.
+    for (u32 block = 2; block < 1760; ++block) {
+        free_block(image, block, block >= 10 && block != 880 && block != 881);
+    }
+    AdfVolume mounted{};
+    CHECK_EQ(adf_mount(image.data(), image.size(), mounted), FsError::Ok);
+    Rig r(std::move(image));
+    r.str(kData, "HombreTest:");
+    const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(lock != 0);
+    const u32 id = kData + 0x800;
+    CHECK_EQ(r.call(dos_lvo::Info, lock, id), DOSTRUE);
+    CHECK_EQ(r.get32(id + id_NumBlocks), mounted.block_count - 2);
+    CHECK_EQ(r.get32(id + id_NumBlocksUsed), adf_used_blocks(mounted));
+    CHECK_EQ(r.get32(id + id_NumBlocksUsed), 10u);
+    CHECK(r.get32(id + id_NumBlocksUsed) < r.get32(id + id_NumBlocks));
+    r.call(dos_lvo::UnLock, lock);
+}
+
 void ram_enumeration_after_delete_info_and_cleanup() {
     auto leak_ram_cmd = []() {
         Asm a;
@@ -7654,5 +7705,6 @@ int main() {
     notify_initial_sends_at_start();
     notify_delete_file_of_the_watched_file();
     file_helpers_follow_the_volume_rules();
+    adf_info_reports_the_used_blocks();
     return check::finish("test_dos");
 }

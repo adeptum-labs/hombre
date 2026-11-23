@@ -6534,6 +6534,23 @@ struct DosOps {
 
     static void ex_all_end(void*, Machine&) {}
 
+    // The blocks of the volume an entry is on and how many are used, as
+    // Info reports them.
+    static void volume_blocks(const Dos& d, const DirEntry& entry, u32& blocks, u32& used) {
+        if (entry.volume == Dos::kVolRam) {
+            const u32 total = (d.ram_.bytes_used() + 511u) / 512u + d.ram_.used_nodes();
+            blocks = total > 1u ? total : 1u;
+            used = blocks;
+        } else if (entry.volume == Dos::kVolRomFonts) {
+            blocks = 0;
+            used = 0;
+        } else {
+            const AdfVolume& disk = d.drives_[entry.volume].volume;
+            blocks = disk.block_count - 2;  // the bootblock is not counted
+            used = adf_used_blocks(disk);
+        }
+    }
+
     static bool fill_info_data(Dos& d, Bus& b, u32 lock_bptr, u32 id,
                                u8 zero_vol = Dos::kVolDf0) {
         if (lock_bptr == 0 && is_drive(zero_vol) && !d.drives_[zero_vol].has_disk) {
@@ -6561,28 +6578,28 @@ struct DosOps {
         }
         b.w32(id + id_NumSoftErrors, 0);
         b.w32(id + id_UnitNumber, is_drive(entry.volume) ? entry.volume : 0);
+        u32 blocks = 0;
+        u32 used = 0;
+        volume_blocks(d, entry, blocks, used);
         if (entry.volume == Dos::kVolRam) {
-            const u32 blocks = (d.ram_.bytes_used() + 511u) / 512u + d.ram_.used_nodes();
-            const u32 used = blocks > 1u ? blocks : 1u;
             b.w32(id + id_DiskState, ID_VALIDATED);
-            b.w32(id + id_NumBlocks, used);
+            b.w32(id + id_NumBlocks, blocks);
             b.w32(id + id_NumBlocksUsed, used);
             b.w32(id + id_BytesPerBlock, 512);
             b.w32(id + id_DiskType, ID_DOS_DISK);
             b.w32(id + id_VolumeNode, d.ram_volume_node_ >> 2);
         } else if (entry.volume == Dos::kVolRomFonts) {
             b.w32(id + id_DiskState, ID_WRITE_PROTECTED);
-            b.w32(id + id_NumBlocks, 0);
-            b.w32(id + id_NumBlocksUsed, 0);
+            b.w32(id + id_NumBlocks, blocks);
+            b.w32(id + id_NumBlocksUsed, used);
             b.w32(id + id_BytesPerBlock, 512);
             b.w32(id + id_DiskType, ID_DOS_DISK);
             b.w32(id + id_VolumeNode, 0);
         } else {
             const AdfVolume& disk = d.drives_[entry.volume].volume;
-            const u32 blocks = disk.block_count - 2;  // the bootblock is not counted
             b.w32(id + id_DiskState, ID_WRITE_PROTECTED);
             b.w32(id + id_NumBlocks, blocks);
-            b.w32(id + id_NumBlocksUsed, blocks);
+            b.w32(id + id_NumBlocksUsed, used);
             b.w32(id + id_BytesPerBlock, disk.ffs ? 512 : 488);
             b.w32(id + id_DiskType, ID_DOS_DISK | disk.image[3]);
             b.w32(id + id_VolumeNode, d.volume_node_[entry.volume] >> 2);
@@ -9730,6 +9747,34 @@ bool Dos::unlock_path(u32 lock) {
         return false;
     }
     return DosOps::free_user_lock(*this, lock);
+}
+
+bool Dos::volume_usage(const char* name, u32& blocks, u32& used) {
+    blocks = 0;
+    used = 0;
+    if (m_ == nullptr || name == nullptr) {
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolDf0;
+    char resolved[kMaxPath];
+    u32 error = 0;
+    if (!DosOps::resolve(*this, b, name, vol, resolved, error)) {
+        if (b.ok()) {
+            set_last_error(error);
+        }
+        return false;
+    }
+    DirEntry entry{};
+    const u32 err = DosOps::fs_find(*this, vol, resolved, entry);
+    if (err != 0) {
+        if (b.ok()) {
+            set_last_error(err);
+        }
+        return false;
+    }
+    DosOps::volume_blocks(*this, entry, blocks, used);
+    return true;
 }
 
 void Dos::unload_seg(u32 seglist) {

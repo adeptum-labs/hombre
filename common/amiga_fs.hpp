@@ -122,6 +122,23 @@ inline constexpr u32 l_hash_next = block_longs - 4;
 inline constexpr u32 l_parent = block_longs - 3;
 inline constexpr u32 l_extension = block_longs - 2;
 inline constexpr u32 l_sec_type = block_longs - 1;
+// The root block's bitmap: the flag, -1 while the bitmap is valid, the
+// first 25 bitmap block pointers and the first extension block of the rest.
+inline constexpr u32 l_bm_flag = 78;
+inline constexpr u32 l_bm_pages = 79;
+inline constexpr u32 l_bm_ext = 104;
+inline constexpr u32 bm_valid = 0xFFFFFFFFu;
+inline constexpr u32 bm_pages_max = 25;
+// A bitmap block is a checksum and 127 longs of bits, one bit a block from
+// block 2 on, the lowest bit of each long first; a set bit is a free block.
+inline constexpr u32 bm_longs = block_longs - 1;
+inline constexpr u32 bm_span = bm_longs * 32;
+// A bitmap extension block holds 127 more page pointers and the next
+// extension block in its last long.
+inline constexpr u32 bm_ext_pages = block_longs - 1;
+// The bitmap pages the root block's own pointers and one extension block
+// hold; a larger volume reports every block used.
+inline constexpr u32 bm_page_slots = bm_pages_max + bm_ext_pages;
 
 inline constexpr u32 t_header = 2;
 inline constexpr u32 t_data = 8;
@@ -301,6 +318,70 @@ inline FsError adf_mount(const u8* image, usize bytes, AdfVolume& volume) {
     }
     volume.name[i] = '\0';
     return FsError::Ok;
+}
+
+// How many of the volume's blocks are in use, counted from the bitmap its
+// root block names: every block from 2 to block_count - 1 has a bit, set
+// while the block is free, and the root block and the bitmap blocks
+// themselves always count as used. A volume whose bitmap is not marked
+// valid, with bitmap pages that are not blocks of the volume, or with more
+// pages than the root block and one extension block hold, reports every
+// block used.
+inline u32 adf_used_blocks(const AdfVolume& volume) {
+    using namespace amiga_fs_detail;
+    if (volume.block_count < 3) {
+        return 0;
+    }
+    const u32 blocks = volume.block_count - 2;
+    const u8* root = block_at(volume, volume.root_block);
+    if (root == nullptr || long_at(root, l_bm_flag) != bm_valid) {
+        return blocks;
+    }
+    const u32 pages_needed = (blocks - 1) / bm_span + 1;
+    if (pages_needed > bm_page_slots) {
+        return blocks;
+    }
+    u32 pages[bm_page_slots]{};
+    for (u32 i = 0; i < pages_needed && i < bm_pages_max; ++i) {
+        pages[i] = long_at(root, l_bm_pages + i);
+    }
+    if (pages_needed > bm_pages_max) {
+        const u8* extension = block_at(volume, long_at(root, l_bm_ext));
+        if (extension == nullptr) {
+            return blocks;
+        }
+        for (u32 i = bm_pages_max; i < pages_needed; ++i) {
+            pages[i] = long_at(extension, i - bm_pages_max);
+        }
+    }
+    for (u32 i = 0; i < pages_needed; ++i) {
+        if (block_at(volume, pages[i]) == nullptr) {
+            return blocks;
+        }
+    }
+    const auto is_free = [&](u32 block) {
+        const u32 index = block - 2;
+        const u8* page = block_at(volume, pages[index / bm_span]);
+        const u32 bit = index % bm_span;
+        return (long_at(page, 1 + bit / 32) & (1u << (bit % 32))) != 0;
+    };
+    u32 used = 0;
+    for (u32 block = 2; block < volume.block_count; ++block) {
+        if (!is_free(block)) {
+            ++used;
+        }
+    }
+    // The root and the bitmap blocks are in use even when their own bits
+    // say otherwise.
+    if (volume.root_block >= 2 && is_free(volume.root_block)) {
+        ++used;
+    }
+    for (u32 i = 0; i < pages_needed; ++i) {
+        if (pages[i] != volume.root_block && pages[i] >= 2 && is_free(pages[i])) {
+            ++used;
+        }
+    }
+    return used;
 }
 
 // Looks a path up: components separated by '/', names compared without

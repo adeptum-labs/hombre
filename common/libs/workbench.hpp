@@ -179,6 +179,14 @@ public:
         // The block of its scroll gadgets, the window's gadget list; 0 for
         // a backdrop, which has none.
         u32 gadgets = 0;
+        // The fuel gauge of a volume window: its gadget and the image it
+        // shows, and the share of the volume that image was drawn for.
+        u32 gauge = 0;
+        u32 gauge_image = 0;
+        u32 gauge_bytes = 0;
+        i32 gauge_height = 0;
+        u32 gauge_depth = 0;
+        u32 gauge_percent = 0;
         Clicks clicks;
     };
 
@@ -457,6 +465,10 @@ private:
     void drop_picture(u32 which);
     void fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom);
     u32 make_scroll_gadgets();
+    u32 make_volume_gauge(u32 gadgets, i32 top, i32 height);
+    void layout_gauge(DrawerWindow& w);
+    void fill_gauge_image(DrawerWindow& w, u32 used, u32 total);
+    void refresh_gauges();
     bool build_arrow_images();
     void paint_arrow_images();
     void update_scroll(DrawerWindow& w);

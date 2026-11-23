@@ -1756,7 +1756,12 @@ void drawers_have_scroll_gadgets_in_their_borders() {
         CHECK(right || bottom);
         gadget = r.get32(gadget + gg_NextGadget);
     }
-    CHECK_EQ(gadget, 0u);
+    // A volume window adds its fuel gauge after the scroll gadgets.
+    CHECK_EQ(gadget, w.gauge);
+    CHECK(gadget != 0);
+    CHECK_EQ(r.get16(gadget + gg_GadgetType) & GTYP_GTYPEMASK, GTYP_BOOLGADGET);
+    CHECK_EQ(r.get16(gadget + gg_Activation), GACT_LEFTBORDER);
+    CHECK_EQ(r.get32(gadget + gg_NextGadget), 0u);
     CHECK_EQ(r.get16(r.workbench.scroll_gadget(drawer, Workbench::kScrollVert) + gg_GadgetType) &
                  GTYP_GTYPEMASK,
              GTYP_PROPGADGET);
@@ -1785,6 +1790,32 @@ constexpr u32 kImageHeight = 6;
 constexpr u32 kImageDepth = 8;
 constexpr u32 kImageData = 10;
 
+void put_image32(std::vector<u8>& image, u32 block, u32 index, u32 value) {
+    u8* p = image.data() + static_cast<usize>(block) * 512 + index * 4;
+    p[0] = static_cast<u8>(value >> 24);
+    p[1] = static_cast<u8>(value >> 16);
+    p[2] = static_cast<u8>(value >> 8);
+    p[3] = static_cast<u8>(value);
+}
+
+// The bitmap the writer leaves out, in the block after the root: the root
+// names it, and every block starts used until free_image_block frees one.
+void add_image_bitmap(std::vector<u8>& image) {
+    put_image32(image, 880, 78, 0xFFFFFFFFu);
+    put_image32(image, 880, 79, 881);
+    adf_fix_checksum(image, 880);
+}
+
+void free_image_block(std::vector<u8>& image, u32 block, bool is_free) {
+    // A bitmap block is a checksum and longs of bits from block 2 on, the
+    // lowest bit of each long first.
+    const u32 bit = block - 2;
+    u8* word = image.data() + static_cast<usize>(881) * 512 + 4 + (bit / 32) * 4;
+    u8& byte = word[3 - (bit % 32) / 8];
+    const u8 mask = static_cast<u8>(1u << (bit % 8));
+    byte = is_free ? static_cast<u8>(byte | mask) : static_cast<u8>(byte & ~mask);
+}
+
 std::vector<u8> image_pens(const Rig& r, u32 image) {
     const u32 width = r.get16(image + kImageWidth);
     const u32 height = r.get16(image + kImageHeight);
@@ -1800,6 +1831,109 @@ std::vector<u8> image_pens(const Rig& r, u32 image) {
         }
     }
     return pens;
+}
+
+std::vector<AdfFile> gauge_files() {
+    return {
+        {"Sub.info", drawer_icon_info(static_cast<i32>(kNoIconPosition),
+                                      static_cast<i32>(kNoIconPosition), 40, 50, 160, 100)},
+        {"Sub/Deep.info", icon_info(kWBTool, 10, 10)},
+    };
+}
+
+// A disk whose bitmap leaves exactly used_blocks blocks in use.
+std::vector<u8> gauge_disk(const char* name, u32 used_blocks) {
+    auto image = build_adf(name, false, gauge_files());
+    add_image_bitmap(image);
+    for (u32 block = 2; block < 1760; ++block) {
+        const bool used = block < used_blocks || block == 880 || block == 881;
+        free_image_block(image, block, !used);
+    }
+    return image;
+}
+
+// A volume window carries a fuel gauge in its left border: the used share
+// of the disk filled from the bottom in FILLPEN, BACKGROUNDPEN above it.
+// A drawer below the volume has no gauge.
+void volume_windows_show_a_fuel_gauge() {
+    constexpr u32 kUsed = 440;
+    Rig r(test_files(), gauge_disk("Second", kUsed), 1);
+    CHECK_EQ(adf_used_blocks(r.second_volume), kUsed);
+    r.workbench.open_desktop();
+    const u32 volume = r.find_icon("Second");
+    CHECK(volume != Workbench::kNoIcon);
+    r.workbench.open_icon(0, volume);
+    const u32 drawer = r.find_window("Second:");
+    CHECK(drawer != Workbench::kNoWindow);
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    const u32 window = w.window;
+    CHECK_EQ(r.get8(window + wd_BorderLeft), 14u);
+    CHECK_EQ(w.inner_left, 14);
+    CHECK(w.gauge != 0);
+
+    // The gauge follows the scroll gadgets in the window's list.
+    u32 gadget = r.get32(window + wd_FirstGadget);
+    for (u32 i = 0; i < Workbench::kScrollGadgets; ++i) {
+        gadget = r.get32(gadget + gg_NextGadget);
+    }
+    CHECK_EQ(gadget, w.gauge);
+    CHECK_EQ(r.get16(gadget + gg_GadgetType) & GTYP_GTYPEMASK, GTYP_BOOLGADGET);
+    CHECK_EQ(r.get16(gadget + gg_Activation), GACT_LEFTBORDER);
+    CHECK_EQ(r.get16(gadget + gg_Flags), GFLG_GADGIMAGE | GFLG_GADGHNONE);
+    CHECK_EQ(r.get16(gadget + gg_LeftEdge), 4u);
+    CHECK_EQ(r.get16(gadget + gg_Width), 8u);
+    CHECK_EQ(r.get32(gadget + gg_NextGadget), 0u);
+    const i32 top = static_cast<i32>(r.get8(window + wd_BorderTop)) + 2;
+    const i32 height = static_cast<i16>(r.get16(window + wd_Height)) - top -
+                       static_cast<i32>(r.get8(window + wd_BorderBottom)) - 4;
+    CHECK_EQ(r.get16(gadget + gg_TopEdge), static_cast<u32>(top));
+    CHECK_EQ(r.get16(gadget + gg_Height), static_cast<u32>(height));
+
+    const u32 image = r.get32(gadget + gg_GadgetRender);
+    CHECK_EQ(r.get16(image + kImageWidth), 8u);
+    CHECK_EQ(r.get16(image + kImageHeight), static_cast<u32>(height));
+    CHECK_EQ(r.get16(image + kImageDepth), 2u);
+    const std::vector<u8> pens = image_pens(r, image);
+    native::Bus bus(r.m);
+    chrome::DrawInfoPens drawinfo;
+    sysimage::read_pens(bus, g_intuition.screen_draw_info(r.screen), drawinfo.pen);
+    const u32 total = r.second_volume.block_count - 2;
+    const u32 inner = static_cast<u32>(height) - 2;
+    const u32 filled = (kUsed * inner + total / 2) / total;
+    CHECK(filled > 0 && filled < inner);
+    const auto pen_at = [&](i32 x, i32 y) {
+        return static_cast<u32>(pens[static_cast<usize>(y) * 8 + static_cast<usize>(x)]);
+    };
+    CHECK_EQ(pen_at(4, 1), static_cast<u32>(drawinfo.pen[sysimage::BackgroundPen]));
+    CHECK_EQ(pen_at(4, height - 2), static_cast<u32>(drawinfo.pen[sysimage::FillPen]));
+    CHECK_EQ(pen_at(4, height - 1 - static_cast<i32>(filled)),
+             static_cast<u32>(drawinfo.pen[sysimage::FillPen]));
+    CHECK_EQ(pen_at(4, height - 2 - static_cast<i32>(filled)),
+             static_cast<u32>(drawinfo.pen[sysimage::BackgroundPen]));
+    CHECK_EQ(pen_at(0, 1), static_cast<u32>(drawinfo.pen[sysimage::ShadowPen]));
+    CHECK_EQ(pen_at(7, 1), static_cast<u32>(drawinfo.pen[sysimage::ShinePen]));
+
+    // A drawer below the volume keeps the default border and has no gauge.
+    r.workbench.open_icon(drawer, r.find_icon_in(drawer, "Sub"));
+    const u32 sub = r.find_window("Second:Sub");
+    CHECK(sub != Workbench::kNoWindow);
+    CHECK_EQ(r.workbench.window(sub).gauge, 0u);
+    CHECK_EQ(r.get8(r.workbench.window(sub).window + wd_BorderLeft), 2u);
+    u32 sub_gadget = r.get32(r.workbench.window(sub).window + wd_FirstGadget);
+    for (u32 i = 0; i < Workbench::kScrollGadgets; ++i) {
+        sub_gadget = r.get32(sub_gadget + gg_NextGadget);
+    }
+    CHECK_EQ(sub_gadget, 0u);
+
+    // Opening and closing the volume window gives the gauge's memory back.
+    r.workbench.close_drawer(sub);
+    r.workbench.close_drawer(drawer);
+    const u32 before = r.free_bytes();
+    r.workbench.open_icon(0, volume);
+    const u32 again = r.find_window("Second:");
+    CHECK(again != Workbench::kNoWindow);
+    r.workbench.close_drawer(again);
+    CHECK_EQ(r.free_bytes(), before);
 }
 
 // The arrow buttons of the drawer are as deep as depth and in the look of
@@ -2799,6 +2933,7 @@ int main() {
     a_disk_icon_inside_a_drawer_is_no_volume();
     a_resized_drawer_clips_its_icons_and_keeps_their_places();
     drawers_have_scroll_gadgets_in_their_borders();
+    volume_windows_show_a_fuel_gauge();
     drawer_arrows_take_the_look_of_the_screen();
     drawer_arrows_follow_the_screen_through_a_reset();
     border_gadgets_stay_when_a_drawer_turns_inactive();

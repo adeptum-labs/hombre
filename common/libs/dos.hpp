@@ -848,6 +848,11 @@ public:
     u32 lock_path(const char* name);
     bool unlock_path(u32 lock);
 
+    // The blocks of the volume the name resolves to and how many of them
+    // are used, as Info reports them. False with IoErr set when the name is
+    // not there or names no volume.
+    bool volume_usage(const char* name, u32& blocks, u32& used);
+
     // UnLoadSeg for code that is not the guest's.
     void unload_seg(u32 seglist);
 

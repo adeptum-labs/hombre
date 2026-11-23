@@ -3996,6 +3996,27 @@ u32 Intuition::window_at(i32 x, i32 y) const {
     return 0;
 }
 
+// The left border a window needs for the gadgets of its list that sit in
+// that border: past their right edge and two pixels of frame. A gadget
+// whose left edge counts from the window's right edge takes no room there.
+u32 left_border_for_gadgets(Bus& b, u32 first) {
+    u32 border = 0;
+    for (u32 step = 0; step < Intuition::kMaxGadgets && first != 0; ++step) {
+        const u32 next = b.r32(first + ndk::gg_NextGadget);
+        const u32 activation = b.r16(first + ndk::gg_Activation);
+        const u32 flags = b.r16(first + ndk::gg_Flags);
+        const i32 left = static_cast<i16>(b.r16(first + ndk::gg_LeftEdge));
+        const i32 width = static_cast<i16>(b.r16(first + ndk::gg_Width));
+        const i32 edge = left + width + 2;
+        if ((activation & ndk::GACT_LEFTBORDER) != 0 && (flags & ndk::GFLG_RELRIGHT) == 0 &&
+            width > 0 && edge > 0 && static_cast<u32>(edge) > border) {
+            border = static_cast<u32>(edge);
+        }
+        first = next;
+    }
+    return border;
+}
+
 u32 Intuition::open_window(u32 new_window, u32 tags) {
     Bus b(*machine_);
     if (new_window == 0 && tags == 0) {
@@ -4048,7 +4069,15 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     const bool has_size = !borderless && (a.flags & ndk::WFLG_SIZEGADGET) != 0;
     const bool size_bottom = has_size && (a.flags & ndk::WFLG_SIZEBBOTTOM) != 0;
     const bool size_right = has_size && (!size_bottom || (a.flags & ndk::WFLG_SIZEBRIGHT) != 0);
-    const u32 border_left = borderless ? 1 : chrome::kBorderLeft;
+    u32 border_left = borderless ? 1 : chrome::kBorderLeft;
+    if (!borderless) {
+        // A gadget in the left border needs the room for its box and the
+        // two pixels of frame past it.
+        const u32 needed = left_border_for_gadgets(b, a.gadgets);
+        if (needed > border_left) {
+            border_left = needed > 0xFF ? 0xFF : needed;
+        }
+    }
     const u32 border_top = borderless ? 1 : static_cast<u32>(srec->metrics.border_top());
     const u32 border_right =
         borderless ? 1 : (size_right ? chrome::kSizeBorderRight : chrome::kBorderRight);

@@ -3807,6 +3807,50 @@ void put_gadget(GfxRig& r, u32 at, u32 next, i32 left, i32 top, i32 width, i32 h
     r.put32(at + gg_SpecialInfo, special);
 }
 
+// A gadget in the left border makes the border wide enough for it, and the
+// frame and the inner area follow the wider border. A gadget placed from
+// the right edge, or no gadget at all, leaves the default border.
+void a_left_border_gadget_widens_the_window_border() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 gad = r.exec.alloc(Gadget_SIZEOF, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(gad != 0);
+    put_gadget(r, gad, 0, 4, 17, 8, 50, GFLG_GADGIMAGE | GFLG_GADGHNONE, GACT_LEFTBORDER,
+               GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.get8(window + wd_BorderLeft), 14u);
+    // The inner line of the frame is at the new border and the interior
+    // starts past it.
+    CHECK_EQ(window_pixel(r, window, 12, 40), 3u);
+    CHECK_EQ(window_pixel(r, window, 13, 40), 1u);
+    CHECK_EQ(window_pixel(r, window, 14, 40), 0u);
+
+    put_gadget(r, gad, 0, 4, 17, 8, 50, GFLG_GADGIMAGE | GFLG_GADGHNONE | GFLG_RELRIGHT,
+               GACT_LEFTBORDER, GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 300, 60, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, gad);
+    const u32 right = open_win(r, kNewWindow);
+    CHECK_EQ(r.get8(right + wd_BorderLeft), 2u);
+
+    put_new_window(r, kNewWindow, 50, 200, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    const u32 plain = open_win(r, kNewWindow);
+    CHECK_EQ(r.get8(plain + wd_BorderLeft), 2u);
+    CHECK_EQ(window_pixel(r, plain, 1, 40), 1u);
+    CHECK_EQ(window_pixel(r, plain, 2, 40), 0u);
+
+    for (const u32 close : {window, right, plain}) {
+        r.cpu().a[0] = close;
+        CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    }
+    r.exec.free(gad, Gadget_SIZEOF);
+}
+
 constexpr u32 kProp1 = kData + 0x700;
 constexpr u32 kGad1 = kData + 0x740;
 constexpr u32 kProp2 = kData + 0x780;
@@ -10141,6 +10185,7 @@ int main() {
     open_screen_depth8_sets_default_and_chrome_palettes();
     unimplemented_vector_ends_run();
     open_window_builds_struct_rastport_and_layer();
+    a_left_border_gadget_widens_the_window_border();
     open_window_draws_chrome();
     open_window_default_fills_the_screen_below_the_bar();
     windows_open_below_the_screen_bar();

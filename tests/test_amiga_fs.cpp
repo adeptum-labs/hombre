@@ -106,6 +106,25 @@ u32 get32(const std::vector<u8>& image, u32 block, u32 index) {
     return (u32{p[0]} << 24) | (u32{p[1]} << 16) | (u32{p[2]} << 8) | u32{p[3]};
 }
 
+// The bitmap the writer leaves out, in the block after the root: the root
+// names it, and every block starts used.
+void add_bitmap(std::vector<u8>& image) {
+    constexpr u32 root = 880;
+    constexpr u32 bitmap = 881;
+    set32(image, root, 78, 0xFFFFFFFFu);
+    set32(image, root, 79, bitmap);
+    adf_fix_checksum(image, root);
+}
+
+void free_block(std::vector<u8>& image, u32 block, bool is_free) {
+    constexpr u32 bitmap = 881;
+    const u32 bit = block - 2;
+    u8* word = image.data() + static_cast<usize>(bitmap) * 512 + 4 + (bit / 32) * 4;
+    u8& byte = word[3 - (bit % 32) / 8];
+    const u8 mask = static_cast<u8>(1u << (bit % 8));
+    byte = is_free ? static_cast<u8>(byte | mask) : static_cast<u8>(byte & ~mask);
+}
+
 // The reference hash, written out again so the reader is not checked against
 // itself.
 u32 hash_of(const std::string& name) {
@@ -920,6 +939,39 @@ void error_names() {
     CHECK(std::strcmp(fs_error_name(static_cast<FsError>(999)), "unknown") == 0);
 }
 
+void used_blocks_come_from_the_bitmap() {
+    auto image = build_adf("Work", true, {});
+    AdfVolume v = mount_ok(image);
+    // The writer leaves the bitmap out: every block counts as used.
+    CHECK_EQ(adf_used_blocks(v), v.block_count - 2);
+
+    add_bitmap(image);
+    v = mount_ok(image);
+    // Its bits are clear: every block is used.
+    CHECK_EQ(adf_used_blocks(v), v.block_count - 2);
+
+    const u32 root = v.root_block;
+    for (u32 block = 2; block < v.block_count; ++block) {
+        free_block(image, block, true);
+    }
+    // The root and the bitmap block count as used even when their own
+    // bits say free.
+    CHECK_EQ(adf_used_blocks(v), 2u);
+    free_block(image, 100, false);
+    free_block(image, 101, false);
+    CHECK_EQ(adf_used_blocks(v), 4u);
+
+    // A volume whose bitmap is not marked valid, or whose bitmap page is not
+    // a block, reports every block used.
+    set32(image, root, 78, 0);
+    adf_fix_checksum(image, root);
+    CHECK_EQ(adf_used_blocks(v), v.block_count - 2);
+    set32(image, root, 78, 0xFFFFFFFFu);
+    set32(image, root, 79, 0);
+    adf_fix_checksum(image, root);
+    CHECK_EQ(adf_used_blocks(v), v.block_count - 2);
+}
+
 void random_damage_never_escapes() {
     // Flip bytes all over a disk with a rich directory tree. Whatever the
     // result, every call returns and the sanitizers see no stray access.
@@ -995,6 +1047,7 @@ int main() {
     thirty_character_file_names_work();
     detect_format();
     error_names();
+    used_blocks_come_from_the_bitmap();
     random_damage_never_escapes();
     return check::finish("test_amiga_fs");
 }
