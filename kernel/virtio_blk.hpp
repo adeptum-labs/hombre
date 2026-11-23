@@ -47,6 +47,10 @@ inline constexpr u8 kVirtioStatusFailed = 128;
 
 // VIRTIO_F_VERSION_1, the only feature the driver accepts.
 inline constexpr u64 kVirtioFeatureVersion1 = 1ull << 32;
+// The device refuses writes.
+inline constexpr u64 kVirtioBlkFeatureRo = 1ull << 5;
+// The device takes flush requests, so writes may sit in its cache until one.
+inline constexpr u64 kVirtioBlkFeatureFlush = 1ull << 9;
 
 // Vendor-specific PCI capability and the virtio structure types it names.
 inline constexpr u8 kPciCapVendor = 0x09;
@@ -60,6 +64,8 @@ inline constexpr u16 kVirtqDescWrite = 2;
 inline constexpr u16 kVirtqAvailNoInterrupt = 1;
 
 inline constexpr u32 kVirtioBlkTypeIn = 0;
+inline constexpr u32 kVirtioBlkTypeOut = 1;
+inline constexpr u32 kVirtioBlkTypeFlush = 4;
 inline constexpr u8 kVirtioBlkStatusOk = 0;
 inline constexpr u32 kVirtioBlkSectorSize = 512;
 // Each request moves at most 64 KiB.
@@ -122,14 +128,28 @@ static_assert(__builtin_offsetof(VirtioPciCommonCfg, queue_driver_lo) == 0x28);
 static_assert(__builtin_offsetof(VirtioPciCommonCfg, queue_device_lo) == 0x30);
 static_assert(sizeof(VirtioPciCommonCfg) == 0x38);
 
-// Fills descriptors 0..2 for one read: the request header (device reads
-// it), the data buffer and the status byte (device writes both). Returns
-// the head index, 0.
+// Fills descriptors 0..2 for one read or write: the request header (device
+// reads it), the data buffer (device writes it for a read, reads it for a
+// write) and the status byte (device writes it). Returns the head index, 0.
+inline u16 virtio_build_data_chain(VirtqDesc* desc, u64 header_phys, u64 data_phys,
+                                   u32 data_bytes, u64 status_phys, bool device_writes_data) {
+    const u16 data_flags = device_writes_data ? kVirtqDescNext | kVirtqDescWrite : kVirtqDescNext;
+    desc[0] = VirtqDesc{header_phys, sizeof(VirtioBlkRequestHeader), kVirtqDescNext, 1};
+    desc[1] = VirtqDesc{data_phys, data_bytes, data_flags, 2};
+    desc[2] = VirtqDesc{status_phys, 1, kVirtqDescWrite, 0};
+    return 0;
+}
+
 inline u16 virtio_build_read_chain(VirtqDesc* desc, u64 header_phys, u64 data_phys,
                                    u32 data_bytes, u64 status_phys) {
+    return virtio_build_data_chain(desc, header_phys, data_phys, data_bytes, status_phys, true);
+}
+
+// Fills descriptors 0..1 for a flush, which carries no data: the request
+// header and the status byte. Returns the head index, 0.
+inline u16 virtio_build_flush_chain(VirtqDesc* desc, u64 header_phys, u64 status_phys) {
     desc[0] = VirtqDesc{header_phys, sizeof(VirtioBlkRequestHeader), kVirtqDescNext, 1};
-    desc[1] = VirtqDesc{data_phys, data_bytes, kVirtqDescNext | kVirtqDescWrite, 2};
-    desc[2] = VirtqDesc{status_phys, 1, kVirtqDescWrite, 0};
+    desc[1] = VirtqDesc{status_phys, 1, kVirtqDescWrite, 0};
     return 0;
 }
 
@@ -325,7 +345,8 @@ inline VirtioPciCaps virtio_find_caps(PciConfigRead32 read32, void* ctx) {
 class VirtioBlk {
 public:
     // Brings the device up: maps its common, notify and device regions,
-    // negotiates VIRTIO_F_VERSION_1 only and sets up queue 0 in pages from
+    // negotiates VIRTIO_F_VERSION_1, and the read-only and flush features
+    // when the device offers them, and sets up queue 0 in pages from
     // `pages`. Returns false, with the device reset and the pages given
     // back, when a region is missing or the device refuses a step.
     bool init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages);
@@ -346,12 +367,26 @@ public:
     // reuse that memory.
     bool read(u64 sector, u32 sectors, u64 dest_phys);
 
+    // Writes `sectors` sectors from physical memory at src_phys to the
+    // drive from `sector` on, failing as read does, and always on a
+    // read-only drive. The data may sit in the device's cache until flush.
+    bool write(u64 sector, u32 sectors, u64 src_phys);
+
+    // Asks the device to put every write it has taken on the medium. True
+    // at once on a device without a cache to flush.
+    bool flush();
+
+    // True when the device refuses writes.
+    bool read_only() const { return read_only_; }
+
     // False once a reset the driver asked for did not complete: the device
     // may still write to memory it was given.
     bool quiesced() const { return !wedged_; }
 
 private:
-    bool read_chunk(u64 sector, u32 sectors, u64 dest_phys);
+    bool transfer(u32 type, u64 sector, u32 sectors, u64 phys);
+    bool transfer_chunk(u32 type, u64 sector, u32 sectors, u64 phys);
+    bool complete(u16 head);
     bool fail(PhysAllocator& pages);
     bool stop();
 
@@ -365,6 +400,8 @@ private:
     u64 capacity_ = 0;
     bool ready_ = false;
     bool wedged_ = false;
+    bool read_only_ = false;
+    bool has_flush_ = false;
 };
 
 // Finds the first virtio-blk function on the PCI buses: vendor 0x1AF4 with

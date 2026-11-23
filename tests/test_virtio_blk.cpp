@@ -79,6 +79,39 @@ void read_chain() {
     CHECK_EQ(kVirtqDescWrite, 2);
 }
 
+void write_chain() {
+    VirtqDesc desc[4];
+    std::memset(desc, 0xAB, sizeof(desc));
+    const u16 head = virtio_build_data_chain(desc, 0x10000, 0x200000, 1024, 0x10010, false);
+    CHECK_EQ(head, 0);
+    CHECK_EQ(desc[0].flags, kVirtqDescNext);
+    // The device only reads the data of a write.
+    CHECK_EQ(desc[1].addr, 0x200000ull);
+    CHECK_EQ(desc[1].len, 1024u);
+    CHECK_EQ(desc[1].flags, kVirtqDescNext);
+    CHECK_EQ(desc[1].next, 2);
+    CHECK_EQ(desc[2].flags, kVirtqDescWrite);
+    CHECK_EQ(desc[3].flags, 0xABAB);
+    CHECK_EQ(kVirtioBlkTypeOut, 1u);
+}
+
+void flush_chain() {
+    VirtqDesc desc[3];
+    std::memset(desc, 0xAB, sizeof(desc));
+    const u16 head = virtio_build_flush_chain(desc, 0x10000, 0x10010);
+    CHECK_EQ(head, 0);
+    CHECK_EQ(desc[0].addr, 0x10000ull);
+    CHECK_EQ(desc[0].len, 16u);
+    CHECK_EQ(desc[0].flags, kVirtqDescNext);
+    CHECK_EQ(desc[0].next, 1);
+    CHECK_EQ(desc[1].addr, 0x10010ull);
+    CHECK_EQ(desc[1].len, 1u);
+    CHECK_EQ(desc[1].flags, kVirtqDescWrite);
+    CHECK_EQ(desc[1].next, 0);
+    CHECK_EQ(desc[2].flags, 0xABAB);
+    CHECK_EQ(kVirtioBlkTypeFlush, 4u);
+}
+
 void queue_size_choice() {
     CHECK_EQ(virtq_queue_size(256, 16), 16);
     CHECK_EQ(virtq_queue_size(16, 16), 16);
@@ -413,6 +446,8 @@ void caps_walk_is_bounded() {
 int main() {
     struct_layouts();
     read_chain();
+    write_chain();
+    flush_chain();
     queue_size_choice();
     ring_layout();
     range_checks();

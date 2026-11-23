@@ -153,15 +153,19 @@ bool VirtioBlk::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages)
     common_->device_status = kVirtioStatusAcknowledge;
     common_->device_status = kVirtioStatusAcknowledge | kVirtioStatusDriver;
 
+    common_->device_feature_select = 0;
+    u64 offered = common_->device_feature;
     common_->device_feature_select = 1;
-    const u64 offered = static_cast<u64>(common_->device_feature) << 32;
+    offered |= static_cast<u64>(common_->device_feature) << 32;
     if ((offered & kVirtioFeatureVersion1) == 0) {
         return fail(pages);
     }
+    const u64 wanted =
+        kVirtioFeatureVersion1 | (offered & (kVirtioBlkFeatureRo | kVirtioBlkFeatureFlush));
     common_->driver_feature_select = 0;
-    common_->driver_feature = 0;
+    common_->driver_feature = static_cast<u32>(wanted);
     common_->driver_feature_select = 1;
-    common_->driver_feature = static_cast<u32>(kVirtioFeatureVersion1 >> 32);
+    common_->driver_feature = static_cast<u32>(wanted >> 32);
 
     u8 status = kVirtioStatusAcknowledge | kVirtioStatusDriver | kVirtioStatusFeaturesOk;
     common_->device_status = status;
@@ -226,6 +230,8 @@ bool VirtioBlk::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages)
         return fail(pages);
     }
 
+    read_only_ = (wanted & kVirtioBlkFeatureRo) != 0;
+    has_flush_ = (wanted & kVirtioBlkFeatureFlush) != 0;
     ready_ = true;
     return true;
 }
@@ -253,34 +259,62 @@ bool VirtioBlk::fail(PhysAllocator& pages) {
 }
 
 bool VirtioBlk::read(u64 sector, u32 sectors, u64 dest_phys) {
+    return transfer(kVirtioBlkTypeIn, sector, sectors, dest_phys);
+}
+
+bool VirtioBlk::write(u64 sector, u32 sectors, u64 src_phys) {
+    return !read_only_ && transfer(kVirtioBlkTypeOut, sector, sectors, src_phys);
+}
+
+bool VirtioBlk::flush() {
+    if (!ready_) {
+        return false;
+    }
+    if (!has_flush_) {
+        return true;
+    }
+    VirtioBlkRequestHeader* header = reinterpret_cast<VirtioBlkRequestHeader*>(request_);
+    header->type = kVirtioBlkTypeFlush;
+    header->reserved = 0;
+    header->sector = 0;
+    request_[kRequestStatusOffset] = 0xFF;
+    return complete(virtio_build_flush_chain(ring_.desc, request_phys_,
+                                             request_phys_ + kRequestStatusOffset));
+}
+
+bool VirtioBlk::transfer(u32 type, u64 sector, u32 sectors, u64 phys) {
     if (!ready_ || !virtio_blk_range_ok(sector, sectors, capacity_) ||
-        !virtio_blk_dest_ok(dest_phys, sectors)) {
+        !virtio_blk_dest_ok(phys, sectors)) {
         return false;
     }
     while (sectors != 0) {
         const u32 chunk = virtio_blk_chunk_sectors(sectors);
-        if (!read_chunk(sector, chunk, dest_phys)) {
+        if (!transfer_chunk(type, sector, chunk, phys)) {
             return false;
         }
         sector += chunk;
         sectors -= chunk;
-        dest_phys += static_cast<u64>(chunk) * kVirtioBlkSectorSize;
+        phys += static_cast<u64>(chunk) * kVirtioBlkSectorSize;
     }
     return true;
 }
 
-bool VirtioBlk::read_chunk(u64 sector, u32 sectors, u64 dest_phys) {
+bool VirtioBlk::transfer_chunk(u32 type, u64 sector, u32 sectors, u64 phys) {
     VirtioBlkRequestHeader* header = reinterpret_cast<VirtioBlkRequestHeader*>(request_);
-    header->type = kVirtioBlkTypeIn;
+    header->type = type;
     header->reserved = 0;
     header->sector = sector;
-    // Any value but OK: a device that never writes the status fails the read.
-    volatile u8* status = request_ + kRequestStatusOffset;
-    *status = 0xFF;
+    // Any value but OK: a device that never writes the status fails the request.
+    request_[kRequestStatusOffset] = 0xFF;
+    return complete(virtio_build_data_chain(ring_.desc, request_phys_, phys,
+                                            sectors * kVirtioBlkSectorSize,
+                                            request_phys_ + kRequestStatusOffset,
+                                            type == kVirtioBlkTypeIn));
+}
 
-    const u16 head = virtio_build_read_chain(ring_.desc, request_phys_, dest_phys,
-                                             sectors * kVirtioBlkSectorSize,
-                                             request_phys_ + kRequestStatusOffset);
+// Hands the chain at `head` to the device and waits for it to come back.
+bool VirtioBlk::complete(u16 head) {
+    volatile u8* status = request_ + kRequestStatusOffset;
     virtq_publish(ring_, head);
     memory_fence();
     *notify_ = 0;  // the queue index
