@@ -33,15 +33,6 @@ using namespace ndk;
 
 namespace {
 
-constexpr u32 TextPen = 2;
-constexpr u32 ShinePen = 3;
-constexpr u32 ShadowPen = 4;
-constexpr u32 FillPen = 5;
-constexpr u32 BackgroundPen = 7;
-constexpr u32 BarDetailPen = 9;
-constexpr u32 BarBlockPen = 10;
-constexpr u32 BarTrimPen = 11;
-
 constexpr u16 kDefaultPens[kPenCount] = {0, 1, 1, 2, 1, 3, 1, 0, 2, 1, 2, 1};
 
 bool selected(u32 state) {

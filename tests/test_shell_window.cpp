@@ -936,9 +936,11 @@ void shell_has_scroll_gadget() {
     CHECK(box_y1 < size_box.y0);
     CHECK_EQ(box_y1, size_box.y0 - 2);
 
-    // The size gadget shows its 3.1 corner and light box, and dragging it resizes.
-    CHECK_EQ(pixel(r, bm, wl + ww - 4, wt + wh - 4), 1u);
-    CHECK_EQ(pixel(r, bm, wl + ww - 5, wt + wh - 5), 2u);
+    // The size gadget shows its 3.1 corner and light box on the fill pen of the
+    // active window, and dragging it resizes.
+    CHECK_EQ(pixel(r, bm, wl + ww - 4, wt + wh - 4), 3u);
+    CHECK_EQ(pixel(r, bm, wl + ww - 5, wt + wh - 5), 1u);
+    CHECK_EQ(pixel(r, bm, wl + ww - 6, wt + wh - 6), 2u);
     press(r, wl + ww - 5, wt + wh - 5);
     move_to(r, wl + ww - 45, wt + wh - 25);
     release(r, wl + ww - 45, wt + wh - 25);

@@ -23,6 +23,7 @@
 
 #include "chrome.hpp"
 
+#include "boopsi.hpp"
 #include "chrome_palette.hpp"
 #include "graphics.hpp"
 #include "intuition.hpp"
@@ -30,6 +31,15 @@
 namespace hombre::chrome {
 
 using native::Bus;
+using sysimage::BackgroundPen;
+using sysimage::BarBlockPen;
+using sysimage::BarDetailPen;
+using sysimage::BarTrimPen;
+using sysimage::FillPen;
+using sysimage::FillTextPen;
+using sysimage::ShadowPen;
+using sysimage::ShinePen;
+using sysimage::TextPen;
 
 namespace {
 
@@ -118,20 +128,19 @@ void draw_frame_box(Graphics& graphics, u32 rp, const Rect& box, u8 fill_pen, u8
 
 // The size gadget, as on 3.1: a corner pointing to the bottom right with a
 // small light box inside it.
-void draw_size_gadget(Graphics& graphics, u32 rp, i32 width, i32 height, bool high_color) {
+void draw_size_gadget(Graphics& graphics, u32 rp, i32 width, i32 height) {
     if (width < static_cast<i32>(kSizeBorderRight) ||
         height < static_cast<i32>(kSizeBorderBottom)) {
         return;
     }
-    const u8 dark = high_color ? kFrameDark : 1;
-    const u8 light = high_color ? kFrameLight : 2;
     // The glyph sits in the middle of the corner the two borders share.
     const i32 right = width - 1 - (static_cast<i32>(kSizeBorderRight) - 7) / 2;
     const i32 bottom = height - 1 - (static_cast<i32>(kSizeBorderBottom) - 7) / 2;
-    graphics.set_pens(rp, dark, 0, ndk::JAM2);
+    graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
     graphics.rect_fill(rp, right, bottom - 6, right, bottom);
     graphics.rect_fill(rp, right - 6, bottom, right, bottom);
-    draw_frame_box(graphics, rp, Rect{right - 3, bottom - 3, right, bottom}, light, dark);
+    draw_frame_box(graphics, rp, Rect{right - 3, bottom - 3, right, bottom}, kFrameLight,
+                   kFrameDark);
 }
 
 i32 rounded_inset(i32 d, i32 radius) {
@@ -175,37 +184,29 @@ void draw_rounded_outline(Graphics& graphics, u32 rp, const Rect& box, i32 radiu
 
 // The body of a title-bar button, in the look of the sliders' knobs:
 // rounded, outlined and shaded from top to bottom. Held down, it takes the
-// shading of a held knob. On screens of fewer than eight planes the body is
-// flat: the background pen, or the fill pen while held.
-void draw_bar_button_body(Graphics& graphics, u32 rp, const Rect& box, bool pressed,
-                          bool high_color) {
+// shading of a held knob.
+void draw_bar_button_body(Graphics& graphics, u32 rp, const Rect& box, bool pressed) {
     const u8 shade = pressed ? kActiveBar2 : kKnob0;
     const i32 steps = pressed ? 4 : 3;
     const i32 inner_h = box.y1 - box.y0 - 1;
     for (i32 y = box.y0 + 1; y < box.y1; ++y) {
         const i32 dy = min_i32(y - box.y0, box.y1 - y);
         const i32 ins = max_i32(1, rounded_inset(dy, kBarButtonRadius));
-        const u8 pen = high_color
-                           ? static_cast<u8>(shade + ((y - box.y0 - 1) * steps) / inner_h)
-                           : static_cast<u8>(pressed ? 3 : 0);
+        const u8 pen = static_cast<u8>(shade + ((y - box.y0 - 1) * steps) / inner_h);
         graphics.set_pens(rp, pen, 0, ndk::JAM2);
         graphics.rect_fill(rp, box.x0 + ins, y, box.x1 - ins, y);
     }
-    draw_rounded_outline(graphics, rp, box, kBarButtonRadius, high_color ? kFrameDark : 1);
+    draw_rounded_outline(graphics, rp, box, kBarButtonRadius, kFrameDark);
 }
 
 // The close button: as on 3.1, a small light square outlined in the dark
 // pen in the middle of the body. Held down, the two swap.
 void draw_close_button(Graphics& graphics, u32 rp, const Metrics& metrics, bool active,
-                       bool pressed, bool high_color) {
+                       bool pressed) {
     const Rect box = close_button_box(metrics);
-    draw_bar_button_body(graphics, rp, box, pressed, high_color);
-    u8 line = 1;
-    u8 face = 2;
-    if (high_color) {
-        line = active ? kFrameDark : kTitleInactive;
-        face = kFrameLight;
-    }
+    draw_bar_button_body(graphics, rp, box, pressed);
+    u8 line = active ? kFrameDark : kTitleInactive;
+    u8 face = kFrameLight;
     if (pressed) {
         const u8 swap = line;
         line = face;
@@ -219,17 +220,10 @@ void draw_close_button(Graphics& graphics, u32 rp, const Metrics& metrics, bool 
 // The depth button: two overlapping sheets, the light one in front of the
 // shaded one.
 void draw_depth_button(Graphics& graphics, u32 rp, i32 width, const Metrics& metrics,
-                       bool active, bool pressed, bool high_color) {
+                       bool active, bool pressed) {
     const Rect box = depth_button_box(width, metrics);
-    draw_bar_button_body(graphics, rp, box, pressed, high_color);
-    u8 line = pressed ? 2 : 1;
-    u8 back = 0;
-    u8 front = 2;
-    if (high_color) {
-        line = pressed ? kFrameLight : (active ? kFrameDark : kTitleInactive);
-        back = kKnob2;
-        front = kFrameLight;
-    }
+    draw_bar_button_body(graphics, rp, box, pressed);
+    const u8 line = pressed ? kFrameLight : (active ? kFrameDark : kTitleInactive);
     const i32 cx = (box.x0 + box.x1) / 2;
     const i32 cy = (box.y0 + box.y1) / 2;
     const Rect behind{cx - 3, cy - 3, cx + 1, cy + 1};
@@ -237,13 +231,12 @@ void draw_depth_button(Graphics& graphics, u32 rp, i32 width, const Metrics& met
         // The sheet behind lets the held body's shading show through.
         draw_outline_box(graphics, rp, behind.x0, behind.y0, behind.x1, behind.y1, line);
     } else {
-        draw_frame_box(graphics, rp, behind, back, line);
+        draw_frame_box(graphics, rp, behind, kKnob2, line);
     }
-    draw_frame_box(graphics, rp, Rect{cx - 1, cy - 1, cx + 3, cy + 3}, front, line);
+    draw_frame_box(graphics, rp, Rect{cx - 1, cy - 1, cx + 3, cy + 3}, kFrameLight, line);
 }
 
-void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gflags,
-               bool high_color) {
+void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gflags) {
     const i32 kw = knob.x1 - knob.x0 + 1;
     const i32 kh = knob.y1 - knob.y0 + 1;
     if (kw <= 0 || kh <= 0) {
@@ -255,19 +248,6 @@ void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gfl
 
     const bool horiz_only = (pflags & ndk::FREEHORIZ) != 0 && (pflags & ndk::FREEVERT) == 0;
     const bool selected = (gflags & ndk::GFLG_SELECTED) != 0;
-
-    if (!high_color) {
-        graphics.set_pens(rp, 2, 0, ndk::JAM2);
-        for (i32 y = knob.y0 + 1; y <= knob.y1 - 1; ++y) {
-            const i32 dy = min_i32(y - knob.y0, knob.y1 - y);
-            const i32 ins = max_i32(1, rounded_inset(dy, radius));
-            if (knob.x0 + ins <= knob.x1 - ins) {
-                graphics.rect_fill(rp, knob.x0 + ins, y, knob.x1 - ins, y);
-            }
-        }
-        draw_rounded_outline(graphics, rp, knob, radius, 1);
-        return;
-    }
 
     const u8 grad_base = selected ? kActiveBar2 : kKnob0;
     const i32 grad_steps = selected ? 4 : 3;
@@ -337,18 +317,97 @@ void draw_knob(Graphics& graphics, u32 rp, const Rect& knob, u16 pflags, u16 gfl
     }
 }
 
+// A one-pixel edge round the box: raised when light is the pen of its top
+// and left sides and dark that of its bottom and right ones, sunken the
+// other way round. As on the border images, the right side owns the top
+// right corner and the left side the bottom left one.
+void draw_bevel(Graphics& graphics, u32 rp, const Rect& box, u32 light, u32 dark) {
+    if (box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
+    graphics.set_pens(rp, light, 0, ndk::JAM2);
+    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y0);
+    graphics.rect_fill(rp, box.x0, box.y0, box.x0, box.y1);
+    graphics.set_pens(rp, dark, 0, ndk::JAM2);
+    graphics.rect_fill(rp, box.x1, box.y0, box.x1, box.y1);
+    graphics.rect_fill(rp, box.x0 + 1, box.y1, box.x1, box.y1);
+}
+
+// The knob of a classic scroll gadget: a raised box in the background pen,
+// or in the fill pen while it is dragged.
+void draw_classic_knob(Graphics& graphics, u32 rp, const Rect& knob, bool selected,
+                       const u16* pens) {
+    graphics.set_pens(rp, selected ? pens[FillPen] : pens[BackgroundPen], 0, ndk::JAM2);
+    graphics.rect_fill(rp, knob.x0, knob.y0, knob.x1, knob.y1);
+    draw_bevel(graphics, rp, knob, pens[ShinePen], pens[ShadowPen]);
+}
+
+// The title between the bar buttons, or the frame where a button is missing.
+void draw_bar_title(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, u32 pen) {
+    const Metrics& metrics = w.metrics;
+    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0
+                           ? close_button_box(metrics).x1 + kTitleGapLeft
+                           : 4;
+    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0
+                            ? depth_button_box(w.width, metrics).x0 - kTitleGapRight
+                            : w.width - 4;
+    graphics.set_pens(rp, pen, 0, ndk::JAM1);
+    draw_title(graphics, b, rp, w.title, text_x, text_x1, metrics);
+}
+
+// How the system images show a gadget of a window that is active or not,
+// held down or not.
+u32 gadget_state(bool active, bool pressed) {
+    if (pressed) {
+        return ndk::IDS_SELECTED;
+    }
+    return active ? ndk::IDS_NORMAL : ndk::IDS_INACTIVENORMAL;
+}
+
+// The frame of a window as on 3.1: the title bar and the borders in the
+// fill pen of an active window and the background pen of an inactive one, a
+// raised edge round the window and a sunken one round its inside, whose top
+// line is the one under the bar. The gadgets are the system images.
+void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) {
+    const u16* pens = w.pens.pen;
+    const i32 right = w.width - 1;
+    const i32 bottom = w.height - 1;
+    const i32 inside_x0 = static_cast<i32>(w.border_left);
+    const i32 inside_y0 = static_cast<i32>(w.border_top);
+    const i32 inside_x1 = right - static_cast<i32>(w.border_right);
+    const i32 inside_y1 = bottom - static_cast<i32>(w.border_bottom);
+
+    graphics.set_pens(rp, w.active ? pens[FillPen] : pens[BackgroundPen], 0, ndk::JAM2);
+    graphics.rect_fill(rp, 0, 0, right, inside_y0 - 1);
+    graphics.rect_fill(rp, 0, inside_y0, inside_x0 - 1, bottom);
+    graphics.rect_fill(rp, inside_x1 + 1, inside_y0, right, bottom);
+    graphics.rect_fill(rp, inside_x0, inside_y1 + 1, inside_x1, bottom);
+    draw_bevel(graphics, rp, Rect{0, 0, right, bottom}, pens[ShinePen], pens[ShadowPen]);
+    draw_bevel(graphics, rp, Rect{inside_x0 - 1, inside_y0 - 1, inside_x1 + 1, inside_y1 + 1},
+               pens[ShadowPen], pens[ShinePen]);
+
+    if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
+        sysimage::draw(graphics, b, rp, ndk::CLOSEIMAGE, close_button_box(w.metrics),
+                       gadget_state(w.active, w.pressed == BarButton::Close), pens);
+    }
+    if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
+        sysimage::draw(graphics, b, rp, ndk::DEPTHIMAGE, depth_button_box(w.width, w.metrics),
+                       gadget_state(w.active, w.pressed == BarButton::Depth), pens);
+    }
+    if ((w.flags & ndk::WFLG_SIZEGADGET) != 0 && w.width >= static_cast<i32>(kSizeBorderRight) &&
+        w.height >= static_cast<i32>(kSizeBorderBottom)) {
+        const Rect corner{w.width - static_cast<i32>(kSizeBorderRight),
+                          w.height - static_cast<i32>(kSizeBorderBottom), right, bottom};
+        sysimage::draw(graphics, b, rp, ndk::SIZEIMAGE, corner, gadget_state(w.active, false),
+                       pens);
+    }
+    draw_bar_title(graphics, b, rp, w, w.active ? pens[FillTextPen] : pens[TextPen]);
+}
+
 // The menu separator on screens of eight planes: a dark line over a light
 // one, as the window frames use.
 constexpr u8 kMenuBarDark = kKnob2;
 constexpr u8 kMenuBarLight = kTitleActive;
-
-// The same roles on screens of fewer planes, in the classic pens: white
-// paper, black labels and the blue fill under light text for the open
-// title and the highlighted item.
-constexpr u8 kFlatPaper = 2;
-constexpr u8 kFlatLabel = 1;
-constexpr u8 kFlatLit = 2;
-constexpr u8 kFlatFill = 3;
 
 constexpr i32 kMenuTextInset = 4;
 // How far a title's name starts in from the left of its box.
@@ -527,31 +586,53 @@ void draw_menu_shadow(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& 
     }
 }
 
+// The pens of a menu strip: the paper and the frame of the boxes, the text
+// of titles and items, its pen on the highlight and the line under the bar.
 struct MenuPens {
-    bool high_color;
+    bool modern;
     u8 paper;
     u8 label;
     u8 shortcut;
     u8 lit;
     u8 frame;
+    u8 rule;
 };
 
-MenuPens menu_pens(bool high_color) {
-    if (high_color) {
+// The classic menu is the screen bar's pens: BARBLOCKPEN paper, BARDETAILPEN
+// text and frames, BARTRIMPEN under the bar. Its highlight inverts the box,
+// so the text keeps its pen on it.
+MenuPens menu_pens(Style style, const DrawInfoPens& drawinfo) {
+    if (style == Style::Modern) {
         return MenuPens{true, kMenuPaperPen, kMenuLabelPen, kMenuLabelPen, kMenuLitPen,
-                        kFrameDark};
+                        kFrameDark, kMenuLabelPen};
     }
-    return MenuPens{false, kFlatPaper, kFlatLabel, kFlatLabel, kFlatLit, kFlatLabel};
+    const u8 block = static_cast<u8>(drawinfo.pen[BarBlockPen]);
+    const u8 detail = static_cast<u8>(drawinfo.pen[BarDetailPen]);
+    const u8 trim = static_cast<u8>(drawinfo.pen[BarTrimPen]);
+    return MenuPens{false, block, detail, detail, detail, detail, trim};
 }
 
 // The highlight under an item or the open title: the active title bar
-// gradient, or the blue pen on screens of fewer planes.
+// gradient. The classic highlight is made once the text is drawn.
 void draw_highlight(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& clip,
                     const Rect& r, const MenuPens& pens) {
-    if (pens.high_color) {
+    if (pens.modern) {
         fill_rounded(b, bitmap, clip, r, kMenuCornerRadius, kActiveBar0, 8);
-    } else {
-        fill_rounded(b, bitmap, clip, r, 1, kFlatFill);
+    }
+}
+
+// What an entry of a classic menu gets after its text: the highlighted one
+// is inverted, as an item of Intuition's HIGHCOMP is, and a disabled one is
+// ghosted.
+void finish_classic_entry(const MenuTarget& t, const Rect& r, bool highlighted, bool ghosted,
+                          const MenuPens& pens) {
+    if (pens.modern) {
+        return;
+    }
+    if (highlighted) {
+        raster::complement_rect(t.b, t.bitmap, t.clip, r, (1u << t.bitmap.depth) - 1);
+    } else if (ghosted) {
+        ghost(t.b, t.bitmap, t.clip, r, pens.paper);
     }
 }
 
@@ -560,7 +641,7 @@ void draw_separator(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& cl
     const i32 x0 = row.x0 + 3;
     const i32 x1 = row.x1 - 3;
     const i32 y = (row.y0 + row.y1) / 2;
-    if (pens.high_color) {
+    if (pens.modern) {
         fill(b, bitmap, clip, x0, y, x1, y, kMenuBarDark);
         fill(b, bitmap, clip, x0, y + 1, x1, y + 1, kMenuBarLight);
     } else {
@@ -602,7 +683,7 @@ void draw_menu_items(const MenuTarget& t, const menu_layout::Item* items, const 
             draw_highlight(b, bitmap, clip, lit, pens);
             label = pens.lit;
             shortcut = pens.lit;
-        } else if (ghosted && pens.high_color) {
+        } else if (ghosted && pens.modern) {
             label = kMenuGhostPen;
             shortcut = kMenuGhostPen;
         }
@@ -644,9 +725,7 @@ void draw_menu_items(const MenuTarget& t, const menu_layout::Item* items, const 
         if (own != 0) {
             t.graphics.close_font(own);
         }
-        if (ghosted && !pens.high_color) {
-            ghost(b, bitmap, clip, lit, pens.paper);
-        }
+        finish_classic_entry(t, row, highlighted, ghosted, pens);
     }
 }
 
@@ -659,8 +738,10 @@ void draw_menu_box(const MenuTarget& t, const Rect& box, bool hangs,
     Bus& b = t.b;
     const raster::Bitmap& bitmap = t.bitmap;
     const raster::Clip& clip = t.clip;
-    draw_menu_shadow(b, bitmap, clip, box, menu.strong_shade, menu.light_shade);
-    const i32 r = pens.high_color ? kMenuCornerRadius : 0;
+    if (pens.modern) {
+        draw_menu_shadow(b, bitmap, clip, box, menu.strong_shade, menu.light_shade);
+    }
+    const i32 r = pens.modern ? kMenuCornerRadius : 0;
     for (i32 y = box.y0; y <= box.y1; ++y) {
         const i32 from_bottom = box.y1 - y;
         const i32 from_top = hangs ? r : y - box.y0;
@@ -668,69 +749,108 @@ void draw_menu_box(const MenuTarget& t, const Rect& box, bool hangs,
         fill(b, bitmap, clip, box.x0 + ins, y, box.x1 - ins, y, pens.paper);
     }
     draw_menu_items(t, items, rects, count, selected, pens, menu.metrics);
-    draw_box_frame(b, bitmap, clip, box, hangs, pens.high_color, pens.frame);
+    draw_box_frame(b, bitmap, clip, box, hangs, pens.modern, pens.frame);
 }
 
-void draw_bar_contents(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, bool high_color) {
+void draw_modern_bar(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) {
     const i32 left = 1;
     const i32 right = w.width - 2;
     const Metrics& metrics = w.metrics;
     const i32 line = metrics.bar_height();
 
-    if (high_color) {
-        const bool rounded =
-            (w.flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0 && w.width >= 7;
-        if (rounded) {
-            graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
-            graphics.rect_fill(rp, 2, 1, 2, 1);
-            graphics.rect_fill(rp, w.width - 3, 1, w.width - 3, 1);
-            graphics.rect_fill(rp, 1, 2, 1, 2);
-            graphics.rect_fill(rp, w.width - 2, 2, w.width - 2, 2);
-
-            graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
-            graphics.rect_fill(rp, 3, 1, w.width - 4, 1);
-        } else {
-            graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
-            graphics.rect_fill(rp, left, 1, right, 1);
-        }
-
-        const u8 base = w.active ? kActiveBar0 : kInactiveBar0;
-        const i32 steps = w.active ? 8 : 6;
-        const i32 rows = line - 2;
-        for (i32 y = 2; y < line; ++y) {
-            const i32 step = ((y - 2) * steps) / rows;
-            const i32 row_left = (rounded && y == 2) ? 2 : left;
-            const i32 row_right = (rounded && y == 2) ? w.width - 3 : right;
-            graphics.set_pens(rp, base + static_cast<u8>(step), 0, ndk::JAM2);
-            graphics.rect_fill(rp, row_left, y, row_right, y);
-        }
+    const bool rounded =
+        (w.flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0 && w.width >= 7;
+    if (rounded) {
         graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
-        graphics.rect_fill(rp, left, line, right, line);
+        graphics.rect_fill(rp, 2, 1, 2, 1);
+        graphics.rect_fill(rp, w.width - 3, 1, w.width - 3, 1);
+        graphics.rect_fill(rp, 1, 2, 1, 2);
+        graphics.rect_fill(rp, w.width - 2, 2, w.width - 2, 2);
+
+        graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
+        graphics.rect_fill(rp, 3, 1, w.width - 4, 1);
     } else {
-        graphics.set_pens(rp, w.active ? 3 : 0, 0, ndk::JAM2);
-        graphics.rect_fill(rp, left, 1, right, line - 1);
-        graphics.set_pens(rp, 1, 0, ndk::JAM2);
-        graphics.rect_fill(rp, left, line, right, line);
+        graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
+        graphics.rect_fill(rp, left, 1, right, 1);
     }
 
+    const u8 base = w.active ? kActiveBar0 : kInactiveBar0;
+    const i32 steps = w.active ? 8 : 6;
+    const i32 rows = line - 2;
+    for (i32 y = 2; y < line; ++y) {
+        const i32 step = ((y - 2) * steps) / rows;
+        const i32 row_left = (rounded && y == 2) ? 2 : left;
+        const i32 row_right = (rounded && y == 2) ? w.width - 3 : right;
+        graphics.set_pens(rp, base + static_cast<u8>(step), 0, ndk::JAM2);
+        graphics.rect_fill(rp, row_left, y, row_right, y);
+    }
+    graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+    graphics.rect_fill(rp, left, line, right, line);
+
     if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        draw_close_button(graphics, rp, metrics, w.active, w.pressed == BarButton::Close,
-                          high_color);
+        draw_close_button(graphics, rp, metrics, w.active, w.pressed == BarButton::Close);
     }
     if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
         draw_depth_button(graphics, rp, w.width, metrics, w.active,
-                          w.pressed == BarButton::Depth, high_color);
+                          w.pressed == BarButton::Depth);
+    }
+    draw_bar_title(graphics, b, rp, w, w.active ? kTitleActive : kTitleInactive);
+}
+
+// The frame of a window as the modern look has it: the outline, the bar
+// and the borders, and the size gadget.
+void draw_modern_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, bool rounded) {
+    const i32 right = w.width - 1;
+    const i32 bottom = w.height - 1;
+
+    if (rounded) {
+        graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
+        graphics.rect_fill(rp, 3, 0, right - 3, 0);
+        graphics.rect_fill(rp, 0, bottom, right, bottom);
+        graphics.rect_fill(rp, 0, 3, 0, bottom);
+        graphics.rect_fill(rp, right, 3, right, bottom);
+        graphics.rect_fill(rp, 2, 1, 2, 1);
+        graphics.rect_fill(rp, right - 2, 1, right - 2, 1);
+        graphics.rect_fill(rp, 1, 2, 1, 2);
+        graphics.rect_fill(rp, right - 1, 2, right - 1, 2);
+    } else {
+        draw_outline_box(graphics, rp, 0, 0, right, bottom, kFrameDark);
     }
 
-    const i32 text_x = (w.flags & ndk::WFLG_CLOSEGADGET) != 0
-                           ? close_button_box(metrics).x1 + kTitleGapLeft
-                           : 4;
-    const i32 text_x1 = (w.flags & ndk::WFLG_DEPTHGADGET) != 0
-                            ? depth_button_box(w.width, metrics).x0 - kTitleGapRight
-                            : w.width - 4;
-    const u8 text_pen = high_color ? (w.active ? kTitleActive : kTitleInactive) : (w.active ? 2 : 1);
-    graphics.set_pens(rp, text_pen, 0, ndk::JAM1);
-    draw_title(graphics, b, rp, w.title, text_x, text_x1, metrics);
+    if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
+        draw_modern_bar(graphics, b, rp, w);
+
+        const i32 body_top = static_cast<i32>(w.border_top);
+        const i32 body_bottom = bottom - 1;
+        if (body_top <= body_bottom && w.width >= 3) {
+            graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
+            graphics.rect_fill(rp, 1, body_top, 1, body_bottom);
+
+            graphics.set_pens(rp, kInactiveBar5, 0, ndk::JAM2);
+            if (w.border_left > 2) {
+                const i32 lx1 = min_i32(static_cast<i32>(w.border_left) - 1, right - 1);
+                if (2 <= lx1) {
+                    graphics.rect_fill(rp, 2, body_top, lx1, body_bottom);
+                }
+            }
+            if (w.border_right >= 2) {
+                const i32 rx0 = max_i32(w.width - static_cast<i32>(w.border_right), 2);
+                if (rx0 <= right - 1) {
+                    graphics.rect_fill(rp, rx0, body_top, right - 1, body_bottom);
+                }
+            }
+            if (w.border_bottom >= 2) {
+                const i32 by0 = max_i32(w.height - static_cast<i32>(w.border_bottom), body_top);
+                if (by0 <= body_bottom && 2 <= right - 1) {
+                    graphics.rect_fill(rp, 2, by0, right - 1, body_bottom);
+                }
+            }
+        }
+
+        if ((w.flags & ndk::WFLG_SIZEGADGET) != 0) {
+            draw_size_gadget(graphics, rp, w.width, w.height);
+        }
+    }
 }
 
 }
@@ -742,16 +862,16 @@ u8 screen_bar_pen(i32 y, i32 bar_height) {
 }
 
 void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title,
-                     const Metrics& metrics) {
+                     const DrawInfoPens& pens, const Metrics& metrics) {
     if (rp == 0 || width == 0) {
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const bool high_color = rastport_depth(b, rp) >= 8;
+    const bool modern = style_for_depth(rastport_depth(b, rp)) == Style::Modern;
     const i32 right = static_cast<i32>(width) - 1;
     const i32 line = metrics.bar_height();
 
-    if (high_color) {
+    if (modern) {
         for (i32 y = 0; y < line; ++y) {
             graphics.set_pens(rp, screen_bar_pen(y, line), 0, ndk::JAM2);
             graphics.rect_fill(rp, 0, y, right, y);
@@ -759,14 +879,14 @@ void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title,
         graphics.set_pens(rp, kMenuLabelPen, 0, ndk::JAM2);
         graphics.rect_fill(rp, 0, line, right, line);
     } else {
-        graphics.set_pens(rp, 0, 0, ndk::JAM2);
+        graphics.set_pens(rp, pens.pen[BarBlockPen], 0, ndk::JAM2);
         graphics.rect_fill(rp, 0, 0, right, line - 1);
-        graphics.set_pens(rp, 1, 0, ndk::JAM2);
+        graphics.set_pens(rp, pens.pen[BarTrimPen], 0, ndk::JAM2);
         graphics.rect_fill(rp, 0, line, right, line);
     }
 
     if (title != 0) {
-        graphics.set_pens(rp, high_color ? kMenuLabelPen : 1, 0, ndk::JAM1);
+        graphics.set_pens(rp, modern ? kMenuLabelPen : pens.pen[BarDetailPen], 0, ndk::JAM1);
         draw_title(graphics, b, rp, title, 1, right, metrics);
     }
     restore_rp(b, rp, saved);
@@ -777,8 +897,11 @@ void draw_window_bar(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) 
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const bool high_color = rastport_depth(b, rp) >= 8;
-    draw_bar_contents(graphics, b, rp, w, high_color);
+    if (style_for_depth(rastport_depth(b, rp)) == Style::Modern) {
+        draw_modern_bar(graphics, b, rp, w);
+    } else {
+        draw_classic_frame(graphics, b, rp, w);
+    }
     restore_rp(b, rp, saved);
 }
 
@@ -788,11 +911,11 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const bool high_color = rastport_depth(b, rp) >= 8;
+    const bool modern = style_for_depth(rastport_depth(b, rp)) == Style::Modern;
     const i32 right = w.width - 1;
     const i32 bottom = w.height - 1;
 
-    const bool rounded = high_color &&
+    const bool rounded = modern &&
                          (w.flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0 &&
                          w.width >= 7 && w.height >= 4;
     graphics.set_pens(rp, 0, 0, ndk::JAM2);
@@ -816,79 +939,10 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
         graphics.rect_fill(rp, 0, 0, right, bottom);
     }
 
-    const u8 frame_pen = high_color ? kFrameDark : 1;
-    if (rounded) {
-        graphics.set_pens(rp, frame_pen, 0, ndk::JAM2);
-        graphics.rect_fill(rp, 3, 0, right - 3, 0);
-        graphics.rect_fill(rp, 0, bottom, right, bottom);
-        graphics.rect_fill(rp, 0, 3, 0, bottom);
-        graphics.rect_fill(rp, right, 3, right, bottom);
-        graphics.rect_fill(rp, 2, 1, 2, 1);
-        graphics.rect_fill(rp, right - 2, 1, right - 2, 1);
-        graphics.rect_fill(rp, 1, 2, 1, 2);
-        graphics.rect_fill(rp, right - 1, 2, right - 1, 2);
-    } else {
-        draw_outline_box(graphics, rp, 0, 0, right, bottom, frame_pen);
-    }
-
-    if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
-        draw_bar_contents(graphics, b, rp, w, high_color);
-
-        const i32 body_top = static_cast<i32>(w.border_top);
-        const i32 body_bottom = bottom - 1;
-        if (body_top <= body_bottom && w.width >= 3) {
-            if (high_color) {
-                graphics.set_pens(rp, kFrameLight, 0, ndk::JAM2);
-                graphics.rect_fill(rp, 1, body_top, 1, body_bottom);
-
-                graphics.set_pens(rp, kInactiveBar5, 0, ndk::JAM2);
-                if (w.border_left > 2) {
-                    const i32 lx1 = min_i32(static_cast<i32>(w.border_left) - 1, right - 1);
-                    if (2 <= lx1) {
-                        graphics.rect_fill(rp, 2, body_top, lx1, body_bottom);
-                    }
-                }
-                if (w.border_right >= 2) {
-                    const i32 rx0 = max_i32(w.width - static_cast<i32>(w.border_right), 2);
-                    if (rx0 <= right - 1) {
-                        graphics.rect_fill(rp, rx0, body_top, right - 1, body_bottom);
-                    }
-                }
-                if (w.border_bottom >= 2) {
-                    const i32 by0 = max_i32(w.height - static_cast<i32>(w.border_bottom), body_top);
-                    if (by0 <= body_bottom && 2 <= right - 1) {
-                        graphics.rect_fill(rp, 2, by0, right - 1, body_bottom);
-                    }
-                }
-            } else {
-                graphics.set_pens(rp, 0, 0, ndk::JAM2);
-                if (w.border_right >= 2) {
-                    const i32 rx0 = max_i32(w.width - static_cast<i32>(w.border_right), 1);
-                    if (rx0 <= right - 1) {
-                        graphics.rect_fill(rp, rx0, body_top, right - 1, body_bottom);
-                    }
-                }
-                if (w.border_bottom >= 2) {
-                    const i32 by0 = max_i32(w.height - static_cast<i32>(w.border_bottom), body_top);
-                    if (by0 <= body_bottom && 1 <= right - 1) {
-                        graphics.rect_fill(rp, 1, by0, right - 1, body_bottom);
-                    }
-                }
-                graphics.set_pens(rp, 1, 0, ndk::JAM2);
-                if (w.border_right > 2 && w.width >= static_cast<i32>(w.border_right)) {
-                    const i32 x = w.width - static_cast<i32>(w.border_right);
-                    graphics.rect_fill(rp, x, body_top, x, bottom);
-                }
-                if (w.border_bottom > 2 && w.height >= static_cast<i32>(w.border_bottom)) {
-                    const i32 y = w.height - static_cast<i32>(w.border_bottom);
-                    graphics.rect_fill(rp, 0, y, right, y);
-                }
-            }
-        }
-
-        if ((w.flags & ndk::WFLG_SIZEGADGET) != 0) {
-            draw_size_gadget(graphics, rp, w.width, w.height, high_color);
-        }
+    if (modern) {
+        draw_modern_frame(graphics, b, rp, w, rounded);
+    } else if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
+        draw_classic_frame(graphics, b, rp, w);
     }
 
     const i32 ix0 = static_cast<i32>(w.border_left);
@@ -910,20 +964,19 @@ void draw_menu(Graphics& graphics, Bus& b, const raster::Bitmap& bitmap, const R
     }
     const raster::Clip clip{area.x0, area.y0, area.x1, area.y1};
     const MenuTarget target{graphics, b, bitmap, menu.bitmap_addr, clip};
-    const MenuPens pens = menu_pens(menu.depth >= 8);
+    const MenuPens pens = menu_pens(style_for_depth(menu.depth), menu.pens);
     const i32 right = menu.width - 1;
     const i32 line = menu.bar_height;
 
     // The bar is drawn in the same pens as the screen title bar it replaces.
-    if (pens.high_color) {
+    if (pens.modern) {
         for (i32 y = 0; y < line; ++y) {
             fill(b, bitmap, clip, 0, y, right, y, screen_bar_pen(y, line));
         }
-        fill(b, bitmap, clip, 0, line, right, line, kMenuLabelPen);
     } else {
-        fill(b, bitmap, clip, 0, 0, right, line - 1, kFlatPaper);
-        fill(b, bitmap, clip, 0, line, right, line, kFlatLabel);
+        fill(b, bitmap, clip, 0, 0, right, line - 1, pens.paper);
     }
+    fill(b, bitmap, clip, 0, line, right, line, pens.rule);
 
     // The titles sit in the middle of a bar higher than their own font's.
     const i32 baseline =
@@ -939,14 +992,12 @@ void draw_menu(Graphics& graphics, Bus& b, const raster::Bitmap& bitmap, const R
         if (open) {
             draw_highlight(b, bitmap, clip, Rect{title.x0, 2, title.x1, line - 2}, pens);
             pen = pens.lit;
-        } else if (!enabled && pens.high_color) {
+        } else if (!enabled && pens.modern) {
             pen = kMenuGhostPen;
         }
         draw_guest_text(target, pen, menu.metrics.font, title.x0 + kMenuTitleInset, baseline,
                         menu.titles[i].name, title.x1 - 4);
-        if (!enabled && !pens.high_color) {
-            ghost(b, bitmap, clip, Rect{title.x0, 0, title.x1, line - 1}, kFlatPaper);
-        }
+        finish_classic_entry(target, Rect{title.x0, 0, title.x1, line - 1}, open, !enabled, pens);
     }
 
     draw_menu_box(target, menu.box, true, menu.items, menu.item_rects, menu.item_count,
@@ -960,27 +1011,32 @@ void draw_prop_gadget(Graphics& graphics, Bus& b, u32 rp, const PropChrome& g) {
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const bool high_color = rastport_depth(b, rp) >= 8;
+    const bool modern = style_for_depth(rastport_depth(b, rp)) == Style::Modern;
+    const u16* pens = g.pens.pen;
+    const bool borderless = (g.pflags & ndk::PROPBORDERLESS) != 0;
 
-    if (high_color) {
+    if (modern) {
         graphics.set_pens(rp, kTrack, 0, ndk::JAM2);
         graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
-        if ((g.pflags & ndk::PROPBORDERLESS) == 0) {
+        if (!borderless) {
             graphics.set_pens(rp, kFrameDark, 0, ndk::JAM2);
             graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y0);
             graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x0, g.box.y1);
         }
     } else {
-        if ((g.pflags & ndk::PROPBORDERLESS) != 0) {
-            graphics.set_pens(rp, 0, 0, ndk::JAM2);
-            graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
-        } else {
-            draw_frame_box(graphics, rp, g.box, 0, 1);
+        graphics.set_pens(rp, pens[BackgroundPen], 0, ndk::JAM2);
+        graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
+        if (!borderless) {
+            draw_bevel(graphics, rp, g.box, pens[ShadowPen], pens[ShinePen]);
         }
     }
 
     if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1) {
-        draw_knob(graphics, rp, g.knob, g.pflags, g.gflags, high_color);
+        if (modern) {
+            draw_knob(graphics, rp, g.knob, g.pflags, g.gflags);
+        } else {
+            draw_classic_knob(graphics, rp, g.knob, (g.gflags & ndk::GFLG_SELECTED) != 0, pens);
+        }
     }
     restore_rp(b, rp, saved);
 }

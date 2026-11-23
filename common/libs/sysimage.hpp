@@ -40,6 +40,20 @@ namespace sysimage {
 // DETAILPEN through BARTRIMPEN.
 constexpr u32 kPenCount = 12;
 
+// The places of the pens in what read_pens fills, in DrawInfo's order.
+constexpr u32 DetailPen = 0;
+constexpr u32 BlockPen = 1;
+constexpr u32 TextPen = 2;
+constexpr u32 ShinePen = 3;
+constexpr u32 ShadowPen = 4;
+constexpr u32 FillPen = 5;
+constexpr u32 FillTextPen = 6;
+constexpr u32 BackgroundPen = 7;
+constexpr u32 HighlightTextPen = 8;
+constexpr u32 BarDetailPen = 9;
+constexpr u32 BarBlockPen = 10;
+constexpr u32 BarTrimPen = 11;
+
 // The pens of the DrawInfo at draw_info, or the 3.1 defaults for no
 // DrawInfo.
 void read_pens(native::Bus& bus, u32 draw_info, u16 (&pens)[kPenCount]);

@@ -28,12 +28,27 @@
 #include "menu_layout.hpp"
 #include "native.hpp"
 #include "raster.hpp"
+#include "sysimage.hpp"
 
 namespace hombre {
 
 class Graphics;
 
 namespace chrome {
+
+// The two looks of the window frames, the screen title bar, the border
+// scroll gadgets and the menus. Classic is the AmigaOS 3.1 look, drawn in
+// the pens of the screen's DrawInfo. Modern is the shaded look, drawn in the
+// pens that screens of eight planes have beyond the base palette.
+enum class Style : u8 { Classic, Modern };
+
+constexpr Style style_for_depth(u32 depth) { return depth >= 8 ? Style::Modern : Style::Classic; }
+
+// The pens of a DrawInfo, DETAILPEN through BARTRIMPEN, indexed as
+// sysimage.hpp has them. Only the classic look draws in them.
+struct DrawInfoPens {
+    u16 pen[sysimage::kPenCount]{};
+};
 
 // The screen's WBorTop: programs size a title bar as WBorTop plus the
 // height of the screen's font plus one.
@@ -103,6 +118,7 @@ struct WindowChrome {
     bool active = false;
     BarButton pressed = BarButton::None;  // the bar button the pointer holds down
     Metrics metrics{};
+    DrawInfoPens pens{};
 };
 
 struct PropChrome {
@@ -110,12 +126,14 @@ struct PropChrome {
     Rect knob{};
     u16 pflags = 0;
     u16 gflags = 0;
+    DrawInfoPens pens{};
 };
 
 // One menu strip in menu mode: the bar titles, the open title's drop-down
 // box and the submenu box, with the indices of the open title and the
-// highlighted items. The shade tables darken the drop shadows and are null
-// on screens of fewer than eight planes, which draw menus flat.
+// highlighted items. The shade tables darken the drop shadows of the modern
+// look and are null on screens of fewer than eight planes, whose classic
+// menus have none.
 struct MenuChrome {
     i32 width = 0;
     const menu_layout::Title* titles = nullptr;
@@ -141,10 +159,13 @@ struct MenuChrome {
     i32 bar_height = Metrics{}.bar_height();
     Metrics metrics{};
     u32 bitmap_addr = 0;
+    DrawInfoPens pens{};
 };
 
 void draw_screen_bar(Graphics& graphics, native::Bus& b, u32 rp, u32 width, u32 title,
-                     const Metrics& metrics = {});
+                     const DrawInfoPens& pens, const Metrics& metrics = {});
+// The bar and what changes with the window's state: the classic look takes
+// the whole frame, whose borders change colour with the bar.
 void draw_window_bar(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w);
 void draw_window_chrome(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w,
                         const Rect* keep = nullptr);

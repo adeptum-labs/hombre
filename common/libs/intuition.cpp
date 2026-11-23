@@ -446,8 +446,9 @@ constexpr i32 smaller(i32 a, i32 b) { return a < b ? a : b; }
 
 constexpr i32 larger(i32 a, i32 b) { return a > b ? a : b; }
 
-// The pens of a requester on screens of eight planes, and the classic
-// white, black and grey of the shallower ones.
+// The pens of a requester on screens of the modern look, and the SHINEPEN,
+// SHADOWPEN, BACKGROUNDPEN and TEXTPEN of the screen's DrawInfo on the
+// others.
 struct RequesterPens {
     u8 light;
     u8 dark;
@@ -455,12 +456,16 @@ struct RequesterPens {
     u8 text;
 };
 
-RequesterPens requester_pens(u32 depth) {
-    if (depth >= 8) {
+RequesterPens requester_pens(u32 depth, const chrome::DrawInfoPens& drawinfo) {
+    if (chrome::style_for_depth(depth) == chrome::Style::Modern) {
         return RequesterPens{chrome::kFrameLight, chrome::kFrameDark, chrome::kInactiveBar0,
                              chrome::kFrameDark};
     }
-    return RequesterPens{2, 1, 2, 1};
+    const u16* pens = drawinfo.pen;
+    return RequesterPens{static_cast<u8>(pens[sysimage::ShinePen]),
+                         static_cast<u8>(pens[sysimage::ShadowPen]),
+                         static_cast<u8>(pens[sysimage::BackgroundPen]),
+                         static_cast<u8>(pens[sysimage::TextPen])};
 }
 
 // A bevel of two pixels around the paper: the top and left edges in the
@@ -980,8 +985,24 @@ PropGeometry load_prop_geometry(Bus& b, const WindowView& w, u32 gadget) {
     return g;
 }
 
+static_assert(chrome::kDrawInfoPens == sysimage::kPenCount);
+
+// The pens the chrome of a screen is drawn in: those of its DrawInfo once
+// one is made, else the ones IPrefs sent for its depth (prefs, null while
+// they have not arrived), else the 3.1 defaults.
+chrome::DrawInfoPens screen_pens(Bus& b, u32 draw_info, const u16* prefs) {
+    chrome::DrawInfoPens pens;
+    if (draw_info == 0 && prefs != nullptr) {
+        std::copy(prefs, prefs + sysimage::kPenCount, pens.pen);
+    } else {
+        sysimage::read_pens(b, draw_info, pens.pen);
+    }
+    return pens;
+}
+
 chrome::WindowChrome to_chrome(const WindowView& w, bool active, chrome::BarButton pressed,
-                               const chrome::Metrics& metrics) {
+                               const chrome::Metrics& metrics,
+                               const chrome::DrawInfoPens& pens) {
     return chrome::WindowChrome{
         w.width,
         w.height,
@@ -994,10 +1015,12 @@ chrome::WindowChrome to_chrome(const WindowView& w, bool active, chrome::BarButt
         active,
         pressed,
         metrics,
+        pens,
     };
 }
 
-void draw_prop_gadget(Graphics& graphics, Bus& b, const WindowView& w, u32 gadget) {
+void draw_prop_gadget(Graphics& graphics, Bus& b, const WindowView& w, u32 gadget,
+                      const chrome::DrawInfoPens& pens) {
     const u32 rp = w.rp;
     if (rp == 0) {
         return;
@@ -1010,7 +1033,8 @@ void draw_prop_gadget(Graphics& graphics, Bus& b, const WindowView& w, u32 gadge
     if (!b.ok()) {
         return;
     }
-    chrome::draw_prop_gadget(graphics, b, rp, chrome::PropChrome{g.box, g.knob, g.pflags, gflags});
+    chrome::draw_prop_gadget(graphics, b, rp,
+                             chrome::PropChrome{g.box, g.knob, g.pflags, gflags, pens});
 }
 
 }
@@ -2558,6 +2582,7 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
                   pens != nullptr ? pens[i] : kDefaultDriPens[i]);
         }
     }
+    const chrome::DrawInfoPens pens = screen_pens(b, rec.draw_info, pen_prefs_for(depth));
 
     // A window has its own planes in the depth of its screen. Its borders,
     // gadgets and whatever its size hook draws come back on the cleared ones.
@@ -2604,7 +2629,8 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
         w.rp = wrec.rp;
         chrome::draw_window_chrome(*graphics_, b, wrec.rp,
                                    to_chrome(w, active_window_ == window,
-                                             held_bar_button(window), window_metrics(window)));
+                                             held_bar_button(window), window_metrics(window),
+                                             pens));
         if (w.first_gadget != 0) {
             draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
         }
@@ -2747,6 +2773,7 @@ void Intuition::apply_font_prefs(u32 screen) {
     graphics_->set_pens(rec->backdrop_rp, background, background, ndk::JAM2);
     graphics_->rect_fill(rec->backdrop_rp, 0, 0, right, bottom);
     chrome::draw_screen_bar(*graphics_, b, rec->backdrop_rp, rec->width, rec->title,
+                            screen_pens(b, rec->draw_info, pen_prefs_for(rec->depth)),
                             rec->metrics);
     compose(screen, Rect{0, 0, right, bottom});
     // A window the higher bar would reach under moves down below it.
@@ -2922,6 +2949,7 @@ void Intuition::reset_screen(u32 screen) {
     graphics_->set_pens(rec->backdrop_rp, background, background, ndk::JAM2);
     graphics_->rect_fill(rec->backdrop_rp, 0, 0, right, bottom);
     chrome::draw_screen_bar(*graphics_, b, rec->backdrop_rp, rec->width, rec->title,
+                            screen_pens(b, rec->draw_info, pen_prefs_for(rec->depth)),
                             rec->metrics);
     compose(screen, Rect{0, 0, right, bottom});
     end_batch();
@@ -3511,7 +3539,9 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     begin_batch();
     graphics_->set_pens(backdrop_rp, 0, 0, ndk::JAM2);
     graphics_->rect_fill(backdrop_rp, 0, 0, right, bottom);
-    chrome::draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title, rec->metrics);
+    chrome::draw_screen_bar(*graphics_, b, backdrop_rp, a.width, title,
+                            screen_pens(b, rec->draw_info, pen_prefs_for(rec->depth)),
+                            rec->metrics);
     compose(screen, Rect{0, 0, right, bottom});
     end_batch();
     if (becomes_default && a.depth >= 8) {
@@ -3813,15 +3843,17 @@ void Intuition::redraw_window_bar(u32 window) {
     if (rec == nullptr) {
         return;
     }
+    const ScreenRecord* srec = find_screen_record(rec->screen);
     Bus b(*machine_);
     WindowView w = load_window(b, window);
-    if (!w.ok || (w.flags & ndk::WFLG_BORDERLESS) != 0) {
+    if (srec == nullptr || !w.ok || (w.flags & ndk::WFLG_BORDERLESS) != 0) {
         return;
     }
     w.rp = rec->rp;
-    chrome::draw_window_bar(*graphics_, b, rec->rp,
-                            to_chrome(w, active_window_ == window, held_bar_button(window),
-                                         window_metrics(window)));
+    chrome::draw_window_bar(
+        *graphics_, b, rec->rp,
+        to_chrome(w, active_window_ == window, held_bar_button(window), window_metrics(window),
+                  screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))));
     const i32 bar_bottom = rec->metrics.bar_height();
     const i32 y1 = rec->height - 1 < bar_bottom ? rec->height - 1 : bar_bottom;
     if (rec->width > 0 && y1 >= 0) {
@@ -4211,9 +4243,10 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     }
     WindowView w = load_window(b, window);
     w.rp = rp;
-    chrome::draw_window_chrome(*graphics_, b, rp,
-                               to_chrome(w, active_window_ == window, held_bar_button(window),
-                                         window_metrics(window)));
+    chrome::draw_window_chrome(
+        *graphics_, b, rp,
+        to_chrome(w, active_window_ == window, held_bar_button(window), window_metrics(window),
+                  screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))));
     if (a.gadgets != 0) {
         draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
     }
@@ -4510,7 +4543,9 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     const u32 rp = b.r32(requester + ndk::wd_RPort);
     if (b.ok() && rp != 0) {
         const u32 depth = b.r8(b.r32(rp + ndk::rp_BitMap) + ndk::bm_Depth);
-        const RequesterPens pens = requester_pens(depth);
+        const ScreenRecord* srec = find_screen_record(screen);
+        const RequesterPens pens = requester_pens(
+            depth, screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)));
         begin_batch();
         if (text_box.x1 >= text_box.x0 && text_box.y1 >= text_box.y0) {
             draw_requester_box(*graphics_, rp, text_box, pens, true);
@@ -4706,10 +4741,12 @@ void Intuition::draw_requester_button(u32 window, const Requester& req, u32 inde
         return;
     }
     const u32 depth = b.r8(b.r32(rp + ndk::rp_BitMap) + ndk::bm_Depth);
-    if (!b.ok()) {
+    const ScreenRecord* srec = find_screen_record(b.r32(window + ndk::wd_WScreen));
+    if (!b.ok() || srec == nullptr) {
         return;
     }
-    const RequesterPens pens = requester_pens(depth);
+    const RequesterPens pens = requester_pens(
+        depth, screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)));
     begin_batch();
     draw_requester_box(*graphics_, rp, req.buttons[index], pens, pressed);
     draw_requester_label(*graphics_, rp, req.buttons[index], req.labels[index],
@@ -4957,19 +4994,22 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
             b.w32(rec->screen + ndk::sc_DefaultTitle, copy);
             begin_batch();
             chrome::draw_screen_bar(*graphics_, b, srec->backdrop_rp, srec->width, srec->title,
+                                    screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)),
                                     srec->metrics);
             end_batch();
         }
     }
     if (redraw) {
+        const ScreenRecord* srec = find_screen_record(rec->screen);
         WindowView w = load_window(b, window);
         w.rp = rec->rp;
-        if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
+        if (srec != nullptr && (w.flags & ndk::WFLG_BORDERLESS) == 0) {
             begin_batch();
             chrome::draw_window_bar(
                 *graphics_, b, rec->rp,
                 to_chrome(w, active_window_ == window, held_bar_button(window),
-                                         window_metrics(window)));
+                          window_metrics(window),
+                          screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))));
             end_batch();
         }
     }
@@ -4994,10 +5034,11 @@ void Intuition::refresh_window_frame(u32 window) {
                       rec->width - static_cast<i32>(w.border_right) - 1,
                       rec->height - static_cast<i32>(w.border_bottom) - 1};
     begin_batch();
-    chrome::draw_window_chrome(*graphics_, b, rec->rp,
-                               to_chrome(w, active_window_ == window, held_bar_button(window),
-                                         window_metrics(window)),
-                               &inside);
+    chrome::draw_window_chrome(
+        *graphics_, b, rec->rp,
+        to_chrome(w, active_window_ == window, held_bar_button(window), window_metrics(window),
+                  screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))),
+        &inside);
     compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
                                             rec->height, rec->flags));
     end_batch();
@@ -5441,6 +5482,7 @@ void Intuition::draw_menu_overlay(Bus& b, raster::Bitmap& bitmap, const Rect& cl
     m.bar_height = srec->metrics.bar_height();
     m.metrics = window_metrics(menu_.window);
     m.bitmap_addr = srec->addr + ndk::sc_BitMap;
+    m.pens = screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth));
     chrome::draw_menu(*graphics_, b, bitmap, clip, m);
 }
 
@@ -5714,8 +5756,9 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
     w.rp = rec->rp;
     chrome::draw_window_chrome(
         *graphics_, b, rec->rp,
-        to_chrome(w, active_window_ == window, held_bar_button(window),
-                                         window_metrics(window)), &keep);
+        to_chrome(w, active_window_ == window, held_bar_button(window), window_metrics(window),
+                  screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))),
+        &keep);
     if (w.first_gadget != 0) {
         draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
     }
@@ -6345,11 +6388,13 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
     if (rec == nullptr || !window_open(window)) {
         return;
     }
+    const ScreenRecord* srec = find_screen_record(rec->screen);
     WindowView w = load_window(b, window);
-    if (!w.ok) {
+    if (srec == nullptr || !w.ok) {
         return;
     }
     w.rp = rec->rp;
+    const chrome::DrawInfoPens pens = screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth));
     const u32 limit = max_count < kMaxGadgets ? max_count : kMaxGadgets;
     u32 gadget = first;
     for (u32 step = 0; step < limit && gadget != 0; ++step) {
@@ -6359,7 +6404,7 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
             return;
         }
         if (gtype == ndk::GTYP_PROPGADGET) {
-            draw_prop_gadget(*graphics_, b, w, gadget);
+            draw_prop_gadget(*graphics_, b, w, gadget, pens);
         } else if (gtype == ndk::GTYP_BOOLGADGET) {
             draw_bool_gadget(b, window, w.rp, gadget);
         } else if (gtype == ndk::GTYP_CUSTOMGADGET) {
@@ -7240,10 +7285,12 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
     if (rec == nullptr) {
         return false;
     }
+    const ScreenRecord* srec = find_screen_record(rec->screen);
     const WindowView w = load_window(b, window);
-    if (!w.ok) {
+    if (srec == nullptr || !w.ok) {
         return false;
     }
+    const chrome::DrawInfoPens pens = screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth));
     const i32 wx = x - w.left;
     const i32 wy = y - w.top;
     u32 gadget = w.first_gadget;
@@ -7282,7 +7329,7 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
             grab_y_ = wy - g.knob.y0;
             WindowView draw_w = w;
             draw_w.rp = rec->rp;
-            draw_prop_gadget(*graphics_, b, draw_w, gadget);
+            draw_prop_gadget(*graphics_, b, draw_w, gadget, pens);
             if ((activation & ndk::GACT_IMMEDIATE) != 0) {
                 post_prop_message(b, window, ndk::IDCMP_GADGETDOWN, gadget);
             }
@@ -7312,7 +7359,7 @@ bool Intuition::hit_prop_gadget(Bus& b, u32 window, i32 x, i32 y) {
         b.w16(g.pi + ndk::pi_VertPot, new_vpot);
         WindowView draw_w = w;
         draw_w.rp = rec->rp;
-        draw_prop_gadget(*graphics_, b, draw_w, gadget);
+        draw_prop_gadget(*graphics_, b, draw_w, gadget, pens);
         call_gadget_hook(gadget, new_vpot);
         if (window_open(window)) {
             if ((activation & ndk::GACT_IMMEDIATE) != 0) {
@@ -7349,8 +7396,9 @@ void Intuition::drag_prop(i32 x, i32 y) {
     if (!b.ok() || gtype != ndk::GTYP_PROPGADGET || (gflags & ndk::GFLG_DISABLED) != 0) {
         return;
     }
+    const ScreenRecord* srec = find_screen_record(rec->screen);
     WindowView w = load_window(b, drag_window_);
-    if (!w.ok) {
+    if (srec == nullptr || !w.ok) {
         return;
     }
     w.rp = rec->rp;
@@ -7374,7 +7422,8 @@ void Intuition::drag_prop(i32 x, i32 y) {
     if (new_hpot != g.hpot || new_vpot != g.vpot) {
         b.w16(g.pi + ndk::pi_HorizPot, new_hpot);
         b.w16(g.pi + ndk::pi_VertPot, new_vpot);
-        draw_prop_gadget(*graphics_, b, w, gadget);
+        draw_prop_gadget(*graphics_, b, w, gadget,
+                         screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)));
         call_gadget_hook(gadget, new_vpot);
     }
     if (window_open(window) && (activation & ndk::GACT_FOLLOWMOUSE) != 0) {
@@ -7406,11 +7455,13 @@ void Intuition::end_prop_drag() {
             b.w16(pi + ndk::pi_Flags, pflags & ~ndk::KNOBHIT);
         }
         const WindowRecord* rec = find_window_record(window);
-        if (rec != nullptr) {
+        const ScreenRecord* srec = rec != nullptr ? find_screen_record(rec->screen) : nullptr;
+        if (srec != nullptr) {
             WindowView w = load_window(b, window);
             if (w.ok) {
                 w.rp = rec->rp;
-                draw_prop_gadget(*graphics_, b, w, gadget);
+                draw_prop_gadget(*graphics_, b, w, gadget,
+                                 screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)));
             }
         }
     }

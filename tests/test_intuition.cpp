@@ -535,9 +535,10 @@ void open_screen_clears_and_draws_title_bar() {
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
     CHECK(screen != 0);
-    CHECK_EQ(screen_pixel(r, screen, 5, 5), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 0, 0), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 639, 13), 0u);
+    // The bar is BARBLOCKPEN with BARTRIMPEN under it.
+    CHECK_EQ(screen_pixel(r, screen, 5, 5), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 0, 0), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 639, 13), 2u);
     CHECK_EQ(screen_pixel(r, screen, 0, 14), 1u);
     CHECK_EQ(screen_pixel(r, screen, 5, 14), 1u);
     CHECK_EQ(screen_pixel(r, screen, 639, 14), 1u);
@@ -580,10 +581,10 @@ void open_screen_taglist_reads_sa_tags() {
     CHECK(r.read_str(title) == "H");
     CHECK_EQ(r.get32(screen + sc_DefaultTitle), title);
 
-    // The title is drawn at pen 1 over the bar, which stays pen 0 on 2-plane.
+    // The title is drawn in BARDETAILPEN (pen 1) over the bar in BARBLOCKPEN (pen 2).
     CHECK_EQ(screen_pixel(r, screen, 1, 3), 1u);
     CHECK_EQ(screen_pixel(r, screen, 2, 3), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 3, 3), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 3, 3), 2u);
     CHECK(refreshed(r, screen, 0, 0, 319, 199));
 
     // A null NewScreen takes the tags and the defaults.
@@ -1123,7 +1124,7 @@ void open_window_builds_struct_rastport_and_layer() {
     CHECK_EQ(r.get16(layer + ly_MaxX), 249u);
     CHECK_EQ(r.get16(layer + ly_MaxY), 159u);
     CHECK_EQ(r.get32(layer + ly_Window), window);
-    CHECK_EQ(window_pixel(r, window, 0, 0), 1u);
+    CHECK_EQ(window_pixel(r, window, 0, 0), 2u);
     CHECK_EQ(window_pixel(r, window, -1, 0), 0xFFFFFFFFu);
 }
 
@@ -1140,21 +1141,29 @@ void open_window_draws_chrome() {
     CHECK_EQ(r.get32(window + wd_Flags),
              static_cast<u32>(WFLG_CLOSEGADGET | WFLG_DEPTHGADGET));
 
-    CHECK_EQ(screen_pixel(r, screen, 50, 60), 1u);
+    // The raised edge round the window: SHINEPEN (2) top and left, SHADOWPEN
+    // (1) bottom and right, the right one owning the top right corner.
+    CHECK_EQ(screen_pixel(r, screen, 50, 60), 2u);
     CHECK_EQ(screen_pixel(r, screen, 249, 60), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 50, 159), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 50, 80), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 159), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 80), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 249, 159), 1u);
+    // The inactive bar is BACKGROUNDPEN (0) over the line that tops the
+    // sunken edge round the inside.
     CHECK_EQ(screen_pixel(r, screen, 100, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 100, 74), 1u);
     CHECK_EQ(screen_pixel(r, screen, 100, 75), 0u);
-    // The close button: its outline, its body and the outlined square in
+    CHECK_EQ(screen_pixel(r, screen, 51, 100), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 248, 100), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 158), 2u);
+    // The close image: its raised edge, its body and the outlined square in
     // the middle.
-    CHECK_EQ(screen_pixel(r, screen, 59, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 59, 62), 2u);
     CHECK_EQ(screen_pixel(r, screen, 55, 67), 0u);
     CHECK_EQ(screen_pixel(r, screen, 56, 67), 1u);
     CHECK_EQ(screen_pixel(r, screen, 59, 67), 2u);
-    // The depth button: its outline, the sheet behind and the one in front.
-    CHECK_EQ(screen_pixel(r, screen, 240, 62), 1u);
+    // The depth image: its raised edge, the sheet behind and the one in front.
+    CHECK_EQ(screen_pixel(r, screen, 240, 62), 2u);
     CHECK_EQ(screen_pixel(r, screen, 237, 64), 1u);
     CHECK_EQ(screen_pixel(r, screen, 238, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 239, 66), 1u);
@@ -1167,7 +1176,7 @@ void open_window_draws_chrome() {
     CHECK(plain != 0);
     CHECK_EQ(screen_pixel(r, screen, 308, 62), 0u);
     CHECK_EQ(screen_pixel(r, screen, 301, 65), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 300, 60), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 60), 2u);
 }
 
 void open_window_default_fills_the_screen_below_the_bar() {
@@ -1189,7 +1198,7 @@ void open_window_default_fills_the_screen_below_the_bar() {
     CHECK_EQ(r.get16(layer + ly_MinY), bar);
     CHECK_EQ(r.get16(layer + ly_MaxX), 639u);
     CHECK_EQ(r.get16(layer + ly_MaxY), 399u);
-    CHECK_EQ(screen_pixel(r, screen, 0, bar), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 0, bar), 2u);
 }
 
 void windows_open_below_the_screen_bar() {
@@ -1465,7 +1474,7 @@ void window_text_goes_into_the_window_only() {
     const std::vector<u8> after = screen_planes(r, screen);
     CHECK(changed_only_inside(before, after, 80, 400, 52, 75, 247, 157));
     CHECK_EQ(screen_pixel(r, screen, 54, 76), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 50, 78), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 50, 78), 2u);
     CHECK_EQ(screen_pixel(r, screen, 249, 78), 1u);
     CHECK_EQ(screen_pixel(r, screen, 100, 74), 1u);
 }
@@ -1514,7 +1523,7 @@ void close_window_repaints_and_unlinks() {
     CHECK_EQ(screen_pixel(r, screen, 50, 60), 0u);
     CHECK_EQ(screen_pixel(r, screen, 100, 65), 0u);
     CHECK_EQ(screen_pixel(r, screen, 249, 159), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 5, 5), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 5), 2u);
     CHECK_EQ(screen_pixel(r, screen, 5, 14), 1u);
     CHECK(refreshed(r, screen, 50, 60, 249, 159));
 }
@@ -1653,9 +1662,9 @@ void open_window_reads_32_bit_flags() {
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
     CHECK_EQ(r.get32(window + wd_Flags), flags);
-    CHECK_EQ(screen_pixel(r, screen, 58, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 58, 62), 2u);
     CHECK_EQ(screen_pixel(r, screen, 58, 67), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 241, 62), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 241, 62), 2u);
     CHECK_EQ(screen_pixel(r, screen, 240, 67), 2u);
 
     put_new_window(r, kNewWindow, 300, 60, 100, 50, WFLG_BORDERLESS, 0, 0, 0);
@@ -1669,7 +1678,7 @@ void open_window_reads_32_bit_flags() {
     const u32 tagged = open_win_tags(r, 0, tags);
     CHECK(tagged != 0);
     CHECK_EQ(r.get32(tagged + wd_Flags), flags);
-    CHECK_EQ(screen_pixel(r, screen, 18, 22), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 18, 22), 2u);
     CHECK_EQ(screen_pixel(r, screen, 11, 21), 3u);
 }
 
@@ -1859,7 +1868,7 @@ void window_rastport_origin_is_the_window_corner() {
     r.cpu().d[3] = 0;
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
     CHECK_EQ(screen_pixel(r, screen, 10, 20), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 11, 20), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 11, 20), 2u);
 }
 
 void window_text_below_the_border() {
@@ -2410,19 +2419,21 @@ void hit_rectangles_match_the_drawn_boxes() {
     const i32 depth_cx = (depth_box.x0 + depth_box.x1) / 2;
     const i32 depth_cy = (depth_box.y0 + depth_box.y1) / 2;
 
+    // The raised edge of an image: SHINEPEN (2) along the top and left,
+    // SHADOWPEN (1) along the bottom and right.
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_cy), 2u);
-    CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y0), 2u);
     CHECK_EQ(screen_pixel(r, screen, close_cx, close_box.y1), 1u);
-    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, close_box.x1, close_cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_box.y0), 0u);
+    CHECK_EQ(screen_pixel(r, screen, close_box.x0, close_box.y0), 2u);
 
-    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y0), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y0), 2u);
     CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_box.y1), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x1, depth_cy), 1u);
     CHECK_EQ(screen_pixel(r, screen, depth_cx, depth_cy), 2u);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_box.y0), 0u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0, depth_box.y0), 2u);
     CHECK_EQ(screen_pixel(r, screen, close_box.x1 + 1, close_box.y0), 0u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0 - 1, depth_box.y0), 0u);
 }
@@ -3311,15 +3322,19 @@ void size_gadget_sets_right_border() {
     CHECK(window != 0);
     CHECK_EQ(r.get8(window + wd_BorderRight), 14u);
     CHECK_EQ(r.get8(window + wd_BorderBottom), 2u);
-    // The size gadget: the dark corner and the light box inside it.
-    CHECK_EQ(window_pixel(r, window, 196, 96), 1u);
-    CHECK_EQ(window_pixel(r, window, 196, 90), 1u);
-    CHECK_EQ(window_pixel(r, window, 190, 96), 1u);
-    CHECK_EQ(window_pixel(r, window, 195, 95), 2u);
-    CHECK_EQ(window_pixel(r, window, 186, 50), 1u);
+    // The size image fills the corner of the two borders: its raised edge,
+    // the dark corner and the light box inside it.
+    CHECK_EQ(window_pixel(r, window, 186, 86), 2u);
+    CHECK_EQ(window_pixel(r, window, 199, 99), 1u);
+    CHECK_EQ(window_pixel(r, window, 196, 96), 0u);
+    CHECK_EQ(window_pixel(r, window, 195, 90), 1u);
+    CHECK_EQ(window_pixel(r, window, 190, 95), 1u);
+    CHECK_EQ(window_pixel(r, window, 194, 94), 2u);
+    // The sunken edge round the inside runs along the right border.
+    CHECK_EQ(window_pixel(r, window, 186, 50), 2u);
     CHECK_EQ(window_pixel(r, window, 185, 50), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 246, 156), 1u);
-    CHECK_EQ(screen_pixel(r, screen, 245, 155), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 245, 155), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 244, 154), 2u);
 }
 
 void size_bbottom_sets_bottom_border() {
@@ -3332,7 +3347,7 @@ void size_bbottom_sets_bottom_border() {
     CHECK(window != 0);
     CHECK_EQ(r.get8(window + wd_BorderBottom), 14u);
     CHECK_EQ(r.get8(window + wd_BorderRight), 2u);
-    CHECK_EQ(window_pixel(r, window, 100, 86), 1u);
+    CHECK_EQ(window_pixel(r, window, 100, 86), 2u);
     CHECK_EQ(window_pixel(r, window, 100, 85), 0u);
 }
 
@@ -3456,9 +3471,9 @@ void drag_moves_window() {
     const u32 layer = r.get32(window + wd_WLayer);
     CHECK_EQ(r.get16(layer + ly_MinX), 250u);
     CHECK_EQ(r.get16(layer + ly_MaxY), 279u);
-    // The active title bar (pen 3 inside the frame) is now at y 121..133.
+    // The active title bar (FILLPEN, 3, inside the frame) is now at y 121..133.
     CHECK_EQ(screen_pixel(r, screen, 300, 125), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 300, 120), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 300, 120), 2u);
     for (i32 y = 100; y < 120; ++y) {
         for (i32 x = 200; x < 250; ++x) {
             CHECK_EQ(screen_pixel(r, screen, x, y), 0u);
@@ -3535,10 +3550,12 @@ void resize_grows_and_clears() {
     CHECK_EQ(window_pixel(r, window, 232, 100), 0u);
     CHECK_EQ(window_pixel(r, window, 250, 170), 0u);
     CHECK_EQ(window_pixel(r, window, 100, 155), 0u);
-    // The size gadget at the new corner, in the window and on screen.
-    CHECK_EQ(window_pixel(r, window, 276, 186), 1u);
-    CHECK_EQ(window_pixel(r, window, 275, 185), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 476, 286), 1u);
+    // The size image at the new corner, in the window and on screen: the
+    // fill pen of the active window round the dark corner and light box.
+    CHECK_EQ(window_pixel(r, window, 276, 186), 3u);
+    CHECK_EQ(window_pixel(r, window, 275, 185), 1u);
+    CHECK_EQ(window_pixel(r, window, 274, 184), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 476, 286), 3u);
     // The old gadget position is interior now.
     CHECK_EQ(screen_pixel(r, screen, 435, 255), 0u);
 }
@@ -3907,18 +3924,21 @@ void open_window_links_and_draws_prop_gadget() {
     CHECK(window != 0);
     CHECK_EQ(r.get32(window + wd_FirstGadget), gad);
 
-    // Container frame (pen 1) at (20,20)..(35,79).
+    // Container frame at (20,20)..(35,79), sunken: SHADOWPEN (1) above and left,
+    // SHINEPEN (2) below and right.
     CHECK_EQ(window_pixel(r, window, 20, 20), 1u);
-    CHECK_EQ(window_pixel(r, window, 35, 20), 1u);
+    CHECK_EQ(window_pixel(r, window, 35, 20), 2u);
     CHECK_EQ(window_pixel(r, window, 20, 79), 1u);
-    CHECK_EQ(window_pixel(r, window, 35, 79), 1u);
-    // Knob at top (inner 21..34 x 21..78, height = 58 * 0x4000 / 0xFFFF = 14 -> y 21..34).
-    CHECK_EQ(window_pixel(r, window, 21, 21), 0u);
-    CHECK_EQ(window_pixel(r, window, 23, 21), 1u);
-    CHECK_EQ(window_pixel(r, window, 22, 22), 1u);
-    CHECK_EQ(window_pixel(r, window, 23, 23), 2u);
-    CHECK_EQ(window_pixel(r, window, 32, 32), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 73, 73), 2u);
+    CHECK_EQ(window_pixel(r, window, 35, 79), 2u);
+    // Knob at top (inner 21..34 x 21..78, height = 58 * 0x4000 / 0xFFFF = 14 -> y 21..34):
+    // raised, SHINEPEN above and left and SHADOWPEN below and right, round BACKGROUNDPEN (0).
+    CHECK_EQ(window_pixel(r, window, 21, 21), 2u);
+    CHECK_EQ(window_pixel(r, window, 25, 21), 2u);
+    CHECK_EQ(window_pixel(r, window, 34, 25), 1u);
+    CHECK_EQ(window_pixel(r, window, 25, 34), 1u);
+    CHECK_EQ(window_pixel(r, window, 23, 23), 0u);
+    CHECK_EQ(window_pixel(r, window, 32, 32), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 71, 71), 2u);
     // Container interior below knob is pen 0.
     CHECK_EQ(window_pixel(r, window, 25, 40), 0u);
     CHECK_EQ(window_pixel(r, window, 25, 78), 0u);
@@ -3951,8 +3971,8 @@ void wa_gadgets_tag_links_list() {
     CHECK_EQ(r.get32(window + wd_FirstGadget), kGad1);
     CHECK_EQ(r.get32(kGad1 + gg_NextGadget), kGad2);
     CHECK_EQ(r.get32(kGad2 + gg_NextGadget), 0u);
-    CHECK_EQ(window_pixel(r, window, 13, 18), 2u);
-    CHECK_EQ(window_pixel(r, window, 43, 18), 2u);
+    CHECK_EQ(window_pixel(r, window, 11, 16), 2u);
+    CHECK_EQ(window_pixel(r, window, 41, 16), 2u);
 }
 
 void add_and_remove_glist_positions() {
@@ -4014,16 +4034,18 @@ void new_modify_prop_moves_knob() {
     r.put32(kNewWindow + nw_FirstGadget, 0);
     CHECK(window != 0);
 
-    // Initially knob is at top (inner y 21..68, knob_h = 12 -> y 21..32).
-    CHECK_EQ(window_pixel(r, window, 25, 22), 2u);
+    // Initially knob is at top (inner y 21..68, knob_h = 11 -> y 21..31); its
+    // top edge is SHINEPEN (2), its inside and the container's BACKGROUNDPEN (0).
+    CHECK_EQ(window_pixel(r, window, 25, 21), 2u);
     CHECK_EQ(window_pixel(r, window, 25, 65), 0u);
 
     r.intuition.new_modify_prop(kGad1, window, AUTOKNOB | FREEVERT, 0, MAXPOT, MAXBODY,
                                 MAXBODY / 4, 1);
     CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT);
-    // Knob moved to bottom (y 57..68).
-    CHECK_EQ(window_pixel(r, window, 25, 22), 0u);
-    CHECK_EQ(window_pixel(r, window, 25, 65), 2u);
+    // Knob moved to bottom (y 58..68).
+    CHECK_EQ(window_pixel(r, window, 25, 21), 0u);
+    CHECK_EQ(window_pixel(r, window, 25, 57), 0u);
+    CHECK_EQ(window_pixel(r, window, 25, 58), 2u);
 }
 
 void relative_geometry_follows_resize() {
@@ -4042,14 +4064,15 @@ void relative_geometry_follows_resize() {
     r.put32(kNewWindow + nw_FirstGadget, 0);
     CHECK(window != 0);
 
-    // At 200x100: box x = 190..197, y = 16..89; knob at x 191..196, y 17..34.
-    CHECK_EQ(window_pixel(r, window, 194, 24), 2u);
+    // At 200x100: box x = 190..197, y = 16..89; knob at x 191..196, y 17..34,
+    // its top edge SHINEPEN.
+    CHECK_EQ(window_pixel(r, window, 194, 17), 2u);
     CHECK_EQ(window_pixel(r, window, 194, 80), 0u);
 
     r.intuition.size_window_to(window, 300, 160);
     // At 300x160: box x = 290..297, y = 16..149; knob at x 291..296, y 17..49.
-    CHECK_EQ(window_pixel(r, window, 194, 24), 0u);
-    CHECK_EQ(window_pixel(r, window, 294, 24), 2u);
+    CHECK_EQ(window_pixel(r, window, 194, 17), 0u);
+    CHECK_EQ(window_pixel(r, window, 294, 17), 2u);
     CHECK_EQ(window_pixel(r, window, 294, 140), 0u);
 }
 
@@ -4498,7 +4521,7 @@ void gadget_lvos_from_guest_calls() {
     r.cpu().a[2] = 0;
     r.cpu().d[0] = 2;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshGList), ExitReason::Halt);
-    CHECK_EQ(window_pixel(r, window, 25, 22), 2u);
+    CHECK_EQ(window_pixel(r, window, 25, 21), 2u);
 
     r.cpu().a[0] = kGad1;
     r.cpu().a[1] = window;
@@ -4511,7 +4534,7 @@ void gadget_lvos_from_guest_calls() {
     r.cpu().d[5] = 1;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::NewModifyProp), ExitReason::Halt);
     CHECK_EQ(r.get16(kProp1 + pi_VertPot), MAXPOT);
-    CHECK_EQ(window_pixel(r, window, 25, 65), 2u);
+    CHECK_EQ(window_pixel(r, window, 25, 58), 2u);
 
     r.cpu().a[0] = window;
     r.cpu().a[1] = kGad1;
@@ -4535,7 +4558,7 @@ void gadget_lvos_from_guest_calls() {
     r.cpu().d[4] = MAXBODY / 4;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ModifyProp), ExitReason::Halt);
     CHECK_EQ(r.get16(kProp1 + pi_VertPot), 0u);
-    CHECK_EQ(window_pixel(r, window, 25, 22), 2u);
+    CHECK_EQ(window_pixel(r, window, 25, 21), 2u);
 
     r.cpu().a[0] = kGad1;
     r.cpu().a[1] = window;
@@ -4897,22 +4920,104 @@ void depth2_fallback_chrome_pens() {
     r.put32(kNewWindow + nw_FirstGadget, 0);
     CHECK(active != 0);
 
-    CHECK_EQ(screen_pixel(r, screen, 20, 20), 1u);
+    // The active window: SHINEPEN (2) edge, FILLPEN (3) bar, FILLTEXTPEN (1) title.
+    CHECK_EQ(screen_pixel(r, screen, 20, 20), 2u);
     CHECK_EQ(screen_pixel(r, screen, 100, 25), 3u);
-    CHECK_EQ(screen_pixel(r, screen, 39, 23), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 39, 23), 1u);
+    // The close image: the light box of its glyph, the fill pen round it and
+    // its SHINEPEN top edge.
     CHECK_EQ(screen_pixel(r, screen, 29, 27), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 25, 27), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 28, 22), 1u);
-    CHECK_EQ(window_pixel(r, active, 25, 25), 2u);
-    CHECK_EQ(window_pixel(r, active, 23, 21), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 25, 27), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 28, 22), 2u);
+    // The knob: SHINEPEN on top, BACKGROUNDPEN inside its edges and in the container.
+    CHECK_EQ(window_pixel(r, active, 25, 21), 2u);
+    CHECK_EQ(window_pixel(r, active, 25, 25), 0u);
     CHECK_EQ(window_pixel(r, active, 25, 50), 0u);
 
+    // The inactive window: BACKGROUNDPEN (0) bar, TEXTPEN (1) title.
     put_new_window(r, kNewWindow, 260, 20, 160, 80, WFLG_CLOSEGADGET, kWinTitle, 0, 0);
     const u32 inactive = open_win(r, kNewWindow);
     CHECK(inactive != 0);
     CHECK_EQ(screen_pixel(r, screen, 320, 25), 0u);
-    CHECK_EQ(screen_pixel(r, screen, 260, 20), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 260, 20), 2u);
     CHECK_EQ(screen_pixel(r, screen, 279, 23), 1u);
+}
+
+void the_look_follows_the_number_of_planes() {
+    CHECK(chrome::style_for_depth(1) == chrome::Style::Classic);
+    CHECK(chrome::style_for_depth(4) == chrome::Style::Classic);
+    CHECK(chrome::style_for_depth(7) == chrome::Style::Classic);
+    CHECK(chrome::style_for_depth(8) == chrome::Style::Modern);
+}
+
+// The classic chrome is drawn in the pens of the screen's DrawInfo once one is
+// made, and until then in the pens IPrefs sent for the screen's depth.
+void classic_chrome_follows_the_draw_info_or_else_the_pen_prefs() {
+    GfxRig r;
+    const u32 size = put_pen_prefs(r, 0, 3);
+    set_iprefs(r, kIPrefs, size, 9);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    // The prefs' BARBLOCKPEN.
+    CHECK_EQ(screen_pixel(r, screen, 5, 5), 3u);
+
+    // Once there is a DrawInfo, its FILLPEN fills the frame of an active
+    // window and its BACKGROUNDPEN that of an inactive one.
+    const u32 pens = r.get32(r.intuition.screen_draw_info(screen) + dri_Pens);
+    r.put16(pens + 5 * 2, 2);
+    r.put16(pens + 7 * 2, 1);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    CHECK(open_win(r, kNewWindow) != 0);
+    put_new_window(r, kNewWindow, 300, 60, 200, 100, 0, 0, 0, 0);
+    CHECK(open_win(r, kNewWindow) != 0);
+    CHECK_EQ(screen_pixel(r, screen, 100, 65), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 350, 65), 1u);
+}
+
+// Activating a window gives its borders the fill pen, as it does its bar, and
+// the window that gives up the activation the background pen. The right
+// border of a window with a size gadget is wide enough to show it.
+void classic_borders_change_colour_with_the_activation() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 30, 30, 180, 100, WFLG_ACTIVATE | WFLG_SIZEGADGET, 0, 0, 0);
+    const u32 first = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 250, 30, 180, 100, WFLG_SIZEGADGET, 0, 0, 0);
+    const u32 second = open_win(r, kNewWindow);
+    CHECK(first != 0 && second != 0);
+    CHECK_EQ(r.intuition.active_window(), first);
+    CHECK_EQ(screen_pixel(r, screen, 30 + 180 - 8, 30 + 50), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 250 + 180 - 8, 30 + 50), 0u);
+
+    press(r, 300, 80);
+    release(r, 300, 80);
+    CHECK_EQ(r.intuition.active_window(), second);
+    CHECK_EQ(screen_pixel(r, screen, 30 + 180 - 8, 30 + 50), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 250 + 180 - 8, 30 + 50), 3u);
+}
+
+// A classic knob is BACKGROUNDPEN, and FILLPEN while it is dragged.
+void classic_knob_takes_the_fill_pen_while_dragged() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_prop_info(r, kProp1, AUTOKNOB | FREEVERT, 0, 0, MAXBODY, MAXBODY / 4);
+    put_gadget(r, kGad1, 0, 20, 20, 12, 40, 0, GACT_IMMEDIATE | GACT_RELVERIFY,
+               GTYP_PROPGADGET, kProp1);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+
+    CHECK_EQ(window_pixel(r, window, 25, 25), 0u);
+    press(r, 75, 75);
+    CHECK_EQ(window_pixel(r, window, 25, 25), 3u);
+    release(r, 75, 75);
+    CHECK_EQ(window_pixel(r, window, 25, 25), 0u);
 }
 
 void activation_switch_redraws_both_bars() {
@@ -5031,7 +5136,7 @@ void held_bar_button_shows_pressed_while_the_pointer_is_over_it() {
     CHECK_EQ(get_msg(r, port), 0u);
 }
 
-void held_bar_button_uses_the_fill_pen_on_a_four_colour_screen() {
+void held_bar_button_swaps_its_edges_on_a_four_colour_screen() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
@@ -5044,15 +5149,21 @@ void held_bar_button_uses_the_fill_pen_on_a_four_colour_screen() {
     const Rect depth_box = Intuition::depth_box_rect(50, 60, 200);
     const i32 cx = (depth_box.x0 + depth_box.x1) / 2;
     const i32 cy = (depth_box.y0 + depth_box.y1) / 2;
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 0u);
-    CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), 1u);
+    // The image's SHINEPEN edge on the left, SHADOWPEN on the right and
+    // FILLPEN (3) between.
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x1 - 1, cy), 3u);
     press(r, cx, cy);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 3u);
+    // Held, the edges swap their pens; the left one is the dark line that ends
+    // the neighbour, which stays.
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 1u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 2u);
     CHECK_EQ(screen_pixel(r, screen, depth_box.x0, cy), 1u);
-    CHECK_EQ(screen_pixel(r, screen, cx - 1, cy - 1), 2u);
-    CHECK_EQ(screen_pixel(r, screen, cx - 2, cy - 2), 3u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x1 - 1, cy), 3u);
     release(r, cx, cy);
-    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 0u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x0 + 1, cy), 2u);
+    CHECK_EQ(screen_pixel(r, screen, depth_box.x1, cy), 1u);
 }
 
 void fill_backdrop_rect(GfxRig& r, u32 screen, i32 x0, i32 y0, i32 x1, i32 y1, u8 pen) {
@@ -5260,8 +5371,8 @@ void depth2_screen_has_no_corners_and_no_shadow() {
     const u32 win = open_win(r, kNewWindow);
     CHECK(win != 0);
 
-    // No corner cut on 2-plane screen.
-    CHECK_EQ(screen_pixel(r, screen, 50, 40), 1u);
+    // No corner cut on 2-plane screen: the raised edge reaches both corners.
+    CHECK_EQ(screen_pixel(r, screen, 50, 40), 2u);
     CHECK_EQ(screen_pixel(r, screen, 169, 40), 1u);
 
     // No shadow on 2-plane screen.
@@ -6118,8 +6229,9 @@ void open_workbench_rebuilds_the_screen_for_the_mode_of_the_prefs() {
     CHECK_EQ(r.get8(window_bitmap(r, window) + bm_Depth), 4u);
     CHECK(r.get32(window_bitmap(r, window) + bm_Planes) != old_window_planes);
 
-    // The screen and the window are drawn again in the classic pens.
-    CHECK_EQ(screen_pixel(r, screen, 20, 30), 1u);
+    // The screen and the window are drawn again in the classic pens: the
+    // window's raised edge starts in SHINEPEN.
+    CHECK_EQ(screen_pixel(r, screen, 20, 30), 2u);
     CHECK_EQ(screen_pixel(r, screen, 400, 14), 1u);
     CHECK(highest_pen_on_screen(r, screen) <= 3u);
     CHECK(logged("intuition: Workbench screen 640x512x4"));
@@ -6317,8 +6429,8 @@ void open_workbench_keeps_the_screen_when_memory_runs_out() {
 }
 
 // The window chrome, the title bars and the gadgets of screens of one and
-// four planes use the pens 0 to 3 of the classic look, which a screen of one
-// plane shows as 0 and 1; nothing is drawn in a pen above 3.
+// four planes use the DrawInfo's pens, 0 to 3 by default, which a screen of
+// one plane shows as 0 and 1; nothing is drawn in a pen above 3.
 void shallow_screens_draw_the_chrome_in_the_classic_pens() {
     for (const u32 depth : {1u, 4u}) {
         GfxRig r;
@@ -6336,11 +6448,11 @@ void shallow_screens_draw_the_chrome_in_the_classic_pens() {
         CHECK(open_win(r, kNewWindow) != 0);
 
         const u32 mask = (1u << depth) - 1;
-        CHECK_EQ(screen_pixel(r, screen, 20, 20), 1u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 20, 20), 2u & mask);
         CHECK_EQ(screen_pixel(r, screen, 100, 25), 3u & mask);
         CHECK_EQ(screen_pixel(r, screen, 29, 27), 2u & mask);
-        CHECK_EQ(screen_pixel(r, screen, 25, 27), 0u);
-        CHECK_EQ(screen_pixel(r, screen, 28, 22), 1u);
+        CHECK_EQ(screen_pixel(r, screen, 25, 27), 3u & mask);
+        CHECK_EQ(screen_pixel(r, screen, 28, 22), 2u & mask);
         CHECK(highest_pen_on_screen(r, screen) <= 3u);
     }
 }
@@ -6762,11 +6874,13 @@ void menu_right_press_opens_the_bar_and_the_second_item_picks() {
     // No title opens until the pointer reaches one.
     CHECK_EQ(screen_pixel(r, screen, 60, 40), under);
 
+    // The open title and the highlighted item are inverted: BARBLOCKPEN (2)
+    // turns to BARDETAILPEN's (1) on two planes.
     menu_move(r, 60, 5);
-    CHECK_EQ(screen_pixel(r, screen, 54, 5), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 54, 5), 1u);
     CHECK_EQ(screen_pixel(r, screen, 100, 30), 2u);
     menu_move(r, 60, 30);
-    CHECK_EQ(screen_pixel(r, screen, 100, 30), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 30), 1u);
     menu_release(r, 60, 30);
 
     const u32 msg = window_message(r, window);
@@ -6919,13 +7033,13 @@ void menu_moving_off_the_box_clears_the_item_but_keeps_the_title() {
 
     menu_press(r, 10, 5);
     menu_move(r, 10, 21);
-    CHECK_EQ(screen_pixel(r, screen, 60, 21), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 60, 21), 1u);
     menu_move(r, 300, 200);
     CHECK_EQ(screen_pixel(r, screen, 60, 21), 2u);
     // Past the last title on the bar the open title stays open too.
     menu_move(r, 300, 5);
     CHECK_EQ(screen_pixel(r, screen, 60, 21), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 6, 5), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 6, 5), 1u);
     menu_release(r, 300, 5);
 
     const u32 msg = window_message(r, window);
@@ -6951,6 +7065,35 @@ void menu_disabled_title_never_opens() {
     const u32 msg = window_message(r, window);
     CHECK(msg != 0);
     CHECK_EQ(r.get16(msg + im_Code), static_cast<u32>(MENUNULL));
+    reply_msg(r, msg);
+}
+
+// On a screen of four colours a menu is drawn in the pens of the screen bar:
+// BARBLOCKPEN paper in a frame of BARDETAILPEN, the highlighted item inverted,
+// and nothing cast beside the box.
+void classic_menu_boxes_are_framed_square_and_cast_no_shadow() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    fill_backdrop_rect(r, screen, 0, 15, 639, 399, 3);
+    put_two_title_strip(r);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, IDCMP_MENUPICK);
+    set_strip(r, window, kMenuA);
+    const u32 beside = screen_pixel(r, screen, 79, 40);
+    const u32 below = screen_pixel(r, screen, 60, 47);
+
+    menu_press(r, 10, 5);
+    menu_move(r, 10, 21);
+    CHECK_EQ(screen_pixel(r, screen, 4, 30), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 5, 30), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 60, 21), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 79, 40), beside);
+    CHECK_EQ(screen_pixel(r, screen, 60, 47), below);
+
+    menu_release(r, 300, 200);
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
     reply_msg(r, msg);
 }
 
@@ -7161,7 +7304,8 @@ void draw_image_takes_word_offsets_and_follows_the_chain() {
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DrawImage), ExitReason::Halt);
     CHECK_EQ(screen_pixel(r, screen, 2, 1), 2u);
     CHECK_EQ(screen_pixel(r, screen, 3, 1), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 4, 1), 0u);
+    // Beside the image the screen bar shows, BARBLOCKPEN (2).
+    CHECK_EQ(screen_pixel(r, screen, 4, 1), 2u);
 
     r.cpu().a[0] = rp;
     r.cpu().a[1] = first;
@@ -7194,14 +7338,15 @@ void draw_image_leaves_out_what_it_cannot_draw() {
     r.put32(negative + img_NextImage, deep);
     r.put32(deep + img_NextImage, good);
     r.put32(good + img_NextImage, empty);
+    // What the images leave out shows the screen bar, BARBLOCKPEN (2).
     draw_image_at(r, rp, empty, 10, 10);
     for (i32 x = 8; x < 20; ++x) {
-        CHECK_EQ(screen_pixel(r, screen, x, 10), 0u);
+        CHECK_EQ(screen_pixel(r, screen, x, 10), 2u);
     }
     for (i32 x = 30; x < 34; ++x) {
         CHECK_EQ(screen_pixel(r, screen, x, 10), 1u);
     }
-    CHECK_EQ(screen_pixel(r, screen, 34, 10), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 34, 10), 2u);
 
     // PlanePick asks for a second plane the image's Depth does not have:
     // that bit of the pen stays clear.
@@ -7213,7 +7358,7 @@ void draw_image_leaves_out_what_it_cannot_draw() {
     draw_image_at(r, rp, good, 200, 10);
     draw_image_at(r, rp, good, 10, 200);
     draw_image_at(r, rp, good, -100, -100);
-    CHECK_EQ(screen_pixel(r, screen, 99, 10), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 99, 10), 2u);
     draw_image_at(r, 0, good, 10, 10);
     draw_image_at(r, rp, 0, 10, 10);
 }
@@ -7259,6 +7404,8 @@ void draw_image_complemented_inverts_every_pen_of_the_image_box() {
     // A four-pixel image whose bits are 1010 on a cleared row and on a row
     // of pen 2: what lay under the image makes no difference, and the
     // image's clear pixels show as much as its set ones.
+    r.graphics.set_pens(rp, 0, 0, JAM1);
+    r.graphics.rect_fill(rp, 10, 10, 13, 10);
     r.graphics.set_pens(rp, 2, 0, JAM1);
     r.graphics.rect_fill(rp, 10, 12, 13, 12);
     const u32 data = kData + 0x1800;
@@ -7270,7 +7417,7 @@ void draw_image_complemented_inverts_every_pen_of_the_image_box() {
         CHECK_EQ(screen_pixel(r, screen, 11, y), 3u);
         CHECK_EQ(screen_pixel(r, screen, 12, y), 2u);
         CHECK_EQ(screen_pixel(r, screen, 13, y), 3u);
-        CHECK_EQ(screen_pixel(r, screen, 14, y), 0u);
+        CHECK_EQ(screen_pixel(r, screen, 14, y), 2u);
     }
 
     // The same image drawn plainly writes its own pens.
@@ -7285,7 +7432,7 @@ void draw_image_complemented_inverts_every_pen_of_the_image_box() {
     r.intuition.draw_image_complemented(rp, solid, 20, 10);
     CHECK_EQ(screen_pixel(r, screen, 20, 10), 2u);
     CHECK_EQ(screen_pixel(r, screen, 23, 10), 2u);
-    CHECK_EQ(screen_pixel(r, screen, 24, 10), 0u);
+    CHECK_EQ(screen_pixel(r, screen, 24, 10), 2u);
 }
 
 }
@@ -9086,10 +9233,14 @@ int main() {
     depth8_chrome_pixel_spot_checks();
     depth8_prop_gadget_chrome_pixels();
     depth2_fallback_chrome_pens();
+    the_look_follows_the_number_of_planes();
+    classic_chrome_follows_the_draw_info_or_else_the_pen_prefs();
+    classic_borders_change_colour_with_the_activation();
+    classic_knob_takes_the_fill_pen_while_dragged();
     activation_switch_redraws_both_bars();
     bar_buttons_are_centred_and_mirror_each_other();
     held_bar_button_shows_pressed_while_the_pointer_is_over_it();
-    held_bar_button_uses_the_fill_pen_on_a_four_colour_screen();
+    held_bar_button_swaps_its_edges_on_a_four_colour_screen();
     rounded_top_corners_on_depth8_show_backdrop_and_chrome();
     drop_shadow_darkens_backdrop_and_behind_window_only();
     moving_and_closing_window_removes_old_shadow();
@@ -9134,6 +9285,7 @@ int main() {
     menu_subitem_pick_carries_the_subitem_number();
     menu_moving_off_the_box_clears_the_item_but_keeps_the_title();
     menu_disabled_title_never_opens();
+    classic_menu_boxes_are_framed_square_and_cast_no_shadow();
     menu_on_a_chrome_screen_highlights_ghosts_and_restores();
     menu_rmbtrap_window_still_gets_menudown_and_menuup();
     menu_mode_ends_without_a_pick_when_the_strip_or_window_goes();
