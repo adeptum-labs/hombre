@@ -37,6 +37,8 @@ TEST_DISK := $(BUILD)/test-disk.dms
 PIC_DISK  := $(BUILD)/pic-disk.adf
 # A hard disk image whose one partition, DH0:, holds the test disk's volume.
 TEST_HDF  := $(BUILD)/test.hdf
+# The same partition inside a GPT of a disk with 4096 byte sectors.
+TEST_HDF4K := $(BUILD)/test-gpt4k.hdf
 ADFTOOL   := $(BUILD)/tools/adftool
 DISK      ?= $(TEST_DISK)
 export DISK DISK1 DISK2 DISK3
@@ -236,7 +238,7 @@ run: image disk-image
 
 # The boots attach the generated test disk whatever DISK says, so they stay
 # hermetic. The main boot expects its size in 512-byte sectors, rounded up.
-check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(ADFTOOL) $(ZERO_DISK) $(CORRUPT_DISK)
+check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(TEST_HDF4K) $(ADFTOOL) $(ZERO_DISK) $(CORRUPT_DISK)
 	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
 	tools/boot_check.sh --disk $(TEST_DISK) "Hombre loader" \
 	    "kernel loaded: entry=0xffffffff8010" "Hombre kernel booted" "usable memory:" \
@@ -289,6 +291,13 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	tools/boot_check.sh --no-disk --hdf $(BUILD)/check.hdf --hdf-bus nvme4k \
 	    --keys "e c h o spc h e j spc shift-less d h 0 shift-dot n o t e ret w h y ret" \
 	    "nvme: ns 1: 2056 sectors, 4096-byte sectors" \
+	    "hd1: DH0: HombreTest (OFS), 16384 blocks, bootpri 0, bootable" \
+	    "startup: ended, returned 0" "shell: builtin why returned 0"
+	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "hej"
+	cp $(TEST_HDF4K) $(BUILD)/check.hdf
+	tools/boot_check.sh --no-disk --hdf $(BUILD)/check.hdf --hdf-bus nvme4k \
+	    --keys "e c h o spc h e j spc shift-less d h 0 shift-dot n o t e ret w h y ret" \
+	    "hd1: table GPT, 1 partitions" \
 	    "hd1: DH0: HombreTest (OFS), 16384 blocks, bootpri 0, bootable" \
 	    "startup: ended, returned 0" "shell: builtin why returned 0"
 	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "hej"
@@ -521,6 +530,9 @@ $(MKHDF): tools/mkhdf.cpp $(COMMON_HOBJ)
 
 $(TEST_HDF): $(MKHDF) $(TEST_DISK)
 	$(MKHDF) $@ $(TEST_DISK)
+
+$(TEST_HDF4K): $(MKHDF) $(TEST_DISK)
+	$(MKHDF) --gpt4k $@ $(TEST_DISK)
 
 MKDISK    := $(BUILD)/tools/mkdisk
 

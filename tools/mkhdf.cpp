@@ -159,11 +159,31 @@ bool load_floppy(const char* path, std::vector<u8>& image) {
     return true;
 }
 
+// The RDB disk as one GPT partition of a disk with 4096 byte sectors, as an
+// NVMe drive formatted that way has it. The partition starts at 1 MiB.
+std::vector<u8> wrap_in_gpt4k(const std::vector<u8>& rdb) {
+    constexpr u64 kLba = 4096;
+    constexpr u64 kFirstLba = 256;
+    const u64 rdb_lbas = (rdb.size() + kLba - 1) / kLba;
+    // Room behind the partition for the backup entry array and header.
+    const u64 disk_lbas = kFirstLba + rdb_lbas + 8;
+    std::vector<u8> disk(disk_lbas * kLba, 0);
+    std::memcpy(disk.data() + kFirstLba * kLba, rdb.data(), rdb.size());
+    write_gpt(disk, {{kFirstLba, kFirstLba + rdb_lbas - 1, true}}, kLba);
+    return disk;
+}
+
 }
 
 int main(int argc, char** argv) {
+    bool gpt4k = false;
+    if (argc > 1 && std::strcmp(argv[1], "--gpt4k") == 0) {
+        gpt4k = true;
+        --argc;
+        ++argv;
+    }
     if (argc < 3) {
-        std::fprintf(stderr, "usage: mkhdf <out.hdf> <adf>...\n");
+        std::fprintf(stderr, "usage: mkhdf [--gpt4k] <out.hdf> <adf>...\n");
         return 2;
     }
     std::vector<std::vector<u8>> floppies;
@@ -214,6 +234,9 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "%s: cannot build its partition\n", argv[2 + i]);
             return 1;
         }
+    }
+    if (gpt4k) {
+        disk = wrap_in_gpt4k(disk);
     }
     std::FILE* f = std::fopen(argv[1], "wb");
     if (f == nullptr) {

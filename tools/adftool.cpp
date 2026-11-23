@@ -163,11 +163,19 @@ bool read_partition(void* ctx, u32 block, u8* out) {
     return read_disk(const_cast<std::vector<u8>*>(disk.image), disk.first + block, out);
 }
 
-// Mounts the first Amiga partition of a hard disk image.
+// Mounts the first Amiga partition of a hard disk image. An image of a disk
+// with 4096 byte sectors has its partition table in those, so both sizes are
+// tried.
 FsError mount_hard_disk(const std::vector<u8>& image, AdfVolume& volume) {
     AmigaPartitions parts{};
-    const RdbError error = find_amiga_partitions(
-        read_disk, const_cast<std::vector<u8>*>(&image), image.size() / 512, parts);
+    RdbError error = RdbError::NoPartitions;
+    for (const u32 lba_bytes : {512u, 4096u}) {
+        error = find_amiga_partitions(read_disk, const_cast<std::vector<u8>*>(&image),
+                                      image.size() / 512, parts, lba_bytes);
+        if (error == RdbError::Ok && parts.count > 0) {
+            break;
+        }
+    }
     if (error != RdbError::Ok || parts.count == 0) {
         return FsError::NotDos;
     }
