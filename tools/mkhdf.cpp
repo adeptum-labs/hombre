@@ -174,11 +174,48 @@ std::vector<u8> wrap_in_gpt4k(const std::vector<u8>& rdb) {
     return disk;
 }
 
+// An empty partition asked for with --empty.
+struct EmptySpec {
+    u32 dos_type;
+    std::string name;
+};
+
+bool parse_empty(const char* type, const char* name, EmptySpec& out) {
+    if (std::strcmp(type, "OFS") == 0) {
+        out.dos_type = 0x444F5300u;
+    } else if (std::strcmp(type, "FFS") == 0) {
+        out.dos_type = 0x444F5301u;
+    } else {
+        std::fprintf(stderr, "mkhdf: type %s is not OFS or FFS\n", type);
+        return false;
+    }
+    const usize length = std::strlen(name);
+    if (length == 0 || length > 30 || std::strpbrk(name, ":/") != nullptr) {
+        std::fprintf(stderr, "mkhdf: bad volume name %s\n", name);
+        return false;
+    }
+    out.name = name;
+    return true;
+}
+
+void usage() {
+    std::fprintf(stderr,
+                 "usage: mkhdf [--gpt4k] [--size <MiB>] [--empty <OFS|FFS> <name>] "
+                 "<out.hdf> [<adf>...]\n"
+                 "  each floppy becomes a partition holding its files; the first is\n"
+                 "  bootable\n"
+                 "  --empty adds an empty formatted partition after them\n"
+                 "  --size grows the last partition until the disk is that large\n"
+                 "  --gpt4k puts the disk in a GPT on a disk with 4096 byte sectors\n");
+}
+
 }
 
 int main(int argc, char** argv) {
     bool gpt4k = false;
     unsigned long size_mib = 0;
+    bool empty = false;
+    EmptySpec empty_spec{};
     while (argc > 1 && argv[1][0] == '-') {
         if (std::strcmp(argv[1], "--gpt4k") == 0) {
             gpt4k = true;
@@ -191,16 +228,22 @@ int main(int argc, char** argv) {
             }
             --argc;
             ++argv;
+        } else if (std::strcmp(argv[1], "--empty") == 0 && argc > 3) {
+            if (!parse_empty(argv[2], argv[3], empty_spec)) {
+                return 2;
+            }
+            empty = true;
+            argc -= 2;
+            argv += 2;
         } else {
-            break;
+            usage();
+            return 2;
         }
         --argc;
         ++argv;
     }
-    if (argc < 3) {
-        std::fprintf(stderr,
-                     "usage: mkhdf [--gpt4k] [--size <MiB>] <out.hdf> <adf>...\n"
-                     "  --size grows the last partition until the RDB disk is that large\n");
+    if (argc < 2 || (argc < 3 && !empty)) {
+        usage();
         return 2;
     }
     std::vector<std::vector<u8>> floppies;
@@ -217,8 +260,10 @@ int main(int argc, char** argv) {
     geometry.rdb_cylinders = kRdbCylinders;
     std::vector<RdbPartitionSpec> parts;
     u32 cylinder = kRdbCylinders;
-    for (usize i = 0; i < floppies.size(); ++i) {
-        u32 blocks = static_cast<u32>(floppies[i].size() / 512);
+    const usize count = floppies.size() + (empty ? 1 : 0);
+    for (usize i = 0; i < count; ++i) {
+        const bool from_floppy = i < floppies.size();
+        u32 blocks = from_floppy ? static_cast<u32>(floppies[i].size() / 512) : 0;
         if (blocks < kMinPartitionBlocks) {
             blocks = kMinPartitionBlocks;
         }
@@ -227,8 +272,9 @@ int main(int argc, char** argv) {
         spec.name = "DH" + std::to_string(i);
         spec.low_cyl = cylinder;
         spec.high_cyl = cylinder + cylinders - 1;
-        spec.dos_type = 0x444F5300u | floppies[i][3];
-        spec.bootable = i == 0;
+        spec.dos_type = from_floppy ? 0x444F5300u | floppies[i][3] : empty_spec.dos_type;
+        // An empty partition has nothing to boot.
+        spec.bootable = i == 0 && from_floppy;
         parts.push_back(spec);
         cylinder += cylinders;
     }
@@ -243,15 +289,23 @@ int main(int argc, char** argv) {
     }
     geometry.cylinders = cylinder;
     std::vector<u8> disk = build_rdb_disk(geometry, parts);
-    for (usize i = 0; i < floppies.size(); ++i) {
+    for (usize i = 0; i < count; ++i) {
+        Window window{&disk, parts[i].low_cyl * kSectorsPerTrack};
+        const BlockSource source{&window, window_read, window_write};
+        const u32 blocks = (parts[i].high_cyl - parts[i].low_cyl + 1) * kSectorsPerTrack;
+        if (i >= floppies.size()) {
+            if (adf_format(source, 0, blocks, 2, empty_spec.dos_type, empty_spec.name.c_str(),
+                           AmigaDate{0, 0, 0}) != FsError::Ok) {
+                std::fprintf(stderr, "mkhdf: cannot format %s\n", empty_spec.name.c_str());
+                return 1;
+            }
+            continue;
+        }
         AdfVolume from{};
         if (adf_mount(floppies[i].data(), floppies[i].size(), from) != FsError::Ok) {
             std::fprintf(stderr, "%s: cannot mount\n", argv[2 + i]);
             return 1;
         }
-        Window window{&disk, parts[i].low_cyl * kSectorsPerTrack};
-        const BlockSource source{&window, window_read, window_write};
-        const u32 blocks = (parts[i].high_cyl - parts[i].low_cyl + 1) * kSectorsPerTrack;
         AdfVolume to{};
         if (adf_format(source, 0, blocks, 2, from.dos_type, from.name, AmigaDate{0, 0, 0}) !=
                 FsError::Ok ||
