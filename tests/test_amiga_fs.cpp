@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -123,6 +124,67 @@ void free_block(std::vector<u8>& image, u32 block, bool is_free) {
     u8& byte = word[3 - (bit % 32) / 8];
     const u8 mask = static_cast<u8>(1u << (bit % 8));
     byte = is_free ? static_cast<u8>(byte | mask) : static_cast<u8>(byte & ~mask);
+}
+
+// A device that starts with the image after `padding` zero blocks.
+struct ImageDevice {
+    const std::vector<u8>* bytes;
+    u32 fail_block = 0xFFFFFFFFu;
+};
+
+bool read_image_device(void* ctx, u32 block, u8* out) {
+    ImageDevice& d = *static_cast<ImageDevice*>(ctx);
+    if (block == d.fail_block || block >= d.bytes->size() / kBlock) {
+        return false;
+    }
+    std::memcpy(out, d.bytes->data() + static_cast<usize>(block) * kBlock, kBlock);
+    return true;
+}
+
+// A big volume held as the blocks that exist; the others read as zero.
+struct SparseDevice {
+    std::map<u32, std::vector<u8>> blocks;
+
+    u8* at(u32 block) {
+        auto it = blocks.find(block);
+        if (it == blocks.end()) {
+            it = blocks.emplace(block, std::vector<u8>(kBlock, 0)).first;
+        }
+        return it->second.data();
+    }
+};
+
+bool read_sparse_device(void* ctx, u32 block, u8* out) {
+    const SparseDevice& d = *static_cast<SparseDevice*>(ctx);
+    const auto it = d.blocks.find(block);
+    if (it == d.blocks.end()) {
+        std::memset(out, 0, kBlock);
+        return true;
+    }
+    std::memcpy(out, it->second.data(), kBlock);
+    return true;
+}
+
+u32 block_long(const u8* block, u32 index) {
+    const u8* p = block + static_cast<usize>(index) * 4;
+    return (u32{p[0]} << 24) | (u32{p[1]} << 16) | (u32{p[2]} << 8) | u32{p[3]};
+}
+
+void set_block_long(u8* block, u32 index, u32 value) {
+    u8* p = block + static_cast<usize>(index) * 4;
+    p[0] = static_cast<u8>(value >> 24);
+    p[1] = static_cast<u8>(value >> 16);
+    p[2] = static_cast<u8>(value >> 8);
+    p[3] = static_cast<u8>(value);
+}
+
+void set_block_sum(u8* block) {
+    set_block_long(block, 5, 0);
+    u32 sum = 0;
+    for (u32 i = 0; i < 128; ++i) {
+        sum += block_long(block, i);
+    }
+    set_block_long(block, 5, 0u - sum);
 }
 
 // The reference hash, written out again so the reader is not checked against
@@ -929,7 +991,7 @@ void error_names() {
     const FsError all[] = {FsError::Ok,       FsError::ImageSize, FsError::NotDos,
                            FsError::UnsupportedFs, FsError::BadChecksum, FsError::BadBlock,
                            FsError::NotFound, FsError::NotFile,   FsError::NotDir,
-                           FsError::Loop,     FsError::NameTooLong};
+                           FsError::Loop,     FsError::NameTooLong, FsError::Io};
     for (usize i = 0; i < sizeof(all) / sizeof(all[0]); ++i) {
         CHECK(fs_error_name(all[i])[0] != '\0');
         for (usize j = i + 1; j < sizeof(all) / sizeof(all[0]); ++j) {
@@ -970,6 +1032,131 @@ void used_blocks_come_from_the_bitmap() {
     set32(image, root, 79, 0);
     adf_fix_checksum(image, root);
     CHECK_EQ(adf_used_blocks(v), v.block_count - 2);
+}
+
+void partition_mount_matches_the_image() {
+    const auto image = build_adf("Work", true, sample_files());
+    constexpr u32 kFirst = 64;
+    std::vector<u8> device(kFirst * kBlock, 0);
+    device.insert(device.end(), image.begin(), image.end());
+    ImageDevice reader{&device, 0xFFFFFFFFu};
+    const BlockSource source{&reader, read_image_device, nullptr};
+
+    AdfVolume memory = mount_ok(image);
+    AdfVolume part{};
+    CHECK_EQ(adf_mount_partition(source, kFirst, static_cast<u32>(image.size() / kBlock), 2, part),
+             FsError::Ok);
+    CHECK(part.image == nullptr);
+    CHECK_EQ(part.first_block, kFirst);
+    CHECK(std::strcmp(part.name, memory.name) == 0);
+    CHECK_EQ(part.root_block, memory.root_block);
+    CHECK_EQ(part.block_count, memory.block_count);
+    CHECK_EQ(part.ffs, memory.ffs);
+    CHECK_EQ(part.dos_type, memory.dos_type);
+    CHECK_EQ(adf_used_blocks(part), adf_used_blocks(memory));
+
+    DirEntry a{};
+    DirEntry b{};
+    CHECK_EQ(adf_find(memory, "S/Startup-Sequence", a), FsError::Ok);
+    CHECK_EQ(adf_find(part, "S/Startup-Sequence", b), FsError::Ok);
+    CHECK(std::strcmp(a.name, b.name) == 0);
+    CHECK_EQ(a.size, b.size);
+    CHECK(read_all(part, b) == read_all(memory, a));
+
+    Listing memory_root;
+    Listing part_root;
+    CHECK_EQ(adf_list(memory, "", collect, &memory_root), FsError::Ok);
+    CHECK_EQ(adf_list(part, "", collect, &part_root), FsError::Ok);
+    CHECK(names(memory_root) == names(part_root));
+}
+
+void partition_read_error_is_io() {
+    const auto image = build_adf("Work", true, sample_files());
+    constexpr u32 kFirst = 64;
+    std::vector<u8> device(kFirst * kBlock, 0);
+    device.insert(device.end(), image.begin(), image.end());
+    ImageDevice reader{&device, 0xFFFFFFFFu};
+    const BlockSource source{&reader, read_image_device, nullptr};
+
+    AdfVolume part{};
+    CHECK_EQ(adf_mount_partition(source, kFirst, static_cast<u32>(image.size() / kBlock), 2, part),
+             FsError::Ok);
+
+    AdfVolume memory = mount_ok(image);
+    DirEntry s{};
+    CHECK_EQ(adf_find(memory, "S", s), FsError::Ok);
+    reader.fail_block = kFirst + s.header_block;
+    DirEntry found{};
+    CHECK_EQ(adf_find(part, "S", found), FsError::Io);
+}
+
+void bitmap_with_two_extension_blocks_counts() {
+    constexpr u32 kReserved = 2;
+    constexpr u32 kPageSpan = 127 * 32;
+    constexpr u32 kPages = 155;  // 25 in the root, one full and one partial extension
+    constexpr u32 kFirstPageBlock = 200000;
+    constexpr u32 kExtensionBlock[] = {400000, 400001};
+
+    const u32 blocks = (kPages - 1) * kPageSpan + 1;
+    const u32 block_count = kReserved + blocks;
+
+    SparseDevice device;
+    u8* boot = device.at(0);
+    boot[0] = 'D';
+    boot[1] = 'O';
+    boot[2] = 'S';
+    boot[3] = 1;
+
+    const u32 root = (block_count - 1 + kReserved) / 2;
+    u8* root_block = device.at(root);
+    set_block_long(root_block, 0, 2);  // a header block
+    set_block_long(root_block, 3, 72);
+    root_block[108 * 4] = 3;
+    root_block[108 * 4 + 1] = 'B';
+    root_block[108 * 4 + 2] = 'i';
+    root_block[108 * 4 + 3] = 'g';
+    set_block_long(root_block, 127, 1);  // the root
+    set_block_long(root_block, 78, 0xFFFFFFFFu);
+    for (u32 i = 0; i < 25; ++i) {
+        set_block_long(root_block, 79 + i, kFirstPageBlock + i);
+    }
+    set_block_long(root_block, 104, kExtensionBlock[0]);
+    set_block_sum(root_block);
+
+    u8* extension = device.at(kExtensionBlock[0]);
+    for (u32 i = 0; i < 127; ++i) {
+        set_block_long(extension, i, kFirstPageBlock + 25 + i);
+    }
+    set_block_long(extension, 127, kExtensionBlock[1]);
+
+    extension = device.at(kExtensionBlock[1]);
+    for (u32 i = 0; i < kPages - 152; ++i) {
+        set_block_long(extension, i, kFirstPageBlock + 152 + i);
+    }
+    set_block_long(extension, 127, 0);
+
+    for (u32 i = 0; i < kPages; ++i) {
+        u8* page = device.at(kFirstPageBlock + i);
+        for (u32 l = 1; l < 128; ++l) {
+            set_block_long(page, l, 0xFFFFFFFFu);  // every block free
+        }
+    }
+    // Three ordinary blocks are in use; the root and the pages count as used
+    // even though their own bits stay free.
+    const u32 used_blocks[] = {2, 3, block_count - 1};
+    for (const u32 block : used_blocks) {
+        const u32 index = block - kReserved;
+        u8* page = device.at(kFirstPageBlock + index / kPageSpan);
+        const u32 long_index = 1 + (index % kPageSpan) / 32;
+        set_block_long(page, long_index, block_long(page, long_index) & ~(1u << (index % 32)));
+    }
+
+    const BlockSource source{&device, read_sparse_device, nullptr};
+    AdfVolume volume{};
+    CHECK_EQ(adf_mount_partition(source, 0, block_count, kReserved, volume), FsError::Ok);
+    CHECK(std::strcmp(volume.name, "Big") == 0);
+    CHECK_EQ(volume.root_block, root);
+    CHECK_EQ(adf_used_blocks(volume), kPages + 1 + 3);
 }
 
 void random_damage_never_escapes() {
@@ -1048,6 +1235,9 @@ int main() {
     detect_format();
     error_names();
     used_blocks_come_from_the_bitmap();
+    partition_mount_matches_the_image();
+    partition_read_error_is_io();
+    bitmap_with_two_extension_blocks_counts();
     random_damage_never_escapes();
     return check::finish("test_amiga_fs");
 }

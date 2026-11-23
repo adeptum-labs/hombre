@@ -27,14 +27,16 @@
 
 namespace hombre {
 
-// Read-only access to an Amiga OFS or FFS floppy image held in memory: 512
-// byte blocks, big endian, a root block in the middle of the disk, and
-// directories that are hash tables of header blocks chained through the
-// header that follows in the same bucket. Every block number that is read is
-// checked against the image, every header checksum is verified, and every
-// chain is bounded, so a damaged image gives an error and never a stray read
-// or a walk that does not end. Nothing is allocated and nothing is kept
-// between calls.
+// Read-only access to an Amiga OFS or FFS volume of 512 byte blocks, either a
+// whole floppy image held in memory or a partition read block by block through
+// a BlockSource at an offset on its device: big endian, a root block in the
+// middle of the volume, and directories that are hash tables of header blocks
+// chained through the header that follows in the same bucket. Every block
+// number that is read is checked against the volume, every header checksum is
+// verified, and every chain is bounded, so a damaged image gives an error and
+// never a stray read or a walk that does not end. A caller reading through a
+// block source keeps each block it still holds at the same time in its own
+// buffer. Nothing is allocated and nothing is kept between calls.
 
 enum class DiskFormat : u32 { Unknown, Dms, Adf };
 
@@ -62,6 +64,7 @@ enum class FsError : u32 {
     NotDir,         // a path through, or a listing of, something that is not a directory
     Loop,           // a hash or extension chain that never ends
     NameTooLong,    // a path component of more than 30 characters
+    Io,             // the block source failed to read or write
 };
 
 inline const char* fs_error_name(FsError error) {
@@ -77,14 +80,29 @@ inline const char* fs_error_name(FsError error) {
     case FsError::NotDir: return "not a directory";
     case FsError::Loop: return "chain loops";
     case FsError::NameTooLong: return "name too long";
+    case FsError::Io: return "i/o error";
     }
     return "unknown";
 }
 
+// A device the volume can be read from: a whole image held in memory leaves
+// `source` unused, a partition is read through it.
+struct BlockSource {
+    void* ctx = nullptr;
+    // Reads one 512-byte block, numbered from the start of the device; false on an I/O error.
+    bool (*read)(void* ctx, u32 block, u8* out) = nullptr;
+    // Writes one block; null on a read-only source.
+    bool (*write)(void* ctx, u32 block, const u8* data) = nullptr;
+};
+
 struct AdfVolume {
-    const u8* image;
-    u32 block_count;
+    const u8* image;       // non-null when the whole volume is held in memory
+    BlockSource source;    // used instead when image is null
+    u32 first_block;       // device block of the volume's block 0
+    u32 block_count;       // blocks in the volume, counting block 0
+    u32 reserved;          // blocks before the first a header may be in: 2 for floppies
     u32 root_block;
+    u8 dos_type;           // the low byte of the DOS\x id
     bool ffs;
     // Names fold the Latin-1 letters as well as ASCII. Set for the INTL
     // types and for the directory cache types, which always do.
@@ -130,15 +148,16 @@ inline constexpr u32 l_bm_ext = 104;
 inline constexpr u32 bm_valid = 0xFFFFFFFFu;
 inline constexpr u32 bm_pages_max = 25;
 // A bitmap block is a checksum and 127 longs of bits, one bit a block from
-// block 2 on, the lowest bit of each long first; a set bit is a free block.
+// block `reserved` on, the lowest bit of each long first; a set bit is a free
+// block.
 inline constexpr u32 bm_longs = block_longs - 1;
 inline constexpr u32 bm_span = bm_longs * 32;
 // A bitmap extension block holds 127 more page pointers and the next
 // extension block in its last long.
 inline constexpr u32 bm_ext_pages = block_longs - 1;
-// The bitmap pages the root block's own pointers and one extension block
-// hold; a larger volume reports every block used.
-inline constexpr u32 bm_page_slots = bm_pages_max + bm_ext_pages;
+// The bitmap pages this reader counts; 2048 pages cover a volume of over
+// 4 GiB, the most FFS takes, and a larger volume reports every block used.
+inline constexpr u32 bm_pages_limit = 2048;
 
 inline constexpr u32 t_header = 2;
 inline constexpr u32 t_data = 8;
@@ -156,12 +175,33 @@ inline u32 be32(const u8* p) {
 inline u32 long_at(const u8* block, u32 index) { return be32(block + index * 4); }
 
 // The block, or null when the number is not one a header or data block can
-// have: the first two blocks are the bootblock.
-inline const u8* block_at(const AdfVolume& v, u32 number) {
-    if (number < 2 || number >= v.block_count) {
+// have: the blocks before `reserved` are the bootblock. An image is read
+// straight from memory and leaves `buf` alone; a source fills `buf`.
+inline const u8* block_at(const AdfVolume& v, u32 number, u8* buf) {
+    if (number < v.reserved || number >= v.block_count) {
         return nullptr;
     }
-    return v.image + static_cast<usize>(number) * block_bytes;
+    if (v.image != nullptr) {
+        return v.image + (static_cast<usize>(v.first_block) + number) * block_bytes;
+    }
+    if (v.source.read == nullptr) {
+        return nullptr;
+    }
+    return v.source.read(v.source.ctx, v.first_block + number, buf) ? buf : nullptr;
+}
+
+// The block, with the error set when it cannot be read: a number outside the
+// volume is a bad block, a failed source read an i/o error.
+inline const u8* block_at_checked(const AdfVolume& v, u32 number, u8* buf, FsError& error) {
+    if (number < v.reserved || number >= v.block_count) {
+        error = FsError::BadBlock;
+        return nullptr;
+    }
+    const u8* block = block_at(v, number, buf);
+    if (block == nullptr) {
+        error = FsError::Io;
+    }
+    return block;
 }
 
 inline bool block_sums_to_zero(const u8* block) {
@@ -221,10 +261,9 @@ inline bool name_matches(const u8* block, const u8* name, u32 length, bool intl)
 
 // A file, directory or root header: checksum, type and own block number.
 // The secondary type is left to the caller.
-inline const u8* load_header(const AdfVolume& v, u32 number, FsError& error) {
-    const u8* block = block_at(v, number);
+inline const u8* load_header(const AdfVolume& v, u32 number, u8* buf, FsError& error) {
+    const u8* block = block_at_checked(v, number, buf, error);
     if (block == nullptr) {
-        error = FsError::BadBlock;
         return nullptr;
     }
     if (!block_sums_to_zero(block)) {
@@ -259,12 +298,13 @@ inline void fill_entry(const u8* header, u32 number, DirEntry& out) {
 inline FsError find_in_dir(const AdfVolume& v, const u8* dir, const u8* name, u32 length,
                            DirEntry& out) {
     u32 number = long_at(dir, l_table + hash_name(name, length, v.intl));
+    u8 buf[block_bytes];
     for (u32 step = 0; number != 0; ++step) {
         if (step >= v.block_count) {
             return FsError::Loop;
         }
         FsError error = FsError::Ok;
-        const u8* header = load_header(v, number, error);
+        const u8* header = load_header(v, number, buf, error);
         if (header == nullptr) {
             return error;
         }
@@ -277,33 +317,28 @@ inline FsError find_in_dir(const AdfVolume& v, const u8* dir, const u8* name, u3
     return FsError::NotFound;
 }
 
-}
-
-inline FsError adf_mount(const u8* image, usize bytes, AdfVolume& volume) {
-    using namespace amiga_fs_detail;
-    if (bytes != 901120 && bytes != 1802240) {
-        return FsError::ImageSize;
-    }
-    if (image[0] != 'D' || image[1] != 'O' || image[2] != 'S') {
+// The fields both mounts set from the bootblock, then the root header its
+// root block holds.
+inline FsError mount_root(AdfVolume& volume, const u8* boot) {
+    if (boot[0] != 'D' || boot[1] != 'O' || boot[2] != 'S') {
         return FsError::NotDos;
     }
     // Bit 0 is FFS, bit 1 INTL, bit 2 the directory cache, which leaves the
     // hash table in place and adds blocks this reader does not look at. The
     // long name types (6 and 7) and anything above are not read.
-    const u8 flags = image[3];
+    const u8 flags = boot[3];
     if (flags > 5) {
         return FsError::UnsupportedFs;
     }
-    volume.image = image;
-    volume.block_count = static_cast<u32>(bytes / block_bytes);
-    volume.root_block = volume.block_count / 2;
+    volume.dos_type = flags;
+    volume.root_block = (volume.block_count - 1 + volume.reserved) / 2;
     volume.ffs = (flags & 1) != 0;
     volume.intl = (flags & 6) != 0;
-    volume.bootblock_checksum_ok = bootblock_sum_ok(image);
     volume.name[0] = '\0';
 
     FsError error = FsError::Ok;
-    const u8* root = load_header(volume, volume.root_block, error);
+    u8 root_buf[block_bytes];
+    const u8* root = load_header(volume, volume.root_block, root_buf, error);
     if (root == nullptr) {
         return error;
     }
@@ -320,65 +355,120 @@ inline FsError adf_mount(const u8* image, usize bytes, AdfVolume& volume) {
     return FsError::Ok;
 }
 
+}
+
+inline FsError adf_mount(const u8* image, usize bytes, AdfVolume& volume) {
+    using namespace amiga_fs_detail;
+    if (bytes != 901120 && bytes != 1802240) {
+        return FsError::ImageSize;
+    }
+    volume.image = image;
+    volume.source = BlockSource{};
+    volume.first_block = 0;
+    volume.block_count = static_cast<u32>(bytes / block_bytes);
+    volume.reserved = 2;
+    volume.bootblock_checksum_ok = bootblock_sum_ok(image);
+    return mount_root(volume, image);
+}
+
+// Mounts a partition whose block 0 is at `first_block` on the device. The
+// bootblock checksum is not checked, as a partition has no bootblock of its
+// own.
+inline FsError adf_mount_partition(const BlockSource& source, u32 first_block, u32 block_count,
+                                   u32 reserved, AdfVolume& volume) {
+    using namespace amiga_fs_detail;
+    u8 boot[block_bytes];
+    if (source.read == nullptr || !source.read(source.ctx, first_block, boot)) {
+        return FsError::Io;
+    }
+    volume.image = nullptr;
+    volume.source = source;
+    volume.first_block = first_block;
+    volume.block_count = block_count;
+    volume.reserved = reserved;
+    volume.bootblock_checksum_ok = false;
+    return mount_root(volume, boot);
+}
+
 // How many of the volume's blocks are in use, counted from the bitmap its
-// root block names: every block from 2 to block_count - 1 has a bit, set
-// while the block is free, and the root block and the bitmap blocks
-// themselves always count as used. A volume whose bitmap is not marked
-// valid, with bitmap pages that are not blocks of the volume, or with more
-// pages than the root block and one extension block hold, reports every
-// block used.
+// root block names: every block from `reserved` to block_count - 1 has a bit,
+// set while the block is free, and the root block and the bitmap blocks
+// themselves always count as used. Each bitmap page is read once, and the
+// extension chain is followed to the last page. A volume whose bitmap is not
+// marked valid, with bitmap pages that are not blocks of the volume, or with
+// more pages than this reader counts, reports every block used.
 inline u32 adf_used_blocks(const AdfVolume& volume) {
     using namespace amiga_fs_detail;
-    if (volume.block_count < 3) {
+    if (volume.block_count <= volume.reserved) {
         return 0;
     }
-    const u32 blocks = volume.block_count - 2;
-    const u8* root = block_at(volume, volume.root_block);
+    const u32 blocks = volume.block_count - volume.reserved;
+    u8 root_buf[block_bytes];
+    const u8* root = block_at(volume, volume.root_block, root_buf);
     if (root == nullptr || long_at(root, l_bm_flag) != bm_valid) {
         return blocks;
     }
     const u32 pages_needed = (blocks - 1) / bm_span + 1;
-    if (pages_needed > bm_page_slots) {
+    if (pages_needed > bm_pages_limit) {
         return blocks;
     }
-    u32 pages[bm_page_slots]{};
+    u32 pages[bm_pages_limit]{};
     for (u32 i = 0; i < pages_needed && i < bm_pages_max; ++i) {
         pages[i] = long_at(root, l_bm_pages + i);
     }
-    if (pages_needed > bm_pages_max) {
-        const u8* extension = block_at(volume, long_at(root, l_bm_ext));
+    u32 next_extension = pages_needed > bm_pages_max ? long_at(root, l_bm_ext) : 0;
+    u8 extension_buf[block_bytes];
+    for (u32 filled = bm_pages_max; filled < pages_needed;) {
+        const u8* extension = block_at(volume, next_extension, extension_buf);
         if (extension == nullptr) {
             return blocks;
         }
-        for (u32 i = bm_pages_max; i < pages_needed; ++i) {
-            pages[i] = long_at(extension, i - bm_pages_max);
+        for (u32 i = 0; i < bm_ext_pages && filled < pages_needed; ++i, ++filled) {
+            pages[filled] = long_at(extension, i);
         }
-    }
-    for (u32 i = 0; i < pages_needed; ++i) {
-        if (block_at(volume, pages[i]) == nullptr) {
+        next_extension = long_at(extension, block_longs - 1);
+        if (filled < pages_needed && next_extension == 0) {
             return blocks;
         }
     }
-    const auto is_free = [&](u32 block) {
-        const u32 index = block - 2;
-        const u8* page = block_at(volume, pages[index / bm_span]);
-        const u32 bit = index % bm_span;
-        return (long_at(page, 1 + bit / 32) & (1u << (bit % 32))) != 0;
+    const auto bit_is_set = [](const u8* page, u32 index) {
+        return (long_at(page, 1 + index / 32) & (1u << (index % 32))) != 0;
     };
     u32 used = 0;
-    for (u32 block = 2; block < volume.block_count; ++block) {
-        if (!is_free(block)) {
+    u8 page_buf[block_bytes];
+    for (u32 i = 0; i < pages_needed; ++i) {
+        const u32 covered = blocks - i * bm_span;
+        const u32 count = covered < bm_span ? covered : bm_span;
+        const u8* page = block_at(volume, pages[i], page_buf);
+        if (page == nullptr) {
+            return blocks;
+        }
+        u32 free_bits = 0;
+        for (u32 l = 0; l * 32 < count; ++l) {
+            u32 word = long_at(page, 1 + l);
+            const u32 bits = count - l * 32;
+            if (bits < 32) {
+                word &= (1u << bits) - 1;
+            }
+            // Counted by hand: the kernel has no libgcc for a popcount builtin.
+            for (; word != 0; word &= word - 1) {
+                ++free_bits;
+            }
+        }
+        used += count - free_bits;
+        // The root and the bitmap blocks are in use even when their own bits
+        // say otherwise.
+        const u32 start = volume.reserved + i * bm_span;
+        const u32 end = start + count;
+        if (volume.root_block >= start && volume.root_block < end &&
+            bit_is_set(page, volume.root_block - start)) {
             ++used;
         }
-    }
-    // The root and the bitmap blocks are in use even when their own bits
-    // say otherwise.
-    if (volume.root_block >= 2 && is_free(volume.root_block)) {
-        ++used;
-    }
-    for (u32 i = 0; i < pages_needed; ++i) {
-        if (pages[i] != volume.root_block && pages[i] >= 2 && is_free(pages[i])) {
-            ++used;
+        for (u32 j = 0; j < pages_needed; ++j) {
+            if (pages[j] != volume.root_block && pages[j] >= start && pages[j] < end &&
+                bit_is_set(page, pages[j] - start)) {
+                ++used;
+            }
         }
     }
     return used;
@@ -419,7 +509,8 @@ inline FsError adf_find(const AdfVolume& volume, const char* path, DirEntry& out
     }
 
     FsError error = FsError::Ok;
-    const u8* root = load_header(volume, volume.root_block, error);
+    u8 root_buf[block_bytes];
+    const u8* root = load_header(volume, volume.root_block, root_buf, error);
     if (root == nullptr) {
         return error;
     }
@@ -442,7 +533,7 @@ inline FsError adf_find(const AdfVolume& volume, const char* path, DirEntry& out
         if (!out.is_dir) {
             return FsError::NotDir;
         }
-        const u8* dir = load_header(volume, out.header_block, error);
+        const u8* dir = load_header(volume, out.header_block, root_buf, error);
         if (dir == nullptr) {
             return error;
         }
@@ -467,10 +558,12 @@ inline FsError adf_list(const AdfVolume& volume, const char* path, DirVisitor vi
     if (!dir_entry.is_dir) {
         return FsError::NotDir;
     }
-    const u8* dir = load_header(volume, dir_entry.header_block, error);
+    u8 dir_buf[block_bytes];
+    const u8* dir = load_header(volume, dir_entry.header_block, dir_buf, error);
     if (dir == nullptr) {
         return error;
     }
+    u8 chain_buf[block_bytes];
     for (u32 slot = 0; slot < hash_slots; ++slot) {
         const u32 first = long_at(dir, l_table + slot);
         // First walk the whole chain to see that it is sound, then report it.
@@ -479,7 +572,7 @@ inline FsError adf_list(const AdfVolume& volume, const char* path, DirVisitor vi
             if (count >= volume.block_count) {
                 return FsError::Loop;
             }
-            const u8* header = load_header(volume, number, error);
+            const u8* header = load_header(volume, number, chain_buf, error);
             if (header == nullptr) {
                 return error;
             }
@@ -488,7 +581,10 @@ inline FsError adf_list(const AdfVolume& volume, const char* path, DirVisitor vi
         }
         u32 number = first;
         for (u32 i = 0; i < count; ++i) {
-            const u8* header = block_at(volume, number);
+            const u8* header = block_at_checked(volume, number, chain_buf, error);
+            if (header == nullptr) {
+                return error;
+            }
             DirEntry entry;
             fill_entry(header, number, entry);
             if (visitor != nullptr) {
@@ -530,14 +626,15 @@ inline FsError start_pointer_blocks(PointerBlocks& w, const u8* header, u32 head
 }
 
 // Moves to the next extension block of the file.
-inline FsError next_pointer_block(const AdfVolume& v, PointerBlocks& w) {
+inline FsError next_pointer_block(const AdfVolume& v, PointerBlocks& w, u8* buf) {
     const u32 next = long_at(w.table, l_extension);
     if (next == 0) {
         return FsError::BadBlock;  // the file claims more data than it has pointers for
     }
-    const u8* block = block_at(v, next);
+    FsError error = FsError::Ok;
+    const u8* block = block_at_checked(v, next, buf, error);
     if (block == nullptr) {
-        return FsError::BadBlock;
+        return error;
     }
     if (!block_sums_to_zero(block)) {
         return FsError::BadChecksum;
@@ -581,7 +678,8 @@ inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offse
         *inconsistent = 0;
     }
     FsError error = FsError::Ok;
-    const u8* header = load_header(volume, file.header_block, error);
+    u8 header_buf[block_bytes];
+    const u8* header = load_header(volume, file.header_block, header_buf, error);
     if (header == nullptr) {
         return error;
     }
@@ -603,7 +701,7 @@ inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offse
     }
     const u32 first_block = offset / payload;
     for (u32 skip = first_block / hash_slots; skip > 0; --skip) {
-        error = next_pointer_block(volume, blocks);
+        error = next_pointer_block(volume, blocks, header_buf);
         if (error != FsError::Ok) {
             return error;
         }
@@ -612,9 +710,10 @@ inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offse
     u32 skip_bytes = offset % payload;
     u32 index = first_block;  // the block's place in the file, from 0
     u32 done = 0;
+    u8 data_buf[block_bytes];
     while (done < want) {
         if (slot == hash_slots) {
-            error = next_pointer_block(volume, blocks);
+            error = next_pointer_block(volume, blocks, header_buf);
             if (error != FsError::Ok) {
                 return error;
             }
@@ -623,9 +722,10 @@ inline FsError adf_read(const AdfVolume& volume, const DirEntry& file, u32 offse
         if (slot >= long_at(blocks.table, l_count)) {
             return FsError::BadBlock;  // the size claims more data than the pointers cover
         }
-        const u8* data = block_at(volume, long_at(blocks.table, l_last_pointer - slot));
+        const u8* data =
+            block_at_checked(volume, long_at(blocks.table, l_last_pointer - slot), data_buf, error);
         if (data == nullptr) {
-            return FsError::BadBlock;
+            return error;
         }
         if (!volume.ffs) {
             // An OFS data block names its file, its place in it and how

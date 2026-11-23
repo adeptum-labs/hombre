@@ -1366,7 +1366,8 @@ struct DosOps {
         if (disk == nullptr) {
             return ERROR_NO_DISK;
         }
-        const u8* header = load_header(*disk, entry.header_block, error);
+        u8 header_buf[block_bytes];
+        const u8* header = load_header(*disk, entry.header_block, header_buf, error);
         if (header == nullptr) {
             return io_error_of(error);
         }
@@ -6546,7 +6547,7 @@ struct DosOps {
             used = 0;
         } else {
             const AdfVolume& disk = d.drives_[entry.volume].volume;
-            blocks = disk.block_count - 2;  // the bootblock is not counted
+            blocks = disk.block_count - disk.reserved;  // the bootblock is not counted
             used = adf_used_blocks(disk);
         }
     }
@@ -6601,7 +6602,7 @@ struct DosOps {
             b.w32(id + id_NumBlocks, blocks);
             b.w32(id + id_NumBlocksUsed, used);
             b.w32(id + id_BytesPerBlock, disk.ffs ? 512 : 488);
-            b.w32(id + id_DiskType, ID_DOS_DISK | disk.image[3]);
+            b.w32(id + id_DiskType, ID_DOS_DISK | disk.dos_type);
             b.w32(id + id_VolumeNode, d.volume_node_[entry.volume] >> 2);
         }
         b.w32(id + id_InUse, 0);
@@ -9264,7 +9265,7 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     for (u32 i = 0; i < kMaxDrives; ++i) {
         const AdfVolume* disk = drives.volume[i];
         drives_[i] = Drive{};
-        if (disk != nullptr && disk->image != nullptr) {
+        if (disk != nullptr && (disk->image != nullptr || disk->source.read != nullptr)) {
             drives_[i].has_disk = true;
             drives_[i].volume = *disk;
         }
@@ -9387,15 +9388,16 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
         const u32 name_at = node + DosList_SIZEOF;
         if (drives_[i].has_disk) {
             const AdfVolume& disk = drives_[i].volume;
-            const u8* root_block = disk.image + static_cast<usize>(disk.root_block) * 512;
+            u8 root_buf[amiga_fs_detail::block_bytes];
+            const u8* root_block = amiga_fs_detail::block_at(disk, disk.root_block, root_buf);
             b.w32(node + dol_Type, DLT_VOLUME);
             b.w32(node + dol_Task, port_[i]);
             for (u32 k = 0; k < 3; ++k) {
                 // The volume's creation date, longs 121 to 123 of the root block.
                 b.w32(node + dol_VolumeDate + k * 4,
-                      amiga_fs_detail::long_at(root_block, 121 + k));
+                      root_block != nullptr ? amiga_fs_detail::long_at(root_block, 121 + k) : 0);
             }
-            b.w32(node + dol_DiskType, ID_DOS_DISK | disk.image[3]);
+            b.w32(node + dol_DiskType, ID_DOS_DISK | disk.dos_type);
             put_bstr(b, name_at, disk.name, 30);
             b.w32(node + dol_Name, name_at >> 2);
         }
