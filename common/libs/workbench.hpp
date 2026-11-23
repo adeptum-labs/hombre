@@ -457,6 +457,7 @@ private:
     void fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom);
     u32 make_scroll_gadgets();
     bool build_arrow_images();
+    void paint_arrow_images();
     void update_scroll(DrawerWindow& w);
     void scroll_by(u32 window_id, i32 dx, i32 dy);
     void follow_sliders(u32 window_id);
@@ -519,6 +520,9 @@ private:
     u32 menu_ = 0;
     u32 title_buffer_ = 0;
     u32 arrows_ = 0;  // the arrow gadgets' images, made once
+    // The depth and pens the arrow images were last painted for.
+    u32 arrow_depth_ = 0;
+    chrome::DrawInfoPens arrow_pens_{};
     // The structs IPrefs passed over for the icon text font and the system
     // font: a TextAttr, a TextFont, a draw mode, a front and a back pen,
     // and a TextAttr and name of their own. IPrefs frees the ones a

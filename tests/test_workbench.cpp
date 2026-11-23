@@ -1802,6 +1802,39 @@ std::vector<u8> image_pens(const Rig& r, u32 image) {
     return pens;
 }
 
+// The arrow buttons of the drawer are as deep as depth and in the look of
+// that depth, in the pens of the screen's DrawInfo.
+void check_drawer_arrows(Rig& r, u32 drawer, u32 depth) {
+    native::Bus bus(r.m);
+    chrome::DrawInfoPens drawinfo;
+    sysimage::read_pens(bus, g_intuition.screen_draw_info(r.screen), drawinfo.pen);
+    for (u16 id = Workbench::kScrollUp; id <= Workbench::kScrollRight; ++id) {
+        const u32 gadget = r.workbench.scroll_gadget(drawer, id);
+        const auto arrow = static_cast<chrome::Arrow>(id - Workbench::kScrollUp);
+        for (const bool pressed : {false, true}) {
+            const u32 image = r.get32(gadget + (pressed ? gg_SelectRender : gg_GadgetRender));
+            const i32 width = static_cast<i32>(r.get16(image + kImageWidth));
+            const i32 height = static_cast<i32>(r.get16(image + kImageHeight));
+            CHECK_EQ(r.get16(image + kImageDepth), depth);
+            std::vector<u8> expected(static_cast<size_t>(width * height));
+            chrome::paint_arrow_button(expected.data(), width, height, arrow, pressed,
+                                       chrome::style_for_depth(depth), depth, drawinfo);
+            const std::vector<u8> pens = image_pens(r, image);
+            CHECK(pens == expected);
+            if (chrome::style_for_depth(depth) == chrome::Style::Classic) {
+                const u32 light = pressed ? sysimage::ShadowPen : sysimage::ShinePen;
+                CHECK_EQ(static_cast<u32>(pens[0]), static_cast<u32>(drawinfo.pen[light]));
+            } else {
+                CHECK_EQ(static_cast<u32>(pens[0]),
+                         static_cast<u32>(chrome::physical_pen(chrome::kTrack, depth)));
+                for (const u8 pen : pens) {
+                    CHECK(pen >= chrome::physical_pen(chrome::kScreenBar0, depth));
+                }
+            }
+        }
+    }
+}
+
 // The arrow buttons in a drawer's borders are as deep as the screen and in
 // the look of its depth: the 3.1 arrow image in the screen's DrawInfo pens on
 // 2 and 4 planes, the modern button in the chrome pens of that depth on 5, 6
@@ -1813,35 +1846,35 @@ void drawer_arrows_take_the_look_of_the_screen() {
         r.workbench.open_icon(0, r.find_icon("HombreTest"));
         const u32 drawer = r.find_window("HombreTest:");
         CHECK(drawer != Workbench::kNoWindow);
-        native::Bus bus(r.m);
-        chrome::DrawInfoPens drawinfo;
-        sysimage::read_pens(bus, g_intuition.screen_draw_info(r.screen), drawinfo.pen);
-        for (u16 id = Workbench::kScrollUp; id <= Workbench::kScrollRight; ++id) {
-            const u32 gadget = r.workbench.scroll_gadget(drawer, id);
-            const auto arrow = static_cast<chrome::Arrow>(id - Workbench::kScrollUp);
-            for (const bool pressed : {false, true}) {
-                const u32 image = r.get32(gadget + (pressed ? gg_SelectRender : gg_GadgetRender));
-                const i32 width = static_cast<i32>(r.get16(image + kImageWidth));
-                const i32 height = static_cast<i32>(r.get16(image + kImageHeight));
-                CHECK_EQ(r.get16(image + kImageDepth), depth);
-                std::vector<u8> expected(static_cast<size_t>(width * height));
-                chrome::paint_arrow_button(expected.data(), width, height, arrow, pressed,
-                                           chrome::style_for_depth(depth), depth, drawinfo);
-                const std::vector<u8> pens = image_pens(r, image);
-                CHECK(pens == expected);
-                if (chrome::style_for_depth(depth) == chrome::Style::Classic) {
-                    const u32 light = pressed ? sysimage::ShadowPen : sysimage::ShinePen;
-                    CHECK_EQ(static_cast<u32>(pens[0]), static_cast<u32>(drawinfo.pen[light]));
-                } else {
-                    CHECK_EQ(static_cast<u32>(pens[0]),
-                             static_cast<u32>(chrome::physical_pen(chrome::kTrack, depth)));
-                    for (const u8 pen : pens) {
-                        CHECK(pen >= chrome::physical_pen(chrome::kScreenBar0, depth));
-                    }
-                }
-            }
-        }
+        check_drawer_arrows(r, drawer, depth);
     }
+}
+
+// A screen mode change resets the Workbench, and the drawers it opens again
+// get arrows in the look of the screen's new depth and pens, not the first.
+void drawer_arrows_follow_the_screen_through_a_reset() {
+    Rig r(test_files(), {}, 1, 8);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    CHECK(r.find_window("HombreTest:") != Workbench::kNoWindow);
+    const u32 draw_info = g_intuition.screen_draw_info(r.screen);
+    const u32 pens = r.get32(draw_info + 4);
+    // struct DrawInfo: dri_Depth.
+    constexpr u32 kDriDepth = 12;
+    const auto reset_to = [&](u32 depth, u32 shine) {
+        CHECK(r.workbench.close_for_reset());
+        r.put16(draw_info + kDriDepth, depth);
+        r.put16(pens + sysimage::ShinePen * 2, shine);
+        r.workbench.open_after_reset();
+        const u32 drawer = r.find_window("HombreTest:");
+        CHECK(drawer != Workbench::kNoWindow);
+        check_drawer_arrows(r, drawer, depth);
+    };
+    reset_to(5, 2);
+    reset_to(4, 2);
+    // The same depth with other pens.
+    reset_to(4, 3);
+    reset_to(8, 2);
 }
 
 void the_arrows_and_sliders_scroll_a_drawer() {
@@ -2619,6 +2652,7 @@ int main() {
     a_resized_drawer_clips_its_icons_and_keeps_their_places();
     drawers_have_scroll_gadgets_in_their_borders();
     drawer_arrows_take_the_look_of_the_screen();
+    drawer_arrows_follow_the_screen_through_a_reset();
     the_arrows_and_sliders_scroll_a_drawer();
     a_window_snapshot_keeps_its_scroll();
     drawers_open_below_the_screen_bar();

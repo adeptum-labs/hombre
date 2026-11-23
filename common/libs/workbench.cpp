@@ -1510,6 +1510,7 @@ u32 Workbench::make_scroll_gadgets() {
     if (arrows_ == 0 && !build_arrow_images()) {
         return 0;
     }
+    paint_arrow_images();
     const u32 block = exec_->alloc(kScrollBlockBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (block == 0) {
         return 0;
@@ -1572,10 +1573,26 @@ u32 Workbench::make_scroll_gadgets() {
     return block;
 }
 
-// The images of the four arrow buttons, plain and pressed, in the
-// window chrome's look and as deep as the screen, which every window's
-// arrows share; they stay as long as the library.
+// The images of the four arrow buttons, plain and pressed, which every
+// window's arrows share. They stay as long as the library, with room for
+// the deepest screen, and take the look of the screen's depth and pens
+// each time a window gets them.
 bool Workbench::build_arrow_images() {
+    const u32 data_bytes = kArrowPlaneBytes * kMaxArrowDepth;
+    const u32 block_bytes = kArrowImages * (Image_SIZEOF + data_bytes);
+    const u32 block = exec_->alloc(block_bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (block == 0) {
+        return false;
+    }
+    arrows_ = block;
+    arrow_depth_ = 0;
+    return true;
+}
+
+// Paints the arrow images for the screen as it is now, unless they already
+// show its depth and pens. A screen mode change closes every window first,
+// so no window shows the images while they change.
+void Workbench::paint_arrow_images() {
     Bus b(*machine_);
     const u32 draw_info = intuition_->screen_draw_info(screen_);
     u32 depth = draw_info != 0 ? b.r16(draw_info + dri_Depth) : 2;
@@ -1583,15 +1600,17 @@ bool Workbench::build_arrow_images() {
         depth = 2;
     }
     depth = depth > kMaxArrowDepth ? kMaxArrowDepth : depth;
-    const u32 data_bytes = kArrowPlaneBytes * depth;
-    const u32 block_bytes = kArrowImages * (Image_SIZEOF + data_bytes);
-    const u32 block = exec_->alloc(block_bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-    if (block == 0) {
-        return false;
-    }
-    const u32 data_at = block + kArrowImages * Image_SIZEOF;
     chrome::DrawInfoPens drawinfo;
     sysimage::read_pens(b, draw_info, drawinfo.pen);
+    bool same = depth == arrow_depth_;
+    for (u32 i = 0; same && i < sysimage::kPenCount; ++i) {
+        same = drawinfo.pen[i] == arrow_pens_.pen[i];
+    }
+    if (same) {
+        return;
+    }
+    const u32 data_bytes = kArrowPlaneBytes * kMaxArrowDepth;
+    const u32 data_at = arrows_ + kArrowImages * Image_SIZEOF;
     u8 pens[kArrowWidth * kArrowMaxHeight];
     for (u32 i = 0; i < kArrowImages; ++i) {
         const chrome::Arrow arrow = static_cast<chrome::Arrow>(i / 2);
@@ -1600,7 +1619,7 @@ bool Workbench::build_arrow_images() {
         const i32 height = vertical ? 10 : kArrowMaxHeight;
         chrome::paint_arrow_button(pens, kArrowWidth, height, arrow, pressed,
                                    chrome::style_for_depth(depth), depth, drawinfo);
-        const u32 image = block + i * Image_SIZEOF;
+        const u32 image = arrows_ + i * Image_SIZEOF;
         const u32 data = data_at + i * data_bytes;
         b.w16(image + im_Width, static_cast<u32>(kArrowWidth));
         b.w16(image + im_Height, static_cast<u32>(height));
@@ -1620,12 +1639,10 @@ bool Workbench::build_arrow_images() {
             }
         }
     }
-    if (!b.ok()) {
-        exec_->free(block, block_bytes);
-        return false;
+    if (b.ok()) {
+        arrow_depth_ = depth;
+        arrow_pens_ = drawinfo;
     }
-    arrows_ = block;
-    return true;
 }
 
 namespace {
