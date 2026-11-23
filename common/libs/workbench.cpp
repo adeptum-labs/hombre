@@ -144,6 +144,7 @@ constexpr u32 kMinDrawerHeight = 56;
 constexpr i32 kCascadeX = 40;
 constexpr i32 kCascadeY = 44;
 constexpr i32 kCascadeStep = 20;
+constexpr u32 kCascadeSlots = 7;
 constexpr u32 kMaxWindowTitle = 64;
 constexpr u32 kClipBytes = ndk::Region_SIZEOF + ndk::RegionRectangle_SIZEOF;
 
@@ -613,8 +614,7 @@ u32 Workbench::build_menu_strip() {
     return strip;
 }
 
-void Workbench::measure_window(u32 index) {
-    DrawerWindow& w = windows_[index];
+void Workbench::measure_window(DrawerWindow& w) {
     Bus b(*machine_);
     w.inner_left = b.r8(w.window + ndk::wd_BorderLeft);
     w.inner_top = b.r8(w.window + ndk::wd_BorderTop);
@@ -646,29 +646,44 @@ void Workbench::measure_window(u32 index) {
 
 // Gives back the window record, its clip Region and its scroll gadgets;
 // the window itself is the caller's to close first.
-void Workbench::release_window(u32 index) {
-    DrawerWindow& w = windows_[index];
+void Workbench::release_window(DrawerWindow& w) {
     if (w.clip != 0) {
         exec_->free(w.clip, kClipBytes);
     }
     if (w.gadgets != 0) {
         exec_->free(w.gadgets, kScrollBlockBytes);
     }
-    w = DrawerWindow{};
+    windows_.remove(&w);
 }
 
-void Workbench::attach_window(u32 index, u32 window, const char* name, const char* path,
-                              u32 gadgets) {
-    DrawerWindow& w = windows_[index];
-    w = DrawerWindow{};
-    w.used = true;
+// The Workbench's windows share one message port, as the Amiga Workbench's
+// do, so a desktop of many windows takes one signal bit: a window opens
+// without IDCMP, adopts the port and then asks for its messages. Closing it
+// takes its queued messages off the port again and leaves the port alone.
+u32 Workbench::open_window_on_port(u32 new_window, u32 idcmp) {
+    const u32 window = intuition_->open_window(new_window, 0);
+    if (window == 0) {
+        return 0;
+    }
+    Bus(*machine_).w32(window + ndk::wd_UserPort, window_port_);
+    if (!intuition_->modify_idcmp(window, idcmp)) {
+        intuition_->close_window(window);
+        return 0;
+    }
+    return window;
+}
+
+// The caller has made sure there is room for it: windows_ is not full.
+Workbench::DrawerWindow& Workbench::attach_window(u32 id, u32 window, const char* name,
+                                                  const char* path, u32 gadgets) {
+    DrawerWindow& w = *windows_.add();
+    w.id = id;
     w.window = window;
     w.gadgets = gadgets;
     Bus b(*machine_);
-    w.user_port = b.r32(window + ndk::wd_UserPort);
     w.rp = b.r32(window + ndk::wd_RPort);
     w.clip = exec_->alloc(kClipBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-    measure_window(index);
+    measure_window(w);
     copy_text(w.name, sizeof w.name, name);
     copy_text(w.path, sizeof w.path, path);
     if (menu_ != 0) {
@@ -676,12 +691,17 @@ void Workbench::attach_window(u32 index, u32 window, const char* name, const cha
         gadtools_->layout_menus(menu_);
         intuition_->set_menu_strip(window, menu_);
     }
+    return w;
 }
 
 // The root window as backdrop_ asks for it: a borderless backdrop under
 // the screen's bar, or an ordinary window of the same size that can be
 // dragged, sized and put behind the drawers, but not closed.
 void Workbench::open_root() {
+    if (windows_.full()) {
+        LogLine().text("workbench: no window left for the backdrop").send();
+        return;
+    }
     Bus b(*machine_);
     const u32 bar_height = b.r8(screen_ + ndk::sc_BarHeight);
     const u32 new_window =
@@ -705,19 +725,18 @@ void Workbench::open_root() {
     b.w16(new_window + ndk::nw_Width, 0);
     b.w16(new_window + ndk::nw_Height, 0);
     const u32 gadgets = backdrop_ ? 0 : make_scroll_gadgets();
+    u32 idcmp;
     if (backdrop_) {
-        b.w32(new_window + ndk::nw_IDCMPFlags,
-              ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | kIdcmpMenuPick |
-                  kIdcmpRefreshWindow);
+        idcmp = ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | kIdcmpMenuPick |
+                kIdcmpRefreshWindow;
         b.w32(new_window + ndk::nw_Flags, ndk::WFLG_BACKDROP | ndk::WFLG_BORDERLESS |
                                                ndk::WFLG_WBENCHWINDOW);
     } else {
         b.w8(new_window + ndk::nw_DetailPen, 0);
         b.w8(new_window + ndk::nw_BlockPen, 1);
-        b.w32(new_window + ndk::nw_IDCMPFlags,
-              ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | ndk::IDCMP_NEWSIZE |
-                  ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP | kIdcmpMenuPick |
-                  kIdcmpRefreshWindow);
+        idcmp = ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | ndk::IDCMP_NEWSIZE |
+                ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP | kIdcmpMenuPick |
+                kIdcmpRefreshWindow;
         b.w32(new_window + ndk::nw_FirstGadget, gadgets);
         b.w32(new_window + ndk::nw_Flags,
               ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_SIZEGADGET |
@@ -731,7 +750,7 @@ void Workbench::open_root() {
     b.w32(new_window + ndk::nw_Title, title);
     b.w32(new_window + ndk::nw_Screen, screen_);
     b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
-    const u32 window = b.ok() ? intuition_->open_window(new_window, 0) : 0;
+    const u32 window = b.ok() ? open_window_on_port(new_window, idcmp) : 0;
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, sizeof kBackdropName);
     if (window == 0) {
@@ -741,13 +760,12 @@ void Workbench::open_root() {
         LogLine().text("workbench: could not open the root window").send();
         return;
     }
-    attach_window(0, window, kBackdropName, "", gadgets);
+    attach_window(kRootWindow, window, kBackdropName, "", gadgets);
 }
 
 // The right-hand column of the root window, top to bottom, then the next
 // column to the left once one is full.
-void Workbench::place_root_icon(IconEntry& icon) {
-    const DrawerWindow& root = windows_[0];
+void Workbench::place_root_icon(const DrawerWindow& root, IconEntry& icon) {
     const Graphics::FontMetrics metrics = label_metrics();
     const i32 label_width = static_cast<i32>(kDiskLabelChars) * metrics.x_size;
     // The column's icons are centred on one line, far enough in for a
@@ -766,16 +784,15 @@ void Workbench::place_root_icon(IconEntry& icon) {
 
 // Icons with a place of their own keep it, moved inside the window when
 // it no longer reaches there; the others go down the right-hand column.
-void Workbench::place_root_icons() {
+void Workbench::place_root_icons(const DrawerWindow& root) {
     volume_top_ = 0;
-    const DrawerWindow& root = windows_[0];
     const Graphics::FontMetrics metrics = label_metrics();
     for (IconEntry& icon : icons_) {
-        if (!icon.used || icon.owner != 0) {
+        if (icon.owner != kRootWindow) {
             continue;
         }
         if (!icon.placed) {
-            place_root_icon(icon);
+            place_root_icon(root, icon);
             continue;
         }
         const i32 max_left = root.inner_width - icon.width;
@@ -816,26 +833,31 @@ u32 Workbench::backdrop_item() const {
 }
 
 void Workbench::set_backdrop(bool on) {
-    if (!desktop_open_ || !windows_[0].used || on == backdrop_) {
+    DrawerWindow* old_root = find_window(kRootWindow);
+    if (!desktop_open_ || old_root == nullptr || on == backdrop_) {
         return;
     }
     cancel_drag();
-    const u32 old_window = windows_[0].window;
-    intuition_->clear_menu_strip(old_window);
-    intuition_->close_window(old_window);
-    release_window(0);
+    // The icons stay, so the selection does.
+    const Clicks selection = old_root->clicks;
+    intuition_->clear_menu_strip(old_root->window);
+    intuition_->close_window(old_root->window);
+    release_window(*old_root);
     backdrop_ = on;
     open_root();
-    if (!windows_[0].used) {
+    DrawerWindow* root = find_window(kRootWindow);
+    if (root == nullptr) {
         // The old kind of window comes back rather than none at all.
         backdrop_ = !on;
         open_root();
-        if (!windows_[0].used) {
+        root = find_window(kRootWindow);
+        if (root == nullptr) {
             return;
         }
     }
-    place_root_icons();
-    draw_window(0);
+    root->clicks = selection;
+    place_root_icons(*root);
+    draw_window(kRootWindow);
     refresh_title();
     const u32 item = backdrop_item();
     if (item != 0) {
@@ -865,35 +887,49 @@ void Workbench::measure(IconEntry& icon) {
     icon.tool_window = b.r32(icon.object + do_ToolWindow);
 }
 
+Workbench::DrawerWindow* Workbench::find_window(u32 id) {
+    return windows_.find_if([&](const DrawerWindow& w) { return w.id == id; });
+}
+
+const Workbench::DrawerWindow* Workbench::find_window(u32 id) const {
+    return windows_.find_if([&](const DrawerWindow& w) { return w.id == id; });
+}
+
+Workbench::IconEntry* Workbench::find_icon(u32 id) {
+    return icons_.find_if([&](const IconEntry& icon) { return icon.id == id; });
+}
+
+const Workbench::IconEntry* Workbench::find_icon(u32 id) const {
+    return icons_.find_if([&](const IconEntry& icon) { return icon.id == id; });
+}
+
 Workbench::IconEntry* Workbench::take_icon(u32 owner) {
-    for (IconEntry& icon : icons_) {
-        if (!icon.used) {
-            icon = IconEntry{};
-            icon.used = true;
-            icon.owner = static_cast<u8>(owner);
-            return &icon;
-        }
+    IconEntry* icon = icons_.add();
+    if (icon != nullptr) {
+        icon->id = ++last_icon_id_;
+        icon->owner = owner;
     }
-    return nullptr;
+    return icon;
 }
 
 void Workbench::free_icons(u32 owner) {
-    for (IconEntry& icon : icons_) {
-        if (!icon.used || icon.owner != owner) {
-            continue;
+    icons_.remove_if([&](const IconEntry& icon) {
+        if (icon.owner != owner) {
+            return false;
         }
         if (icon.owned && icon.object != 0) {
             icon_->free_object(icon.object);
         }
-        icon = IconEntry{};
-    }
+        return true;
+    });
 }
 
 void Workbench::add_volume(const char* label, const char* icon_path, u8 drive) {
-    if (!windows_[0].used) {
+    const DrawerWindow* root = find_window(kRootWindow);
+    if (root == nullptr) {
         return;
     }
-    IconEntry* icon = take_icon(0);
+    IconEntry* icon = take_icon(kRootWindow);
     if (icon == nullptr) {
         LogLine().text("workbench: icon table full").send();
         return;
@@ -913,7 +949,7 @@ void Workbench::add_volume(const char* label, const char* icon_path, u8 drive) {
     measure(*icon);
     read_position(*icon);
     if (!icon->placed) {
-        place_root_icon(*icon);
+        place_root_icon(*root, *icon);
     }
     LogLine().text("workbench: volume ").text(label).send();
 }
@@ -964,7 +1000,7 @@ bool Workbench::volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) c
 
 // --- drawer windows ------------------------------------------------------
 
-void Workbench::add_dir_icon(u32 window_index, const char* entry, bool is_dir) {
+void Workbench::add_dir_icon(const DrawerWindow& drawer, const char* entry, bool is_dir) {
     if (is_dir || !ends_with_ci(entry, ".info")) {
         return;
     }
@@ -973,7 +1009,6 @@ void Workbench::add_dir_icon(u32 window_index, const char* entry, bool is_dir) {
     if (stem[0] == '\0') {
         return;
     }
-    const DrawerWindow& drawer = windows_[window_index];
     if (is_volume_root(drawer.path) && same_ci(stem, "Disk")) {
         return;
     }
@@ -985,7 +1020,7 @@ void Workbench::add_dir_icon(u32 window_index, const char* entry, bool is_dir) {
     if (object == 0) {
         return;
     }
-    IconEntry* icon = take_icon(window_index);
+    IconEntry* icon = take_icon(drawer.id);
     if (icon == nullptr) {
         icon_->free_object(object);
         LogLine().text("workbench: icon table full").send();
@@ -1001,31 +1036,30 @@ void Workbench::add_dir_icon(u32 window_index, const char* entry, bool is_dir) {
     measure(*icon);
 }
 
-void Workbench::fill_drawer(u32 window_index) {
+void Workbench::fill_drawer(DrawerWindow& drawer) {
     cancel_drag();
-    free_icons(window_index);
+    free_icons(drawer.id);
     // The icon the selection named is gone with the others.
-    clicks_[window_index].clear();
+    drawer.clicks.clear();
     struct Collect {
         Workbench* self;
-        u32 window_index;
-    } collect{this, window_index};
+        const DrawerWindow* drawer;
+    } collect{this, &drawer};
     auto visit = [](void* at, const char* name, bool is_dir) {
         const Collect& c = *static_cast<const Collect*>(at);
-        c.self->add_dir_icon(c.window_index, name, is_dir);
+        c.self->add_dir_icon(*c.drawer, name, is_dir);
     };
     u32 error = 0;
-    dos_->list_dir(windows_[window_index].path, visit, &collect, error);
-    place_icons(window_index);
+    dos_->list_dir(drawer.path, visit, &collect, error);
+    place_icons(drawer);
 }
 
-void Workbench::place_icons(u32 window_index) {
-    const DrawerWindow& drawer = windows_[window_index];
+void Workbench::place_icons(const DrawerWindow& drawer) {
     const i32 label_height = label_metrics().y_size;
     i32 cell_width = 16;
     i32 cell_height = 16;
     for (const IconEntry& icon : icons_) {
-        if (!icon.used || icon.owner != window_index) {
+        if (icon.owner != drawer.id) {
             continue;
         }
         cell_width = icon.width + kCellGapX > cell_width ? icon.width + kCellGapX : cell_width;
@@ -1039,7 +1073,7 @@ void Workbench::place_icons(u32 window_index) {
     }
     u32 slot = 0;
     for (IconEntry& icon : icons_) {
-        if (!icon.used || icon.owner != window_index || icon.placed) {
+        if (icon.owner != drawer.id || icon.placed) {
             continue;
         }
         icon.left = kGridMarginX + static_cast<i32>(slot / static_cast<u32>(rows)) * cell_width;
@@ -1048,24 +1082,19 @@ void Workbench::place_icons(u32 window_index) {
     }
 }
 
-u32 Workbench::free_window_slot() const {
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        if (!windows_[i].used) {
-            return i;
-        }
+void Workbench::open_drawer(u32 window_id, const IconEntry& icon) {
+    const DrawerWindow* window = find_window(window_id);
+    if (window == nullptr) {
+        return;
     }
-    return kMaxWindows;
-}
-
-void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
     char path[Dos::kMaxPath];
-    if (!icon_target_path(window_index, icon, path)) {
+    if (!icon_target_path(*window, icon, path)) {
         return;
     }
     // The window's box comes from the icon as it is saved now, so a
     // Snapshot since the icon was read counts.
     char info[Dos::kMaxPath];
-    const u32 fresh = icon_path(window_index, icon, info) ? icon_->load_object(info) : 0;
+    const u32 fresh = icon_path(*window, icon, info) ? icon_->load_object(info) : 0;
     open_drawer_window(path, icon.name, fresh != 0 ? fresh : icon.object);
     if (fresh != 0) {
         icon_->free_object(fresh);
@@ -1075,34 +1104,34 @@ void Workbench::open_drawer(u32 window_index, const IconEntry& icon) {
 // The drawer a disk or drawer icon stands for: "Name:" for a volume on
 // the root window, the drawer's path for anything else, a disk-typed icon
 // inside a drawer included.
-bool Workbench::icon_target_path(u32 window_index, const IconEntry& icon,
+bool Workbench::icon_target_path(const DrawerWindow& window, const IconEntry& icon,
                                  char (&out)[Dos::kMaxPath]) const {
-    if (window_index == 0 && icon.type == kDisk) {
+    if (window.id == kRootWindow && icon.type == kDisk) {
         return volume_root(icon, out);
     }
-    return join_path(windows_[window_index].path, icon.file, out);
+    return join_path(window.path, icon.file, out);
 }
 
 // The path of the icon's .info without the suffix: "Name:Disk" for a disk.
-bool Workbench::icon_path(u32 window_index, const IconEntry& icon,
+bool Workbench::icon_path(const DrawerWindow& window, const IconEntry& icon,
                           char (&out)[Dos::kMaxPath]) const {
-    if (window_index == 0 && icon.type == kDisk) {
+    if (window.id == kRootWindow && icon.type == kDisk) {
         char volume[Dos::kMaxPath];
-        return icon_target_path(window_index, icon, volume) && join_path(volume, "Disk", out);
+        return icon_target_path(window, icon, volume) && join_path(volume, "Disk", out);
     }
-    return join_path(windows_[window_index].path, icon.file, out);
+    return join_path(window.path, icon.file, out);
 }
 
 void Workbench::open_drawer_window(const char* path, const char* name, u32 object,
                                    const DrawerBox* box) {
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        if (windows_[i].used && same_ci(windows_[i].path, path)) {
-            intuition_->window_to_front(windows_[i].window);
-            return;
-        }
+    const DrawerWindow* existing = windows_.find_if([&](const DrawerWindow& w) {
+        return w.id != kRootWindow && same_ci(w.path, path);
+    });
+    if (existing != nullptr) {
+        intuition_->window_to_front(existing->window);
+        return;
     }
-    const u32 slot = free_window_slot();
-    if (slot == kMaxWindows) {
+    if (windows_.full()) {
         LogLine().text("workbench: no window left for ").text(name).send();
         return;
     }
@@ -1142,11 +1171,14 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
         left = -1;
         top = -1;
     }
+    // Each drawer without a box of its own opens a step below and to the
+    // right of the one before, and the steps start over after kCascadeSlots.
+    const i32 cascade = static_cast<i32>((windows_.size() - 1) % kCascadeSlots);
     if (left < 0) {
-        left = kCascadeX + kCascadeStep * static_cast<i32>(slot - 1);
+        left = kCascadeX + kCascadeStep * cascade;
     }
     if (top < 0) {
-        top = kCascadeY + kCascadeStep * static_cast<i32>(slot - 1);
+        top = kCascadeY + kCascadeStep * cascade;
     }
     // No drawer opens over the screen's title bar.
     const i32 bar_height = static_cast<i32>(b.r8(screen_ + ndk::sc_BarHeight));
@@ -1180,10 +1212,6 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     b.w16(new_window + ndk::nw_Height, static_cast<u32>(height));
     b.w8(new_window + ndk::nw_DetailPen, 0);
     b.w8(new_window + ndk::nw_BlockPen, 1);
-    b.w32(new_window + ndk::nw_IDCMPFlags,
-          ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
-              ndk::IDCMP_NEWSIZE | ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP |
-              kIdcmpMenuPick | kIdcmpRefreshWindow);
     b.w32(new_window + ndk::nw_FirstGadget, gadgets);
     b.w32(new_window + ndk::nw_Flags,
           ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_CLOSEGADGET |
@@ -1198,9 +1226,12 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     b.w16(new_window + ndk::nw_MinHeight, kMinDrawerHeight);
     b.w16(new_window + ndk::nw_MaxWidth, 0xFFFF);
     b.w16(new_window + ndk::nw_MaxHeight, 0xFFFF);
+    const u32 idcmp = ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
+                      ndk::IDCMP_NEWSIZE | ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP |
+                      kIdcmpMenuPick | kIdcmpRefreshWindow;
     // The window keeps a copy of its title, so the one built here goes
     // back with the NewWindow.
-    const u32 window = b.ok() ? intuition_->open_window(new_window, 0) : 0;
+    const u32 window = b.ok() ? open_window_on_port(new_window, idcmp) : 0;
     exec_->free(new_window, ndk::NewWindow_SIZEOF);
     exec_->free(title, title_bytes);
     if (window == 0) {
@@ -1208,26 +1239,25 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
         LogLine().text("workbench: could not open ").text(name).send();
         return;
     }
-    attach_window(slot, window, name, path, gadgets);
-    windows_[slot].order = ++open_count_;
+    DrawerWindow& drawer = attach_window(++open_count_, window, name, path, gadgets);
     // The view a snapshot kept; drawing keeps it inside the icons.
-    windows_[slot].scroll_x = scroll_x;
-    windows_[slot].scroll_y = scroll_y;
-    fill_drawer(slot);
-    draw_window(slot);
+    drawer.scroll_x = scroll_x;
+    drawer.scroll_y = scroll_y;
+    fill_drawer(drawer);
+    draw_window(drawer.id);
     LogLine().text("workbench: opened ").text(name).send();
 }
 
-void Workbench::close_drawer(u32 window_index) {
-    if (window_index == 0 || !windows_[window_index].used) {
+void Workbench::close_drawer(u32 window_id) {
+    DrawerWindow* drawer = find_window(window_id);
+    if (window_id == kRootWindow || drawer == nullptr) {
         return;
     }
     cancel_drag();
-    free_icons(window_index);
-    clicks_[window_index].clear();
-    intuition_->close_window(windows_[window_index].window);
-    release_window(window_index);
-    draw_window(0);
+    free_icons(window_id);
+    intuition_->close_window(drawer->window);
+    release_window(*drawer);
+    draw_window(kRootWindow);
 }
 
 // --- drawing -------------------------------------------------------------
@@ -1302,20 +1332,17 @@ void Workbench::draw_icon(const DrawerWindow& drawer, const IconEntry& icon, boo
 
 // The window's view kept inside its icons and its sliders set to match,
 // then its icons drawn.
-void Workbench::draw_window(u32 window_index) {
-    if (!windows_[window_index].used) {
+void Workbench::draw_window(u32 window_id) {
+    DrawerWindow* w = find_window(window_id);
+    if (w == nullptr) {
         return;
     }
-    update_scroll(window_index);
-    paint_window(window_index);
+    update_scroll(*w);
+    paint_window(*w);
 }
 
-void Workbench::paint_window(u32 window_index) {
-    if (!windows_[window_index].used) {
-        return;
-    }
-    const DrawerWindow& drawer = windows_[window_index];
-    const u32 selected = clicks_[window_index].selected();
+void Workbench::paint_window(const DrawerWindow& drawer) {
+    const u32 selected = drawer.clicks.selected();
     const i32 right = drawer.inner_left + drawer.inner_width - 1;
     const i32 bottom = drawer.inner_top + drawer.inner_height - 1;
     if (right < drawer.inner_left || bottom < drawer.inner_top) {
@@ -1324,21 +1351,20 @@ void Workbench::paint_window(u32 window_index) {
     const InnerClip clip(*machine_, drawer.rp, drawer.clip);
     graphics_->set_pens(drawer.rp, 0, 0, ndk::JAM1);
     graphics_->rect_fill(drawer.rp, drawer.inner_left, drawer.inner_top, right, bottom);
-    fill_pattern(drawer, window_index == 0 ? 0 : 1, right, bottom);
-    for (u32 i = 0; i < kMaxIcons; ++i) {
-        const IconEntry& icon = icons_[i];
-        if (icon.used && icon.owner == window_index) {
-            draw_icon(drawer, icon, selected == i);
+    fill_pattern(drawer, drawer.id == kRootWindow ? 0 : 1, right, bottom);
+    for (const IconEntry& icon : icons_) {
+        if (icon.owner == drawer.id) {
+            draw_icon(drawer, icon, selected == icon.id);
         }
     }
 }
 
-Workbench::Extent Workbench::extent(u32 window_index) const {
+Workbench::Extent Workbench::extent(u32 window_id) const {
     Extent e;
     Bus b(*machine_);
     const Graphics::FontMetrics metrics = label_metrics();
     for (const IconEntry& icon : icons_) {
-        if (!icon.used || icon.owner != window_index) {
+        if (icon.owner != window_id) {
             continue;
         }
         const LabelPlace label =
@@ -1359,17 +1385,13 @@ Workbench::Extent Workbench::extent(u32 window_index) const {
 
 // Keeps the view inside the window's icons and sets the sliders to it; a
 // window without scroll gadgets shows its icons from the origin.
-void Workbench::update_scroll(u32 window_index) {
-    DrawerWindow& w = windows_[window_index];
-    if (!w.used) {
-        return;
-    }
+void Workbench::update_scroll(DrawerWindow& w) {
     if (w.gadgets == 0) {
         w.scroll_x = 0;
         w.scroll_y = 0;
         return;
     }
-    const Extent e = extent(window_index);
+    const Extent e = extent(w.id);
     w.scroll_x = clamp_scroll(w.scroll_x, e.min_x, e.max_x, w.inner_width);
     w.scroll_y = clamp_scroll(w.scroll_y, e.min_y, e.max_y, w.inner_height);
     Bus b(*machine_);
@@ -1398,25 +1420,30 @@ void Workbench::update_scroll(u32 window_index) {
     }
 }
 
-void Workbench::scroll_by(u32 window_index, i32 dx, i32 dy) {
-    DrawerWindow& w = windows_[window_index];
+void Workbench::scroll_by(u32 window_id, i32 dx, i32 dy) {
+    DrawerWindow* found = find_window(window_id);
+    if (found == nullptr) {
+        return;
+    }
+    DrawerWindow& w = *found;
     const i32 old_x = w.scroll_x;
     const i32 old_y = w.scroll_y;
     w.scroll_x += dx;
     w.scroll_y += dy;
-    update_scroll(window_index);
+    update_scroll(w);
     if (w.scroll_x != old_x || w.scroll_y != old_y) {
-        paint_window(window_index);
+        paint_window(w);
     }
 }
 
 // The view where the user has put the sliders. Intuition has drawn their
 // knobs already, so they are not set again.
-void Workbench::follow_sliders(u32 window_index) {
-    DrawerWindow& w = windows_[window_index];
-    if (w.gadgets == 0) {
+void Workbench::follow_sliders(u32 window_id) {
+    DrawerWindow* found = find_window(window_id);
+    if (found == nullptr || found->gadgets == 0) {
         return;
     }
+    DrawerWindow& w = *found;
     Bus b(*machine_);
     const u32 vert = w.gadgets + kPropInfoAt;
     const u32 horiz = vert + ndk::PropInfo_SIZEOF;
@@ -1425,18 +1452,19 @@ void Workbench::follow_sliders(u32 window_index) {
     if (!b.ok()) {
         return;
     }
-    const Extent e = extent(window_index);
+    const Extent e = extent(window_id);
     const i32 x = scroll_of_pot(e.min_x, e.max_x, w.inner_width, hpot);
     const i32 y = scroll_of_pot(e.min_y, e.max_y, w.inner_height, vpot);
     if (x != w.scroll_x || y != w.scroll_y) {
         w.scroll_x = x;
         w.scroll_y = y;
-        paint_window(window_index);
+        paint_window(w);
     }
 }
 
-u16 Workbench::scroll_gadget_id(u32 window_index, u32 address) const {
-    const u32 block = windows_[window_index].gadgets;
+u16 Workbench::scroll_gadget_id(u32 window_id, u32 address) const {
+    const DrawerWindow* w = find_window(window_id);
+    const u32 block = w != nullptr ? w->gadgets : 0;
     if (block == 0 || address < block) {
         return 0;
     }
@@ -1447,28 +1475,29 @@ u16 Workbench::scroll_gadget_id(u32 window_index, u32 address) const {
     return kScrollSpecs[offset / ndk::Gadget_SIZEOF].id;
 }
 
-u32 Workbench::scroll_gadget(u32 window_index, u16 id) const {
-    if (window_index >= kMaxWindows || windows_[window_index].gadgets == 0) {
+u32 Workbench::scroll_gadget(u32 window_id, u16 id) const {
+    const DrawerWindow* w = find_window(window_id);
+    if (w == nullptr || w->gadgets == 0) {
         return 0;
     }
     for (u32 i = 0; i < kScrollGadgets; ++i) {
         if (kScrollSpecs[i].id == id) {
-            return windows_[window_index].gadgets + i * ndk::Gadget_SIZEOF;
+            return w->gadgets + i * ndk::Gadget_SIZEOF;
         }
     }
     return 0;
 }
 
 // A slider moved, by its knob or a click beside it, or an arrow pressed.
-void Workbench::scroll_message(u32 window_index, u32 idcmp_class, u16 id) {
+void Workbench::scroll_message(u32 window_id, u32 idcmp_class, u16 id) {
     if (id == kScrollVert || id == kScrollHoriz) {
-        follow_sliders(window_index);
+        follow_sliders(window_id);
     } else if (idcmp_class == ndk::IDCMP_GADGETDOWN) {
         // TODO: repeat while the arrow is held, once Intuition sends
         // IDCMP_INTUITICKS.
         const i32 dx = id == kScrollLeft ? -kScrollStep : (id == kScrollRight ? kScrollStep : 0);
         const i32 dy = id == kScrollUp ? -kScrollStep : (id == kScrollDown ? kScrollStep : 0);
-        scroll_by(window_index, dx, dy);
+        scroll_by(window_id, dx, dy);
     }
 }
 
@@ -1916,28 +1945,30 @@ void Workbench::load_picture(u32 which, const char* name) {
 }
 
 void Workbench::redraw_all() {
-    for (u32 i = 0; i < kMaxWindows; ++i) {
-        draw_window(i);
+    for (const DrawerWindow& w : windows_) {
+        draw_window(w.id);
     }
 }
 
 // The labels take their size from the icon font: the unplaced icons take
 // their cells again and every window draws its labels in the new one.
 void Workbench::relayout_labels() {
-    if (!windows_[0].used) {
+    const DrawerWindow* root = find_window(kRootWindow);
+    if (root == nullptr) {
         return;
     }
-    place_root_icons();
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        if (windows_[i].used) {
-            place_icons(i);
+    place_root_icons(*root);
+    for (const DrawerWindow& w : windows_) {
+        if (w.id != kRootWindow) {
+            place_icons(w);
         }
     }
     redraw_all();
 }
 
 void Workbench::refresh_title() {
-    if (!windows_[0].used) {
+    const DrawerWindow* root = find_window(kRootWindow);
+    if (root == nullptr) {
         return;
     }
     if (title_buffer_ == 0) {
@@ -1967,66 +1998,61 @@ void Workbench::refresh_title() {
         b.w8(title_buffer_ + i, static_cast<u8>(text[i]));
     }
     if (b.ok()) {
-        intuition_->set_window_titles(windows_[0].window, 0xFFFFFFFF, title_buffer_);
+        intuition_->set_window_titles(root->window, 0xFFFFFFFF, title_buffer_);
     }
 }
 
 // --- the desktop's actions ----------------------------------------------
 
-u32 Workbench::icon_at(u32 window_index, i32 x, i32 y) const {
-    for (u32 i = 0; i < kMaxIcons; ++i) {
-        const IconEntry& icon = icons_[i];
-        if (!icon.used || icon.owner != window_index) {
-            continue;
-        }
-        if (x >= icon.left && x < icon.left + icon.width && y >= icon.top &&
-            y < icon.top + icon.height) {
-            return i;
-        }
-    }
-    return kNoIcon;
+const Workbench::IconEntry* Workbench::icon_at(u32 window_id, i32 x, i32 y) const {
+    return icons_.find_if([&](const IconEntry& icon) {
+        return icon.owner == window_id && x >= icon.left && x < icon.left + icon.width &&
+               y >= icon.top && y < icon.top + icon.height;
+    });
 }
 
-void Workbench::open_icon(u32 window_index, u32 icon_index) {
-    if (icon_index >= kMaxIcons || !icons_[icon_index].used) {
+void Workbench::open_icon(u32 window_id, u32 icon_id) {
+    const DrawerWindow* window = find_window(window_id);
+    const IconEntry* icon = find_icon(icon_id);
+    if (window == nullptr || icon == nullptr) {
         return;
     }
-    const IconEntry& icon = icons_[icon_index];
-    const char* drawer = windows_[window_index].path;
-    switch (icon.type) {
+    const char* drawer = window->path;
+    switch (icon->type) {
     case kDisk:
     case kDrawer:
-        open_drawer(window_index, icon);
+        open_drawer(window_id, *icon);
         break;
     case kTool:
-        start_tool(icon, drawer);
+        start_tool(*icon, drawer);
         break;
     case kProject:
-        start_project(icon, drawer);
+        start_project(*icon, drawer);
         break;
     default:
         break;
     }
 }
 
-void Workbench::mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us) {
-    if (!windows_[window_index].used) {
+void Workbench::mouse_click(u32 window_id, i32 mx, i32 my, u64 now_us) {
+    DrawerWindow* drawer = find_window(window_id);
+    if (drawer == nullptr) {
         return;
     }
     cancel_drag();
-    const DrawerWindow& drawer = windows_[window_index];
-    const i32 x = mx - drawer.inner_left + drawer.scroll_x;
-    const i32 y = my - drawer.inner_top + drawer.scroll_y;
-    const u32 hit = icon_at(window_index, x, y);
-    const ClickAction action = clicks_[window_index].click(hit, now_us);
+    const i32 x = mx - drawer->inner_left + drawer->scroll_x;
+    const i32 y = my - drawer->inner_top + drawer->scroll_y;
+    const IconEntry* hit = icon_at(window_id, x, y);
+    const u32 hit_id = hit != nullptr ? hit->id : kNoIcon;
+    const ClickAction action = drawer->clicks.click(hit_id, now_us);
     switch (action) {
     case ClickAction::Select:
     case ClickAction::Clear:
-        draw_window(window_index);
+        draw_window(window_id);
         break;
     case ClickAction::Open:
-        draw_window(window_index);
-        open_icon(window_index, hit);
+        draw_window(window_id);
+        open_icon(window_id, hit_id);
         break;
     case ClickAction::None:
         break;
@@ -2034,40 +2060,41 @@ void Workbench::mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us) {
     // The press that does not open the icon may start dragging it.
     i32 origin_x = 0;
     i32 origin_y = 0;
-    if (hit == kNoIcon || action == ClickAction::Open ||
-        !screen_origin(window_index, origin_x, origin_y)) {
+    if (hit == nullptr || action == ClickAction::Open ||
+        !screen_origin(window_id, origin_x, origin_y)) {
         return;
     }
     drag_ = IconDrag{};
     drag_.armed = true;
-    drag_.window = window_index;
-    drag_.icon = hit;
-    drag_.grab_x = x - icons_[hit].left;
-    drag_.grab_y = y - icons_[hit].top;
+    drag_.window = window_id;
+    drag_.icon = hit_id;
+    drag_.grab_x = x - hit->left;
+    drag_.grab_y = y - hit->top;
     drag_.start_x = origin_x + mx;
     drag_.start_y = origin_y + my;
-    intuition_->report_mouse(windows_[window_index].window, true);
+    intuition_->report_mouse(drawer->window, true);
 }
 
 // The window's top-left corner on the screen; the pointer positions its
 // messages carry are relative to it.
-bool Workbench::screen_origin(u32 window_index, i32& x, i32& y) const {
-    if (window_index >= kMaxWindows || !windows_[window_index].used) {
+bool Workbench::screen_origin(u32 window_id, i32& x, i32& y) const {
+    const DrawerWindow* w = find_window(window_id);
+    if (w == nullptr) {
         return false;
     }
     Bus b(*machine_);
-    x = static_cast<i16>(b.r16(windows_[window_index].window + ndk::wd_LeftEdge));
-    y = static_cast<i16>(b.r16(windows_[window_index].window + ndk::wd_TopEdge));
+    x = static_cast<i16>(b.r16(w->window + ndk::wd_LeftEdge));
+    y = static_cast<i16>(b.r16(w->window + ndk::wd_TopEdge));
     return b.ok();
 }
 
-void Workbench::drag_to(u32 window_index, i32 mx, i32 my) {
-    if (!drag_.armed || window_index != drag_.window) {
+void Workbench::drag_to(u32 window_id, i32 mx, i32 my) {
+    if (!drag_.armed || window_id != drag_.window) {
         return;
     }
     i32 origin_x = 0;
     i32 origin_y = 0;
-    if (!screen_origin(window_index, origin_x, origin_y)) {
+    if (!screen_origin(window_id, origin_x, origin_y)) {
         return;
     }
     const i32 sx = origin_x + mx;
@@ -2082,7 +2109,8 @@ void Workbench::drag_to(u32 window_index, i32 mx, i32 my) {
         drag_.active = true;
     }
     Bus b(*machine_);
-    const IconArt art = art_of(b, icons_[drag_.icon].object);
+    const IconEntry* icon = find_icon(drag_.icon);
+    const IconArt art = art_of(b, icon != nullptr ? icon->object : 0);
     if (art.render == 0) {
         return;
     }
@@ -2090,20 +2118,21 @@ void Workbench::drag_to(u32 window_index, i32 mx, i32 my) {
     intuition_->set_drag_image(screen_, art.render, sx - drag_.grab_x, sy - drag_.grab_y);
 }
 
-void Workbench::end_drag(u32 window_index, i32 mx, i32 my) {
-    if (!drag_.armed || window_index != drag_.window) {
+void Workbench::end_drag(u32 window_id, i32 mx, i32 my) {
+    if (!drag_.armed || window_id != drag_.window) {
         return;
     }
     const IconDrag ended = drag_;
     i32 origin_x = 0;
     i32 origin_y = 0;
-    const bool placed = screen_origin(window_index, origin_x, origin_y);
+    DrawerWindow* drawer = find_window(window_id);
+    const bool placed = drawer != nullptr && screen_origin(window_id, origin_x, origin_y);
     cancel_drag();
     if (!ended.active || !placed) {
         return;
     }
     // A drag is no first click of a double click.
-    clicks_[window_index].forget();
+    drawer->clicks.forget();
     drop(ended, origin_x + mx, origin_y + my);
 }
 
@@ -2111,8 +2140,9 @@ void Workbench::cancel_drag() {
     if (!drag_.armed) {
         return;
     }
-    if (drag_.window < kMaxWindows && windows_[drag_.window].used) {
-        intuition_->report_mouse(windows_[drag_.window].window, false);
+    const DrawerWindow* drawer = find_window(drag_.window);
+    if (drawer != nullptr) {
+        intuition_->report_mouse(drawer->window, false);
     }
     intuition_->clear_drag_image();
     drag_ = IconDrag{};
@@ -2121,41 +2151,35 @@ void Workbench::cancel_drag() {
 // Where a dragged icon lands: its own window takes it at the new place; a
 // drawer or disk icon, or another drawer's window, takes the file.
 void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
-    if (drag.icon >= kMaxIcons || !icons_[drag.icon].used ||
-        icons_[drag.icon].owner != drag.window || !windows_[drag.window].used) {
+    IconEntry* dragged = find_icon(drag.icon);
+    const DrawerWindow* source = find_window(drag.window);
+    if (dragged == nullptr || dragged->owner != drag.window || source == nullptr) {
         return;
     }
+    IconEntry& icon = *dragged;
     const u32 under = intuition_->window_under(sx, sy);
-    u32 target = kMaxWindows;
-    for (u32 i = 0; i < kMaxWindows; ++i) {
-        if (windows_[i].used && windows_[i].window == under) {
-            target = i;
-            break;
-        }
-    }
+    const DrawerWindow* to =
+        windows_.find_if([&](const DrawerWindow& w) { return w.window == under; });
     i32 origin_x = 0;
     i32 origin_y = 0;
-    if (target == kMaxWindows || !screen_origin(target, origin_x, origin_y)) {
-        LogLine().text("workbench: ").text(icons_[drag.icon].name).text(" dropped nowhere").send();
+    if (to == nullptr || !screen_origin(to->id, origin_x, origin_y)) {
+        LogLine().text("workbench: ").text(icon.name).text(" dropped nowhere").send();
         return;
     }
-    const DrawerWindow& to = windows_[target];
-    const i32 px = sx - origin_x - to.inner_left + to.scroll_x;
-    const i32 py = sy - origin_y - to.inner_top + to.scroll_y;
+    const i32 px = sx - origin_x - to->inner_left + to->scroll_x;
+    const i32 py = sy - origin_y - to->inner_top + to->scroll_y;
     const i32 left = px - drag.grab_x;
     const i32 top = py - drag.grab_y;
-    u32 on = icon_at(target, px, py);
-    if (on == drag.icon) {
-        on = kNoIcon;
+    const IconEntry* on = icon_at(to->id, px, py);
+    if (on == &icon) {
+        on = nullptr;
     }
-    const bool into_icon =
-        on != kNoIcon && (icons_[on].type == kDrawer || icons_[on].type == kDisk);
-    IconEntry& icon = icons_[drag.icon];
-    if (target == drag.window && !into_icon) {
+    const bool into_icon = on != nullptr && (on->type == kDrawer || on->type == kDisk);
+    if (to->id == drag.window && !into_icon) {
         icon.left = left < 0 ? 0 : left;
         icon.top = top < 0 ? 0 : top;
         icon.placed = true;
-        draw_window(target);
+        draw_window(to->id);
         return;
     }
     if (icon.type != kTool && icon.type != kProject) {
@@ -2164,17 +2188,17 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
     }
     char dest[Dos::kMaxPath];
     if (into_icon) {
-        if (!icon_target_path(target, icons_[on], dest)) {
+        if (!icon_target_path(*to, *on, dest)) {
             return;
         }
-    } else if (target == 0) {
+    } else if (to->id == kRootWindow) {
         LogLine().text("workbench: ").text(icon.name).text(" cannot be left out").send();
         return;
     } else {
-        copy_text(dest, sizeof dest, to.path);
+        copy_text(dest, sizeof dest, to->path);
     }
     char from[Dos::kMaxPath];
-    copy_text(from, sizeof from, windows_[drag.window].path);
+    copy_text(from, sizeof from, source->path);
     if (same_ci(dest, from)) {
         return;
     }
@@ -2185,20 +2209,20 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
     if (!transfer(moving, from, dest, keep_left, keep_top)) {
         return;
     }
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        if (windows_[i].used && (same_ci(windows_[i].path, from) ||
-                                 same_ci(windows_[i].path, dest))) {
-            fill_drawer(i);
-            draw_window(i);
+    for (DrawerWindow& w : windows_) {
+        if (w.id != kRootWindow && (same_ci(w.path, from) || same_ci(w.path, dest))) {
+            fill_drawer(w);
+            draw_window(w.id);
         }
     }
 }
 
-void Workbench::open_parent(u32 window_index) {
-    if (window_index == 0 || !windows_[window_index].used) {
+void Workbench::open_parent(u32 window_id) {
+    const DrawerWindow* window = find_window(window_id);
+    if (window_id == kRootWindow || window == nullptr) {
         return;
     }
-    const char* path = windows_[window_index].path;
+    const char* path = window->path;
     if (is_volume_root(path)) {
         return;  // a disk's window has no drawer above it
     }
@@ -2249,30 +2273,34 @@ void Workbench::open_parent(u32 window_index) {
     }
 }
 
-void Workbench::select_contents(u32 window_index) {
-    for (u32 i = 0; i < kMaxIcons; ++i) {
-        if (icons_[i].used && icons_[i].owner == window_index) {
-            clicks_[window_index].select(i);
-            draw_window(window_index);
-            return;
-        }
+void Workbench::select_contents(u32 window_id) {
+    DrawerWindow* drawer = find_window(window_id);
+    const IconEntry* first =
+        icons_.find_if([&](const IconEntry& icon) { return icon.owner == window_id; });
+    if (drawer != nullptr && first != nullptr) {
+        drawer->clicks.select(first->id);
+        draw_window(window_id);
     }
 }
 
-void Workbench::clean_up(u32 window_index) {
+void Workbench::clean_up(u32 window_id) {
+    const DrawerWindow* drawer = find_window(window_id);
+    if (drawer == nullptr) {
+        return;
+    }
     for (IconEntry& icon : icons_) {
-        if (icon.used && icon.owner == window_index) {
+        if (icon.owner == window_id) {
             icon.placed = false;
         }
     }
-    place_icons(window_index);
-    draw_window(window_index);
+    place_icons(*drawer);
+    draw_window(window_id);
 }
 
-void Workbench::open_selected(u32 window_index) {
-    const u32 selected = clicks_[window_index].selected();
-    if (selected != kNoIcon) {
-        open_icon(window_index, selected);
+void Workbench::open_selected(u32 window_id) {
+    const DrawerWindow* drawer = find_window(window_id);
+    if (drawer != nullptr && drawer->clicks.selected() != kNoIcon) {
+        open_icon(window_id, drawer->clicks.selected());
     }
 }
 
@@ -2459,7 +2487,8 @@ void Workbench::show_requester(const char* title, const char* text) {
     b.w32(block + ndk::es_TextFormat, format_at);
     b.w32(block + ndk::es_GadgetFormat, gadgets_at);
     b.w32(args, text_at);
-    const u32 window = windows_[0].used ? windows_[0].window : 0;
+    const DrawerWindow* root = find_window(kRootWindow);
+    const u32 window = root != nullptr ? root->window : 0;
     if (b.ok()) {
         intuition_->easy_request(window, block, 0, args);
     }
@@ -2468,18 +2497,19 @@ void Workbench::show_requester(const char* title, const char* text) {
 
 // --- snapshots -----------------------------------------------------------
 
-bool Workbench::snapshot_icon(u32 window_index, u32 icon_index) {
-    if (window_index >= kMaxWindows || icon_index >= kMaxIcons || !icons_[icon_index].used ||
-        icons_[icon_index].owner != window_index) {
+bool Workbench::snapshot_icon(u32 window_id, u32 icon_id) {
+    const DrawerWindow* window = find_window(window_id);
+    IconEntry* found = find_icon(icon_id);
+    if (window == nullptr || found == nullptr || found->owner != window_id) {
         return false;
     }
-    IconEntry& icon = icons_[icon_index];
+    IconEntry& icon = *found;
     if (!icon.owned || icon.type == kAppIcon || icon.object == 0) {
         LogLine().text("workbench: ").text(icon.name).text(" keeps no snapshot").send();
         return false;
     }
     char path[Dos::kMaxPath];
-    if (!icon_path(window_index, icon, path)) {
+    if (!icon_path(*window, icon, path)) {
         return false;
     }
     Bus b(*machine_);
@@ -2495,18 +2525,19 @@ bool Workbench::snapshot_icon(u32 window_index, u32 icon_index) {
     return true;
 }
 
-bool Workbench::unsnapshot_icon(u32 window_index, u32 icon_index) {
-    if (window_index >= kMaxWindows || icon_index >= kMaxIcons || !icons_[icon_index].used ||
-        icons_[icon_index].owner != window_index) {
+bool Workbench::unsnapshot_icon(u32 window_id, u32 icon_id) {
+    const DrawerWindow* window = find_window(window_id);
+    IconEntry* found = find_icon(icon_id);
+    if (window == nullptr || found == nullptr || found->owner != window_id) {
         return false;
     }
-    IconEntry& icon = icons_[icon_index];
+    IconEntry& icon = *found;
     if (!icon.owned || icon.type == kAppIcon || icon.object == 0) {
         LogLine().text("workbench: ").text(icon.name).text(" keeps no snapshot").send();
         return false;
     }
     char path[Dos::kMaxPath];
-    if (!icon_path(window_index, icon, path)) {
+    if (!icon_path(*window, icon, path)) {
         return false;
     }
     Bus b(*machine_);
@@ -2518,25 +2549,26 @@ bool Workbench::unsnapshot_icon(u32 window_index, u32 icon_index) {
         return false;
     }
     icon.placed = false;
-    if (window_index == 0) {
-        place_root_icons();
+    if (window_id == kRootWindow) {
+        place_root_icons(*window);
     } else {
-        place_icons(window_index);
+        place_icons(*window);
     }
-    draw_window(window_index);
+    draw_window(window_id);
     LogLine().text("workbench: unsnapshot ").text(path).send();
     return true;
 }
 
-bool Workbench::snapshot_window(u32 window_index, bool all) {
-    if (window_index >= kMaxWindows || !windows_[window_index].used) {
+bool Workbench::snapshot_window(u32 window_id, bool all) {
+    const DrawerWindow* found = find_window(window_id);
+    if (found == nullptr) {
         return false;
     }
-    if (window_index == 0) {
+    if (window_id == kRootWindow) {
         LogLine().text("workbench: the Workbench window keeps no snapshot").send();
         return false;
     }
-    const DrawerWindow& drawer = windows_[window_index];
+    const DrawerWindow& drawer = *found;
     // A disk keeps its window in Disk.info, a drawer in its own icon.
     char path[Dos::kMaxPath];
     const bool volume = is_volume_root(drawer.path);
@@ -2576,23 +2608,27 @@ bool Workbench::snapshot_window(u32 window_index, bool all) {
     LogLine().text("workbench: snapshot ").text(path).send();
     bool every = true;
     if (all) {
-        for (u32 i = 0; i < kMaxIcons; ++i) {
-            if (icons_[i].used && icons_[i].owner == window_index &&
-                !snapshot_icon(window_index, i)) {
-                every = false;
+        // Ids, not the icons themselves: a snapshot that fails waits for its
+        // requester to be answered, and other tasks may remove icons then.
+        std::vector<u32> ids;
+        for (const IconEntry& icon : icons_) {
+            if (icon.owner == window_id) {
+                ids.push_back(icon.id);
             }
+        }
+        for (const u32 id : ids) {
+            every = snapshot_icon(window_id, id) && every;
         }
     }
     return every;
 }
 
 void Workbench::update_all() {
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        if (!windows_[i].used) {
-            continue;
+    for (DrawerWindow& w : windows_) {
+        if (w.id != kRootWindow) {
+            fill_drawer(w);
+            draw_window(w.id);
         }
-        fill_drawer(i);
-        draw_window(i);
     }
 }
 
@@ -2638,14 +2674,15 @@ void Workbench::show_about() {
     b.w32(args + 4, kHombreLibRevision);
     b.w32(args + 8, kHombreLibVersion);
     b.w32(args + 12, kHombreLibRevision);
-    const u32 window = windows_[0].used ? windows_[0].window : 0;
+    const DrawerWindow* root = find_window(kRootWindow);
+    const u32 window = root != nullptr ? root->window : 0;
     if (b.ok()) {
         intuition_->easy_request(window, block, 0, args);
     }
     exec_->free(block, bytes);
 }
 
-void Workbench::menu_pick(u32 window_index, u32 number) {
+void Workbench::menu_pick(u32 window_id, u32 number) {
     const u32 menu = number & 0x1F;
     const u32 item = (number >> 5) & 0x3F;
     const u32 sub = (number >> 11) & 0x1F;
@@ -2672,31 +2709,32 @@ void Workbench::menu_pick(u32 window_index, u32 number) {
         }
     } else if (menu == kMenuWindow) {
         if (item == 1) {
-            open_parent(window_index);
+            open_parent(window_id);
         } else if (item == 2) {
-            close_drawer(window_index);
+            close_drawer(window_id);
         } else if (item == 4) {
-            select_contents(window_index);
+            select_contents(window_id);
         } else if (item == 5) {
-            clean_up(window_index);
+            clean_up(window_id);
         } else if (item == kItemWindowSnapshot && sub != kNoSub) {
-            snapshot_window(window_index, sub == kSubAll);
+            snapshot_window(window_id, sub == kSubAll);
         }
     } else if (menu == kMenuIcons) {
-        const u32 selected = clicks_[window_index].selected();
+        const DrawerWindow* window = find_window(window_id);
+        const u32 selected = window != nullptr ? window->clicks.selected() : kNoIcon;
         if (item == 0) {
-            open_selected(window_index);
+            open_selected(window_id);
         } else if (item == kItemIconSnapshot && selected != kNoIcon) {
-            snapshot_icon(window_index, selected);
+            snapshot_icon(window_id, selected);
         } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {
-            unsnapshot_icon(window_index, selected);
+            unsnapshot_icon(window_id, selected);
         }
     }
 }
 
 // --- messages ------------------------------------------------------------
 
-void Workbench::handle_message(u32 window_index, u32 message) {
+void Workbench::handle_message(u32 message) {
     Bus b(*machine_);
     const u32 idcmp_class = b.r32(message + ndk::im_Class);
     const u32 code = b.r16(message + ndk::im_Code);
@@ -2704,30 +2742,37 @@ void Workbench::handle_message(u32 window_index, u32 message) {
     const i32 my = static_cast<i16>(b.r16(message + ndk::im_MouseY));
     const u64 when = static_cast<u64>(b.r32(message + ndk::im_Seconds)) * 1000000 +
                      b.r32(message + ndk::im_Micros);
-    const u16 scroll_id = scroll_gadget_id(window_index, b.r32(message + ndk::im_IAddress));
+    const u32 window = b.r32(message + ndk::im_IDCMPWindow);
+    const DrawerWindow* source =
+        windows_.find_if([&](const DrawerWindow& w) { return w.window == window; });
+    const u32 window_id = source != nullptr ? source->id : kNoWindow;
+    const u16 scroll_id = scroll_gadget_id(window_id, b.r32(message + ndk::im_IAddress));
     // The message goes back before it is acted on: closing the window it
-    // came from takes the port and everything still tied to it away.
+    // came from takes everything still tied to it away.
     exec_->reply_message(message);
-    if (!b.ok()) {
+    // A message for a window the desktop no longer has is only answered.
+    if (!b.ok() || window_id == kNoWindow) {
         return;
     }
     if (idcmp_class == ndk::IDCMP_CLOSEWINDOW) {
-        close_drawer(window_index);
+        close_drawer(window_id);
     } else if (idcmp_class == ndk::IDCMP_NEWSIZE) {
-        measure_window(window_index);
-        draw_window(window_index);
+        if (DrawerWindow* w = find_window(window_id); w != nullptr) {
+            measure_window(*w);
+        }
+        draw_window(window_id);
     } else if (scroll_id != 0 &&
                (idcmp_class == ndk::IDCMP_GADGETDOWN || idcmp_class == ndk::IDCMP_GADGETUP ||
                 idcmp_class == ndk::IDCMP_MOUSEMOVE)) {
-        scroll_message(window_index, idcmp_class, scroll_id);
+        scroll_message(window_id, idcmp_class, scroll_id);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTDOWN) {
-        mouse_click(window_index, mx, my, when);
+        mouse_click(window_id, mx, my, when);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTUP) {
-        end_drag(window_index, mx, my);
+        end_drag(window_id, mx, my);
     } else if (idcmp_class == ndk::IDCMP_MOUSEMOVE) {
-        drag_to(window_index, mx, my);
+        drag_to(window_id, mx, my);
     } else if (idcmp_class == kIdcmpMenuPick) {
-        menu_pick(window_index, code);
+        menu_pick(window_id, code);
     }
 }
 
@@ -2743,23 +2788,17 @@ bool Workbench::pump() {
         }
     }
     reap_tools();
-    for (u32 i = 0; i < kMaxWindows; ++i) {
+    if (window_port_ != 0) {
         for (u32 n = 0;; ++n) {
-            // A close gadget closes the window and its port, so both are
-            // read again for every message.
-            const u32 port = windows_[i].user_port;
-            if (!windows_[i].used || port == 0) {
-                break;
-            }
             if (n == kMaxMessagesPerPump) {
                 more = true;
                 break;
             }
-            const u32 message = exec_->get_message(port);
+            const u32 message = exec_->get_message(window_port_);
             if (message == 0) {
                 break;
             }
-            handle_message(i, message);
+            handle_message(message);
         }
     }
     return more;
@@ -2781,11 +2820,7 @@ u32 Workbench::wait_mask() const {
         }
     };
     add(reply_port_);
-    for (const DrawerWindow& w : windows_) {
-        if (w.used) {
-            add(w.user_port);
-        }
-    }
+    add(window_port_);
     return mask;
 }
 
@@ -2974,14 +3009,7 @@ u32 Workbench::build_startup(u32 process, u32 seglist, const StartupArg* args, u
 bool Workbench::start_program(const char* name, u32 seglist, const char* current_dir,
                               const StartupArg* args, u32 nargs, const char* tool_window,
                               u32 stack_size) {
-    RunningTool* record = nullptr;
-    for (RunningTool& tool : tools_) {
-        if (!tool.used) {
-            record = &tool;
-            break;
-        }
-    }
-    if (record == nullptr) {
+    if (tools_.full()) {
         LogLine().text("workbench: too many programs running").send();
         dos_->unload_seg(seglist);
         return false;
@@ -3025,16 +3053,16 @@ bool Workbench::start_program(const char* name, u32 seglist, const char* current
     if (!exec_->post_message(port, message)) {
         LogLine().text("workbench: no startup message for ").text(name).send();
     }
-    record->used = true;
-    record->message = message;
-    record->message_bytes = message_bytes;
-    record->process = process;
-    record->seglist = seglist;
+    RunningTool& record = *tools_.add();
+    record.message = message;
+    record.message_bytes = message_bytes;
+    record.process = process;
+    record.seglist = seglist;
     for (u32 i = 0; i < lock_count; ++i) {
-        record->locks[i] = locks[i];
+        record.locks[i] = locks[i];
     }
-    record->lock_count = lock_count;
-    copy_text(record->name, sizeof record->name, name);
+    record.lock_count = lock_count;
+    copy_text(record.name, sizeof record.name, name);
     LogLine().text("workbench: started ").text(name).send();
     return true;
 }
@@ -3144,30 +3172,30 @@ void Workbench::release_tool(RunningTool& tool) {
         dos_->unlock_path(tool.locks[i]);
     }
     exec_->free(tool.message, tool.message_bytes);
-    tool = RunningTool{};
 }
 
 bool Workbench::tool_reply(u32 message) {
-    for (RunningTool& tool : tools_) {
-        if (!tool.used || tool.message != message) {
-            continue;
-        }
-        LogLine().text("workbench: ").text(tool.name).text(" ended").send();
-        release_tool(tool);
-        return true;
+    RunningTool* tool =
+        tools_.find_if([&](const RunningTool& candidate) { return candidate.message == message; });
+    if (tool == nullptr) {
+        LogLine().text("workbench: reply to no running program").send();
+        return false;
     }
-    LogLine().text("workbench: reply to no running program").send();
-    return false;
+    LogLine().text("workbench: ").text(tool->name).text(" ended").send();
+    release_tool(*tool);
+    tools_.remove(tool);
+    return true;
 }
 
 void Workbench::reap_tools() {
-    for (RunningTool& tool : tools_) {
-        if (!tool.used || exec_->scheduler().find(tool.process) >= 0) {
-            continue;
+    tools_.remove_if([&](RunningTool& tool) {
+        const bool ended = exec_->scheduler().find(tool.process) < 0;
+        if (ended) {
+            LogLine().text("workbench: ").text(tool.name).text(" ended without a reply").send();
+            release_tool(tool);
         }
-        LogLine().text("workbench: ").text(tool.name).text(" ended without a reply").send();
-        release_tool(tool);
-    }
+        return ended;
+    });
 }
 
 void Workbench::start_wbstartup() {
@@ -3237,13 +3265,14 @@ void Workbench::open_desktop() {
         return;
     }
     reply_port_ = exec_->create_port();
-    if (reply_port_ == 0) {
+    window_port_ = exec_->create_port();
+    if (reply_port_ == 0 || window_port_ == 0) {
         LogLine().text("workbench: no message port").send();
         return;
     }
     menu_ = build_menu_strip();
     open_root();
-    if (!windows_[0].used) {
+    if (!has_window(kRootWindow)) {
         return;
     }
     add_volume_icons();
@@ -3251,7 +3280,7 @@ void Workbench::open_desktop() {
     dos_->set_file_closed(&Workbench::file_closed, this);
     intuition_->set_workbench_hooks(
         Intuition::WorkbenchHooks{&Workbench::hook_close, &Workbench::hook_open, this});
-    draw_window(0);
+    draw_window(kRootWindow);
     start_wbstartup();
     desktop_open_ = true;
     refresh_title();
@@ -3259,70 +3288,60 @@ void Workbench::open_desktop() {
 }
 
 bool Workbench::close_for_reset() {
-    if (!desktop_open_ || !windows_[0].used) {
+    DrawerWindow* root = find_window(kRootWindow);
+    if (!desktop_open_ || root == nullptr) {
         return false;
     }
     cancel_drag();
-    for (Clicks& clicks : clicks_) {
-        clicks.clear();
-    }
-    remembered_count_ = 0;
+    remembered_.clear();
     Bus b(*machine_);
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        if (!windows_[i].used) {
+    for (const DrawerWindow& w : windows_) {
+        if (w.id == kRootWindow) {
             continue;
         }
-        RememberedDrawer& drawer = remembered_[remembered_count_++];
-        copy_text(drawer.path, sizeof drawer.path, windows_[i].path);
-        copy_text(drawer.name, sizeof drawer.name, windows_[i].name);
-        drawer.left = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_LeftEdge));
-        drawer.top = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_TopEdge));
-        drawer.width = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_Width));
-        drawer.height = static_cast<i16>(b.r16(windows_[i].window + ndk::wd_Height));
-        drawer.order = windows_[i].order;
+        RememberedDrawer& drawer = remembered_.emplace_back();
+        copy_text(drawer.path, sizeof drawer.path, w.path);
+        copy_text(drawer.name, sizeof drawer.name, w.name);
+        drawer.left = static_cast<i16>(b.r16(w.window + ndk::wd_LeftEdge));
+        drawer.top = static_cast<i16>(b.r16(w.window + ndk::wd_TopEdge));
+        drawer.width = static_cast<i16>(b.r16(w.window + ndk::wd_Width));
+        drawer.height = static_cast<i16>(b.r16(w.window + ndk::wd_Height));
     }
-    for (u32 i = 1; i < remembered_count_; ++i) {
-        const RememberedDrawer drawer = remembered_[i];
-        u32 j = i;
-        for (; j > 0 && remembered_[j - 1].order > drawer.order; --j) {
-            remembered_[j] = remembered_[j - 1];
-        }
-        remembered_[j] = drawer;
+    while (const DrawerWindow* drawer = windows_.find_if(
+               [](const DrawerWindow& w) { return w.id != kRootWindow; })) {
+        close_drawer(drawer->id);
     }
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        close_drawer(i);
-    }
-    intuition_->clear_menu_strip(windows_[0].window);
-    intuition_->close_window(windows_[0].window);
-    release_window(0);
+    intuition_->clear_menu_strip(root->window);
+    intuition_->close_window(root->window);
+    release_window(*root);
     return true;
 }
 
 void Workbench::open_after_reset() {
-    if (!desktop_open_ || machine_ == nullptr || windows_[0].used) {
+    if (!desktop_open_ || machine_ == nullptr || has_window(kRootWindow)) {
         return;
     }
     open_root();
-    if (!windows_[0].used) {
-        remembered_count_ = 0;
+    const DrawerWindow* root = find_window(kRootWindow);
+    if (root == nullptr) {
+        remembered_.clear();
         return;
     }
-    place_root_icons();
-    draw_window(0);
+    place_root_icons(*root);
+    draw_window(kRootWindow);
     refresh_title();
-    for (u32 i = 0; i < remembered_count_; ++i) {
-        const RememberedDrawer& drawer = remembered_[i];
+    for (const RememberedDrawer& drawer : remembered_) {
         const DrawerBox box{drawer.left, drawer.top, drawer.width, drawer.height};
         open_drawer_window(drawer.path, drawer.name, 0, &box);
     }
-    remembered_count_ = 0;
+    remembered_.clear();
 }
 
 bool Workbench::hook_close(void* ctx) { return static_cast<Workbench*>(ctx)->close_for_reset(); }
 
-// The windows reopen in the Workbench's own task, so their ports signal it
-// and not the task that called OpenWorkBench; without a task of its own
-// they reopen at once.
+// The windows reopen in the Workbench's own task, so they belong to it and
+// not to the task that called OpenWorkBench; without a task of its own they
+// reopen at once. Their port is the one it made, whichever task opens them.
 void Workbench::hook_open(void* ctx) {
     Workbench& wb = *static_cast<Workbench*>(ctx);
     Bus b(*wb.machine_);
@@ -3369,66 +3388,55 @@ bool Workbench::update_workbench(u32 name) {
     if (!b.string(name, text, sizeof text)) {
         return false;
     }
-    for (u32 i = 1; i < kMaxWindows; ++i) {
-        if (!windows_[i].used) {
-            continue;
-        }
-        if (same_ci(windows_[i].path, text) || same_ci(windows_[i].name, text)) {
-            fill_drawer(i);
-            draw_window(i);
-            return true;
-        }
+    DrawerWindow* drawer = windows_.find_if([&](const DrawerWindow& w) {
+        return w.id != kRootWindow && (same_ci(w.path, text) || same_ci(w.name, text));
+    });
+    if (drawer == nullptr) {
+        return false;
     }
-    return false;
+    fill_drawer(*drawer);
+    draw_window(drawer->id);
+    return true;
 }
 
 // --- application registrations -------------------------------------------
 
 u32 Workbench::record_app(AppKind kind, u32 id, u32 user) {
-    for (App& app : apps_) {
-        if (app.used) {
-            continue;
-        }
-        const u32 handle = exec_->alloc(kAppBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-        if (handle == 0) {
-            return 0;
-        }
-        app = App{};
-        app.used = true;
-        app.kind = kind;
-        app.handle = handle;
-        app.id = id;
-        app.user = user;
-        return handle;
+    if (apps_.full()) {
+        LogLine().text("workbench: application table full").send();
+        return 0;
     }
-    LogLine().text("workbench: application table full").send();
-    return 0;
+    const u32 handle = exec_->alloc(kAppBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (handle == 0) {
+        return 0;
+    }
+    App& app = *apps_.add();
+    app.kind = kind;
+    app.handle = handle;
+    app.id = id;
+    app.user = user;
+    return handle;
 }
 
 Workbench::App* Workbench::find_app(u32 handle, AppKind kind) {
-    for (App& app : apps_) {
-        if (app.used && app.handle == handle && app.kind == kind) {
-            return &app;
-        }
-    }
-    return nullptr;
+    return apps_.find_if(
+        [&](const App& app) { return app.handle == handle && app.kind == kind; });
 }
 
 void Workbench::drop_app_icon(const App& app) {
-    if (app.icon == kNoIcon || app.icon >= kMaxIcons) {
+    IconEntry* icon = find_icon(app.icon);
+    if (icon == nullptr || icon->owner != kRootWindow) {
         return;
     }
-    IconEntry& icon = icons_[app.icon];
-    if (icon.used && icon.owner == 0) {
-        if (drag_.armed && drag_.icon == app.icon) {
-            cancel_drag();
-        }
-        icon = IconEntry{};
-        if (clicks_[0].selected() == app.icon) {
-            clicks_[0].clear();
-        }
-        draw_window(0);
+    if (drag_.armed && drag_.icon == app.icon) {
+        cancel_drag();
     }
+    icons_.remove(icon);
+    DrawerWindow* root = find_window(kRootWindow);
+    if (root != nullptr && root->clicks.selected() == app.icon) {
+        root->clicks.clear();
+    }
+    draw_window(kRootWindow);
 }
 
 u32 Workbench::add_app_window(u32 id, u32 user, u32 window, u32 msg_port, u32 tags) {
@@ -3444,7 +3452,7 @@ bool Workbench::remove_app_window(u32 handle) {
         return false;
     }
     exec_->free(app->handle, kAppBytes);
-    *app = App{};
+    apps_.remove(app);
     return true;
 }
 
@@ -3461,10 +3469,11 @@ u32 Workbench::add_app_icon(u32 id, u32 user, u32 name, u32 msg_port, u32 lock, 
         return 0;
     }
     App* app = find_app(handle, AppKind::Icon);
-    if (!windows_[0].used) {
+    const DrawerWindow* root = find_window(kRootWindow);
+    if (root == nullptr) {
         return handle;
     }
-    IconEntry* icon = take_icon(0);
+    IconEntry* icon = take_icon(kRootWindow);
     if (icon == nullptr) {
         return handle;
     }
@@ -3482,9 +3491,9 @@ u32 Workbench::add_app_icon(u32 id, u32 user, u32 name, u32 msg_port, u32 lock, 
     copy_text(icon->name, sizeof icon->name, label);
     copy_text(icon->file, sizeof icon->file, label);
     measure(*icon);
-    place_root_icon(*icon);
-    app->icon = static_cast<u32>(icon - icons_);
-    draw_window(0);
+    place_root_icon(*root, *icon);
+    app->icon = icon->id;
+    draw_window(kRootWindow);
     return handle;
 }
 
@@ -3495,7 +3504,7 @@ bool Workbench::remove_app_icon(u32 handle) {
     }
     drop_app_icon(*app);
     exec_->free(app->handle, kAppBytes);
-    *app = App{};
+    apps_.remove(app);
     return true;
 }
 
@@ -3512,7 +3521,7 @@ bool Workbench::remove_app_menu_item(u32 handle) {
         return false;
     }
     exec_->free(app->handle, kAppBytes);
-    *app = App{};
+    apps_.remove(app);
     return true;
 }
 

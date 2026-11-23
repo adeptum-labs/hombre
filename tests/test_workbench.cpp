@@ -393,31 +393,30 @@ public:
     }
 
     u32 find_icon(const std::string& name) const {
-        for (u32 i = 0; i < Workbench::kMaxIcons; ++i) {
-            const Workbench::IconEntry& icon = workbench.icon(i);
-            if (icon.used && name == icon.name) {
-                return i;
+        for (const Workbench::IconEntry& icon : workbench.icons()) {
+            if (name == icon.name) {
+                return icon.id;
             }
         }
         return Workbench::kNoIcon;
     }
 
     u32 find_window(const std::string& path) const {
-        for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
-            if (workbench.window(i).used && path == workbench.window(i).path) {
-                return i;
+        for (const Workbench::DrawerWindow& w : workbench.windows()) {
+            if (path == w.path) {
+                return w.id;
             }
         }
-        return Workbench::kMaxWindows;
+        return Workbench::kNoWindow;
     }
 
-    u32 find_tool(const std::string& name) const {
-        for (u32 i = 0; i < Workbench::kMaxTools; ++i) {
-            if (workbench.tool(i).used && name == workbench.tool(i).name) {
-                return i;
+    const Workbench::RunningTool* find_tool(const std::string& name) const {
+        for (const Workbench::RunningTool& tool : workbench.tools()) {
+            if (name == tool.name) {
+                return &tool;
             }
         }
-        return Workbench::kMaxTools;
+        return nullptr;
     }
 
     std::string window_title(u32 window) const { return str(get32(window + wd_Title)); }
@@ -533,10 +532,9 @@ public:
     }
 
     u32 find_icon_in(u32 window_index, const std::string& name) const {
-        for (u32 i = 0; i < Workbench::kMaxIcons; ++i) {
-            const Workbench::IconEntry& icon = workbench.icon(i);
-            if (icon.used && icon.owner == window_index && name == icon.name) {
-                return i;
+        for (const Workbench::IconEntry& icon : workbench.icons()) {
+            if (icon.owner == window_index && name == icon.name) {
+                return icon.id;
             }
         }
         return Workbench::kNoIcon;
@@ -713,7 +711,7 @@ void an_icon_font_draws_and_lays_out_the_labels() {
     const u32 root = r.find_window("HombreTest:");
     r.workbench.open_icon(root, r.find_icon_in(root, "Fonts"));
     const u32 labels = r.find_window("HombreTest:Fonts");
-    CHECK(labels != Workbench::kMaxWindows);
+    CHECK(labels != Workbench::kNoWindow);
     const Workbench::DrawerWindow& w = r.workbench.window(labels);
     const u32 window = w.window;
     const u32 hasklig13 = open_hasklig(r, kData + 0x100, kData + 0x140, 13);
@@ -793,8 +791,8 @@ void desktop_shows_the_volumes_and_their_menus() {
     CHECK(ram != Workbench::kNoIcon);
     CHECK_EQ(r.workbench.icon(ram).type, kWBDisk);
 
-    const Workbench::DrawerWindow& backdrop = r.workbench.window(0);
-    CHECK(backdrop.used);
+    CHECK(r.workbench.has_window(Workbench::kRootWindow));
+    const Workbench::DrawerWindow& backdrop = r.workbench.window(Workbench::kRootWindow);
     CHECK(backdrop.window != 0);
     CHECK(r.window_title(backdrop.window) == "Workbench");
     CHECK_EQ(r.get16(backdrop.window + wd_LeftEdge), 0u);
@@ -830,14 +828,14 @@ void drawer_icons_keep_their_positions_and_use_the_grid() {
 
     r.workbench.open_icon(0, volume);
     const u32 root = r.find_window("HombreTest:");
-    CHECK(root != Workbench::kMaxWindows);
+    CHECK(root != Workbench::kNoWindow);
     const u32 tools = r.find_icon("Tools");
     CHECK(tools != Workbench::kNoIcon);
     CHECK_EQ(r.workbench.icon(tools).type, kWBDrawer);
 
     r.workbench.open_icon(root, tools);
     const u32 drawer = r.find_window("HombreTest:Tools");
-    CHECK(drawer != Workbench::kMaxWindows);
+    CHECK(drawer != Workbench::kNoWindow);
     const u32 window = r.workbench.window(drawer).window;
     CHECK(r.window_title(window) == "Tools");
     CHECK_EQ(r.get16(window + wd_LeftEdge), 30u);
@@ -958,9 +956,9 @@ void reply_unloads_the_seglist_and_unlocks() {
     CHECK(r.workbench.start_tool(icon, "HombreTest:Tools"));
     CHECK(logged("workbench: started Tiny"));
 
-    const u32 slot = r.find_tool("Tiny");
-    CHECK(slot != Workbench::kMaxTools);
-    const Workbench::RunningTool tool = r.workbench.tool(slot);
+    const Workbench::RunningTool* started = r.find_tool("Tiny");
+    CHECK(started != nullptr);
+    const Workbench::RunningTool tool = *started;
     CHECK(tool.message != 0);
     CHECK(tool.seglist != 0);
     CHECK(tool.process != 0);
@@ -973,7 +971,7 @@ void reply_unloads_the_seglist_and_unlocks() {
     CHECK(r.workbench.tool_reply(tool.message));
     CHECK(r.free_bytes() > before);
     CHECK(!g_dos.unlock_path(tool.locks[0]));
-    CHECK(!r.workbench.tool(slot).used);
+    CHECK(r.find_tool("Tiny") == nullptr);
     CHECK(logged("workbench: Tiny ended"));
     CHECK(!r.workbench.tool_reply(0x12345678));
 }
@@ -986,16 +984,16 @@ void a_project_starts_its_default_tool() {
     const u32 root = r.find_window("HombreTest:");
     r.workbench.open_icon(root, r.find_icon("Tools"));
     const u32 tools_window = r.find_window("HombreTest:Tools");
-    CHECK(tools_window != Workbench::kMaxWindows);
+    CHECK(tools_window != Workbench::kNoWindow);
 
     const u32 project = r.find_icon("Proj");
     CHECK(project != Workbench::kNoIcon);
     CHECK_EQ(r.workbench.icon(project).type, kWBProject);
     r.workbench.open_icon(tools_window, project);
 
-    const u32 slot = r.find_tool("Tiny");
-    CHECK(slot != Workbench::kMaxTools);
-    const Workbench::RunningTool tool = r.workbench.tool(slot);
+    const Workbench::RunningTool* started = r.find_tool("Tiny");
+    CHECK(started != nullptr);
+    const Workbench::RunningTool tool = *started;
     const u32 arglist = r.get32(tool.message + sm_ArgList);
     CHECK_EQ(r.get32(tool.message + sm_NumArgs), 2u);
     CHECK(r.str(r.get32(arglist + wa_Name)) == "Tiny");
@@ -1009,10 +1007,11 @@ void app_registrations_add_and_remove() {
     const u32 window = r.workbench.add_app_window(7, 0x11, 0, 0, 0);
     CHECK(window != 0);
     CHECK_EQ(r.get32(window), 0u);
-    CHECK_EQ(r.workbench.app(0).id, 7u);
-    CHECK_EQ(r.workbench.app(0).user, 0x11u);
+    CHECK_EQ(r.workbench.apps().size(), 1u);
+    CHECK_EQ(r.workbench.apps()[0].id, 7u);
+    CHECK_EQ(r.workbench.apps()[0].user, 0x11u);
     CHECK(r.workbench.remove_app_window(window));
-    CHECK(!r.workbench.app(0).used);
+    CHECK(r.workbench.apps().empty());
     CHECK(!r.workbench.remove_app_window(window));
 
     const u32 object = g_icon.default_object(kWBDisk);
@@ -1033,8 +1032,7 @@ void app_registrations_add_and_remove() {
     const u32 item = r.workbench.add_app_menu_item(11, 0x33, 0, 0, 0);
     CHECK(item != 0);
     r.workbench.remove_app_menu_item(item);
-    CHECK(!r.workbench.app(0).used);
-    CHECK(!r.workbench.app(1).used);
+    CHECK(r.workbench.apps().empty());
 }
 
 void app_vectors_take_their_arguments_from_the_documented_registers() {
@@ -1062,8 +1060,8 @@ void app_vectors_take_their_arguments_from_the_documented_registers() {
     const u32 icon = r.find_icon("Hatch");
     CHECK(icon != Workbench::kNoIcon);
     CHECK_EQ(r.workbench.icon(icon).object, object);
-    CHECK_EQ(r.workbench.app(0).id, 9u);
-    CHECK_EQ(r.workbench.app(0).user, 0x22u);
+    CHECK_EQ(r.workbench.apps()[0].id, 9u);
+    CHECK_EQ(r.workbench.apps()[0].user, 0x22u);
 
     // RemoveAppIcon is TRUE for the handle and FALSE once it is gone.
     r.m.cpu.a[0] = app_icon;
@@ -1097,7 +1095,7 @@ void a_drawer_window_keeps_its_title_when_the_memory_it_came_from_is_reused() {
     r.workbench.open_desktop();
     r.workbench.open_icon(0, r.find_icon("HombreTest"));
     const u32 root = r.find_window("HombreTest:");
-    CHECK(root != Workbench::kMaxWindows);
+    CHECK(root != Workbench::kNoWindow);
     const u32 window = r.workbench.window(root).window;
     // Blocks of the size the title was built in, filled with other bytes.
     for (u32 i = 0; i < 16; ++i) {
@@ -1118,20 +1116,20 @@ void open_parent_opens_the_drawer_above() {
     const u32 root = r.find_window("HombreTest:");
     r.workbench.open_icon(root, r.find_icon("Tools"));
     const u32 tools = r.find_window("HombreTest:Tools");
-    CHECK(tools != Workbench::kMaxWindows);
+    CHECK(tools != Workbench::kNoWindow);
     r.workbench.open_icon(tools, r.find_icon("Sub"));
     const u32 sub = r.find_window("HombreTest:Tools/Sub");
-    CHECK(sub != Workbench::kMaxWindows);
+    CHECK(sub != Workbench::kNoWindow);
     CHECK(r.find_icon("Deep") != Workbench::kNoIcon);
 
     // With the drawers above closed, Open Parent opens each again at the
     // place its icon gives it.
     r.workbench.close_drawer(tools);
     r.workbench.close_drawer(root);
-    CHECK_EQ(r.find_window("HombreTest:Tools"), Workbench::kMaxWindows);
+    CHECK_EQ(r.find_window("HombreTest:Tools"), Workbench::kNoWindow);
     r.workbench.open_parent(sub);
     const u32 tools_again = r.find_window("HombreTest:Tools");
-    CHECK(tools_again != Workbench::kMaxWindows);
+    CHECK(tools_again != Workbench::kNoWindow);
     const u32 tools_window = r.workbench.window(tools_again).window;
     CHECK(r.window_title(tools_window) == "Tools");
     CHECK_EQ(r.get16(tools_window + wd_LeftEdge), 30u);
@@ -1141,22 +1139,15 @@ void open_parent_opens_the_drawer_above() {
 
     r.workbench.open_parent(tools_again);
     const u32 root_again = r.find_window("HombreTest:");
-    CHECK(root_again != Workbench::kMaxWindows);
+    CHECK(root_again != Workbench::kNoWindow);
     CHECK(r.window_title(r.workbench.window(root_again).window) == "HombreTest");
 
     // An open parent only comes forward, and a disk has none.
-    u32 open_before = 0;
-    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
-        open_before += r.workbench.window(i).used ? 1 : 0;
-    }
+    const usize open_before = r.workbench.windows().size();
     r.workbench.open_parent(sub);
     r.workbench.open_parent(root_again);
     r.workbench.open_parent(0);
-    u32 open_after = 0;
-    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
-        open_after += r.workbench.window(i).used ? 1 : 0;
-    }
-    CHECK_EQ(open_after, open_before);
+    CHECK_EQ(r.workbench.windows().size(), open_before);
 }
 
 void a_click_shows_the_icon_selected_and_a_rescan_drops_the_selection() {
@@ -1166,7 +1157,7 @@ void a_click_shows_the_icon_selected_and_a_rescan_drops_the_selection() {
     const u32 root = r.find_window("HombreTest:");
     r.workbench.open_icon(root, r.find_icon("Tools"));
     const u32 tools = r.find_window("HombreTest:Tools");
-    CHECK(tools != Workbench::kMaxWindows);
+    CHECK(tools != Workbench::kNoWindow);
     const Workbench::DrawerWindow drawer = r.workbench.window(tools);
     const Workbench::IconEntry tool = r.workbench.icon(r.find_icon("Tool"));
 
@@ -1210,15 +1201,17 @@ void the_desktop_waits_on_the_signals_of_its_ports() {
     Rig r;
     r.workbench.open_desktop();
     const u32 reply_bit = r.get8(r.workbench.reply_port() + mp_SigBit);
-    const u32 backdrop_bit = r.get8(r.workbench.window(0).user_port + mp_SigBit);
-    CHECK(reply_bit != backdrop_bit);
-    CHECK_EQ(r.workbench.wait_mask(), (1u << reply_bit) | (1u << backdrop_bit));
+    const u32 window_bit = r.get8(r.workbench.window_port() + mp_SigBit);
+    CHECK(reply_bit != window_bit);
+    CHECK_EQ(r.workbench.wait_mask(), (1u << reply_bit) | (1u << window_bit));
+    CHECK_EQ(r.get32(r.workbench.window(0).window + wd_UserPort), r.workbench.window_port());
 
+    // Every window of the desktop uses the one port, so another window adds
+    // no signal to wait on.
     r.workbench.open_icon(0, r.find_icon("HombreTest"));
     const u32 root = r.find_window("HombreTest:");
-    const u32 root_bit = r.get8(r.workbench.window(root).user_port + mp_SigBit);
-    CHECK_EQ(r.workbench.wait_mask(),
-             (1u << reply_bit) | (1u << backdrop_bit) | (1u << root_bit));
+    CHECK_EQ(r.get32(r.workbench.window(root).window + wd_UserPort), r.workbench.window_port());
+    CHECK_EQ(r.workbench.wait_mask(), (1u << reply_bit) | (1u << window_bit));
 
     // Nothing waits at the ports once they are read; a click in the
     // window raises its signal again.
@@ -1229,11 +1222,17 @@ void the_desktop_waits_on_the_signals_of_its_ports() {
     const i32 x = static_cast<i32>(r.get16(w.window + wd_LeftEdge)) + w.inner_left + 250;
     const i32 y = static_cast<i32>(r.get16(w.window + wd_TopEdge)) + w.inner_top + 100;
     g_intuition.pointer_event(x, y, 1, 1, 0, true);
-    CHECK_EQ(g_exec.wait_for(r.workbench.wait_mask(), 0), 1u << root_bit);
+    CHECK_EQ(g_exec.wait_for(r.workbench.wait_mask(), 0), 1u << window_bit);
     CHECK(!r.workbench.pump());
 
+    // A message still queued for a window goes with it when it closes, and
+    // the port stays.
+    g_intuition.pointer_event(x, y, 0, 0, 1, false);
+    CHECK_EQ(g_exec.wait_for(r.workbench.wait_mask(), 0), 1u << window_bit);
     r.workbench.close_drawer(root);
-    CHECK_EQ(r.workbench.wait_mask(), (1u << reply_bit) | (1u << backdrop_bit));
+    CHECK_EQ(g_exec.get_message(r.workbench.window_port()), 0u);
+    CHECK_EQ(r.workbench.wait_mask(), (1u << reply_bit) | (1u << window_bit));
+    CHECK(!r.workbench.pump());
 }
 
 void a_resized_drawer_is_measured_again() {
@@ -1257,7 +1256,7 @@ void the_startup_message_signals_the_started_process() {
     std::strcpy(icon.name, "Tiny");
     icon.stack_size = 4096;
     CHECK(r.workbench.start_tool(icon, "HombreTest:Tools"));
-    const Workbench::RunningTool tool = r.workbench.tool(r.find_tool("Tiny"));
+    const Workbench::RunningTool tool = *r.find_tool("Tiny");
 
     // The message is the one on the process's port, and the port's signal
     // is set in the task for a program that waits for it.
@@ -1280,18 +1279,17 @@ void a_program_that_ends_without_replying_gives_back_what_it_held() {
     icon.stack_size = 4096;
     const u32 before = r.free_bytes();
     CHECK(r.workbench.start_tool(icon, "HombreTest:Tools"));
-    const u32 slot = r.find_tool("Tiny");
-    const Workbench::RunningTool tool = r.workbench.tool(slot);
+    const Workbench::RunningTool tool = *r.find_tool("Tiny");
 
     // While its process lives the program keeps its record.
     r.workbench.reap_tools();
-    CHECK(r.workbench.tool(slot).used);
+    CHECK(r.find_tool("Tiny") != nullptr);
 
     // The process is removed as a faulted one is, its message unanswered.
     r.m.cpu.a[1] = tool.process;
     CHECK_EQ(r.call(g_exec.exec_base(), exec_lvo::RemTask), ExitReason::Halt);
     r.workbench.pump();
-    CHECK(!r.workbench.tool(slot).used);
+    CHECK(r.find_tool("Tiny") == nullptr);
     CHECK(logged("workbench: Tiny ended without a reply"));
     CHECK(!g_dos.unlock_path(tool.locks[0]));
     CHECK_EQ(r.free_bytes(), before);
@@ -1390,7 +1388,7 @@ void backdrop_toggles_the_root_window() {
 
     r.workbench.open_icon(0, volume);
     const u32 drawer = r.find_window("HombreTest:");
-    CHECK(drawer != Workbench::kMaxWindows);
+    CHECK(drawer != Workbench::kNoWindow);
     const u32 drawer_window = r.workbench.window(drawer).window;
     const u32 before = r.free_bytes();
 
@@ -1400,8 +1398,8 @@ void backdrop_toggles_the_root_window() {
     r.workbench.menu_pick(0, 0);
     CHECK(!r.workbench.backdrop());
     CHECK(logged("workbench: backdrop off"));
-    const Workbench::DrawerWindow& root = r.workbench.window(0);
-    CHECK(root.used);
+    CHECK(r.workbench.has_window(Workbench::kRootWindow));
+    const Workbench::DrawerWindow& root = r.workbench.window(Workbench::kRootWindow);
     CHECK(r.window_title(root.window) == "Workbench");
     const u32 window_flags = r.get32(root.window + wd_Flags);
     CHECK_EQ(window_flags & (WFLG_BACKDROP | WFLG_BORDERLESS | WFLG_CLOSEGADGET), 0u);
@@ -1450,8 +1448,8 @@ void backdrop_toggles_the_root_window() {
 
 // The ADF's drawer and the Ram Disk's window side by side.
 struct TwoWindows {
-    u32 tools = Workbench::kMaxWindows;
-    u32 ram = Workbench::kMaxWindows;
+    u32 tools = Workbench::kNoWindow;
+    u32 ram = Workbench::kNoWindow;
 };
 
 TwoWindows open_tools_and_ram(Rig& r) {
@@ -1461,12 +1459,12 @@ TwoWindows open_tools_and_ram(Rig& r) {
     const u32 root = r.find_window("HombreTest:");
     r.workbench.open_icon(root, r.find_icon_in(root, "Tools"));
     w.tools = r.find_window("HombreTest:Tools");
-    CHECK(w.tools != Workbench::kMaxWindows);
+    CHECK(w.tools != Workbench::kNoWindow);
     r.workbench.close_drawer(root);
     g_intuition.move_window_to(r.workbench.window(w.tools).window, 20, 30);
     r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
     w.ram = r.find_window("Ram Disk:");
-    CHECK(w.ram != Workbench::kMaxWindows);
+    CHECK(w.ram != Workbench::kNoWindow);
     g_intuition.move_window_to(r.workbench.window(w.ram).window, 330, 200);
     return w;
 }
@@ -1582,12 +1580,15 @@ void a_dragged_disk_keeps_its_place_over_a_backdrop_toggle() {
     r.drag(0, before.left + 3, before.top + 3, r.screen_x(0, 103), r.screen_y(0, 123));
     CHECK_EQ(r.workbench.icon(disk).left, 100);
     CHECK_EQ(r.workbench.icon(disk).top, 120);
+    CHECK_EQ(r.workbench.window(Workbench::kRootWindow).clicks.selected(), disk);
     r.workbench.set_backdrop(false);
     CHECK_EQ(r.workbench.icon(disk).left, 100);
     CHECK_EQ(r.workbench.icon(disk).top, 120);
+    CHECK_EQ(r.workbench.window(Workbench::kRootWindow).clicks.selected(), disk);
     r.workbench.set_backdrop(true);
     CHECK_EQ(r.workbench.icon(disk).left, 100);
     CHECK_EQ(r.workbench.icon(disk).top, 120);
+    CHECK_EQ(r.workbench.window(Workbench::kRootWindow).clicks.selected(), disk);
 }
 
 void a_disk_icon_inside_a_drawer_is_no_volume() {
@@ -1596,8 +1597,8 @@ void a_disk_icon_inside_a_drawer_is_no_volume() {
     const u32 fake = r.find_icon_in(w.tools, "Fake");
     CHECK(fake != Workbench::kNoIcon);
     r.workbench.open_icon(w.tools, fake);
-    CHECK(r.find_window("HombreTest:Tools/Fake") != Workbench::kMaxWindows);
-    CHECK_EQ(r.find_window("Fake:"), Workbench::kMaxWindows);
+    CHECK(r.find_window("HombreTest:Tools/Fake") != Workbench::kNoWindow);
+    CHECK_EQ(r.find_window("Fake:"), Workbench::kNoWindow);
 }
 
 void a_resized_drawer_clips_its_icons_and_keeps_their_places() {
@@ -1613,7 +1614,7 @@ void a_resized_drawer_clips_its_icons_and_keeps_their_places() {
     const u32 root = r.find_window("HombreTest:");
     r.workbench.open_icon(root, r.find_icon_in(root, "Labels"));
     const u32 labels = r.find_window("HombreTest:Labels");
-    CHECK(labels != Workbench::kMaxWindows);
+    CHECK(labels != Workbench::kNoWindow);
     const u32 window = r.workbench.window(labels).window;
     const u32 layer = r.get32(r.workbench.window(labels).rp + rp_Layer);
     CHECK(layer != 0);
@@ -1708,7 +1709,7 @@ u32 open_long(Rig& r) {
     const u32 root = r.find_window("HombreTest:");
     r.workbench.open_icon(root, r.find_icon_in(root, "Long"));
     const u32 long_drawer = r.find_window("HombreTest:Long");
-    CHECK(long_drawer != Workbench::kMaxWindows);
+    CHECK(long_drawer != Workbench::kNoWindow);
     return long_drawer;
 }
 
@@ -1893,7 +1894,7 @@ void a_window_snapshot_keeps_its_scroll() {
     r.workbench.open_desktop();
     r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
     const u32 ram = r.find_window("Ram Disk:");
-    CHECK(ram != Workbench::kMaxWindows);
+    CHECK(ram != Workbench::kNoWindow);
     const u32 window = r.workbench.window(ram).window;
     g_intuition.size_window_to(window, 200, 90);
     r.workbench.pump();
@@ -1962,7 +1963,7 @@ void every_disk_in_a_drive_gets_an_icon() {
         CHECK(logged("workbench: volume Second"));
         r.workbench.open_icon(0, second);
         const u32 window = r.find_window("Second:");
-        CHECK(window != Workbench::kMaxWindows);
+        CHECK(window != Workbench::kNoWindow);
         CHECK(r.find_icon_in(window, "Docs") != Workbench::kNoIcon);
         CHECK(r.window_title(r.workbench.window(window).window) == "Second");
     }
@@ -1973,10 +1974,10 @@ void every_disk_in_a_drive_gets_an_icon() {
     twins.workbench.open_desktop();
     u32 disks[2] = {Workbench::kNoIcon, Workbench::kNoIcon};
     u32 found = 0;
-    for (u32 i = 0; i < Workbench::kMaxIcons && found < 2; ++i) {
-        const Workbench::IconEntry& icon = twins.workbench.icon(i);
-        if (icon.used && icon.owner == 0 && std::string(icon.name) == "HombreTest") {
-            disks[found++] = i;
+    for (const Workbench::IconEntry& icon : twins.workbench.icons()) {
+        if (found < 2 && icon.owner == Workbench::kRootWindow &&
+            std::string(icon.name) == "HombreTest") {
+            disks[found++] = icon.id;
         }
     }
     CHECK_EQ(found, 2u);
@@ -1984,8 +1985,8 @@ void every_disk_in_a_drive_gets_an_icon() {
     twins.workbench.open_icon(0, disks[1]);
     const u32 df0 = twins.find_window("DF0:");
     const u32 df1 = twins.find_window("DF1:");
-    CHECK(df0 != Workbench::kMaxWindows);
-    CHECK(df1 != Workbench::kMaxWindows);
+    CHECK(df0 != Workbench::kNoWindow);
+    CHECK(df1 != Workbench::kNoWindow);
     CHECK(twins.find_icon_in(df1, "Only") != Workbench::kNoIcon);
     CHECK(twins.find_icon_in(df0, "Tools") != Workbench::kNoIcon);
     CHECK(twins.window_title(twins.workbench.window(df1).window) == "HombreTest");
@@ -2047,7 +2048,7 @@ void a_window_snapshot_is_used_when_the_window_opens_again() {
     r.workbench.close_drawer(w.ram);
     r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
     const u32 ram = r.find_window("Ram Disk:");
-    CHECK(ram != Workbench::kMaxWindows);
+    CHECK(ram != Workbench::kNoWindow);
     const u32 reopened = r.workbench.window(ram).window;
     CHECK_EQ(r.get16(reopened + wd_LeftEdge), 100u);
     CHECK_EQ(r.get16(reopened + wd_TopEdge), 120u);
@@ -2220,7 +2221,7 @@ void the_backdrop_shows_a_wbpattern_picture() {
 void a_reset_closes_and_reopens_the_windows() {
     Rig r;
     r.workbench.open_desktop();
-    CHECK(r.workbench.window(0).used);
+    CHECK(r.workbench.has_window(Workbench::kRootWindow));
     CHECK_EQ(r.get32(r.workbench.window(0).window + wd_Flags) & WFLG_WBENCHWINDOW,
              WFLG_WBENCHWINDOW);
 
@@ -2228,7 +2229,7 @@ void a_reset_closes_and_reopens_the_windows() {
     CHECK(volume != Workbench::kNoIcon);
     r.workbench.open_icon(0, volume);
     const u32 drawer = r.find_window("HombreTest:");
-    CHECK(drawer != Workbench::kMaxWindows);
+    CHECK(drawer != Workbench::kNoWindow);
     const u32 window = r.workbench.window(drawer).window;
     CHECK_EQ(r.get32(window + wd_Flags) & WFLG_WBENCHWINDOW, WFLG_WBENCHWINDOW);
     const u32 left = r.get16(window + wd_LeftEdge);
@@ -2237,17 +2238,15 @@ void a_reset_closes_and_reopens_the_windows() {
     const u32 height = r.get16(window + wd_Height);
 
     CHECK(r.workbench.close_for_reset());
-    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
-        CHECK(!r.workbench.window(i).used);
-    }
-    CHECK_EQ(r.find_window("HombreTest:"), Workbench::kMaxWindows);
+    CHECK(r.workbench.windows().empty());
+    CHECK_EQ(r.find_window("HombreTest:"), Workbench::kNoWindow);
 
     r.workbench.open_after_reset();
-    CHECK(r.workbench.window(0).used);
+    CHECK(r.workbench.has_window(Workbench::kRootWindow));
     CHECK_EQ(r.get32(r.workbench.window(0).window + wd_Flags) & WFLG_WBENCHWINDOW,
              WFLG_WBENCHWINDOW);
     const u32 reopened = r.find_window("HombreTest:");
-    CHECK(reopened != Workbench::kMaxWindows);
+    CHECK(reopened != Workbench::kNoWindow);
     const u32 again = r.workbench.window(reopened).window;
     CHECK_EQ(r.get16(again + wd_LeftEdge), left);
     CHECK_EQ(r.get16(again + wd_TopEdge), top);
@@ -2270,6 +2269,250 @@ void resets_give_back_their_memory() {
         r.workbench.open_after_reset();
     }
     CHECK_EQ(r.free_bytes(), before);
+}
+
+// A disk whose root holds count drawers, Many0 and on, each with one icon.
+std::vector<AdfFile> drawer_files(u32 count) {
+    const i32 nowhere = static_cast<i32>(kNoIconPosition);
+    std::vector<AdfFile> files = test_files();
+    for (u32 i = 0; i < count; ++i) {
+        const std::string name = "Many" + std::to_string(i);
+        files.push_back({name + ".info", drawer_icon_info(nowhere, nowhere, 0, 0, 0, 0)});
+        files.push_back({name + "/Item.info", icon_info(kWBTool, nowhere, nowhere)});
+    }
+    return files;
+}
+
+// The window of the drawer opened from the window of the disk, or kNoWindow.
+u32 open_drawer_named(Rig& r, u32 disk_window, const std::string& name) {
+    r.workbench.open_icon(disk_window, r.find_icon_in(disk_window, name));
+    return r.find_window("HombreTest:" + name);
+}
+
+// A task for the rig to run the desktop in, as the Workbench task does, so
+// the signal bits its ports take can be read from the task.
+u32 enter_task(Rig& r) {
+    const u32 task = g_exec.alloc(TC_SIZE, MEMF_PUBLIC | MEMF_CLEAR);
+    CHECK(task != 0);
+    r.put8(task + LN_TYPE, NT_TASK);
+    r.put32(task + TC_SIGALLOC, 0x0000FFFF);
+    g_exec.set_this_task(task);
+    return task;
+}
+
+void more_drawers_open_than_the_old_table_held() {
+    constexpr u32 kDrawers = 20;
+    Rig r(drawer_files(kDrawers));
+    const u32 task = enter_task(r);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 disk = r.find_window("HombreTest:");
+    CHECK(disk != Workbench::kNoWindow);
+    // The windows share one port: more of them take no more signal bits.
+    const u32 signals = r.get32(task + TC_SIGALLOC);
+
+    std::vector<u32> drawers;
+    std::vector<u32> windows;
+    for (u32 i = 0; i < kDrawers; ++i) {
+        drawers.push_back(open_drawer_named(r, disk, "Many" + std::to_string(i)));
+        CHECK(drawers.back() != Workbench::kNoWindow);
+        CHECK(r.find_icon_in(drawers.back(), "Item") != Workbench::kNoIcon);
+        windows.push_back(r.workbench.window(drawers.back()).window);
+    }
+    // The root window, the disk's drawer and the others.
+    CHECK_EQ(r.workbench.windows().size(), 2 + kDrawers);
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), signals);
+    for (const u32 window : windows) {
+        CHECK_EQ(r.get32(window + wd_UserPort), r.workbench.window_port());
+    }
+
+    // Each drawer opens a step below and right of the one before, and the
+    // steps start over after seven.
+    for (u32 i = 0; i < kDrawers; ++i) {
+        CHECK_EQ(r.get16(windows[i] + wd_LeftEdge), 40u + 20u * ((i + 1) % 7));
+    }
+
+    // Closing some leaves the others as they were: an id names its window,
+    // and the record it holds stays where it is.
+    const Workbench::DrawerWindow& kept = r.workbench.window(drawers[1]);
+    const Workbench::IconEntry& kept_icon = r.workbench.icon(r.find_icon_in(drawers[1], "Item"));
+    u32 closed_count = 0;
+    for (u32 i = 0; i < kDrawers; i += 3) {
+        r.workbench.close_drawer(drawers[i]);
+        ++closed_count;
+    }
+    for (u32 i = 0; i < kDrawers; ++i) {
+        const bool closed = i % 3 == 0;
+        CHECK_EQ(r.workbench.has_window(drawers[i]), !closed);
+        CHECK_EQ(r.find_icon_in(drawers[i], "Item") == Workbench::kNoIcon, closed);
+        if (!closed) {
+            CHECK_EQ(r.workbench.window(drawers[i]).window, windows[i]);
+        }
+    }
+    CHECK(&r.workbench.window(drawers[1]) == &kept);
+    CHECK(&r.workbench.icon(kept_icon.id) == &kept_icon);
+
+    // A drawer opened again is a new window, and a reset reopens the drawers
+    // in the order they were opened.
+    const u32 again = open_drawer_named(r, disk, "Many0");
+    CHECK(again != Workbench::kNoWindow);
+    CHECK(again > drawers.back());
+    auto open_paths = [&]() {
+        std::vector<std::string> paths;
+        for (const Workbench::DrawerWindow& w : r.workbench.windows()) {
+            if (w.id != Workbench::kRootWindow) {
+                paths.push_back(w.path);
+            }
+        }
+        return paths;
+    };
+    const std::vector<std::string> before = open_paths();
+    // The disk's drawer, the drawers still open and the one opened again.
+    CHECK_EQ(before.size(), 1 + (kDrawers - closed_count) + 1);
+    CHECK(r.workbench.close_for_reset());
+    CHECK(r.workbench.windows().empty());
+    r.workbench.open_after_reset();
+    CHECK(open_paths() == before);
+    CHECK_EQ(r.get32(task + TC_SIGALLOC), signals);
+}
+
+void no_window_is_left_once_the_table_is_full() {
+    Rig r(drawer_files(Workbench::kMaxWindows));
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 disk = r.find_window("HombreTest:");
+    // The root window and the disk's drawer take two of the places.
+    const u32 room = Workbench::kMaxWindows - 2;
+    std::vector<u32> drawers;
+    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
+        drawers.push_back(open_drawer_named(r, disk, "Many" + std::to_string(i)));
+    }
+    CHECK_EQ(r.workbench.windows().size(), Workbench::kMaxWindows);
+    for (u32 i = 0; i < Workbench::kMaxWindows; ++i) {
+        CHECK_EQ(drawers[i] != Workbench::kNoWindow, i < room);
+    }
+    CHECK_EQ(logged_count("workbench: no window left for Many" + std::to_string(room)), 1u);
+
+    // A closed drawer makes room for the next.
+    r.workbench.close_drawer(drawers[0]);
+    CHECK(open_drawer_named(r, disk, "Many" + std::to_string(room)) != Workbench::kNoWindow);
+    CHECK_EQ(r.workbench.windows().size(), Workbench::kMaxWindows);
+}
+
+void a_drawer_shows_more_icons_than_the_old_table_held() {
+    constexpr u32 kEntries = 150;
+    constexpr usize kOldTable = 96;
+    const i32 nowhere = static_cast<i32>(kNoIconPosition);
+    std::vector<AdfFile> files = test_files();
+    files.push_back({"Crowd.info", drawer_icon_info(nowhere, nowhere, 30, 50, 300, 120)});
+    for (u32 i = 0; i < kEntries; ++i) {
+        files.push_back({"Crowd/E" + std::to_string(i) + ".info",
+                         icon_info(kWBTool, nowhere, nowhere)});
+    }
+    Rig r(files);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 disk = r.find_window("HombreTest:");
+    r.workbench.open_icon(disk, r.find_icon_in(disk, "Crowd"));
+    const u32 crowd = r.find_window("HombreTest:Crowd");
+    CHECK(crowd != Workbench::kNoWindow);
+
+    u32 shown = 0;
+    u32 newest = 0;
+    for (const Workbench::IconEntry& icon : r.workbench.icons()) {
+        shown += icon.owner == crowd ? 1 : 0;
+        newest = icon.id > newest ? icon.id : newest;
+        CHECK(&r.workbench.icon(icon.id) == &icon);
+    }
+    CHECK_EQ(shown, kEntries);
+    CHECK(r.workbench.icons().size() > kOldTable);
+
+    // A rescan gives the icons back and makes them again under new ids.
+    r.rescan("HombreTest:Crowd");
+    shown = 0;
+    for (const Workbench::IconEntry& icon : r.workbench.icons()) {
+        if (icon.owner == crowd) {
+            ++shown;
+            CHECK(icon.id > newest);
+        }
+    }
+    CHECK_EQ(shown, kEntries);
+
+    // Icons of another window coming and going leave an icon where it is.
+    const Workbench::IconEntry& kept = r.workbench.icon(r.find_icon_in(crowd, "E7"));
+    r.workbench.open_icon(disk, r.find_icon_in(disk, "Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kNoWindow);
+    r.workbench.close_drawer(tools);
+    CHECK_EQ(r.find_icon_in(tools, "Tool"), Workbench::kNoIcon);
+    CHECK(&r.workbench.icon(kept.id) == &kept);
+    CHECK(std::string(kept.name) == "E7");
+}
+
+void more_applications_register_than_the_old_table_held() {
+    Rig r;
+    r.workbench.open_desktop();
+    std::vector<u32> handles;
+    for (u32 i = 0; i < Workbench::kMaxApps; ++i) {
+        handles.push_back(r.workbench.add_app_window(i, 0, 0, 0, 0));
+        CHECK(handles.back() != 0);
+    }
+    CHECK_EQ(r.workbench.apps().size(), Workbench::kMaxApps);
+    CHECK_EQ(logged_count("workbench: application table full"), 0u);
+
+    // A full table refuses another registration, until one is removed.
+    CHECK_EQ(r.workbench.add_app_window(1, 0, 0, 0, 0), 0u);
+    CHECK_EQ(logged_count("workbench: application table full"), 1u);
+    CHECK(r.workbench.remove_app_window(handles[500]));
+    CHECK_EQ(r.workbench.apps().size(), Workbench::kMaxApps - 1);
+    const u32 again = r.workbench.add_app_window(2, 0, 0, 0, 0);
+    CHECK(again != 0);
+    CHECK_EQ(r.workbench.apps().size(), Workbench::kMaxApps);
+
+    // Every other handle still names its own registration.
+    for (u32 i = 0; i < Workbench::kMaxApps; ++i) {
+        if (i != 500) {
+            CHECK(r.workbench.remove_app_window(handles[i]));
+        }
+    }
+    CHECK(r.workbench.remove_app_window(again));
+    CHECK(r.workbench.apps().empty());
+}
+
+void several_programs_run_at_once() {
+    Rig r;
+    r.workbench.open_desktop();
+    Workbench::IconEntry icon;
+    std::strcpy(icon.file, "Tiny");
+    std::strcpy(icon.name, "Tiny");
+    icon.stack_size = 4096;
+    constexpr u32 kPrograms = 4;
+    for (u32 i = 0; i < kPrograms; ++i) {
+        CHECK(r.workbench.start_tool(icon, "HombreTest:Tools"));
+    }
+    CHECK_EQ(r.workbench.tools().size(), kPrograms);
+    std::vector<Workbench::RunningTool> started;
+    for (const Workbench::RunningTool& tool : r.workbench.tools()) {
+        started.push_back(tool);
+    }
+
+    // The reply to one message ends that program and no other.
+    CHECK(r.workbench.tool_reply(started[1].message));
+    CHECK(!g_dos.unlock_path(started[1].locks[0]));
+    CHECK_EQ(r.workbench.tools().size(), kPrograms - 1);
+
+    // So does a program that ends without a reply.
+    r.m.cpu.a[1] = started[0].process;
+    CHECK_EQ(r.call(g_exec.exec_base(), exec_lvo::RemTask), ExitReason::Halt);
+    r.workbench.reap_tools();
+    CHECK(!g_dos.unlock_path(started[0].locks[0]));
+    CHECK_EQ(r.workbench.tools().size(), kPrograms - 2);
+    CHECK_EQ(r.workbench.tools()[0].message, started[2].message);
+    CHECK_EQ(r.workbench.tools()[1].message, started[3].message);
+
+    CHECK(r.workbench.tool_reply(started[3].message));
+    CHECK(r.workbench.tool_reply(started[2].message));
+    CHECK(r.workbench.tools().empty());
 }
 
 int main() {
@@ -2313,5 +2556,10 @@ int main() {
     snapshot_and_unsnapshot_store_the_icon_place();
     a_window_snapshot_is_used_when_the_window_opens_again();
     a_reset_closes_and_reopens_the_windows();
+    more_drawers_open_than_the_old_table_held();
+    no_window_is_left_once_the_table_is_full();
+    a_drawer_shows_more_icons_than_the_old_table_held();
+    more_applications_register_than_the_old_table_held();
+    several_programs_run_at_once();
     return check::finish("test_workbench");
 }

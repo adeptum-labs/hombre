@@ -24,6 +24,7 @@
 #pragma once
 
 #include "../m68k_cpu.hpp"
+#include "../slot_list.hpp"
 #include "../types.hpp"
 #include "dos.hpp"
 #include "exec.hpp"
@@ -33,6 +34,8 @@
 #include "intuition.hpp"
 #include "native.hpp"
 #include "version.hpp"
+
+#include <vector>
 
 // workbench.library written in C++ for code run by the 68000 translator.
 //
@@ -78,14 +81,17 @@ constexpr u32 Last = 90;
 
 class Workbench {
 public:
-    static constexpr u32 kMaxWindows = 8;  // the backdrop and seven drawers
-    static constexpr u32 kMaxIcons = 96;
-    static constexpr u32 kMaxTools = 8;
-    static constexpr u32 kMaxApps = 32;
+    static constexpr u32 kMaxWindows = 64;  // the root window and 63 drawers
+    static constexpr u32 kMaxIcons = 8192;
+    static constexpr u32 kMaxTools = 256;
+    static constexpr u32 kMaxApps = 1024;
     static constexpr u32 kMaxDirEntries = 64;
-    // The most messages of one window a pass over the ports handles.
+    // The most window messages a pass over the ports handles.
     static constexpr u32 kMaxMessagesPerPump = 64;
     static constexpr u32 kNoIcon = 0xFFFFFFFF;
+    static constexpr u32 kNoWindow = 0xFFFFFFFF;
+    // The id of the root window; the id of every drawer is above it.
+    static constexpr u32 kRootWindow = 0;
     static constexpr u8 kNoDrive = 0xFF;
     static constexpr u32 kAppBytes = 16;
     // Two clicks on the same icon within this many microseconds open it:
@@ -103,13 +109,15 @@ public:
     static constexpr u8 kAppIcon = 8;
 
     // One icon of a window: the DiskObject it was built from, the label
-    // under it and the place it took.
+    // under it and the place it took. Its id names it for as long as it
+    // lives: ids count up from 1 and are not given out again, so the id of
+    // an icon that is gone names no icon.
     struct IconEntry {
-        bool used = false;
+        u32 id = 0;
         bool placed = false;  // left and top are the icon's own position
         bool owned = false;   // the DiskObject is this library's to free
         u8 type = 0;
-        u8 owner = 0;  // the window the icon belongs to
+        u32 owner = 0;  // the id of the window the icon belongs to
         u32 object = 0;
         i32 left = 0;
         i32 top = 0;
@@ -121,56 +129,6 @@ public:
         char file[32]{};      // the file the icon stands for
         // A floppy's disk icon: the drive it is in; kNoDrive otherwise.
         u8 drive = kNoDrive;
-    };
-
-    // An open window of the desktop: the root window (index 0), a backdrop
-    // or an ordinary window, or a drawer. clip is a Region of its inner
-    // area that the Workbench's drawing stays inside, so icons past the
-    // edges of a sized window are cut off rather than moved; the window's
-    // scroll gadgets bring them into view.
-    struct DrawerWindow {
-        bool used = false;
-        u32 window = 0;
-        u32 user_port = 0;
-        u32 rp = 0;
-        u32 clip = 0;
-        i32 inner_left = 0;
-        i32 inner_top = 0;
-        i32 inner_width = 0;
-        i32 inner_height = 0;
-        char name[32]{};
-        char path[Dos::kMaxPath]{};
-        // The drawer point shown at the inner area's top-left corner.
-        i32 scroll_x = 0;
-        i32 scroll_y = 0;
-        // The block of its scroll gadgets, the window's gadget list; 0 for
-        // a backdrop, which has none.
-        u32 gadgets = 0;
-        // Its place in the order the desktop opened the windows, so a
-        // reset reopens it in its turn.
-        u32 order = 0;
-    };
-
-    // The scroll gadgets of a window, by their GadgetID: the two sliders
-    // in the right and bottom borders and the arrows beside them.
-    static constexpr u16 kScrollVert = 1;
-    static constexpr u16 kScrollHoriz = 2;
-    static constexpr u16 kScrollUp = 3;
-    static constexpr u16 kScrollDown = 4;
-    static constexpr u16 kScrollLeft = 5;
-    static constexpr u16 kScrollRight = 6;
-    static constexpr u32 kScrollGadgets = 6;
-    // How far one click on an arrow moves the view.
-    static constexpr i32 kScrollStep = 8;
-
-    // The box the icons of a window take, in drawer coordinates: the
-    // origin, every icon with its label, and a margin past the right and
-    // bottom ones. max is one past the last point.
-    struct Extent {
-        i32 min_x = 0;
-        i32 min_y = 0;
-        i32 max_x = 0;
-        i32 max_y = 0;
     };
 
     // What a click did to the icons of its window.
@@ -197,10 +155,58 @@ public:
         u64 last_us_ = 0;
     };
 
+    // An open window of the desktop: the root window (kRootWindow), a
+    // backdrop or an ordinary window, or a drawer. clip is a Region of its
+    // inner area that the Workbench's drawing stays inside, so icons past the
+    // edges of a sized window are cut off rather than moved; the window's
+    // scroll gadgets bring them into view.
+    struct DrawerWindow {
+        // kRootWindow, or a drawer's place in the order the desktop opened
+        // the windows, so a reset reopens it in its turn.
+        u32 id = 0;
+        u32 window = 0;
+        u32 rp = 0;
+        u32 clip = 0;
+        i32 inner_left = 0;
+        i32 inner_top = 0;
+        i32 inner_width = 0;
+        i32 inner_height = 0;
+        char name[32]{};
+        char path[Dos::kMaxPath]{};
+        // The drawer point shown at the inner area's top-left corner.
+        i32 scroll_x = 0;
+        i32 scroll_y = 0;
+        // The block of its scroll gadgets, the window's gadget list; 0 for
+        // a backdrop, which has none.
+        u32 gadgets = 0;
+        Clicks clicks;
+    };
+
+    // The scroll gadgets of a window, by their GadgetID: the two sliders
+    // in the right and bottom borders and the arrows beside them.
+    static constexpr u16 kScrollVert = 1;
+    static constexpr u16 kScrollHoriz = 2;
+    static constexpr u16 kScrollUp = 3;
+    static constexpr u16 kScrollDown = 4;
+    static constexpr u16 kScrollLeft = 5;
+    static constexpr u16 kScrollRight = 6;
+    static constexpr u32 kScrollGadgets = 6;
+    // How far one click on an arrow moves the view.
+    static constexpr i32 kScrollStep = 8;
+
+    // The box the icons of a window take, in drawer coordinates: the
+    // origin, every icon with its label, and a margin past the right and
+    // bottom ones. max is one past the last point.
+    struct Extent {
+        i32 min_x = 0;
+        i32 min_y = 0;
+        i32 max_x = 0;
+        i32 max_y = 0;
+    };
+
     // A program started with a WBStartup message, until the message comes
     // back.
     struct RunningTool {
-        bool used = false;
         u32 message = 0;
         u32 message_bytes = 0;
         u32 process = 0;
@@ -229,7 +235,6 @@ public:
 
     // One AddAppWindowA, AddAppIconA or AddAppMenuItemA registration.
     struct App {
-        bool used = false;
         AppKind kind = AppKind::Window;
         u32 handle = 0;
         u32 id = 0;
@@ -254,14 +259,22 @@ public:
     u32 base() const { return base_; }
     u32 process() const { return process_; }
     u32 reply_port() const { return reply_port_; }
+    // The one port the IDCMP messages of every window of the desktop come to.
+    u32 window_port() const { return window_port_; }
     bool running() const { return running_; }
     bool desktop_open() const { return desktop_open_; }
     bool backdrop() const { return backdrop_; }
     u32 menu() const { return menu_; }
-    const DrawerWindow& window(u32 index) const { return windows_[index]; }
-    const IconEntry& icon(u32 index) const { return icons_[index]; }
-    const RunningTool& tool(u32 index) const { return tools_[index]; }
-    const App& app(u32 index) const { return apps_[index]; }
+    bool has_window(u32 id) const { return find_window(id) != nullptr; }
+    // The window or icon with that id, which must exist.
+    const DrawerWindow& window(u32 id) const { return *find_window(id); }
+    const IconEntry& icon(u32 id) const { return *find_icon(id); }
+    // The open windows, the icons, the running programs and the
+    // registrations, each in the order it was added.
+    const SlotList<DrawerWindow>& windows() const { return windows_; }
+    const SlotList<IconEntry>& icons() const { return icons_; }
+    const SlotList<RunningTool>& tools() const { return tools_; }
+    const SlotList<App>& apps() const { return apps_; }
     const IconDrag& drag() const { return drag_; }
     // The TextFont of the icon text font and of the system font IPrefs
     // passed over; 0 is the built-in font.
@@ -269,8 +282,8 @@ public:
     u32 system_font() const;
 
     // The window's scroll gadget with the GadgetID id; 0 when it has none.
-    u32 scroll_gadget(u32 window_index, u16 id) const;
-    Extent extent(u32 window_index) const;
+    u32 scroll_gadget(u32 window_id, u16 id) const;
+    Extent extent(u32 window_id) const;
 
     // StartWorkbench: starts the Workbench as a detached task with a
     // Process of its own and returns DOSTRUE. A call while it runs returns
@@ -319,13 +332,13 @@ public:
     u32 build_startup(u32 process, u32 seglist, const StartupArg* args, u32 nargs,
                       const char* tool_window, u32* locks, u32& lock_count, u32& bytes);
 
-    // Opens the window the icon of window window_index stands for, or
+    // Opens the window the icon of window window_id stands for, or
     // brings the window already open for it to the front.
-    void open_drawer(u32 window_index, const IconEntry& icon);
+    void open_drawer(u32 window_id, const IconEntry& icon);
 
     // Closes a drawer's window and gives its icons back; the backdrop
     // stays.
-    void close_drawer(u32 window_index);
+    void close_drawer(u32 window_id);
 
     // Starts the tool or project the icon describes from drawer, with a
     // message it finds on its port. False, logged, when the program cannot
@@ -336,7 +349,7 @@ public:
 
     // What a double click on the icon does: its window, its program or its
     // project's program.
-    void open_icon(u32 window_index, u32 icon_index);
+    void open_icon(u32 window_id, u32 icon_id);
 
     // The reply to a running tool's message: unloads its seglist, unlocks
     // the arguments' locks and frees the message. False for a message no
@@ -349,7 +362,7 @@ public:
 
     // The Window menu's Open Parent: opens the drawer the window's drawer
     // lies in, or brings its window to the front. A disk's window has none.
-    void open_parent(u32 window_index);
+    void open_parent(u32 window_id);
 
     // The Workbench menu's Backdrop: reopens the root window as a backdrop
     // behind every other window, or as an ordinary "Workbench" window with
@@ -358,26 +371,26 @@ public:
     void set_backdrop(bool on);
 
     // Does what the menu item numbered number picks in the window.
-    void menu_pick(u32 window_index, u32 number);
+    void menu_pick(u32 window_id, u32 number);
 
     // Icons > Snapshot: stores the icon's place in its .info. Unsnapshot
     // stores "no place" and puts it back on the grid. False, logged, when
     // the .info cannot be written; an AppIcon's object is left alone.
-    bool snapshot_icon(u32 window_index, u32 icon_index);
-    bool unsnapshot_icon(u32 window_index, u32 icon_index);
+    bool snapshot_icon(u32 window_id, u32 icon_id);
+    bool unsnapshot_icon(u32 window_id, u32 icon_id);
 
     // Window > Snapshot: stores the drawer window's place, size and scroll
     // in the icon of its drawer or disk, and with all every icon's place
     // too.
-    bool snapshot_window(u32 window_index, bool all);
+    bool snapshot_window(u32 window_id, bool all);
 
     // Handles the replies of ended programs and the messages waiting at
-    // the windows' ports. True when a window had more messages than one
+    // the windows' port. True when the port had more messages than one
     // pass takes.
     bool pump();
 
     // The signals of the ports the desktop gets its messages at: the reply
-    // port and every open window's.
+    // port and the windows' port.
     u32 wait_mask() const;
 
 private:
@@ -395,7 +408,6 @@ private:
         i32 top = 0;
         i32 width = 0;
         i32 height = 0;
-        u32 order = 0;
     };
 
     // The box open_drawer_window opens a drawer at instead of the one its
@@ -413,41 +425,43 @@ private:
     static bool hook_close(void* ctx);
     static void hook_open(void* ctx);
     void run();
-    void handle_message(u32 window_index, u32 message);
+    void handle_message(u32 message);
     void show_about();
     void refresh_title();
 
     u32 build_menu_strip();
-    void attach_window(u32 index, u32 window, const char* name, const char* path, u32 gadgets);
-    void measure_window(u32 index);
-    void release_window(u32 index);
+    DrawerWindow& attach_window(u32 id, u32 window, const char* name, const char* path,
+                                u32 gadgets);
+    void measure_window(DrawerWindow& w);
+    void release_window(DrawerWindow& w);
+    u32 open_window_on_port(u32 new_window, u32 idcmp);
     void open_drawer_window(const char* path, const char* name, u32 object,
                             const DrawerBox* box = nullptr);
     void release_tool(RunningTool& tool);
     void open_root();
-    void place_root_icon(IconEntry& icon);
-    void place_root_icons();
+    void place_root_icon(const DrawerWindow& root, IconEntry& icon);
+    void place_root_icons(const DrawerWindow& root);
     void read_position(IconEntry& icon);
     u32 backdrop_item() const;
     void add_volume_icons();
-    void add_dir_icon(u32 window_index, const char* entry, bool is_dir);
+    void add_dir_icon(const DrawerWindow& drawer, const char* entry, bool is_dir);
     void add_volume(const char* label, const char* icon_path, u8 drive);
     bool volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) const;
-    void fill_drawer(u32 window_index);
-    void place_icons(u32 window_index);
-    void draw_window(u32 window_index);
-    void paint_window(u32 window_index);
+    void fill_drawer(DrawerWindow& drawer);
+    void place_icons(const DrawerWindow& drawer);
+    void draw_window(u32 window_id);
+    void paint_window(const DrawerWindow& drawer);
     bool load_patterns();
     void load_picture(u32 which, const char* name);
     void drop_picture(u32 which);
     void fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom);
     u32 make_scroll_gadgets();
     bool build_arrow_images();
-    void update_scroll(u32 window_index);
-    void scroll_by(u32 window_index, i32 dx, i32 dy);
-    void follow_sliders(u32 window_index);
-    u16 scroll_gadget_id(u32 window_index, u32 address) const;
-    void scroll_message(u32 window_index, u32 idcmp_class, u16 id);
+    void update_scroll(DrawerWindow& w);
+    void scroll_by(u32 window_id, i32 dx, i32 dy);
+    void follow_sliders(u32 window_id);
+    u16 scroll_gadget_id(u32 window_id, u32 address) const;
+    void scroll_message(u32 window_id, u32 idcmp_class, u16 id);
     void draw_icon(const DrawerWindow& drawer, const IconEntry& icon, bool selected);
     Graphics::FontMetrics label_metrics() const;
     i32 label_span(const IconEntry& icon) const;
@@ -455,28 +469,32 @@ private:
     void relayout_labels();
     void redraw_all();
     void update_all();
-    void select_contents(u32 window_index);
-    void clean_up(u32 window_index);
-    void open_selected(u32 window_index);
-    void mouse_click(u32 window_index, i32 mx, i32 my, u64 now_us);
-    void drag_to(u32 window_index, i32 mx, i32 my);
-    void end_drag(u32 window_index, i32 mx, i32 my);
+    void select_contents(u32 window_id);
+    void clean_up(u32 window_id);
+    void open_selected(u32 window_id);
+    void mouse_click(u32 window_id, i32 mx, i32 my, u64 now_us);
+    void drag_to(u32 window_id, i32 mx, i32 my);
+    void end_drag(u32 window_id, i32 mx, i32 my);
     void cancel_drag();
     void drop(const IconDrag& drag, i32 sx, i32 sy);
     bool transfer(const IconEntry& icon, const char* from, const char* to, i32 left, i32 top);
-    bool icon_path(u32 window_index, const IconEntry& icon, char (&out)[Dos::kMaxPath]) const;
-    bool icon_target_path(u32 window_index, const IconEntry& icon,
+    bool icon_path(const DrawerWindow& window, const IconEntry& icon,
+                   char (&out)[Dos::kMaxPath]) const;
+    bool icon_target_path(const DrawerWindow& window, const IconEntry& icon,
                           char (&out)[Dos::kMaxPath]) const;
-    bool screen_origin(u32 window_index, i32& x, i32& y) const;
+    bool screen_origin(u32 window_id, i32& x, i32& y) const;
     void show_error(const char* what, const char* name, u32 error);
     void show_requester(const char* title, const char* text);
-    u32 icon_at(u32 window_index, i32 x, i32 y) const;
+    const IconEntry* icon_at(u32 window_id, i32 x, i32 y) const;
     void start_wbstartup();
 
+    DrawerWindow* find_window(u32 id);
+    const DrawerWindow* find_window(u32 id) const;
+    IconEntry* find_icon(u32 id);
+    const IconEntry* find_icon(u32 id) const;
     IconEntry* take_icon(u32 owner);
     void free_icons(u32 owner);
     void measure(IconEntry& icon);
-    u32 free_window_slot() const;
     bool split_tool(const char* reference, const char* drawer, char (&dir)[Dos::kMaxPath],
                     char (&name)[Dos::kMaxPath]) const;
     bool start_program(const char* name, u32 seglist, const char* current_dir,
@@ -497,6 +515,7 @@ private:
     u32 process_ = 0;
     u32 screen_ = 0;
     u32 reply_port_ = 0;
+    u32 window_port_ = 0;
     u32 menu_ = 0;
     u32 title_buffer_ = 0;
     u32 arrows_ = 0;  // the arrow gadgets' images, made once
@@ -528,14 +547,14 @@ private:
     bool running_ = false;
     bool desktop_open_ = false;
     bool backdrop_ = true;
-    IconEntry icons_[kMaxIcons]{};
-    DrawerWindow windows_[kMaxWindows]{};
-    RememberedDrawer remembered_[kMaxWindows - 1]{};
-    u32 remembered_count_ = 0;
-    u32 open_count_ = 0;
-    RunningTool tools_[kMaxTools]{};
-    App apps_[kMaxApps]{};
-    Clicks clicks_[kMaxWindows]{};
+    SlotList<IconEntry> icons_{kMaxIcons};
+    u32 last_icon_id_ = 0;  // the id of the icon made last
+    SlotList<DrawerWindow> windows_{kMaxWindows};
+    // The drawers close_for_reset closed, in the order they were opened.
+    std::vector<RememberedDrawer> remembered_;
+    u32 open_count_ = 0;  // the drawers opened so far; the id of the last
+    SlotList<RunningTool> tools_{kMaxTools};
+    SlotList<App> apps_{kMaxApps};
     IconDrag drag_{};
     NativeVector vectors_[kVectors]{};
 };
