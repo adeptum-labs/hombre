@@ -22,6 +22,7 @@
  */
 
 #include "boot_disk.hpp"
+#include "ahci.hpp"
 #include "disk.hpp"
 #include "hard_disks.hpp"
 #include "hda.hpp"
@@ -47,8 +48,9 @@ namespace {
 // the floppy drives DF0: to DF3:.
 constinit VirtioBlk drive_devices[kFloppyDrives];
 
-// The hard disks, opened into disks indexed by their slot, and the volumes
-// they carry, which stay mounted for dos as the floppy volumes do.
+// The hard disks, the virtio ones indexed by their slot and the SATA ones
+// after them, and the volumes they carry, which stay mounted for dos as the
+// floppy volumes do.
 constinit VirtioBlk hard_disk_devices[kMaxHardDisks];
 constinit Disk hard_disks[kMaxHardDisks]{};
 constinit HardVolume hard_volumes[kMaxHardVolumes]{};
@@ -385,8 +387,8 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
 
     // Each floppy by its slot; a single device elsewhere is DF0: as before
     // drives had slots. The hard disks are found from the same scan.
-    PciAddress found[kFloppyDrives * 2];
-    const u32 count = virtio_blk_find_all(found, kFloppyDrives * 2);
+    PciAddress found[kFloppyDrives + kMaxHardDisks];
+    const u32 count = virtio_blk_find_all(found, kFloppyDrives + kMaxHardDisks);
     PciAddress addresses[kFloppyDrives]{};
     bool present[kFloppyDrives]{};
     for (u32 i = 0; i < count; ++i) {
@@ -415,6 +417,7 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
     // is looked for, so a machine with only hard disks still says what it
     // found.
     bool disk_present[kMaxHardDisks]{};
+    u32 hard_disk_slots = 0;
     for (u32 i = 0; i < count; ++i) {
         if (!in_hard_disk_slot(found[i]) || found[i].function != 0) {
             continue;
@@ -424,6 +427,9 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
             continue;
         }
         disk_present[disk] = true;
+        if (hard_disk_slots <= disk) {
+            hard_disk_slots = disk + 1;
+        }
         char prefix[] = "hd0: ";
         prefix[2] = static_cast<char>('0' + disk);
         if (!virtio_disk_open(hard_disk_devices[disk], found[i], mmio, phys_pages,
@@ -431,6 +437,11 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
             serial::write(prefix);
             serial::write("virtio-blk: init failed\n");
         }
+    }
+    // SATA disks take the slots after the virtio ones.
+    if (hard_disk_slots < kMaxHardDisks) {
+        ahci_open_disks(mmio, phys_pages, hard_disks + hard_disk_slots,
+                        kMaxHardDisks - hard_disk_slots);
     }
     const u32 hard_count =
         hard_disks_mount(hard_disks, kMaxHardDisks, phys_pages, hard_volumes, kMaxHardVolumes);

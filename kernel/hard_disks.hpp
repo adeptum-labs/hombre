@@ -41,7 +41,7 @@ struct HardVolume {
     u32 env[envec::longs];
 };
 
-constexpr u32 kMaxHardDisks = 4;
+constexpr u32 kMaxHardDisks = 8;
 constexpr u32 kMaxHardVolumes = 8;
 
 // Scans each disk for Amiga partitions, reads them through a sector cache

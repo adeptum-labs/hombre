@@ -46,9 +46,11 @@ DISK_IMG  := $(BUILD)/disk.img
 # optional HDF1 to HDF3, each an RDB-partitioned image or a bare DOS volume,
 # whose partitions become DH0: and on. Hard disk n sits in PCI slot 0x18 + n.
 # They are attached as they are and written to; HDF_SNAPSHOT=1 keeps every
-# write in QEMU instead. With HDF given and DISK not, DF0: stays empty and
-# Hombre boots from the hard disk.
-export HDF HDF1 HDF2 HDF3 HDF_SNAPSHOT
+# write in QEMU instead. HDF_BUS=ahci puts them on the q35 machine's SATA
+# controller and HDF_BUS=nvme on NVMe controllers instead of virtio-blk;
+# HDF_SECTOR=4096 gives the NVMe disks 4096-byte sectors. With HDF given and
+# DISK not, DF0: stays empty and Hombre boots from the hard disk.
+export HDF HDF1 HDF2 HDF3 HDF_SNAPSHOT HDF_BUS HDF_SECTOR
 ifneq ($(HDF),)
 ifeq ($(origin DISK),file)
 NO_DF0 := 1
@@ -214,7 +216,12 @@ run: image disk-image
 	    if [ -n "$$f" ]; then \
 	        [ -f "$$f" ] || { echo "missing hard disk image $$f" >&2; exit 1; }; \
 	        set -- "$$@" -drive "if=none,id=hd$$n,format=raw$$snap,file=$$(echo "$$f" | sed 's/,/,,/g')"; \
-	        set -- "$$@" -device virtio-blk-pci,disable-legacy=on,drive=hd$$n,addr=0x1$$((8 + n)); \
+	        case "$$HDF_BUS" in \
+	        ahci) set -- "$$@" -device ide-hd,drive=hd$$n,bus=ide.$$((n + 1)) ;; \
+	        nvme) set -- "$$@" -device nvme,id=nvme$$n,serial=hombre$$n \
+	                  -device nvme-ns,drive=hd$$n,bus=nvme$$n,logical_block_size=$${HDF_SECTOR:-512},physical_block_size=$${HDF_SECTOR:-512} ;; \
+	        *) set -- "$$@" -device virtio-blk-pci,disable-legacy=on,drive=hd$$n,addr=0x1$$((8 + n)) ;; \
+	        esac; \
 	    fi; \
 	    n=$$((n + 1)); \
 	done; \
@@ -264,6 +271,13 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    --keys "e c h o spc d a spc shift-less shift-less d h 0 shift-dot n o t e ret w h y ret" \
 	    "shell: builtin echo returned 0" "shell: builtin why returned 0"
 	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "$$(printf 'hej\nda')"
+	cp $(TEST_HDF) $(BUILD)/check.hdf
+	tools/boot_check.sh --no-disk --hdf $(BUILD)/check.hdf --hdf-bus ahci \
+	    --keys "e c h o spc h e j spc shift-less d h 0 shift-dot n o t e ret w h y ret" \
+	    "ahci: port 1: QEMU HARDDISK, 16448 sectors, 512-byte sectors" \
+	    "hd1: DH0: HombreTest (OFS), 16384 blocks, bootpri 0, bootable" \
+	    "startup: ended, returned 0" "shell: builtin why returned 0"
+	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "hej"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "v e r s i o n ret z z z ret bracket_left apostrophe semicolon ret" \
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \

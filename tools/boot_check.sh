@@ -30,6 +30,8 @@
 # --disk1 <file> and --disk2 <file> attach copies of more disks as DF1:
 # and DF2:. --hdf <file> attaches that hard disk image itself, writable, as
 # the first hard disk, so what the boot writes stays in the file.
+# --hdf-bus ahci|nvme|nvme4k attaches it to the SATA controller, to an NVMe
+# controller, or to one with 4096-byte sectors, instead of virtio-blk.
 #
 # --usb-kbd attaches an xHCI controller with a USB keyboard. --keys "<names>"
 # implies it and, once "shell: ready" shows on the serial console, types the
@@ -52,7 +54,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--hdf <file>] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -72,6 +74,7 @@ disk_source=
 disk1_source=
 disk2_source=
 hdf=
+hdf_bus=virtio
 no_startup=false
 while [[ ${1:-} == --* ]]; do
     case $1 in
@@ -95,6 +98,11 @@ while [[ ${1:-} == --* ]]; do
         --hdf)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
             hdf=$2
+            shift
+            ;;
+        --hdf-bus)
+            [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
+            hdf_bus=$2
             shift
             ;;
         --usb-kbd) usb_kbd=true ;;
@@ -181,11 +189,19 @@ if [[ -n $disk2_source ]]; then
     disk_args+=(-drive "if=none,id=disk2,format=raw,readonly=on,file=$disk2"
                 -device virtio-blk-pci,disable-legacy=on,drive=disk2,addr=0x12)
 fi
-# Hard disk n sits in PCI slot 0x18 + n.
+# A virtio hard disk sits in PCI slot 0x18; the others go on the q35
+# machine's SATA controller or an NVMe controller of their own.
 if [[ -n $hdf ]]; then
     [[ -f $hdf ]] || { echo "missing hard disk image $hdf" >&2; exit 1; }
-    disk_args+=(-drive "if=none,id=hd0,format=raw,file=${hdf//,/,,}"
-                -device virtio-blk-pci,disable-legacy=on,drive=hd0,addr=0x18)
+    disk_args+=(-drive "if=none,id=hd0,format=raw,file=${hdf//,/,,}")
+    case $hdf_bus in
+        virtio) disk_args+=(-device virtio-blk-pci,disable-legacy=on,drive=hd0,addr=0x18) ;;
+        ahci) disk_args+=(-device ide-hd,drive=hd0,bus=ide.1) ;;
+        nvme) disk_args+=(-device nvme,serial=hombre0,drive=hd0) ;;
+        nvme4k) disk_args+=(-device nvme,id=nvme0,serial=hombre0
+                            -device nvme-ns,drive=hd0,bus=nvme0,logical_block_size=4096,physical_block_size=4096) ;;
+        *) echo "$usage" >&2; exit 2 ;;
+    esac
 fi
 
 serial_log=$build_dir/serial.log
