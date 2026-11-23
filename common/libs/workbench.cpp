@@ -208,10 +208,11 @@ constexpr u32 kScrollBlockBytes = kKnobAt + kSliders * Image_SIZEOF;
 
 // The fuel gauge of a volume window: a column in its left border, from two
 // pixels below the window's inner top to its inner bottom, as wide as the
-// look of the screen has it and never more than a word of image data.
+// look of the screen has it and never more than a word of image data. A
+// window with fewer than kGaugeMinHeight rows for it shows none.
 constexpr i32 kGaugeInset = 2;
 constexpr u32 kGaugeRowBytes = 2;
-constexpr i32 kGaugeMinHeight = 3;
+constexpr i32 kGaugeMinHeight = 6;
 static_assert(chrome::fuel_gauge_width(chrome::Style::Classic) <= 16 &&
               chrome::fuel_gauge_width(chrome::Style::Modern) <= 16);
 
@@ -1310,6 +1311,9 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     }
     DrawerWindow& drawer = attach_window(++open_count_, window, name, path, gadgets);
     drawer.gauge = gauge;
+    if (gauge != 0) {
+        intuition_->set_size_hook(window, &Workbench::gauge_sized, this);
+    }
     // The view a snapshot kept; drawing keeps it inside the icons.
     drawer.scroll_x = scroll_x;
     drawer.scroll_y = scroll_y;
@@ -1654,7 +1658,7 @@ u32 Workbench::make_volume_gauge(u32 gadgets, i32 top, i32 height) {
         return 0;
     }
     if (height < kGaugeMinHeight) {
-        height = kGaugeMinHeight;
+        height = 0;
     }
     Bus b(*machine_);
     const chrome::Style style =
@@ -1681,7 +1685,8 @@ u32 Workbench::make_volume_gauge(u32 gadgets, i32 top, i32 height) {
 namespace {
 
 // Where the gauge of a volume window sits: from two pixels below the
-// window's inner top to its inner bottom.
+// window's inner top to its inner bottom. A window with fewer rows than
+// kGaugeMinHeight there has no room for a gauge, which has no rows then.
 struct GaugeBox {
     i32 top;
     i32 height;
@@ -1695,7 +1700,7 @@ GaugeBox gauge_box(Bus& b, u32 window) {
     box.top = border_top + kGaugeInset;
     box.height = window_height - box.top - border_bottom;
     if (box.height < kGaugeMinHeight) {
-        box.height = kGaugeMinHeight;
+        box.height = 0;
     }
     return box;
 }
@@ -1759,6 +1764,28 @@ bool Workbench::fit_gauge(DrawerWindow& w) {
     b.w8(w.gauge_image + im_PlanePick, (1u << depth) - 1);
     fill_gauge_image(w);
     return b.ok();
+}
+
+// Intuition sized the window and drew its gadgets, the gauge as high as it
+// was. A gauge that reaches past the window's new inner bottom was drawn
+// through the bottom border and the gadgets there, so it is made to fit
+// and the borders and their gadgets are drawn again, all before the screen
+// shows the window. A gauge with room to grow is left to the window's
+// IDCMP_NEWSIZE.
+void Workbench::gauge_sized(void* ctx, u32 window) {
+    Workbench& self = *static_cast<Workbench*>(ctx);
+    DrawerWindow* w =
+        self.windows_.find_if([&](const DrawerWindow& d) { return d.window == window; });
+    if (w == nullptr || w->gauge == 0 || w->gauge_image == 0) {
+        return;
+    }
+    Bus b(*self.machine_);
+    if (gauge_box(b, window).height >= w->gauge_height) {
+        return;
+    }
+    self.fit_gauge(*w);
+    self.intuition_->refresh_window_frame(window);
+    self.intuition_->refresh_glist(b.r32(window + ndk::wd_FirstGadget), window, -1);
 }
 
 // The gauge's image in the look of the screen's depth, for the window as it

@@ -2239,6 +2239,144 @@ void the_modern_fuel_gauge_is_in_the_look_of_the_sliders() {
     }
 }
 
+// The pens of the window's borders, row by row: its frame and the gadgets
+// there, without its inner area.
+std::vector<u32> border_pens(Rig& r, u32 window) {
+    const i32 width = static_cast<i16>(r.get16(window + wd_Width));
+    const i32 height = static_cast<i16>(r.get16(window + wd_Height));
+    const i32 x0 = static_cast<i32>(r.get8(window + wd_BorderLeft));
+    const i32 y0 = static_cast<i32>(r.get8(window + wd_BorderTop));
+    const i32 x1 = width - static_cast<i32>(r.get8(window + wd_BorderRight));
+    const i32 y1 = height - static_cast<i32>(r.get8(window + wd_BorderBottom));
+    std::vector<u32> pens;
+    for (i32 y = 0; y < height; ++y) {
+        for (i32 x = 0; x < width; ++x) {
+            if (x < x0 || x >= x1 || y < y0 || y >= y1) {
+                pens.push_back(r.window_pixel(window, x, y));
+            }
+        }
+    }
+    return pens;
+}
+
+// The gauge ends at the window's inner bottom or has no rows at all, and the
+// window's borders show what Intuition draws there from the frame and the
+// gadgets as they are: nothing of a gauge that was higher is left in them.
+// The gauge's rows.
+i32 check_gauge_fits(Rig& r, u32 drawer) {
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    const u32 window = w.window;
+    const i32 inner_top = static_cast<i32>(r.get8(window + wd_BorderTop));
+    const i32 inner_bottom = static_cast<i16>(r.get16(window + wd_Height)) -
+                             static_cast<i32>(r.get8(window + wd_BorderBottom));
+    const i32 top = static_cast<i32>(r.get16(w.gauge + gg_TopEdge));
+    const i32 rows = static_cast<i32>(r.get16(w.gauge + gg_Height));
+    CHECK_EQ(top, inner_top + 2);
+    CHECK(rows == 0 || rows >= 6);
+    CHECK(top + rows <= inner_bottom || rows == 0);
+    if (rows != 0) {
+        CHECK_EQ(r.get16(r.get32(w.gauge + gg_GadgetRender) + kImageHeight),
+                 static_cast<u32>(rows));
+    }
+    const std::vector<u32> shown = border_pens(r, window);
+    g_intuition.refresh_window_frame(window);
+    g_intuition.refresh_glist(r.get32(window + wd_FirstGadget), window, -1);
+    CHECK(border_pens(r, window) == shown);
+    return rows;
+}
+
+// A volume window that gets smaller, by its zoom gadget, ZipWindow or
+// ChangeWindowBox, never shows its gauge in the bottom border: the gauge is
+// as high as the smaller window's inner area before the screen shows the
+// window, and the bottom border and its gadgets are whole. A window with no
+// room for a gauge shows none. The gauge grows again with the window.
+void the_fuel_gauge_stays_out_of_the_bottom_border() {
+    for (const u32 depth : {2u, 8u}) {
+        constexpr u32 kUsed = 900;
+        Rig r(test_files(), gauge_disk("Second", kUsed), 1, depth);
+        r.workbench.open_desktop();
+        const u32 volume = r.find_icon("Second");
+        r.workbench.open_icon(0, volume);
+        r.workbench.close_drawer(r.find_window("Second:"));
+        const u32 before = r.free_bytes();
+        r.workbench.open_icon(0, volume);
+        const u32 drawer = r.find_window("Second:");
+        CHECK(drawer != Workbench::kNoWindow);
+        const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+        const u32 window = w.window;
+        const u32 total = r.second_volume.block_count - 2;
+        const i32 border_top = static_cast<i32>(r.get8(window + wd_BorderTop));
+        const i32 border_bottom = static_cast<i32>(r.get8(window + wd_BorderBottom));
+        const i32 left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+        const i32 top = static_cast<i16>(r.get16(window + wd_TopEdge));
+        const i32 width = static_cast<i16>(r.get16(window + wd_Width));
+        const i32 height = static_cast<i16>(r.get16(window + wd_Height));
+        const i32 full = check_gauge_fits(r, drawer);
+        CHECK_EQ(full, height - border_top - 2 - border_bottom);
+        const std::vector<u8> pens =
+            check_gauge_shown(r, drawer, gauge_of(r, drawer, kUsed, total));
+
+        // The small box of the zoom gadget: the gauge fits it at once, before
+        // the desktop hears of the new size.
+        g_intuition.zip_window(window);
+        const i32 small = static_cast<i16>(r.get16(window + wd_Height));
+        CHECK(small < height);
+        CHECK_EQ(check_gauge_fits(r, drawer), small - border_top - 2 - border_bottom);
+        r.workbench.pump();
+        CHECK_EQ(check_gauge_fits(r, drawer), small - border_top - 2 - border_bottom);
+        check_gauge_shown(r, drawer, gauge_of(r, drawer, kUsed, total));
+
+        // Back in its box the window still has the short gauge until the
+        // desktop answers, and then the one it had.
+        g_intuition.zip_window(window);
+        CHECK_EQ(static_cast<i16>(r.get16(window + wd_Height)), height);
+        CHECK_EQ(check_gauge_fits(r, drawer), small - border_top - 2 - border_bottom);
+        r.workbench.pump();
+        CHECK_EQ(check_gauge_fits(r, drawer), full);
+        CHECK(check_gauge_shown(r, drawer, gauge_of(r, drawer, kUsed, total)) == pens);
+
+        // The zoom gadget itself, and a box set from outside.
+        click_zoom(r, window);
+        CHECK_EQ(check_gauge_fits(r, drawer), small - border_top - 2 - border_bottom);
+        click_zoom(r, window);
+        CHECK_EQ(check_gauge_fits(r, drawer), full);
+        g_intuition.change_window_box(window, left + 10, top + 5, width, height - 20);
+        CHECK_EQ(check_gauge_fits(r, drawer), full - 20);
+        r.workbench.pump();
+        CHECK_EQ(check_gauge_fits(r, drawer), full - 20);
+        check_gauge_shown(r, drawer, gauge_of(r, drawer, kUsed, total));
+
+        // A window of four rows between its bar and its bottom border has no
+        // room for a gauge: the gadget has no rows and the border is plain.
+        CHECK(g_intuition.window_limits(window, 0, 20, 0, 0));
+        g_intuition.change_window_box(window, left, top, width, border_top + 4 + border_bottom);
+        CHECK_EQ(static_cast<i16>(r.get16(window + wd_Height)), border_top + 4 + border_bottom);
+        CHECK_EQ(check_gauge_fits(r, drawer), 0);
+        r.workbench.pump();
+        CHECK_EQ(check_gauge_fits(r, drawer), 0);
+        const chrome::FuelGauge none = gauge_of(r, drawer, kUsed, total);
+        const u32 face = none.style == chrome::Style::Modern
+                             ? chrome::physical_pen(chrome::kInactiveBar5, depth)
+                             : none.pens.pen[none.active ? sysimage::FillPen
+                                                         : sysimage::BackgroundPen];
+        for (i32 y = border_top; y < border_top + 4; ++y) {
+            for (i32 x = 2; x < w.inner_left - 1; ++x) {
+                CHECK_EQ(r.window_pixel(window, x, y), face);
+            }
+        }
+
+        // With room again the gauge is back, whole.
+        g_intuition.change_window_box(window, left, top, width, height);
+        CHECK_EQ(check_gauge_fits(r, drawer), 0);
+        r.workbench.pump();
+        CHECK_EQ(check_gauge_fits(r, drawer), full);
+        CHECK(check_gauge_shown(r, drawer, gauge_of(r, drawer, kUsed, total)) == pens);
+
+        r.workbench.close_drawer(drawer);
+        CHECK_EQ(r.free_bytes(), before);
+    }
+}
+
 // The arrow buttons of the drawer are as deep as depth and in the look of
 // that depth, in the pens of the screen's DrawInfo.
 void check_drawer_arrows(Rig& r, u32 drawer, u32 depth) {
@@ -3230,6 +3368,7 @@ int main() {
     volume_windows_show_a_fuel_gauge();
     the_classic_fuel_gauge_follows_its_window_state();
     the_modern_fuel_gauge_is_in_the_look_of_the_sliders();
+    the_fuel_gauge_stays_out_of_the_bottom_border();
     drawer_arrows_take_the_look_of_the_screen();
     drawer_arrows_follow_the_screen_through_a_reset();
     border_gadgets_stay_when_a_drawer_turns_inactive();

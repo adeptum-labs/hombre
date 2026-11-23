@@ -473,6 +473,7 @@ private:
     void layout_gauge(DrawerWindow& w);
     bool fit_gauge(DrawerWindow& w);
     void fill_gauge_image(DrawerWindow& w);
+    static void gauge_sized(void* ctx, u32 window);
     void refresh_gauges();
     bool build_arrow_images();
     void paint_arrow_images();
