@@ -3870,6 +3870,20 @@ void Intuition::redraw_window_bar(u32 window) {
         *graphics_, b, rec->rp,
         to_chrome(w, active_window_ == window, held_bar_button(window), window_metrics(window),
                   screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))));
+    if (chrome::style_for_depth(srec->depth) == chrome::Style::Classic) {
+        // The classic look paints the whole frame in the pens of the
+        // window's state, over the gadgets in the borders, which come back
+        // on top of it.
+        if (w.first_gadget != 0) {
+            draw_gadget_list(b, window, w.first_gadget, kMaxGadgets, true);
+        }
+        rec = find_window_record(window);
+        if (rec != nullptr && rec->width > 0 && rec->height > 0) {
+            compose(rec->screen, Rect{rec->left, rec->top, rec->left + rec->width - 1,
+                                      rec->top + rec->height - 1});
+        }
+        return;
+    }
     const i32 bar_bottom = rec->metrics.bar_height();
     const i32 y1 = rec->height - 1 < bar_bottom ? rec->height - 1 : bar_bottom;
     if (rec->width > 0 && y1 >= 0) {
@@ -6427,7 +6441,8 @@ void Intuition::erase_image(u32 rp, u32 image, i32 left, i32 top) {
     }
 }
 
-void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
+void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count,
+                                 bool border_only) {
     if (window == 0 || first == 0 || max_count == 0) {
         return;
     }
@@ -6447,10 +6462,15 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count) {
     for (u32 step = 0; step < limit && gadget != 0; ++step) {
         const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
         const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        constexpr u32 kBorders = ndk::GACT_RIGHTBORDER | ndk::GACT_LEFTBORDER |
+                                 ndk::GACT_TOPBORDER | ndk::GACT_BOTTOMBORDER;
+        const bool in_border = (b.r16(gadget + ndk::gg_Activation) & kBorders) != 0;
         if (!b.ok()) {
             return;
         }
-        if (gtype == ndk::GTYP_PROPGADGET) {
+        if (border_only && !in_border) {
+            // Not in the borders: left as it is.
+        } else if (gtype == ndk::GTYP_PROPGADGET) {
             draw_prop_gadget(*graphics_, b, w, gadget, pens);
         } else if (gtype == ndk::GTYP_BOOLGADGET) {
             draw_bool_gadget(b, window, w.rp, gadget);

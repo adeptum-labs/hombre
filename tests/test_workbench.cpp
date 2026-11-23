@@ -1877,6 +1877,62 @@ void drawer_arrows_follow_the_screen_through_a_reset() {
     reset_to(8, 2);
 }
 
+// On a screen of the classic look a window's whole frame is repainted in
+// the pens of its new state when it turns inactive, and the arrows and the
+// sliders in its borders come back on top of it.
+void border_gadgets_stay_when_a_drawer_turns_inactive() {
+    Rig r(test_files(), {}, 1, 2);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 drawer = r.find_window("HombreTest:");
+    CHECK(drawer != Workbench::kNoWindow);
+    const u32 window = r.workbench.window(drawer).window;
+    CHECK_EQ(g_intuition.active_window(), window);
+
+    const auto arrows_shown = [&] {
+        for (u16 id = Workbench::kScrollUp; id <= Workbench::kScrollRight; ++id) {
+            const u32 gadget = r.workbench.scroll_gadget(drawer, id);
+            const u32 image = r.get32(gadget + gg_GadgetRender);
+            const std::vector<u8> pens = image_pens(r, image);
+            const i32 width = static_cast<i32>(r.get16(image + kImageWidth));
+            const Rig::Box box = r.gadget_box(window, gadget);
+            for (i32 y = box.y0; y <= box.y1; ++y) {
+                for (i32 x = box.x0; x <= box.x1; ++x) {
+                    CHECK_EQ(r.window_pixel(window, x, y),
+                             static_cast<u32>(pens[(y - box.y0) * width + (x - box.x0)]));
+                }
+            }
+        }
+    };
+    // The slider's raised knob has its light edge at its top left.
+    const auto knob_shown = [&] {
+        native::Bus bus(r.m);
+        chrome::DrawInfoPens drawinfo;
+        sysimage::read_pens(bus, g_intuition.screen_draw_info(r.screen), drawinfo.pen);
+        const u32 slider = r.workbench.scroll_gadget(drawer, Workbench::kScrollVert);
+        const Rig::Box box = r.gadget_box(window, slider);
+        bool lit = false;
+        for (i32 y = box.y0; y <= box.y1 && !lit; ++y) {
+            for (i32 x = box.x0; x <= box.x1 && !lit; ++x) {
+                lit = r.window_pixel(window, x, y) == drawinfo.pen[sysimage::ShinePen];
+            }
+        }
+        CHECK(lit);
+    };
+    arrows_shown();
+    knob_shown();
+
+    // A click on the desktop beside the drawer makes the root window active.
+    const i32 left = static_cast<i16>(r.get16(window + wd_LeftEdge));
+    const i32 width = static_cast<i16>(r.get16(window + wd_Width));
+    const Workbench::DrawerWindow& root = r.workbench.window(0);
+    const i32 x = left > 8 ? 2 : left + width + 4;
+    r.click(0, x - root.inner_left, 300 - root.inner_top);
+    CHECK(g_intuition.active_window() != window);
+    arrows_shown();
+    knob_shown();
+}
+
 void the_arrows_and_sliders_scroll_a_drawer() {
     Rig r(scroll_files());
     const u32 drawer = open_long(r);
@@ -2653,6 +2709,7 @@ int main() {
     drawers_have_scroll_gadgets_in_their_borders();
     drawer_arrows_take_the_look_of_the_screen();
     drawer_arrows_follow_the_screen_through_a_reset();
+    border_gadgets_stay_when_a_drawer_turns_inactive();
     the_arrows_and_sliders_scroll_a_drawer();
     a_window_snapshot_keeps_its_scroll();
     drawers_open_below_the_screen_bar();

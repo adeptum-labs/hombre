@@ -740,7 +740,10 @@ private:
     void free_tracked_message(u32 message);
     u32 window_at(i32 x, i32 y) const;
     void set_gadget_disabled(u32 gadget, u32 window, bool disabled);
-    void draw_gadget_list(native::Bus& b, u32 window, u32 first, u32 max_count);
+    // Draws the gadgets of the list, or with border_only only those in the
+    // window's borders.
+    void draw_gadget_list(native::Bus& b, u32 window, u32 first, u32 max_count,
+                          bool border_only = false);
     bool hit_prop_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     bool hit_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void draw_custom_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
