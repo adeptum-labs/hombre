@@ -72,7 +72,9 @@ constexpr u32 kCmdPowerOn = 1u << 1;
 constexpr u32 kCmdFisReceive = 1u << 4;
 constexpr u32 kCmdFisReceiveRunning = 1u << 14;
 constexpr u32 kCmdListRunning = 1u << 15;
-constexpr u32 kIsTaskFileError = 1u << 28;
+// PxIS bits that end a command with an error: task file, host bus fatal,
+// host bus data and interface fatal errors.
+constexpr u32 kIsCommandErrors = (1u << 30) | (1u << 29) | (1u << 28) | (1u << 27);
 constexpr u32 kTfdError = 1u << 0;
 constexpr u32 kTfdBusy = 1u << 7;
 constexpr u32 kSstsDetMask = 0x0Fu;
@@ -198,6 +200,9 @@ struct AhciDisk {
     u64 sectors;
     u32 sector_bytes;
     bool flush;
+    // Set after a command timed out: the device may still hold it and write
+    // to the bounce page, so the disk takes no further commands.
+    bool failed;
 };
 
 constinit AhciDisk disk_contexts[kMaxAhciDisks]{};
@@ -220,7 +225,6 @@ bool stop_port(volatile u8* port) {
     if (!wait_bits(port, kPortCmd, kCmdFisReceiveRunning, 0, kPortLimit)) {
         return false;
     }
-    write32(port, kPortCi, 0xFFFFFFFFu);
     write32(port, kPortIe, 0);
     write32(port, kPortIs, 0xFFFFFFFFu);
     write32(port, kPortSerr, 0xFFFFFFFFu);
@@ -249,7 +253,8 @@ bool restart_port(volatile u8* port) {
     if (!wait_bits(port, kPortCmd, kCmdListRunning, 0, kPortLimit)) {
         return false;
     }
-    write32(port, kPortCi, 0xFFFFFFFFu);
+    // PxCI is cleared by the controller when start goes off; writing it
+    // would only set bits and issue stale commands.
     write32(port, kPortIs, 0xFFFFFFFFu);
     write32(port, kPortSerr, 0xFFFFFFFFu);
     write32(port, kPortCmd, read32(port, kPortCmd) | kCmdStart);
@@ -257,6 +262,9 @@ bool restart_port(volatile u8* port) {
 }
 
 bool run_command(AhciDisk& disk, u8 command, bool write, u64 lba, u16 count, u32 bytes) {
+    if (disk.failed) {
+        return false;
+    }
     volatile u8* port = disk.regs;
     u8* table = disk.memory.page + kAhciCmdTableOffset;
     __builtin_memset(table, 0, kAhciCmdTableBytes);
@@ -272,8 +280,17 @@ bool run_command(AhciDisk& disk, u8 command, bool write, u64 lba, u16 count, u32
     memory_fence();
     write32(port, kPortCi, 1u);
 
+    // CI stays set when the command fails, so the error bits end the wait
+    // too. An error leaves the port restarted for the next command; a
+    // timeout leaves the disk unused.
     for (u64 spins = 0; (read32(port, kPortCi) & 1u) != 0; ++spins) {
+        if ((read32(port, kPortIs) & kIsCommandErrors) != 0) {
+            restart_port(port);
+            return false;
+        }
         if (spins == kPollLimit) {
+            disk.failed = true;
+            serial::write("ahci: command timed out, disk no longer used\n");
             restart_port(port);
             return false;
         }
@@ -282,7 +299,7 @@ bool run_command(AhciDisk& disk, u8 command, bool write, u64 lba, u16 count, u32
     // The command is complete: the data the device wrote is visible before
     // the caller reads the bounce page.
     memory_fence();
-    return (read32(port, kPortIs) & kIsTaskFileError) == 0 &&
+    return (read32(port, kPortIs) & kIsCommandErrors) == 0 &&
            (read32(port, kPortTfd) & (kTfdError | kTfdBusy)) == 0;
 }
 
@@ -481,6 +498,17 @@ u32 open_controller(PciAddress address, MmioMapper& mmio, PhysAllocator& pages, 
         return 0;
     }
 
+    // Every implemented port stops before bus mastering comes on: a port the
+    // firmware left running would otherwise receive FISes into memory the
+    // kernel has since handed out. A port that will not stop keeps bus
+    // mastering off for the whole controller.
+    const u32 implemented = read32(regs, kPi);
+    for (u32 p = 0; p < kPortCount; ++p) {
+        if ((implemented & (1u << p)) != 0 && !stop_port(regs + kPortBase + p * kPortBytes)) {
+            log_port(p, "will not stop, controller not used");
+            return 0;
+        }
+    }
     set_command(address, kPciCommandBusMaster, 0);
 
     u32 opened = 0;
