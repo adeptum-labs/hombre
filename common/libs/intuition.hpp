@@ -245,8 +245,10 @@ public:
 
     // Opens a window from the NewWindow at new_window, overridden by the
     // tags at tags. Either may be 0 but not both. Returns the Window, or 0
-    // with a log.
-    u32 open_window(u32 new_window, u32 tags);
+    // with a log. With copy_title the window keeps a copy of its title, for
+    // callers that build it in memory they free; without, as for programs,
+    // it shows the caller's string, which must last as long as the window.
+    u32 open_window(u32 new_window, u32 tags, bool copy_title = true);
     void close_window(u32 window);
 
     // EasyRequestArgs, BuildEasyRequestArgs, SysReqHandler and
@@ -271,7 +273,10 @@ public:
                       u32 neg_flags, i32 width, i32 height);
 
     bool modify_idcmp(u32 window, u32 flags);
-    void set_window_titles(u32 window, u32 title, u32 screen_title);
+    // Shows new titles; copy_title as for open_window. A program may put
+    // back a title it read from wd_Title, so the strings it was given are
+    // never freed here.
+    void set_window_titles(u32 window, u32 title, u32 screen_title, bool copy_title = true);
     // Draws the window's border and title bar again; what is inside the
     // border stays as it is.
     void refresh_window_frame(u32 window);

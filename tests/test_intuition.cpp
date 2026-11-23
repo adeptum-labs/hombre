@@ -1260,10 +1260,9 @@ void open_window_taglist_reads_wa_tags() {
     CHECK_EQ(r.get16(window + wd_Height), 120u);
     CHECK_EQ(r.get32(window + wd_WScreen), first);
     CHECK((r.get32(window + wd_Flags) & WFLG_CLOSEGADGET) != 0);
-    const u32 title = r.get32(window + wd_Title);
-    CHECK(title != 0);
-    CHECK(title != kWinTitle);
-    CHECK(r.read_str(title) == "B");
+    // The window shows the program's own string, as Intuition does.
+    CHECK_EQ(r.get32(window + wd_Title), kWinTitle);
+    CHECK(r.read_str(kWinTitle) == "B");
 
     // A null NewWindow takes the tags and the front screen.
     const u32 short_tags = r.tags(kTagList, {{WA_Left, 5}, {WA_Top, 5}, {WA_Width, 64},
@@ -1604,10 +1603,7 @@ void set_window_titles_redraws_title() {
     r.cpu().a[1] = kWinTitle;
     r.cpu().a[2] = 0xFFFFFFFF;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
-    const u32 title = r.get32(window + wd_Title);
-    CHECK(title != 0);
-    CHECK(title != kWinTitle);
-    CHECK(r.read_str(title) == "B");
+    CHECK_EQ(r.get32(window + wd_Title), kWinTitle);
     CHECK_EQ(screen_pixel(r, screen, 69, 63), 1u);
 
     r.cpu().a[0] = window;
@@ -1628,10 +1624,42 @@ void set_window_titles_redraws_title() {
     r.cpu().a[1] = 0xFFFFFFFF;
     r.cpu().a[2] = kWinTitle;
     CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
-    const u32 screen_title = r.get32(screen + sc_Title);
-    CHECK(screen_title != 0);
-    CHECK(screen_title != kWinTitle);
-    CHECK(r.read_str(screen_title) == "S");
+    CHECK_EQ(r.get32(screen + sc_Title), kWinTitle);
+    CHECK(r.read_str(kWinTitle) == "S");
+}
+
+// A program may keep the title it read from wd_Title, show another and put
+// the first back, as HDToolBox does around its partitioning page: the first
+// string must still be there.
+void a_saved_window_title_can_be_put_back() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.str(kWinTitle, "Main");
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET, kWinTitle, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 saved = r.get32(window + wd_Title);
+
+    const u32 other = kWinTitle + 0x40;
+    r.str(other, "Partitioning");
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = other;
+    r.cpu().a[2] = 0xFFFFFFFF;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = saved;
+    r.cpu().a[2] = 0xFFFFFFFF;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetWindowTitles), ExitReason::Halt);
+    CHECK_EQ(r.get32(window + wd_Title), saved);
+    CHECK(r.read_str(saved) == "Main");
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    // The program's strings are its own and stay untouched.
+    CHECK(r.read_str(kWinTitle) == "Main");
 }
 
 void window_refresh_reaches_the_sink() {
@@ -10201,6 +10229,7 @@ int main() {
     close_window_repaints_and_unlinks();
     close_window_twice_and_null_ignored();
     set_window_titles_redraws_title();
+    a_saved_window_title_can_be_put_back();
     refresh_window_frame_redraws_the_border_only();
     window_refresh_reaches_the_sink();
     open_window_reads_32_bit_flags();

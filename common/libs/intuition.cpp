@@ -1506,15 +1506,15 @@ struct IntuitionNatives {
     }
 
     static void open_window(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).open_window(m.cpu.a[0], 0));
+        native::set_result(m, of(ctx).open_window(m.cpu.a[0], 0, false));
     }
 
     static void open_window_tag_list(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).open_window(m.cpu.a[0], m.cpu.a[1]));
+        native::set_result(m, of(ctx).open_window(m.cpu.a[0], m.cpu.a[1], false));
     }
 
     static void set_window_titles(void* ctx, Machine& m) {
-        of(ctx).set_window_titles(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2]);
+        of(ctx).set_window_titles(m.cpu.a[0], m.cpu.a[1], m.cpu.a[2], false);
     }
 
     static void refresh_window_frame(void* ctx, Machine& m) {
@@ -3648,7 +3648,7 @@ bool Intuition::close_screen(u32 screen) {
     if (rec->colormap != 0) {
         exec_->free(rec->colormap, rec->colormap_bytes);
     }
-    if (rec->title != 0) {
+    if (rec->title_bytes != 0) {
         exec_->free(rec->title, rec->title_bytes);
     }
     graphics_->close_font(rec->font);
@@ -4017,7 +4017,7 @@ u32 left_border_for_gadgets(Bus& b, u32 first) {
     return border;
 }
 
-u32 Intuition::open_window(u32 new_window, u32 tags) {
+u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     Bus b(*machine_);
     if (new_window == 0 && tags == 0) {
         b.r32((machine_->mem.size + 1) & ~1u);
@@ -4184,7 +4184,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
         if (user_port_owned && user_port != 0) {
             exec_->delete_port(user_port);
         }
-        if (title != 0) {
+        if (title_bytes != 0) {
             exec_->free(title, title_bytes);
         }
         if (planes != 0) {
@@ -4226,11 +4226,13 @@ u32 Intuition::open_window(u32 new_window, u32 tags) {
     if (planes == 0) {
         return fail();
     }
-    if (a.title != 0) {
-        title = copy_title(b, *exec_, a.title, title_bytes);
+    if (a.title != 0 && copy_title) {
+        title = hombre::copy_title(b, *exec_, a.title, title_bytes);
         if (title == 0) {
             return fail();
         }
+    } else {
+        title = a.title;
     }
     if (a.idcmp != 0) {
         user_port = b.r32(window + ndk::wd_UserPort);
@@ -4447,7 +4449,7 @@ void Intuition::close_window(u32 window) {
             remove_window_messages(rec->user_port, window);
         }
     }
-    if (rec->title != 0) {
+    if (rec->title_bytes != 0) {
         exec_->free(rec->title, rec->title_bytes);
     }
     graphics_->close_font(rec->metrics.font);
@@ -5053,7 +5055,7 @@ bool Intuition::modify_idcmp(u32 window, u32 flags) {
     return b.ok();
 }
 
-void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
+void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title, bool copy_title) {
     if (!window_open(window)) {
         return;
     }
@@ -5064,15 +5066,15 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
     Bus b(*machine_);
     bool redraw = false;
     if (title != 0xFFFFFFFF) {
-        u32 copy = 0;
+        u32 copy = title;
         u32 bytes = 0;
-        if (title != 0) {
-            copy = copy_title(b, *exec_, title, bytes);
+        if (title != 0 && copy_title) {
+            copy = hombre::copy_title(b, *exec_, title, bytes);
             if (copy == 0) {
                 return;
             }
         }
-        if (rec->title != 0) {
+        if (rec->title_bytes != 0) {
             exec_->free(rec->title, rec->title_bytes);
         }
         rec->title = copy;
@@ -5083,15 +5085,15 @@ void Intuition::set_window_titles(u32 window, u32 title, u32 screen_title) {
     if (screen_title != 0xFFFFFFFF) {
         ScreenRecord* srec = find_screen_record(rec->screen);
         if (srec != nullptr) {
-            u32 copy = 0;
+            u32 copy = screen_title;
             u32 bytes = 0;
-            if (screen_title != 0) {
-                copy = copy_title(b, *exec_, screen_title, bytes);
+            if (screen_title != 0 && copy_title) {
+                copy = hombre::copy_title(b, *exec_, screen_title, bytes);
                 if (copy == 0) {
                     return;
                 }
             }
-            if (srec->title != 0) {
+            if (srec->title_bytes != 0) {
                 exec_->free(srec->title, srec->title_bytes);
             }
             srec->title = copy;
