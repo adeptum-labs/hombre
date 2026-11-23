@@ -173,6 +173,7 @@ constexpr AhciSignature ahci_classify_signature(u32 signature) {
 struct AhciIdentify {
     u64 sectors;       // logical sectors
     u32 sector_bytes;  // logical sector size as the drive reports it
+    bool lba48;        // 48-bit addressing, which READ and WRITE DMA EXT need
     bool flush;        // FLUSH CACHE EXT is supported
     char model[41];    // words 27 to 46, with the padding trimmed
 };
@@ -184,12 +185,12 @@ constexpr bool ahci_sector_size_ok(u32 bytes) {
 }
 
 // Fills `info` from the 256 words of IDENTIFY DEVICE data. Returns false
-// when the drive reports no sectors or a logical sector size this driver
-// cannot serve; every field is filled either way.
+// when the drive lacks 48-bit addressing or reports no sectors or a logical
+// sector size this driver cannot serve; every field is filled either way.
 constexpr bool ahci_parse_identify(const u16* words, AhciIdentify& info) {
-    const bool lba48 = (words[83] & (1u << 10)) != 0;
+    info.lba48 = (words[83] & (1u << 10)) != 0;
     info.sectors =
-        lba48 ? (static_cast<u64>(words[100]) | (static_cast<u64>(words[101]) << 16) |
+        info.lba48 ? (static_cast<u64>(words[100]) | (static_cast<u64>(words[101]) << 16) |
                  (static_cast<u64>(words[102]) << 32) | (static_cast<u64>(words[103]) << 48))
               : (static_cast<u64>(words[60]) | (static_cast<u64>(words[61]) << 16));
     const u16 sector_words = words[106];
@@ -212,7 +213,7 @@ constexpr bool ahci_parse_identify(const u16* words, AhciIdentify& info) {
          --end) {
         info.model[end - 1] = '\0';
     }
-    return info.sectors != 0 && ahci_sector_size_ok(info.sector_bytes);
+    return info.lba48 && info.sectors != 0 && ahci_sector_size_ok(info.sector_bytes);
 }
 
 // Where a 512-byte disk sector sits in the logical sector that holds it.

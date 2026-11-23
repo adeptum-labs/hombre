@@ -186,14 +186,15 @@ void identify_with_4k_sectors() {
     CHECK_EQ(ahci_disk_sectors(info.sectors, info.sector_bytes), info.sectors * 8);
 }
 
-void identify_falls_back_to_lba28() {
+void identify_rejects_a_drive_without_lba48() {
     u16 words[256];
     std::memset(words, 0, sizeof(words));
     words[60] = 0x1234;
     words[61] = 0x5678;
 
     AhciIdentify info{};
-    CHECK(ahci_parse_identify(words, info));
+    CHECK(!ahci_parse_identify(words, info));
+    CHECK(!info.lba48);
     CHECK_EQ(info.sectors, 0x56781234ull);
     CHECK_EQ(info.sector_bytes, 512u);
     CHECK(!info.flush);
@@ -294,7 +295,7 @@ int main() {
     prdt_building();
     signature_classification();
     identify_with_4k_sectors();
-    identify_falls_back_to_lba28();
+    identify_rejects_a_drive_without_lba48();
     identify_rejects_unsupported_sector_size();
     identify_rejects_empty_drive();
     sector_sizes();
