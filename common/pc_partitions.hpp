@@ -65,10 +65,23 @@ struct AmigaPartition {
     PartitionSource source; // the container the partition was found in
 };
 
+// A stretch of the disk that belongs to the Amiga and may be handed to
+// programs whole, to partition or repartition: a disk without a PC table
+// that holds an RDB, a DOS volume or nothing at all; an MBR partition of an
+// Amiga type; a GPT partition that holds an RDB.
+struct AmigaContainer {
+    u64 first;
+    u64 sectors;
+    PartitionSource source;
+};
+
 struct AmigaPartitions {
     static constexpr u32 kMax = 16;
+    static constexpr u32 kMaxContainers = 8;
     u32 count;
     AmigaPartition list[kMax];
+    u32 container_count;
+    AmigaContainer containers[kMaxContainers];
     // Partitions skipped: of an unsupported block size, outside their
     // container, too large for a 32 bit sector number, or past kMax.
     u32 skipped;
@@ -95,6 +108,16 @@ inline constexpr u32 min_gpt_entry_bytes = 128;
 // without keeping the whole entry array in memory. Real tables use 128.
 inline constexpr u32 max_gpt_entry_bytes = 512;
 inline constexpr u32 gpt_header_bytes = 92;
+// A disk without a PC table counts as blank when this much of its start
+// reads as zeroes: it holds no boot code, table, RDB or file system.
+inline constexpr u32 blank_sectors = 128;
+
+inline void add_container(u64 first, u64 sectors, PartitionSource source,
+                          AmigaPartitions& out) {
+    if (out.container_count < AmigaPartitions::kMaxContainers) {
+        out.containers[out.container_count++] = AmigaContainer{first, sectors, source};
+    }
+}
 
 // The disk as its partition tables see it: LBAs of `scale` 512 byte sectors.
 struct TableDisk {
@@ -222,7 +245,9 @@ inline void add_partitions(const RdbDisk& disk, u64 base, PartitionSource source
 
 // Looks for a Rigid Disk Block in one PC partition. Its partitions are
 // relative to the partition's start, so the container's first sector is added
-// to each. A bare DOS volume is not a partitioned disk and is ignored.
+// to each. A bare DOS volume is not a partitioned disk and is ignored. A GPT
+// partition with an RDB is the Amiga's; an MBR partition of an Amiga type is
+// too, unless what is in it cannot be read or is damaged.
 inline void scan_container(DiskRead read, void* ctx, u64 first, u64 sectors,
                            PartitionSource source, AmigaPartitions& out) {
     if (sectors == 0) {
@@ -240,13 +265,39 @@ inline void scan_container(DiskRead read, void* ctx, u64 first, u64 sectors,
         ++out.skipped;
         return;
     }
+    if (source == PartitionSource::Mbr) {
+        add_container(first, sectors, source, out);
+    }
     if (error != RdbError::Ok) {
         return;
     }
     out.skipped += disk.skipped;
     if (disk.has_rdb) {
+        if (source == PartitionSource::Gpt) {
+            add_container(first, sectors, source, out);
+        }
         add_partitions(disk, first, source, out);
     }
+}
+
+// True when the first blank_sectors sectors of the disk, or all of a smaller
+// disk, read as zeroes.
+inline bool blank_start(DiskRead read, void* ctx, u64 disk_sectors, bool& io_error) {
+    io_error = false;
+    u8 sector[sector_bytes];
+    const u64 sectors = disk_sectors < blank_sectors ? disk_sectors : blank_sectors;
+    for (u64 n = 0; n < sectors; ++n) {
+        if (!read(ctx, n, sector)) {
+            io_error = true;
+            return false;
+        }
+        for (u32 i = 0; i < sector_bytes; ++i) {
+            if (sector[i] != 0) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 // A disk without a PC table: an RDB at its start, or a bare DOS volume, over
@@ -259,10 +310,18 @@ inline RdbError scan_whole_disk(DiskRead read, void* ctx, u64 disk_sectors,
     ContainerRead whole{read, ctx, 0, sectors};
     RdbDisk disk;
     const RdbError error = rdb_scan(read_container, &whole, sectors, disk);
+    if (error == RdbError::NoPartitions) {
+        bool io_error = false;
+        if (blank_start(read, ctx, disk_sectors, io_error)) {
+            add_container(0, disk_sectors, PartitionSource::WholeDisk, out);
+        }
+        return io_error ? RdbError::Io : error;
+    }
     if (error != RdbError::Ok) {
         return error;
     }
     out.skipped += disk.skipped;
+    add_container(0, disk_sectors, PartitionSource::WholeDisk, out);
     add_partitions(disk, 0, PartitionSource::WholeDisk, out);
     return RdbError::Ok;
 }
@@ -493,6 +552,7 @@ inline RdbError find_amiga_partitions(DiskRead read, void* ctx, u64 disk_sectors
     using namespace pc_partitions_detail;
     out.count = 0;
     out.skipped = 0;
+    out.container_count = 0;
     out.table = PcTable::None;
     if (lba_bytes < sector_bytes || lba_bytes % sector_bytes != 0) {
         return RdbError::Unsupported;

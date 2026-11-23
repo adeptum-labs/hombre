@@ -99,6 +99,11 @@ void a_whole_disk_rdb_is_found() {
     CHECK_EQ(parts.list[1].source, PartitionSource::WholeDisk);
     CHECK_EQ(parts.list[1].disk_first_sector, u64{52} * 32);
     CHECK(std::strcmp(parts.list[1].part.name, "Work") == 0);
+
+    CHECK_EQ(parts.container_count, 1u);
+    CHECK_EQ(parts.containers[0].first, 0u);
+    CHECK_EQ(parts.containers[0].sectors, d.sectors());
+    CHECK_EQ(parts.containers[0].source, PartitionSource::WholeDisk);
 }
 
 void a_bare_dos_volume_is_one_partition() {
@@ -116,6 +121,7 @@ void a_bare_dos_volume_is_one_partition() {
     CHECK_EQ(parts.list[0].disk_first_sector, 0u);
     CHECK_EQ(parts.list[0].part.dos_type, 0x444F5303u);
     CHECK(std::strcmp(parts.list[0].part.name, "DH0") == 0);
+    CHECK_EQ(parts.container_count, 1u);
 }
 
 void an_rdb_inside_an_mbr_partition_is_found() {
@@ -132,6 +138,54 @@ void an_rdb_inside_an_mbr_partition_is_found() {
     CHECK_EQ(parts.list[0].source, PartitionSource::Mbr);
     CHECK_EQ(parts.list[0].disk_first_sector, u64{100} + u64{52} * 32);
     CHECK(std::strcmp(parts.list[0].part.name, "Work") == 0);
+    // The NTFS partition is no container.
+    CHECK_EQ(parts.container_count, 1u);
+    CHECK_EQ(parts.containers[0].first, 100u);
+    CHECK_EQ(parts.containers[0].sectors, u64{sectors});
+    CHECK_EQ(parts.containers[0].source, PartitionSource::Mbr);
+}
+
+void an_empty_amiga_mbr_partition_is_a_container() {
+    Disk d{std::vector<u8>(4096 * sector_bytes, 0)};
+    write_mbr(d.image, {{0x76, 64, 2000, false}, {0x83, 2064, 1000, false}});
+    AmigaPartitions parts;
+    CHECK_EQ(scan(d, parts), RdbError::Ok);
+    CHECK_EQ(parts.count, 0u);
+    CHECK_EQ(parts.container_count, 1u);
+    CHECK_EQ(parts.containers[0].first, 64u);
+    CHECK_EQ(parts.containers[0].sectors, 2000u);
+}
+
+void a_damaged_rdb_in_an_amiga_mbr_partition_is_no_container() {
+    std::vector<u8> rdb = build_rdb_disk(geometry(100), {RdbPartitionSpec{"Work", 52, 99}});
+    rdb[20] ^= 1;
+    Disk d{std::vector<u8>(8192 * sector_bytes, 0)};
+    place(d.image, 100, rdb);
+    write_mbr(d.image, {{0x30, 100, static_cast<u32>(rdb.size() / sector_bytes), false}});
+    AmigaPartitions parts;
+    CHECK_EQ(scan(d, parts), RdbError::Ok);
+    CHECK_EQ(parts.container_count, 0u);
+}
+
+void only_gpt_partitions_with_an_rdb_are_containers() {
+    std::vector<u8> rdb = build_rdb_disk(geometry(100), {RdbPartitionSpec{"GPT0", 52, 99}});
+    Disk d{std::vector<u8>(8192 * sector_bytes, 0)};
+    place(d.image, 4096, rdb);
+    write_gpt(d.image, {{64, 2047, true}, {4096, 7295, true}});
+    AmigaPartitions parts;
+    CHECK_EQ(scan(d, parts), RdbError::Ok);
+    CHECK_EQ(parts.container_count, 1u);
+    CHECK_EQ(parts.containers[0].first, 4096u);
+    CHECK_EQ(parts.containers[0].sectors, 3200u);
+    CHECK_EQ(parts.containers[0].source, PartitionSource::Gpt);
+}
+
+void a_disk_with_unknown_data_is_no_container() {
+    Disk d{std::vector<u8>(2048 * sector_bytes, 0)};
+    d.image[127 * sector_bytes + 5] = 1;
+    AmigaPartitions parts;
+    CHECK_EQ(scan(d, parts), RdbError::NoPartitions);
+    CHECK_EQ(parts.container_count, 0u);
 }
 
 void logical_amiga_partitions_are_found_through_the_ebr_chain() {
@@ -323,6 +377,9 @@ void a_blank_disk_has_no_partitions() {
     CHECK_EQ(scan(d, parts), RdbError::NoPartitions);
     CHECK_EQ(parts.table, PcTable::None);
     CHECK_EQ(parts.count, 0u);
+    // Blank, so the Amiga may set it up.
+    CHECK_EQ(parts.container_count, 1u);
+    CHECK_EQ(parts.containers[0].sectors, d.sectors());
 }
 
 void a_read_error_on_sector_0_is_io() {
@@ -338,6 +395,10 @@ int main() {
     a_whole_disk_rdb_is_found();
     a_bare_dos_volume_is_one_partition();
     an_rdb_inside_an_mbr_partition_is_found();
+    an_empty_amiga_mbr_partition_is_a_container();
+    a_damaged_rdb_in_an_amiga_mbr_partition_is_no_container();
+    only_gpt_partitions_with_an_rdb_are_containers();
+    a_disk_with_unknown_data_is_no_container();
     logical_amiga_partitions_are_found_through_the_ebr_chain();
     an_ebr_chain_that_loops_ends();
     an_rdb_inside_a_gpt_partition_is_found();
