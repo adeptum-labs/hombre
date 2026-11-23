@@ -23,6 +23,7 @@
 
 #include "dos.hpp"
 
+#include "../amiga_fs_write.hpp"
 #include "../hunk.hpp"
 
 namespace hombre {
@@ -317,7 +318,12 @@ u32 io_error_of(FsError error) {
     case FsError::NotFound: return ERROR_OBJECT_NOT_FOUND;
     case FsError::NotDir:
     case FsError::NotFile: return ERROR_OBJECT_WRONG_TYPE;
-    case FsError::NameTooLong: return ERROR_INVALID_COMPONENT_NAME;
+    case FsError::NameTooLong:
+    case FsError::BadName: return ERROR_INVALID_COMPONENT_NAME;
+    case FsError::ReadOnly: return ERROR_DISK_WRITE_PROTECTED;
+    case FsError::Exists: return ERROR_OBJECT_EXISTS;
+    case FsError::DiskFull: return ERROR_DISK_FULL;
+    case FsError::NotEmpty: return ERROR_DIRECTORY_NOT_EMPTY;
     default: return ERROR_NOT_A_DOS_DISK;
     }
 }
@@ -805,8 +811,7 @@ struct DosOps {
         }
         f.written = true;
         if (f.entry.volume != Dos::kVolRam) {
-            set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
-            return false;
+            return write_disk(d, b, f, data, bytes);
         }
         if (f.entry.header_block == 0) {
             set_io_err(d, b, ERROR_OBJECT_NOT_FOUND);
@@ -906,6 +911,20 @@ struct DosOps {
         return is_drive(vol) && d.drives_[vol].has_disk ? &d.drives_[vol].volume : nullptr;
     }
 
+    // Whether the drive's disk can be written: it is read through a source
+    // that also writes, and is of a type the writer knows.
+    static bool writable_disk(const Dos& d, u8 vol) {
+        const AdfVolume* disk = disk_of(d, vol);
+        return disk != nullptr && disk->image == nullptr && disk->source.write != nullptr &&
+               disk->dos_type <= amiga_fs_write_detail::last_plain_dos_type;
+    }
+
+    // RAM: and the disks that can be written; every other volume refuses
+    // changes with ERROR_DISK_WRITE_PROTECTED.
+    static bool writable(const Dos& d, u8 vol) {
+        return vol == Dos::kVolRam || writable_disk(d, vol);
+    }
+
     static const char* volume_name(const Dos& d, u8 vol) {
         if (vol == Dos::kVolRam) {
             return "Ram Disk";
@@ -993,7 +1012,9 @@ struct DosOps {
         return boot;
     }
 
-    // Protection bits that, when set, deny the access (FIBF_READ, FIBF_WRITE).
+    // Protection bits that, when set, deny the access (FIBF_DELETE, FIBF_WRITE,
+    // FIBF_READ).
+    static constexpr u32 kFibfDelete = 1u << 0;
     static constexpr u32 kFibfWrite = 1u << 2;
     static constexpr u32 kFibfRead = 1u << 3;
 
@@ -1032,28 +1053,33 @@ struct DosOps {
         }
     }
 
-    static bool ram_node_busy(const Dos& d, u32 node, bool want_exclusive) {
-        const u32 key = node + 1;
+    // Whether a lock or an open file holds the object at header_block of the
+    // volume: any of them with want_exclusive, otherwise only an exclusive one.
+    static bool object_busy(const Dos& d, u8 vol, u32 header_block, bool want_exclusive) {
         for (const Dos::LockSlot& l : d.lock_slots_) {
-            if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block == key &&
+            if (l.used && l.entry.volume == vol && l.entry.header_block == header_block &&
                 (want_exclusive || l.exclusive)) {
                 return true;
             }
         }
         for (const Dos::LockSlot& l : d.assign_lock_slots_) {
-            if (l.used && l.entry.volume == Dos::kVolRam && l.entry.header_block == key &&
+            if (l.used && l.entry.volume == vol && l.entry.header_block == header_block &&
                 (want_exclusive || l.exclusive)) {
                 return true;
             }
         }
         for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
             const Dos::FileSlot& f = d.files_[i];
-            if (f.stream == Dos::Stream::File && f.entry.volume == Dos::kVolRam &&
-                f.entry.header_block == key && (want_exclusive || f.exclusive)) {
+            if (f.stream == Dos::Stream::File && f.entry.volume == vol &&
+                f.entry.header_block == header_block && (want_exclusive || f.exclusive)) {
                 return true;
             }
         }
         return false;
+    }
+
+    static bool ram_node_busy(const Dos& d, u32 node, bool want_exclusive) {
+        return object_busy(d, Dos::kVolRam, node + 1, want_exclusive);
     }
 
     static bool ram_is_at_or_below(const RamFs& ram, u32 node, u32 ancestor) {
@@ -1306,6 +1332,16 @@ struct DosOps {
             }
             return d.ram_.node(node).size;
         }
+        // A disk that can be written is asked, as another handle may have changed the file.
+        if (!entry.is_dir && writable_disk(d, entry.volume)) {
+            u8 header_buf[amiga_fs_detail::block_bytes];
+            FsError error = FsError::Ok;
+            const u8* header =
+                amiga_fs_detail::load_header(d.drives_[entry.volume].volume, entry.header_block,
+                                             header_buf, error);
+            return header != nullptr ? amiga_fs_detail::long_at(header, amiga_fs_detail::l_size)
+                                     : entry.size;
+        }
         return entry.size;
     }
 
@@ -1405,9 +1441,11 @@ struct DosOps {
             return io_error_of(error);
         }
         const u32 payload = disk->ffs ? block_bytes : block_bytes - ofs_header_bytes;
+        // The size is the header's own, which a write to the disk may have changed.
+        const u32 size = entry.is_dir ? 0 : long_at(header, l_size);
         out.type = long_at(header, l_sec_type);
-        out.size = entry.size;
-        out.num_blocks = entry.is_dir ? 0 : (entry.size + payload - 1) / payload;
+        out.size = size;
+        out.num_blocks = entry.is_dir ? 0 : (size + payload - 1) / payload;
         out.protection = long_at(header, block_longs - 48);
         out.days = long_at(header, block_longs - 23);
         out.minute = long_at(header, block_longs - 22);
@@ -1417,6 +1455,381 @@ struct DosOps {
         out.comment = reinterpret_cast<const char*>(comment + 1);
         out.owner = 0;
         return 0;
+    }
+
+    // --- writing disks -----------------------------------------------------
+
+    static AmigaDate amiga_now(const Dos& d) {
+        const DosStamp s = current_stamp(d);
+        return AmigaDate{s.days, s.minutes, s.ticks};
+    }
+
+    // The IoErr code a call that used the writer ends with, 0 for success.
+    // The disk is flushed once, whatever the result, unless the writer
+    // refused before it wrote anything. A change that is written but cannot
+    // be flushed fails too.
+    static u32 finish_write(const Dos& d, u8 vol, FsError result) {
+        const BlockSource& source = d.drives_[vol].volume.source;
+        const bool flushed =
+            result == FsError::ReadOnly || source.flush == nullptr || source.flush(source.ctx);
+        if (result != FsError::Ok) {
+            return io_error_of(result);
+        }
+        return flushed ? 0 : ERROR_NOT_A_DOS_DISK;
+    }
+
+    // Whether the object has the protection bit set that denies an access.
+    static bool disk_denies(const Dos& d, const DirEntry& entry, u32 bit) {
+        FsMeta meta{};
+        return fs_meta(d, entry, meta) == 0 && (meta.protection & bit) != 0;
+    }
+
+    // Where a file written to a disk goes: the directory it is in, its leaf
+    // name, and the file that has the name already, if any.
+    struct DiskTarget {
+        DirEntry dir;
+        DirEntry file;
+        const char* leaf;
+        bool exists;
+    };
+
+    // Finds the target for the file at the path, to be made or written anew.
+    // Fails when the disk cannot be written, the path is the root, its
+    // directory is not there, or the name is a directory or a file that is
+    // write protected or in use. Returns the IoErr code.
+    static u32 find_disk_target(Dos& d, u8 vol, const char* resolved, DiskTarget& t) {
+        if (!writable_disk(d, vol)) {
+            return ERROR_DISK_WRITE_PROTECTED;
+        }
+        if (resolved[0] == '\0') {
+            return ERROR_OBJECT_WRONG_TYPE;
+        }
+        char parent[Dos::kMaxPath];
+        split_parent_and_leaf(resolved, parent, t.leaf);
+        u32 err = fs_find(d, vol, parent, t.dir);
+        if (err != 0) {
+            return err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : err;
+        }
+        if (!t.dir.is_dir) {
+            return ERROR_DIR_NOT_FOUND;
+        }
+        err = fs_find(d, vol, resolved, t.file);
+        t.exists = err == 0;
+        if (!t.exists) {
+            return err == ERROR_OBJECT_NOT_FOUND ? 0 : err;
+        }
+        if (t.file.is_dir) {
+            return ERROR_OBJECT_EXISTS;
+        }
+        if (disk_denies(d, t.file, kFibfWrite)) {
+            return ERROR_WRITE_PROTECTED;
+        }
+        return object_busy(d, vol, t.file.header_block, true) ? ERROR_OBJECT_IN_USE : 0;
+    }
+
+    // Makes the target's file, or empties the one that is there.
+    static FsError start_disk_file(const Dos& d, u8 vol, DiskTarget& t) {
+        const AdfVolume& disk = d.drives_[vol].volume;
+        if (t.exists) {
+            t.file.size = 0;
+            return adf_set_size(disk, t.file.header_block, 0, amiga_now(d));
+        }
+        const FsError error =
+            adf_create_file(disk, t.dir.header_block, t.leaf, amiga_now(d), t.file);
+        t.file.volume = vol;
+        return error;
+    }
+
+    // Writes a whole file to a disk, made or emptied first; one that cannot be
+    // written to the end is not left behind. Returns the IoErr code.
+    static u32 write_disk_file(Dos& d, u8 vol, const char* resolved, const u8* data, u32 bytes) {
+        DiskTarget t{};
+        const u32 err = find_disk_target(d, vol, resolved, t);
+        if (err != 0) {
+            return err;
+        }
+        const AdfVolume& disk = d.drives_[vol].volume;
+        FsError result = start_disk_file(d, vol, t);
+        if (result == FsError::Ok) {
+            u32 written = 0;
+            result = adf_write(disk, t.file.header_block, 0, data, bytes, amiga_now(d), written);
+            if (result != FsError::Ok) {
+                adf_delete(disk, t.file.header_block, amiga_now(d));
+            }
+        }
+        return finish_write(d, vol, result);
+    }
+
+    // Deletes the file at the path, or with allow_dir an empty directory
+    // too. Returns the IoErr code.
+    static u32 delete_disk_object(Dos& d, u8 vol, const char* resolved, bool allow_dir) {
+        if (!writable_disk(d, vol)) {
+            return ERROR_DISK_WRITE_PROTECTED;
+        }
+        if (resolved[0] == '\0') {
+            return ERROR_OBJECT_WRONG_TYPE;
+        }
+        DirEntry entry{};
+        const u32 err = fs_find(d, vol, resolved, entry);
+        if (err != 0) {
+            return err;
+        }
+        if (entry.is_dir && !allow_dir) {
+            return ERROR_OBJECT_WRONG_TYPE;
+        }
+        if (object_busy(d, vol, entry.header_block, true)) {
+            return ERROR_OBJECT_IN_USE;
+        }
+        if (disk_denies(d, entry, kFibfDelete)) {
+            return ERROR_DELETE_PROTECTED;
+        }
+        return finish_write(d, vol,
+                            adf_delete(d.drives_[vol].volume, entry.header_block, amiga_now(d)));
+    }
+
+    // Moves the object at old_resolved to new_resolved on one disk. Returns
+    // the IoErr code.
+    static u32 rename_disk_object(Dos& d, u8 vol, const char* old_resolved,
+                                  const char* new_resolved) {
+        if (!writable_disk(d, vol)) {
+            return ERROR_DISK_WRITE_PROTECTED;
+        }
+        DirEntry object{};
+        u32 err = fs_find(d, vol, old_resolved, object);
+        if (err != 0) {
+            return err;
+        }
+        if (is_root_entry(d, object)) {
+            return ERROR_OBJECT_IN_USE;
+        }
+        if (new_resolved[0] == '\0') {
+            return ERROR_OBJECT_EXISTS;
+        }
+        char parent[Dos::kMaxPath];
+        const char* leaf = nullptr;
+        split_parent_and_leaf(new_resolved, parent, leaf);
+        DirEntry dir{};
+        err = fs_find(d, vol, parent, dir);
+        if (err != 0) {
+            return err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : err;
+        }
+        if (!dir.is_dir) {
+            return ERROR_DIR_NOT_FOUND;
+        }
+        const FsError result = adf_rename(d.drives_[vol].volume, object.header_block,
+                                          dir.header_block, leaf, amiga_now(d));
+        const u32 code = finish_write(d, vol, result);
+        // A directory moved into itself or below.
+        return result == FsError::Loop ? ERROR_OBJECT_IN_USE : code;
+    }
+
+    // Makes the directory at the path. Returns the IoErr code.
+    static u32 create_disk_dir(Dos& d, u8 vol, const char* resolved, DirEntry& entry) {
+        if (!writable_disk(d, vol)) {
+            return ERROR_DISK_WRITE_PROTECTED;
+        }
+        if (resolved[0] == '\0') {
+            return ERROR_OBJECT_EXISTS;
+        }
+        char parent[Dos::kMaxPath];
+        const char* leaf = nullptr;
+        split_parent_and_leaf(resolved, parent, leaf);
+        DirEntry dir{};
+        const u32 err = fs_find(d, vol, parent, dir);
+        if (err != 0) {
+            return err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : err;
+        }
+        if (!dir.is_dir) {
+            return ERROR_DIR_NOT_FOUND;
+        }
+        const FsError result =
+            adf_create_dir(d.drives_[vol].volume, dir.header_block, leaf, amiga_now(d), entry);
+        entry.volume = vol;
+        return finish_write(d, vol, result);
+    }
+
+    // Changes the header of the object at the path with a writer call:
+    // change(disk, header block, now) returns its result. Returns the IoErr
+    // code.
+    template <typename Change>
+    static u32 change_disk_object(Dos& d, u8 vol, const char* resolved, Change change) {
+        if (!writable_disk(d, vol)) {
+            return ERROR_DISK_WRITE_PROTECTED;
+        }
+        DirEntry entry{};
+        const u32 err = fs_find(d, vol, resolved, entry);
+        if (err != 0) {
+            return err;
+        }
+        return finish_write(d, vol,
+                            change(d.drives_[vol].volume, entry.header_block, amiga_now(d)));
+    }
+
+    // Ends a call that changed an object of a disk: D0 is DOSTRUE, or the
+    // error is the IoErr code.
+    static bool finish_change(Dos& d, Bus& b, u32 err) {
+        if (err != 0) {
+            fail(d, b, err, DOSFALSE);
+            return false;
+        }
+        native::set_result(b.machine(), DOSTRUE);
+        return true;
+    }
+
+    // The path of the object at header_block from the root, which its
+    // headers give on the way up, put together from the end of a buffer.
+    // False when a header cannot be read or the path does not fit.
+    static bool disk_path_of(const AdfVolume& disk, u32 header_block,
+                             char (&out)[Dos::kMaxPath]) {
+        using namespace amiga_fs_detail;
+        char tmp[Dos::kMaxPath];
+        u32 at = Dos::kMaxPath - 1;
+        tmp[at] = '\0';
+        u8 buf[block_bytes];
+        FsError error = FsError::Ok;
+        u32 block = header_block;
+        for (u32 step = 0; block != disk.root_block; ++step) {
+            const u8* header = load_header(disk, block, buf, error);
+            const u32 length = header != nullptr ? header[l_name * 4] : 0;
+            if (header == nullptr || step >= Dos::kMaxPath / 2 || length > name_max ||
+                length + 1 > at) {
+                return false;
+            }
+            if (at != Dos::kMaxPath - 1) {
+                tmp[--at] = '/';
+            }
+            at -= length;
+            __builtin_memcpy(tmp + at, header + l_name * 4 + 1, length);
+            block = long_at(header, l_parent);
+        }
+        copy_cstr(out, tmp + at, Dos::kMaxPath);
+        return true;
+    }
+
+    // After a rename, the locks and files on the disk, and the CLIs' current
+    // directory names, have the paths their headers give now.
+    static void refresh_disk_paths(Dos& d, Bus& b, u8 vol) {
+        const AdfVolume& disk = d.drives_[vol].volume;
+        const auto refresh = [&](DirEntry& entry, char (&path)[Dos::kMaxPath]) {
+            char fresh[Dos::kMaxPath];
+            if (entry.header_block == disk.root_block ||
+                !disk_path_of(disk, entry.header_block, fresh)) {
+                return;
+            }
+            copy_cstr(path, fresh, sizeof path);
+            const char* leaf = fresh;
+            for (const char* c = fresh; *c != '\0'; ++c) {
+                leaf = *c == '/' ? c + 1 : leaf;
+            }
+            copy_cstr(entry.name, leaf, sizeof entry.name);
+        };
+        for (Dos::LockSlot& l : d.lock_slots_) {
+            if (l.used && l.entry.volume == vol) {
+                refresh(l.entry, l.path);
+            }
+        }
+        for (Dos::LockSlot& l : d.assign_lock_slots_) {
+            if (l.used && l.entry.volume == vol) {
+                refresh(l.entry, l.path);
+            }
+        }
+        for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
+            Dos::FileSlot& f = d.files_[i];
+            if (f.stream == Dos::Stream::File && f.entry.volume == vol) {
+                refresh(f.entry, f.path);
+            }
+        }
+        for (Dos::ProcContext& p : d.procs_) {
+            const u32 cur = p.used && p.cli != 0 ? b.r32(p.process + pr_CurrentDir) : 0;
+            const Dos::LockSlot* slot = b.ok() && cur != 0 ? find_lock_slot(d, cur) : nullptr;
+            if (slot != nullptr && slot->entry.volume == vol) {
+                char full_name[kMaxName];
+                format_volume_path(volume_name(d, vol), slot->path, full_name, sizeof full_name);
+                put_bstr(b, p.set_name, full_name, 255);
+                b.w32(p.cli + cli_SetName, p.set_name >> 2);
+            }
+        }
+    }
+
+    // Open for a file on a disk: found, or made or emptied when the mode asks
+    // for it and the disk can be written. Disks that can be written keep the
+    // protection and exclusive-use rules RAM: has.
+    static void open_disk(Dos& d, Bus& b, i64 slot, u8 vol, const char* resolved, u32 mode) {
+        const bool tracked = writable_disk(d, vol);
+        if (mode != MODE_OLDFILE && !tracked) {
+            fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0);
+            return;
+        }
+        DirEntry entry{};
+        bool exclusive = false;
+        u32 err = fs_find(d, vol, resolved, entry);
+        if (mode == MODE_NEWFILE || (mode == MODE_READWRITE && err == ERROR_OBJECT_NOT_FOUND)) {
+            if (slot < 0) {
+                table_full(d, b, "file handle", Dos::kMaxFiles);
+                return;
+            }
+            DiskTarget target{};
+            err = find_disk_target(d, vol, resolved, target);
+            if (err == 0) {
+                err = finish_write(d, vol, start_disk_file(d, vol, target));
+            }
+            entry = target.file;
+            exclusive = mode == MODE_NEWFILE;
+        } else if (err == 0) {
+            const u32 needs = mode == MODE_READWRITE ? kFibfWrite : kFibfRead;
+            if (entry.is_dir) {
+                err = ERROR_OBJECT_WRONG_TYPE;
+            } else if (tracked && disk_denies(d, entry, needs)) {
+                err = needs == kFibfWrite ? ERROR_WRITE_PROTECTED : ERROR_READ_PROTECTED;
+            } else if (tracked && object_busy(d, vol, entry.header_block, false)) {
+                err = ERROR_OBJECT_IN_USE;
+            } else if (slot < 0) {
+                table_full(d, b, "file handle", Dos::kMaxFiles);
+                return;
+            }
+        }
+        if (err != 0) {
+            fail(d, b, err, 0);
+            return;
+        }
+        char canonical[Dos::kMaxPath];
+        fs_canonical(d, vol, resolved, canonical);
+        open_slot(d, static_cast<u32>(slot),
+                  make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner(), exclusive));
+        init_handle(d, b, static_cast<u32>(slot), false);
+        native::set_result(b.machine(), handle_bptr(d, static_cast<u32>(slot)));
+    }
+
+    // Writes bytes at the position of a handle on a disk; false, with IoErr
+    // set, if they cannot all be stored. A disk that fills up keeps what fitted.
+    static bool write_disk(Dos& d, Bus& b, Dos::FileSlot& f, const u8* data, u32 bytes) {
+        const u8 vol = f.entry.volume;
+        if (!writable_disk(d, vol)) {
+            set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
+            return false;
+        }
+        f.has_unget = false;
+        f.has_last = false;
+        if (bytes == 0) {
+            return true;
+        }
+        if (disk_denies(d, f.entry, kFibfWrite)) {
+            set_io_err(d, b, ERROR_WRITE_PROTECTED);
+            return false;
+        }
+        u32 written = 0;
+        const FsError result = adf_write(d.drives_[vol].volume, f.entry.header_block, f.pos, data,
+                                         bytes, amiga_now(d), written);
+        // The data is flushed when the handle closes: a flush for every
+        // Write would reach the medium once per buffered chunk.
+        const u32 err = result == FsError::Ok ? 0 : finish_write(d, vol, result);
+        f.pos += written;
+        f.entry.size = fs_size(d, f.entry);
+        if (err != 0) {
+            set_io_err(d, b, err);
+            return false;
+        }
+        return true;
     }
 
     // --- names and paths ---------------------------------------------------
@@ -2323,30 +2736,7 @@ struct DosOps {
             return;
         }
         if (vol != Dos::kVolRam) {
-            if (mode == MODE_NEWFILE || mode == MODE_READWRITE) {
-                fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0);
-                return;
-            }
-            DirEntry entry{};
-            const u32 err = fs_find(d, vol, resolved, entry);
-            if (err != 0) {
-                fail(d, b, err, 0);
-                return;
-            }
-            if (entry.is_dir) {
-                fail(d, b, ERROR_OBJECT_WRONG_TYPE, 0);
-                return;
-            }
-            if (slot < 0) {
-                table_full(d, b, "file handle", Dos::kMaxFiles);
-                return;
-            }
-            char canonical[Dos::kMaxPath];
-            fs_canonical(d, vol, resolved, canonical);
-            open_slot(d, static_cast<u32>(slot),
-                      make_file_slot(Dos::Stream::File, entry, canonical, d.cur_owner()));
-            init_handle(d, b, static_cast<u32>(slot), false);
-            native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
+            open_disk(d, b, slot, vol, resolved, mode);
             return;
         }
 
@@ -2442,6 +2832,9 @@ struct DosOps {
                 char path[Dos::kMaxPath];
                 copy_cstr(path, f.path, Dos::kMaxPath);
                 const u8 vol = f.entry.volume;
+                if (writable_disk(d, vol)) {
+                    finish_write(d, vol, FsError::Ok);
+                }
                 release_entry(d, f.entry);
                 close_slot(d, static_cast<u32>(slot));
                 notify_changed(d, vol, path);
@@ -2803,7 +3196,7 @@ struct DosOps {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, 0xFFFFFFFF);
             return;
         }
-        if (f.entry.volume != Dos::kVolRam) {
+        if (!writable(d, f.entry.volume)) {
             fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0xFFFFFFFF);
             return;
         }
@@ -2831,11 +3224,19 @@ struct DosOps {
             return;
         }
         const u32 target = static_cast<u32>(new_size);
-        if (ram_denies(d, node, kFibfWrite)) {
+        u32 err = 0;
+        if (f.entry.volume != Dos::kVolRam) {
+            err = disk_denies(d, f.entry, kFibfWrite)
+                      ? ERROR_WRITE_PROTECTED
+                      : finish_write(d, f.entry.volume,
+                                     adf_set_size(d.drives_[f.entry.volume].volume,
+                                                  f.entry.header_block, target, amiga_now(d)));
+        } else if (ram_denies(d, node, kFibfWrite)) {
             fail(d, b, ERROR_WRITE_PROTECTED, 0xFFFFFFFF);
             return;
+        } else {
+            err = d.ram_.set_size(node, target);
         }
-        const u32 err = d.ram_.set_size(node, target);
         if (err != 0) {
             fail(d, b, err, 0xFFFFFFFF);
             return;
@@ -3512,30 +3913,38 @@ struct DosOps {
         }
     }
 
+    // The variable's file in a directory of variables, ENV: or ENVARC:.
+    static constexpr char kEnvArea[] = "ENV:";
+    static constexpr char kEnvArchive[] = "ENVARC:";
+
     static bool resolve_env(Dos& d, Bus& b, const char* name, u8& vol,
-                            char (&resolved)[Dos::kMaxPath], u32& error) {
-        char env_path[kMaxName + 4];
-        env_path[0] = 'E';
-        env_path[1] = 'N';
-        env_path[2] = 'V';
-        env_path[3] = ':';
-        copy_cstr(env_path + 4, name, sizeof env_path - 4);
+                            char (&resolved)[Dos::kMaxPath], u32& error,
+                            const char* area = kEnvArea) {
+        char env_path[kMaxName + sizeof kEnvArchive];
+        copy_cstr(env_path, area, sizeof env_path);
+        const u32 area_length = length_of(env_path);
+        copy_cstr(env_path + area_length, name, sizeof env_path - area_length);
         return resolve(d, b, env_path, vol, resolved, error);
     }
 
-    static bool write_env_var(Dos& d, Bus& b, const char* name, const u8* from, u32 size) {
+    static bool write_env_var(Dos& d, Bus& b, const char* name, const u8* from, u32 size,
+                              const char* area = kEnvArea) {
         u8 vol = Dos::kVolDf0;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_env(d, b, name, vol, resolved, error)) {
+        if (!resolve_env(d, b, name, vol, resolved, error, area)) {
             if (b.ok()) {
                 set_io_err(d, b, error);
             }
             return false;
         }
         if (vol != Dos::kVolRam) {
-            set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
-            return false;
+            const u32 disk_err = write_disk_file(d, vol, resolved, from, size);
+            if (disk_err != 0) {
+                set_io_err(d, b, disk_err);
+                return false;
+            }
+            return b.ok();
         }
         if (resolved[0] == '\0') {
             set_io_err(d, b, ERROR_OBJECT_WRONG_TYPE);
@@ -3571,19 +3980,23 @@ struct DosOps {
         return b.ok();
     }
 
-    static bool delete_env_var(Dos& d, Bus& b, const char* name) {
+    static bool delete_env_var(Dos& d, Bus& b, const char* name, const char* area = kEnvArea) {
         u8 vol = Dos::kVolDf0;
         char resolved[Dos::kMaxPath];
         u32 error = 0;
-        if (!resolve_env(d, b, name, vol, resolved, error)) {
+        if (!resolve_env(d, b, name, vol, resolved, error, area)) {
             if (b.ok()) {
                 set_io_err(d, b, error);
             }
             return false;
         }
         if (vol != Dos::kVolRam) {
-            set_io_err(d, b, ERROR_DISK_WRITE_PROTECTED);
-            return false;
+            const u32 disk_err = delete_disk_object(d, vol, resolved, false);
+            if (disk_err != 0) {
+                set_io_err(d, b, disk_err);
+                return false;
+            }
+            return b.ok();
         }
         if (resolved[0] == '\0') {
             set_io_err(d, b, ERROR_OBJECT_WRONG_TYPE);
@@ -3688,14 +4101,30 @@ struct DosOps {
         return b.ok() ? static_cast<i32>(n) : -1;
     }
 
+    // GVF_SAVE_VAR: the variable is kept in ENVARC: as well, or removed from
+    // it. An ENVARC: that cannot be written is no error and leaves IoErr as
+    // the ENV: part of the call set it.
+    static void archive_env_var(Dos& d, Bus& b, const char* name, const u8* from, u32 size,
+                                bool has_value) {
+        const u32 io_err = b.r32(d.cur().process + pr_Result2);
+        if (has_value) {
+            write_env_var(d, b, name, from, size, kEnvArchive);
+        } else {
+            delete_env_var(d, b, name, kEnvArchive);
+        }
+        set_io_err(d, b, io_err);
+    }
+
     static bool set_var_impl(Dos& d, Bus& b, const char* name, const u8* from, u32 size,
                              bool has_value, u32 flags) {
         const u32 type = flags & 0xFF;
         if ((flags & GVF_GLOBAL_ONLY) != 0) {
-            if (!has_value) {
-                return delete_env_var(d, b, name);
+            const bool done = has_value ? write_env_var(d, b, name, from, size)
+                                        : delete_env_var(d, b, name);
+            if (done && (flags & GVF_SAVE_VAR) != 0) {
+                archive_env_var(d, b, name, from, size, has_value);
             }
-            return write_env_var(d, b, name, from, size);
+            return done;
         }
         u32 node = find_var(d, b, name, type);
         if (!b.ok()) {
@@ -3800,7 +4229,11 @@ struct DosOps {
             }
         }
         if (!local_only && (global_only || type == LV_VAR)) {
-            return delete_env_var(d, b, name);
+            const bool done = delete_env_var(d, b, name);
+            if (done && (flags & GVF_SAVE_VAR) != 0) {
+                archive_env_var(d, b, name, nullptr, 0, false);
+            }
+            return done;
         }
         set_io_err(d, b, ERROR_OBJECT_NOT_FOUND);
         return false;
@@ -3809,7 +4242,8 @@ struct DosOps {
     // SetVar(name, buffer, size, flags): sets a local variable of the type
     // in the low byte of flags (default), or writes ENV:<name> when
     // GVF_GLOBAL_ONLY is set, to size bytes from buffer (up to NUL for -1);
-    // a null buffer deletes it. GVF_SAVE_VAR is ignored for ENVARC: (read-only).
+    // a null buffer deletes it. GVF_SAVE_VAR does the same in ENVARC:, where
+    // that is on a disk that can be written, and is ignored where it is not.
     static void set_var(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -4503,8 +4937,8 @@ struct DosOps {
     static bool alloc_user_lock(Dos& d, Bus& b, const char* path, const DirEntry& entry,
                                 u32 access, u32& bptr_out, u8 owner) {
         const bool exclusive = access == EXCLUSIVE_LOCK;
-        if (entry.volume == Dos::kVolRam && entry.header_block > 0 &&
-            ram_node_busy(d, entry.header_block - 1, exclusive)) {
+        if (writable(d, entry.volume) && entry.header_block > 0 &&
+            object_busy(d, entry.volume, entry.header_block, exclusive)) {
             fail(d, b, ERROR_OBJECT_IN_USE, 0);
             return false;
         }
@@ -6645,7 +7079,8 @@ struct DosOps {
             b.w32(id + id_VolumeNode, 0);
         } else {
             const AdfVolume& disk = d.drives_[entry.volume].volume;
-            b.w32(id + id_DiskState, ID_WRITE_PROTECTED);
+            b.w32(id + id_DiskState,
+                  writable_disk(d, entry.volume) ? ID_VALIDATED : ID_WRITE_PROTECTED);
             b.w32(id + id_NumBlocks, blocks);
             b.w32(id + id_NumBlocksUsed, used);
             b.w32(id + id_BytesPerBlock, disk.ffs ? 512 : 488);
@@ -6826,8 +7261,11 @@ struct DosOps {
             return false;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
-            return false;
+            const u32 disk_err = delete_disk_object(d, vol, resolved, true);
+            if (disk_err == 0) {
+                notify_changed(d, vol, resolved);
+            }
+            return finish_change(d, b, disk_err);
         }
         if (resolved[0] == '\0') {
             fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
@@ -6897,8 +7335,13 @@ struct DosOps {
             return false;
         }
         if (old_vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
-            return false;
+            const u32 disk_err = rename_disk_object(d, old_vol, old_resolved, new_resolved);
+            if (disk_err == 0) {
+                refresh_disk_paths(d, b, old_vol);
+                notify_changed(d, old_vol, old_resolved);
+                notify_changed(d, new_vol, new_resolved);
+            }
+            return finish_change(d, b, disk_err);
         }
         u32 old_node = RamFs::kNone;
         const u32 find_err = d.ram_.find_path(old_resolved, old_node);
@@ -6989,8 +7432,23 @@ struct DosOps {
             return false;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, 0);
-            return false;
+            if (writable_disk(d, vol) && free_lock(d) < 0) {
+                table_full(d, b, "lock", Dos::kMaxLocks);
+                return false;
+            }
+            DirEntry made{};
+            const u32 disk_err = create_disk_dir(d, vol, resolved, made);
+            if (disk_err != 0) {
+                fail(d, b, disk_err, 0);
+                return false;
+            }
+            u32 disk_bptr = 0;
+            if (!alloc_user_lock(d, b, resolved, made, EXCLUSIVE_LOCK, disk_bptr)) {
+                return false;
+            }
+            notify_changed(d, vol, resolved);
+            native::set_result(b.machine(), disk_bptr);
+            return true;
         }
         if (resolved[0] == '\0') {
             fail(d, b, ERROR_OBJECT_EXISTS, 0);
@@ -7063,8 +7521,12 @@ struct DosOps {
             return false;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
-            return false;
+            return finish_change(
+                d, b,
+                change_disk_object(d, vol, resolved,
+                                   [mask](const AdfVolume& v, u32 block, const AmigaDate& now) {
+                                       return adf_set_protection(v, block, mask, now);
+                                   }));
         }
         u32 node = RamFs::kNone;
         const u32 find_err = d.ram_.find_path(resolved, node);
@@ -7102,7 +7564,8 @@ struct DosOps {
     }
 
     // SetOwner(name D1, owner_info D2): the owner UID (high word) and GID
-    // (low word) of a file or drawer. Only RAM: can be written.
+    // (low word) of a file or drawer. RAM: keeps it; a disk that can be
+    // written accepts it and keeps nothing.
     static void set_owner(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -7128,7 +7591,10 @@ struct DosOps {
             return;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
+            DirEntry entry{};
+            finish_change(d, b,
+                          writable_disk(d, vol) ? fs_find(d, vol, resolved, entry)
+                                                : ERROR_DISK_WRITE_PROTECTED);
             return;
         }
         u32 node = RamFs::kNone;
@@ -7155,8 +7621,12 @@ struct DosOps {
             return false;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
-            return false;
+            return finish_change(
+                d, b,
+                change_disk_object(d, vol, resolved,
+                                   [comment](const AdfVolume& v, u32 block, const AmigaDate& now) {
+                                       return adf_set_comment(v, block, comment, now);
+                                   }));
         }
         u32 node = RamFs::kNone;
         const u32 find_err = d.ram_.find_path(resolved, node);
@@ -7222,8 +7692,13 @@ struct DosOps {
             return false;
         }
         if (vol != Dos::kVolRam) {
-            fail(d, b, ERROR_DISK_WRITE_PROTECTED, DOSFALSE);
-            return false;
+            const AmigaDate date{days, minute, tick};
+            return finish_change(
+                d, b,
+                change_disk_object(d, vol, resolved,
+                                   [date](const AdfVolume& v, u32 block, const AmigaDate& now) {
+                                       return adf_set_date(v, block, date, now);
+                                   }));
         }
         u32 node = RamFs::kNone;
         const u32 find_err = d.ram_.find_path(resolved, node);
@@ -9949,9 +10424,11 @@ bool Dos::write_file(const char* name, const u8* data, u32 bytes, u32& error) {
         return false;
     }
     if (vol != kVolRam) {
-        error = ERROR_DISK_WRITE_PROTECTED;
-        set_last_error(error);
-        return false;
+        error = DosOps::write_disk_file(*this, vol, resolved, data, bytes);
+        if (error != 0) {
+            set_last_error(error);
+        }
+        return error == 0;
     }
     if (resolved[0] == '\0') {
         error = ERROR_OBJECT_WRONG_TYPE;
@@ -10012,9 +10489,11 @@ bool Dos::delete_file(const char* name, u32& error) {
         return false;
     }
     if (vol != kVolRam) {
-        error = ERROR_DISK_WRITE_PROTECTED;
-        set_last_error(error);
-        return false;
+        error = DosOps::delete_disk_object(*this, vol, resolved, false);
+        if (error != 0) {
+            set_last_error(error);
+        }
+        return error == 0;
     }
     if (resolved[0] == '\0') {
         error = ERROR_OBJECT_WRONG_TYPE;

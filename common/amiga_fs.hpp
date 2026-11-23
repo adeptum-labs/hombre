@@ -103,6 +103,8 @@ struct BlockSource {
     bool (*read)(void* ctx, u32 block, u8* out) = nullptr;
     // Writes one block; null on a read-only source.
     bool (*write)(void* ctx, u32 block, const u8* data) = nullptr;
+    // Puts every block written so far on the medium; null when writes need no flush.
+    bool (*flush)(void* ctx) = nullptr;
 };
 
 struct AdfVolume {

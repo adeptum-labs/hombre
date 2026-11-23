@@ -41,7 +41,7 @@
 #include <vector>
 
 // dos.library written in C++ for code run by the 68000 translator, over the
-// read-only volumes of the floppy drives and of the hard disk partitions.
+// volumes of the floppy drives and of the hard disk partitions.
 //
 // dos keeps its structures in guest memory with the AmigaOS layout: the
 // DosLibrary with its RootNode and DosInfo, a volume node and a device node
@@ -56,10 +56,14 @@
 // console 0 is the boot console. Every console stream handle belongs to one
 // of them: what a program writes to it goes to that console's ConsoleWrite
 // sink, and what it reads is the command's argument line, once, then that
-// console's reader. Files on the volume can be opened, read and seeked in;
-// anything that would write to the volume fails with
-// ERROR_DISK_WRITE_PROTECTED. NIL: reads end of file and writes to it are
-// discarded.
+// console's reader. Files on the volume can be opened, read and seeked in.
+// RAM: and a hard disk partition read through a block source that also
+// writes (and is DOS\0 to DOS\3) can be changed too: files and directories
+// are made, written, resized, renamed, deleted and given new protection
+// bits, comments and dates. Every call that changed such a disk flushes its
+// block source before it returns. Anything else that would write to a volume
+// fails with ERROR_DISK_WRITE_PROTECTED. NIL: reads end of file and writes to
+// it are discarded.
 //
 // Variables can be local (LocalVar nodes on pr_LocalVars, as SetVar
 // creates by default) or global (files under ENV: on the RAM volume).
@@ -909,12 +913,14 @@ public:
     // end of its task would.
     void end_process(u32 process);
 
-    // Replaces the file name with the bytes; RAM: is the only writable
-    // volume, and a file there protected from writing or open elsewhere
-    // stays as it is. False with error and IoErr set otherwise.
+    // Replaces the file name with the bytes; RAM: and a disk that can be
+    // written are the writable volumes, and a file there protected from
+    // writing or open elsewhere stays as it is. A disk file that cannot be
+    // written to its end is removed. False with error and IoErr set
+    // otherwise.
     bool write_file(const char* name, const u8* data, u32 bytes, u32& error);
 
-    // Deletes the file name, on RAM: only.
+    // Deletes the file name, on RAM: or a disk that can be written.
     bool delete_file(const char* name, u32& error);
 
     // Called with the path of each file that was written to when it is

@@ -98,6 +98,12 @@ bool write_partition(void* ctx, u32 block, const u8* data) {
     return source.cache->write(source.base + block, data);
 }
 
+// Puts the writes of the whole disk on the medium: the partitions of a disk
+// share its cache and its device.
+bool flush_partition(void* ctx) {
+    return static_cast<PartitionWindow*>(ctx)->cache->flush();
+}
+
 void write_name(const char* name, usize max) {
     char text[40];
     sanitize_text(text, sizeof(text), name, max);
@@ -266,7 +272,8 @@ u32 hard_disks_mount(const Disk* disks, u32 disk_count, PhysAllocator& pages, Ha
             source.count = part.part.block_count;
             source.writable = writable;
             const BlockSource block_source{&source, read_partition,
-                                           writable ? write_partition : nullptr};
+                                           writable ? write_partition : nullptr,
+                                           writable ? flush_partition : nullptr};
 
             const FsError error = adf_mount_partition(block_source, 0, part.part.block_count,
                                                       part.part.reserved, volume.volume);

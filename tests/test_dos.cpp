@@ -24,6 +24,7 @@
 #include "libs/dos.hpp"
 #include "libs/timer_device.hpp"
 #include "check.hpp"
+#include "fs_check.hpp"
 #include "ofs_writer.hpp"
 #include "test_guest.hpp"
 
@@ -2250,43 +2251,56 @@ struct Floppy {
     AdfVolume volume{};
 };
 
-// A floppy image read through a BlockSource as a hard disk partition is,
-// with a device name, a boot priority and the DosEnvec of a partition block.
-struct Partition {
+// The drive information of a partition: a device name, a boot priority and
+// the DosEnvec of a partition block.
+DriveInfo partition_info(const char* device, i32 boot_pri, bool bootable) {
+    DriveInfo info;
+    std::snprintf(info.device, sizeof info.device, "%s", device);
+    info.boot_pri = boot_pri;
+    info.bootable = bootable;
+    info.has_env = true;
+    info.env[envec::table_size] = envec::dos_type;
+    info.env[envec::size_block] = 128;
+    info.env[envec::surfaces] = 2;
+    info.env[envec::sectors_per_block] = 1;
+    info.env[envec::blocks_per_track] = 11;
+    info.env[envec::reserved] = 2;
+    info.env[envec::high_cyl] = 79;
+    info.env[envec::num_buffers] = 30;
+    info.env[envec::boot_pri] = static_cast<u32>(boot_pri);
+    info.env[envec::dos_type] = ID_DOS_DISK | 1;
+    return info;
+}
+
+// What dos is given of a hard disk partition: its volume and its drive
+// information.
+struct PartitionDrive {
+    AdfVolume volume{};
+    DriveInfo info{};
+};
+
+// A floppy image read through a BlockSource as a hard disk partition is.
+struct Partition : PartitionDrive {
     Partition(std::vector<u8> disk, const char* device, i32 boot_pri = 0, bool bootable = true)
         : image(std::move(disk)) {
         const BlockSource source{&image, read_partition_block, nullptr};
         CHECK(adf_mount_partition(source, 0, static_cast<u32>(image.size() / 512), 2, volume) ==
               FsError::Ok);
-        std::snprintf(info.device, sizeof info.device, "%s", device);
-        info.boot_pri = boot_pri;
-        info.bootable = bootable;
-        info.has_env = true;
-        info.env[envec::table_size] = envec::dos_type;
-        info.env[envec::size_block] = 128;
-        info.env[envec::surfaces] = 2;
-        info.env[envec::sectors_per_block] = 1;
-        info.env[envec::blocks_per_track] = 11;
-        info.env[envec::reserved] = 2;
-        info.env[envec::high_cyl] = 79;
-        info.env[envec::num_buffers] = 30;
-        info.env[envec::boot_pri] = static_cast<u32>(boot_pri);
-        info.env[envec::dos_type] = ID_DOS_DISK | 1;
+        info = partition_info(device, boot_pri, bootable);
     }
     Partition(const Partition&) = delete;
     Partition& operator=(const Partition&) = delete;
 
     std::vector<u8> image;
-    AdfVolume volume{};
-    DriveInfo info{};
 };
 
 // df0 in DF0: (none when null) and the partitions in the hard disk slots.
-Drives with_partitions(const AdfVolume* df0, std::initializer_list<const Partition*> partitions) {
+Drives with_partitions(const AdfVolume* df0,
+                       std::initializer_list<const PartitionDrive*> partitions) {
     Drives drives;
     drives.volume[0] = df0;
     u32 slot = kFloppyDrives;
-    for (const Partition* p : partitions) {
+    for (const PartitionDrive* p : partitions) {
         drives.volume[slot] = &p->volume;
         drives.info[slot++] = p->info;
     }
@@ -2535,6 +2549,683 @@ void the_dos_list_has_the_hard_disk_partitions() {
         CHECK_EQ(r.get32(plain + dol_Startup), 0u);
     }
     r.call(dos_lvo::UnLockDosList, LDF_ALL | LDF_READ);
+}
+
+// --- writing hard disk partitions ---------------------------------------------
+
+constexpr AmigaDate kFormatDay{100, 10, 1};
+
+// The dos clock while a disk is written: day 1000, 61 minutes in, tick 7.
+u64 disk_clock() {
+    return 1000ull * 4320000ull + 61ull * 3000ull + 7ull;
+}
+
+// A hard disk partition held in memory: formatted with adf_format, and read
+// and written through a block source that counts its writes and flushes.
+struct DiskPartition : PartitionDrive {
+    explicit DiskPartition(u8 dos_type = 1, u32 block_count = 1760, const char* device = "DH0")
+        : blocks(block_count), bytes(static_cast<usize>(block_count) * 512) {
+        CHECK(adf_format(source(), 0, blocks, 2, dos_type, "Work", kFormatDay) == FsError::Ok);
+        mount();
+        info = partition_info(device, 0, true);
+    }
+    DiskPartition(const DiskPartition&) = delete;
+    DiskPartition& operator=(const DiskPartition&) = delete;
+
+    BlockSource source() { return BlockSource{this, read_block, write_block, flush_block}; }
+
+    void mount() { CHECK(adf_mount_partition(source(), 0, blocks, 2, volume) == FsError::Ok); }
+
+    // The volume says DOS\4 from now on, a type the writer leaves alone.
+    void make_dos4() {
+        bytes[3] = 4;
+        mount();
+    }
+
+    u32 blocks;
+    std::vector<u8> bytes;
+    u32 writes = 0;
+    u32 flushes = 0;
+
+private:
+    static bool read_block(void* ctx, u32 block, u8* out) {
+        const DiskPartition& p = *static_cast<const DiskPartition*>(ctx);
+        if (block >= p.blocks) {
+            return false;
+        }
+        std::memcpy(out, p.bytes.data() + static_cast<usize>(block) * 512, 512);
+        return true;
+    }
+
+    static bool write_block(void* ctx, u32 block, const u8* data) {
+        DiskPartition& p = *static_cast<DiskPartition*>(ctx);
+        if (block >= p.blocks) {
+            return false;
+        }
+        std::memcpy(p.bytes.data() + static_cast<usize>(block) * 512, data, 512);
+        ++p.writes;
+        return true;
+    }
+
+    static bool flush_block(void* ctx) {
+        ++static_cast<DiskPartition*>(ctx)->flushes;
+        return true;
+    }
+};
+
+// Every problem fs_check finds is printed; the volume must have none.
+void expect_sound(const AdfVolume& volume, int line) {
+    const std::vector<std::string> problems = fs_check(volume);
+    for (const std::string& problem : problems) {
+        std::fprintf(stderr, "line %d: %s\n", line, problem.c_str());
+    }
+    CHECK(problems.empty());
+}
+
+#define CHECK_SOUND(volume) expect_sound((volume), __LINE__)
+
+// Opens the file in the mode, writes the data with one Write call and closes
+// it; what Write returned.
+u32 write_file_in(Rig& r, const std::string& name, const std::string& data,
+                  u32 mode = MODE_NEWFILE) {
+    r.str(kData + 0x600, name);
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, mode);
+    CHECK(fh != 0);
+    for (usize i = 0; i < data.size(); ++i) {
+        r.put8(kArray + static_cast<u32>(i), static_cast<u8>(data[i]));
+    }
+    const u32 written = r.call(dos_lvo::Write, fh, kArray, static_cast<u32>(data.size()));
+    r.call(dos_lvo::Close, fh);
+    return written;
+}
+
+// The file's first 2048 bytes.
+std::string read_file_of(Rig& r, const std::string& name) {
+    r.str(kData + 0x600, name);
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE);
+    CHECK(fh != 0);
+    const u32 n = r.call(dos_lvo::Read, fh, kArray, 2048);
+    r.call(dos_lvo::Close, fh);
+    std::string out;
+    for (u32 i = 0; i < n && i < 2048; ++i) {
+        out.push_back(static_cast<char>(r.get8(kArray + i)));
+    }
+    return out;
+}
+
+// Fills the FileInfoBlock at fib with what the name has; false when it
+// cannot be locked.
+bool examine_name(Rig& r, const std::string& name, u32 fib) {
+    r.str(kData + 0x600, name);
+    const u32 lock = r.call(dos_lvo::Lock, kData + 0x600, SHARED_LOCK);
+    if (lock == 0) {
+        return false;
+    }
+    const bool examined = r.call(dos_lvo::Examine, lock, fib) == DOSTRUE;
+    r.call(dos_lvo::UnLock, lock);
+    return examined;
+}
+
+// The blocks Info says are in use on the volume the name is on.
+u32 blocks_used(Rig& r, const std::string& name) {
+    r.str(kData + 0x600, name);
+    const u32 lock = r.call(dos_lvo::Lock, kData + 0x600, SHARED_LOCK);
+    CHECK(lock != 0);
+    const u32 id = kData + 0x400;
+    CHECK_EQ(r.call(dos_lvo::Info, lock, id), DOSTRUE);
+    r.call(dos_lvo::UnLock, lock);
+    return r.get32(id + id_NumBlocksUsed);
+}
+
+// A name written where a call takes it; its address.
+u32 name_at(Rig& r, u32 at, const std::string& name) {
+    r.str(at, name);
+    return at;
+}
+
+std::string pattern_text(u32 length) {
+    std::string out;
+    for (u32 i = 0; i < length; ++i) {
+        out.push_back(static_cast<char>('a' + (i * 7) % 26));
+    }
+    return out;
+}
+
+void redirected_output_reaches_a_partition() {
+    DiskPartition disk;
+    Rig r(with_partitions(nullptr, {&disk}));
+    g_dos.set_clock(disk_clock);
+    const u32 fh = g_dos.open_redirection("dh0:note", true, false);
+    CHECK(fh != 0);
+    const u8 text[] = {'h', 'e', 'j', '\n'};
+    CHECK(g_dos.write_handle(fh, text, 4));
+    g_dos.close_redirection(fh);
+    CHECK(read_file_of(r, "DH0:note") == "hej\n");
+}
+
+void a_new_file_on_a_partition_is_written_and_flushed() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk;
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    g_dos.set_clock(disk_clock);
+    CHECK_EQ(disk.flushes, 0u);
+
+    // Open creates the file and flushes once; Write stores without a flush,
+    // and Close of the written handle flushes. Read and an Open that changes
+    // nothing do not.
+    r.str(kData + 0x600, "DH0:Note");
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_NEWFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(disk.flushes, 1u);
+    r.str(kData + 0x700, "hello disk");
+    CHECK_EQ(r.call(dos_lvo::Write, fh, kData + 0x700, 10), 10u);
+    CHECK_EQ(disk.flushes, 1u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+    CHECK(read_file_of(r, "DH0:Note") == "hello disk");
+    CHECK(read_file_of(r, "Work:Note") == "hello disk");
+    CHECK_EQ(disk.flushes, 2u);
+
+    // The directory entry has the size and the date the clock gave.
+    const u32 fib = kData + 0x800;
+    CHECK(examine_name(r, "DH0:Note", fib));
+    CHECK(r.read_str(fib + fib_FileName) == "Note");
+    CHECK_EQ(r.get32(fib + fib_Size), 10u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 1000u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 61u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 7u);
+    CHECK_SOUND(disk.volume);
+
+    // NEWFILE on a file that is there empties it; READWRITE makes a missing
+    // one and opens an existing one as it is; OLDFILE of a missing one fails.
+    r.str(kData + 0x600, "DH0:Note");
+    const u32 again = r.call(dos_lvo::Open, kData + 0x600, MODE_NEWFILE);
+    CHECK(again != 0);
+    CHECK_EQ(disk.flushes, 3u);
+    r.call(dos_lvo::Close, again);
+    CHECK(read_file_of(r, "DH0:Note").empty());
+    CHECK_EQ(write_file_in(r, "DH0:Fresh", "abc", MODE_READWRITE), 3u);
+    CHECK_EQ(write_file_in(r, "DH0:Fresh", "Z", MODE_READWRITE), 1u);
+    CHECK(read_file_of(r, "DH0:Fresh") == "Zbc");
+    const u32 flushes = disk.flushes;
+    r.str(kData + 0x600, "DH0:Missing");
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    r.str(kData + 0x600, "DH0:Nowhere/File");
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DIR_NOT_FOUND);
+    CHECK_EQ(disk.flushes, flushes);
+    CHECK_SOUND(disk.volume);
+}
+
+void a_file_is_overwritten_extended_and_resized_in_place() {
+    for (const u8 dos_type : {u8{0}, u8{1}}) {
+        Floppy df0(build_adf("HombreTest", false, standard_files()));
+        DiskPartition disk(dos_type);
+        Rig r(with_partitions(&df0.volume, {&disk}));
+        g_dos.set_clock(disk_clock);
+        const std::string content = pattern_text(1300);
+        CHECK_EQ(write_file_in(r, "DH0:Big", content), 1300u);
+        CHECK(read_file_of(r, "DH0:Big") == content);
+
+        // Seek, and Write over the bytes at the position.
+        r.str(kData + 0x600, "DH0:Big");
+        u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_READWRITE);
+        CHECK(fh != 0);
+        CHECK_EQ(r.call(dos_lvo::Seek, fh, 600, OFFSET_BEGINNING), 0u);
+        r.str(kData + 0x700, "XXXX");
+        CHECK_EQ(r.call(dos_lvo::Write, fh, kData + 0x700, 4), 4u);
+        std::string expected = content;
+        expected.replace(600, 4, "XXXX");
+
+        // Seek to the end and append.
+        CHECK_EQ(r.call(dos_lvo::Seek, fh, 0, OFFSET_END), 604u);
+        r.str(kData + 0x700, "tail");
+        CHECK_EQ(r.call(dos_lvo::Write, fh, kData + 0x700, 4), 4u);
+        expected += "tail";
+        CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+        CHECK(read_file_of(r, "DH0:Big") == expected);
+        CHECK_SOUND(disk.volume);
+
+        // SetFileSize shrinks the file and grows it with zeros, in every
+        // mode of offset, one flush each.
+        fh = r.call(dos_lvo::Open, kData + 0x600, MODE_READWRITE);
+        CHECK(fh != 0);
+        const u32 flushes = disk.flushes;
+        CHECK_EQ(r.call(dos_lvo::SetFileSize, fh, 700, OFFSET_BEGINNING), 700u);
+        CHECK_EQ(disk.flushes, flushes + 1);
+        CHECK(read_file_of(r, "DH0:Big") == expected.substr(0, 700));
+        CHECK_EQ(r.call(dos_lvo::SetFileSize, fh, 1000, OFFSET_CURRENT), 1000u);
+        CHECK_EQ(r.call(dos_lvo::SetFileSize, fh, 0xFFFFFFF4, OFFSET_END), 988u);
+        CHECK_EQ(disk.flushes, flushes + 3);
+        const std::string grown = read_file_of(r, "DH0:Big");
+        CHECK_EQ(grown.size(), 988u);
+        CHECK(grown.substr(0, 700) == expected.substr(0, 700));
+        CHECK(grown.substr(700) == std::string(288, '\0'));
+        CHECK_EQ(r.call(dos_lvo::SetFileSize, fh, 0, OFFSET_BEGINNING), 0u);
+        CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+        CHECK(read_file_of(r, "DH0:Big").empty());
+        CHECK_SOUND(disk.volume);
+    }
+}
+
+void a_write_past_the_end_of_a_shortened_file_fills_the_gap_with_zeros() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk;
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    CHECK_EQ(write_file_in(r, "DH0:Gap", pattern_text(100)), 100u);
+
+    // The second handle cuts the file below the first one's position.
+    r.str(kData + 0x600, "DH0:Gap");
+    const u32 first = r.call(dos_lvo::Open, kData + 0x600, MODE_READWRITE);
+    const u32 second = r.call(dos_lvo::Open, kData + 0x600, MODE_READWRITE);
+    CHECK(first != 0);
+    CHECK(second != 0);
+    CHECK_EQ(r.call(dos_lvo::Seek, first, 0, OFFSET_END), 0u);
+    CHECK_EQ(r.call(dos_lvo::SetFileSize, second, 10, OFFSET_BEGINNING), 10u);
+    r.str(kData + 0x700, "Z");
+    CHECK_EQ(r.call(dos_lvo::Write, first, kData + 0x700, 1), 1u);
+    r.call(dos_lvo::Close, first);
+    r.call(dos_lvo::Close, second);
+    const std::string got = read_file_of(r, "DH0:Gap");
+    CHECK_EQ(got.size(), 101u);
+    CHECK(got.substr(0, 10) == pattern_text(100).substr(0, 10));
+    CHECK(got.substr(10, 90) == std::string(90, '\0'));
+    CHECK_EQ(got[100], 'Z');
+    CHECK_SOUND(disk.volume);
+}
+
+void directories_are_made_renamed_and_deleted_on_a_partition() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk;
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    u32 seen = 0;
+    const auto flushes_since = [&]() {
+        const u32 n = disk.flushes - seen;
+        seen = disk.flushes;
+        return n;
+    };
+
+    // CreateDir gives an exclusive lock on the new directory, which keeps
+    // other locks off it until it is let go.
+    const u32 dir = r.call(dos_lvo::CreateDir, name_at(r, kData, "DH0:Dir"));
+    CHECK(dir != 0);
+    CHECK_EQ(flushes_since(), 1u);
+    CHECK_EQ(r.get32((dir << 2) + fl_Access), static_cast<u32>(EXCLUSIVE_LOCK));
+    r.str(kData + 0x40, "DH0:Dir");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData + 0x40, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::UnLock, dir);
+    const u32 fib = kData + 0x800;
+    CHECK(examine_name(r, "DH0:Dir", fib));
+    CHECK_EQ(as_signed(r.get32(fib + fib_DirEntryType)), 2);
+    CHECK_EQ(r.call(dos_lvo::CreateDir, name_at(r, kData, "DH0:Dir")), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_EXISTS);
+    CHECK_EQ(r.call(dos_lvo::CreateDir, name_at(r, kData, "DH0:No/Sub")), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DIR_NOT_FOUND);
+    r.call(dos_lvo::UnLock, r.call(dos_lvo::CreateDir, name_at(r, kData, "DH0:Dir/Inner")));
+    seen = disk.flushes;
+
+    // Rename within a directory and into another, one flush each; the
+    // object is where its new name says.
+    CHECK_EQ(write_file_in(r, "DH0:Note", "contents"), 8u);
+    seen = disk.flushes;
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Note"),
+                    name_at(r, kData + 0x40, "DH0:Note2")),
+             DOSTRUE);
+    CHECK_EQ(flushes_since(), 1u);
+    CHECK(read_file_of(r, "DH0:Note2") == "contents");
+    CHECK_EQ(r.call(dos_lvo::Lock, name_at(r, kData, "DH0:Note"), SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Note2"),
+                    name_at(r, kData + 0x40, "DH0:Dir/Inner/Moved")),
+             DOSTRUE);
+    CHECK_EQ(flushes_since(), 1u);
+    CHECK(read_file_of(r, "DH0:Dir/Inner/Moved") == "contents");
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Dir/Inner/Moved"),
+                    name_at(r, kData + 0x40, "dh0:dir/MOVED")),
+             DOSTRUE);
+    CHECK(read_file_of(r, "DH0:Dir/Moved") == "contents");
+    seen = disk.flushes;
+
+    // A name that is taken, a directory moved into itself, another volume.
+    CHECK_EQ(write_file_in(r, "DH0:Other", "x"), 1u);
+    seen = disk.flushes;
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Other"),
+                    name_at(r, kData + 0x40, "DH0:Dir/Moved")),
+             DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_EXISTS);
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Dir"),
+                    name_at(r, kData + 0x40, "DH0:Dir/Inner/Dir")),
+             DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Other"),
+                    name_at(r, kData + 0x40, "DF0:Other")),
+             DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_RENAME_ACROSS_DEVICES);
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Other"),
+                    name_at(r, kData + 0x40, "RAM:Other")),
+             DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_RENAME_ACROSS_DEVICES);
+    CHECK_SOUND(disk.volume);
+
+    // A lock on a renamed directory follows it, so names relative to it
+    // still resolve.
+    r.str(kData, "DH0:Dir");
+    const u32 held = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(held != 0);
+    CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, "DH0:Dir"),
+                    name_at(r, kData + 0x40, "DH0:Folder")),
+             DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, held, kData + 0x200, 64), DOSTRUE);
+    CHECK(r.read_str(kData + 0x200) == "Work:Folder");
+    const u32 previous = r.call(dos_lvo::CurrentDir, held);
+    CHECK(read_file_of(r, "Moved") == "contents");
+    r.call(dos_lvo::CurrentDir, previous);
+    r.call(dos_lvo::UnLock, held);
+
+    // DeleteFile takes a file or an empty directory, and one flush each; a
+    // directory with entries, a file in use and a protected one stay.
+    seen = disk.flushes;
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Folder/Moved")), DOSTRUE);
+    CHECK_EQ(flushes_since(), 1u);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Folder")), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DIRECTORY_NOT_EMPTY);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Folder/Inner")), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Folder")), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Folder")), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    r.str(kData + 0x600, "DH0:Other");
+    const u32 open = r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE);
+    CHECK(open != 0);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Other")), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::Close, open);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, name_at(r, kData, "DH0:Other"), 1), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Other")), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_DELETE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, name_at(r, kData, "DH0:Other"), 0), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Other")), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:")), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_WRONG_TYPE);
+    CHECK_SOUND(disk.volume);
+
+    // All of it is gone: the disk is as empty as the day it was formatted.
+    CHECK_EQ(blocks_used(r, "DH0:"), 2u);
+}
+
+void protection_comment_and_date_are_kept_in_the_header() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk;
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    g_dos.set_clock(disk_clock);
+    CHECK_EQ(write_file_in(r, "DH0:Note", "contents"), 8u);
+    u32 seen = disk.flushes;
+    const auto flushed_once = [&]() {
+        const bool once = disk.flushes == seen + 1;
+        seen = disk.flushes;
+        return once;
+    };
+
+    // Each change is flushed and shows when the file is examined.
+    const u32 fib = kData + 0x800;
+    CHECK_EQ(r.call(dos_lvo::SetProtection, name_at(r, kData, "DH0:Note"), 0x50), DOSTRUE);
+    CHECK(flushed_once());
+    r.str(kData + 0x40, "kept in the header");
+    CHECK_EQ(r.call(dos_lvo::SetComment, name_at(r, kData, "DH0:Note"), kData + 0x40), DOSTRUE);
+    CHECK(flushed_once());
+    const u32 stamp = kData + 0x100;
+    r.put32(stamp + ds_Days, 4321);
+    r.put32(stamp + ds_Minute, 12);
+    r.put32(stamp + ds_Tick, 34);
+    CHECK_EQ(r.call(dos_lvo::SetFileDate, name_at(r, kData, "DH0:Note"), stamp), DOSTRUE);
+    CHECK(flushed_once());
+    CHECK(examine_name(r, "DH0:Note", fib));
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x50u);
+    CHECK(r.read_str(fib + fib_Comment) == "kept in the header");
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Days), 4321u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Minute), 12u);
+    CHECK_EQ(r.get32(fib + fib_DateStamp + ds_Tick), 34u);
+    CHECK_EQ(r.get32(fib + fib_Size), 8u);
+
+    // SetOwner is accepted and keeps nothing; a missing object is missing.
+    const u32 flushes = disk.flushes;
+    CHECK_EQ(r.call(dos_lvo::SetOwner, name_at(r, kData, "DH0:Note"), 0x00010002), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::SetOwner, name_at(r, kData, "DH0:Missing"), 1), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(disk.flushes, flushes);
+
+    // The protection bits that deny an access are kept to.
+    CHECK_EQ(r.call(dos_lvo::SetProtection, name_at(r, kData, "DH0:Note"), 4), DOSTRUE);
+    r.str(kData + 0x600, "DH0:Note");
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_READWRITE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, name_at(r, kData, "DH0:Note"), 8), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_READ_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, name_at(r, kData, "DH0:Note"), 0), DOSTRUE);
+    CHECK(read_file_of(r, "DH0:Note") == "contents");
+    CHECK_SOUND(disk.volume);
+}
+
+void a_full_partition_says_so_and_info_follows_the_blocks() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk(1, 64);
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    const u32 id = kData + 0x400;
+    const auto info = [&]() {
+        r.str(kData, "DH0:");
+        const u32 root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK_EQ(r.call(dos_lvo::Info, root, id), DOSTRUE);
+        r.call(dos_lvo::UnLock, root);
+        CHECK_EQ(r.get32(id + id_DiskState), ID_VALIDATED);
+        CHECK_EQ(r.get32(id + id_NumBlocks), 62u);
+        CHECK_EQ(r.get32(id + id_BytesPerBlock), 512u);
+        return r.get32(id + id_NumBlocksUsed);
+    };
+
+    // The root and the bitmap are the blocks in use; a file of a header and
+    // three data blocks adds four.
+    const u32 empty = info();
+    CHECK_EQ(empty, 2u);
+    CHECK_EQ(write_file_in(r, "DH0:Small", pattern_text(1300)), 1300u);
+    CHECK_EQ(info(), empty + 4);
+
+    // Too much for the disk: Write fails, the file keeps what fitted, and
+    // with no block left nothing new can be made.
+    const u32 big = g_exec.alloc(40000, MEMF_PUBLIC);
+    CHECK(big != 0);
+    r.str(kData + 0x600, "DH0:Huge");
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_NEWFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::Write, fh, big, 40000), 0xFFFFFFFFu);
+    CHECK_EQ(r.io_err(), ERROR_DISK_FULL);
+    r.call(dos_lvo::Close, fh);
+    const u32 fib = kData + 0x800;
+    CHECK(examine_name(r, "DH0:Huge", fib));
+    CHECK(r.get32(fib + fib_Size) > 0);
+    CHECK(r.get32(fib + fib_Size) < 40000u);
+    CHECK_EQ(info(), 62u);
+    r.str(kData + 0x600, "DH0:Another");
+    CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_FULL);
+    CHECK_EQ(r.call(dos_lvo::CreateDir, name_at(r, kData, "DH0:Another")), 0u);
+    CHECK_EQ(r.io_err(), ERROR_DISK_FULL);
+    CHECK_SOUND(disk.volume);
+
+    // Deleting the big file gives the blocks back.
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, "DH0:Huge")), DOSTRUE);
+    CHECK_EQ(info(), empty + 4);
+    g_exec.free(big, 40000);
+    CHECK_SOUND(disk.volume);
+}
+
+void a_disk_that_cannot_be_written_refuses_every_change() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition dos4;
+    dos4.make_dos4();
+    DiskPartition readonly(1, 1760, "DH1");
+    readonly.volume.source.write = nullptr;
+    const u32 writes = dos4.writes;
+    Rig r(with_partitions(&df0.volume, {&dos4, &readonly}));
+    for (const char* drive : {"DF0:", "DH0:", "DH1:"}) {
+        const std::string prefix = drive;
+        r.str(kData + 0x600, prefix + "New");
+        CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_NEWFILE), 0u);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::Open, kData + 0x600, MODE_READWRITE), 0u);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::CreateDir, name_at(r, kData, prefix + "Dir")), 0u);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::DeleteFile, name_at(r, kData, prefix + "C")), DOSFALSE);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::Rename, name_at(r, kData, prefix + "C"),
+                        name_at(r, kData + 0x40, prefix + "D")),
+                 DOSFALSE);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::SetProtection, name_at(r, kData, prefix + "C"), 0), DOSFALSE);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::SetComment, name_at(r, kData, prefix + "C"), kData + 0x40),
+                 DOSFALSE);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::SetFileDate, name_at(r, kData, prefix + "C"), kData + 0x100),
+                 DOSFALSE);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+        CHECK_EQ(r.call(dos_lvo::SetOwner, name_at(r, kData, prefix + "C"), 0), DOSFALSE);
+        CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    }
+
+    // A file that is open there takes no write and no new size.
+    r.str(kData + 0x600, "DF0:C/Echo");
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE);
+    CHECK(fh != 0);
+    CHECK_EQ(r.call(dos_lvo::Write, fh, kData + 0x700, 4), 0xFFFFFFFFu);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetFileSize, fh, 0, OFFSET_BEGINNING), 0xFFFFFFFFu);
+    CHECK_EQ(r.io_err(), ERROR_DISK_WRITE_PROTECTED);
+    r.call(dos_lvo::Close, fh);
+
+    // Info says the disks are protected, and nothing was written or flushed.
+    const u32 id = kData + 0x400;
+    for (const char* drive : {"DF0:", "DH0:", "DH1:"}) {
+        r.str(kData, drive);
+        const u32 root = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+        CHECK(root != 0);
+        CHECK_EQ(r.call(dos_lvo::Info, root, id), DOSTRUE);
+        CHECK_EQ(r.get32(id + id_DiskState), ID_WRITE_PROTECTED);
+        r.call(dos_lvo::UnLock, root);
+    }
+    CHECK_EQ(dos4.writes, writes);
+    CHECK_EQ(dos4.flushes, 0u);
+    CHECK_EQ(readonly.flushes, 0u);
+}
+
+void the_public_calls_write_and_delete_files_on_a_partition() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk;
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    const std::string content = pattern_text(900);
+    const auto bytes_of = [](const std::string& s) {
+        return reinterpret_cast<const u8*>(s.data());
+    };
+    u32 error = 99;
+
+    CHECK(g_dos.write_file("DH0:Api", bytes_of(content), 900, error));
+    CHECK_EQ(error, 0u);
+    CHECK_EQ(disk.flushes, 1u);
+    CHECK(read_file_of(r, "DH0:Api") == content);
+    CHECK(g_dos.write_file("DH0:Api", bytes_of("new"), 3, error));
+    CHECK(read_file_of(r, "DH0:Api") == "new");
+    CHECK_EQ(disk.flushes, 2u);
+    CHECK_SOUND(disk.volume);
+
+    CHECK(!g_dos.write_file("DH0:Nowhere/Api", bytes_of(content), 900, error));
+    CHECK_EQ(error, ERROR_DIR_NOT_FOUND);
+    CHECK(!g_dos.write_file("DH0:", bytes_of(content), 900, error));
+    CHECK_EQ(error, ERROR_OBJECT_WRONG_TYPE);
+    CHECK(!g_dos.write_file("DF0:Api", bytes_of(content), 900, error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+
+    // A file that is open is not replaced or deleted.
+    r.str(kData + 0x600, "DH0:Api");
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE);
+    CHECK(!g_dos.write_file("DH0:Api", bytes_of(content), 900, error));
+    CHECK_EQ(error, ERROR_OBJECT_IN_USE);
+    CHECK(!g_dos.delete_file("DH0:Api", error));
+    CHECK_EQ(error, ERROR_OBJECT_IN_USE);
+    r.call(dos_lvo::Close, fh);
+
+    // A directory is not a file for delete_file; a file is.
+    r.call(dos_lvo::UnLock, r.call(dos_lvo::CreateDir, name_at(r, kData, "DH0:Dir")));
+    CHECK(!g_dos.delete_file("DH0:Dir", error));
+    CHECK_EQ(error, ERROR_OBJECT_WRONG_TYPE);
+    const u32 flushes = disk.flushes;
+    CHECK(g_dos.delete_file("DH0:Api", error));
+    CHECK_EQ(disk.flushes, flushes + 1);
+    CHECK(!g_dos.delete_file("DH0:Api", error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK(!g_dos.delete_file("DF0:C/Echo", error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+    CHECK_SOUND(disk.volume);
+}
+
+void a_file_that_does_not_fit_is_not_left_behind() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk(1, 64);
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    const std::vector<u8> too_much(40000, 7);
+    u32 error = 0;
+    CHECK(!g_dos.write_file("DH0:Huge", too_much.data(), 40000, error));
+    CHECK_EQ(error, ERROR_DISK_FULL);
+    r.str(kData, "DH0:Huge");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(blocks_used(r, "DH0:"), 2u);
+    CHECK_SOUND(disk.volume);
+}
+
+void set_var_saves_to_envarc_on_a_writable_boot_partition() {
+    DiskPartition disk;
+    const AmigaDate day{200, 20, 2};
+    DirEntry prefs{};
+    DirEntry archive{};
+    CHECK(adf_create_dir(disk.volume, disk.volume.root_block, "Prefs", day, prefs) == FsError::Ok);
+    CHECK(adf_create_dir(disk.volume, prefs.header_block, "Env-Archive", day, archive) ==
+          FsError::Ok);
+    Rig r(with_partitions(nullptr, {&disk}));
+    CHECK(r.booted);
+    CHECK_EQ(g_dos.boot_volume(), kFloppyDrives);
+
+    // The variable goes to ENV: and, with GVF_SAVE_VAR, to ENVARC: on the
+    // disk, flushed once; without the flag only to ENV:.
+    const u32 flushes = disk.flushes;
+    CHECK_EQ(set_var(r, "Foo", "saved", GVF_GLOBAL_ONLY | GVF_SAVE_VAR), DOSTRUE);
+    CHECK_EQ(disk.flushes, flushes + 1);
+    CHECK(read_file_of(r, "ENV:Foo") == "saved");
+    CHECK(read_file_of(r, "ENVARC:Foo") == "saved");
+    DirEntry saved{};
+    CHECK(adf_find(disk.volume, "Prefs/Env-Archive/Foo", saved) == FsError::Ok);
+    CHECK_EQ(saved.size, 5u);
+    CHECK_EQ(set_var(r, "Bar", "temporary", GVF_GLOBAL_ONLY), DOSTRUE);
+    CHECK(read_file_of(r, "ENV:Bar") == "temporary");
+    r.str(kData, "ENVARC:Bar");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+    CHECK_EQ(disk.flushes, flushes + 1);
+
+    // A new value replaces the saved one, and DeleteVar takes the saved
+    // copy away with the other.
+    CHECK_EQ(set_var(r, "Foo", "again", GVF_GLOBAL_ONLY | GVF_SAVE_VAR), DOSTRUE);
+    CHECK(read_file_of(r, "ENVARC:Foo") == "again");
+    r.str(kData, "Foo");
+    CHECK_EQ(r.call(dos_lvo::DeleteVar, kData, GVF_GLOBAL_ONLY | GVF_SAVE_VAR), DOSTRUE);
+    r.str(kData, "ENV:Foo");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    r.str(kData, "ENVARC:Foo");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);
+    CHECK(adf_find(disk.volume, "Prefs/Env-Archive/Foo", saved) == FsError::NotFound);
+    CHECK_SOUND(disk.volume);
 }
 
 void info_on_the_volume() {
@@ -7906,6 +8597,17 @@ int main() {
     the_boot_volume_follows_the_boot_priority();
     the_default_assigns_follow_the_boot_volume();
     the_dos_list_has_the_hard_disk_partitions();
+    redirected_output_reaches_a_partition();
+    a_new_file_on_a_partition_is_written_and_flushed();
+    a_file_is_overwritten_extended_and_resized_in_place();
+    a_write_past_the_end_of_a_shortened_file_fills_the_gap_with_zeros();
+    directories_are_made_renamed_and_deleted_on_a_partition();
+    protection_comment_and_date_are_kept_in_the_header();
+    a_full_partition_says_so_and_info_follows_the_blocks();
+    a_disk_that_cannot_be_written_refuses_every_change();
+    the_public_calls_write_and_delete_files_on_a_partition();
+    a_file_that_does_not_fit_is_not_left_behind();
+    set_var_saves_to_envarc_on_a_writable_boot_partition();
     layout_matches_the_ndk();
     dos_library_is_built();
     command_writes_to_the_console();
