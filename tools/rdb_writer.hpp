@@ -197,12 +197,13 @@ inline std::vector<u8> build_rdb_disk(const RdbGeometry& g,
 // Writes up to four partition entries and the 0x55AA signature at the end of
 // the given sector, for a master boot record or an extended boot record.
 inline void write_mbr_sector(std::vector<u8>& image, u64 lba,
-                             const std::vector<MbrPartitionSpec>& entries) {
+                             const std::vector<MbrPartitionSpec>& entries,
+                             u32 lba_bytes = rdb_writer_detail::sector_bytes) {
     using namespace rdb_writer_detail;
     if (entries.size() > usize{mbr_entries}) {
         throw std::runtime_error("too many MBR entries");
     }
-    const usize base = static_cast<usize>(lba) * sector_bytes;
+    const usize base = static_cast<usize>(lba) * lba_bytes;
     if (base + sector_bytes > image.size()) {
         throw std::runtime_error("MBR sector outside the image");
     }
@@ -224,15 +225,17 @@ inline void write_mbr_sector(std::vector<u8>& image, u64 lba,
     image[base + 511] = 0xAA;
 }
 
-inline void write_mbr(std::vector<u8>& image, const std::vector<MbrPartitionSpec>& entries) {
-    write_mbr_sector(image, 0, entries);
+inline void write_mbr(std::vector<u8>& image, const std::vector<MbrPartitionSpec>& entries,
+                      u32 lba_bytes = rdb_writer_detail::sector_bytes) {
+    write_mbr_sector(image, 0, entries, lba_bytes);
 }
 
 inline void write_gpt_header(std::vector<u8>& image, u64 lba, u64 entries_lba,
                              u32 entry_count, u32 entries_crc, u64 my_lba,
-                             u64 alternate_lba) {
+                             u64 alternate_lba,
+                             u32 lba_bytes = rdb_writer_detail::sector_bytes) {
     using namespace rdb_writer_detail;
-    const usize base = static_cast<usize>(lba) * sector_bytes;
+    const usize base = static_cast<usize>(lba) * lba_bytes;
     if (base + sector_bytes > image.size()) {
         throw std::runtime_error("GPT header outside the image");
     }
@@ -258,10 +261,12 @@ inline void write_gpt_header(std::vector<u8>& image, u64 lba, u64 entries_lba,
 // A protective MBR and both GPT headers with their entry arrays: the primary
 // header at LBA 1 and its array at LBA 2, the backup header in the last
 // sector and its array in the one before it. The entries must fit the first
-// entry array sector.
-inline void write_gpt(std::vector<u8>& image, const std::vector<GptPartitionSpec>& entries) {
+// entry array sector. LBAs are lba_bytes long, as on a disk with 4096 byte
+// sectors.
+inline void write_gpt(std::vector<u8>& image, const std::vector<GptPartitionSpec>& entries,
+                      u32 lba_bytes = rdb_writer_detail::sector_bytes) {
     using namespace rdb_writer_detail;
-    const u64 sectors = image.size() / sector_bytes;
+    const u64 sectors = image.size() / lba_bytes;
     if (sectors < 8) {
         throw std::runtime_error("disk too small for a GPT");
     }
@@ -273,7 +278,7 @@ inline void write_gpt(std::vector<u8>& image, const std::vector<GptPartitionSpec
     protective.first_lba = 1;
     protective.sectors =
         static_cast<u32>(sectors - 1 > 0xFFFFFFFFu ? 0xFFFFFFFFu : sectors - 1);
-    write_mbr(image, {protective});
+    write_mbr(image, {protective}, lba_bytes);
 
     std::vector<u8> array(entries.size() * gpt_entry_bytes, 0);
     for (usize i = 0; i < entries.size(); ++i) {
@@ -289,14 +294,14 @@ inline void write_gpt(std::vector<u8>& image, const std::vector<GptPartitionSpec
     const u64 backup_header = sectors - 1;
     const u64 backup_array = sectors - 2;
     if (!array.empty()) {
-        std::memcpy(image.data() + 2 * sector_bytes, array.data(), array.size());
-        std::memcpy(image.data() + static_cast<usize>(backup_array) * sector_bytes,
+        std::memcpy(image.data() + 2 * lba_bytes, array.data(), array.size());
+        std::memcpy(image.data() + static_cast<usize>(backup_array) * lba_bytes,
                     array.data(), array.size());
     }
     write_gpt_header(image, 1, 2, static_cast<u32>(entries.size()), array_crc, 1,
-                     backup_header);
+                     backup_header, lba_bytes);
     write_gpt_header(image, backup_header, backup_array,
-                     static_cast<u32>(entries.size()), array_crc, backup_header, 1);
+                     static_cast<u32>(entries.size()), array_crc, backup_header, 1, lba_bytes);
 }
 
 }

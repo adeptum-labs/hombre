@@ -239,7 +239,8 @@ u32 hard_disks_mount(const Disk* disks, u32 disk_count, PhysAllocator& pages, Ha
 
         AmigaPartitions partitions{};
         const RdbError scan =
-            find_amiga_partitions(&read_through_cache, &cache, disk.sectors, partitions);
+            find_amiga_partitions(&read_through_cache, &cache, disk.sectors, partitions,
+                                  disk.lba_bytes);
         write_prefix(n);
         serial::write("table ");
         serial::write(table_name(partitions.table));

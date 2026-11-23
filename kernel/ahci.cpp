@@ -547,6 +547,7 @@ u32 open_controller(PciAddress address, MmioMapper& mmio, PhysAllocator& pages, 
         out[opened].dev =
             SectorDevice{&disk_contexts[disk_context_count], read_sector, write_sector, flush_disk};
         out[opened].sectors = disk.sectors;
+        out[opened].lba_bytes = disk.sector_bytes;
         out[opened].read_only = false;
         out[opened].kind = "ahci";
         ++disk_context_count;

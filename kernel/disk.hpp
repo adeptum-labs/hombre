@@ -29,10 +29,12 @@ namespace hombre {
 
 // A hard disk as the kernel sees it, whatever the driver behind it: 512 byte
 // sectors through one device, read-only when the medium or the device says
-// so. `kind` names the driver in the log.
+// so. `lba_bytes` is the disk's own logical sector size, which its MBR or
+// GPT counts in. `kind` names the driver in the log.
 struct Disk {
     SectorDevice dev;
     u64 sectors;
+    u32 lba_bytes;
     bool read_only;
     const char* kind;
 };

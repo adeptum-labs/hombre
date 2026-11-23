@@ -84,6 +84,7 @@ bool virtio_disk_open(VirtioBlk& blk, PciAddress address, MmioMapper& mmio,
     const bool read_only = blk.read_only();
     out.dev = SectorDevice{&disk, read_sector, read_only ? nullptr : write_sector, flush_disk};
     out.sectors = blk.sector_count();
+    out.lba_bytes = 512;
     out.read_only = read_only;
     out.kind = "virtio";
     return true;

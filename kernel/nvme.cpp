@@ -612,6 +612,7 @@ u32 open_controller(PciAddress address, MmioMapper& mmio, PhysAllocator& pages, 
         log_namespace(disk.nsid, candidates[i].info, flush);
         out[opened].dev = SectorDevice{&disk, read_sector, write_sector, flush_disk};
         out[opened].sectors = disk.sectors;
+        out[opened].lba_bytes = disk.sector_bytes;
         out[opened].read_only = false;
         out[opened].kind = "nvme";
         ++disk_context_count;

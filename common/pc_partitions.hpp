@@ -33,9 +33,12 @@ namespace hombre {
 // read through that table only, so an RDB elsewhere on it is not mistaken for
 // the disk's own; a disk without one is scanned as a whole.
 //
-// MBR and GPT are little-endian, the Amiga blocks big-endian. Only 512 byte
-// sectors are used: a GPT lives at LBA 1 with 512 byte LBAs, and drivers
-// present 4K disks the same way. Every table read is bounds-checked, both
+// MBR and GPT are little-endian, the Amiga blocks big-endian. Drivers present
+// every disk as 512 byte sectors, but MBR and GPT count in the disk's own
+// logical sectors: on a disk with 4096 byte sectors the GPT header sits at
+// byte 4096 and every LBA in the tables is eight of our sectors. The RDB
+// inside a partition is read in 512 byte sectors. Every table read is
+// bounds-checked, both
 // copies of a GPT are tried and checked with their CRC32s, and the MBR
 // extended chain and the GPT entry array are bounded, so a damaged disk gives
 // fewer partitions or an error and never a stray read.
@@ -93,6 +96,19 @@ inline constexpr u32 min_gpt_entry_bytes = 128;
 inline constexpr u32 max_gpt_entry_bytes = 512;
 inline constexpr u32 gpt_header_bytes = 92;
 
+// The disk as its partition tables see it: LBAs of `scale` 512 byte sectors.
+struct TableDisk {
+    DiskRead read;
+    void* ctx;
+    u32 scale;
+    u64 lbas;
+
+    // Reads the 512 byte sector `part` of logical sector `lba`.
+    bool read_lba(u64 lba, u8* out, u64 part = 0) const {
+        return read(ctx, lba * scale + part, out);
+    }
+};
+
 enum class GptRead : u8 {
     Ok,
     Bad,
@@ -147,7 +163,7 @@ inline bool mbr_protective(const u8* sector) {
 // The table of a disk that says it has one: every used entry has a boot flag
 // MBRs allow, a type, a nonzero start, and lies inside the disk. Unused
 // entries are all zero and take no part.
-inline bool valid_mbr(const u8* sector, u64 disk_sectors) {
+inline bool valid_mbr(const u8* sector, u64 disk_lbas) {
     for (u32 i = 0; i < mbr_entries; ++i) {
         const u8* entry = sector + mbr_entry_base + i * mbr_entry_bytes;
         if (entry[4] == 0) {
@@ -155,7 +171,7 @@ inline bool valid_mbr(const u8* sector, u64 disk_sectors) {
         }
         const u32 first = le32(entry + 8);
         if ((entry[0] != 0x00 && entry[0] != mbr_bootable) || first == 0 ||
-            u64{first} + le32(entry + 12) > disk_sectors) {
+            u64{first} + le32(entry + 12) > disk_lbas) {
             return false;
         }
     }
@@ -273,10 +289,9 @@ inline bool gpt_signature(const u8* header) {
 // Reads and checks one GPT header. The CRC covers HeaderSize bytes with the
 // CRC field itself read as zero. The entry array must lie inside the disk and
 // be addressable with 32 bit sector numbers.
-inline GptRead read_gpt_header(DiskRead read, void* ctx, u64 lba, u64 disk_sectors,
-                               GptHeader& out) {
+inline GptRead read_gpt_header(const TableDisk& disk, u64 lba, GptHeader& out) {
     u8 sector[sector_bytes];
-    if (!read(ctx, lba, sector)) {
+    if (!disk.read_lba(lba, sector)) {
         return GptRead::Io;
     }
     if (!gpt_signature(sector)) {
@@ -301,12 +316,13 @@ inline GptRead read_gpt_header(DiskRead read, void* ctx, u64 lba, u64 disk_secto
         entry_size > max_gpt_entry_bytes || entry_size % min_gpt_entry_bytes != 0) {
         return GptRead::Bad;
     }
-    if (entry_lba == 0 || entry_lba >= disk_sectors) {
+    if (entry_lba == 0 || entry_lba >= disk.lbas) {
         return GptRead::Bad;
     }
     const u64 array_bytes = u64{entry_count} * entry_size;
-    const u64 array_sectors = (array_bytes + sector_bytes - 1) / sector_bytes;
-    if (entry_lba + array_sectors > disk_sectors) {
+    const u64 lba_bytes = u64{sector_bytes} * disk.scale;
+    const u64 array_lbas = (array_bytes + lba_bytes - 1) / lba_bytes;
+    if (entry_lba + array_lbas > disk.lbas) {
         return GptRead::Bad;
     }
     out.entry_lba = entry_lba;
@@ -318,15 +334,13 @@ inline GptRead read_gpt_header(DiskRead read, void* ctx, u64 lba, u64 disk_secto
 
 // The CRC32 of the entry array, read a sector at a time so the array never
 // has to fit in memory.
-inline GptRead gpt_array_crc(DiskRead read, void* ctx, const GptHeader& header,
-                             u32& crc_out) {
+inline GptRead gpt_array_crc(const TableDisk& disk, const GptHeader& header, u32& crc_out) {
     const u64 bytes = u64{header.entry_count} * header.entry_size;
     u32 crc = 0xFFFFFFFFu;
     u64 done = 0;
     u8 sector[sector_bytes];
     while (done < bytes) {
-        const u64 lba = header.entry_lba + done / sector_bytes;
-        if (!read(ctx, lba, sector)) {
+        if (!disk.read_lba(header.entry_lba, sector, done / sector_bytes)) {
             return GptRead::Io;
         }
         const u64 left = bytes - done;
@@ -341,15 +355,14 @@ inline GptRead gpt_array_crc(DiskRead read, void* ctx, const GptHeader& header,
 // Scans one GPT copy: its header, its entry array, then every used entry that
 // lies inside the disk. An entry crossing a sector boundary is assembled from
 // the two sectors it touches.
-inline GptRead scan_gpt_at(DiskRead read, void* ctx, u64 header_lba, u64 disk_sectors,
-                           AmigaPartitions& out) {
+inline GptRead scan_gpt_at(const TableDisk& disk, u64 header_lba, AmigaPartitions& out) {
     GptHeader header;
-    const GptRead header_result = read_gpt_header(read, ctx, header_lba, disk_sectors, header);
+    const GptRead header_result = read_gpt_header(disk, header_lba, header);
     if (header_result != GptRead::Ok) {
         return header_result;
     }
     u32 array_crc = 0;
-    const GptRead crc_result = gpt_array_crc(read, ctx, header, array_crc);
+    const GptRead crc_result = gpt_array_crc(disk, header, array_crc);
     if (crc_result != GptRead::Ok) {
         return crc_result;
     }
@@ -361,11 +374,11 @@ inline GptRead scan_gpt_at(DiskRead read, void* ctx, u64 header_lba, u64 disk_se
         const u64 offset = u64{i} * header.entry_size;
         const u64 array_sector = offset / sector_bytes;
         const u32 within = static_cast<u32>(offset % sector_bytes);
-        if (!read(ctx, header.entry_lba + array_sector, block)) {
+        if (!disk.read_lba(header.entry_lba, block, array_sector)) {
             return GptRead::Io;
         }
         if (within + header.entry_size > sector_bytes &&
-            !read(ctx, header.entry_lba + array_sector + 1, block + sector_bytes)) {
+            !disk.read_lba(header.entry_lba, block + sector_bytes, array_sector + 1)) {
             return GptRead::Io;
         }
         const u8* entry = block + within;
@@ -378,23 +391,24 @@ inline GptRead scan_gpt_at(DiskRead read, void* ctx, u64 header_lba, u64 disk_se
         }
         const u64 first = le64(entry + 32);
         const u64 last = le64(entry + 40);
-        if (first > last || last >= disk_sectors) {
+        if (first > last || last >= disk.lbas) {
             continue;
         }
-        scan_container(read, ctx, first, last - first + 1, PartitionSource::Gpt, out);
+        scan_container(disk.read, disk.ctx, first * disk.scale, (last - first + 1) * disk.scale,
+                       PartitionSource::Gpt, out);
     }
     return GptRead::Ok;
 }
 
 // The primary GPT header, or the backup at the disk's last sector when the
 // primary is damaged.
-inline GptRead scan_gpt(DiskRead read, void* ctx, u64 disk_sectors, AmigaPartitions& out) {
-    if (disk_sectors < 2) {
+inline GptRead scan_gpt(const TableDisk& disk, AmigaPartitions& out) {
+    if (disk.lbas < 2) {
         return GptRead::Bad;
     }
-    GptRead result = scan_gpt_at(read, ctx, 1, disk_sectors, out);
+    GptRead result = scan_gpt_at(disk, 1, out);
     if (result == GptRead::Bad) {
-        result = scan_gpt_at(read, ctx, disk_sectors - 1, disk_sectors, out);
+        result = scan_gpt_at(disk, disk.lbas - 1, out);
     }
     return result;
 }
@@ -404,7 +418,7 @@ inline GptRead scan_gpt(DiskRead read, void* ctx, u64 disk_sectors, AmigaPartiti
 // links to the next EBR, relative to the extended partition's start. A link
 // that does not move forward, or leaves the extended partition, ends the
 // walk, as does the chain bound.
-inline RdbError scan_ebr_chain(DiskRead read, void* ctx, u64 extended_first,
+inline RdbError scan_ebr_chain(const TableDisk& disk, u64 extended_first,
                                u64 extended_sectors, bool& amiga, AmigaPartitions& out) {
     const u64 extended_end = extended_first + extended_sectors;
     u64 ebr = extended_first;
@@ -413,7 +427,7 @@ inline RdbError scan_ebr_chain(DiskRead read, void* ctx, u64 extended_first,
         if (ebr >= extended_end) {
             break;
         }
-        if (!read(ctx, ebr, sector)) {
+        if (!disk.read_lba(ebr, sector)) {
             return RdbError::Io;
         }
         if (!mbr_signature(sector)) {
@@ -425,7 +439,8 @@ inline RdbError scan_ebr_chain(DiskRead read, void* ctx, u64 extended_first,
             const u64 first = ebr + le32(logical + 8);
             const u64 sectors = le32(logical + 12);
             if (first > ebr && first + sectors <= extended_end) {
-                scan_container(read, ctx, first, sectors, PartitionSource::Mbr, out);
+                scan_container(disk.read, disk.ctx, first * disk.scale, sectors * disk.scale,
+                               PartitionSource::Mbr, out);
             } else {
                 ++out.skipped;
             }
@@ -448,17 +463,17 @@ inline RdbError scan_ebr_chain(DiskRead read, void* ctx, u64 extended_first,
 
 // The Amiga entries of a primary MBR: partitions of type 0x30 and 0x76
 // directly, and the logical partitions of each extended partition.
-inline RdbError scan_mbr(DiskRead read, void* ctx, const u8* sector, bool& amiga,
+inline RdbError scan_mbr(const TableDisk& disk, const u8* sector, bool& amiga,
                          AmigaPartitions& out) {
     for (u32 i = 0; i < mbr_entries; ++i) {
         const u8* entry = sector + mbr_entry_base + i * mbr_entry_bytes;
         if (mbr_amiga(entry)) {
             amiga = true;
-            scan_container(read, ctx, le32(entry + 8), le32(entry + 12),
-                           PartitionSource::Mbr, out);
+            scan_container(disk.read, disk.ctx, u64{le32(entry + 8)} * disk.scale,
+                           u64{le32(entry + 12)} * disk.scale, PartitionSource::Mbr, out);
         } else if (mbr_extended(entry)) {
             const RdbError error =
-                scan_ebr_chain(read, ctx, le32(entry + 8), le32(entry + 12), amiga, out);
+                scan_ebr_chain(disk, le32(entry + 8), le32(entry + 12), amiga, out);
             if (error != RdbError::Ok) {
                 return error;
             }
@@ -469,22 +484,27 @@ inline RdbError scan_mbr(DiskRead read, void* ctx, const u8* sector, bool& amiga
 
 }
 
-// Finds the Amiga partitions of a disk of disk_sectors 512 byte sectors. The
-// disk's MBR or GPT table decides where to look; a disk without a usable
-// table is scanned as a whole, and a whole disk that is neither an RDB nor a
-// DOS volume has no partitions.
+// Finds the Amiga partitions of a disk of disk_sectors 512 byte sectors whose
+// own logical sectors are lba_bytes long. The disk's MBR or GPT table decides
+// where to look; a disk without a usable table is scanned as a whole, and a
+// whole disk that is neither an RDB nor a DOS volume has no partitions.
 inline RdbError find_amiga_partitions(DiskRead read, void* ctx, u64 disk_sectors,
-                                      AmigaPartitions& out) {
+                                      AmigaPartitions& out, u32 lba_bytes = 512) {
     using namespace pc_partitions_detail;
     out.count = 0;
     out.skipped = 0;
     out.table = PcTable::None;
+    if (lba_bytes < sector_bytes || lba_bytes % sector_bytes != 0) {
+        return RdbError::Unsupported;
+    }
+    const u32 scale = lba_bytes / sector_bytes;
+    const TableDisk disk{read, ctx, scale, disk_sectors / scale};
     u8 sector[sector_bytes];
     if (!read(ctx, 0, sector)) {
         return RdbError::Io;
     }
     if (mbr_signature(sector) && mbr_protective(sector)) {
-        const GptRead gpt = scan_gpt(read, ctx, disk_sectors, out);
+        const GptRead gpt = scan_gpt(disk, out);
         if (gpt == GptRead::Io) {
             return RdbError::Io;
         }
@@ -494,10 +514,10 @@ inline RdbError find_amiga_partitions(DiskRead read, void* ctx, u64 disk_sectors
         }
         return scan_whole_disk(read, ctx, disk_sectors, out);
     }
-    if (mbr_signature(sector) && valid_mbr(sector, disk_sectors)) {
+    if (mbr_signature(sector) && valid_mbr(sector, disk.lbas)) {
         out.table = PcTable::Mbr;
         bool amiga = false;
-        const RdbError error = scan_mbr(read, ctx, sector, amiga, out);
+        const RdbError error = scan_mbr(disk, sector, amiga, out);
         if (error != RdbError::Ok) {
             return error;
         }

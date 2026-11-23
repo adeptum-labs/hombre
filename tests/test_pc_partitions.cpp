@@ -186,6 +186,45 @@ void an_rdb_inside_a_gpt_partition_is_found() {
     CHECK(std::strcmp(parts.list[0].part.name, "GPT0") == 0);
 }
 
+void a_gpt_with_4096_byte_sectors_is_found() {
+    // A 4 MiB disk of 1024 sectors of 4096 bytes. The partition starts at
+    // LBA 256, which is our sector 2048.
+    std::vector<u8> rdb = build_rdb_disk(geometry(100), {RdbPartitionSpec{"GPT0", 52, 99}});
+    Disk d{std::vector<u8>(1024 * 4096, 0)};
+    place(d.image, 2048, rdb);
+    write_gpt(d.image, {{256, 1021, true}}, 4096);
+    AmigaPartitions parts;
+    CHECK_EQ(find_amiga_partitions(read_sector, &d, d.sectors(), parts, 4096), RdbError::Ok);
+    CHECK_EQ(parts.table, PcTable::Gpt);
+    CHECK_EQ(parts.count, 1u);
+    CHECK_EQ(parts.skipped, 0u);
+    CHECK_EQ(parts.list[0].disk_first_sector, u64{2048} + u64{52} * 32);
+
+    // Read as 512 byte LBAs the GPT header is not at LBA 1, and the RDB is
+    // not at the disk's start, so nothing is found.
+    CHECK_EQ(scan(d, parts), RdbError::NoPartitions);
+    CHECK_EQ(parts.count, 0u);
+}
+
+void an_mbr_with_4096_byte_sectors_is_found() {
+    std::vector<u8> rdb = build_rdb_disk(geometry(100), {RdbPartitionSpec{"MBR0", 52, 99}});
+    Disk d{std::vector<u8>(1024 * 4096, 0)};
+    place(d.image, 800, rdb);
+    write_mbr(d.image, {{0x30, 100, 800, false}}, 4096);
+    AmigaPartitions parts;
+    CHECK_EQ(find_amiga_partitions(read_sector, &d, d.sectors(), parts, 4096), RdbError::Ok);
+    CHECK_EQ(parts.table, PcTable::Mbr);
+    CHECK_EQ(parts.count, 1u);
+    CHECK_EQ(parts.list[0].disk_first_sector, u64{800} + u64{52} * 32);
+}
+
+void a_logical_sector_size_that_is_not_a_multiple_of_512_is_refused() {
+    Disk d{std::vector<u8>(64 * sector_bytes, 0)};
+    AmigaPartitions parts;
+    CHECK_EQ(find_amiga_partitions(read_sector, &d, d.sectors(), parts, 520),
+             RdbError::Unsupported);
+}
+
 // A disk of 4 TiB: its first 4096 sectors and 4096 sectors from `high` on
 // are kept, and every other sector reads as zeroes.
 struct SparseDisk {
@@ -302,6 +341,9 @@ int main() {
     logical_amiga_partitions_are_found_through_the_ebr_chain();
     an_ebr_chain_that_loops_ends();
     an_rdb_inside_a_gpt_partition_is_found();
+    a_gpt_with_4096_byte_sectors_is_found();
+    an_mbr_with_4096_byte_sectors_is_found();
+    a_logical_sector_size_that_is_not_a_multiple_of_512_is_refused();
     a_gpt_partition_past_2_tib_is_found();
     a_bad_primary_gpt_header_falls_back_to_the_backup();
     a_gpt_with_bad_entry_arrays_falls_back_to_the_whole_disk();
