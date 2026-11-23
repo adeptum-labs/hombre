@@ -38,6 +38,7 @@
 #include "rdb_writer.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -177,13 +178,29 @@ std::vector<u8> wrap_in_gpt4k(const std::vector<u8>& rdb) {
 
 int main(int argc, char** argv) {
     bool gpt4k = false;
-    if (argc > 1 && std::strcmp(argv[1], "--gpt4k") == 0) {
-        gpt4k = true;
+    unsigned long size_mib = 0;
+    while (argc > 1 && argv[1][0] == '-') {
+        if (std::strcmp(argv[1], "--gpt4k") == 0) {
+            gpt4k = true;
+        } else if (std::strcmp(argv[1], "--size") == 0 && argc > 2) {
+            char* end = nullptr;
+            size_mib = std::strtoul(argv[2], &end, 10);
+            if (*end != '\0' || size_mib == 0 || size_mib > 1024 * 1024) {
+                std::fprintf(stderr, "mkhdf: bad size %s\n", argv[2]);
+                return 2;
+            }
+            --argc;
+            ++argv;
+        } else {
+            break;
+        }
         --argc;
         ++argv;
     }
     if (argc < 3) {
-        std::fprintf(stderr, "usage: mkhdf [--gpt4k] <out.hdf> <adf>...\n");
+        std::fprintf(stderr,
+                     "usage: mkhdf [--gpt4k] [--size <MiB>] <out.hdf> <adf>...\n"
+                     "  --size grows the last partition until the RDB disk is that large\n");
         return 2;
     }
     std::vector<std::vector<u8>> floppies;
@@ -214,6 +231,15 @@ int main(int argc, char** argv) {
         spec.bootable = i == 0;
         parts.push_back(spec);
         cylinder += cylinders;
+    }
+    if (size_mib != 0) {
+        const u64 wanted = u64{size_mib} * 1024 * 1024 / 512 / kSectorsPerTrack;
+        if (wanted < cylinder) {
+            std::fprintf(stderr, "mkhdf: the partitions need more than %lu MiB\n", size_mib);
+            return 1;
+        }
+        cylinder = static_cast<u32>(wanted);
+        parts.back().high_cyl = cylinder - 1;
     }
     geometry.cylinders = cylinder;
     std::vector<u8> disk = build_rdb_disk(geometry, parts);
