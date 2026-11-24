@@ -473,6 +473,7 @@ private:
     u32 make_scroll_gadgets();
     u32 make_volume_gauge(u32 gadgets, i32 top, i32 height);
     void layout_gauge(DrawerWindow& w);
+    u32 pen_depth(native::Bus& b) const;
     bool fit_gauge(DrawerWindow& w);
     void fill_gauge_image(DrawerWindow& w);
     static void gauge_sized(void* ctx, u32 window);

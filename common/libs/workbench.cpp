@@ -1728,9 +1728,16 @@ void Workbench::layout_gauge(DrawerWindow& w) {
 // paints the image for the share of the volume last asked for. A gauge that
 // shrinks keeps its image's memory, so this takes none then. False when the
 // window has no room for a gauge, whose gadget of no rows is not drawn.
+// The planes of the screen's pens: its BitMap's depth, or 8 for a deep
+// screen of a HOMBRE mode, which has 256 pens whatever its pixels hold.
+u32 Workbench::pen_depth(Bus& b) const {
+    const u32 bitmap = screen_ + ndk::sc_BitMap;
+    return graphics_->deep(bitmap) != nullptr ? 8 : b.r8(bitmap + ndk::bm_Depth);
+}
+
 bool Workbench::fit_gauge(DrawerWindow& w) {
     Bus b(*machine_);
-    const u32 depth = b.r8(screen_ + ndk::sc_BitMap + ndk::bm_Depth);
+    const u32 depth = pen_depth(b);
     if (!b.ok() || depth == 0 || depth > 8) {
         return false;
     }
@@ -2140,8 +2147,7 @@ void Workbench::load_picture(u32 which, const char* name) {
     }
     // The screen's pens nearest each colour of the picture.
     Bus b(*machine_);
-    const u32 screen_bitmap = screen_ + ndk::sc_BitMap;
-    const u32 depth = b.r8(screen_bitmap + ndk::bm_Depth);
+    const u32 depth = pen_depth(b);
     const u32 colormap = b.r32(screen_ + ndk::sc_ViewPort + ndk::vp_ColorMap);
     if (!b.ok() || depth == 0 || depth > 8) {
         return;

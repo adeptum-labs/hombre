@@ -23,6 +23,7 @@
 
 #include "libs/chrome.hpp"
 #include "libs/chrome_palette.hpp"
+#include "libs/display_modes.hpp"
 #include "libs/dos.hpp"
 #include "libs/exec.hpp"
 #include "libs/gadtools.hpp"
@@ -3397,7 +3398,33 @@ void the_root_window_has_a_zoom_gadget_only_when_it_is_not_a_backdrop() {
              WFLG_HASZOOM);
 }
 
+// On a 24-bit HOMBRE screen, whose BitMap says depth 24 but which has 256
+// pens, a volume window still gets its fuel gauge.
+void the_fuel_gauge_shows_on_a_24_bit_screen() {
+    constexpr u32 kUsed = 700;
+    Rig r(test_files(), gauge_disk("Second", kUsed), 1, 8);
+    display_modes::configure_hombre(1280, 800, 8u * 1024 * 1024);
+    constexpr u32 kTags = kData + 0x200;
+    r.put32(kTags, SA_DisplayID);
+    r.put32(kTags + 4, display_modes::hombre_id(0, 2));
+    r.put32(kTags + 8, 0);
+    const u32 deep = g_intuition.open_screen(0, kTags);
+    CHECK(deep != 0);
+    CHECK_EQ(r.get8(deep + sc_BitMap + bm_Depth), 24u);
+    g_intuition.set_default_screen(deep);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("Second"));
+    const u32 drawer = r.find_window("Second:");
+    CHECK(drawer != Workbench::kNoWindow);
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    CHECK(w.gauge != 0);
+    CHECK(w.gauge_image != 0);
+    CHECK(r.get16(w.gauge + gg_Height) > 0u);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
 int main() {
+    the_fuel_gauge_shows_on_a_24_bit_screen();
     resets_give_back_their_memory();
     the_backdrop_shows_a_wbpattern_picture();
     the_backdrop_shows_the_wbpattern_pattern();
