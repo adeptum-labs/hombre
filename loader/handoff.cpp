@@ -28,6 +28,7 @@
 #include "../common/paging.hpp"
 #include "../common/serial.hpp"
 #include "error_line.hpp"
+#include "gop_choice.hpp"
 
 namespace hombre {
 
@@ -90,6 +91,34 @@ bool same_guid(const EfiGuid& a, const EfiGuid& b) {
     return true;
 }
 
+bool usable_format(EfiPixelFormat format) {
+    return format == EfiPixelFormat::BlueGreenRedReserved8 ||
+           format == EfiPixelFormat::RedGreenBlueReserved8;
+}
+
+// Switches the GOP to its mode with the most pixels and a 32-bit
+// framebuffer, so the largest Hombre screen mode shows one to one. A mode
+// that cannot be queried counts as unusable; a failed switch keeps the
+// mode the firmware chose.
+void choose_largest_mode(EfiSystemTable* st, EfiGraphicsOutput* gop) {
+    constexpr u32 kMaxModes = 64;
+    GopModeSize sizes[kMaxModes]{};
+    const u32 count = gop->mode->max_mode < kMaxModes ? gop->mode->max_mode : kMaxModes;
+    for (u32 i = 0; i < count; ++i) {
+        usize size = 0;
+        EfiGraphicsModeInfo* info = nullptr;
+        if (gop->query_mode(gop, i, &size, &info) == efi_success && info != nullptr) {
+            sizes[i] = GopModeSize{info->horizontal_resolution, info->vertical_resolution,
+                                   usable_format(info->pixel_format)};
+            st->boot_services->free_pool(info);
+        }
+    }
+    const u32 best = best_gop_mode(sizes, count, gop->mode->mode);
+    if (best != gop->mode->mode) {
+        gop->set_mode(gop, best);
+    }
+}
+
 // A missing GOP, or one without a linear 32-bit framebuffer, leaves
 // fb.phys at 0.
 FramebufferInfo find_framebuffer(EfiSystemTable* st, u64& fb_bytes) {
@@ -105,6 +134,10 @@ FramebufferInfo find_framebuffer(EfiSystemTable* st, u64& fb_bytes) {
         return fb;
     }
 
+    choose_largest_mode(st, gop);
+    if (gop->mode->info == nullptr || gop->mode->frame_buffer_base == 0) {
+        return fb;
+    }
     const EfiGraphicsModeInfo& info = *gop->mode->info;
     switch (info.pixel_format) {
     case EfiPixelFormat::BlueGreenRedReserved8:

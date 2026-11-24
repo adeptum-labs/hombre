@@ -213,8 +213,9 @@ struct EfiGraphicsMode {
 };
 
 struct EfiGraphicsOutput {
-    void* query_mode;
-    void* set_mode;
+    EfiStatus (*query_mode)(EfiGraphicsOutput* self, u32 mode_number, usize* size_of_info,
+                            EfiGraphicsModeInfo** info);
+    EfiStatus (*set_mode)(EfiGraphicsOutput* self, u32 mode_number);
     void* blt;
     EfiGraphicsMode* mode;
 };
