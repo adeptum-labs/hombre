@@ -1809,6 +1809,140 @@ void a_slider_shows_what_its_display_function_makes_of_the_level() {
 
 // In a window the level is drawn again by GT_SetGadgetAttrs and by each
 // move of the knob, here a click on the track left of it.
+// A level too wide for the room its label leaves before the slider, as
+// ScreenMode's colours on a 24-bit mode, is shown in K or M when it is a
+// whole number of them, and leaves the label as it is.
+void a_level_too_wide_for_its_room_is_shown_shorter() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    const u32 rp = make_surface(r);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    // move.l 8(sp),d1; moveq #1,d0; lsl.l d1,d0; rts
+    const u32 code[] = {0x222F, 0x0008, 0x7001, 0xE3A8, 0x4E75};
+    for (u32 i = 0; i < 5; ++i) {
+        r.put16(kDispFunc + 2 * i, code[i]);
+    }
+    r.jit.flush();
+    r.str(kFormat, "%ld");
+    // Room for four characters after the label's text, as ScreenMode has.
+    r.str(kFileLabel, "Colors:    ");
+    u32 previous = context;
+    const auto slider = [&](i32 top, u32 depth) {
+        put_new_gadget(r, 140, top, 120, 10, kFileLabel, 1, 0, 0);
+        previous = create_gadget(
+            r, g, SLIDER_KIND, previous,
+            r.tags(kTags, {{GTSL_Min, 1}, {GTSL_Max, 24}, {GTSL_Level, depth},
+                           {GTSL_MaxLevelLen, 10}, {GTSL_LevelFormat, kFormat},
+                           {GTSL_DispFunc, kDispFunc}, {TAG_DONE, 0}}));
+        CHECK(previous != 0);
+        r.cpu().a[7] = kStack;
+        CHECK(g.render(0, rp, previous));
+        return previous;
+    };
+    slider(20, 8);
+    slider(40, 24);
+    slider(60, 16);
+    // The label reads the same over 256, 16777216 and 65536 colours.
+    const std::string label = pixels_of(r, rp, 0, 20, 103, 29);
+    CHECK(label.find_first_not_of('0') != std::string::npos);
+    CHECK(pixels_of(r, rp, 0, 40, 103, 49) == label);
+    CHECK(pixels_of(r, rp, 0, 60, 103, 69) == label);
+    // 16M and 64K take three characters, as 256 does, but other ones.
+    const std::string field = pixels_of(r, rp, 104, 20, 139, 29);
+    CHECK(pixels_of(r, rp, 104, 40, 139, 49) != field);
+    CHECK(pixels_of(r, rp, 104, 60, 139, 69) != field);
+    CHECK(pixels_of(r, rp, 104, 40, 139, 49) != pixels_of(r, rp, 104, 60, 139, 69));
+
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+}
+
+// A level moved from 4 to 16M in a window leaves nothing of the wider
+// level beside the shorter one.
+void a_shorter_level_clears_the_wider_one() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.intuition.set_gadget_renderer(&GadTools::render_gadget, &g);
+    r.intuition.set_gadget_prop_code(&GadTools::prop_gadget_moved);
+    r.intuition.set_gadget_wheel(&GadTools::wheel_gadget);
+    g.set_intuition(&r.intuition);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0);
+    CHECK(open_new_screen(r, kNewScreen) != 0);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    // move.l 8(sp),d1; moveq #1,d0; lsl.l d1,d0; rts
+    const u32 code[] = {0x222F, 0x0008, 0x7001, 0xE3A8, 0x4E75};
+    for (u32 i = 0; i < 5; ++i) {
+        r.put16(kDispFunc + 2 * i, code[i]);
+    }
+    r.jit.flush();
+    r.str(kFormat, "%ld");
+    r.str(kFileLabel, "Colors:    ");
+    u32 previous = context;
+    const auto slider = [&](i32 top, u32 depth) {
+        put_new_gadget(r, 140, top, 120, 10, kFileLabel, 1, 0, 0);
+        previous = create_gadget(
+            r, g, SLIDER_KIND, previous,
+            r.tags(kTags, {{GTSL_Min, 1}, {GTSL_Max, 24}, {GTSL_Level, depth},
+                           {GTSL_MaxLevelLen, 10}, {GTSL_LevelFormat, kFormat},
+                           {GTSL_DispFunc, kDispFunc}, {TAG_DONE, 0}}));
+        CHECK(previous != 0);
+        return previous;
+    };
+    slider(20, 24);
+    slider(40, 2);
+    for (u32 i = 0; i < NewWindow_SIZEOF; ++i) {
+        r.put8(kNewWindow + i, 0);
+    }
+    r.put16(kNewWindow + nw_LeftEdge, 50);
+    r.put16(kNewWindow + nw_TopEdge, 50);
+    r.put16(kNewWindow + nw_Width, 400);
+    r.put16(kNewWindow + nw_Height, 100);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE | WFLG_BORDERLESS);
+    r.put32(kNewWindow + nw_FirstGadget, context);
+    r.cpu().a[0] = kNewWindow;
+    r.cpu().a[7] = kStack;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    CHECK(window != 0);
+    const u32 wrp = r.get32(window + wd_RPort);
+    r.cpu().a[0] = window;
+    r.cpu().a[7] = kStack;
+    CHECK_EQ(gt_call(r, g, gadtools_lvo::GT_RefreshWindow), ExitReason::Halt);
+
+    r.intuition.pointer_event(50 + 200, 50 + 44, 0, 0, 0, true);
+    // The program reads its messages after each notch, and the level its
+    // display function makes is drawn each time: 512K among them, wider
+    // than 16M.
+    const u32 port = r.get32(window + wd_UserPort);
+    for (u32 i = 0; i < 22; ++i) {
+        r.cpu().a[7] = kStack;
+        r.intuition.wheel_event(1);
+        for (u32 n = 0; n < 4; ++n) {
+            r.cpu().a[0] = port;
+            r.cpu().a[7] = kStack;
+            const u32 msg = gt_result(r, g, gadtools_lvo::GT_GetIMsg);
+            if (msg == 0) {
+                break;
+            }
+            r.cpu().a[1] = msg;
+            r.cpu().a[7] = kStack;
+            gt_result(r, g, gadtools_lvo::GT_ReplyIMsg);
+        }
+    }
+    CHECK(pixels_of(r, wrp, 0, 40, 139, 49) == pixels_of(r, wrp, 0, 20, 139, 29));
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    r.intuition.set_gadget_prop_code(nullptr);
+    r.intuition.set_gadget_wheel(nullptr);
+}
+
 void a_slider_in_a_window_draws_its_level_again_when_it_changes() {
     constexpr u32 kLeft = 1;
     GfxRig r;
@@ -1973,6 +2107,8 @@ int main() {
     a_slider_draws_its_level_beside_its_box();
     a_slider_shows_what_its_display_function_makes_of_the_level();
     a_slider_in_a_window_draws_its_level_again_when_it_changes();
+    a_level_too_wide_for_its_room_is_shown_shorter();
+    a_shorter_level_clears_the_wider_one();
     list_views_lay_out_their_parts_and_show_the_selected_label();
     a_list_view_draws_its_rows_and_arrows();
     list_arrows_take_the_look_of_the_surface();

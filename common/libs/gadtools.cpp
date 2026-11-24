@@ -2266,6 +2266,44 @@ u32 GadTools::level_text(Bus& b, u32 gadget, i32 level, char* out, u32 capacity)
 // GTSL_MaxLevelLen characters beside its box. The field is cleared first,
 // except for PLACETEXT_IN, whose field is the box itself, which Intuition
 // has drawn again by the time the level is.
+namespace {
+
+// text, a whole number of length digits, as a number of M (1048576) or K
+// (1024) when it is a whole number of them: "16777216" becomes "16M".
+// The new length, or 0 when it has no shorter form.
+u32 shorter_level(char* text, u32 length, u32 capacity) {
+    u64 value = 0;
+    for (u32 i = 0; i < length; ++i) {
+        if (text[i] < '0' || text[i] > '9' || value > 0xFFFFFFFFu) {
+            return 0;
+        }
+        value = value * 10 + static_cast<u32>(text[i] - '0');
+    }
+    for (const auto& [unit, suffix] : {std::pair<u64, char>{1u << 20, 'M'},
+                                       std::pair<u64, char>{1u << 10, 'K'}}) {
+        if (length == 0 || value < unit || value % unit != 0) {
+            continue;
+        }
+        char digits[24];
+        u32 n = 0;
+        for (u64 v = value / unit; v != 0 || n == 0; v /= 10) {
+            digits[n++] = static_cast<char>('0' + v % 10);
+        }
+        if (n + 2 > capacity) {
+            return 0;
+        }
+        for (u32 i = 0; i < n; ++i) {
+            text[i] = digits[n - 1 - i];
+        }
+        text[n] = suffix;
+        text[n + 1] = '\0';
+        return n + 1;
+    }
+    return 0;
+}
+
+}
+
 void GadTools::draw_slider_level(Bus& b, u32 rp, u32 gadget) {
     if (rp == 0 || machine_ == nullptr || graphics_ == nullptr ||
         b.r32(gadget + gt_LevelFormat) == 0 || !b.ok()) {
@@ -2291,15 +2329,56 @@ void GadTools::draw_slider_level(Bus& b, u32 rp, u32 gadget) {
     // it so a fixed-width format such as "%3lu" covers the last level.
     const u8* chars = reinterpret_cast<const u8*>(text);
     const i32 limit = static_cast<i32>(b.r16(gadget + gt_LevelLen)) * cell.x_size;
-    const u32 shown = gfx.text_fit(font, chars, length, limit);
-    const i32 span = gfx.text_width(font, chars, shown);
+    u32 shown = gfx.text_fit(font, chars, length, limit);
+    i32 span = gfx.text_width(font, chars, shown);
     const i32 baseline = top + (height - cell.y_size) / 2 + cell.baseline;
     const Rect box{left, top, left + width - 1, top + height - 1};
-    const TextOrigin at = text_origin(place, span, box, width, baseline, cell);
+    TextOrigin at = text_origin(place, span, box, width, baseline, cell);
+    // To the left, the level's field ends where its text does and is as
+    // wide as GTSL_MaxLevelLen allows, short of the label's text.
+    const bool left_of = (place & 0x1F) == PLACETEXT_LEFT;
+    const i32 field_right = at.x + span;
+    i32 field_left = field_right - limit;
+    // A label to the left leaves the level the room after its text, spaces
+    // and all: a level wider than that, as millions of colours where a
+    // program planned for 256, is shown in K or M so the label stays clear.
+    const u32 label_place = b.r16(gadget + gt_Place);
+    if ((place & 0x1F) == PLACETEXT_LEFT && (label_place & 0x1F) == PLACETEXT_LEFT) {
+        char label[128];
+        u32 label_chars = read_label(b, b.r32(gadget + gt_Label),
+                                     static_cast<u8>(b.r8(gadget + gt_Underscore)), label,
+                                     sizeof label);
+        const u8* label_text = reinterpret_cast<const u8*>(label);
+        const i32 label_span = gfx.text_width(font, label_text, label_chars);
+        const i32 label_x =
+            text_origin(label_place, label_span, box, width, baseline, cell).x;
+        while (label_chars > 0 && label[label_chars - 1] == ' ') {
+            --label_chars;
+        }
+        const i32 text_end = label_x + gfx.text_width(font, label_text, label_chars);
+        const i32 room = field_right - text_end - cell.x_size;
+        if (label_chars > 0 && field_left < text_end) {
+            field_left = text_end;
+        }
+        if (label_chars > 0 && span > room) {
+            const u32 shorter = shorter_level(text, shown, sizeof text);
+            if (shorter != 0) {
+                shown = shorter;
+                span = gfx.text_width(font, chars, shown);
+                at = text_origin(place, span, box, width, baseline, cell);
+            }
+        }
+    }
     if (!b.ok() || shown == 0) {
         return;
     }
     const RastPortState keep(b, rp);
+    // What a wider level left of the text goes first.
+    if (left_of && field_left < at.x) {
+        const i32 cell_top = baseline - cell.baseline;
+        gfx.set_pens(rp, kBackgroundPen, 0, ndk::JAM1);
+        gfx.rect_fill(rp, field_left, cell_top, at.x - 1, cell_top + cell.y_size - 1);
+    }
     const bool inside = (place & PLACETEXT_IN) != 0;
     gfx.set_pens(rp, kTextPen, kBackgroundPen, inside ? ndk::JAM1 : ndk::JAM2);
     gfx.move(rp, at.x, at.y);
