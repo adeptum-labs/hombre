@@ -4646,6 +4646,17 @@ void a_custom_typed_gadget_that_is_no_object_draws_its_border() {
     CHECK_EQ(window_pixel(r, window, 25, 20), 3u);
 }
 
+void display_beep_returns() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.cpu().a[0] = screen;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DisplayBeep), ExitReason::Halt);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DisplayBeep), ExitReason::Halt);
+}
+
 void gadget_lvos_from_guest_calls() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -10523,6 +10534,7 @@ int main() {
     a_window_without_key_flags_gets_no_keys();
     mouse_buttons_carry_the_keyboard_qualifier();
     gadget_lvos_from_guest_calls();
+    display_beep_returns();
     a_custom_typed_gadget_that_is_no_object_draws_its_border();
     modify_prop_ignores_non_prop_gadget();
     modify_prop_keeps_knobhit_during_drag();

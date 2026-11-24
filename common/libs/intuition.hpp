@@ -73,6 +73,7 @@ constexpr u32 CloseWorkBench = 78;
 constexpr u32 ClearMenuStrip = 54;
 constexpr u32 CloseWindow = 72;
 constexpr u32 ItemAddress = 144;
+constexpr u32 DisplayBeep = 96;
 constexpr u32 ModifyIDCMP = 150;
 constexpr u32 ModifyProp = 156;
 constexpr u32 OffGadget = 174;

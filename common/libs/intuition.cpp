@@ -1523,6 +1523,10 @@ struct IntuitionNatives {
         of(ctx).refresh_window_frame(m.cpu.a[0]);
     }
 
+    // DisplayBeep(screen A0): there is no flash or sound to give, and the
+    // call only asks for attention, so it does nothing.
+    static void display_beep(void*, Machine&) {}
+
     static void window_to_back(void* ctx, Machine& m) { of(ctx).window_to_back(m.cpu.a[0]); }
 
     static void window_to_front(void* ctx, Machine& m) { of(ctx).window_to_front(m.cpu.a[0]); }
@@ -2074,6 +2078,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::RefreshGadgets, IntuitionNatives::refresh_gadgets, "RefreshGadgets"},
     {intuition_lvo::RemoveGadget, IntuitionNatives::remove_gadget, "RemoveGadget"},
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
+    {intuition_lvo::DisplayBeep, IntuitionNatives::display_beep, "DisplayBeep"},
     {intuition_lvo::ScreenToFront, IntuitionNatives::screen_to_front, "ScreenToFront"},
     {intuition_lvo::SetWindowTitles, IntuitionNatives::set_window_titles, "SetWindowTitles"},
     {intuition_lvo::RefreshWindowFrame, IntuitionNatives::refresh_window_frame,
