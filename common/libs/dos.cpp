@@ -9674,7 +9674,9 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
         b.w32(cli_at + cli_CurrentOutput, output);
         b.w32(cli_at + cli_DefaultStack, stack_bytes / 4);
         b.w32(cli_at + cli_StandardOutput, output);
-        b.w32(cli_at + cli_Module, 0);
+        // The command owns its code while cli_Module holds it, so a program
+        // can hand it to a process it starts by clearing the field.
+        b.w32(cli_at + cli_Module, spec.free_seglist ? spec.seglist : 0);
         p.command_name = command_name_at;
         p.prompt = prompt_at;
         p.set_name = set_name_at;
@@ -9698,6 +9700,7 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
     p.exit_code = 0;
     p.seglist = spec.seglist;
     p.free_seglist = spec.free_seglist;
+    p.first_link = spec.seglist != 0 ? b.r32(spec.seglist << 2) : 0;
     p.cli_number = cli;
     p.process_bytes = process_bytes;
     p.cli_bytes = spec.cli ? kCliBlockBytes : 0;
@@ -9866,7 +9869,24 @@ void Dos::process_ended(u32 task, bool self) {
     }
     DosOps::free_paths(*this, p);
     if (p.free_seglist && p.seglist != 0) {
-        DosOps::unload(*this, p.seglist);
+        // A command that put another seglist in cli_Module, or cut the link
+        // out of its first segment, keeps that code for the processes it
+        // started: only what cli_Module still holds is unloaded.
+        u32 module = p.seglist;
+        u32 link_now = p.first_link;
+        if (p.cli_bytes != 0) {
+            m_->mem.read32(p.cli + cli_Module, module);
+            m_->mem.read32(p.seglist << 2, link_now);
+            if (module != p.seglist || link_now != p.first_link) {
+                exec_->detach_tasks_of(p.process);
+            }
+            if (link_now != p.first_link && module == p.seglist) {
+                module = 0;
+            }
+        }
+        if (module != 0) {
+            DosOps::unload(*this, module);
+        }
     }
     if (p.cli_number != 0) {
         b.w32(task_array_at(p.cli_number), 0);

@@ -1082,6 +1082,7 @@ private:
         u32 exit_code;
         u32 seglist;        // the running seglist, when the context owns one
         bool free_seglist;
+        u32 first_link;     // the link out of the seglist's first segment at the start
         u32 cli_number;     // CLI number 1..kMaxProcs, 0 when the process has no CLI
         u32 process_bytes;  // bytes of the Process block, 0 when not owned
         u32 cli_bytes;      // bytes of the CLI block, 0 when not owned

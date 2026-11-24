@@ -8088,6 +8088,39 @@ void processes_leave_the_parents_output_open() {
     r.call(dos_lvo::UnLoadSeg, seglist);
 }
 
+// A command started with Run keeps its code while it is the owner in
+// cli_Module. One that cleared cli_Module has handed the code to a process
+// it started, which still runs it: the command's end leaves it loaded.
+void a_run_command_that_hands_over_its_code_leaves_it_loaded() {
+    Rig r;
+    use_noop_task_host();
+    const u32 tags = kData + 0x400;
+    r.put32(tags, SYS_Asynch);
+    r.put32(tags + 4, DOSTRUE);
+    r.put32(tags + 8, TAG_DONE);
+    r.put32(tags + 12, 0);
+
+    auto run_and_end = [&](bool hand_over) {
+        const u32 before = g_exec.free_bytes();
+        r.str(kData, "C:Hello");
+        CHECK_EQ(r.call(dos_lvo::SystemTagList, kData, tags), 0u);
+        const u32 async = r.call(dos_lvo::FindCliProc, 2);
+        CHECK(async != 0);
+        const u32 cli = r.get32(async + pr_CLI) << 2;
+        CHECK(r.get32(cli + cli_Module) != 0);
+        if (hand_over) {
+            r.put32(cli + cli_Module, 0);
+        }
+        r.cpu().a[1] = async;
+        CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+        return before;
+    };
+    const u32 before_kept = run_and_end(false);
+    CHECK_EQ(g_exec.free_bytes(), before_kept);
+    const u32 before_handed = run_and_end(true);
+    CHECK(g_exec.free_bytes() < before_handed);
+}
+
 void a_passed_handle_belongs_to_the_child() {
     std::vector<AdfFile> files = standard_files();
     files.push_back({"C/SpawnOwn", spawn_with_own_handle_command()});
@@ -8758,6 +8791,7 @@ int main() {
     processes_leave_the_parents_output_open();
     a_passed_handle_belongs_to_the_child();
     a_detaching_command_leaves_its_child_running();
+    a_run_command_that_hands_over_its_code_leaves_it_loaded();
     stale_handle_bptrs_are_rejected();
     a_shell_console_pair_serves_its_children();
     run_command_in_ends_the_shells_children();
