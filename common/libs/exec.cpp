@@ -3995,6 +3995,9 @@ void Exec::task_main(u32 id) {
         // Workbench's among them, see crashed children for themselves.
         const bool crashed = why != ExitReason::None && why != ExitReason::Halt &&
                              why != ExitReason::Returned && why != ExitReason::Break;
+        if (crashed) {
+            LogLine().text("exec: task ").text(name).text(" stopped at pc=").hex(m_->cpu.pc).send();
+        }
         const u32 boot_task = tasks_[0].task_addr;
         if (crashed && boot_task != 0 && tasks_[id].parent == boot_task) {
             signal_task(tasks_[id].parent, SIGBREAKF_CTRL_C);
