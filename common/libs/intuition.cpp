@@ -7839,6 +7839,11 @@ u32 Intuition::remove_glist(u32 window, u32 gadget, i32 count) {
                     drag_window_ = 0;
                     drag_gadget_ = 0;
                 }
+                if (custom_.gadget != 0 && custom_.window == window &&
+                    native::guest_address(*machine_, custom_.gadget) ==
+                        native::guest_address(*machine_, rem)) {
+                    drop_custom_gadget();
+                }
                 clear_gadget_hook(rem);
                 rem = b.r32(rem + ndk::gg_NextGadget);
                 if (!b.ok()) {

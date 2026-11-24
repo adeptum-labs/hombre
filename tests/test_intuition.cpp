@@ -8875,6 +8875,47 @@ void a_boopsi_gadget_draws_itself_and_takes_the_click() {
     CHECK(bo.free_class(cl));
 }
 
+// A gadget removed while the pointer holds it is let go: its release
+// reaches no one, as the gadget's memory may be in use again.
+void removing_the_active_custom_gadget_ends_its_input() {
+    GfxRig r;
+    put_dispatcher(r);
+    hombre::Boopsi& bo = r.intuition.boopsi();
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    const u32 cl = bo.make_class(0, 0, bo.gadget_class(), 0, 0);
+    r.put32(cl + h_Entry, kDispatcher);
+    const u32 tags = r.tags(kTagList, {{GA_Left, 20}, {GA_Top, 20}, {GA_Width, 40},
+                                       {GA_Height, 14}, {GA_RelVerify, 1}, {GA_Immediate, 1},
+                                       {TAG_DONE, 0}});
+    const u32 g = bo.new_object(cl, 0, tags);
+    CHECK(g != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_GADGETDOWN);
+    r.put32(kNewWindow + nw_FirstGadget, g);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    const u32 down = get_msg(r, port);
+    CHECK(down != 0);
+    reply_msg(r, down);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = g;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::RemoveGList), 0u);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    r.cpu().a[0] = window;
+    r.call(Base::Intuition, intuition_lvo::CloseWindow);
+    bo.dispose_object(g);
+    CHECK(bo.free_class(cl));
+}
+
 void a_boopsi_notify_posts_idcmpupdate() {
     GfxRig r;
     Boopsi& bo = r.intuition.boopsi();
@@ -10337,6 +10378,7 @@ int main() {
     a_class_in_68000_code_reaches_its_superclass();
     a_custom_gadget_with_a_hook_is_drawn_by_the_hook();
     a_boopsi_gadget_draws_itself_and_takes_the_click();
+    removing_the_active_custom_gadget_ends_its_input();
     a_boopsi_notify_posts_idcmpupdate();
     a_boopsi_notify_without_idcmpupdate_is_dropped();
     a_boopsi_notify_chains_through_an_object_target();
