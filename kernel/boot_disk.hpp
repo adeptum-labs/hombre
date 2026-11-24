@@ -29,6 +29,8 @@
 
 namespace hombre {
 
+class Dos;
+
 // Finds the boot drive on the PCI bus (the allocator and the MMIO mapper are
 // already running, see mem_init), reads the drive, unpacks it when it is a
 // DMS archive, mounts the Amiga volume, prints the root directory and
@@ -38,5 +40,11 @@ namespace hombre {
 // Call it after the loader's lower-half mapping is gone: it uses the direct
 // map only.
 void boot_disk_run(const BootInfo& info, PhysAllocator& pages, MmioMapper& mmio);
+
+// Looks at the floppy drives, at most once a second, and gives dos the disk
+// of a drive whose medium has changed since it was last read: a different
+// disk, none, or one that does not mount. Call it from the kernel's polling;
+// it does nothing before boot_disk_run has set the drives up.
+void boot_disk_poll_media(Dos& dos);
 
 }

@@ -217,16 +217,8 @@ bool VirtioBlk::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages)
 
     // The capacity is 64 bits wide but read as two halves, so it is read
     // again whenever the configuration generation moves in between.
-    volatile u32* config = reinterpret_cast<volatile u32*>(device);
-    bool stable = false;
-    for (u32 attempt = 0; attempt < kConfigReadAttempts && !stable; ++attempt) {
-        const u8 generation = common_->config_generation;
-        const u32 lo = config[0];
-        const u32 hi = config[1];
-        stable = generation == common_->config_generation;
-        capacity_ = (static_cast<u64>(hi) << 32) | lo;
-    }
-    if (!stable) {
+    config_ = reinterpret_cast<volatile u32*>(device);
+    if (!refresh_capacity()) {
         return fail(pages);
     }
 
@@ -234,6 +226,23 @@ bool VirtioBlk::init(PciAddress address, MmioMapper& mmio, PhysAllocator& pages)
     has_flush_ = (wanted & kVirtioBlkFeatureFlush) != 0;
     ready_ = true;
     return true;
+}
+
+bool VirtioBlk::refresh_capacity() {
+    if (config_ == nullptr) {
+        return false;
+    }
+    bool stable = false;
+    for (u32 attempt = 0; attempt < kConfigReadAttempts && !stable; ++attempt) {
+        const u8 generation = common_->config_generation;
+        const u32 lo = config_[0];
+        const u32 hi = config_[1];
+        stable = generation == common_->config_generation;
+        if (stable) {
+            capacity_ = (static_cast<u64>(hi) << 32) | lo;
+        }
+    }
+    return stable;
 }
 
 // Tells the device it failed, resets it so it stops using the queue, turns

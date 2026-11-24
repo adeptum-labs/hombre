@@ -355,6 +355,11 @@ public:
     // configuration at init.
     u64 sector_count() const { return capacity_; }
 
+    // Reads the size from the device configuration again, for a medium the
+    // host has changed under the device. True when it is a size the device
+    // gave twice the same; the size answered by sector_count is then new.
+    bool refresh_capacity();
+
     // Reads `sectors` sectors from `sector` on into physical memory at
     // dest_phys, in requests of at most 64 KiB. Returns false for an empty
     // range or one past the end of the drive, a destination at 0 or one
@@ -398,6 +403,7 @@ private:
     u8* request_ = nullptr;  // the request header, then the status byte
     u64 request_phys_ = 0;
     u64 capacity_ = 0;
+    volatile u32* config_ = nullptr;
     bool ready_ = false;
     bool wedged_ = false;
     bool read_only_ = false;

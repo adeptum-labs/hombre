@@ -23,6 +23,7 @@
 
 #include "boot_disk.hpp"
 #include "bochs_vga.hpp"
+#include "clock.hpp"
 #include "ahci.hpp"
 #include "disk.hpp"
 #include "hard_disks.hpp"
@@ -32,6 +33,7 @@
 
 #include "../common/amiga_fs.hpp"
 #include "../common/dms.hpp"
+#include "../common/libs/dos.hpp"
 #include "../common/printable.hpp"
 #include "../common/serial.hpp"
 #include "m68k_run.hpp"
@@ -382,6 +384,94 @@ bool same_address(PciAddress a, PciAddress b) {
 // needs them.
 constinit AdfVolume drive_volumes[kFloppyDrives]{};
 
+// --- floppy media ------------------------------------------------------------
+//
+// The host can put another disk in a floppy drive under a running system. A
+// drive's medium is told by a few of its sectors: the start, where a DMS
+// archive has its header and an ADF its boot block, and the root block of
+// an ADF, where its name and dates are.
+
+struct FloppyWatch {
+    bool active;
+    u64 signature;
+};
+
+constinit FloppyWatch floppy_watches[kFloppyDrives]{};
+PhysAllocator* watch_pages = nullptr;
+u64 watch_scratch = 0;  // a page the signature reads go to
+u64 watch_next_us = 0;
+constexpr u64 media_poll_us = 1000000;
+constexpr u64 media_signature_sectors[] = {0, 1, 2, 880, 881};
+
+// A hash of the drive's signature sectors and its size. False when a read
+// fails.
+bool floppy_signature(VirtioBlk& device, u64& out) {
+    u64 hash = 0xCBF29CE484222325ull ^ device.sector_count();
+    for (const u64 sector : media_signature_sectors) {
+        if (sector >= device.sector_count()) {
+            continue;
+        }
+        if (!device.read(sector, 1, watch_scratch)) {
+            return false;
+        }
+        const u8* data = watch_pages->to_ptr(watch_scratch);
+        for (u32 i = 0; i < kVirtioBlkSectorSize; ++i) {
+            hash = (hash ^ data[i]) * 0x100000001B3ull;
+        }
+    }
+    out = hash;
+    return true;
+}
+
+// Starts watching the drives whose device came up.
+void floppy_watch_start(PhysAllocator& phys_pages, const bool* present) {
+    watch_pages = &phys_pages;
+    watch_scratch = phys_pages.alloc_pages(1);
+    if (watch_scratch == 0) {
+        return;
+    }
+    for (u32 n = 0; n < kFloppyDrives; ++n) {
+        FloppyWatch& watch = floppy_watches[n];
+        watch = FloppyWatch{};
+        if (present[n] && drive_devices[n].sector_count() != 0 &&
+            floppy_signature(drive_devices[n], watch.signature)) {
+            watch.active = true;
+        }
+    }
+}
+
+// Reads the drive's new disk and gives it to dos, or takes the disk out when
+// the medium holds none dos can use.
+void floppy_reload(Dos& dos, u32 n) {
+    char prefix[] = "drive 0: ";
+    prefix[6] = static_cast<char>('0' + n);
+    Image drive;
+    Image image;
+    bool loaded = read_drive(*watch_pages, drive_devices[n], prefix, drive);
+    if (loaded) {
+        switch (detect_disk_format(drive.data, drive.bytes)) {
+        case DiskFormat::Dms:
+            loaded = unpack_dms(*watch_pages, drive, prefix, image);
+            break;
+        case DiskFormat::Adf:
+            serial::write(prefix);
+            serial::write("disk: ADF\n");
+            image = drive;
+            break;
+        case DiskFormat::Unknown:
+            serial::write(prefix);
+            serial::write("disk: unknown format\n");
+            loaded = false;
+            break;
+        }
+    }
+    if (loaded && mount_disk(image, prefix, drive_volumes[n])) {
+        dos.replace_disk(n, &drive_volumes[n]);
+    } else {
+        dos.replace_disk(n, nullptr);
+    }
+}
+
 }
 
 void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& mmio) {
@@ -516,8 +606,30 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
         drive.has_env = true;
         drive.unit = hard.unit;
     }
+    floppy_watch_start(phys_pages, present);
     bochs_vga_init(mmio);
     m68k_run_command(info, phys_pages, drives, "C:Version", "");
+}
+
+void boot_disk_poll_media(Dos& dos) {
+    if (watch_pages == nullptr || watch_scratch == 0) {
+        return;
+    }
+    const u64 now = clock_us();
+    if (now == 0 || now < watch_next_us) {
+        return;
+    }
+    watch_next_us = now + media_poll_us;
+    for (u32 n = 0; n < kFloppyDrives; ++n) {
+        FloppyWatch& watch = floppy_watches[n];
+        u64 signature = 0;
+        if (!watch.active || !drive_devices[n].refresh_capacity() ||
+            !floppy_signature(drive_devices[n], signature) || signature == watch.signature) {
+            continue;
+        }
+        watch.signature = signature;
+        floppy_reload(dos, n);
+    }
 }
 
 }

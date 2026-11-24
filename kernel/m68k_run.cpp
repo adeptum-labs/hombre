@@ -21,6 +21,7 @@
  * Contact: info@adeptum.se
  */
 
+#include "boot_disk.hpp"
 #include "m68k_run.hpp"
 #include "hda.hpp"
 #include "splash.hpp"
@@ -698,6 +699,7 @@ void task_host_poll(void*) {
     poll_keys();
     intuition.intui_ticks();
     pump_audio();
+    boot_disk_poll_media(dos);
 }
 
 bool hook_trampoline(void*) {
