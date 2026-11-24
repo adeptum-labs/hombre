@@ -121,6 +121,7 @@ constexpr u32 CopyMem = 624;
 constexpr u32 CopyMemQuick = 630;
 constexpr u32 CacheClearU = 636;
 constexpr u32 CacheClearE = 642;
+constexpr u32 CacheControl = 648;
 constexpr u32 CreateIORequest = 654;
 constexpr u32 DeleteIORequest = 660;
 constexpr u32 CreateMsgPort = 666;
@@ -706,6 +707,7 @@ private:
     static constexpr u32 kMaxPatches = 256;
     u32 patches_[kMaxPatches]{};  // targets SetFunction put in vectors
     u32 patch_count_ = 0;
+    u32 cache_bits_ = 0;  // what CacheControl was last given
     TaskHost task_host_{};
     struct DropHook {
         void (*fn)(void* ctx, u32 task) = nullptr;

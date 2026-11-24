@@ -453,6 +453,16 @@ struct ExecOps {
 
     static void cache_clear(void*, Machine& m) { m.jit->flush(); }
 
+    // CacheControl(bits D0, mask D1): the translations are the only cache,
+    // so the bits are only kept: the ones in mask become bits, and the old
+    // ones come back.
+    static void cache_control(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        const u32 old = e.cache_bits_;
+        e.cache_bits_ = (old & ~m.cpu.d[1]) | (m.cpu.d[0] & m.cpu.d[1]);
+        native::set_result(m, old);
+    }
+
     // --- lists -----------------------------------------------------------
 
     static void insert_node(void*, Machine& m) {
@@ -2731,6 +2741,7 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::CopyMemQuick, ExecOps::copy_mem, "CopyMemQuick"},
     {exec_lvo::CacheClearU, ExecOps::cache_clear, "CacheClearU"},
     {exec_lvo::CacheClearE, ExecOps::cache_clear, "CacheClearE"},
+    {exec_lvo::CacheControl, ExecOps::cache_control, "CacheControl"},
     {exec_lvo::CreateIORequest, ExecOps::create_io_request_lvo, "CreateIORequest"},
     {exec_lvo::DeleteIORequest, ExecOps::delete_io_request_lvo, "DeleteIORequest"},
     {exec_lvo::CreateMsgPort, ExecOps::create_msg_port_lvo, "CreateMsgPort"},
@@ -2756,6 +2767,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
     }
     region_count_ = 0;
     patch_count_ = 0;
+    cache_bits_ = 0;
     sig_alloc_ = 0x0000FFFF;
     signals_ = 0;
     port_signals_ = 0;

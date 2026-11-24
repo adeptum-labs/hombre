@@ -291,6 +291,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(exec_lvo::CopyMemQuick, 630u);
     CHECK_EQ(exec_lvo::CacheClearU, 636u);
     CHECK_EQ(exec_lvo::CacheClearE, 642u);
+    CHECK_EQ(exec_lvo::CacheControl, 648u);
     CHECK_EQ(exec_lvo::CreateMsgPort, 666u);
     CHECK_EQ(exec_lvo::DeleteMsgPort, 672u);
     CHECK_EQ(exec_lvo::AllocVec, 684u);
@@ -1816,6 +1817,23 @@ void cache_clear_flushes_the_translations() {
     CHECK_EQ(self_modifying_run(0x4E71, 0x4E71), 1u);  // NOPs: the stale block runs
     CHECK_EQ(self_modifying_run(0x4EAE, disp(exec_lvo::CacheClearU)), 2u);
     CHECK_EQ(self_modifying_run(0x4EAE, disp(exec_lvo::CacheClearE)), 2u);
+}
+
+// CacheControl keeps the cache bits a program sets and answers the old ones.
+void cache_control_keeps_the_bits() {
+    Rig r;
+    r.cpu().d[0] = 0x3;
+    r.cpu().d[1] = 0x3;
+    CHECK_EQ(r.exec(exec_lvo::CacheControl), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    r.cpu().d[0] = 0;
+    r.cpu().d[1] = 0x1;
+    CHECK_EQ(r.exec(exec_lvo::CacheControl), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 3u);
+    r.cpu().d[0] = 0;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::CacheControl), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 2u);
 }
 
 // --- RawDoFmt -----------------------------------------------------------
@@ -4537,6 +4555,7 @@ int main() {
     copy_mem();
     high_byte_pointers_reach_their_24_bit_alias();
     cache_clear_flushes_the_translations();
+    cache_control_keeps_the_bits();
     raw_do_fmt_into_a_buffer();
     raw_do_fmt_through_a_character_routine();
     raw_do_fmt_on_bad_input();
