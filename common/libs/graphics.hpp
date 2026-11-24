@@ -181,6 +181,9 @@ public:
     // palette's colours. False when the table is full.
     bool attach_deep(u32 bitmap, u32 pixels, u32 pixel_bytes, u32 bytes_per_row, u32 width,
                      u32 height, PixFmt fmt, const u32* palette, u32 colormap);
+    // Tells the display, or the damage sink, that rect of the bitmap
+    // changed; rect counts in the bitmap's own pixels.
+    void report_bitmap(u32 bitmap, const Rect& rect);
     // Forgets that bitmap is deep; its memory stays the caller's.
     void detach_deep(u32 bitmap) { deep_bitmaps_.remove(bitmap); }
     // The deep bitmap at that address, null for a planar one.

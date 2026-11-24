@@ -29,6 +29,7 @@
 #include "../common/dos_date.hpp"
 #include "../common/format.hpp"
 #include "../common/libs/audio_device.hpp"
+#include "../common/libs/cybergraphics.hpp"
 #include "../common/libs/display_modes.hpp"
 #include "../common/libs/scsi_device.hpp"
 #include "../common/libs/console_device.hpp"
@@ -106,6 +107,7 @@ constinit Exec exec{};
 constinit TimerDevice timer_device{};
 constinit AudioDevice audio_device{};
 constinit ScsiDevice scsi_device{};
+constinit CyberGraphics cybergraphics{};
 constinit TaskStacks task_stacks{};
 constinit Utility utility{};
 constinit Dos dos{};
@@ -233,7 +235,8 @@ void open_amiga_screen(const BootInfo& info) {
                                         : 0);
     if (!graphics.init(machine, exec, display) ||
         !intuition.init(machine, exec, graphics, display) ||
-        !gadtools.init(machine, exec, graphics)) {
+        !gadtools.init(machine, exec, graphics) ||
+        !cybergraphics.init(machine, exec, graphics)) {
         fail("graphics init failed");
         return;
     }

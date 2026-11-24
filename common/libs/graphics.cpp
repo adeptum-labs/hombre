@@ -2906,6 +2906,15 @@ u32 Graphics::alloc_deep_bitmap(u32 width, u32 height, PixFmt fmt) {
     return bitmap;
 }
 
+void Graphics::report_bitmap(u32 bitmap, const Rect& rect) {
+    if (machine_ == nullptr || bitmap == 0) {
+        return;
+    }
+    View v{};
+    v.bitmap_addr = bitmap;
+    report(display_, *machine_, v, rect);
+}
+
 void Graphics::free_deep_bitmap(u32 bitmap) {
     const DeepBitmap* deep = deep_bitmaps_.find(bitmap);
     if (deep == nullptr || exec_ == nullptr) {
