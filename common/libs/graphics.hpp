@@ -190,6 +190,8 @@ public:
     const DeepBitmap* deep(u32 bitmap) const { return deep_bitmaps_.find(bitmap); }
     DeepBitmap* deep(u32 bitmap) { return deep_bitmaps_.find(bitmap); }
     const DeepBitmaps& deep_bitmaps() const { return deep_bitmaps_; }
+    // Room left in the table of deep bitmaps.
+    u32 deep_room() const { return deep_bitmaps_.free_count(); }
 
     // The 256 colours of a ColorMap as 0x00RRGGBB, kept in step with it
     // from then on: what pens draw in on a deep bitmap of that screen. Up

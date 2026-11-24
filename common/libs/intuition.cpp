@@ -2589,6 +2589,12 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
                                       ndk::MEMF_CLEAR);
         allocated = fit.planes != 0;
     }
+    // A deep screen and its windows each take an entry in graphics' table
+    // of deep bitmaps; those already deep keep theirs.
+    if (allocated && surface.deep && !rec.surface.deep &&
+        graphics_->deep_room() < 2 + static_cast<u32>(fits.size())) {
+        allocated = false;
+    }
     if (!allocated) {
         fresh.release(*exec_);
         for (const WindowFit& fit : fits) {
@@ -2663,10 +2669,12 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
         wrec.max_w = fit.x.lim;
         wrec.max_h = fit.y.lim;
         if (surface.deep) {
-            graphics_->attach_deep(wrec.bitmap, wrec.planes, wrec.planes_bytes,
-                                   fit.bytes_per_row, static_cast<u32>(fit.x.lim),
-                                   static_cast<u32>(fit.y.lim), surface.fmt, rec.palette,
-                                   rec.colormap);
+            if (graphics_->attach_deep(wrec.bitmap, wrec.planes, wrec.planes_bytes,
+                                       fit.bytes_per_row, static_cast<u32>(fit.x.lim),
+                                       static_cast<u32>(fit.y.lim), surface.fmt, rec.palette,
+                                       rec.colormap)) {
+                graphics_->deep(wrec.bitmap)->layer = wrec.layer;
+            }
         } else {
             graphics_->detach_deep(wrec.bitmap);
             init_planar_bitmap(b, wrec.bitmap, fit.bytes_per_row, static_cast<u32>(fit.y.lim),
@@ -2941,6 +2949,10 @@ void Intuition::apply_palette_prefs(ScreenRecord& rec) {
         Bus b(*machine_);
         write_complement_mirrors(b, rec.depth, rec.colors, rec.low_colors);
     }
+    // A deep screen's pens draw in graphics' copy of the palette.
+    if (graphics_ != nullptr && rec.surface.deep) {
+        graphics_->palettes_changed();
+    }
     if (display_ == nullptr) {
         return;
     }
@@ -2996,6 +3008,9 @@ void Intuition::update_chrome_palette(u32 screen) {
         }
     }
     write_complement_mirrors(b, rec->depth, rec->colors, rec->low_colors);
+    if (rec->surface.deep) {
+        graphics_->palettes_changed();
+    }
     if (display_ != nullptr) {
         ++display_->palette_gen;
         if (display_->front_screen == rec->addr) {
@@ -3412,23 +3427,32 @@ void Intuition::ScreenBuffers::release(Exec& exec) {
     *this = ScreenBuffers{};
 }
 
-void Intuition::ScreenBuffers::attach(Bus& b, Graphics& graphics, u32 bitmap,
+bool Intuition::ScreenBuffers::attach(Bus& b, Graphics& graphics, u32 bitmap,
                                       u32 backdrop_bitmap, u32 map, u32 height, u32 depth,
                                       const u32* palette) const {
+    bool attached = true;
     if (surface.deep) {
-        graphics.attach_deep(bitmap, planes, plane_bytes, bytes_per_row, width, height,
-                             surface.fmt, palette, map);
-        graphics.attach_deep(backdrop_bitmap, backdrop_planes, plane_bytes, bytes_per_row, width,
-                             height, surface.fmt, palette, map);
+        attached = graphics.attach_deep(bitmap, planes, plane_bytes, bytes_per_row, width,
+                                        height, surface.fmt, palette, map) &&
+                   graphics.attach_deep(backdrop_bitmap, backdrop_planes, plane_bytes,
+                                        bytes_per_row, width, height, surface.fmt, palette, map);
+        if (!attached) {
+            graphics.detach_deep(bitmap);
+            graphics.detach_deep(backdrop_bitmap);
+        }
     } else {
         graphics.detach_deep(bitmap);
         graphics.detach_deep(backdrop_bitmap);
         init_planar_bitmap(b, bitmap, bytes_per_row, height, depth, planes);
         init_planar_bitmap(b, backdrop_bitmap, bytes_per_row, height, depth, backdrop_planes);
     }
+    if (!attached) {
+        return false;
+    }
     b.w16(map + ndk::cm_Count, 1u << depth);
     b.w32(map + ndk::cm_ColorTable, colors);
     b.w32(map + ndk::cm_LowColorBits, low_colors);
+    return true;
 }
 
 void Intuition::ScreenRecord::take(const ScreenBuffers& buffers) {
@@ -3584,7 +3608,11 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
 
     write_screen_size(b, screen, a.width, a.height, *mode);
     const u32* palette = surface.deep ? graphics_->palette_for(map) : nullptr;
-    buffers.attach(b, *graphics_, bitmap, backdrop_bitmap, map, a.height, a.depth, palette);
+    if (!buffers.attach(b, *graphics_, bitmap, backdrop_bitmap, map, a.height, a.depth,
+                        palette)) {
+        graphics_->release_palette(map);
+        return fail();
+    }
 
     graphics_->init_rastport(rp);
     b.w32(rp + ndk::rp_BitMap, bitmap);
@@ -4319,6 +4347,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
                                     srec->colormap)) {
             return fail();
         }
+        graphics_->deep(bitmap)->layer = layer;
     } else {
         init_planar_bitmap(b, bitmap, bpr, static_cast<u32>(max_h), depth, planes);
     }

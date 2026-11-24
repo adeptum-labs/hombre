@@ -35,6 +35,10 @@ using native::Bus;
 
 namespace {
 
+// The low word of a register: CyberGraphX takes coordinates, sizes, row
+// bytes and formats as UWORDs, and a caller may leave the upper word set.
+u32 word(u32 value) { return value & 0xFFFF; }
+
 using namespace cyber;
 using namespace ndk;
 
@@ -391,8 +395,8 @@ struct CyberGraphicsNatives {
     static void read_rgb_pixel(void*, Machine& m) {
         Bus b(m);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
-        const i32 x = static_cast<i32>(m.cpu.d[0]) + v.origin_x;
-        const i32 y = static_cast<i32>(m.cpu.d[1]) + v.origin_y;
+        const i32 x = static_cast<i32>(word(m.cpu.d[0])) + v.origin_x;
+        const i32 y = static_cast<i32>(word(m.cpu.d[1])) + v.origin_y;
         if (!v.ok || !inside(b, v.bitmap, v.clip, x, y)) {
             native::set_result(m, kAllOnes);
             return;
@@ -404,8 +408,8 @@ struct CyberGraphicsNatives {
         CyberGraphics& c = of(ctx);
         Bus b(m);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
-        const i32 x = static_cast<i32>(m.cpu.d[0]) + v.origin_x;
-        const i32 y = static_cast<i32>(m.cpu.d[1]) + v.origin_y;
+        const i32 x = static_cast<i32>(word(m.cpu.d[0])) + v.origin_x;
+        const i32 y = static_cast<i32>(word(m.cpu.d[1])) + v.origin_y;
         if (v.ok && v.bitmap.deep && inside(b, v.bitmap, v.clip, x, y)) {
             chunky::write_value(b, v.bitmap, static_cast<u32>(x), static_cast<u32>(y),
                                 chunky::rgb_value(v.bitmap, m.cpu.d[2]));
@@ -420,16 +424,16 @@ struct CyberGraphicsNatives {
         CyberGraphics& c = of(ctx);
         Bus b(m);
         const u32 source = m.cpu.a[0];
-        const u32 source_x = m.cpu.d[0];
-        const u32 source_y = m.cpu.d[1];
-        const u32 modulo = m.cpu.d[2];
-        const u32 size_x = m.cpu.d[5];
-        const u32 size_y = m.cpu.d[6];
-        const u32 format = m.cpu.d[7];
+        const u32 source_x = word(m.cpu.d[0]);
+        const u32 source_y = word(m.cpu.d[1]);
+        const u32 modulo = word(m.cpu.d[2]);
+        const u32 size_x = word(m.cpu.d[5]);
+        const u32 size_y = word(m.cpu.d[6]);
+        const u32 format = word(m.cpu.d[7]);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
         const u32 bpp = array_bytes(format, v.bitmap);
-        const i32 dest_x = static_cast<i32>(m.cpu.d[3]) + v.origin_x;
-        const i32 dest_y = static_cast<i32>(m.cpu.d[4]) + v.origin_y;
+        const i32 dest_x = static_cast<i32>(word(m.cpu.d[3])) + v.origin_x;
+        const i32 dest_y = static_cast<i32>(word(m.cpu.d[4])) + v.origin_y;
         if (source == 0 || !v.ok || bpp == 0) {
             native::set_result(m, 0);
             return;
@@ -463,16 +467,16 @@ struct CyberGraphicsNatives {
     static void read_pixel_array(void*, Machine& m) {
         Bus b(m);
         const u32 dest = m.cpu.a[0];
-        const u32 dest_x = m.cpu.d[0];
-        const u32 dest_y = m.cpu.d[1];
-        const u32 modulo = m.cpu.d[2];
-        const u32 size_x = m.cpu.d[5];
-        const u32 size_y = m.cpu.d[6];
-        const u32 format = m.cpu.d[7];
+        const u32 dest_x = word(m.cpu.d[0]);
+        const u32 dest_y = word(m.cpu.d[1]);
+        const u32 modulo = word(m.cpu.d[2]);
+        const u32 size_x = word(m.cpu.d[5]);
+        const u32 size_y = word(m.cpu.d[6]);
+        const u32 format = word(m.cpu.d[7]);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
         const u32 bpp = array_bytes(format, v.bitmap);
-        const i32 source_x = static_cast<i32>(m.cpu.d[3]) + v.origin_x;
-        const i32 source_y = static_cast<i32>(m.cpu.d[4]) + v.origin_y;
+        const i32 source_x = static_cast<i32>(word(m.cpu.d[3])) + v.origin_x;
+        const i32 source_y = static_cast<i32>(word(m.cpu.d[4])) + v.origin_y;
         if (dest == 0 || !v.ok || bpp == 0) {
             native::set_result(m, 0);
             return;
@@ -504,16 +508,16 @@ struct CyberGraphicsNatives {
         CyberGraphics& c = of(ctx);
         Bus b(m);
         const u32 source = m.cpu.a[0];
-        const u32 source_x = m.cpu.d[0];
-        const u32 source_y = m.cpu.d[1];
-        const u32 modulo = m.cpu.d[2];
+        const u32 source_x = word(m.cpu.d[0]);
+        const u32 source_y = word(m.cpu.d[1]);
+        const u32 modulo = word(m.cpu.d[2]);
         const u32 table = m.cpu.a[2];
-        const u32 size_x = m.cpu.d[5];
-        const u32 size_y = m.cpu.d[6];
-        const u32 format = m.cpu.d[7];
+        const u32 size_x = word(m.cpu.d[5]);
+        const u32 size_y = word(m.cpu.d[6]);
+        const u32 format = word(m.cpu.d[7]);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
-        const i32 dest_x = static_cast<i32>(m.cpu.d[3]) + v.origin_x;
-        const i32 dest_y = static_cast<i32>(m.cpu.d[4]) + v.origin_y;
+        const i32 dest_x = static_cast<i32>(word(m.cpu.d[3])) + v.origin_x;
+        const i32 dest_y = static_cast<i32>(word(m.cpu.d[4])) + v.origin_y;
         if (source == 0 || table == 0 || format != CTABFMT_XRGB8 || !v.ok) {
             native::set_result(m, 0);
             return;
@@ -548,16 +552,16 @@ struct CyberGraphicsNatives {
         CyberGraphics& c = of(ctx);
         Bus b(m);
         const u32 source = m.cpu.a[0];
-        const u32 source_w = m.cpu.d[0];
-        const u32 source_h = m.cpu.d[1];
-        const u32 modulo = m.cpu.d[2];
-        const u32 dest_w = m.cpu.d[5];
-        const u32 dest_h = m.cpu.d[6];
-        const u32 format = m.cpu.d[7];
+        const u32 source_w = word(m.cpu.d[0]);
+        const u32 source_h = word(m.cpu.d[1]);
+        const u32 modulo = word(m.cpu.d[2]);
+        const u32 dest_w = word(m.cpu.d[5]);
+        const u32 dest_h = word(m.cpu.d[6]);
+        const u32 format = word(m.cpu.d[7]);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
         const u32 bpp = array_bytes(format, v.bitmap);
-        const i32 dest_x = static_cast<i32>(m.cpu.d[3]) + v.origin_x;
-        const i32 dest_y = static_cast<i32>(m.cpu.d[4]) + v.origin_y;
+        const i32 dest_x = static_cast<i32>(word(m.cpu.d[3])) + v.origin_x;
+        const i32 dest_y = static_cast<i32>(word(m.cpu.d[4])) + v.origin_y;
         if (source == 0 || !v.ok || bpp == 0 || source_w == 0 || source_h == 0 ||
             dest_w == 0 || dest_h == 0) {
             native::set_result(m, 0);
@@ -593,13 +597,13 @@ struct CyberGraphicsNatives {
     static void move_pixel_array(void* ctx, Machine& m) {
         CyberGraphics& c = of(ctx);
         Bus b(m);
-        const u32 size_x = m.cpu.d[4];
-        const u32 size_y = m.cpu.d[5];
+        const u32 size_x = word(m.cpu.d[4]);
+        const u32 size_y = word(m.cpu.d[5]);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
-        const i32 source_x = static_cast<i32>(m.cpu.d[0]) + v.origin_x;
-        const i32 source_y = static_cast<i32>(m.cpu.d[1]) + v.origin_y;
-        const i32 dest_x = static_cast<i32>(m.cpu.d[2]) + v.origin_x;
-        const i32 dest_y = static_cast<i32>(m.cpu.d[3]) + v.origin_y;
+        const i32 source_x = static_cast<i32>(word(m.cpu.d[0])) + v.origin_x;
+        const i32 source_y = static_cast<i32>(word(m.cpu.d[1])) + v.origin_y;
+        const i32 dest_x = static_cast<i32>(word(m.cpu.d[2])) + v.origin_x;
+        const i32 dest_y = static_cast<i32>(word(m.cpu.d[3])) + v.origin_y;
         if (!v.ok) {
             native::set_result(m, 0);
             return;
@@ -641,10 +645,10 @@ struct CyberGraphicsNatives {
         CyberGraphics& c = of(ctx);
         Bus b(m);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
-        const i32 x0 = static_cast<i32>(m.cpu.d[0]) + v.origin_x;
-        const i32 y0 = static_cast<i32>(m.cpu.d[1]) + v.origin_y;
-        const u32 width = m.cpu.d[2];
-        const u32 height = m.cpu.d[3];
+        const i32 x0 = static_cast<i32>(word(m.cpu.d[0])) + v.origin_x;
+        const i32 y0 = static_cast<i32>(word(m.cpu.d[1])) + v.origin_y;
+        const u32 width = word(m.cpu.d[2]);
+        const u32 height = word(m.cpu.d[3]);
         if (!v.ok) {
             native::set_result(m, 0);
             return;
@@ -684,10 +688,10 @@ struct CyberGraphicsNatives {
         CyberGraphics& c = of(ctx);
         Bus b(m);
         const raster::RastPortView v = raster::load_rastport(b, m.cpu.a[1]);
-        const i32 x0 = static_cast<i32>(m.cpu.d[0]) + v.origin_x;
-        const i32 y0 = static_cast<i32>(m.cpu.d[1]) + v.origin_y;
-        const u32 width = m.cpu.d[2];
-        const u32 height = m.cpu.d[3];
+        const i32 x0 = static_cast<i32>(word(m.cpu.d[0])) + v.origin_x;
+        const i32 y0 = static_cast<i32>(word(m.cpu.d[1])) + v.origin_y;
+        const u32 width = word(m.cpu.d[2]);
+        const u32 height = word(m.cpu.d[3]);
         const u32 argb = m.cpu.d[4];
         if (!v.ok) {
             native::set_result(m, 0);
@@ -735,6 +739,25 @@ struct CyberGraphicsNatives {
             native::set_result(m, 0);
             return;
         }
+        // A window's bitmap holds the window only, but a program locks it as
+        // the screen's, as on a graphics card, and writes at the window's
+        // place on the screen. The base moves back by that place, so those
+        // writes land in the window's own pixels, and the size reaches to
+        // the window's far edges.
+        u32 base = deep->pixels;
+        u32 width = deep->width;
+        u32 height = deep->height;
+        if (deep->layer != 0) {
+            using i16 = __INT16_TYPE__;
+            const i32 min_x = static_cast<i16>(b.r16(deep->layer + ndk::ly_MinX));
+            const i32 min_y = static_cast<i16>(b.r16(deep->layer + ndk::ly_MinY));
+            if (b.ok() && min_x >= 0 && min_y >= 0) {
+                base -= static_cast<u32>(min_y) * deep->bytes_per_row +
+                        static_cast<u32>(min_x) * bytes_per_pixel(deep->fmt);
+                width += static_cast<u32>(min_x);
+                height += static_cast<u32>(min_y);
+            }
+        }
         u32 item = m.cpu.a[1];
         u32 budget = tags::kMaxTagItems;
         while (const u32 at = tags::next(b, item, budget)) {
@@ -742,10 +765,10 @@ struct CyberGraphicsNatives {
             u32 value = 0;
             switch (tag) {
             case LBMI_WIDTH:
-                value = deep->width;
+                value = width;
                 break;
             case LBMI_HEIGHT:
-                value = deep->height;
+                value = height;
                 break;
             case LBMI_DEPTH:
                 value = depth_of(deep->fmt);
@@ -760,7 +783,7 @@ struct CyberGraphicsNatives {
                 value = deep->bytes_per_row;
                 break;
             case LBMI_BASEADDRESS:
-                value = deep->pixels;
+                value = base;
                 break;
             default:
                 continue;

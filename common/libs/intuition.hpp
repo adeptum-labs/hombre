@@ -513,7 +513,8 @@ private:
         void release(Exec& exec);
         // Points the screen's BitMap, its backdrop's and its ColorMap at the
         // buffers; deep BitMaps join graphics' table with the palette.
-        void attach(native::Bus& b, Graphics& graphics, u32 bitmap, u32 backdrop_bitmap, u32 map,
+        // False when graphics' table of deep bitmaps has no room for them.
+        bool attach(native::Bus& b, Graphics& graphics, u32 bitmap, u32 backdrop_bitmap, u32 map,
                     u32 height, u32 depth, const u32* palette) const;
     };
 

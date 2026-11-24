@@ -23,6 +23,7 @@
 
 
 #include "gfx_rig.hpp"
+#include "libs/cybergraphics.hpp"
 #include "libs/display_modes.hpp"
 
 using namespace gfx_test;
@@ -258,6 +259,84 @@ void workbench_reopens_amiga_hombre_amiga() {
     display_modes::configure_hombre(0, 0, 0);
 }
 
+// Palette prefs IPrefs sends reach what pens draw on a 24-bit screen.
+void palette_prefs_reach_a_deep_screen() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 screen = open_screen(r, k800x24);
+    r.intuition.set_default_screen(screen);
+    constexpr u32 kPrefs = kData + 0x700;
+    r.put16(kPrefs, 2);
+    r.put16(kPrefs + 2, 0xFFFF);
+    r.put16(kPrefs + 4, 0);
+    r.put16(kPrefs + 6, 0);
+    r.put16(kPrefs + 8, 0xFFFF);
+    set_iprefs(r, kPrefs, 10, 8);
+    const u32 rp = screen + ndk::sc_RastPort;
+    r.graphics.set_pens(rp, 2, 0, ndk::JAM1);
+    r.graphics.rect_fill(rp, 0, 100, 0, 100);
+    CHECK_EQ(value_at(r, screen + ndk::sc_BitMap, 0, 100) & 0xFFFFFF, 0xFF0000u);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+// With the table of deep bitmaps full, a deep screen cannot open: 0, not a
+// screen with a BitMap nothing draws into.
+void open_screen_fails_when_the_deep_table_is_full() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    std::vector<u32> taken;
+    for (u32 i = 0; i < hombre::DeepBitmaps::kCapacity; ++i) {
+        const u32 bm = r.graphics.alloc_deep_bitmap(1, 1, PixFmt::Lut8);
+        if (bm == 0) {
+            break;
+        }
+        taken.push_back(bm);
+    }
+    CHECK_EQ(r.graphics.alloc_deep_bitmap(1, 1, PixFmt::Lut8), 0u);
+    const u32 fast = r.exec.free_bytes(ndk::MEMF_FAST);
+    CHECK_EQ(open_screen(r, k800x24), 0u);
+    CHECK_EQ(r.exec.free_bytes(ndk::MEMF_FAST), fast);
+    r.graphics.free_deep_bitmap(taken.back());
+    r.graphics.free_deep_bitmap(taken[0]);
+    CHECK(open_screen(r, k800x24) != 0);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+// A program that locks its window's bitmap and writes at the window's place
+// on the screen, as on a graphics card, hits the window's own pixels.
+void lock_on_a_window_bitmap_takes_screen_coordinates() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    hombre::CyberGraphics cgx;
+    CHECK(cgx.init(r.machine, r.exec, r.graphics));
+    const u32 screen = open_screen(r, k800x24);
+    const u32 window = open_window(r, screen, 300, 200, 200, 120);
+    const u32 bitmap = r.get32(r.get32(window + ndk::wd_RPort) + ndk::rp_BitMap);
+    constexpr u32 kLockTags = kData + 0x800;
+    constexpr u32 kOut = kData + 0x900;
+    r.tags(kLockTags, {{0x84001007, kOut}, {0x84001006, kOut + 4}, {0x84001001, kOut + 8},
+                       {0, 0}});
+    r.put16(kCall, 0x4EAE);
+    r.put16(kCall + 2, static_cast<u16>(0x10000 - 168));
+    r.put16(kCall + 4, 0x4EF8);
+    r.put16(kCall + 6, 0x0400);
+    r.jit.flush();
+    r.machine.cpu.a[0] = bitmap;
+    r.machine.cpu.a[1] = kLockTags;
+    r.machine.cpu.a[6] = cgx.base();
+    r.machine.cpu.a[7] = kStack;
+    r.machine.cpu.pc = kCall;
+    CHECK(r.jit.run(1000000) == ExitReason::Halt);
+    CHECK(r.machine.cpu.d[0] != 0);
+    const u32 base = r.get32(kOut);
+    const u32 row = r.get32(kOut + 4);
+    CHECK(r.get32(kOut + 8) >= 500u);
+    // Pixel 5,5 of the window is screen pixel 305,205.
+    const hombre::DeepBitmap* deep = r.graphics.deep(bitmap);
+    CHECK_EQ(base + 205 * row + 305 * 4, deep->pixels + 5 * deep->bytes_per_row + 5 * 4);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
 }
 
 int main() {
@@ -270,5 +349,8 @@ int main() {
     requester_on_deep_screen_restores_what_it_covered();
     shadow_on_argb32_screen_darkens_the_colour();
     workbench_reopens_amiga_hombre_amiga();
+    palette_prefs_reach_a_deep_screen();
+    open_screen_fails_when_the_deep_table_is_full();
+    lock_on_a_window_bitmap_takes_screen_coordinates();
     return check::finish("test_intuition_deep");
 }

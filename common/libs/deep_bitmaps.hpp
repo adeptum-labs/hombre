@@ -48,6 +48,9 @@ struct DeepBitmap {
     // The 256 colours its pens draw in, as 0x00RRGGBB: the screen's, shared
     // by its windows. Null for the default palette.
     const u32* palette = nullptr;
+    // For a window's bitmap, the window's Layer: its bounds say where the
+    // bitmap's first pixel sits on the screen. 0 for any other bitmap.
+    u32 layer = 0;
 };
 
 // The bytes of a row and of the whole of a deep bitmap of width by height
@@ -69,7 +72,7 @@ inline bool deep_size(u32 width, u32 height, PixFmt fmt, u32& bytes_per_row, u32
 
 class DeepBitmaps {
 public:
-    static constexpr u32 kCapacity = 256;
+    static constexpr u32 kCapacity = 1024;
 
     bool add(const DeepBitmap& bitmap) {
         for (DeepBitmap& slot : slots_) {
@@ -95,6 +98,14 @@ public:
 
     DeepBitmap* find(u32 bitmap) {
         return const_cast<DeepBitmap*>(static_cast<const DeepBitmaps&>(*this).find(bitmap));
+    }
+
+    u32 free_count() const {
+        u32 count = 0;
+        for (const DeepBitmap& slot : slots_) {
+            count += slot.bitmap == 0 ? 1 : 0;
+        }
+        return count;
     }
 
     void remove(u32 bitmap) {

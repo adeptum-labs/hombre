@@ -485,6 +485,13 @@ void read_write_rgb_pixel() {
     r.cpu().d[0] = 5;
     r.cpu().d[1] = 2;
     CHECK_EQ(result_cyber(r, c, lvo::ReadRGBPixel), 0x00123456u);
+    // The coordinates are words: a caller may leave junk in the upper half.
+    r.cpu().a[1] = kRp;
+    r.cpu().d[0] = 0xABCD0006;
+    r.cpu().d[1] = 0x12340002;
+    r.cpu().d[2] = 0x00654321;
+    CHECK_EQ(result_cyber(r, c, lvo::WriteRGBPixel), 0u);
+    CHECK_EQ(value_at(r, argb, 6, 2), 0xFF654321u);
     r.cpu().a[1] = kRp;
     r.cpu().d[0] = 8;
     r.cpu().d[1] = 2;
