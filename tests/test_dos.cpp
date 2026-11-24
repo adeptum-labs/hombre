@@ -4800,6 +4800,16 @@ void dopkt_disk_info_and_unknown_action() {
     CHECK_EQ(r.get32(packet + dp_Port), reply);
     CHECK_EQ(r.call(dos_lvo::WaitPkt), packet);
 
+    // A packet put straight to the file system port with PutMsg is done
+    // the same way and comes back to the message's reply port.
+    r.put32(packet + dp_Res1, 0);
+    r.put32(packet + dp_Type, ACTION_IS_FILESYSTEM);
+    r.put32(sp + mn_ReplyPort, reply);
+    r.cpu().a[0] = port;
+    exec_call(r, exec_lvo::PutMsg, 0, 0, sp);
+    CHECK_EQ(r.get32(packet + dp_Res1), DOSTRUE);
+    CHECK_EQ(r.call(dos_lvo::WaitPkt), packet);
+
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, parent), DOSTRUE);
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, dup), DOSTRUE);
     CHECK_EQ(r.call(dos_lvo::DoPkt, port, ACTION_FREE_LOCK, sub), DOSTRUE);

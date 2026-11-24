@@ -7768,11 +7768,12 @@ struct DosOps {
     // done at once, as DoPkt does it, its results go in dp_Res1 and
     // dp_Res2, and its message comes back to the reply port for WaitPkt.
     static void send_pkt(void* ctx, Machine& m) {
-        Dos& d = of(ctx);
+        run_packet(of(ctx), m, m.cpu.d[1], m.cpu.d[2], m.cpu.d[3]);
+    }
+
+    // Does a packet at once and sends its message back to the reply port.
+    static void run_packet(Dos& d, Machine& m, u32 packet, u32 port, u32 reply) {
         Bus b(m);
-        const u32 packet = m.cpu.d[1];
-        const u32 port = m.cpu.d[2];
-        const u32 reply = m.cpu.d[3];
         const u32 message = b.r32(packet + dp_Link);
         u32 saved[8];
         for (u32 i = 0; i < 8; ++i) {
@@ -7787,7 +7788,7 @@ struct DosOps {
         if (!b.ok()) {
             return;
         }
-        do_pkt(ctx, m);
+        do_pkt(&d, m);
         const u32 res1 = m.cpu.d[0];
         const u32 res2 = b.r32(d.cur().process + pr_Result2);
         for (u32 i = 0; i < 8; ++i) {
@@ -7800,6 +7801,24 @@ struct DosOps {
         if (b.ok() && message != 0) {
             d.exec_->reply_message(message);
         }
+    }
+
+    // A packet put straight to a file system port with PutMsg is done as
+    // SendPkt does it, so its reply comes back to the sender's port.
+    static bool take_message(void* ctx, u32 port, u32 message) {
+        Dos& d = of(ctx);
+        u8 vol = 0;
+        if (d.m_ == nullptr || !volume_of_port(d, port, vol)) {
+            return false;
+        }
+        Bus b(*d.m_);
+        const u32 packet = b.r32(message + LN_NAME);
+        const u32 reply = b.r32(message + mn_ReplyPort);
+        if (packet == 0 || !b.ok()) {
+            return false;
+        }
+        run_packet(d, *d.m_, packet, port, reply);
+        return true;
     }
 
     // WaitPkt: the packet of the next message at the process's port.
@@ -9855,6 +9874,7 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
         return false;
     }
     m_ = &m;
+    exec.set_message_hook(MessageHook{&DosOps::take_message, this});
     root_ = block_ + kRootAt;
     for (u32 i = 0; i < kMaxDrives; ++i) {
         volume_node_[i] = block_ + kVolumeAt + i * kVolumeBytes;

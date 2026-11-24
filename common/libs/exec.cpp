@@ -1304,6 +1304,9 @@ struct ExecOps {
             fault_null(b);
             return;
         }
+        if (e.message_hook_.take != nullptr && e.message_hook_.take(e.message_hook_.ctx, port, message)) {
+            return;
+        }
         queue_message(e, b, port, message, NT_MESSAGE);
     }
 

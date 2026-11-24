@@ -385,6 +385,13 @@ struct IdleHook {
     void* ctx;
 };
 
+// Called by PutMsg before it queues a message. True means the host took
+// the message, as a file system handler takes a DOS packet.
+struct MessageHook {
+    bool (*take)(void* ctx, u32 port, u32 message);
+    void* ctx;
+};
+
 class Exec {
 public:
     // Builds ExecBase and exec's memory list in guest memory, stores the
@@ -446,6 +453,9 @@ public:
     // Wait and WaitPort call this while no wanted signal is pending. It may
     // be set before init and is kept across it.
     void set_idle_hook(const IdleHook& hook) { idle_ = hook; }
+
+    // PutMsg offers each message to this hook first. Kept across init.
+    void set_message_hook(const MessageHook& hook) { message_hook_ = hook; }
 
     // Supplies the host context-switch and timer callbacks. Kept across init.
     void set_task_host(const TaskHost& host) { task_host_ = host; }
@@ -689,6 +699,7 @@ private:
     u32 task_exit_stub_ = 0;
     SegmentLoader loader_{nullptr, nullptr};
     IdleHook idle_{nullptr, nullptr};
+    MessageHook message_hook_{nullptr, nullptr};
     TaskHost task_host_{};
     struct DropHook {
         void (*fn)(void* ctx, u32 task) = nullptr;
