@@ -70,6 +70,15 @@ u32 pack_point(i32 x, i32 y) {
 
 namespace {
 
+// The IntuitionBase past the Library node: ViewLord (a View, 18 bytes),
+// ActiveWindow, ActiveScreen, FirstScreen, Flags, MouseY, MouseX, Seconds
+// and Micros.
+constexpr u32 kViewLordAt = 34;
+constexpr u32 kActiveWindowAt = 52;
+constexpr u32 kActiveScreenAt = 56;
+constexpr u32 kFirstScreenAt = 60;
+constexpr u32 kIntuitionBaseBytes = 80;
+
 constexpr char kIntuitionName[] = "intuition.library";
 
 // struct IFontPrefs, as IPrefs sends it: a TextAttr whose name pointer
@@ -1169,7 +1178,10 @@ struct IntuitionNatives {
 
     static void screen_to_front(void* ctx, Machine& m) { of(ctx).screen_to_front(m.cpu.a[0]); }
 
-    static void lock_i_base(void*, Machine& m) { native::set_result(m, 0); }
+    static void lock_i_base(void* ctx, Machine& m) {
+        of(ctx).sync_base();
+        native::set_result(m, 0);
+    }
 
     static void unlock_i_base(void*, Machine&) {}
 
@@ -2242,7 +2254,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
         return false;
     }
     const u32 base = exec.make_native_library(kIntuitionName, kHombreLibVersion, vectors_, kVectors,
-                                              this);
+                                              this, kIntuitionBaseBytes);
     if (base == 0) {
         exec.delete_port(reply_port);
         return false;
@@ -2257,6 +2269,28 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     boopsi_.set_sys_image_renderer(draw_sys_image, this);
     base_ = base;
     return true;
+}
+
+// The fields of the IntuitionBase past the Library node: ViewLord (a View)
+// at 34, then ActiveWindow, ActiveScreen and FirstScreen.
+void Intuition::sync_base() {
+    if (machine_ == nullptr || base_ == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    u32 active_screen = front_;
+    if (active_window_ != 0 && window_open(active_window_)) {
+        const u32 screen = b.r32(active_window_ + ndk::wd_WScreen);
+        if (b.ok() && screen != 0) {
+            active_screen = screen;
+        }
+    }
+    b.w32(base_ + kViewLordAt, front_ != 0 ? front_ + ndk::sc_ViewPort : 0);
+    b.w32(base_ + kActiveWindowAt, active_window_ != 0 && window_open(active_window_)
+                                       ? active_window_
+                                       : 0);
+    b.w32(base_ + kActiveScreenAt, active_screen);
+    b.w32(base_ + kFirstScreenAt, front_);
 }
 
 void Intuition::begin_batch() { ++batch_depth_; }

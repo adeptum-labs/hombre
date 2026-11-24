@@ -250,6 +250,11 @@ public:
     void screen_to_front(u32 screen);
     u32 front_screen() const { return front_; }
 
+    // Writes what programs read from the IntuitionBase after LockIBase: the
+    // front screen's ViewPort in ViewLord, the active window and screen and
+    // the first screen.
+    void sync_base();
+
     // Opens a window from the NewWindow at new_window, overridden by the
     // tags at tags. Either may be 0 but not both. Returns the Window, or 0
     // with a log. With copy_title the window keeps a copy of its title, for

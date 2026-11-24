@@ -4646,6 +4646,32 @@ void a_custom_typed_gadget_that_is_no_object_draws_its_border() {
     CHECK_EQ(window_pixel(r, window, 25, 20), 3u);
 }
 
+// The IntuitionBase carries the structure programs read after LockIBase:
+// the front screen's ViewPort in ViewLord, the active window and screen
+// and the first screen, and the library's name stays reachable.
+void the_intuition_base_shows_the_screens_and_the_active_window() {
+    GfxRig r;
+    const u32 base = r.base(Base::Intuition);
+    CHECK_EQ(r.get32(base + LN_NAME) != 0, true);
+    CHECK(r.read_str(r.get32(base + LN_NAME)) == "intuition.library");
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockIBase), 0u);
+    CHECK_EQ(r.get32(base + 34), 0u);       // ViewLord.ViewPort
+    CHECK_EQ(r.get32(base + 52), 0u);       // ActiveWindow
+    CHECK_EQ(r.get32(base + 60), 0u);       // FirstScreen
+
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::LockIBase), 0u);
+    CHECK_EQ(r.get32(base + 34), screen + sc_ViewPort);
+    CHECK_EQ(r.get32(base + 52), window);
+    CHECK_EQ(r.get32(base + 56), screen);
+    CHECK_EQ(r.get32(base + 60), screen);
+}
+
 void display_beep_returns() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -10535,6 +10561,7 @@ int main() {
     mouse_buttons_carry_the_keyboard_qualifier();
     gadget_lvos_from_guest_calls();
     display_beep_returns();
+    the_intuition_base_shows_the_screens_and_the_active_window();
     a_custom_typed_gadget_that_is_no_object_draws_its_border();
     modify_prop_ignores_non_prop_gadget();
     modify_prop_keeps_knobhit_during_drag();
