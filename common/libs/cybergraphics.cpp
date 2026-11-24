@@ -287,7 +287,7 @@ struct CyberGraphicsNatives {
         const display_modes::Mode* largest = nullptr;
         for (u32 i = 0; i < display_modes::count(); ++i) {
             const display_modes::Mode& mode = display_modes::at(i);
-            if (!mode.deep || static_cast<u32>(mode.max_depth) != wanted) {
+            if (!mode.deep || mode.any_depth || static_cast<u32>(mode.max_depth) != wanted) {
                 continue;
             }
             if (largest == nullptr || mode_area(mode) > mode_area(*largest)) {

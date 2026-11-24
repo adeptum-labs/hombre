@@ -3166,12 +3166,19 @@ void display_info_presents_hombre_modes() {
     r.put32(kTags + 20, 24);
     r.put32(kTags + 24, 0);
     r.cpu().a[0] = kTags;
-    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::BestModeIDA), k1080x24);
+    // The best mode is the listed one of the size, whose depth picks the
+    // format when a screen opens.
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::BestModeIDA),
+             display_modes::hombre_id(12, display_modes::kAnyDepth));
 
-    // The last Amiga mode now leads on to the first HOMBRE one.
+    // The last Amiga mode now leads on to the first HOMBRE one, and that to
+    // the next size: the modes of one format are not listed.
     r.cpu().d[0] = display_modes::at(display_modes::kAmigaModeCount - 1).id;
     const u32 after_amiga = r.result(Base::Graphics, graphics_lvo::NextDisplayInfo);
-    CHECK_EQ(after_amiga, display_modes::hombre_id(0, 0));
+    CHECK_EQ(after_amiga, display_modes::hombre_id(0, display_modes::kAnyDepth));
+    r.cpu().d[0] = after_amiga;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::NextDisplayInfo),
+             display_modes::hombre_id(1, display_modes::kAnyDepth));
     r.cpu().d[0] = kInvalid;
     display_modes::configure_hombre(0, 0, 0);
 }

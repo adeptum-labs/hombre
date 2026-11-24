@@ -46,14 +46,29 @@ void amiga_modes_unchanged() {
 
 void hombre_modes_listed_after_amiga() {
     configure_hombre(1280, 800, 512 * kMiB);
-    CHECK_EQ(count(), kAmigaModes + 45);
-    const Mode& first = at(kAmigaModes);
+    CHECK_EQ(count(), kAmigaModes + 60);
+    // Each size is listed once, up to 24 bits deep; the depth a screen
+    // asks for picks its format.
+    const Mode& listed = at(kAmigaModes);
+    CHECK_EQ(listed.id, hombre_id(0, kAnyDepth));
+    CHECK_EQ(listed.width, 800u);
+    CHECK_EQ(listed.height, 600u);
+    CHECK_EQ(listed.max_depth, 24u);
+    CHECK(listed.deep);
+    CHECK(listed.listed);
+    CHECK(listed.any_depth);
+    CHECK(std::strcmp(listed.name, "HOMBRE:800x600") == 0);
+    CHECK_EQ(listed.flags, kIsForeign | kIsWb);
+    // The modes of one format each follow it, known but not listed.
+    const Mode& first = at(kAmigaModes + 1);
     CHECK_EQ(first.id, kHombreMonitorId);
     CHECK_EQ(first.width, 800u);
     CHECK_EQ(first.height, 600u);
     CHECK_EQ(first.max_depth, 8u);
     CHECK(first.deep);
     CHECK(first.square);
+    CHECK(!first.listed);
+    CHECK(!first.any_depth);
     CHECK(first.pixfmt == PixFmt::Lut8);
     CHECK(std::strcmp(first.name, "HOMBRE:800x600 8bit") == 0);
     CHECK_EQ(first.flags, kIsForeign | kIsWb);
@@ -78,9 +93,10 @@ void hombre_modes_listed_after_amiga() {
 
 void native_mode_added_for_unlisted_size() {
     configure_hombre(1920, 1080, 512 * kMiB);
-    CHECK_EQ(count(), kAmigaModes + 45);
+    CHECK_EQ(count(), kAmigaModes + 60);
     configure_hombre(1360, 768, 512 * kMiB);
-    CHECK_EQ(count(), kAmigaModes + 48);
+    CHECK_EQ(count(), kAmigaModes + 64);
+    CHECK(find(hombre_id(15, kAnyDepth)) != nullptr);
     const Mode* native = find(kHombreMonitorId | (15u << 4) | 2u);
     CHECK(native != nullptr);
     CHECK_EQ(native->width, 1360u);
@@ -95,6 +111,29 @@ void large_modes_dropped_when_fast_is_small() {
     CHECK(find(kHombreMonitorId | (14u << 4) | 2u) == nullptr);
     CHECK(find(kHombreMonitorId | (14u << 4) | 0u) != nullptr);
     CHECK(find(kHombreMonitorId | (12u << 4) | 2u) != nullptr);
+    // The listed 4K mode goes only as deep as the formats that fit.
+    const Mode* uhd = find(hombre_id(14, kAnyDepth));
+    CHECK(uhd != nullptr);
+    CHECK_EQ(uhd->max_depth, 16u);
+    CHECK_EQ(resolve(hombre_id(14, kAnyDepth), 24), hombre_id(14, 1));
+    configure_hombre(0, 0, 0);
+}
+
+// The depth asked of a listed HOMBRE mode picks the mode of one format: up
+// to 8 bits 8-bit, up to 16 bits 16-bit, deeper 24-bit. Any other mode is
+// itself.
+void depth_picks_the_format() {
+    configure_hombre(1280, 800, 512 * kMiB);
+    const u32 fhd = hombre_id(12, kAnyDepth);
+    CHECK_EQ(resolve(fhd, 0), hombre_id(12, 0));
+    CHECK_EQ(resolve(fhd, 1), hombre_id(12, 0));
+    CHECK_EQ(resolve(fhd, 8), hombre_id(12, 0));
+    CHECK_EQ(resolve(fhd, 9), hombre_id(12, 1));
+    CHECK_EQ(resolve(fhd, 16), hombre_id(12, 1));
+    CHECK_EQ(resolve(fhd, 17), hombre_id(12, 2));
+    CHECK_EQ(resolve(fhd, 24), hombre_id(12, 2));
+    CHECK_EQ(resolve(hombre_id(12, 1), 24), hombre_id(12, 1));
+    CHECK_EQ(resolve(0x29004, 4), 0x29004u);
     configure_hombre(0, 0, 0);
 }
 
@@ -105,5 +144,6 @@ int main() {
     hombre_modes_listed_after_amiga();
     native_mode_added_for_unlisted_size();
     large_modes_dropped_when_fast_is_small();
+    depth_picks_the_format();
     return check::finish("test_display_modes");
 }

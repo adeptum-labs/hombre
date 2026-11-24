@@ -2342,13 +2342,13 @@ struct GraphicsNatives {
         constexpr u32 kInvalidId = 0xFFFFFFFF;
         const u32 last = m.cpu.d[0];
         u32 next = kInvalidId;
-        if (last == kInvalidId) {
-            next = display_modes::at(0).id;
-        } else {
-            const u32 index = display_modes::index_of(last);
-            if (index + 1 < display_modes::count()) {
-                next = display_modes::at(index + 1).id;
-            }
+        // The modes of one HOMBRE format are known but not listed.
+        u32 index = last == kInvalidId ? 0 : display_modes::index_of(last) + 1;
+        while (index < display_modes::count() && !display_modes::at(index).listed) {
+            ++index;
+        }
+        if (index < display_modes::count()) {
+            next = display_modes::at(index).id;
         }
         native::set_result(m, next);
     }
@@ -2516,6 +2516,9 @@ struct GraphicsNatives {
         bool best_fits = false;
         for (u32 i = 0; i < display_modes::count(); ++i) {
             const display_modes::Mode& mode = display_modes::at(i);
+            if (!mode.listed) {
+                continue;
+            }
             if (!monitor_any && monitor_of(mode.id) != monitor) {
                 continue;
             }

@@ -90,6 +90,11 @@ struct Mode {
     bool deep = false;
     bool square = false;
     PixFmt pixfmt = PixFmt::Lut8;
+    // Walked by NextDisplayInfo. The HOMBRE modes of one format each are
+    // known but not listed: the list has one mode a size, any_depth, whose
+    // screens take the format of the depth asked for.
+    bool listed = true;
+    bool any_depth = false;
 };
 
 constexpr u32 mode_flags(u32 monitor, u32 key) {
@@ -209,7 +214,9 @@ constexpr HombreSize kHombreSizes[] = {
 constexpr u32 kHombreSizeCount = sizeof kHombreSizes / sizeof kHombreSizes[0];
 constexpr u32 kNativeSize = 15;
 constexpr u32 kHombreDepths = 3;
-constexpr u32 kMaxHombreModes = (kHombreSizeCount + 1) * kHombreDepths;
+// The depth code of the listed mode of a size, whose depth picks the format.
+constexpr u32 kAnyDepth = 3;
+constexpr u32 kMaxHombreModes = (kHombreSizeCount + 1) * (kHombreDepths + 1);
 
 constexpr u8 kHombreDepth[kHombreDepths] = {8, 16, 24};
 constexpr PixFmt kHombreFormat[kHombreDepths] = {PixFmt::Lut8, PixFmt::Rgb16, PixFmt::Argb32};
@@ -242,21 +249,47 @@ inline void put_number(char* out, u32& at, u32 value) {
     }
 }
 
+// "HOMBRE:<width>x<height>" into name; returns its length.
+inline u32 put_size_name(char* name, u32 width, u32 height) {
+    u32 at = 0;
+    for (const char* p = "HOMBRE:"; *p != '\0'; ++p) {
+        name[at++] = *p;
+    }
+    put_number(name, at, width);
+    name[at++] = 'x';
+    put_number(name, at, height);
+    name[at] = '\0';
+    return at;
+}
+
+inline bool hombre_fits(u32 width, u32 height, u32 depth, u64 fast_bytes) {
+    return u64{width} * height * bytes_per_pixel(kHombreFormat[depth]) <= fast_bytes / 4;
+}
+
 inline void add_hombre(u32 size_index, u32 width, u32 height, u64 fast_bytes) {
     HombreTable& table = hombre_table;
+    u32 deepest = kHombreDepths;
     for (u32 depth = 0; depth < kHombreDepths; ++depth) {
-        const u64 bytes = u64{width} * height * bytes_per_pixel(kHombreFormat[depth]);
-        if (bytes > fast_bytes / 4) {
+        if (hombre_fits(width, height, depth, fast_bytes)) {
+            deepest = depth;
+        }
+    }
+    if (deepest == kHombreDepths) {
+        return;
+    }
+    char* listed_name = table.names[table.count];
+    put_size_name(listed_name, width, height);
+    Mode& listed = table.modes[table.count++];
+    listed = Mode{hombre_id(size_index, kAnyDepth), static_cast<u16>(width),
+                  static_cast<u16>(height), kHombreDepth[deepest], 22, 22,
+                  kIsForeign | kIsWb, listed_name, true, true, kHombreFormat[deepest]};
+    listed.any_depth = true;
+    for (u32 depth = 0; depth < kHombreDepths; ++depth) {
+        if (!hombre_fits(width, height, depth, fast_bytes)) {
             continue;
         }
         char* name = table.names[table.count];
-        u32 at = 0;
-        for (const char* p = "HOMBRE:"; *p != '\0'; ++p) {
-            name[at++] = *p;
-        }
-        put_number(name, at, width);
-        name[at++] = 'x';
-        put_number(name, at, height);
+        u32 at = put_size_name(name, width, height);
         name[at++] = ' ';
         put_number(name, at, kHombreDepth[depth]);
         for (const char* p = "bit"; *p != '\0'; ++p) {
@@ -267,6 +300,7 @@ inline void add_hombre(u32 size_index, u32 width, u32 height, u64 fast_bytes) {
         mode = Mode{hombre_id(size_index, depth), static_cast<u16>(width),
                     static_cast<u16>(height), kHombreDepth[depth], 22, 22,
                     kIsForeign | kIsWb, name, true, true, kHombreFormat[depth]};
+        mode.listed = false;
     }
 }
 
@@ -310,6 +344,22 @@ inline u32 index_of(u32 id) {
 inline const Mode* find(u32 id) {
     const u32 index = index_of(id);
     return index < count() ? &at(index) : nullptr;
+}
+
+// The mode a screen of depth bits opens in for the mode id: for a listed
+// HOMBRE mode, its mode of the format the depth needs (8-bit up to 8 bits,
+// 16-bit up to 16, 24-bit beyond), or the deepest it has; id itself for
+// any other mode.
+inline u32 resolve(u32 id, u32 depth) {
+    const Mode* mode = find(id);
+    if (mode == nullptr || !mode->any_depth) {
+        return id;
+    }
+    u32 code = depth <= 8 ? 0 : depth <= 16 ? 1 : 2;
+    while (code > 0 && find((id & ~0xFu) | code) == nullptr) {
+        --code;
+    }
+    return (id & ~0xFu) | code;
 }
 
 constexpr u32 from_view_modes(u16 view_modes) {

@@ -36,7 +36,7 @@ software, on modern hardware and in virtual machines.
   plain and laced, in up to 256 colours, scaled to fill the display.
 - HOMBRE screen modes: PC and widescreen sizes from 800x600 to 3840x2160,
   720p, 1080p and 1440p among them, in 256 colours, 16-bit and 24-bit, with
-  square pixels. The Workbench runs in them through ScreenMode prefs, and
+  square pixels, the depth picked by ScreenMode's Colors slider. The Workbench runs in them through ScreenMode prefs, and
   CyberGraphX programs draw on them. In QEMU and VirtualBox the display
   switches to each mode's size; elsewhere a mode of the display's own
   size is shown pixel for pixel.

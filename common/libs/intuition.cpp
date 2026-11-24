@@ -2533,7 +2533,9 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
         display_ == nullptr) {
         return;
     }
-    const display_modes::Mode* mode = display_modes::find(wb_mode_.mode_id);
+    // On a listed HOMBRE mode the colours chosen pick the format.
+    const display_modes::Mode* mode =
+        display_modes::find(display_modes::resolve(wb_mode_.mode_id, wb_mode_.depth));
     const bool known = mode != nullptr;
     // A HOMBRE mode makes the screen deep, with 256 pens.
     const Surface surface = known ? Surface{mode->deep, mode->pixfmt} : Surface{};
@@ -3502,6 +3504,13 @@ u32 Intuition::open_screen(u32 new_screen, u32 tags) {
     }
     if (a.depth > mode->max_depth) {
         return reject(ndk::OSERR_TOODEEP);
+    }
+    // A listed HOMBRE mode opens in the format of the depth asked for.
+    if (mode->any_depth) {
+        mode = display_modes::find(display_modes::resolve(mode->id, a.depth));
+        if (mode == nullptr) {
+            return reject(ndk::OSERR_UNKNOWNMODE);
+        }
     }
     if (!b.ok()) {
         return 0;

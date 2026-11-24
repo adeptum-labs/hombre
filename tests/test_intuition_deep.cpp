@@ -259,6 +259,63 @@ void workbench_reopens_amiga_hombre_amiga() {
     display_modes::configure_hombre(0, 0, 0);
 }
 
+// A listed HOMBRE mode opens in the format of the depth asked for: up to 8
+// bits 8-bit, up to 16 bits 16-bit, deeper 24-bit. The screen's own ModeID
+// is then the mode of that format.
+void listed_mode_depth_picks_the_format() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 listed = display_modes::hombre_id(0, display_modes::kAnyDepth);
+    const struct {
+        u32 depth;
+        PixFmt fmt;
+        u32 bm_depth;
+        u32 code;
+    } cases[] = {{4, PixFmt::Lut8, 8, 0}, {16, PixFmt::Rgb16, 16, 1},
+                 {24, PixFmt::Argb32, 24, 2}};
+    for (const auto& c : cases) {
+        const u32 tags = r.tags(kScreenTags, {{ndk::SA_DisplayID, listed},
+                                              {ndk::SA_Depth, c.depth},
+                                              {0, 0}});
+        const u32 screen = r.intuition.open_screen(0, tags);
+        CHECK(screen != 0);
+        const hombre::DeepBitmap* deep = r.graphics.deep(screen + ndk::sc_BitMap);
+        CHECK(deep != nullptr);
+        CHECK(deep->fmt == c.fmt);
+        CHECK_EQ(r.get8(screen + ndk::sc_BitMap + ndk::bm_Depth), c.bm_depth);
+        r.cpu().a[0] = screen + ndk::sc_ViewPort;
+        CHECK_EQ(r.result(Base::Graphics, hombre::graphics_lvo::GetVPModeID),
+                 display_modes::hombre_id(0, c.code));
+        r.cpu().a[0] = screen;
+        r.call(Base::Intuition, hombre::intuition_lvo::CloseScreen);
+    }
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+// ScreenMode's colours pick the Workbench's format on a listed mode.
+void workbench_colours_pick_the_format() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 screen = open_screen(r, 0x8004);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    const u32 listed = display_modes::hombre_id(0, display_modes::kAnyDepth);
+    switch_workbench(r, listed, 0xFFFF, 0xFFFF, 16);
+    const hombre::DeepBitmap* deep = r.graphics.deep(screen + ndk::sc_BitMap);
+    CHECK(deep != nullptr);
+    CHECK(deep->fmt == PixFmt::Rgb16);
+    CHECK(r.display.mode_fmt == PixFmt::Rgb16);
+    switch_workbench(r, listed, 0xFFFF, 0xFFFF, 24);
+    deep = r.graphics.deep(screen + ndk::sc_BitMap);
+    CHECK(deep != nullptr);
+    CHECK(deep->fmt == PixFmt::Argb32);
+    switch_workbench(r, listed, 0xFFFF, 0xFFFF, 8);
+    deep = r.graphics.deep(screen + ndk::sc_BitMap);
+    CHECK(deep != nullptr);
+    CHECK(deep->fmt == PixFmt::Lut8);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
 // Palette prefs IPrefs sends reach what pens draw on a 24-bit screen.
 void palette_prefs_reach_a_deep_screen() {
     GfxRig r;
@@ -340,6 +397,8 @@ void lock_on_a_window_bitmap_takes_screen_coordinates() {
 }
 
 int main() {
+    listed_mode_depth_picks_the_format();
+    workbench_colours_pick_the_format();
     open_screen_hombre_800x600_24();
     window_on_deep_screen_has_deep_bitmap();
     compose_puts_window_pixels_on_screen();
