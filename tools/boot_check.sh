@@ -33,6 +33,13 @@
 # --hdf-bus ahci|nvme|nvme4k attaches it to the SATA controller, to an NVMe
 # controller, or to one with 4096-byte sectors, instead of virtio-blk.
 #
+# --swappable gives the four floppy drives devices of their own that keep
+# their place when the disk in them changes: a drive with no disk gets an
+# empty one, and every disk is held in 1 MiB so they trade places. A --mouse
+# command "swap <n> <file>" then puts the disk in the file, an image as
+# --disk takes, in DF<n>: at that point in the command list; "swap <n>" with
+# no file takes the disk out. It needs socat.
+#
 # --usb-kbd attaches an xHCI controller with a USB keyboard. --keys "<names>"
 # implies it and, once "shell: ready" shows on the serial console, types the
 # space-separated QEMU key names (for example "v e r s i o n ret") through
@@ -54,7 +61,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--disk3 <file>] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--disk3 <file>] [--swappable] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -74,6 +81,7 @@ disk_source=
 disk1_source=
 disk2_source=
 disk3_source=
+swappable=false
 hdf=
 hdf_bus=virtio
 no_startup=false
@@ -101,6 +109,7 @@ while [[ ${1:-} == --* ]]; do
             disk3_source=$2
             shift
             ;;
+        --swappable) swappable=true ;;
         --hdf)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
             hdf=$2
@@ -201,6 +210,28 @@ if [[ -n $disk3_source ]]; then
     disk_args+=(-drive "if=none,id=disk3,format=raw,readonly=on,file=$disk3"
                 -device virtio-blk-pci,disable-legacy=on,drive=disk3,addr=0x13)
 fi
+# Swappable floppy drives: every drive has a device, in a block graph of
+# its own that the monitor can reopen on another file.
+qmp_socket=
+if [[ $swappable == true ]]; then
+    command -v socat > /dev/null || { echo "$0: --swappable needs socat" >&2; exit 1; }
+    floppy_sources=("${disk:-}" "${disk1:-}" "${disk2:-}" "${disk3:-}")
+    disk_args=()
+    for n in 0 1 2 3; do
+        img=$build_dir/boot-check-swap$n.img
+        if [[ -n ${floppy_sources[n]} ]]; then
+            cp -- "${floppy_sources[n]}" "$img"
+        else
+            : > "$img"
+        fi
+        [[ $(stat -c %s -- "$img") -le 1048576 ]] || { echo "$0: disk of DF$n: is over 1 MiB" >&2; exit 1; }
+        truncate -s 1M "$img"
+        disk_args+=(-blockdev "driver=file,node-name=file$n,filename=$img,read-only=on"
+                    -blockdev "driver=raw,node-name=disk$n,file=file$n,read-only=on"
+                    -device "virtio-blk-pci,disable-legacy=on,drive=disk$n,addr=0x1$n")
+    done
+    qmp_socket=$build_dir/qmp.$$.sock
+fi
 # A virtio hard disk sits in PCI slot 0x18; the others go on the q35
 # machine's SATA controller or an NVMe controller of their own.
 if [[ -n $hdf ]]; then
@@ -224,6 +255,9 @@ if [[ -n $keys || -n $mouse || $no_startup == true ]]; then
     monitor_socket=$build_dir/monitor.$$.sock
     monitor_args=(-monitor "unix:$monitor_socket,server,nowait")
 fi
+if [[ -n $qmp_socket ]]; then
+    monitor_args+=(-qmp "unix:$qmp_socket,server,nowait")
+fi
 : > "$serial_log"
 # Firmware variables of this boot's own, and the boot image as a snapshot,
 # so that make run can boot beside it.
@@ -239,7 +273,7 @@ qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G \
     -drive format=raw,snapshot=on,file="$image" "${disk_args[@]}" "${usb_args[@]}" \
     "${sound_args[@]}" "${monitor_args[@]}" &
 qemu_pid=$!
-trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; rm -f "$monitor_socket" "$ovmf_vars"' EXIT
+trap 'kill "$qemu_pid" 2>/dev/null || true; wait "$qemu_pid" 2>/dev/null || true; rm -f "$monitor_socket" "$qmp_socket" "$ovmf_vars"' EXIT
 
 # Sends one HMP command, then waits 0.25 s. Every command goes over one
 # connection to the monitor, opened by the first: a connection per command
@@ -255,6 +289,30 @@ monitor_send() {
 }
 trap '' PIPE
 
+# Puts the disk in a file in a floppy drive, or takes the disk out when there
+# is no file: a new image of 1 MiB opens as a block node of its own, and the
+# drive's node is reopened on it. The device sees the new medium; the kernel
+# notices it at its next look at the drive.
+swap_count=0
+qmp_swap() {
+    local n=$1 source=${2:-} img node=swapfile$1x$swap_count
+    img=$build_dir/boot-check-swap$n.$swap_count.img
+    swap_count=$((swap_count + 1))
+    if [[ -n $source ]]; then
+        "$tools_dir/make_disk.sh" "$source" "$img"
+    else
+        : > "$img"
+    fi
+    [[ $(stat -c %s -- "$img") -le 1048576 ]] || return 1
+    truncate -s 1M "$img"
+    {
+        echo '{"execute":"qmp_capabilities"}'
+        printf '{"execute":"blockdev-add","arguments":{"driver":"file","node-name":"%s","filename":"%s","read-only":true}}\n' "$node" "$img"
+        printf '{"execute":"blockdev-reopen","arguments":{"options":[{"driver":"raw","node-name":"disk%s","file":"%s","read-only":true}]}}\n' "$n" "$node"
+        sleep 1
+    } | socat - "UNIX-CONNECT:$qmp_socket" > "$build_dir/qmp.$$.log"
+}
+
 # Types the keys once the shell reads the keyboard. Best effort: a missing
 # marker is reported with the others at the end.
 send_keys() {
@@ -267,10 +325,18 @@ keys_sent=false
 
 # Sends the ';'-separated HMP mouse commands once --mouse-after shows up.
 send_mouse() {
-    local cmds cmd
+    local cmds cmd rest drive_n file
     IFS=';' read -ra cmds <<< "$mouse"
     for cmd in "${cmds[@]}"; do
         [[ -n $cmd ]] || continue
+        if [[ $cmd == swap\ * ]]; then
+            rest=${cmd#swap }
+            drive_n=${rest%% *}
+            file=
+            [[ $rest == *\ * ]] && file=${rest#* }
+            qmp_swap "$drive_n" "$file" || return 1
+            continue
+        fi
         monitor_send "$cmd" || return 1
     done
 }
