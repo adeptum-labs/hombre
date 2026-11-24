@@ -1021,6 +1021,13 @@ public:
     // as a file or out is too small. process 0 is the boot shell's process.
     bool find_command(const char* word, char* out, u32 size, u32 process = 0);
 
+    // The Resident command: "[NAME] file [PURE|FORCE|SYSTEM|ADD|REPLACE]"
+    // makes the file a command known by NAME, the file's own name without
+    // NAME, found before the path is searched; "REMOVE name" takes one out.
+    // Redirections in args are skipped. Returns the return code: 0, or 20
+    // for a file that is not there or a name that is not resident.
+    u32 resident_command(const char* args);
+
     // Registers console 0's interactive input callbacks, used after the
     // command's argument line is exhausted and by read_console_line.
     // WaitForChar uses the readiness callback of the handle's console. Pass
@@ -1254,6 +1261,12 @@ private:
     };
     Drive drives_[kMaxDrives]{};
     u32 disk_serial_[kMaxDrives]{};
+    struct ResidentEntry {
+        char name[kMaxPath];
+        char path[kMaxPath];
+    };
+    static constexpr u32 kMaxResidents = 64;
+    SlotList<ResidentEntry> residents_{kMaxResidents};
     void write_volume_node(native::Bus& b, u32 drive);
     u8 boot_vol_ = kVolDf0;
     RamFs ram_{};

@@ -9191,10 +9191,8 @@ struct DosOps {
         if (word[0] == '\0') {
             return false;
         }
-        // The shell keeps no list of resident commands, so Resident is
-        // accepted and changes nothing, here as at the shell.
         if (same_name(word, w, "RESIDENT")) {
-            rc = 0;
+            rc = d.resident_command(s);
             return true;
         }
         char clean[Dos::kMaxArgs + 1];
@@ -10270,6 +10268,7 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     unknown_pkt_count_ = 0;
     notifies_.clear();
     user_entries_.clear();
+    residents_.clear();
     for (u32& serial : disk_serial_) {
         serial = 0;
     }
@@ -11420,6 +11419,120 @@ bool Dos::path_name(u32 i, char* out, u32 size) const {
                               lock_slots_[slot].path, out, size);
 }
 
+u32 Dos::resident_command(const char* args) {
+    if (m_ == nullptr || args == nullptr) {
+        return 20;
+    }
+    // The arguments split at blanks; a quoted one keeps its blanks. A
+    // redirection, or the file after a lone one, is left out.
+    char tokens[4][kMaxPath];
+    u32 count = 0;
+    bool remove = false;
+    const char* p = args;
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == '\n') {
+            ++p;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        char token[kMaxPath];
+        u32 t = 0;
+        const bool quoted = *p == '"';
+        if (quoted) {
+            ++p;
+        }
+        while (*p != '\0' && (quoted ? *p != '"' : (*p != ' ' && *p != '\t' && *p != '\n'))) {
+            if (t + 1 < sizeof token) {
+                token[t++] = *p;
+            }
+            ++p;
+        }
+        if (quoted && *p == '"') {
+            ++p;
+        }
+        token[t] = '\0';
+        if (!quoted && (token[0] == '>' || token[0] == '<')) {
+            if (t == 1 || (t == 2 && token[1] == token[0])) {
+                while (*p == ' ' || *p == '\t') {
+                    ++p;
+                }
+                while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '\n') {
+                    ++p;
+                }
+            }
+            continue;
+        }
+        if (!quoted && (same_name(token, t, "PURE") || same_name(token, t, "FORCE") ||
+                        same_name(token, t, "SYSTEM") || same_name(token, t, "ADD") ||
+                        same_name(token, t, "REPLACE"))) {
+            continue;
+        }
+        if (!quoted && same_name(token, t, "REMOVE")) {
+            remove = true;
+            continue;
+        }
+        if (count < 4) {
+            copy_cstr(tokens[count++], token, kMaxPath);
+        }
+    }
+    if (count == 0) {
+        return remove ? 20u : 0u;  // no arguments: nothing to list
+    }
+    if (remove) {
+        ResidentEntry* e = residents_.find_if([&](const ResidentEntry& r) {
+            return same_name(tokens[0], length_of(tokens[0]), r.name);
+        });
+        if (e == nullptr) {
+            return 20;
+        }
+        residents_.remove(e);
+        return 0;
+    }
+    const char* file = tokens[count - 1];
+    Bus b(*m_);
+    u8 vol = kVolDf0;
+    char resolved[kMaxPath];
+    DirEntry entry{};
+    u32 error = 0;
+    if (!DosOps::locate(*this, b, file, vol, resolved, entry, error) || entry.is_dir) {
+        return 20;
+    }
+    ResidentEntry made{};
+    if (!format_volume_path(DosOps::volume_name(*this, vol), resolved, made.path,
+                            sizeof made.path)) {
+        return 20;
+    }
+    if (count >= 2) {
+        copy_cstr(made.name, tokens[0], sizeof made.name);
+    } else {
+        // The file's own name, after the last slash or colon.
+        const char* leaf = file;
+        for (const char* c = file; *c != '\0'; ++c) {
+            if (*c == '/' || *c == ':') {
+                leaf = c + 1;
+            }
+        }
+        copy_cstr(made.name, leaf, sizeof made.name);
+    }
+    if (made.name[0] == '\0') {
+        return 20;
+    }
+    ResidentEntry* old = residents_.find_if([&](const ResidentEntry& r) {
+        return same_name(made.name, length_of(made.name), r.name);
+    });
+    if (old != nullptr) {
+        *old = made;
+        return 0;
+    }
+    ResidentEntry* slot = residents_.add();
+    if (slot == nullptr) {
+        return 20;
+    }
+    *slot = made;
+    return 0;
+}
+
 bool Dos::find_command(const char* word, char* out, u32 size, u32 process) {
     if (m_ == nullptr || word == nullptr || word[0] == '\0' || out == nullptr || size == 0) {
         return false;
@@ -11456,6 +11569,13 @@ bool Dos::find_command(const char* word, char* out, u32 size, u32 process) {
 
     if (has_sep) {
         return exists_file(word) && copy_out(word);
+    }
+
+    // A resident command comes first, if the disk it is on is still there.
+    for (const ResidentEntry& r : residents_) {
+        if (same_name(word, word_len, r.name) && exists_file(r.path)) {
+            return copy_out(r.path);
+        }
     }
 
     if (exists_file(word)) {

@@ -748,15 +748,20 @@ void endcli_ends_the_boot_shell() {
     CHECK(cmds.ended());
 }
 
-void resident_is_accepted() {
+// Resident makes a file a command by name, REMOVE takes it out, and a file
+// that is not there gives the return code 20.
+void resident_keeps_commands() {
     Rig rig;
     std::string out;
     ShellCommands cmds(g_dos, print_sink, &out);
     g_dos.set_return_code(5);
-    CHECK(cmds.run("Resident", "C:Assign PURE"));
-    CHECK(cmds.run("RESIDENT", "Assign REMOVE"));
-    CHECK(out.empty());
+    CHECK(cmds.run("Resident", "C:RunMe PURE"));
     CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.run("RESIDENT", "RunMe REMOVE"));
+    CHECK_EQ(g_dos.last_return_code(), 0u);
+    CHECK(cmds.run("Resident", "C:Missing PURE"));
+    CHECK_EQ(g_dos.last_return_code(), 20u);
+    CHECK(out.empty());
 }
 
 void set_process_uses_that_cli() {
@@ -829,7 +834,7 @@ int main() {
     newshell_calls_the_hook();
     newshell_without_a_hook_fails();
     endcli_ends_the_boot_shell();
-    resident_is_accepted();
+    resident_keeps_commands();
     set_process_uses_that_cli();
     return check::finish("test_shell_commands");
 }

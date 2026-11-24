@@ -8420,9 +8420,22 @@ void system_redirects_output_to_a_file() {
     CHECK(read_whole(r, "RAM:out") == "hi\n");
 }
 
-void system_accepts_resident() {
-    Rig r;
-    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "resident Foo:C/Bar PURE"), 0), 0u);
+// Resident keeps a command by its name, found before the path is searched,
+// until it is removed; a file that is not there cannot be made resident.
+void resident_commands_are_found_by_name() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Tools/Prog", hello_command()});
+    Rig r(files);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Prog"), 0), 0xFFFFFFFFu);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Resident Tools/Prog PURE"), 0), 0u);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "prog"), 0), 3u);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Resident Other Tools/Prog"), 0), 0u);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Other"), 0), 3u);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Resident >NIL: REMOVE Prog"), 0), 0u);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Prog"), 0), 0xFFFFFFFFu);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Other"), 0), 3u);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Resident Foo:C/Bar PURE"), 0), 20u);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "Resident REMOVE Nosuch"), 0), 20u);
 }
 
 void console_star_follows_the_process_console() {
@@ -8918,7 +8931,7 @@ int main() {
     run_command_in_ends_the_shells_children();
     system_uses_the_shell_process_directory();
     system_redirects_output_to_a_file();
-    system_accepts_resident();
+    resident_commands_are_found_by_name();
     console_star_follows_the_process_console();
     paths_belong_to_each_process();
     start_notify_signals_the_watching_task();

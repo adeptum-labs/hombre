@@ -78,7 +78,7 @@ private:
     void cmd_failat(const char* args);
     void cmd_run(const char* args);
     void cmd_newshell();
-    void cmd_resident();
+    void cmd_resident(const char* args);
     void cmd_endcli();
     void cmd_set_var(const char* args, bool global);
     void cmd_get_var(const char* args, bool global);

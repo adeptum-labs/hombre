@@ -218,7 +218,7 @@ bool ShellCommands::run(const char* word, const char* args) {
         return true;
     }
     if (eq_nocase(word, "RESIDENT")) {
-        cmd_resident();
+        cmd_resident(a);
         return true;
     }
     if (eq_nocase(word, "CD")) {
@@ -617,9 +617,11 @@ void ShellCommands::cmd_endcli() {
     dos_->set_return_code(0);
 }
 
-// Resident: there is no list of resident commands yet, so PURE, REMOVE and
-// the rest are accepted and change nothing. TODO: keep resident commands.
-void ShellCommands::cmd_resident() { dos_->set_return_code(0); }
+// Resident: dos keeps the resident commands, which Execute and System find
+// as well.
+void ShellCommands::cmd_resident(const char* args) {
+    dos_->set_return_code(dos_->resident_command(args));
+}
 
 void ShellCommands::cmd_set_var(const char* args, bool global) {
     const char* p = args;
