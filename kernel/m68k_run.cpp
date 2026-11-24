@@ -40,6 +40,7 @@
 #include "../common/libs/icon.hpp"
 #include "../common/libs/keymap_library.hpp"
 #include "../common/libs/layers.hpp"
+#include "../common/libs/expansion_library.hpp"
 #include "../common/libs/version_library.hpp"
 #include "../common/libs/intuition.hpp"
 #include "../common/libs/native.hpp"
@@ -117,6 +118,7 @@ constinit Intuition intuition{};
 constinit GadTools gadtools{};
 constinit Layers layers{};
 constinit VersionLibrary version_library{};
+constinit ExpansionLibrary expansion_library{};
 constinit KeymapLibrary keymap_library{};
 constinit ConsoleDevice console_device{};
 constinit Icon icon{};
@@ -906,6 +908,10 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         fail("version init failed");
         return false;
     }
+    if (!expansion_library.init(machine, exec)) {
+        fail("expansion init failed");
+        return false;
+    }
     if (!keymap_library.init(machine, exec)) {
         fail("keymap init failed");
         return false;
@@ -916,6 +922,11 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     }
     if (!dos.init(machine, exec, drives, &console_write, &consoles[0])) {
         fail("dos init failed");
+        return false;
+    }
+    if (dos.boot_device_node() != 0 &&
+        !expansion_library.add_boot_node(machine, exec, dos.boot_device_node(), 0)) {
+        fail("boot node failed");
         return false;
     }
     splash_progress(7, kSplashKernelSteps);

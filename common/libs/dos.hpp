@@ -869,6 +869,9 @@ public:
     // The drive of the boot volume.
     u32 boot_volume() const { return boot_vol_; }
 
+    // The device node of the boot volume's drive.
+    u32 boot_device_node() const { return device_node_[boot_vol_]; }
+
     // The drives, the floppy drives first, then the hard disk partitions:
     // whether one holds a disk, the name of its volume ("" for an empty
     // drive) and the device name it answers to, without the colon ("" for a

@@ -25,6 +25,7 @@
 #include "libs/exec.hpp"
 #include "libs/icon.hpp"
 #include "libs/layers.hpp"
+#include "libs/expansion_library.hpp"
 #include "libs/version_library.hpp"
 #include "check.hpp"
 #include "ofs_writer.hpp"
@@ -55,6 +56,7 @@ Exec g_exec;
 Dos g_dos;
 Layers g_layers;
 VersionLibrary g_version;
+ExpansionLibrary g_expansion;
 Icon g_icon;
 std::vector<std::string> g_lines;
 
@@ -94,6 +96,7 @@ public:
         CHECK(g_exec.init(m, kFreeStart, kTestChipEnd, kTestGuestBytes));
         CHECK(g_layers.init(m, g_exec));
         CHECK(g_version.init(m, g_exec));
+        CHECK(g_expansion.init(m, g_exec));
         CHECK(adf_mount(image_.data(), image_.size(), volume) == FsError::Ok);
         CHECK(g_dos.init(m, g_exec, volume, nullptr, nullptr));
         CHECK(g_icon.init(m, g_exec, g_dos));
@@ -247,6 +250,25 @@ void version_library_carries_the_system_version() {
     r.result(g_exec.exec_base(), exec_lvo::CloseLibrary);
 }
 
+void expansion_library_lists_its_boot_nodes() {
+    Rig r;
+    r.m.cpu.a[1] = r.str(kData, "expansion.library");
+    r.m.cpu.d[0] = 0;
+    const u32 base = r.result(g_exec.exec_base(), exec_lvo::OpenLibrary);
+    CHECK_EQ(base, g_expansion.base());
+    const u32 list = base + ExpansionLibrary::kMountListOffset;
+    CHECK_EQ(r.get32(list), list + 4);  // empty
+    CHECK(g_expansion.add_boot_node(r.m, g_exec, 0x1234, 5));
+    const u32 node = r.get32(list);
+    CHECK_EQ(r.get8(node + 8), 16u);
+    CHECK_EQ(r.get8(node + 9), 5u);
+    CHECK_EQ(r.get32(node + 16), 0x1234u);
+    CHECK_EQ(r.get32(node), list + 4);
+    CHECK_EQ(r.get32(list + 8), node);
+    r.m.cpu.a[1] = base;
+    r.result(g_exec.exec_base(), exec_lvo::CloseLibrary);
+}
+
 void icon_reads_what_is_there_and_defaults_the_rest() {
     Rig r;
     r.str(kData, "NoIcon");
@@ -280,5 +302,6 @@ int main() {
     install_clip_region_keeps_the_region_and_returns_the_one_before();
     icon_reads_what_is_there_and_defaults_the_rest();
     version_library_carries_the_system_version();
+    expansion_library_lists_its_boot_nodes();
     return check::finish("test_layers_icon");
 }
