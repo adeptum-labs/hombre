@@ -2100,6 +2100,12 @@ struct GraphicsNatives {
     // The MonitorSpec of the default, NTSC or PAL monitor, made on first
     // use.
     static u32 monitor_spec(Graphics& g, Bus& b, u32 monitor) {
+        if (monitor == display_modes::kHombreMonitorId) {
+            if (g.hombre_monitor_ == 0) {
+                g.hombre_monitor_ = make_monitor_spec(g, b, "hombre.monitor", 1080, 226);
+            }
+            return g.hombre_monitor_;
+        }
         const bool ntsc = monitor == display_modes::kNtscMonitorId;
         const bool pal = monitor == display_modes::kPalMonitorId;
         u32& spec = pal ? g.pal_monitor_ : ntsc ? g.ntsc_monitor_ : g.monitor_;
@@ -2125,11 +2131,14 @@ struct GraphicsNatives {
                 monitor = display_modes::kNtscMonitorId;
             } else if (b.equals(name, "pal.monitor")) {
                 monitor = display_modes::kPalMonitorId;
+            } else if (b.equals(name, "hombre.monitor")) {
+                monitor = display_modes::kHombreMonitorId;
             }
         } else {
             const u32 display_monitor = m.cpu.d[0] & display_modes::kMonitorIdMask;
             if (display_monitor == display_modes::kNtscMonitorId ||
-                display_monitor == display_modes::kPalMonitorId) {
+                display_monitor == display_modes::kPalMonitorId ||
+                display_monitor == display_modes::kHombreMonitorId) {
                 monitor = display_monitor;
             }
         }
@@ -2149,15 +2158,20 @@ struct GraphicsNatives {
         Bus b(m);
         const u32 spec = m.cpu.a[0];
         if (spec != 0 &&
-            (spec == g.monitor_ || spec == g.ntsc_monitor_ || spec == g.pal_monitor_) &&
+            (spec == g.monitor_ || spec == g.ntsc_monitor_ || spec == g.pal_monitor_ ||
+             spec == g.hombre_monitor_) &&
             b.r16(spec + ms_OpenCount) != 0) {
             b.w16(spec + ms_OpenCount, b.r16(spec + ms_OpenCount) - 1);
         }
         native::set_result(m, 0);
     }
 
-    // The monitor a mode belongs to: PAL, else NTSC, else the default one.
+    // The monitor a mode belongs to: HOMBRE, PAL, else NTSC, else the
+    // default one.
     static u32 monitor_of(u32 id) {
+        if (display_modes::is_hombre(id)) {
+            return display_modes::kHombreMonitorId;
+        }
         if ((id & display_modes::kPalMonitorId) == display_modes::kPalMonitorId) {
             return display_modes::kPalMonitorId;
         }
@@ -2271,16 +2285,17 @@ struct GraphicsNatives {
                 return;
             }
             const bool pal = monitor == display_modes::kPalMonitorId;
+            const bool hombre = monitor == display_modes::kHombreMonitorId;
             bytes = 96;
             put32(16, spec);  // Mspc
             put16(24, 22);    // ViewResolution across
             put16(26, 22);    // and down
-            put16(36, pal ? 625 : 525);  // TotalRows
-            put16(38, 227);              // TotalColorClocks
-            put16(40, pal ? 29 : 21);    // MinRow
+            put16(36, hombre ? mode->height : pal ? 625 : 525);  // TotalRows
+            put16(38, 227);                                       // TotalColorClocks
+            put16(40, hombre ? 0 : pal ? 29 : 21);                // MinRow
             put16(76, 1);                // MouseTicks across
             put16(78, 1);                // and down
-            put32(84, display_modes::preferred(monitor));  // PreferredModeID
+            put32(84, hombre ? mode->id : display_modes::preferred(monitor));  // PreferredModeID
         } else if (tag == kName) {
             bytes = 56;
             for (u32 i = 0; mode->name[i] != '\0'; ++i) {

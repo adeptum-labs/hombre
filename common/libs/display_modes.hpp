@@ -23,11 +23,14 @@
 
 #pragma once
 
+#include "../pixel_format.hpp"
 #include "../types.hpp"
 
 // The display modes graphics.library knows: every standard mode of the
 // default, NTSC and PAL monitors, with the size, depth and property flags
-// their DisplayInfos carry.
+// their DisplayInfos carry, and after them the modes of the HOMBRE monitor:
+// PC sizes with square pixels in 8, 16 and 24-bit, as a graphics card has
+// them, which exist once the kernel has called configure_hombre.
 
 namespace hombre::display_modes {
 
@@ -35,6 +38,7 @@ constexpr u32 kMonitorIdMask = 0xFFFF1000;
 constexpr u32 kDefaultMonitorId = 0x00000;
 constexpr u32 kNtscMonitorId = 0x11000;
 constexpr u32 kPalMonitorId = 0x21000;
+constexpr u32 kHombreMonitorId = 0x51001000;
 
 constexpr u32 kLores = 0x0000;
 constexpr u32 kLace = 0x0004;
@@ -64,6 +68,7 @@ constexpr u32 kIsPal = 0x20;
 constexpr u32 kIsWb = 0x100;
 constexpr u32 kIsExtraHalfBrite = 0x1000;
 constexpr u32 kIsAa = 0x10000;
+constexpr u32 kIsForeign = 0x80000000;
 
 constexpr u32 kViewHires = 0x8000;
 constexpr u32 kViewLace = 0x0004;
@@ -80,6 +85,11 @@ struct Mode {
     u16 res_y;
     u32 flags;
     const char* name;
+    // A deep (chunky) mode of the HOMBRE monitor, with square pixels, and
+    // the pixel format of its bitmaps.
+    bool deep = false;
+    bool square = false;
+    PixFmt pixfmt = PixFmt::Lut8;
 };
 
 constexpr u32 mode_flags(u32 monitor, u32 key) {
@@ -111,7 +121,7 @@ constexpr Mode make_mode(u32 monitor, u32 key, u16 width, u16 height, u8 max_dep
             name};
 }
 
-constexpr Mode kModes[] = {
+constexpr Mode kAmigaModes[] = {
     make_mode(kDefaultMonitorId, kLores, 320, 200, 8, 44, 44, "NTSC:Low Res"),
     make_mode(kDefaultMonitorId, kLoresLace, 320, 400, 8, 44, 22, "NTSC:Low Res Laced"),
     make_mode(kDefaultMonitorId, kHires, 640, 200, 8, 22, 44, "NTSC:High Res"),
@@ -181,22 +191,125 @@ constexpr Mode kModes[] = {
               "PAL:Super-High Res Laced EHB"),
 };
 
-constexpr u32 count() { return sizeof kModes / sizeof kModes[0]; }
+constexpr u32 kAmigaModeCount = sizeof kAmigaModes / sizeof kAmigaModes[0];
 
-constexpr const Mode& at(u32 index) { return kModes[index]; }
+// The sizes of the HOMBRE monitor; the index is part of the ModeID, so the
+// order is fixed. The native size takes index kNativeSize when the
+// framebuffer has a size this list lacks.
+struct HombreSize {
+    u16 width;
+    u16 height;
+};
 
-constexpr u32 index_of(u32 id) {
+constexpr HombreSize kHombreSizes[] = {
+    {800, 600},   {1024, 768},  {1600, 1200}, {1280, 1024}, {1280, 800},
+    {1440, 900},  {1680, 1050}, {1920, 1200}, {2560, 1600}, {1280, 720},
+    {1366, 768},  {1600, 900},  {1920, 1080}, {2560, 1440}, {3840, 2160},
+};
+constexpr u32 kHombreSizeCount = sizeof kHombreSizes / sizeof kHombreSizes[0];
+constexpr u32 kNativeSize = 15;
+constexpr u32 kHombreDepths = 3;
+constexpr u32 kMaxHombreModes = (kHombreSizeCount + 1) * kHombreDepths;
+
+constexpr u8 kHombreDepth[kHombreDepths] = {8, 16, 24};
+constexpr PixFmt kHombreFormat[kHombreDepths] = {PixFmt::Lut8, PixFmt::Rgb16, PixFmt::Argb32};
+
+constexpr u32 hombre_id(u32 size_index, u32 depth_code) {
+    return kHombreMonitorId | (size_index << 4) | depth_code;
+}
+
+constexpr bool is_hombre(u32 id) { return (id & kMonitorIdMask) == kHombreMonitorId; }
+
+namespace detail {
+
+struct HombreTable {
+    Mode modes[kMaxHombreModes];
+    char names[kMaxHombreModes][32];
+    u32 count;
+};
+
+inline HombreTable hombre_table{};
+
+inline void put_number(char* out, u32& at, u32 value) {
+    char digits[10];
+    u32 n = 0;
+    do {
+        digits[n++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    while (n != 0) {
+        out[at++] = digits[--n];
+    }
+}
+
+inline void add_hombre(u32 size_index, u32 width, u32 height, u64 fast_bytes) {
+    HombreTable& table = hombre_table;
+    for (u32 depth = 0; depth < kHombreDepths; ++depth) {
+        const u64 bytes = u64{width} * height * bytes_per_pixel(kHombreFormat[depth]);
+        if (bytes > fast_bytes / 4) {
+            continue;
+        }
+        char* name = table.names[table.count];
+        u32 at = 0;
+        for (const char* p = "HOMBRE:"; *p != '\0'; ++p) {
+            name[at++] = *p;
+        }
+        put_number(name, at, width);
+        name[at++] = 'x';
+        put_number(name, at, height);
+        name[at++] = ' ';
+        put_number(name, at, kHombreDepth[depth]);
+        for (const char* p = "bit"; *p != '\0'; ++p) {
+            name[at++] = *p;
+        }
+        name[at] = '\0';
+        Mode& mode = table.modes[table.count++];
+        mode = Mode{hombre_id(size_index, depth), static_cast<u16>(width),
+                    static_cast<u16>(height), kHombreDepth[depth], 22, 22,
+                    kIsForeign | kIsWb, name, true, true, kHombreFormat[depth]};
+    }
+}
+
+}
+
+// Lists the HOMBRE modes for a framebuffer of fb_width by fb_height and
+// fast_bytes of fast memory: every listed size, and the framebuffer's own
+// when it is not listed, each in 8, 16 and 24-bit, leaving out the ones
+// whose screen alone takes more than a quarter of fast memory. A
+// framebuffer of 0 by 0 adds no native size.
+inline void configure_hombre(u32 fb_width, u32 fb_height, u64 fast_bytes) {
+    detail::HombreTable& table = detail::hombre_table;
+    table.count = 0;
+    bool listed = fb_width == 0 || fb_height == 0;
+    for (u32 i = 0; i < kHombreSizeCount; ++i) {
+        detail::add_hombre(i, kHombreSizes[i].width, kHombreSizes[i].height, fast_bytes);
+        listed = listed ||
+                 (kHombreSizes[i].width == fb_width && kHombreSizes[i].height == fb_height);
+    }
+    if (!listed && fb_width <= 0xFFFF && fb_height <= 0xFFFF) {
+        detail::add_hombre(kNativeSize, fb_width, fb_height, fast_bytes);
+    }
+}
+
+inline u32 count() { return kAmigaModeCount + detail::hombre_table.count; }
+
+inline const Mode& at(u32 index) {
+    return index < kAmigaModeCount ? kAmigaModes[index]
+                                   : detail::hombre_table.modes[index - kAmigaModeCount];
+}
+
+inline u32 index_of(u32 id) {
     for (u32 i = 0; i < count(); ++i) {
-        if (kModes[i].id == id) {
+        if (at(i).id == id) {
             return i;
         }
     }
     return count();
 }
 
-constexpr const Mode* find(u32 id) {
+inline const Mode* find(u32 id) {
     const u32 index = index_of(id);
-    return index < count() ? &kModes[index] : nullptr;
+    return index < count() ? &at(index) : nullptr;
 }
 
 constexpr u32 from_view_modes(u16 view_modes) {

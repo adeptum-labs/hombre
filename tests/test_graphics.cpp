@@ -24,6 +24,7 @@
 #include "../common/font.hpp"
 #include "gfx_rig.hpp"
 #include "libs/chrome_palette.hpp"
+#include "libs/display_modes.hpp"
 #include "libs/rom_fonts.hpp"
 #include "libs/text_blend.hpp"
 #include "libs/utility.hpp"
@@ -3118,9 +3119,67 @@ void display_info_presents_ntsc() {
     CHECK_EQ(r.result(Base::Graphics, graphics_lvo::BestModeIDA), kPalHam);
 }
 
+// The HOMBRE monitor's modes follow the Amiga ones once the kernel has
+// listed them, with their own names, depths and monitor.
+void display_info_presents_hombre_modes() {
+    GfxRig r;
+    constexpr u32 kDisplayInfo = kData + 0xE00;
+    constexpr u32 kTags = kData + 0x1000;
+    constexpr u32 kDisp = 0x80000000;
+    constexpr u32 kDims = 0x80001000;
+    constexpr u32 kMntr = 0x80002000;
+    constexpr u32 kName = 0x80003000;
+    constexpr u32 kInvalid = 0xFFFFFFFF;
+    constexpr u32 kNominalWidth = 0x80000004;
+    constexpr u32 kNominalHeight = 0x80000005;
+    constexpr u32 kDepth = 0x80000008;
+    const u32 k1080x24 = display_modes::hombre_id(12, 2);
+    display_modes::configure_hombre(1280, 800, 512u * 1024 * 1024);
+
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kDisplayInfo;
+    r.cpu().d[0] = 56;
+    r.cpu().d[1] = kName;
+    r.cpu().d[2] = k1080x24;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
+    CHECK(r.read_str(kDisplayInfo + 16) == "HOMBRE:1920x1080 24bit");
+    r.cpu().d[1] = kDisp;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 56u);
+    CHECK_EQ(r.get32(kDisplayInfo + 18), 0x80000100u);
+    r.cpu().d[0] = 88;
+    r.cpu().d[1] = kDims;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 88u);
+    CHECK_EQ(r.get16(kDisplayInfo + 16), 24u);
+    CHECK_EQ(r.get16(kDisplayInfo + 30), 1919u);
+    CHECK_EQ(r.get16(kDisplayInfo + 32), 1079u);
+    r.cpu().d[0] = 96;
+    r.cpu().d[1] = kMntr;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetDisplayInfoData), 96u);
+    const u32 spec = r.get32(kDisplayInfo + 16);
+    CHECK(r.read_str(r.get32(spec + LN_NAME)) == "hombre.monitor");
+
+    r.put32(kTags, kNominalWidth);
+    r.put32(kTags + 4, 1920);
+    r.put32(kTags + 8, kNominalHeight);
+    r.put32(kTags + 12, 1080);
+    r.put32(kTags + 16, kDepth);
+    r.put32(kTags + 20, 24);
+    r.put32(kTags + 24, 0);
+    r.cpu().a[0] = kTags;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::BestModeIDA), k1080x24);
+
+    // The last Amiga mode now leads on to the first HOMBRE one.
+    r.cpu().d[0] = display_modes::at(display_modes::kAmigaModeCount - 1).id;
+    const u32 after_amiga = r.result(Base::Graphics, graphics_lvo::NextDisplayInfo);
+    CHECK_EQ(after_amiga, display_modes::hombre_id(0, 0));
+    r.cpu().d[0] = kInvalid;
+    display_modes::configure_hombre(0, 0, 0);
+}
+
 int main() {
     monitors_open_and_close();
     display_info_presents_ntsc();
+    display_info_presents_hombre_modes();
     set_soft_style_keeps_the_drawn_styles();
     gfx_base_lists_the_memory_fonts();
     topaz_font_holds_the_built_in_glyphs();

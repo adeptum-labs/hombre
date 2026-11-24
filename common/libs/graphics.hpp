@@ -253,6 +253,7 @@ private:
     u32 monitor_ = 0;
     u32 ntsc_monitor_ = 0;
     u32 pal_monitor_ = 0;
+    u32 hombre_monitor_ = 0;
     // The display modes of the ViewPorts registered for GetVPModeID.
     static constexpr u32 kVpModeIds = 256;
     struct VpModeId {
