@@ -2265,6 +2265,36 @@ struct GraphicsNatives {
         return spec;
     }
 
+    // VideoControl(colorMap A0, tags A1): there is no copper list to control,
+    // so every request is accepted and a _GET tag reads back as not set.
+    // A tag naming the view port's mode reads back INVALID_ID.
+    static void video_control(void*, Machine& m) {
+        Bus b(m);
+        u32 budget = tags::kMaxTagItems;
+        u32 at = m.cpu.a[1];
+        for (;;) {
+            const u32 item = tags::next(b, at, budget);
+            if (item == 0) {
+                break;
+            }
+            const u32 tag = b.r32(item);
+            if (tag == 0x80000020) {
+                b.w32(item + 4, 0xFFFFFFFF);
+            } else if ((tag >= 0x80000000 && tag <= 0x8000003C) || tag >= 0x80000080) {
+                const bool get = tag == 0x8000000F || tag == 0x80000011 || tag == 0x80000013 ||
+                                 (tag >= 0x80000015 && tag <= 0x8000001D) || tag == 0x80000023 ||
+                                 (tag >= 0x80000026 && tag <= 0x80000029) || tag == 0x8000002E ||
+                                 tag == 0x80000032 || tag == 0x80000034 || tag == 0x80000036 ||
+                                 tag == 0x80000039 || tag == 0x8000003C ||
+                                 tag == 0x80000081 || tag == 0x80000083 || tag == 0x80000085;
+                if (get) {
+                    b.w32(item + 4, 0);
+                }
+            }
+        }
+        native::set_result(m, 0);
+    }
+
     // OpenMonitor(name A1, displayID D0): the MonitorSpec of the monitor
     // named or of the display ID's monitor, the default monitor's for
     // anything else, its open count one up.
@@ -2798,6 +2828,7 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::PolyDraw, GraphicsNatives::poly_draw, "PolyDraw"},
     {graphics_lvo::BltTemplate, GraphicsNatives::blt_template, "BltTemplate"},
     {graphics_lvo::ClipBlit, GraphicsNatives::clip_blit, "ClipBlit"},
+    {graphics_lvo::VideoControl, GraphicsNatives::video_control, "VideoControl"},
     {graphics_lvo::OpenMonitor, GraphicsNatives::open_monitor, "OpenMonitor"},
     {graphics_lvo::CloseMonitor, GraphicsNatives::close_monitor, "CloseMonitor"},
     {graphics_lvo::FindDisplayInfo, GraphicsNatives::find_display_info, "FindDisplayInfo"},

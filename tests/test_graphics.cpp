@@ -2937,6 +2937,22 @@ void text_blends_on_a_five_to_seven_plane_palette() {
     }
 }
 
+// VideoControl accepts every request and reads _GET tags back as unset.
+void video_control_accepts_requests() {
+    GfxRig r;
+    const u32 tags = 0x6000;
+    r.put32(tags, 0x80000017);      // VTAG_BORDERBLANK_GET
+    r.put32(tags + 4, 0x1234);
+    r.put32(tags + 8, 0x80000020);  // VTAG_VPMODEID_GET
+    r.put32(tags + 12, 0x1234);
+    r.put32(tags + 16, 0);
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = tags;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::VideoControl), 0u);
+    CHECK_EQ(r.get32(tags + 4), 0u);
+    CHECK_EQ(r.get32(tags + 12), 0xFFFFFFFFu);
+}
+
 // OpenMonitor hands out the default and the NTSC monitor's MonitorSpecs,
 // counting their opens; CloseMonitor counts them down again.
 void monitors_open_and_close() {
@@ -3185,6 +3201,7 @@ void display_info_presents_hombre_modes() {
 
 int main() {
     monitors_open_and_close();
+    video_control_accepts_requests();
     display_info_presents_ntsc();
     display_info_presents_hombre_modes();
     set_soft_style_keeps_the_drawn_styles();
