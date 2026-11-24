@@ -29,6 +29,7 @@
 #include "../common/dos_date.hpp"
 #include "../common/format.hpp"
 #include "../common/libs/audio_device.hpp"
+#include "../common/libs/display_modes.hpp"
 #include "../common/libs/scsi_device.hpp"
 #include "../common/libs/console_device.hpp"
 #include "../common/libs/dos.hpp"
@@ -224,6 +225,12 @@ void open_amiga_screen(const BootInfo& info) {
     if (info.fb.phys == 0) {
         return;
     }
+    // The HOMBRE modes fit this framebuffer and the fast memory there is.
+    display_modes::configure_hombre(static_cast<u32>(info.fb.width),
+                                    static_cast<u32>(info.fb.height),
+                                    machine.mem.size > m68k::kChipBytes
+                                        ? machine.mem.size - m68k::kChipBytes
+                                        : 0);
     if (!graphics.init(machine, exec, display) ||
         !intuition.init(machine, exec, graphics, display) ||
         !gadtools.init(machine, exec, graphics)) {

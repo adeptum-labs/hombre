@@ -50,6 +50,23 @@ struct DeepBitmap {
     const u32* palette = nullptr;
 };
 
+// The bytes of a row and of the whole of a deep bitmap of width by height
+// pixels in fmt; rows are 16-byte aligned. False when it would not fit a
+// BitMap's 16-bit row size or 2 GiB.
+inline bool deep_size(u32 width, u32 height, PixFmt fmt, u32& bytes_per_row, u32& bytes) {
+    if (width == 0 || height == 0 || width > 0x7FFF || height > 0x7FFF) {
+        return false;
+    }
+    const u32 row = (width * bytes_per_pixel(fmt) + 15) & ~15u;
+    const u64 total = u64{row} * height;
+    if (row > 0xFFFF || total > 0x7FFFFFFF) {
+        return false;
+    }
+    bytes_per_row = row;
+    bytes = static_cast<u32>(total);
+    return true;
+}
+
 class DeepBitmaps {
 public:
     static constexpr u32 kCapacity = 256;

@@ -175,6 +175,14 @@ public:
     u32 alloc_deep_bitmap(u32 width, u32 height, PixFmt fmt);
     // Frees a bitmap alloc_deep_bitmap made; any other is left alone.
     void free_deep_bitmap(u32 bitmap);
+    // Makes the BitMap at bitmap, which the caller owns, a deep one over
+    // pixels it allocated, of width by height in fmt with rows of
+    // bytes_per_row; an earlier entry for it is replaced. Its pens take the
+    // palette's colours. False when the table is full.
+    bool attach_deep(u32 bitmap, u32 pixels, u32 pixel_bytes, u32 bytes_per_row, u32 width,
+                     u32 height, PixFmt fmt, const u32* palette, u32 colormap);
+    // Forgets that bitmap is deep; its memory stays the caller's.
+    void detach_deep(u32 bitmap) { deep_bitmaps_.remove(bitmap); }
     // The deep bitmap at that address, null for a planar one.
     const DeepBitmap* deep(u32 bitmap) const { return deep_bitmaps_.find(bitmap); }
     DeepBitmap* deep(u32 bitmap) { return deep_bitmaps_.find(bitmap); }

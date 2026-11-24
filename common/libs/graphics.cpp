@@ -2853,14 +2853,34 @@ void Graphics::palettes_changed() {
     }
 }
 
-u32 Graphics::alloc_deep_bitmap(u32 width, u32 height, PixFmt fmt) {
-    if (exec_ == nullptr || machine_ == nullptr || width == 0 || height == 0 ||
-        width > 0x7FFF || height > 0x7FFF) {
-        return 0;
+bool Graphics::attach_deep(u32 bitmap, u32 pixels, u32 pixel_bytes, u32 bytes_per_row,
+                           u32 width, u32 height, PixFmt fmt, const u32* palette,
+                           u32 colormap) {
+    if (machine_ == nullptr || bitmap == 0) {
+        return false;
     }
-    const u32 row_bytes = (width * bytes_per_pixel(fmt) + 15) & ~15u;
-    const u64 pixel_bytes = u64{row_bytes} * height;
-    if (row_bytes > 0xFFFF || pixel_bytes > 0x7FFFFFFF) {
+    deep_bitmaps_.remove(bitmap);
+    DeepBitmap entry{bitmap, pixels, pixel_bytes, width, height, bytes_per_row, fmt, colormap};
+    entry.palette = palette;
+    if (!deep_bitmaps_.add(entry)) {
+        return false;
+    }
+    Bus b(*machine_);
+    for (u32 i = 0; i < ndk::BitMap_SIZEOF; ++i) {
+        b.w8(bitmap + i, 0);
+    }
+    b.w16(bitmap + ndk::bm_BytesPerRow, bytes_per_row);
+    b.w16(bitmap + ndk::bm_Rows, height);
+    b.w8(bitmap + ndk::bm_Depth, kDeepDepth[static_cast<u32>(fmt)]);
+    b.w32(bitmap + ndk::bm_Planes, pixels);
+    return b.ok();
+}
+
+u32 Graphics::alloc_deep_bitmap(u32 width, u32 height, PixFmt fmt) {
+    u32 row_bytes = 0;
+    u32 pixel_bytes = 0;
+    if (exec_ == nullptr || machine_ == nullptr || !deep_size(width, height, fmt, row_bytes,
+                                                              pixel_bytes)) {
         return 0;
     }
     const u32 bitmap = exec_->alloc(ndk::BitMap_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);

@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "../pixel_format.hpp"
 #include "../slot_list.hpp"
 #include "../types.hpp"
 #include "boopsi.hpp"
@@ -485,6 +486,13 @@ private:
     // The memory the pixels and colours of a screen take, which a screen
     // started over in another mode gets afresh: the planes of its BitMap and
     // of its backdrop's, and the two tables of its ColorMap.
+    // A screen's bitmaps are planar, or deep in fmt for a HOMBRE mode; a
+    // deep screen has 256 pens. Its windows' bitmaps are of the same kind.
+    struct Surface {
+        bool deep = false;
+        PixFmt fmt = PixFmt::Lut8;
+    };
+
     struct ScreenBuffers {
         u32 bytes_per_row = 0;
         u32 plane_bytes = 0;
@@ -493,17 +501,20 @@ private:
         u32 backdrop_planes = 0;
         u32 colors = 0;
         u32 low_colors = 0;
+        Surface surface{};
+        u32 width = 0;
 
         // Works the sizes out for the screen's size and depth. False when
-        // the planes are more bytes than an address reaches.
-        bool size(u32 width, u32 height, u32 depth);
+        // the planes are more bytes than an address reaches. A deep screen
+        // keeps its pixels where planes go, in fast memory.
+        bool size(u32 width, u32 height, u32 depth, Surface surface);
         // False, with nothing left allocated, when exec is out of memory.
         bool allocate(Exec& exec);
         void release(Exec& exec);
         // Points the screen's BitMap, its backdrop's and its ColorMap at the
-        // buffers.
-        void attach(native::Bus& b, u32 bitmap, u32 backdrop_bitmap, u32 map, u32 height,
-                    u32 depth) const;
+        // buffers; deep BitMaps join graphics' table with the palette.
+        void attach(native::Bus& b, Graphics& graphics, u32 bitmap, u32 backdrop_bitmap, u32 map,
+                    u32 height, u32 depth, const u32* palette) const;
     };
 
     // What a screen owns in guest memory, so that closing it never has to
@@ -544,6 +555,9 @@ private:
         u32 height = 0;
         u32 depth = 0;
         u32 mode_id = kInvalidModeId;
+        Surface surface{};
+        // The 256 colours of a deep screen's pens, kept by graphics.
+        const u32* palette = nullptr;
         u32 first_window = 0;
         u32 palette_gen = 0;
         Rect pending = {0, 0, -1, -1};
@@ -918,6 +932,7 @@ private:
     bool begin_request(u32 requester, u32 window);
     void end_request(u32 requester, u32 window);
     void drop_requests(u32 window);
+    void free_saved(const Block& block);
     void draw_requester(native::Bus& b, const Block& block);
     Rect requester_gadget_box(native::Bus& b, const Block& block, u32 gadget);
     void draw_requester_gadget(native::Bus& b, const Block& block, u32 gadget);
