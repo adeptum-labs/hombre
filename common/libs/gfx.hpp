@@ -24,6 +24,7 @@
 #pragma once
 
 #include "../pointer_image.hpp"
+#include "../pixel_format.hpp"
 #include "../types.hpp"
 
 namespace hombre {
@@ -68,6 +69,10 @@ struct DisplayState {
     u16 mode_width = 640;
     u16 mode_height = 400;
     u32 mode_flags = 0;
+    // A HOMBRE mode: the screen's bitmap is deep in mode_fmt, and its
+    // pixels are square.
+    bool mode_deep = false;
+    PixFmt mode_fmt = PixFmt::Lut8;
     // Changes drawn into any bitmap other than the front screen's go here.
     DamageSink damage{nullptr, nullptr};
     PaletteSource palette{nullptr, nullptr};

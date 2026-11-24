@@ -23,7 +23,9 @@
 
 #pragma once
 
+#include "../common/display_fit.hpp"
 #include "../common/libs/gfx.hpp"
+#include "../common/pixel_format.hpp"
 #include "../common/libs/native.hpp"
 #include "../common/pointer_image.hpp"
 #include "../common/types.hpp"
@@ -85,6 +87,8 @@ public:
         box_height_ = static_cast<u32>(box_height);
         box_x_ = centred(width, box_width);
         box_y_ = centred(height, box_height);
+        amiga_box_ = Fit{box_x_, box_y_, box_width_, box_height_};
+        applied_deep_ = false;
         pointer_pixel_width_ = at_least_one(box_width_ / kPointerPixelsAcross);
         pointer_pixel_height_ = at_least_one(box_height_ / kPointerPixelsDown);
         applied_screen_ = 0;
@@ -147,6 +151,10 @@ public:
             return;
         }
         display.adopt_front(screen);
+        if (display.applied_deep_) {
+            display.refresh_deep(b, bitmap, bytes_per_row, palette, width, height, dirty);
+            return;
+        }
         // TODO: scroll a screen larger than its mode's nominal area (autoscroll).
         const u32 shown_width = width < display.applied_width_ ? width : display.applied_width_;
         const u32 shown_height =
@@ -169,7 +177,7 @@ public:
         const u32 first_bx = static_cast<u32>(first_x) >> 3;
         const u32 last_bx = (static_cast<u32>(first_x) + count - 1) >> 3;
         const u32 bx_count = last_bx - first_bx + 1;
-        u32 row[kMaxModeWidth];
+        u32* row = display.row_;
         for (i32 y = first_y; y <= last_y; ++y) {
             const u32 rows_top = display.host_row(y);
             const u32 rows_bottom = display.host_row(y + 1);
@@ -231,8 +239,9 @@ private:
     // The tables below bound the box; framebuffers beyond it get a box of this size.
     static constexpr u32 kMaxBoxWidth = 4096;
     static constexpr u32 kMaxBoxHeight = kMaxBoxWidth * kBoxHeightUnits / kBoxWidthUnits;
-    // The widest nominal mode size, which the row buffer holds.
-    static constexpr u32 kMaxModeWidth = 1280;
+    // The widest nominal mode size, which the row buffer holds: the widest
+    // HOMBRE mode, and a native one of a monitor up to 4096 pixels across.
+    static constexpr u32 kMaxModeWidth = 4096;
     static constexpr u32 kDefaultModeWidth = 640;
     static constexpr u32 kDefaultModeHeight = 400;
     // The pointer pixel is a High Res Laced pixel of the box.
@@ -242,6 +251,7 @@ private:
     static constexpr u32 kMaxPlanes = 8;
     static constexpr u32 kMaxColours = 1u << kMaxPlanes;
     static constexpr u32 kBorder = 0xAAAAAA;
+    static constexpr u32 kBars = 0x000000;
 
     static u32 at_least_one(u32 value) { return value > 0 ? value : 1; }
 
@@ -263,7 +273,9 @@ private:
     void adopt_front(u32 screen) {
         const u32 width = mode_width();
         const u32 height = mode_height();
-        if (screen == applied_screen_ && width == applied_width_ && height == applied_height_) {
+        const bool deep = state_ != nullptr && state_->mode_deep;
+        if (screen == applied_screen_ && width == applied_width_ && height == applied_height_ &&
+            deep == applied_deep_) {
             return;
         }
         pointer_x_ = static_cast<i32>(static_cast<i64>(pointer_x_) * width / applied_width_);
@@ -271,8 +283,78 @@ private:
         applied_screen_ = screen;
         applied_width_ = width;
         applied_height_ = height;
+        // A deep screen's pixels are square: it fills as much of the
+        // framebuffer as its shape allows, with black beside it. An Amiga
+        // screen fills the 16:10 box, with the border colour beside it.
+        const bool kind_changed = deep != applied_deep_;
+        applied_deep_ = deep;
+        const Fit box = deep ? fit_square(static_cast<u32>(fb_.width()),
+                                          static_cast<u32>(fb_.height()), width, height)
+                             : amiga_box_;
+        box_x_ = box.x;
+        box_y_ = box.y;
+        box_width_ = box.width < kMaxBoxWidth ? box.width : kMaxBoxWidth;
+        box_height_ = box.height < kMaxBoxHeight ? box.height : kMaxBoxHeight;
+        if (deep) {
+            pointer_pixel_width_ = at_least_one(box_width_ / width);
+            pointer_pixel_height_ = at_least_one(box_height_ / height);
+        } else {
+            pointer_pixel_width_ = at_least_one(box_width_ / kPointerPixelsAcross);
+            pointer_pixel_height_ = at_least_one(box_height_ / kPointerPixelsDown);
+        }
         map_mode();
-        fb_.fill_rect(box_x_, box_y_, box_width_, box_height_, kBorder);
+        if (deep || kind_changed) {
+            fb_.fill(deep ? kBars : kBorder);
+        } else {
+            fb_.fill_rect(box_x_, box_y_, box_width_, box_height_, kBorder);
+        }
+    }
+
+    // The dirty part of a deep screen, a row at a time: its pixels from the
+    // bitmap's pixel memory, through the palette on LUT8.
+    void refresh_deep(native::Bus& b, u32 bitmap, u32 bytes_per_row, const u32* palette,
+                      u32 width, u32 height, const Rect& dirty) {
+        const PixFmt fmt = state_->mode_fmt;
+        const u32 step = bytes_per_pixel(fmt);
+        const u32 pixels = b.r32(bitmap + ndk::bm_Planes);
+        const u32 shown_width = width < applied_width_ ? width : applied_width_;
+        const u32 shown_height = height < applied_height_ ? height : applied_height_;
+        const i32 last_x = at_most(dirty.x1, shown_width);
+        const i32 last_y = at_most(dirty.y1, shown_height);
+        const i32 first_x = dirty.x0 > 0 ? dirty.x0 : 0;
+        const i32 first_y = dirty.y0 > 0 ? dirty.y0 : 0;
+        if (!b.ok() || first_x > last_x || first_y > last_y ||
+            u64{shown_width} * step > bytes_per_row) {
+            return;
+        }
+        const u32 host_left = host_column(first_x);
+        const u32 host_right = host_column(last_x + 1);
+        const u32 host_top = host_row(first_y);
+        const u32 host_bottom = host_row(last_y + 1);
+        if (host_left == host_right || host_top == host_bottom) {
+            return;
+        }
+        const u32 count = static_cast<u32>(last_x - first_x + 1);
+        for (i32 y = first_y; y <= last_y; ++y) {
+            const u32 rows_top = host_row(y);
+            const u32 rows_bottom = host_row(y + 1);
+            if (rows_top == rows_bottom) {
+                continue;
+            }
+            const u8* src = b.bytes_at(pixels + static_cast<u32>(y) * bytes_per_row +
+                                           static_cast<u32>(first_x) * step,
+                                       count * step);
+            if (src == nullptr) {
+                return;
+            }
+            row_to_framebuffer(fmt, src, count, palette, true, row_ + first_x);
+            fb_.put_mapped_row(box_x_ + host_left, box_y_ + rows_top, rows_bottom - rows_top,
+                               row_, column_x_ + host_left, host_right - host_left);
+        }
+        if (pointer_visible_) {
+            draw_pointer(box_x_ + host_left, box_y_ + host_top, box_x_ + host_right,
+                         box_y_ + host_bottom);
+        }
     }
 
     // Looks up, for every host column and row of the box, the screen pixel it
@@ -445,6 +527,9 @@ private:
     // What the box shows: the front screen and its mode's nominal size, and
     // the screen pixel under each host column and row of the box.
     u32 applied_screen_ = 0;
+    bool applied_deep_ = false;
+    Fit amiga_box_{};
+    u32 row_[kMaxModeWidth]{};
     u32 applied_width_ = kDefaultModeWidth;
     u32 applied_height_ = kDefaultModeHeight;
     u16 column_x_[kMaxBoxWidth]{};

@@ -356,6 +356,8 @@ void set_front_mode(DisplayState& display, u32 mode_id) {
     display.mode_width = mode != nullptr ? mode->width : 640;
     display.mode_height = mode != nullptr ? mode->height : 400;
     display.mode_flags = mode != nullptr ? mode->flags : 0;
+    display.mode_deep = mode != nullptr && mode->deep;
+    display.mode_fmt = mode != nullptr ? mode->pixfmt : PixFmt::Lut8;
 }
 
 // The standard size of a screen: the extent of the DClip rectangle if one

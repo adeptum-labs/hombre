@@ -198,9 +198,90 @@ private:
     Machine m_;
 };
 
+// Guest memory holding the Screen of a deep ARGB32 screen of width by
+// height, its pixels at kPlaneBase all black.
+class DeepGuest {
+public:
+    DeepGuest(u32 width, u32 height) : width_(width), memory_(kMemoryBytes, kGuardByte) {
+        m_.cpu = CpuState{};
+        m_.mem = GuestMemory{memory_.data(), kMemoryBytes};
+        m_.jit = nullptr;
+        std::memset(memory_.data() + kPlaneBase, 0, width * 4 * height);
+        put16(kScreen + ndk::sc_Width, width);
+        put16(kScreen + ndk::sc_Height, height);
+        put16(kScreen + ndk::sc_BitMap + ndk::bm_BytesPerRow, width * 4);
+        put16(kScreen + ndk::sc_BitMap + ndk::bm_Rows, height);
+        put8(kScreen + ndk::sc_BitMap + ndk::bm_Depth, 24);
+        put32(kScreen + ndk::sc_BitMap + ndk::bm_Planes, kPlaneBase);
+        put32(kScreen + ndk::sc_ViewPort + ndk::vp_ColorMap, kColourMap);
+        put8(kColourMap + ndk::cm_Type, ndk::COLORMAP_TYPE_V39);
+        put16(kColourMap + ndk::cm_Count, 256);
+        put32(kColourMap + ndk::cm_ColorTable, kColourTable);
+        put32(kColourMap + ndk::cm_LowColorBits, kLowColourTable);
+    }
+
+    Machine& machine() { return m_; }
+
+    void set_pixel(u32 x, u32 y, u32 argb) { put32(kPlaneBase + (y * width_ + x) * 4, argb); }
+
+private:
+    void put8(u32 at, u32 v) { memory_[at] = static_cast<u8>(v); }
+    void put16(u32 at, u32 v) {
+        put8(at, v >> 8);
+        put8(at + 1, v);
+    }
+    void put32(u32 at, u32 v) {
+        put16(at, v >> 16);
+        put16(at + 2, v);
+    }
+
+    u32 width_;
+    std::vector<u8> memory_;
+    Machine m_;
+};
+
 void refresh(AmigaDisplay& display, Machine& m, u32 screen, Rect dirty) {
     const DisplaySink sink = display.sink();
     sink.refresh(sink.ctx, m, screen, dirty);
+}
+
+// A deep screen of a 4:3 HOMBRE mode on a 16:10 framebuffer keeps its
+// shape: black bars at the sides, its pixels in their own colours, and the
+// Amiga box with its border comes back for an Amiga screen.
+void deep_screen_is_square_and_pillarboxed() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    DeepGuest guest(80, 60);
+    guest.set_pixel(0, 0, 0xFFFF0000u);
+    guest.set_pixel(79, 59, 0xFF00FF00u);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    DisplayState state;
+    state.mode_width = 80;
+    state.mode_height = 60;
+    state.mode_deep = true;
+    state.mode_fmt = PixFmt::Argb32;
+    display.follow_pointer_shape(state);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 79, 59});
+    // 80x60 at 800 rows high is 1066 wide, from x 107.
+    CHECK_EQ(display.box_x(), 107u);
+    CHECK_EQ(display.box_width(), 1066u);
+    CHECK_EQ(display.box_height(), 800u);
+    CHECK_EQ(fb.pixel(107, 0), 0x00FF0000u);
+    CHECK_EQ(fb.pixel(107 + 1065, 799), 0x0000FF00u);
+    CHECK_EQ(fb.pixel(0, 400), 0u);
+    CHECK_EQ(fb.pixel(1279, 400), 0u);
+    CHECK_EQ(fb.pixel(500, 400), 0u);
+    CHECK(fb.guards_intact());
+
+    Guest amiga;
+    state.mode_width = 640;
+    state.mode_height = 400;
+    state.mode_deep = false;
+    amiga.set_all_pixels(1);
+    refresh(display, amiga.machine(), kScreen, Rect{0, 0, 639, 399});
+    CHECK_EQ(display.box_x(), 0u);
+    CHECK_EQ(display.box_width(), 1280u);
+    CHECK(fb.guards_intact());
 }
 
 void scale_two_at_1280x800_and_no_border() {
@@ -942,6 +1023,7 @@ void pointer_keeps_its_host_size_in_a_low_res_mode_and_its_place_when_the_mode_c
 }
 
 int main() {
+    deep_screen_is_square_and_pillarboxed();
     scale_two_at_1280x800_and_no_border();
     wide_framebuffer_gets_a_centred_box_with_border_colour_beside_it();
     tall_framebuffer_gets_a_centred_box_with_border_colour_above_and_below_it();
