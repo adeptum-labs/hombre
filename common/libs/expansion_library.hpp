@@ -27,13 +27,31 @@
 #include "../types.hpp"
 #include "exec.hpp"
 
-// expansion.library written in C++. It has no functions of its own: its
-// library base carries eb_MountList, the boot nodes, which programs such
-// as GuessBootDev walk to find the device the system started from. Being
-// in the library list, it is opened instead of an expansion.library in
-// LIBS:.
+// expansion.library written in C++. The machine has no expansion boards,
+// so FindConfigDev finds none and the board calls that make or free a
+// ConfigDev only keep the books; the library base carries eb_MountList,
+// the boot nodes, which programs such as GuessBootDev walk to find the
+// device the system started from. The calls it has no use for end the run
+// as unimplemented. Being in the library list, it is opened instead of an
+// expansion.library in LIBS:.
 
 namespace hombre {
+
+namespace expansion_lvo {
+constexpr u32 AddConfigDev = 30;
+constexpr u32 AddBootNode = 36;
+constexpr u32 AllocConfigDev = 48;
+constexpr u32 FindConfigDev = 72;
+constexpr u32 FreeConfigDev = 84;
+constexpr u32 RemConfigDev = 108;
+constexpr u32 ObtainConfigBinding = 120;
+constexpr u32 ReleaseConfigBinding = 126;
+constexpr u32 SetCurrentBinding = 132;
+constexpr u32 GetCurrentBinding = 138;
+constexpr u32 MakeDosNode = 144;
+constexpr u32 AddDosNode = 150;
+constexpr u32 Last = 162;
+}
 
 class ExpansionLibrary {
 public:
@@ -53,7 +71,16 @@ public:
     u32 base() const { return base_; }
 
 private:
+    friend struct ExpansionNatives;
+    static constexpr u32 kVectors = expansion_lvo::Last / 6;
+    static constexpr u32 kConfigDevBytes = 68;
+    static constexpr u32 kBindingBytes = 16;
+
+    m68k::Machine* machine_ = nullptr;
+    Exec* exec_ = nullptr;
     u32 base_ = 0;
+    NativeVector vectors_[kVectors]{};
+    u8 binding_[kBindingBytes]{};
 };
 
 }

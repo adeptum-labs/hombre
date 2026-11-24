@@ -35,9 +35,91 @@ constexpr u32 kBootNodeBytes = 18;  // Node, bn_Flags, bn_DeviceNode
 
 }
 
+struct ExpansionNatives {
+    static ExpansionLibrary& of(void* ctx) { return *static_cast<ExpansionLibrary*>(ctx); }
+
+    // FindConfigDev(old A0, manufacturer D0, product D1): no board.
+    static void find_config_dev(void*, Machine& m) { native::set_result(m, 0); }
+
+    // AllocConfigDev(): a cleared ConfigDev.
+    static void alloc_config_dev(void* ctx, Machine& m) {
+        ExpansionLibrary& e = of(ctx);
+        native::set_result(m, e.exec_->alloc(ExpansionLibrary::kConfigDevBytes,
+                                             ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR));
+    }
+
+    // FreeConfigDev(configDev A0)
+    static void free_config_dev(void* ctx, Machine& m) {
+        ExpansionLibrary& e = of(ctx);
+        if (m.cpu.a[0] != 0) {
+            e.exec_->free(m.cpu.a[0], ExpansionLibrary::kConfigDevBytes);
+        }
+    }
+
+    // The calls that only keep the books of a board list there is none of.
+    static void nothing(void*, Machine&) {}
+
+    // SetCurrentBinding(binding A0, size D0): the binding is kept for
+    // GetCurrentBinding, up to its own size.
+    static void set_current_binding(void* ctx, Machine& m) {
+        ExpansionLibrary& e = of(ctx);
+        Bus b(m);
+        const u32 size = m.cpu.d[0] < ExpansionLibrary::kBindingBytes
+                             ? m.cpu.d[0]
+                             : ExpansionLibrary::kBindingBytes;
+        for (u32 i = 0; i < size; ++i) {
+            e.binding_[i] = static_cast<u8>(b.r8(m.cpu.a[0] + i));
+        }
+    }
+
+    // GetCurrentBinding(binding A0, size D0)
+    static void get_current_binding(void* ctx, Machine& m) {
+        ExpansionLibrary& e = of(ctx);
+        Bus b(m);
+        const u32 size = m.cpu.d[0] < ExpansionLibrary::kBindingBytes
+                             ? m.cpu.d[0]
+                             : ExpansionLibrary::kBindingBytes;
+        for (u32 i = 0; i < size; ++i) {
+            b.w8(m.cpu.a[0] + i, e.binding_[i]);
+        }
+    }
+};
+
+namespace {
+
+struct Function {
+    u32 lvo;
+    m68k::NativeFn fn;
+    const char* name;
+};
+
+constexpr Function kFunctions[] = {
+    {expansion_lvo::AddConfigDev, ExpansionNatives::nothing, "AddConfigDev"},
+    {expansion_lvo::AllocConfigDev, ExpansionNatives::alloc_config_dev, "AllocConfigDev"},
+    {expansion_lvo::FindConfigDev, ExpansionNatives::find_config_dev, "FindConfigDev"},
+    {expansion_lvo::FreeConfigDev, ExpansionNatives::free_config_dev, "FreeConfigDev"},
+    {expansion_lvo::RemConfigDev, ExpansionNatives::nothing, "RemConfigDev"},
+    {expansion_lvo::ObtainConfigBinding, ExpansionNatives::nothing, "ObtainConfigBinding"},
+    {expansion_lvo::ReleaseConfigBinding, ExpansionNatives::nothing, "ReleaseConfigBinding"},
+    {expansion_lvo::SetCurrentBinding, ExpansionNatives::set_current_binding,
+     "SetCurrentBinding"},
+    {expansion_lvo::GetCurrentBinding, ExpansionNatives::get_current_binding,
+     "GetCurrentBinding"},
+};
+
+}
+
 bool ExpansionLibrary::init(Machine& m, Exec& exec) {
     base_ = 0;
-    const u32 base = exec.make_native_library(kName, 40, nullptr, 0, nullptr, kBaseBytes);
+    machine_ = &m;
+    exec_ = &exec;
+    for (NativeVector& v : vectors_) {
+        v = NativeVector{nullptr, nullptr};
+    }
+    for (const Function& f : kFunctions) {
+        vectors_[f.lvo / ndk::LIB_VECTSIZE - 1] = NativeVector{f.fn, f.name};
+    }
+    const u32 base = exec.make_native_library(kName, 40, vectors_, kVectors, this, kBaseBytes);
     if (base == 0) {
         return false;
     }

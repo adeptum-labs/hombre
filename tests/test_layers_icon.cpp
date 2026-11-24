@@ -269,6 +269,48 @@ void expansion_library_lists_its_boot_nodes() {
     r.result(g_exec.exec_base(), exec_lvo::CloseLibrary);
 }
 
+// There are no expansion boards: FindConfigDev finds none, ConfigDevs can
+// be made and given back, the binding is kept, and a call past the ones
+// made ends the run as unimplemented instead of leaving the table.
+void expansion_library_has_no_boards() {
+    Rig r;
+    r.m.cpu.a[1] = r.str(kData, "expansion.library");
+    r.m.cpu.d[0] = 0;
+    const u32 base = r.result(g_exec.exec_base(), exec_lvo::OpenLibrary);
+    CHECK_EQ(base, g_expansion.base());
+
+    r.m.cpu.a[0] = 0;
+    r.m.cpu.d[0] = 0;
+    r.m.cpu.d[1] = 0;
+    CHECK_EQ(r.result(base, expansion_lvo::FindConfigDev), 0u);
+
+    const u32 free_before = g_exec.free_bytes();
+    const u32 cd = r.result(base, expansion_lvo::AllocConfigDev);
+    CHECK(cd != 0);
+    r.m.cpu.a[0] = cd;
+    CHECK_EQ(r.call(base, expansion_lvo::FreeConfigDev), ExitReason::Halt);
+    CHECK_EQ(g_exec.free_bytes(), free_before);
+
+    for (u32 i = 0; i < 4; ++i) {
+        r.put8(kData + 0x40 + i, 0x11);
+        r.put8(kData + 0x44 + i, 0x22);
+    }
+    r.m.cpu.a[0] = kData + 0x40;
+    r.m.cpu.d[0] = 8;
+    CHECK_EQ(r.call(base, expansion_lvo::SetCurrentBinding), ExitReason::Halt);
+    r.m.cpu.a[0] = kData + 0x80;
+    r.m.cpu.d[0] = 8;
+    CHECK_EQ(r.call(base, expansion_lvo::GetCurrentBinding), ExitReason::Halt);
+    CHECK_EQ(r.get32(kData + 0x80), 0x11111111u);
+    CHECK_EQ(r.get32(kData + 0x84), 0x22222222u);
+
+    CHECK_EQ(r.call(base, expansion_lvo::ObtainConfigBinding), ExitReason::Halt);
+    CHECK_EQ(r.call(base, expansion_lvo::ReleaseConfigBinding), ExitReason::Halt);
+    r.m.cpu.a[1] = base;
+    r.m.cpu.d[0] = 0;
+    CHECK_EQ(r.call(base, expansion_lvo::MakeDosNode), ExitReason::Unimplemented);
+}
+
 void icon_reads_what_is_there_and_defaults_the_rest() {
     Rig r;
     r.str(kData, "NoIcon");
@@ -303,5 +345,6 @@ int main() {
     icon_reads_what_is_there_and_defaults_the_rest();
     version_library_carries_the_system_version();
     expansion_library_lists_its_boot_nodes();
+    expansion_library_has_no_boards();
     return check::finish("test_layers_icon");
 }
