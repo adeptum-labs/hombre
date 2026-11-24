@@ -309,6 +309,87 @@ bool inked_columns(const u8* bits, u32 bytes, u32& first, u32& last) {
     return true;
 }
 
+// Mixes two colours, 0x00RRGGBB, level parts of the way from a to b out of
+// text_blend::kLevels - 1.
+inline u32 mix_rgb(u32 a, u32 b, u32 level) {
+    const u32 top = text_blend::kLevels - 1;
+    u32 out = 0;
+    for (u32 shift = 0; shift <= 16; shift += 8) {
+        const u32 ca = (a >> shift) & 0xFF;
+        const u32 cb = (b >> shift) & 0xFF;
+        out |= ((ca * (top - level) + cb * level + top / 2) / top) << shift;
+    }
+    return out;
+}
+
+// One row of 1-bit text on a deep bitmap: bit (x - origin) of bits says
+// whether column x is set, for x0 to x1.
+inline void deep_text_bits(native::Bus& bus, const Bitmap& bitmap, i64 y, i64 x0, i64 x1,
+                           i64 origin, const u8* bits, const Pens& pens, u32 mode, Rect& dirty) {
+    const u32 fg = chunky::pen_value(bitmap, pens.fg);
+    const u32 bg = chunky::pen_value(bitmap, pens.bg);
+    const u32 flip = bitmap.fmt == PixFmt::Lut8 ? pens.fg & 0xFF
+                     : bitmap.fmt == PixFmt::Rgb16 ? 0xFFFFu
+                                                   : 0x00FFFFFFu;
+    for (i64 x = x0; x <= x1; ++x) {
+        const u32 index = static_cast<u32>(x - origin);
+        const bool set = (bits[index >> 3] & (0x80u >> (index & 7))) != 0;
+        if (mode != ndk::JAM2 && !set) {
+            continue;
+        }
+        const u32 ux = static_cast<u32>(x);
+        const u32 uy = static_cast<u32>(y);
+        if (mode == ndk::COMPLEMENT) {
+            chunky::write_value(bus, bitmap, ux, uy, chunky::read_value(bus, bitmap, ux, uy) ^ flip);
+        } else {
+            chunky::write_value(bus, bitmap, ux, uy, set ? fg : bg);
+        }
+        grow(dirty, static_cast<i32>(x), static_cast<i32>(y));
+    }
+}
+
+// One row of antialiased text on a deep bitmap, from the coverage levels of
+// columns x0 to x1. RGB bitmaps blend their colours; LUT8 ones take the
+// pens of the blend cache's ramps, as planar bitmaps do.
+inline void deep_text_cover(native::Bus& bus, const Bitmap& bitmap, i64 y, i64 x0, i64 x1,
+                            const u8* cover, i64 cover_origin, const Pens& pens, u32 mode,
+                            text_blend::Cache* blend, const u8* bg_ramp, Rect& dirty) {
+    const u32* palette = chunky::palette_of(bitmap);
+    const u32 fg_rgb = palette[pens.fg & 0xFF];
+    const u32 bg_rgb = palette[pens.bg & 0xFF];
+    const u32 top = text_blend::kLevels - 1;
+    for (i64 x = x0; x <= x1; ++x) {
+        const u32 level = cover[static_cast<u32>(x - cover_origin)];
+        if (mode != ndk::JAM2 && level == 0) {
+            continue;
+        }
+        const u32 ux = static_cast<u32>(x);
+        const u32 uy = static_cast<u32>(y);
+        u32 value = 0;
+        if (bitmap.fmt == PixFmt::Lut8) {
+            if (mode == ndk::JAM2) {
+                value = bg_ramp[level];
+            } else if (level == top) {
+                value = pens.fg;
+            } else {
+                const u8* ramp =
+                    blend->ramp(pens.fg, static_cast<u8>(chunky::read_value(bus, bitmap, ux, uy)));
+                if (ramp == nullptr) {
+                    continue;
+                }
+                value = ramp[level];
+            }
+        } else {
+            const u32 under = mode == ndk::JAM2
+                                  ? bg_rgb
+                                  : chunky::value_rgb(bitmap, chunky::read_value(bus, bitmap, ux, uy));
+            value = chunky::rgb_value(bitmap, mix_rgb(under, fg_rgb, level));
+        }
+        chunky::write_value(bus, bitmap, ux, uy, value);
+        grow(dirty, static_cast<i32>(x), static_cast<i32>(y));
+    }
+}
+
 Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, const Pens& pens,
                     const Font& f, const TextStyle& style, const TextSpan& span, i32 x,
                     i32 baseline_y, const u8* chars, u32 count,
@@ -316,7 +397,7 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
     Rect dirty = empty_rect();
     // The text's rectangle, cut to the bitmap and the clip.
     const i64 top = static_cast<i64>(baseline_y) - f.baseline;
-    const i64 width = static_cast<i64>(bitmap.bytes_per_row) * 8;
+    const i64 width = pixel_width(bitmap);
     i64 x0 = x + span.min_x;
     i64 x1 = x + span.max_x;
     i64 y0 = top;
@@ -375,12 +456,16 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
     // Only the palette of a bitmap of text_blend::kMinPlanes planes or more
     // through a cache can take the coverage levels; every other mode keeps
     // the font's 1-bit glyphs.
-    const bool can_blend = f.coverage != nullptr && blend != nullptr &&
-                           text_blend::blends_on(bitmap.depth) && !inverse &&
-                           (mode == ndk::JAM1 || mode == ndk::JAM2);
+    // RGB bitmaps blend colours themselves and need no cache.
+    const bool deep_rgb = bitmap.deep && bitmap.fmt != PixFmt::Lut8;
+    const bool can_blend =
+        f.coverage != nullptr && !inverse && (mode == ndk::JAM1 || mode == ndk::JAM2) &&
+        (deep_rgb || (blend != nullptr && text_blend::blends_on(bitmap.depth)));
     const u32 planes_used = bitmap.depth;
-    const u8* bg_ramp = can_blend && mode == ndk::JAM2 ? blend->ramp(pens.fg, pens.bg) : nullptr;
-    const bool antialiased = can_blend && (mode == ndk::JAM1 || bg_ramp != nullptr);
+    const u8* bg_ramp =
+        can_blend && !deep_rgb && mode == ndk::JAM2 ? blend->ramp(pens.fg, pens.bg) : nullptr;
+    const bool antialiased =
+        can_blend && (deep_rgb || mode == ndk::JAM1 || bg_ramp != nullptr);
     for (i64 y = y0; y <= y1; ++y) {
         const i32 row = static_cast<i32>(y - top);
         if (antialiased) {
@@ -413,6 +498,11 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
             }
             if (smear != 0) {
                 smear_coverage(cover, line_pixels, static_cast<u32>(smear));
+            }
+            if (bitmap.deep) {
+                deep_text_cover(bus, bitmap, y, x0, x1, cover, cover_origin, pens, mode, blend,
+                                bg_ramp, dirty);
+                continue;
             }
             const u32 row_offset = static_cast<u32>(y) * bitmap.bytes_per_row + first;
             u8* planes[8];
@@ -512,6 +602,11 @@ Rect draw_text_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, co
             for (u32 i = 0; i < bytes; ++i) {
                 bits[i] = static_cast<u8>(~bits[i]);
             }
+        }
+        if (bitmap.deep) {
+            deep_text_bits(bus, bitmap, y, x0, x1, static_cast<i64>(first) * 8, bits, pens, mode,
+                           dirty);
+            continue;
         }
         const u32 row_offset = static_cast<u32>(y) * bitmap.bytes_per_row + first;
         if (mode == ndk::JAM2) {

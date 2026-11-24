@@ -23,7 +23,9 @@
 
 #pragma once
 
+#include "../pixel_format.hpp"
 #include "../types.hpp"
+#include "deep_bitmaps.hpp"
 #include "gfx.hpp"
 #include "native.hpp"
 
@@ -36,13 +38,31 @@
 
 namespace hombre::raster {
 
+// A planar BitMap, or with deep set a chunky one: pixels holds the address
+// of its rows of width pixels in fmt, and palette the colours of its pens.
 struct Bitmap {
     u32 planes[8];
     u32 bytes_per_row;
     u32 rows;
     u32 depth;
     u32 addr;
+    bool deep = false;
+    PixFmt fmt = PixFmt::Lut8;
+    u32 width = 0;
+    u32 pixels = 0;
+    const u32* palette = nullptr;
 };
+
+// The deep bitmaps load_bitmap knows; graphics.library sets it.
+inline const DeepBitmaps* g_deep_lookup = nullptr;
+
+inline void set_deep_lookup(const DeepBitmaps* lookup) { g_deep_lookup = lookup; }
+
+// The pixels across a row.
+inline i64 pixel_width(const Bitmap& bitmap) {
+    return bitmap.deep ? static_cast<i64>(bitmap.width)
+                       : static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
+}
 
 // An inclusive rectangle the drawing stays inside. With region not 0 the
 // drawing also stays inside the rectangles of that Region, whose
@@ -78,16 +98,14 @@ constexpr u32 kAllOnes = 0xFFFFFFFF;
 constexpr u32 kMaxLineSteps = 4096;
 
 bool in_bitmap(const Bitmap& bitmap, i32 x, i32 y) {
-    return x >= 0 && y >= 0 && (static_cast<u32>(x) >> 3) < bitmap.bytes_per_row &&
-           static_cast<u32>(y) < bitmap.rows;
+    return x >= 0 && y >= 0 && x < pixel_width(bitmap) && static_cast<u32>(y) < bitmap.rows;
 }
 
 bool visible(const Bitmap& bitmap, const Clip& clip, i64 x, i64 y) {
     if (x < clip.x0 || x > clip.x1 || y < clip.y0 || y > clip.y1) {
         return false;
     }
-    return x >= 0 && y >= 0 && (static_cast<u64>(x) >> 3) < bitmap.bytes_per_row &&
-           static_cast<u64>(y) < bitmap.rows;
+    return x >= 0 && y >= 0 && x < pixel_width(bitmap) && static_cast<u64>(y) < bitmap.rows;
 }
 
 u32 plane_address(const Bitmap& bitmap, u32 plane, u32 x, u32 y) {
@@ -214,12 +232,35 @@ void copy_span(u8* dst, const u8* src, u32 span, u8 lmask, u8 rmask) {
 
 }
 
+}
+
+#include "raster_chunky.hpp"
+
+namespace hombre::raster {
+
 // The largest bitmap a draw works on: 4096 x 4096 pixels, which bounds the
 // work one native call can do.
 constexpr u32 kMaxBytesPerRow = 512;
 constexpr u32 kMaxRows = 4096;
 
 inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
+    if (g_deep_lookup != nullptr) {
+        if (const DeepBitmap* deep = g_deep_lookup->find(bitmap_addr)) {
+            out = Bitmap{};
+            out.deep = true;
+            out.fmt = deep->fmt;
+            out.width = deep->width;
+            out.rows = deep->height;
+            out.bytes_per_row = deep->bytes_per_row;
+            out.depth = out.fmt == PixFmt::Lut8 ? 8 : out.fmt == PixFmt::Rgb16 ? 16 : 24;
+            out.pixels = deep->pixels;
+            out.palette = deep->palette;
+            out.addr = bitmap_addr;
+            return out.rows <= kMaxRows &&
+                   u64{out.width} * bytes_per_pixel(out.fmt) <= out.bytes_per_row &&
+                   bus.bytes_at(out.pixels, out.bytes_per_row * out.rows) != nullptr;
+        }
+    }
     out.bytes_per_row = bus.r16(bitmap_addr + ndk::bm_BytesPerRow);
     out.rows = bus.r16(bitmap_addr + ndk::bm_Rows);
     out.depth = bus.r8(bitmap_addr + ndk::bm_Depth);
@@ -280,7 +321,7 @@ inline RastPortView load_rastport(native::Bus& bus, u32 rp) {
         view.clip.region_x = view.origin_x;
         view.clip.region_y = view.origin_y;
     } else {
-        view.clip = Clip{0, 0, static_cast<i32>(view.bitmap.bytes_per_row << 3) - 1,
+        view.clip = Clip{0, 0, static_cast<i32>(pixel_width(view.bitmap)) - 1,
                          static_cast<i32>(view.bitmap.rows) - 1};
     }
     view.ok = bus.ok();
@@ -290,6 +331,9 @@ inline RastPortView load_rastport(native::Bus& bus, u32 rp) {
 inline u32 read_pixel(native::Bus& bus, const Bitmap& bitmap, i32 x, i32 y) {
     if (!in_bitmap(bitmap, x, y)) {
         return kAllOnes;
+    }
+    if (bitmap.deep) {
+        return chunky::read_pen(bus, bitmap, static_cast<u32>(x), static_cast<u32>(y));
     }
     const u32 bit = 0x80u >> (static_cast<u32>(x) & 7);
     u32 pen = 0;
@@ -304,6 +348,11 @@ inline u32 read_pixel(native::Bus& bus, const Bitmap& bitmap, i32 x, i32 y) {
 
 inline void write_pixel(native::Bus& bus, const Bitmap& bitmap, i32 x, i32 y, u32 pen) {
     if (!in_bitmap(bitmap, x, y)) {
+        return;
+    }
+    if (bitmap.deep) {
+        chunky::write_value(bus, bitmap, static_cast<u32>(x), static_cast<u32>(y),
+                            chunky::pen_value(bitmap, pen));
         return;
     }
     const u32 bit = 0x80u >> (static_cast<u32>(x) & 7);
@@ -333,7 +382,7 @@ namespace {
 
 Rect fill_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r, u32 pen,
                     u8 plane_mask) {
-    const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
+    const i64 width = pixel_width(bitmap);
     const i64 height = static_cast<i64>(bitmap.rows);
     i64 left = r.x0 > clip.x0 ? r.x0 : clip.x0;
     i64 top = r.y0 > clip.y0 ? r.y0 : clip.y0;
@@ -353,6 +402,12 @@ Rect fill_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Re
     }
     if (left > right || top > bottom) {
         return empty_rect();
+    }
+    if (bitmap.deep) {
+        chunky::fill(bus, bitmap, left, top, right, bottom, chunky::pen_value(bitmap, pen),
+                     plane_mask);
+        return Rect{static_cast<i32>(left), static_cast<i32>(top), static_cast<i32>(right),
+                    static_cast<i32>(bottom)};
     }
     // A plane byte at a time: whole bytes inside the span, masked at its ends.
     const u32 first = static_cast<u32>(left) >> 3;
@@ -408,7 +463,7 @@ Rect draw_line_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i3
 
 Rect scroll_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, i32 dx, i32 dy,
                       Rect area, u32 bg_pen) {
-    const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
+    const i64 width = pixel_width(bitmap);
     const i64 height = static_cast<i64>(bitmap.rows);
     i64 left = area.x0 > clip.x0 ? area.x0 : clip.x0;
     i64 top = area.y0 > clip.y0 ? area.y0 : clip.y0;
@@ -431,6 +486,11 @@ Rect scroll_rect_part(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
     }
     const Rect area_done{static_cast<i32>(left), static_cast<i32>(top), static_cast<i32>(right),
                          static_cast<i32>(bottom)};
+    if (bitmap.deep) {
+        chunky::scroll(bus, bitmap, left, top, right, bottom, dx, dy,
+                       chunky::pen_value(bitmap, bg_pen));
+        return area_done;
+    }
 
     if (dx == 0) {
         // A vertical move keeps every pixel in its byte column: whole plane
@@ -512,7 +572,7 @@ inline Rect fill_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, 
 inline Rect complement_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& clip, Rect r,
                             u32 mask) {
     Rect dirty = empty_rect();
-    const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
+    const i64 width = pixel_width(bitmap);
     const i64 height = static_cast<i64>(bitmap.rows);
     walk_clip(bus, clip, [&](const Clip& part) {
         const i64 left = r.x0 > part.x0 ? (r.x0 > 0 ? r.x0 : 0) : (part.x0 > 0 ? part.x0 : 0);
@@ -521,6 +581,15 @@ inline Rect complement_rect(native::Bus& bus, const Bitmap& bitmap, const Clip& 
         i64 bottom = r.y1 < part.y1 ? r.y1 : part.y1;
         right = right < width ? right : width - 1;
         bottom = bottom < height ? bottom : height - 1;
+        if (bitmap.deep) {
+            if (left <= right && top <= bottom) {
+                chunky::complement(bus, bitmap, left, top, right, bottom, mask);
+                dirty = unite_rects(dirty, Rect{static_cast<i32>(left), static_cast<i32>(top),
+                                                static_cast<i32>(right),
+                                                static_cast<i32>(bottom)});
+            }
+            return true;
+        }
         for (i64 y = top; y <= bottom && bus.ok(); ++y) {
             for (i64 x = left; x <= right; ++x) {
                 const i32 px = static_cast<i32>(x);
@@ -582,8 +651,8 @@ inline bool clip_copy_bounds(const Bitmap& src, const Bitmap& dst, i64& s_x, i64
         s_y -= d_y;
         d_y = 0;
     }
-    const i64 src_w = static_cast<i64>(static_cast<u64>(src.bytes_per_row) << 3);
-    const i64 dst_w = static_cast<i64>(static_cast<u64>(dst.bytes_per_row) << 3);
+    const i64 src_w = pixel_width(src);
+    const i64 dst_w = pixel_width(dst);
     const i64 src_h = static_cast<i64>(src.rows);
     const i64 dst_h = static_cast<i64>(dst.rows);
     if (s_x >= src_w || d_x >= dst_w || s_y >= src_h || d_y >= dst_h) {
@@ -604,6 +673,44 @@ inline bool clip_copy_bounds(const Bitmap& src, const Bitmap& dst, i64& s_x, i64
     return w > 0 && h > 0;
 }
 
+// Copies a clipped rectangle where either bitmap is deep. Rows of the same
+// format move whole, in the order that reads an overlapping source row before
+// it is written; other pairs go pixel by pixel through colour or pen.
+inline void copy_deep(native::Bus& bus, const Bitmap& src, u32 sx, u32 sy, const Bitmap& dst,
+                      u32 dx, u32 dy, u32 w, u32 h) {
+    const bool same_format = src.deep && dst.deep && src.fmt == dst.fmt;
+    const bool downward = src.pixels == dst.pixels && dy > sy;
+    for (u32 i = 0; i < h && bus.ok(); ++i) {
+        const u32 row_index = downward ? h - 1 - i : i;
+        const u32 y_in = sy + row_index;
+        const u32 y_out = dy + row_index;
+        if (same_format) {
+            const u8* in = chunky::row(bus, src, sx, y_in, w);
+            u8* out = chunky::row(bus, dst, dx, y_out, w);
+            if (in == nullptr || out == nullptr) {
+                return;
+            }
+            __builtin_memmove(out, in, w * chunky::bpp(dst));
+            continue;
+        }
+        for (u32 x = 0; x < w; ++x) {
+            const i32 xi = static_cast<i32>(sx + x);
+            const i32 xo = static_cast<i32>(dx + x);
+            if (!dst.deep) {
+                write_pixel(bus, dst, xo, static_cast<i32>(y_out),
+                            read_pixel(bus, src, xi, static_cast<i32>(y_in)));
+            } else if (!src.deep) {
+                chunky::write_value(bus, dst, dx + x, y_out,
+                                    chunky::pen_value(dst, read_pixel(bus, src, xi,
+                                                                      static_cast<i32>(y_in))));
+            } else {
+                const u32 xrgb = chunky::value_rgb(src, chunky::read_value(bus, src, sx + x, y_in));
+                chunky::write_value(bus, dst, dx + x, y_out, chunky::rgb_value(dst, xrgb));
+            }
+        }
+    }
+}
+
 // Copies a rectangle between two distinct bitmaps; overlapping regions within
 // the same bitmap are not handled. Each destination byte is built from the one
 // or two source bytes it straddles and masked at the left and right edges.
@@ -616,6 +723,12 @@ inline void copy_rect(native::Bus& bus, const Bitmap& src, i32 sx, i32 sy, const
     i64 w = width;
     i64 h = height;
     if (!clip_copy_bounds(src, dst, s_x, s_y, d_x, d_y, w, h)) {
+        return;
+    }
+    if (src.deep || dst.deep) {
+        copy_deep(bus, src, static_cast<u32>(s_x), static_cast<u32>(s_y), dst,
+                  static_cast<u32>(d_x), static_cast<u32>(d_y), static_cast<u32>(w),
+                  static_cast<u32>(h));
         return;
     }
 
@@ -732,7 +845,30 @@ inline void remap_rect(native::Bus& bus, const Bitmap& bitmap, Rect r, const u8*
     if (table == nullptr || table_size == 0 || bitmap.depth == 0) {
         return;
     }
-    const i64 width = static_cast<i64>(static_cast<u64>(bitmap.bytes_per_row) << 3);
+    const i64 width = pixel_width(bitmap);
+    if (bitmap.deep) {
+        // Pens are only kept on LUT8; an RGB pixel has no pen to remap.
+        if (bitmap.fmt != PixFmt::Lut8) {
+            return;
+        }
+        const i64 l = r.x0 > 0 ? r.x0 : 0;
+        const i64 t = r.y0 > 0 ? r.y0 : 0;
+        const i64 rr = r.x1 < width ? r.x1 : width - 1;
+        const i64 bb = r.y1 < static_cast<i64>(bitmap.rows) ? r.y1 : bitmap.rows - 1;
+        for (i64 y = t; y <= bb && l <= rr; ++y) {
+            u8* at = chunky::row(bus, bitmap, static_cast<u32>(l), static_cast<u32>(y),
+                                 static_cast<u32>(rr - l + 1));
+            if (at == nullptr) {
+                return;
+            }
+            for (i64 x = 0; x <= rr - l; ++x) {
+                if (at[x] < table_size) {
+                    at[x] = table[at[x]];
+                }
+            }
+        }
+        return;
+    }
     const i64 height = static_cast<i64>(bitmap.rows);
     i64 left = r.x0 > 0 ? r.x0 : 0;
     i64 top = r.y0 > 0 ? r.y0 : 0;

@@ -2761,6 +2761,8 @@ void Graphics::free_deep_bitmap(u32 bitmap) {
 
 bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     machine_ = &m;
+    deep_bitmaps_ = DeepBitmaps{};
+    raster::set_deep_lookup(&deep_bitmaps_);
     exec_ = &exec;
     display_ = &display;
     base_ = 0;

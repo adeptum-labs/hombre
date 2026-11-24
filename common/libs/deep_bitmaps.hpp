@@ -45,6 +45,9 @@ struct DeepBitmap {
     // The ColorMap its pens take their colours from, 0 for the default
     // palette.
     u32 colormap = 0;
+    // The 256 colours its pens draw in, as 0x00RRGGBB: the screen's, shared
+    // by its windows. Null for the default palette.
+    const u32* palette = nullptr;
 };
 
 class DeepBitmaps {
