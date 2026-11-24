@@ -454,6 +454,9 @@ public:
     // be set before init and is kept across it.
     void set_idle_hook(const IdleHook& hook) { idle_ = hook; }
 
+    // True when a SetFunction made a library vector jump into [lo, hi).
+    bool function_set_within(u32 lo, u32 hi) const;
+
     // PutMsg offers each message to this hook first. Kept across init.
     void set_message_hook(const MessageHook& hook) { message_hook_ = hook; }
 
@@ -700,6 +703,9 @@ private:
     SegmentLoader loader_{nullptr, nullptr};
     IdleHook idle_{nullptr, nullptr};
     MessageHook message_hook_{nullptr, nullptr};
+    static constexpr u32 kMaxPatches = 256;
+    u32 patches_[kMaxPatches]{};  // targets SetFunction put in vectors
+    u32 patch_count_ = 0;
     TaskHost task_host_{};
     struct DropHook {
         void (*fn)(void* ctx, u32 task) = nullptr;

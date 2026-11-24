@@ -3257,6 +3257,25 @@ void info_on_the_volume() {
 
 // --- loading ----------------------------------------------------------------
 
+// A library vector that SetFunction pointed into a seglist keeps the seglist
+// loaded: unloading it would leave the vector jumping into freed memory.
+void a_patched_vector_keeps_its_code_loaded() {
+    Rig r;
+    r.str(kData, "C:Hello");
+    const auto before = r.chunks();
+    const u32 seg = r.call(dos_lvo::LoadSeg, kData);
+    CHECK(seg != 0);
+    r.cpu().a[1] = g_exec.exec_base();
+    r.cpu().a[0] = static_cast<u32>(-static_cast<i32>(exec_lvo::SumLibrary));
+    r.cpu().d[0] = (seg << 2) + 4;
+    CHECK_EQ(r.exec(exec_lvo::SetFunction), ExitReason::Halt);
+    r.call(dos_lvo::UnLoadSeg, seg);
+    CHECK(r.chunks() != before);
+    CHECK_EQ(r.get16((seg << 2) + 4), 0x2C78u);
+    CHECK(!g_lines.empty());
+    g_lines.clear();
+}
+
 void load_seg_and_unload_seg() {
     Rig r;
     const auto before = r.chunks();
@@ -8707,6 +8726,7 @@ int main() {
     examine_and_ex_next();
     info_on_the_volume();
     load_seg_and_unload_seg();
+    a_patched_vector_keeps_its_code_loaded();
     load_seg_of_bad_hunks();
     unload_seg_of_bad_seglists();
     read_args_from_the_command_line();

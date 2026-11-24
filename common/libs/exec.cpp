@@ -1849,6 +1849,9 @@ struct ExecOps {
         }
         b.w16(vec, native::kJmpAbsL);
         b.w32(vec + 2, function);
+        if (e.patch_count_ < Exec::kMaxPatches) {
+            e.patches_[e.patch_count_++] = function;
+        }
         b.w8(lib + LIB_FLAGS, static_cast<u8>(b.r8(lib + LIB_FLAGS) | LIBF_CHANGED));
         sum_library(b, lib);
         m.jit->flush();
@@ -2752,6 +2755,7 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
         region = Region{};
     }
     region_count_ = 0;
+    patch_count_ = 0;
     sig_alloc_ = 0x0000FFFF;
     signals_ = 0;
     port_signals_ = 0;
@@ -4058,6 +4062,15 @@ void Exec::end_child_tasks() {
         m_->mem.write32(base_ + ThisTask, task_);
     }
     end_tasks_of(tasks_[0].task_addr != 0 ? tasks_[0].task_addr : task_);
+}
+
+bool Exec::function_set_within(u32 lo, u32 hi) const {
+    for (u32 i = 0; i < patch_count_; ++i) {
+        if (patches_[i] >= lo && patches_[i] < hi) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Exec::detach_tasks_of(u32 parent) {

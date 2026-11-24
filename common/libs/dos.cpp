@@ -8021,6 +8021,28 @@ struct DosOps {
 
     static void unload(Dos& d, u32 seglist) {
         const GuestMemory& mem = d.m_->mem;
+        // Code a library vector jumps into (SetFunction) stays loaded, as
+        // the program that patched it left it.
+        {
+            u32 at = seglist;
+            for (u32 n = 0; at != 0 && n < kMaxHunks; ++n) {
+                const u64 link = native::guest_address(*d.m_, at << 2);
+                u32 size = 0;
+                u32 next = 0;
+                if (link < 4 || link + 4 > mem.size ||
+                    !mem.read32(static_cast<u32>(link - 4), size) ||
+                    !mem.read32(static_cast<u32>(link), next)) {
+                    break;
+                }
+                if (d.exec_->function_set_within(static_cast<u32>(link - 4),
+                                                 static_cast<u32>(link - 4) + size)) {
+                    LogLine().text("dos: seglist ").hex(seglist)
+                        .text(" kept loaded, a library vector jumps into it").send();
+                    return;
+                }
+                at = next;
+            }
+        }
         u32 bptr = seglist;
         for (u32 n = 0; bptr != 0; ++n) {
             if (n == kMaxHunks) {
