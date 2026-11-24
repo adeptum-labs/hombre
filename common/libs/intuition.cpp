@@ -1535,6 +1535,24 @@ struct IntuitionNatives {
         of(ctx).refresh_window_frame(m.cpu.a[0]);
     }
 
+    // MakeScreen(screen A0), RemakeDisplay() and RethinkDisplay(): the
+    // screens are shown from what they hold, so these have the display
+    // drawn again from it and give 0, the call's answer for success.
+    static void make_screen(void* ctx, Machine& m) {
+        if (m.cpu.a[0] != 0) {
+            of(ctx).refresh_screen(m.cpu.a[0]);
+        }
+        native::set_result(m, 0);
+    }
+
+    static void rethink_display(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        if (in.front_screen() != 0) {
+            in.refresh_screen(in.front_screen());
+        }
+        native::set_result(m, 0);
+    }
+
     // DisplayBeep(screen A0): there is no flash or sound to give, and the
     // call only asks for attention, so it does nothing.
     static void display_beep(void*, Machine&) {}
@@ -2091,6 +2109,9 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::RemoveGadget, IntuitionNatives::remove_gadget, "RemoveGadget"},
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
     {intuition_lvo::DisplayBeep, IntuitionNatives::display_beep, "DisplayBeep"},
+    {intuition_lvo::MakeScreen, IntuitionNatives::make_screen, "MakeScreen"},
+    {intuition_lvo::RemakeDisplay, IntuitionNatives::rethink_display, "RemakeDisplay"},
+    {intuition_lvo::RethinkDisplay, IntuitionNatives::rethink_display, "RethinkDisplay"},
     {intuition_lvo::ScreenToFront, IntuitionNatives::screen_to_front, "ScreenToFront"},
     {intuition_lvo::SetWindowTitles, IntuitionNatives::set_window_titles, "SetWindowTitles"},
     {intuition_lvo::RefreshWindowFrame, IntuitionNatives::refresh_window_frame,

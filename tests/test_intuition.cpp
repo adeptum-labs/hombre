@@ -4672,6 +4672,22 @@ void the_intuition_base_shows_the_screens_and_the_active_window() {
     CHECK_EQ(r.get32(base + 60), screen);
 }
 
+// MakeScreen, RemakeDisplay and RethinkDisplay rebuild what is shown from
+// what the screens hold; with nothing to rebuild they still answer 0.
+void the_display_can_be_rethought() {
+    GfxRig r;
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::RemakeDisplay), 0u);
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::RethinkDisplay), 0u);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    r.cpu().a[0] = screen;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::MakeScreen), 0u);
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::RemakeDisplay), 0u);
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::RethinkDisplay), 0u);
+}
+
 void display_beep_returns() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -10561,6 +10577,7 @@ int main() {
     mouse_buttons_carry_the_keyboard_qualifier();
     gadget_lvos_from_guest_calls();
     display_beep_returns();
+    the_display_can_be_rethought();
     the_intuition_base_shows_the_screens_and_the_active_window();
     a_custom_typed_gadget_that_is_no_object_draws_its_border();
     modify_prop_ignores_non_prop_gadget();
