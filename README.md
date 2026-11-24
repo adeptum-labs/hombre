@@ -14,8 +14,9 @@ software, on modern hardware and in virtual machines.
   translator.
 - Native AmigaOS libraries written in C++: exec, dos, intuition, graphics,
   layers, gadtools, icon, workbench, utility, keymap and version, with
-  timer.device, console.device, audio.device and scsi.device. No Kickstart
-  ROM needed.
+  timer.device, console.device, audio.device and scsi.device, and
+  cybergraphics.library for programs written for graphics cards. No
+  Kickstart ROM needed.
 - Reads real Amiga floppy images, ADF and DMS, in DF0: to DF3:, next to a
   writable Ram Disk.
 - Hard disks: RDB-partitioned hard disk images (HDF), and Amiga partitions
@@ -33,6 +34,11 @@ software, on modern hardware and in virtual machines.
   ScreenMode reopens the Workbench in another mode.
 - Every standard PAL and NTSC screen mode, Low, High and Super-High Res,
   plain and laced, in up to 256 colours, scaled to fill the display.
+- HOMBRE screen modes: PC and widescreen sizes from 800x600 to 3840x2160,
+  720p, 1080p and 1440p among them, in 256 colours, 16-bit and 24-bit, with
+  square pixels. The Workbench runs in them through ScreenMode prefs, and
+  CyberGraphX programs draw on them. Hombre boots in the monitor's largest
+  resolution, where the mode of that size is shown pixel for pixel.
 - Built-in topaz and Hasklig fonts, Hasklig antialiased on 256-colour
   screens.
 - HombreShell, a native shell with the Workbench 3.1 builtins that runs the
