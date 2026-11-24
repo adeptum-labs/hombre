@@ -58,6 +58,7 @@
 #include "../common/shell_script.hpp"
 #include "../common/shell_window.hpp"
 #include "amiga_display.hpp"
+#include "bochs_vga.hpp"
 #include "apic.hpp"
 #include "boot_framebuffer.hpp"
 #include "clock.hpp"
@@ -292,6 +293,9 @@ void show_amiga_screen(const BootInfo& info) {
     splash_progress(kSplashKernelSteps, kSplashKernelSteps);
     splash_end();
     amiga_display.init(make_framebuffer(info));
+    if (bochs_vga_present()) {
+        amiga_display.set_mode_switch(&bochs_vga_set_mode);
+    }
     pointer.init(kPointerGridWidth, kPointerGridHeight, kPointerGridWidth / 2,
                  kPointerGridHeight / 2);
     amiga_display.move_pointer(machine, amiga_screen, pointer_screen_x(), pointer_screen_y());

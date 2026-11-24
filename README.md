@@ -37,8 +37,9 @@ software, on modern hardware and in virtual machines.
 - HOMBRE screen modes: PC and widescreen sizes from 800x600 to 3840x2160,
   720p, 1080p and 1440p among them, in 256 colours, 16-bit and 24-bit, with
   square pixels. The Workbench runs in them through ScreenMode prefs, and
-  CyberGraphX programs draw on them. A mode of the display's own size is
-  shown pixel for pixel.
+  CyberGraphX programs draw on them. In QEMU and VirtualBox the display
+  switches to each mode's size; elsewhere a mode of the display's own
+  size is shown pixel for pixel.
 - Built-in topaz and Hasklig fonts, Hasklig antialiased on 256-colour
   screens.
 - HombreShell, a native shell with the Workbench 3.1 builtins that runs the

@@ -22,6 +22,7 @@
  */
 
 #include "boot_disk.hpp"
+#include "bochs_vga.hpp"
 #include "ahci.hpp"
 #include "disk.hpp"
 #include "hard_disks.hpp"
@@ -515,6 +516,7 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
         drive.has_env = true;
         drive.unit = hard.unit;
     }
+    bochs_vga_init(mmio);
     m68k_run_command(info, phys_pages, drives, "C:Version", "");
 }
 

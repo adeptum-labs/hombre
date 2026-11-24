@@ -71,6 +71,26 @@ public:
     // border colour.
     void init(Framebuffer fb) {
         fb_ = fb;
+        home_width_ = fb_.width();
+        home_height_ = fb_.height();
+        fit_amiga_box();
+        applied_deep_ = false;
+        applied_screen_ = 0;
+        applied_width_ = kDefaultModeWidth;
+        applied_height_ = kDefaultModeHeight;
+        map_mode();
+        fb_.fill(kBorder);
+    }
+
+    // A display adapter that can change mode: a deep screen then gets a
+    // display of its own size, and an Amiga screen the size the display
+    // started in. Without one the size never changes.
+    using ModeSwitch = bool (*)(u32 width, u32 height, Framebuffer& out);
+    void set_mode_switch(ModeSwitch mode_switch) { mode_switch_ = mode_switch; }
+
+private:
+    // The 16:10 box of the current framebuffer, for Amiga screens.
+    void fit_amiga_box() {
         const u64 width = fb_.width();
         const u64 height = fb_.height();
         u64 box_width = width;
@@ -88,16 +108,11 @@ public:
         box_x_ = centred(width, box_width);
         box_y_ = centred(height, box_height);
         amiga_box_ = Fit{box_x_, box_y_, box_width_, box_height_};
-        applied_deep_ = false;
         pointer_pixel_width_ = at_least_one(box_width_ / kPointerPixelsAcross);
         pointer_pixel_height_ = at_least_one(box_height_ / kPointerPixelsDown);
-        applied_screen_ = 0;
-        applied_width_ = kDefaultModeWidth;
-        applied_height_ = kDefaultModeHeight;
-        map_mode();
-        fb_.fill(kBorder);
     }
 
+public:
     DisplaySink sink() { return DisplaySink{&AmigaDisplay::refresh, this}; }
 
     // Draws the pointer in the shape state publishes, without it the arrow,
@@ -283,10 +298,30 @@ private:
         applied_screen_ = screen;
         applied_width_ = width;
         applied_height_ = height;
+        // With an adapter that changes mode, the display takes a deep
+        // screen's own size, and the size it started in for an Amiga one.
+        bool kind_changed = deep != applied_deep_;
+        if (mode_switch_ != nullptr) {
+            const u32 want_width = deep ? width : home_width_;
+            const u32 want_height = deep ? height : home_height_;
+            Framebuffer next;
+            bool switched = (want_width != fb_.width() || want_height != fb_.height()) &&
+                            mode_switch_(want_width, want_height, next);
+            // A size the adapter cannot show falls back to the starting size,
+            // and the screen is scaled into that.
+            if (!switched && deep && (want_width != fb_.width() || want_height != fb_.height()) &&
+                (fb_.width() != home_width_ || fb_.height() != home_height_)) {
+                switched = mode_switch_(home_width_, home_height_, next);
+            }
+            if (switched) {
+                fb_ = next;
+                fit_amiga_box();
+                kind_changed = true;
+            }
+        }
         // A deep screen's pixels are square: it fills as much of the
         // framebuffer as its shape allows, with black beside it. An Amiga
         // screen fills the 16:10 box, with the border colour beside it.
-        const bool kind_changed = deep != applied_deep_;
         applied_deep_ = deep;
         const Fit box = deep ? fit_square(static_cast<u32>(fb_.width()),
                                           static_cast<u32>(fb_.height()), width, height)
@@ -528,6 +563,9 @@ private:
     // the screen pixel under each host column and row of the box.
     u32 applied_screen_ = 0;
     bool applied_deep_ = false;
+    u32 home_width_ = 0;
+    u32 home_height_ = 0;
+    ModeSwitch mode_switch_ = nullptr;
     Fit amiga_box_{};
     u32 row_[kMaxModeWidth]{};
     u32 applied_width_ = kDefaultModeWidth;

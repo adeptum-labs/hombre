@@ -284,6 +284,64 @@ void deep_screen_is_square_and_pillarboxed() {
     CHECK(fb.guards_intact());
 }
 
+// The framebuffers a display adapter that can change mode gives, and the
+// sizes it was asked for.
+Screen* g_switch_small = nullptr;
+Screen* g_switch_home = nullptr;
+std::vector<std::pair<u32, u32>> g_switches;
+
+bool fake_switch(u32 width, u32 height, Framebuffer& out) {
+    g_switches.emplace_back(width, height);
+    Screen* fb = width == 80 ? g_switch_small : width == 1280 ? g_switch_home : nullptr;
+    if (fb == nullptr) {
+        return false;
+    }
+    out = fb->framebuffer();
+    return true;
+}
+
+// With an adapter that changes mode, a deep screen gets a display of its own
+// size, pixel for pixel, and an Amiga screen the firmware's size back.
+void adapter_switches_to_the_deep_screen_size_and_back() {
+    Screen home(1280, 800, 1280 * 4, kBgrx);
+    Screen small(80, 60, 80 * 4, kBgrx);
+    g_switch_home = &home;
+    g_switch_small = &small;
+    g_switches.clear();
+    DeepGuest guest(80, 60);
+    guest.set_pixel(0, 0, 0xFFFF0000u);
+    guest.set_pixel(79, 59, 0xFF00FF00u);
+    AmigaDisplay display;
+    display.init(home.framebuffer());
+    display.set_mode_switch(&fake_switch);
+    DisplayState state;
+    state.mode_width = 80;
+    state.mode_height = 60;
+    state.mode_deep = true;
+    state.mode_fmt = PixFmt::Argb32;
+    display.follow_pointer_shape(state);
+    refresh(display, guest.machine(), kScreen, Rect{0, 0, 79, 59});
+    CHECK_EQ(g_switches.size(), 1u);
+    CHECK_EQ(g_switches[0].first, 80u);
+    CHECK_EQ(display.box_x(), 0u);
+    CHECK_EQ(display.box_width(), 80u);
+    CHECK_EQ(small.pixel(0, 0), 0x00FF0000u);
+    CHECK_EQ(small.pixel(79, 59), 0x0000FF00u);
+    CHECK(small.guards_intact());
+
+    Guest amiga;
+    state.mode_width = 640;
+    state.mode_height = 400;
+    state.mode_deep = false;
+    amiga.set_all_pixels(1);
+    refresh(display, amiga.machine(), kScreen, Rect{0, 0, 639, 399});
+    CHECK_EQ(g_switches.size(), 2u);
+    CHECK_EQ(g_switches[1].first, 1280u);
+    CHECK_EQ(display.box_width(), 1280u);
+    CHECK_EQ(home.pixel(0, 0), 0u);
+    CHECK(home.guards_intact());
+}
+
 void scale_two_at_1280x800_and_no_border() {
     Screen fb(1280, 800, 1280 * 4, kBgrx);
     Guest guest;
@@ -1024,6 +1082,7 @@ void pointer_keeps_its_host_size_in_a_low_res_mode_and_its_place_when_the_mode_c
 
 int main() {
     deep_screen_is_square_and_pillarboxed();
+    adapter_switches_to_the_deep_screen_size_and_back();
     scale_two_at_1280x800_and_no_border();
     wide_framebuffer_gets_a_centred_box_with_border_colour_beside_it();
     tall_framebuffer_gets_a_centred_box_with_border_colour_above_and_below_it();
