@@ -3434,6 +3434,15 @@ bool Workbench::split_tool(const char* reference, const char* drawer,
         dos_->examine(probe).kind != Dos::TargetKind::Missing) {
         return true;
     }
+    static const char* const kToolPath[] = {"C:", "SYS:Utilities", "SYS:System", "SYS:Tools",
+                                            "SYS:Tools/Commodities", "SYS:Prefs"};
+    for (const char* where : kToolPath) {
+        if (join_path(where, reference, probe) &&
+            dos_->examine(probe).kind != Dos::TargetKind::Missing) {
+            copy_text(dir, Dos::kMaxPath, where);
+            return name[0] != '\0';
+        }
+    }
     copy_text(dir, Dos::kMaxPath, "C:");
     return name[0] != '\0';
 }
