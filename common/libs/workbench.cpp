@@ -345,6 +345,20 @@ bool ends_with_ci(const char* text, const char* suffix) {
     return same_ci(text + (text_len - suffix_len), suffix);
 }
 
+bool starts_with_ci(const char* text, const char* prefix) {
+    const u32 prefix_len = text_length(prefix);
+    if (prefix_len > text_length(text)) {
+        return false;
+    }
+    char head[Dos::kMaxPath];
+    u32 i = 0;
+    for (; i < prefix_len && i + 1 < sizeof head; ++i) {
+        head[i] = text[i];
+    }
+    head[i] = '\0';
+    return same_ci(head, prefix);
+}
+
 void copy_text(char* dst, u32 capacity, const char* src) {
     u32 i = 0;
     for (; i + 1 < capacity && src[i] != '\0'; ++i) {
@@ -1018,20 +1032,86 @@ void Workbench::add_volume(const char* label, const char* icon_path, u8 drive) {
 // hard disk partitions, then the Ram Disk.
 void Workbench::add_volume_icons() {
     for (u32 n = 0; n < dos_->drive_count(); ++n) {
-        if (!dos_->has_disk(n)) {
-            continue;
-        }
-        IconEntry probe;
-        copy_text(probe.name, sizeof probe.name, dos_->volume_name(n));
-        probe.type = kDisk;
-        probe.drive = static_cast<u8>(n);
-        char root[Dos::kMaxPath];
-        char path[Dos::kMaxPath];
-        if (volume_root(probe, root) && join_path(root, "Disk", path)) {
-            add_volume(probe.name, path, probe.drive);
-        }
+        add_drive_volume(n);
     }
     add_volume(kRamDiskName, "RAM:Disk", kNoDrive);
+}
+
+// The icon of the disk in a drive, when the drive holds one.
+void Workbench::add_drive_volume(u32 drive) {
+    if (!dos_->has_disk(drive)) {
+        return;
+    }
+    IconEntry probe;
+    copy_text(probe.name, sizeof probe.name, dos_->volume_name(drive));
+    probe.type = kDisk;
+    probe.drive = static_cast<u8>(drive);
+    char root[Dos::kMaxPath];
+    char path[Dos::kMaxPath];
+    if (volume_root(probe, root) && join_path(root, "Disk", path)) {
+        add_volume(probe.name, path, probe.drive);
+    }
+}
+
+void Workbench::refresh_volumes() {
+    DrawerWindow* root = find_window(kRootWindow);
+    if (!desktop_open_ || root == nullptr) {
+        return;
+    }
+    bool changed = false;
+    for (;;) {
+        IconEntry* stale = icons_.find_if([&](const IconEntry& icon) {
+            return icon.owner == kRootWindow && icon.type == kDisk && icon.drive != kNoDrive &&
+                   (!dos_->has_disk(icon.drive) ||
+                    !same_ci(dos_->volume_name(icon.drive), icon.name));
+        });
+        if (stale == nullptr) {
+            break;
+        }
+        // The windows of the volume go: whatever path begins with its name,
+        // or with the device of its drive.
+        char by_name[Dos::kMaxPath];
+        char by_device[Dos::kMaxPath];
+        copy_text(by_name, sizeof by_name, stale->name);
+        const u32 name_length = text_length(by_name);
+        by_name[name_length] = ':';
+        by_name[name_length + 1] = '\0';
+        copy_text(by_device, sizeof by_device, dos_->device_name(stale->drive));
+        by_device[text_length(by_device)] = ':';
+        by_device[text_length(by_device) + 1] = '\0';
+        for (;;) {
+            const DrawerWindow* drawer = windows_.find_if([&](const DrawerWindow& w) {
+                return w.id != kRootWindow &&
+                       (starts_with_ci(w.path, by_name) || starts_with_ci(w.path, by_device));
+            });
+            if (drawer == nullptr) {
+                break;
+            }
+            close_drawer(drawer->id);
+        }
+        if (drag_.armed && drag_.icon == stale->id) {
+            cancel_drag();
+        }
+        if (root->clicks.selected() == stale->id) {
+            root->clicks.clear();
+        }
+        icons_.remove(stale);
+        changed = true;
+    }
+    const usize before = icons_.size();
+    for (u32 n = 0; n < dos_->drive_count(); ++n) {
+        const bool shown = icons_.find_if([&](const IconEntry& icon) {
+                               return icon.owner == kRootWindow && icon.type == kDisk &&
+                                      icon.drive == n;
+                           }) != nullptr;
+        if (!shown) {
+            add_drive_volume(n);
+        }
+    }
+    changed = changed || icons_.size() != before;
+    if (changed) {
+        draw_window(kRootWindow);
+    }
 }
 
 // The root of the disk an icon stands for: "Name:" by its volume's name,
@@ -3154,6 +3234,10 @@ void Workbench::run() {
                 redraw_all();
             }
         }
+        if (now >= next_volume_us_) {
+            refresh_volumes();
+            next_volume_us_ = now + kVolumeCheckUs;
+        }
         if (now >= next_refresh_us_) {
             // WBPattern's Use takes effect at the next look.
             if (load_patterns()) {
@@ -3166,7 +3250,8 @@ void Workbench::run() {
         // Until a message arrives at one of the ports, or the title is due
         // again. Messages a full pump left behind are taken at once.
         if (!more) {
-            exec_->wait_for(wait_mask(), next_refresh_us_ - now);
+            const u64 due = next_volume_us_ < next_refresh_us_ ? next_volume_us_ : next_refresh_us_;
+            exec_->wait_for(wait_mask(), due > now ? due - now : 0);
         }
     }
 }

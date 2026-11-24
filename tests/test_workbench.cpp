@@ -1054,6 +1054,38 @@ void a_leading_slash_default_tool_is_in_the_parent_drawer() {
     CHECK(r.workbench.tool_reply(started->message));
 }
 
+// A disk changed in a drive changes the icon on the desktop: the old disk's
+// icon and open window go and the new disk's icon comes; an empty drive has
+// no icon.
+void a_swapped_disk_changes_the_desktop() {
+    Rig r(test_files(), build_adf("Second", false, test_files()), 1);
+    r.workbench.open_desktop();
+    const u32 second = r.find_icon("Second");
+    CHECK(second != Workbench::kNoIcon);
+    r.workbench.open_icon(0, second);
+    CHECK(r.find_window("Second:") != Workbench::kNoWindow);
+
+    std::vector<u8> third = build_adf("Third", false, test_files());
+    AdfVolume third_volume{};
+    CHECK(adf_mount(third.data(), third.size(), third_volume) == FsError::Ok);
+    CHECK(g_dos.replace_disk(1, &third_volume));
+    r.workbench.refresh_volumes();
+    CHECK_EQ(r.find_icon("Second"), Workbench::kNoIcon);
+    CHECK(r.find_icon("Third") != Workbench::kNoIcon);
+    CHECK_EQ(r.find_window("Second:"), Workbench::kNoWindow);
+    CHECK(r.find_icon("HombreTest") != Workbench::kNoIcon);
+
+    // Nothing changed: the icons stay as they are.
+    const u32 third_icon = r.find_icon("Third");
+    r.workbench.refresh_volumes();
+    CHECK_EQ(r.find_icon("Third"), third_icon);
+
+    CHECK(g_dos.replace_disk(1, nullptr));
+    r.workbench.refresh_volumes();
+    CHECK_EQ(r.find_icon("Third"), Workbench::kNoIcon);
+    CHECK(r.find_icon("Ram Disk") != Workbench::kNoIcon);
+}
+
 void app_registrations_add_and_remove() {
     Rig r;
     r.workbench.open_desktop();
@@ -3497,6 +3529,7 @@ int main() {
     project_startup_names_the_tool_and_the_project();
     reply_unloads_the_seglist_and_unlocks();
     a_project_starts_its_default_tool();
+    a_swapped_disk_changes_the_desktop();
     a_bare_default_tool_is_found_on_the_command_path();
     a_leading_slash_default_tool_is_in_the_parent_drawer();
     app_registrations_add_and_remove();

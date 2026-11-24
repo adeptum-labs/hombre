@@ -100,6 +100,7 @@ public:
     static constexpr u64 kDoubleClickUs = 1000000;
     // The title bar of the desktop is looked at again this often.
     static constexpr u64 kRefreshUs = 3000000;
+    static constexpr u64 kVolumeCheckUs = 1000000;
 
     // workbench/workbench.h object types.
     static constexpr u8 kDisk = 1;
@@ -445,6 +446,14 @@ private:
     void show_about();
     void refresh_title();
 
+public:
+    // Makes the disk icons follow the disks in the drives: the icon of a
+    // disk that is gone or replaced goes, with its open windows, and a disk
+    // without an icon gets one. The desktop does it a second.
+    void refresh_volumes();
+
+private:
+
     u32 build_menu_strip();
     DrawerWindow& attach_window(u32 id, u32 window, const char* name, const char* path,
                                 u32 gadgets);
@@ -463,6 +472,7 @@ private:
     void add_volume_icons();
     void add_dir_icon(const DrawerWindow& drawer, const char* entry, bool is_dir);
     void add_volume(const char* label, const char* icon_path, u8 drive);
+    void add_drive_volume(u32 drive);
     bool volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) const;
     void fill_drawer(DrawerWindow& drawer);
     void place_icons(const DrawerWindow& drawer);
@@ -569,6 +579,7 @@ private:
     Pattern patterns_[2]{};
     u32 pattern_sum_ = 0;
     i32 volume_top_ = 0;
+    u64 next_volume_us_ = 0;
     u64 next_refresh_us_ = 0;
     bool patterns_changed_ = false;  // WBPattern's prefs were written
     bool reopen_pending_ = false;  // OpenWorkBench asked for the windows back
