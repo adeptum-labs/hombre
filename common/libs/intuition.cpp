@@ -6720,7 +6720,12 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count,
     const u32 limit = max_count < kMaxGadgets ? max_count : kMaxGadgets;
     u32 gadget = first;
     for (u32 step = 0; step < limit && gadget != 0; ++step) {
-        const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        // A custom-typed gadget that is no object is a plain gadget of the
+        // old kind, drawn from its borders and text.
+        if (gtype == ndk::GTYP_CUSTOMGADGET && !boopsi_.is_object(gadget)) {
+            gtype = ndk::GTYP_BOOLGADGET;
+        }
         const u32 next = b.r32(gadget + ndk::gg_NextGadget);
         constexpr u32 kBorders = ndk::GACT_RIGHTBORDER | ndk::GACT_LEFTBORDER |
                                  ndk::GACT_TOPBORDER | ndk::GACT_BOTTOMBORDER;
@@ -6777,7 +6782,8 @@ bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
         if (!b.ok()) {
             return false;
         }
-        const Rect box = gtype == ndk::GTYP_CUSTOMGADGET && (gflags & ndk::GFLG_DISABLED) == 0
+        const Rect box = gtype == ndk::GTYP_CUSTOMGADGET && (gflags & ndk::GFLG_DISABLED) == 0 &&
+                                 boopsi_.is_object(gadget)
                              ? resolve_gadget_box(b, w, gadget)
                              : Rect{0, 0, -1, -1};
         if (!in_rect(box, wx, wy)) {
@@ -7591,15 +7597,19 @@ void Intuition::draw_bool_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
     }
     const bool selected = (flags & ndk::GFLG_SELECTED) != 0;
     const u32 highlight = flags & ndk::GFLG_GADGHIGHBITS;
-    if ((flags & ndk::GFLG_GADGIMAGE) != 0) {
-        const u32 select = b.r32(gadget + ndk::gg_SelectRender);
-        const u32 render = b.r32(gadget + ndk::gg_GadgetRender);
-        const bool high = selected && highlight == ndk::GFLG_GADGHIMAGE && select != 0;
-        const u32 image = high ? select : render;
-        if (image != 0) {
-            draw_image(rp, image, box.x0, box.y0);
+    const u32 select = b.r32(gadget + ndk::gg_SelectRender);
+    const u32 render = b.r32(gadget + ndk::gg_GadgetRender);
+    const bool high = selected && highlight == ndk::GFLG_GADGHIMAGE && select != 0;
+    const u32 shown = high ? select : render;
+    if (shown != 0) {
+        if ((flags & ndk::GFLG_GADGIMAGE) != 0) {
+            draw_image(rp, shown, box.x0, box.y0);
+        } else {
+            IntuitionNatives::border_chain(*this, b, rp, shown, box.x0, box.y0);
         }
     }
+    IntuitionNatives::itext_chain(*this, b, rp, b.r32(gadget + ndk::gg_GadgetText), box.x0,
+                                  box.y0);
     if (selected && highlight == ndk::GFLG_GADGHCOMP) {
         complement_gadget(b, window, rp, gadget);
     }
@@ -7641,7 +7651,10 @@ bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
         const u32 gflags = b.r16(gadget + ndk::gg_Flags);
         const u32 activation = b.r16(gadget + ndk::gg_Activation);
         const u32 type = b.r16(gadget + ndk::gg_GadgetType);
-        const u32 gtype = type & ndk::GTYP_GTYPEMASK;
+        u32 gtype = type & ndk::GTYP_GTYPEMASK;
+        if (gtype == ndk::GTYP_CUSTOMGADGET && !boopsi_.is_object(gadget)) {
+            gtype = ndk::GTYP_BOOLGADGET;
+        }
         const u32 next = b.r32(gadget + ndk::gg_NextGadget);
         if (!b.ok()) {
             return false;

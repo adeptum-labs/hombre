@@ -4605,6 +4605,47 @@ void mouse_buttons_carry_the_keyboard_qualifier() {
     CHECK_EQ(r.get16(msg + im_Qualifier), kQualLShift);
 }
 
+// A gadget typed as a custom one that is no BOOPSI object is drawn like the
+// old plain gadgets, from its border chain, and refreshing it does not read
+// its fields as an object header.
+void a_custom_typed_gadget_that_is_no_object_draws_its_border() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    constexpr u32 kBorderAt = 0x7000;
+    constexpr u32 kPointsAt = 0x7020;
+    for (u32 i = 0; i < 0x40; ++i) {
+        r.put8(kBorderAt + i, 0);
+    }
+    r.put8(kBorderAt + 4, 3);   // FrontPen
+    r.put8(kBorderAt + 7, 2);   // Count
+    r.put32(kBorderAt + 8, kPointsAt);
+    r.put16(kPointsAt + 2, 0);
+    r.put16(kPointsAt, 0);
+    r.put16(kPointsAt + 4, 10);
+    r.put16(kPointsAt + 6, 0);
+    put_gadget(r, kGad1, 0, 20, 20, 12, 8, GFLG_GADGHIMAGE, GACT_RELVERIFY, 5, 0);
+    r.put32(kGad1 + gg_GadgetRender, kBorderAt);
+    r.put32(kGad1 + gg_SelectRender, 0xD60013);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kGad1;
+    r.cpu().d[0] = 0xFFFF;
+    r.cpu().d[1] = 1;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::AddGList), 0u);
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshGList), ExitReason::Halt);
+    CHECK_EQ(window_pixel(r, window, 25, 20), 3u);
+}
+
 void gadget_lvos_from_guest_calls() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -10405,6 +10446,7 @@ int main() {
     a_window_without_key_flags_gets_no_keys();
     mouse_buttons_carry_the_keyboard_qualifier();
     gadget_lvos_from_guest_calls();
+    a_custom_typed_gadget_that_is_no_object_draws_its_border();
     modify_prop_ignores_non_prop_gadget();
     modify_prop_keeps_knobhit_during_drag();
     remove_glist_clears_hook();

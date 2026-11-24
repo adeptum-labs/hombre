@@ -345,8 +345,13 @@ u32 Boopsi::class_of(u32 object) const {
 // An object of one of the classes: its header names a class whose
 // dispatcher is set.
 bool Boopsi::is_object(u32 object) const {
+    if (object < Object_SIZEOF || (object & 1) != 0) {
+        return false;
+    }
     const u32 cl = class_of(object);
-    if (cl == 0) {
+    // A header read from something that is not an object may be anything:
+    // only an even address in memory can be a class.
+    if (cl == 0 || (cl & 1) != 0 || native::guest_address(*machine_, cl + h_Entry) == 0) {
         return false;
     }
     Bus b(*machine_);
