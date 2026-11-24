@@ -152,6 +152,11 @@ constexpr u32 BestModeIDA = 1050;
 constexpr u32 LoadRGB32 = 882;
 constexpr u32 GetRGB32 = 900;
 constexpr u32 SetRGB32CM = 996;
+constexpr u32 ReadPixelLine8 = 768;
+constexpr u32 WritePixelLine8 = 774;
+constexpr u32 ReadPixelArray8 = 780;
+constexpr u32 WritePixelArray8 = 786;
+constexpr u32 WriteChunkyPixels = 1056;
 // The last vector of the 3.9 library; the table reaches down to it.
 constexpr u32 Last = 1056;
 
@@ -174,6 +179,15 @@ public:
     const DeepBitmap* deep(u32 bitmap) const { return deep_bitmaps_.find(bitmap); }
     DeepBitmap* deep(u32 bitmap) { return deep_bitmaps_.find(bitmap); }
     const DeepBitmaps& deep_bitmaps() const { return deep_bitmaps_; }
+
+    // The 256 colours of a ColorMap as 0x00RRGGBB, kept in step with it
+    // from then on: what pens draw in on a deep bitmap of that screen. Up
+    // to kMaxPalettes ColorMaps; null past that, or for 0.
+    const u32* palette_for(u32 colormap);
+    // Lets go of a ColorMap's palette when its screen closes.
+    void release_palette(u32 colormap);
+    // A colour of some ColorMap changed: the palettes follow.
+    void palettes_changed();
 
     u32 graphics_base() const { return base_; }
     u32 topaz_font() const { return topaz_; }
@@ -267,6 +281,13 @@ private:
     u32 pal_monitor_ = 0;
     u32 hombre_monitor_ = 0;
     DeepBitmaps deep_bitmaps_{};
+    struct HostPalette {
+        u32 colormap = 0;
+        u32 rgb[256]{};
+    };
+    static constexpr u32 kMaxPalettes = 8;
+    HostPalette palettes_[kMaxPalettes]{};
+    void sync_palette(HostPalette& palette);
     // The display modes of the ViewPorts registered for GetVPModeID.
     static constexpr u32 kVpModeIds = 256;
     struct VpModeId {
@@ -322,6 +343,9 @@ private:
     // the colours of its 2^depth pens, or nullptr when it has too few planes
     // for text to be blended or Intuition knows no ColorMap for it.
     text_blend::Cache* blend_for(u32 bitmap_addr, u32 depth);
+    void blit_deep(native::Bus& b, const raster::Bitmap& src, i32 sx, i32 sy,
+                   const raster::Bitmap& dst, const raster::Clip* clip, i32 dx, i32 dy,
+                   i32 width, i32 height, u32 minterm, u32 mask);
     u32 blit(native::Bus& b, u32 src, i32 sx, i32 sy, const raster::RastPortView& v,
              const raster::Clip* clip, i32 dx, i32 dy, i32 width, i32 height, u32 minterm,
              u32 mask);

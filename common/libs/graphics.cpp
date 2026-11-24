@@ -101,7 +101,7 @@ i32 cp_x(Bus& b, u32 rp) { return static_cast<i16>(b.r16(rp + ndk::rp_cp_x)); }
 i32 cp_y(Bus& b, u32 rp) { return static_cast<i16>(b.r16(rp + ndk::rp_cp_y)); }
 
 bool drawable(Bus& b, const View& v, i32 x, i32 y) {
-    return x >= 0 && y >= 0 && (static_cast<u32>(x) >> 3) < v.bitmap.bytes_per_row &&
+    return x >= 0 && y >= 0 && x < raster::pixel_width(v.bitmap) &&
            static_cast<u32>(y) < v.bitmap.rows && raster::in_clip(b, v.clip, x, y);
 }
 
@@ -143,6 +143,46 @@ void report(const DisplayState* display, Machine& m, const View& v, const Rect& 
         display->damage.damaged(display->damage.ctx, m, v.bitmap_addr, changed);
     }
 }
+
+// Reads or writes a width by height block of pens, one byte a pen, rows
+// modulo bytes apart, at x, y of the RastPort. Pixels outside the bitmap or
+// its clip are skipped; read ones there are left as they are in the array.
+// The number of pixels the block holds.
+u32 pixel_array(Bus& b, const DisplayState* display, Machine& m, u32 rp, i32 x0, i32 y0,
+                i32 width, i32 height, u32 array, u32 modulo, bool write) {
+    if (rp == 0 || array == 0 || width <= 0 || height <= 0) {
+        return 0;
+    }
+    const View v = raster::load_rastport(b, rp);
+    if (!v.ok) {
+        return 0;
+    }
+    Rect changed{0, 0, -1, -1};
+    for (i32 row = 0; row < height && b.ok(); ++row) {
+        u8* bytes = b.bytes_at(array + static_cast<u32>(row) * modulo, static_cast<u32>(width));
+        if (bytes == nullptr) {
+            break;
+        }
+        const i32 y = y0 + row + v.origin_y;
+        for (i32 col = 0; col < width; ++col) {
+            const i32 x = x0 + col + v.origin_x;
+            if (!drawable(b, v, x, y)) {
+                continue;
+            }
+            if (write) {
+                raster::write_pixel(b, v.bitmap, x, y, bytes[col]);
+                changed = unite(changed, Rect{x, y, x, y});
+            } else {
+                bytes[col] = static_cast<u8>(raster::read_pixel(b, v.bitmap, x, y));
+            }
+        }
+    }
+    if (write && changed.x1 >= changed.x0) {
+        report(display, m, v, changed);
+    }
+    return static_cast<u32>(width) * static_cast<u32>(height);
+}
+
 
 void bump_palette(DisplayState* display) {
     if (display != nullptr) {
@@ -852,7 +892,7 @@ struct GraphicsNatives {
             }
         }
         if (n != 0 && b.ok()) {
-            bump_palette(g.display_);
+            g.palettes_changed();
             mark_viewport_dirty(g.display_, m, vp);
         }
     }
@@ -949,7 +989,7 @@ struct GraphicsNatives {
             b.w16(t.low_table + index * 2, value);
         }
         if (b.ok()) {
-            bump_palette(g.display_);
+            g.palettes_changed();
             mark_viewport_dirty(g.display_, m, vp);
         }
     }
@@ -1375,6 +1415,51 @@ struct GraphicsNatives {
     static void rect_fill(void* ctx, Machine& m) {
         of(ctx).rect_fill(m.cpu.a[1], static_cast<i16>(m.cpu.d[0]), static_cast<i16>(m.cpu.d[1]),
                           static_cast<i16>(m.cpu.d[2]), static_cast<i16>(m.cpu.d[3]));
+    }
+
+    // WritePixelArray8 and ReadPixelArray8(rp A0, xstart D0, ystart D1,
+    // xstop D2, ystop D3, array A2, temprp A1): a block of pens, rows padded
+    // to a multiple of 16; the pixels it holds.
+    static void pixel_array8(void* ctx, Machine& m, bool write) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const i32 x0 = static_cast<i32>(m.cpu.d[0] & 0xFFFF);
+        const i32 y0 = static_cast<i32>(m.cpu.d[1] & 0xFFFF);
+        const i32 width = static_cast<i32>(m.cpu.d[2] & 0xFFFF) - x0 + 1;
+        const i32 height = static_cast<i32>(m.cpu.d[3] & 0xFFFF) - y0 + 1;
+        const u32 modulo = width > 0 ? (static_cast<u32>(width) + 15) & ~15u : 0;
+        native::set_result(m, pixel_array(b, g.display_, m, m.cpu.a[0], x0, y0, width, height,
+                                          m.cpu.a[2], modulo, write));
+    }
+
+    static void write_pixel_array8(void* ctx, Machine& m) { pixel_array8(ctx, m, true); }
+    static void read_pixel_array8(void* ctx, Machine& m) { pixel_array8(ctx, m, false); }
+
+    // WritePixelLine8 and ReadPixelLine8(rp A0, xstart D0, ystart D1,
+    // width D2, array A2, temprp A1): one row of pens.
+    static void pixel_line8(void* ctx, Machine& m, bool write) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const i32 width = static_cast<i32>(m.cpu.d[2] & 0xFFFF);
+        native::set_result(m, pixel_array(b, g.display_, m, m.cpu.a[0],
+                                          static_cast<i32>(m.cpu.d[0] & 0xFFFF),
+                                          static_cast<i32>(m.cpu.d[1] & 0xFFFF), width, 1,
+                                          m.cpu.a[2], static_cast<u32>(width), write));
+    }
+
+    static void write_pixel_line8(void* ctx, Machine& m) { pixel_line8(ctx, m, true); }
+    static void read_pixel_line8(void* ctx, Machine& m) { pixel_line8(ctx, m, false); }
+
+    // WriteChunkyPixels(rp A0, xstart D0, ystart D1, xstop D2, ystop D3,
+    // array A2, bytesperrow D4).
+    static void write_chunky_pixels(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const i32 x0 = static_cast<i32>(m.cpu.d[0] & 0xFFFF);
+        const i32 y0 = static_cast<i32>(m.cpu.d[1] & 0xFFFF);
+        pixel_array(b, g.display_, m, m.cpu.a[0], x0, y0,
+                    static_cast<i32>(m.cpu.d[2] & 0xFFFF) - x0 + 1,
+                    static_cast<i32>(m.cpu.d[3] & 0xFFFF) - y0 + 1, m.cpu.a[2], m.cpu.d[4], true);
     }
 
     static void read_pixel(void*, Machine& m) {
@@ -1846,7 +1931,7 @@ struct GraphicsNatives {
         }
         const ColorMapTables t = colormap_tables(b, b.r32(vp + ndk::vp_ColorMap));
         if (write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
-            bump_palette(g.display_);
+            g.palettes_changed();
             mark_viewport_dirty(g.display_, m, vp);
         }
     }
@@ -1896,7 +1981,7 @@ struct GraphicsNatives {
             p = next;
         }
         if (changed && b.ok()) {
-            bump_palette(g.display_);
+            g.palettes_changed();
             mark_viewport_dirty(g.display_, m, vp);
         }
     }
@@ -2020,7 +2105,7 @@ struct GraphicsNatives {
         g.pen_exclusive_[pen] = exclusive;
         if (fresh && (flags & kNoSetColor) == 0 &&
             write_rgb32_entry(b, t, static_cast<u32>(pen), m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
-            bump_palette(g.display_);
+            g.palettes_changed();
             mark_colormap_dirty(g.display_, m, map);
         }
         native::set_result(m, static_cast<u32>(pen));
@@ -2057,7 +2142,7 @@ struct GraphicsNatives {
         if (!exact) {
             const i32 spare = free_pen(g, count);
             if (spare >= 0 && write_rgb32_entry(b, t, static_cast<u32>(spare), r, gr, bl)) {
-                bump_palette(g.display_);
+                g.palettes_changed();
                 mark_colormap_dirty(g.display_, m, map);
                 pen = spare;
             }
@@ -2609,7 +2694,7 @@ struct GraphicsNatives {
         Bus b(m);
         const ColorMapTables t = colormap_tables(b, m.cpu.a[0]);
         if (write_rgb32_entry(b, t, m.cpu.d[0], m.cpu.d[1], m.cpu.d[2], m.cpu.d[3])) {
-            bump_palette(g.display_);
+            g.palettes_changed();
             mark_colormap_dirty(g.display_, m, m.cpu.a[0]);
         }
     }
@@ -2694,6 +2779,11 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::ObtainPen, GraphicsNatives::obtain_pen, "ObtainPen"},
     {graphics_lvo::GetVPModeID, GraphicsNatives::get_vp_mode_id, "GetVPModeID"},
     {graphics_lvo::BestModeIDA, GraphicsNatives::best_mode_id, "BestModeIDA"},
+    {graphics_lvo::WritePixelArray8, GraphicsNatives::write_pixel_array8, "WritePixelArray8"},
+    {graphics_lvo::ReadPixelArray8, GraphicsNatives::read_pixel_array8, "ReadPixelArray8"},
+    {graphics_lvo::WritePixelLine8, GraphicsNatives::write_pixel_line8, "WritePixelLine8"},
+    {graphics_lvo::ReadPixelLine8, GraphicsNatives::read_pixel_line8, "ReadPixelLine8"},
+    {graphics_lvo::WriteChunkyPixels, GraphicsNatives::write_chunky_pixels, "WriteChunkyPixels"},
     {graphics_lvo::PolyDraw, GraphicsNatives::poly_draw, "PolyDraw"},
     {graphics_lvo::BltTemplate, GraphicsNatives::blt_template, "BltTemplate"},
     {graphics_lvo::ClipBlit, GraphicsNatives::clip_blit, "ClipBlit"},
@@ -2714,6 +2804,53 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::FindColor, GraphicsNatives::find_color, "FindColor"},
 };
 
+}
+
+const u32* Graphics::palette_for(u32 colormap) {
+    if (colormap == 0) {
+        return nullptr;
+    }
+    HostPalette* free_slot = nullptr;
+    for (HostPalette& palette : palettes_) {
+        if (palette.colormap == colormap) {
+            return palette.rgb;
+        }
+        if (palette.colormap == 0 && free_slot == nullptr) {
+            free_slot = &palette;
+        }
+    }
+    if (free_slot == nullptr) {
+        return nullptr;
+    }
+    free_slot->colormap = colormap;
+    sync_palette(*free_slot);
+    return free_slot->rgb;
+}
+
+void Graphics::release_palette(u32 colormap) {
+    for (HostPalette& palette : palettes_) {
+        if (palette.colormap == colormap) {
+            palette = HostPalette{};
+        }
+    }
+}
+
+void Graphics::sync_palette(HostPalette& palette) {
+    for (u32 i = 0; i < 256; ++i) {
+        u8 r = 0, g = 0, b = 0;
+        palette.rgb[i] = color_of(palette.colormap, i, r, g, b)
+                             ? (u32{r} << 16) | (u32{g} << 8) | b
+                             : 0;
+    }
+}
+
+void Graphics::palettes_changed() {
+    bump_palette(display_);
+    for (HostPalette& palette : palettes_) {
+        if (palette.colormap != 0) {
+            sync_palette(palette);
+        }
+    }
 }
 
 u32 Graphics::alloc_deep_bitmap(u32 width, u32 height, PixFmt fmt) {
@@ -2762,6 +2899,9 @@ void Graphics::free_deep_bitmap(u32 bitmap) {
 bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     machine_ = &m;
     deep_bitmaps_ = DeepBitmaps{};
+    for (HostPalette& palette : palettes_) {
+        palette = HostPalette{};
+    }
     raster::set_deep_lookup(&deep_bitmaps_);
     exec_ = &exec;
     display_ = &display;
@@ -3055,14 +3195,21 @@ u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const ra
         sy -= dy;
         dy = 0;
     }
-    const i32 src_w = static_cast<i32>(src.bytes_per_row * 8);
-    const i32 dst_w = static_cast<i32>(dst.bytes_per_row * 8);
+    const i32 src_w = static_cast<i32>(raster::pixel_width(src));
+    const i32 dst_w = static_cast<i32>(raster::pixel_width(dst));
     width = sx + width > src_w ? src_w - sx : width;
     width = dx + width > dst_w ? dst_w - dx : width;
     height = sy + height > static_cast<i32>(src.rows) ? static_cast<i32>(src.rows) - sy : height;
     height = dy + height > static_cast<i32>(dst.rows) ? static_cast<i32>(dst.rows) - dy : height;
     if (width <= 0 || height <= 0) {
         return 0;
+    }
+    if (src.deep || dst.deep) {
+        blit_deep(b, src, sx, sy, dst, clip, dx, dy, width, height, minterm, mask);
+        if (b.ok()) {
+            report(display_, *machine_, v, Rect{dx, dy, dx + width - 1, dy + height - 1});
+        }
+        return 1;
     }
     // With A always set, the minterm's upper four bits give the result for
     // each pair of source (B) and destination (C) bits.
@@ -3105,6 +3252,71 @@ u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const ra
         report(display_, *machine_, v, Rect{dx, dy, dx + width - 1, dy + height - 1});
     }
     return written;
+}
+
+// The minterm's result for source B and destination C, bit by bit, as the
+// blitter computes it with A set.
+static u32 apply_minterm(u32 minterm, u32 src, u32 dst) {
+    u32 out = 0;
+    out |= (minterm & 0x80) != 0 ? (src & dst) : 0;
+    out |= (minterm & 0x40) != 0 ? (src & ~dst) : 0;
+    out |= (minterm & 0x20) != 0 ? (~src & dst) : 0;
+    out |= (minterm & 0x10) != 0 ? (~src & ~dst) : 0;
+    return out;
+}
+
+// A blit where either bitmap is deep. A plain copy without a clip region
+// moves rows; any other goes pixel by pixel. On LUT8 and planar targets the
+// minterm works on the pens' bits under mask, on RGB on the colour bits;
+// a source of another kind comes over as the target's colour or pen first.
+void Graphics::blit_deep(Bus& b, const raster::Bitmap& src, i32 sx, i32 sy,
+                         const raster::Bitmap& dst, const raster::Clip* clip, i32 dx, i32 dy,
+                         i32 width, i32 height, u32 minterm, u32 mask) {
+    const bool pens = !dst.deep || dst.fmt == PixFmt::Lut8;
+    if ((minterm & 0xF0) == 0xC0 && clip == nullptr && (!pens || (mask & 0xFF) == 0xFF)) {
+        raster::copy_rect(b, src, sx, sy, dst, dx, dy, width, height);
+        return;
+    }
+    const u32 bits = !pens ? (dst.fmt == PixFmt::Rgb16 ? 0xFFFFu : 0x00FFFFFFu) : (mask & 0xFF);
+    const bool upward = src.addr == dst.addr && dy > sy;
+    for (i32 n = 0; n < height && b.ok(); ++n) {
+        const i32 r = upward ? height - 1 - n : n;
+        for (i32 x = 0; x < width; ++x) {
+            const i32 tx = dx + x;
+            const i32 ty = dy + r;
+            if (clip != nullptr && !raster::in_clip(b, *clip, tx, ty)) {
+                continue;
+            }
+            const u32 ux = static_cast<u32>(tx);
+            const u32 uy = static_cast<u32>(ty);
+            u32 source = 0;
+            u32 old = 0;
+            if (dst.deep) {
+                old = raster::chunky::read_value(b, dst, ux, uy);
+                if (src.deep && src.fmt == dst.fmt) {
+                    source = raster::chunky::read_value(b, src, static_cast<u32>(sx + x),
+                                                        static_cast<u32>(sy + r));
+                } else if (src.deep) {
+                    source = raster::chunky::rgb_value(
+                        dst, raster::chunky::value_rgb(
+                                 src, raster::chunky::read_value(b, src, static_cast<u32>(sx + x),
+                                                                 static_cast<u32>(sy + r))));
+                } else {
+                    source = raster::chunky::pen_value(
+                        dst, raster::read_pixel(b, src, sx + x, sy + r));
+                }
+            } else {
+                old = raster::read_pixel(b, dst, tx, ty);
+                source = raster::read_pixel(b, src, sx + x, sy + r);
+            }
+            const u32 result = (old & ~bits) | (apply_minterm(minterm, source, old) & bits);
+            if (dst.deep) {
+                raster::chunky::write_value(b, dst, ux, uy, result);
+            } else {
+                raster::write_pixel(b, dst, tx, ty, result);
+            }
+        }
+    }
 }
 
 bool Graphics::color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue) {
