@@ -1838,7 +1838,15 @@ struct GraphicsNatives {
             deep = false;
         }
         if (deep) {
-            native::set_result(m, g.alloc_deep_bitmap(width, height, fmt));
+            const u32 bitmap = g.alloc_deep_bitmap(width, height, fmt);
+            // A friend's bitmap draws in the friend's colours, as a double
+            // buffer of a screen must.
+            const DeepBitmap* friend_bm = g.deep(m.cpu.a[0]);
+            if (bitmap != 0 && friend_bm != nullptr) {
+                g.deep(bitmap)->palette = friend_bm->palette;
+                g.deep(bitmap)->colormap = friend_bm->colormap;
+            }
+            native::set_result(m, bitmap);
             return;
         }
         if (g.exec_ == nullptr || depth == 0 || depth > 8 || row_bytes == 0 || height == 0 ||
@@ -3308,8 +3316,27 @@ void Graphics::blit_deep(Bus& b, const raster::Bitmap& src, i32 sx, i32 sy,
     }
     const u32 bits = !pens ? (dst.fmt == PixFmt::Rgb16 ? 0xFFFFu : 0x00FFFFFFu) : (mask & 0xFF);
     const bool upward = src.addr == dst.addr && dy > sy;
+    // Each source row is read whole before any of it is written, so a copy
+    // across itself, to the right included, takes the pixels as they were.
+    std::vector<u32> sources(static_cast<usize>(width));
     for (i32 n = 0; n < height && b.ok(); ++n) {
         const i32 r = upward ? height - 1 - n : n;
+        for (i32 x = 0; x < width; ++x) {
+            if (dst.deep && src.deep && src.fmt == dst.fmt) {
+                sources[static_cast<usize>(x)] = raster::chunky::read_value(
+                    b, src, static_cast<u32>(sx + x), static_cast<u32>(sy + r));
+            } else if (dst.deep && src.deep) {
+                sources[static_cast<usize>(x)] = raster::chunky::rgb_value(
+                    dst, raster::chunky::value_rgb(
+                             src, raster::chunky::read_value(b, src, static_cast<u32>(sx + x),
+                                                             static_cast<u32>(sy + r))));
+            } else if (dst.deep) {
+                sources[static_cast<usize>(x)] =
+                    raster::chunky::pen_value(dst, raster::read_pixel(b, src, sx + x, sy + r));
+            } else {
+                sources[static_cast<usize>(x)] = raster::read_pixel(b, src, sx + x, sy + r);
+            }
+        }
         for (i32 x = 0; x < width; ++x) {
             const i32 tx = dx + x;
             const i32 ty = dy + r;
@@ -3318,26 +3345,9 @@ void Graphics::blit_deep(Bus& b, const raster::Bitmap& src, i32 sx, i32 sy,
             }
             const u32 ux = static_cast<u32>(tx);
             const u32 uy = static_cast<u32>(ty);
-            u32 source = 0;
-            u32 old = 0;
-            if (dst.deep) {
-                old = raster::chunky::read_value(b, dst, ux, uy);
-                if (src.deep && src.fmt == dst.fmt) {
-                    source = raster::chunky::read_value(b, src, static_cast<u32>(sx + x),
-                                                        static_cast<u32>(sy + r));
-                } else if (src.deep) {
-                    source = raster::chunky::rgb_value(
-                        dst, raster::chunky::value_rgb(
-                                 src, raster::chunky::read_value(b, src, static_cast<u32>(sx + x),
-                                                                 static_cast<u32>(sy + r))));
-                } else {
-                    source = raster::chunky::pen_value(
-                        dst, raster::read_pixel(b, src, sx + x, sy + r));
-                }
-            } else {
-                old = raster::read_pixel(b, dst, tx, ty);
-                source = raster::read_pixel(b, src, sx + x, sy + r);
-            }
+            const u32 source = sources[static_cast<usize>(x)];
+            const u32 old = dst.deep ? raster::chunky::read_value(b, dst, ux, uy)
+                                     : raster::read_pixel(b, dst, tx, ty);
             const u32 result = (old & ~bits) | (apply_minterm(minterm, source, old) & bits);
             if (dst.deep) {
                 raster::chunky::write_value(b, dst, ux, uy, result);

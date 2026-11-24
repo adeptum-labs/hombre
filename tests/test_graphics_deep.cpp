@@ -302,6 +302,49 @@ void setrgb32_does_not_recolour_drawn_pixels() {
     CHECK_EQ(value_at(r, bm, 2, 0), 0xFF0000FFu);
 }
 
+// A bitmap made with a deep friend draws in the friend's palette.
+void friend_bitmap_keeps_the_palette() {
+    GfxRig r;
+    make_colormap(r);
+    const u32 screen = r.graphics.alloc_deep_bitmap(32, 16, PixFmt::Argb32);
+    r.graphics.deep(screen)->colormap = kMap;
+    r.graphics.deep(screen)->palette = r.graphics.palette_for(kMap);
+    r.cpu().d[0] = 16;
+    r.cpu().d[1] = 8;
+    r.cpu().d[2] = 8;
+    r.cpu().d[3] = 0;
+    r.cpu().a[0] = screen;
+    const u32 bm = r.result(Base::Graphics, lvo::AllocBitMap);
+    CHECK(r.graphics.deep(bm) != nullptr);
+    CHECK(r.graphics.deep(bm)->palette == r.graphics.deep(screen)->palette);
+    CHECK_EQ(r.graphics.deep(bm)->colormap, kMap);
+}
+
+// A copy to the right inside one row of a deep RastPort reads each source
+// pixel before it is overwritten.
+void blt_bitmap_rastport_overlapping_to_the_right() {
+    GfxRig r;
+    const u32 bm = r.graphics.alloc_deep_bitmap(16, 4, PixFmt::Lut8);
+    rastport(r, kRp, bm);
+    for (u32 x = 0; x < 6; ++x) {
+        set_pen(r, kRp, x + 1);
+        rect_fill(r, kRp, static_cast<i32>(x), 0, static_cast<i32>(x), 0);
+    }
+    r.cpu().a[0] = bm;
+    r.cpu().d[0] = 0;
+    r.cpu().d[1] = 0;
+    r.cpu().a[1] = kRp;
+    r.cpu().d[2] = 2;
+    r.cpu().d[3] = 0;
+    r.cpu().d[4] = 6;
+    r.cpu().d[5] = 1;
+    r.cpu().d[6] = 0xC0;
+    r.call(Base::Graphics, lvo::BltBitMapRastPort);
+    for (u32 x = 0; x < 6; ++x) {
+        CHECK_EQ(value_at(r, bm, x + 2, 0), x + 1);
+    }
+}
+
 }
 
 int main() {
@@ -311,5 +354,7 @@ int main() {
     write_chunky_pixels_maps_pens();
     pixel_array8_round_trip();
     setrgb32_does_not_recolour_drawn_pixels();
+    friend_bitmap_keeps_the_palette();
+    blt_bitmap_rastport_overlapping_to_the_right();
     return check::finish("test_graphics_deep");
 }
