@@ -207,6 +207,8 @@ public:
     static constexpr u32 kScrollGadgets = 6;
     // How far one click on an arrow moves the view.
     static constexpr i32 kScrollStep = 8;
+    // How far a notch of the mouse wheel scrolls a drawer.
+    static constexpr i32 kWheelStep = 3 * kScrollStep;
 
     // The box the icons of a window take, in drawer coordinates: the
     // origin, every icon with its label, and a margin past the right and

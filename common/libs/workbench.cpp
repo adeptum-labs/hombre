@@ -722,6 +722,9 @@ u32 Workbench::open_window_on_port(u32 new_window, u32 idcmp, const char* zoom_t
         return 0;
     }
     Bus(*machine_).w32(window + ndk::wd_UserPort, window_port_);
+    // The mouse wheel scrolls a drawer: it comes as RAWKEY, without the
+    // keys, which still go to the shell.
+    intuition_->take_wheel(window);
     if (!intuition_->modify_idcmp(window, idcmp)) {
         intuition_->close_window(window);
         return 0;
@@ -3071,6 +3074,18 @@ void Workbench::handle_message(u32 message) {
         drag_to(window_id, mx, my);
     } else if (idcmp_class == kIdcmpMenuPick) {
         menu_pick(window_id, code);
+    } else if (idcmp_class == ndk::IDCMP_RAWKEY &&
+               (code == ndk::NM_WHEEL_UP || code == ndk::NM_WHEEL_DOWN)) {
+        // Up and down, or across when the drawer is as tall as its icons.
+        const i32 step = code == ndk::NM_WHEEL_UP ? -kWheelStep : kWheelStep;
+        // The backdrop, which has no scroll gadgets, does not scroll.
+        if (const DrawerWindow* w = find_window(window_id); w != nullptr && w->gadgets != 0) {
+            const i32 old_y = w->scroll_y;
+            scroll_by(window_id, 0, step);
+            if (w->scroll_y == old_y) {
+                scroll_by(window_id, step, 0);
+            }
+        }
     }
 }
 

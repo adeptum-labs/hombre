@@ -2628,6 +2628,34 @@ void the_arrows_and_sliders_scroll_a_drawer() {
     CHECK_EQ(r.get16(vert_info + pi_VertBody), MAXBODY);
 }
 
+// The wheel over a drawer scrolls its view three arrow steps a notch, down
+// for down, and moves the slider's knob with it.
+void the_wheel_scrolls_a_drawer() {
+    Rig r(scroll_files());
+    const u32 drawer = open_long(r);
+    const Workbench::DrawerWindow& w = r.workbench.window(drawer);
+    const u32 window = w.window;
+    CHECK_EQ(g_intuition.active_window(), window);
+    // Typed keys still go to the shell, not the drawer.
+    CHECK(!g_intuition.wants_keys(window));
+    const u32 vert = r.workbench.scroll_gadget(drawer, Workbench::kScrollVert);
+    const u32 vert_info = r.get32(vert + gg_SpecialInfo);
+    g_intuition.pointer_event(r.screen_x(drawer, 100), r.screen_y(drawer, 60), 0, 0, 0, true);
+    r.workbench.pump();
+
+    g_intuition.wheel_event(1);
+    r.workbench.pump();
+    CHECK_EQ(w.scroll_y, 0);
+    g_intuition.wheel_event(-2);
+    r.workbench.pump();
+    CHECK_EQ(w.scroll_y, 2 * Workbench::kWheelStep);
+    CHECK(r.get16(vert_info + pi_VertPot) > 0u);
+    g_intuition.wheel_event(1);
+    r.workbench.pump();
+    CHECK_EQ(w.scroll_y, Workbench::kWheelStep);
+    CHECK_EQ(w.scroll_x, 0);
+}
+
 void a_window_snapshot_keeps_its_scroll() {
     // A drawer kept scrolled opens scrolled, as far as its icons reach.
     {
@@ -3467,6 +3495,7 @@ int main() {
     drawer_arrows_follow_the_screen_through_a_reset();
     border_gadgets_stay_when_a_drawer_turns_inactive();
     the_arrows_and_sliders_scroll_a_drawer();
+    the_wheel_scrolls_a_drawer();
     a_window_snapshot_keeps_its_scroll();
     drawers_open_below_the_screen_bar();
     every_disk_in_a_drive_gets_an_icon();
