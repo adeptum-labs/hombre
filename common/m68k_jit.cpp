@@ -1781,6 +1781,7 @@ ExitReason Jit::call_guest(u32 entry, u64 max_blocks) {
     }
     CpuState& cpu = machine_->cpu;
     const u32 caller_pc = cpu.pc;
+    const u16 caller_sr = cpu.sr;
     const u32 sp = cpu.a[7] - 4;
     if (!machine_->mem.write32(sp & address_mask_, kReturnStub)) {
         cpu.exit = (sp & 1) != 0 ? ExitReason::AddressError : ExitReason::BusError;
@@ -1794,6 +1795,9 @@ ExitReason Jit::call_guest(u32 entry, u64 max_blocks) {
     if (why == ExitReason::Returned) {
         cpu.exit = ExitReason::None;
         cpu.pc = caller_pc;
+        // The called code may run between two instructions of the caller,
+        // as an input event's hook does: the flags are the caller's.
+        cpu.sr = caller_sr;
     }
     return why;
 }

@@ -496,10 +496,12 @@ void call_guest_returns_through_the_stub() {
     Rig r;
     r.code(0x2000, {0x7609, 0x4E75});  // MOVEQ #9,D3 ; RTS
     r.cpu().pc = 0x1234;
+    r.cpu().sr = 0x0015;  // X, Z and C set: MOVEQ clears Z and C
     CHECK_EQ(g_jit.call_guest(0x2000, 1000), ExitReason::Returned);
     CHECK_EQ(r.cpu().d[3], 9u);
     CHECK_EQ(r.cpu().a[7], kStack);
     CHECK_EQ(r.cpu().pc, 0x1234u);
+    CHECK_EQ(r.cpu().sr, 0x0015u);  // the caller's flags come back
     CHECK_EQ(r.cpu().exit, ExitReason::None);
     CHECK_EQ(r.get16(kReturnStub), 0xA001u);
     CHECK_EQ(r.get16(kReturnStub + 2), 0x4E75u);
