@@ -8252,6 +8252,24 @@ void system_uses_the_shell_process_directory() {
     g_exec.set_this_task(r.proc());
 }
 
+void system_redirects_output_to_a_file() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"S/CmdS", hello_command()});
+    Rig r(files);
+    TestConsole one;
+    g_dos.set_console(1, test_console_write, test_console_read, nullptr, &one);
+    u32 shell = 0;
+    u32 shell_cli = 0;
+    CHECK(g_dos.create_shell_process(1, shell, shell_cli));
+    u32 err = 0;
+    CHECK(g_dos.change_dir("S", err, shell));
+    g_exec.set_this_task(shell);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "CmdS >RAM:out"), 0), 3u);
+    CHECK(one.written.empty());
+    g_exec.set_this_task(r.proc());
+    CHECK(read_whole(r, "RAM:out") == "hi\n");
+}
+
 void system_accepts_resident() {
     Rig r;
     CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "resident Foo:C/Bar PURE"), 0), 0u);
@@ -8744,6 +8762,7 @@ int main() {
     a_shell_console_pair_serves_its_children();
     run_command_in_ends_the_shells_children();
     system_uses_the_shell_process_directory();
+    system_redirects_output_to_a_file();
     system_accepts_resident();
     console_star_follows_the_process_console();
     paths_belong_to_each_process();

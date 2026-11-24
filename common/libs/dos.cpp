@@ -8888,6 +8888,102 @@ struct DosOps {
             m, run_seg(d, b, seglist, args, length, 0, 0, d.stack_size_of(d.cur())));
     }
 
+    // Opens name for a redirection through Open, as a program would.
+    // Returns the file handle, 0 when it cannot be opened.
+    static u32 open_redirect(Dos& d, Bus& b, const char* name, u32 mode) {
+        Machine& m = b.machine();
+        const u32 length = length_of(name) + 1;
+        const u32 text = d.exec_->alloc(length, MEMF_PUBLIC | MEMF_CLEAR);
+        if (text == 0) {
+            return 0;
+        }
+        for (u32 i = 0; i < length; ++i) {
+            b.w8(text + i, static_cast<u8>(name[i]));
+        }
+        u32 saved[3];
+        saved[0] = m.cpu.d[0];
+        saved[1] = m.cpu.d[1];
+        saved[2] = m.cpu.d[2];
+        m.cpu.d[1] = text;
+        m.cpu.d[2] = mode;
+        m.cpu.d[0] = 0;
+        open(&d, m);
+        const u32 handle = m.cpu.d[0];
+        m.cpu.d[0] = saved[0];
+        m.cpu.d[1] = saved[1];
+        m.cpu.d[2] = saved[2];
+        d.exec_->free(text, length);
+        return handle;
+    }
+
+    static void close_redirect(Dos& d, Bus& b, u32 handle) {
+        if (handle == 0) {
+            return;
+        }
+        Machine& m = b.machine();
+        const u32 saved0 = m.cpu.d[0];
+        const u32 saved1 = m.cpu.d[1];
+        m.cpu.d[1] = handle;
+        close(&d, m);
+        m.cpu.d[0] = saved0;
+        m.cpu.d[1] = saved1;
+    }
+
+    // Takes <file, >file and >>file out of args, outside quotes, into the
+    // input and output file names. False when a name is missing or too long.
+    static bool split_redirects(const char* args, char (&clean)[Dos::kMaxArgs + 1],
+                                char (&in)[Dos::kMaxPath], char (&out)[Dos::kMaxPath],
+                                bool& append) {
+        in[0] = '\0';
+        out[0] = '\0';
+        append = false;
+        u32 n = 0;
+        bool quoted = false;
+        while (*args != '\0') {
+            const char c = *args;
+            if (c == '"') {
+                quoted = !quoted;
+            }
+            if (!quoted && (c == '<' || c == '>')) {
+                ++args;
+                if (c == '>' && *args == '>') {
+                    append = true;
+                    ++args;
+                }
+                while (*args == ' ' || *args == '\t') {
+                    ++args;
+                }
+                char (&target)[Dos::kMaxPath] = c == '<' ? in : out;
+                u32 t = 0;
+                const bool name_quoted = *args == '"';
+                if (name_quoted) {
+                    ++args;
+                }
+                while (*args != '\0' && (name_quoted ? *args != '"' : (*args != ' ' && *args != '\t'))) {
+                    if (t + 1 >= Dos::kMaxPath) {
+                        return false;
+                    }
+                    target[t++] = *args++;
+                }
+                if (name_quoted && *args == '"') {
+                    ++args;
+                }
+                target[t] = '\0';
+                if (t == 0) {
+                    return false;
+                }
+                continue;
+            }
+            if (n + 1 >= sizeof clean) {
+                return false;
+            }
+            clean[n++] = c;
+            ++args;
+        }
+        clean[n] = '\0';
+        return true;
+    }
+
     // Runs a command line in the current process, or as a background CLI
     // process when asynch is true. False when the command is not found or
     // could not be loaded; rc is its return code otherwise.
@@ -8920,6 +9016,16 @@ struct DosOps {
             rc = 0;
             return true;
         }
+        char clean[Dos::kMaxArgs + 1];
+        char redirect_in[Dos::kMaxPath];
+        char redirect_out[Dos::kMaxPath];
+        bool append = false;
+        if (!asynch && split_redirects(s, clean, redirect_in, redirect_out, append)) {
+            s = clean;
+        } else {
+            redirect_in[0] = '\0';
+            redirect_out[0] = '\0';
+        }
         char path[Dos::kMaxPath];
         if (!d.find_command(word, path, sizeof path, d.cur().process)) {
             return false;
@@ -8927,6 +9033,31 @@ struct DosOps {
         const u32 seglist = d.load_seg(path);
         if (seglist == 0) {
             return false;
+        }
+        u32 opened_in = 0;
+        u32 opened_out = 0;
+        if (redirect_in[0] != '\0') {
+            opened_in = open_redirect(d, b, redirect_in, MODE_OLDFILE);
+            if (opened_in == 0) {
+                unload(d, seglist);
+                return false;
+            }
+            input = opened_in;
+        }
+        if (redirect_out[0] != '\0') {
+            opened_out = open_redirect(d, b, redirect_out, append ? MODE_READWRITE : MODE_NEWFILE);
+            if (opened_out == 0) {
+                close_redirect(d, b, opened_in);
+                unload(d, seglist);
+                return false;
+            }
+            if (append) {
+                const i64 slot = handle_slot(d, opened_out);
+                if (slot >= 0) {
+                    d.files_[slot].pos = fs_size(d, d.files_[slot].entry);
+                }
+            }
+            output = opened_out;
         }
         if (asynch) {
             Dos::NewProcess spec{};
@@ -8953,6 +9084,8 @@ struct DosOps {
         rc = run_seg(d, b, seglist, s, length_of(s), input, output,
                      d.stack_size_of(d.cur()));
         unload(d, seglist);
+        close_redirect(d, b, opened_in);
+        close_redirect(d, b, opened_out);
         return true;
     }
 
