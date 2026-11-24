@@ -119,6 +119,7 @@ constexpr u32 GetRGB4 = 582;
 constexpr u32 BltTemplate = 36;
 constexpr u32 PolyDraw = 336;
 constexpr u32 ClipBlit = 552;
+constexpr u32 SetChipRev = 888;
 constexpr u32 VideoControl = 708;
 constexpr u32 OpenMonitor = 714;
 constexpr u32 CloseMonitor = 720;

@@ -2937,6 +2937,15 @@ void text_blends_on_a_five_to_seven_plane_palette() {
     }
 }
 
+// SetChipRev reports the chips the machine has, the full set.
+void set_chip_rev_reports_the_full_set() {
+    GfxRig r;
+    r.cpu().d[0] = 0xFFFFFFFF;  // SETCHIPREV_BEST
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::SetChipRev), 0xFu);
+    r.cpu().d[0] = 0x3;  // SETCHIPREV_ECS
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::SetChipRev), 0xFu);
+}
+
 // VideoControl accepts every request and reads _GET tags back as unset.
 void video_control_accepts_requests() {
     GfxRig r;
@@ -3202,6 +3211,7 @@ void display_info_presents_hombre_modes() {
 int main() {
     monitors_open_and_close();
     video_control_accepts_requests();
+    set_chip_rev_reports_the_full_set();
     display_info_presents_ntsc();
     display_info_presents_hombre_modes();
     set_soft_style_keeps_the_drawn_styles();

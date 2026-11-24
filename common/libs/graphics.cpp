@@ -2265,6 +2265,10 @@ struct GraphicsNatives {
         return spec;
     }
 
+    // SetChipRev(want D0): the machine has the whole chip set, whatever
+    // is asked for: the AGA bits with the ECS ones.
+    static void set_chip_rev(void*, Machine& m) { native::set_result(m, 0xF); }
+
     // VideoControl(colorMap A0, tags A1): there is no copper list to control,
     // so every request is accepted and a _GET tag reads back as not set.
     // A tag naming the view port's mode reads back INVALID_ID.
@@ -2828,6 +2832,7 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::PolyDraw, GraphicsNatives::poly_draw, "PolyDraw"},
     {graphics_lvo::BltTemplate, GraphicsNatives::blt_template, "BltTemplate"},
     {graphics_lvo::ClipBlit, GraphicsNatives::clip_blit, "ClipBlit"},
+    {graphics_lvo::SetChipRev, GraphicsNatives::set_chip_rev, "SetChipRev"},
     {graphics_lvo::VideoControl, GraphicsNatives::video_control, "VideoControl"},
     {graphics_lvo::OpenMonitor, GraphicsNatives::open_monitor, "OpenMonitor"},
     {graphics_lvo::CloseMonitor, GraphicsNatives::close_monitor, "CloseMonitor"},
