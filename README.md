@@ -14,9 +14,15 @@ software, on modern hardware and in virtual machines.
   translator.
 - Native AmigaOS libraries written in C++: exec, dos, intuition, graphics,
   layers, gadtools, icon, workbench, utility, keymap and version, with
-  timer.device and console.device. No Kickstart ROM needed.
+  timer.device, console.device, audio.device and scsi.device. No Kickstart
+  ROM needed.
 - Reads real Amiga floppy images, ADF and DMS, in DF0: to DF3:, next to a
   writable Ram Disk.
+- Hard disks: RDB-partitioned hard disk images (HDF), and Amiga partitions
+  inside an MBR or GPT disk, on virtio, SATA (AHCI) and NVMe. The
+  partitions mount as DH0: and on, can be written, and Hombre boots from
+  the bootable one with the highest boot priority, as an Amiga does.
+- HDToolBox from the 3.1 Install disk sees the disks through scsi.device.
 - Boots with a splash and a progress bar, then runs the boot disk's
   `S:Startup-Sequence`, as an Amiga does.
 - A Workbench desktop: drawers, framed icons as on 3.1, icon drag and drop,
@@ -78,6 +84,20 @@ make run DISK="path/to/Workbench.dms"
 boots a generated test disk.
 
 Hombre ships no AmigaOS files. Use your own, legally owned AmigaOS disks.
+
+Add a hard disk image with `HDF=`. `mkhdf` makes one, here a 128 MB disk
+whose bootable DH0: holds a copy of the floppy:
+
+```sh
+make build/tools/mkhdf
+build/tools/mkhdf --size 128 dh0.hdf "path/to/Workbench.dms"
+make run HDF=dh0.hdf
+```
+
+`mkhdf --size 128 --empty FFS Work work.hdf` makes an empty FFS disk
+instead. `HDF1=` to `HDF3=` add more disks, and `HDF_BUS=ahci` or
+`HDF_BUS=nvme` puts them on a SATA or NVMe controller. Hombre writes to
+the image, so a file you save is there after the next boot.
 
 Hombre runs the disk's `S:Startup-Sequence`. On the Workbench 3.1 disk it
 ends with `LoadWB`, so you land on the Workbench. Press Ctrl+D while Hombre
