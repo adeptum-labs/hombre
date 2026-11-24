@@ -626,17 +626,18 @@ void draw_menu_shadow(Bus& b, const raster::Bitmap& bitmap, const raster::Clip& 
     struct Band {
         Rect rect;
         const u8* table;
+        u32 percent;
     };
     const Band bands[4] = {
-        {Rect{box.x1 + 1, box.y0 + 4, box.x1 + 2, box.y1}, strong},
-        {Rect{box.x1 + 3, box.y0 + 4, box.x1 + 4, box.y1 + 2}, light},
-        {Rect{box.x0 + 4, box.y1 + 1, box.x1 + 2, box.y1 + 2}, strong},
-        {Rect{box.x0 + 4, box.y1 + 3, box.x1 + 4, box.y1 + 4}, light},
+        {Rect{box.x1 + 1, box.y0 + 4, box.x1 + 2, box.y1}, strong, 70},
+        {Rect{box.x1 + 3, box.y0 + 4, box.x1 + 4, box.y1 + 2}, light, 85},
+        {Rect{box.x0 + 4, box.y1 + 1, box.x1 + 2, box.y1 + 2}, strong, 70},
+        {Rect{box.x0 + 4, box.y1 + 3, box.x1 + 4, box.y1 + 4}, light, 85},
     };
     for (const Band& band : bands) {
         const Rect r = clipped(band.rect, clip);
         if (menu_layout::valid(r)) {
-            raster::remap_rect(b, bitmap, r, band.table, 256);
+            raster::shade_rect(b, bitmap, r, band.table, band.percent);
         }
     }
 }

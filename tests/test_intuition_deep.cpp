@@ -186,6 +186,78 @@ void requester_on_deep_screen_restores_what_it_covered() {
     display_modes::configure_hombre(0, 0, 0);
 }
 
+// A window on an RGB screen casts its shadow by darkening the colours
+// beside it, at 70% in the strong band.
+void shadow_on_argb32_screen_darkens_the_colour() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 screen = open_screen(r, k800x24);
+    const u32 bitmap = screen + ndk::sc_BitMap;
+    const u32 backdrop = value_at(r, bitmap, 400, 400) & 0xFFFFFF;
+    const u32 window = open_window(r, screen, 100, 50, 200, 120);
+    CHECK(window != 0);
+    const u32 shadow = value_at(r, bitmap, 300, 100) & 0xFFFFFF;
+    CHECK(shadow != backdrop);
+    const u32 red = (backdrop >> 16) & 0xFF;
+    CHECK_EQ((shadow >> 16) & 0xFF, red * 70 / 100);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+void set_iprefs(GfxRig& r, u32 prefs, u32 size, u32 type) {
+    r.cpu().a[0] = prefs;
+    r.cpu().d[0] = size;
+    r.cpu().d[1] = type;
+    CHECK_EQ(r.result(Base::Intuition, hombre::intuition_lvo::SetIPrefs), 0u);
+}
+
+// IPrefs sends a screen mode and resets the Workbench, as ScreenMode's Use
+// does.
+void switch_workbench(GfxRig& r, u32 mode_id, u32 width, u32 height, u32 depth) {
+    constexpr u32 kPrefs = kData + 0x600;
+    r.put32(kPrefs, mode_id);
+    r.put16(kPrefs + 4, width);
+    r.put16(kPrefs + 6, height);
+    r.put16(kPrefs + 8, depth);
+    r.put16(kPrefs + 10, 3);
+    set_iprefs(r, kPrefs, 12, 1);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.result(Base::Intuition, hombre::intuition_lvo::CloseWorkBench), 1u);
+    r.cpu().a[0] = 0;
+    r.call(Base::Intuition, hombre::intuition_lvo::OpenWorkBench);
+}
+
+// The Workbench goes from an Amiga mode to a HOMBRE one and back with its
+// window kept: deep in the HOMBRE mode, planar again after.
+void workbench_reopens_amiga_hombre_amiga() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 screen = open_screen(r, 0x8004);
+    CHECK(screen != 0);
+    r.intuition.set_default_screen(screen);
+    const u32 window = open_window(r, screen, 20, 30, 300, 200);
+    r.intuition.keep_through_workbench_reset(window);
+    const auto window_bitmap = [&]() {
+        return r.get32(r.get32(window + ndk::wd_RPort) + ndk::rp_BitMap);
+    };
+    CHECK(r.graphics.deep(window_bitmap()) == nullptr);
+
+    switch_workbench(r, k800x24, 0xFFFF, 0xFFFF, 8);
+    CHECK(r.graphics.deep(screen + ndk::sc_BitMap) != nullptr);
+    CHECK(r.graphics.deep(window_bitmap()) != nullptr);
+    CHECK(r.graphics.deep(window_bitmap())->fmt == PixFmt::Argb32);
+    CHECK(r.display.mode_deep);
+    CHECK_EQ(r.get16(screen + ndk::sc_Width), 800u);
+    CHECK(r.intuition.window_open(window));
+
+    switch_workbench(r, 0x8004, 0xFFFF, 0xFFFF, 8);
+    CHECK(r.graphics.deep(screen + ndk::sc_BitMap) == nullptr);
+    CHECK(r.graphics.deep(window_bitmap()) == nullptr);
+    CHECK_EQ(r.get8(window_bitmap() + ndk::bm_Depth), 8u);
+    CHECK(!r.display.mode_deep);
+    CHECK(r.intuition.window_open(window));
+    display_modes::configure_hombre(0, 0, 0);
+}
+
 }
 
 int main() {
@@ -196,5 +268,7 @@ int main() {
     open_screen_fails_when_fast_memory_runs_out();
     close_screen_frees_deep_memory();
     requester_on_deep_screen_restores_what_it_covered();
+    shadow_on_argb32_screen_darkens_the_colour();
+    workbench_reopens_amiga_hombre_amiga();
     return check::finish("test_intuition_deep");
 }

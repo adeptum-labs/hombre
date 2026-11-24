@@ -933,4 +933,32 @@ inline void remap_rect(native::Bus& bus, const Bitmap& bitmap, Rect r, const u8*
     }
 }
 
+// Darkens the rectangle, inside the bitmap, for a shadow: through table on
+// planar and LUT8 bitmaps, whose pens it maps to darker ones, and to percent
+// of every colour channel on RGB ones.
+inline void shade_rect(native::Bus& bus, const Bitmap& bitmap, Rect r, const u8* table,
+                       u32 percent) {
+    if (!bitmap.deep || bitmap.fmt == PixFmt::Lut8) {
+        remap_rect(bus, bitmap, r, table, 256);
+        return;
+    }
+    const i64 width = pixel_width(bitmap);
+    const i64 left = r.x0 > 0 ? r.x0 : 0;
+    const i64 top = r.y0 > 0 ? r.y0 : 0;
+    const i64 right = r.x1 < width ? r.x1 : width - 1;
+    const i64 bottom = r.y1 < static_cast<i64>(bitmap.rows) ? r.y1 : bitmap.rows - 1;
+    for (i64 y = top; y <= bottom && left <= right; ++y) {
+        for (i64 x = left; x <= right; ++x) {
+            const u32 ux = static_cast<u32>(x);
+            const u32 uy = static_cast<u32>(y);
+            const u32 rgb = chunky::value_rgb(bitmap, chunky::read_value(bus, bitmap, ux, uy));
+            const u32 red = ((rgb >> 16) & 0xFF) * percent / 100;
+            const u32 green = ((rgb >> 8) & 0xFF) * percent / 100;
+            const u32 blue = (rgb & 0xFF) * percent / 100;
+            chunky::write_value(bus, bitmap, ux, uy,
+                                chunky::rgb_value(bitmap, (red << 16) | (green << 8) | blue));
+        }
+    }
+}
+
 }

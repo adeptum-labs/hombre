@@ -3116,17 +3116,18 @@ void Intuition::compose(u32 screen, Rect r) {
             struct ShadowBand {
                 Rect rect;
                 const u8* table;
+                u32 percent;
             };
             const ShadowBand bands[4] = {
-                {Rect{wright + 1, wtop + 4, wright + 2, wbottom}, srec->strong_shade},
-                {Rect{wright + 3, wtop + 4, wright + 4, wbottom + 2}, srec->light_shade},
-                {Rect{wleft + 4, wbottom + 1, wright + 2, wbottom + 2}, srec->strong_shade},
-                {Rect{wleft + 4, wbottom + 3, wright + 4, wbottom + 4}, srec->light_shade},
+                {Rect{wright + 1, wtop + 4, wright + 2, wbottom}, srec->strong_shade, 70},
+                {Rect{wright + 3, wtop + 4, wright + 4, wbottom + 2}, srec->light_shade, 85},
+                {Rect{wleft + 4, wbottom + 1, wright + 2, wbottom + 2}, srec->strong_shade, 70},
+                {Rect{wleft + 4, wbottom + 3, wright + 4, wbottom + 4}, srec->light_shade, 85},
             };
             for (const ShadowBand& band : bands) {
                 const Rect clipped = intersect_rect(band.rect, r);
                 if (clipped.x0 <= clipped.x1 && clipped.y0 <= clipped.y1) {
-                    raster::remap_rect(b, dst, clipped, band.table, 256);
+                    raster::shade_rect(b, dst, clipped, band.table, band.percent);
                 }
             }
         }
