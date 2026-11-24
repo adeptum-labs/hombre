@@ -262,6 +262,32 @@ inline u32 put_size_name(char* name, u32 width, u32 height) {
     return at;
 }
 
+// The aspect ratio of width by height: the common one within 2% of it, as
+// 16:9 for 1366x768, else the reduced fraction.
+inline void aspect_of(u32 width, u32 height, u32& across, u32& down) {
+    constexpr u32 kCommon[][2] = {{4, 3}, {5, 4}, {3, 2}, {16, 10}, {16, 9}, {21, 9}, {1, 1}};
+    for (const auto& ratio : kCommon) {
+        // |w/h - a/d| < 2% of a/d, in whole numbers.
+        const u64 lhs = u64{width} * ratio[1] * 50;
+        const u64 rhs = u64{height} * ratio[0] * 50;
+        const u64 diff = lhs > rhs ? lhs - rhs : rhs - lhs;
+        if (diff < u64{height} * ratio[0]) {
+            across = ratio[0];
+            down = ratio[1];
+            return;
+        }
+    }
+    u32 a = width;
+    u32 b = height;
+    while (b != 0) {
+        const u32 t = a % b;
+        a = b;
+        b = t;
+    }
+    across = a != 0 ? width / a : 0;
+    down = a != 0 ? height / a : 0;
+}
+
 inline bool hombre_fits(u32 width, u32 height, u32 depth, u64 fast_bytes) {
     return u64{width} * height * bytes_per_pixel(kHombreFormat[depth]) <= fast_bytes / 4;
 }
@@ -277,8 +303,21 @@ inline void add_hombre(u32 size_index, u32 width, u32 height, u64 fast_bytes) {
     if (deepest == kHombreDepths) {
         return;
     }
+    // "HOMBRE:1920x1080 (16:9)": the size and its shape.
     char* listed_name = table.names[table.count];
-    put_size_name(listed_name, width, height);
+    u32 at = put_size_name(listed_name, width, height);
+    u32 across = 0;
+    u32 down = 0;
+    aspect_of(width, height, across, down);
+    if (across != 0 && across < 1000 && down < 1000) {
+        listed_name[at++] = ' ';
+        listed_name[at++] = '(';
+        put_number(listed_name, at, across);
+        listed_name[at++] = ':';
+        put_number(listed_name, at, down);
+        listed_name[at++] = ')';
+        listed_name[at] = '\0';
+    }
     Mode& listed = table.modes[table.count++];
     listed = Mode{hombre_id(size_index, kAnyDepth), static_cast<u16>(width),
                   static_cast<u16>(height), kHombreDepth[deepest], 22, 22,

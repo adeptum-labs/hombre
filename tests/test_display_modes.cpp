@@ -57,7 +57,7 @@ void hombre_modes_listed_after_amiga() {
     CHECK(listed.deep);
     CHECK(listed.listed);
     CHECK(listed.any_depth);
-    CHECK(std::strcmp(listed.name, "HOMBRE:800x600") == 0);
+    CHECK(std::strcmp(listed.name, "HOMBRE:800x600 (4:3)") == 0);
     CHECK_EQ(listed.flags, kIsForeign | kIsWb);
     // The modes of one format each follow it, known but not listed.
     const Mode& first = at(kAmigaModes + 1);
@@ -119,6 +119,28 @@ void large_modes_dropped_when_fast_is_small() {
     configure_hombre(0, 0, 0);
 }
 
+// A listed mode's name carries its aspect ratio; a size near a common one,
+// as 1366x768, takes that one.
+void listed_names_carry_the_aspect_ratio() {
+    configure_hombre(1360, 768, 512 * kMiB);
+    const struct {
+        u32 size;
+        const char* name;
+    } names[] = {{0, "HOMBRE:800x600 (4:3)"},     {3, "HOMBRE:1280x1024 (5:4)"},
+                 {4, "HOMBRE:1280x800 (16:10)"},  {10, "HOMBRE:1366x768 (16:9)"},
+                 {12, "HOMBRE:1920x1080 (16:9)"}, {14, "HOMBRE:3840x2160 (16:9)"},
+                 {15, "HOMBRE:1360x768 (16:9)"}};
+    for (const auto& n : names) {
+        const Mode* mode = find(hombre_id(n.size, kAnyDepth));
+        CHECK(mode != nullptr);
+        if (mode != nullptr) {
+            CHECK(std::strcmp(mode->name, n.name) == 0);
+        }
+    }
+    CHECK(std::strcmp(find(hombre_id(12, 2))->name, "HOMBRE:1920x1080 24bit") == 0);
+    configure_hombre(0, 0, 0);
+}
+
 // The depth asked of a listed HOMBRE mode picks the mode of one format: up
 // to 8 bits 8-bit, up to 16 bits 16-bit, deeper 24-bit. Any other mode is
 // itself.
@@ -145,5 +167,6 @@ int main() {
     native_mode_added_for_unlisted_size();
     large_modes_dropped_when_fast_is_small();
     depth_picks_the_format();
+    listed_names_carry_the_aspect_ratio();
     return check::finish("test_display_modes");
 }
