@@ -288,6 +288,9 @@ std::vector<AdfFile> test_files() {
         {"Utilities/Finder", hunk_rts()},
         {"Tools/Lost.info", project_info("Finder", 90, 80)},
         {"Tools/Lost", text("a project")},
+        {"Tools/Up.info", project_info("/Tiny2", 120, 80)},
+        {"Tools/Up", text("a project")},
+        {"Tiny2", hunk_rts()},
         {"Tools/Sub.info", drawer_icon_info(200, 20, 60, 70, 200, 90)},
         {"Tools/Sub/Deep.info", icon_info(kWBTool, 10, 10)},
         {"Tools/Fake.info", icon_info(kWBDisk, 250, 10)},
@@ -1036,6 +1039,17 @@ void a_bare_default_tool_is_found_on_the_command_path() {
     const u32 tools_window = r.find_window("HombreTest:Tools");
     r.workbench.open_icon(tools_window, r.find_icon("Lost"));
     const Workbench::RunningTool* started = r.find_tool("Finder");
+    CHECK(started != nullptr);
+    CHECK(r.workbench.tool_reply(started->message));
+}
+
+void a_leading_slash_default_tool_is_in_the_parent_drawer() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    r.workbench.open_icon(r.find_window("HombreTest:"), r.find_icon("Tools"));
+    r.workbench.open_icon(r.find_window("HombreTest:Tools"), r.find_icon("Up"));
+    const Workbench::RunningTool* started = r.find_tool("Tiny2");
     CHECK(started != nullptr);
     CHECK(r.workbench.tool_reply(started->message));
 }
@@ -3484,6 +3498,7 @@ int main() {
     reply_unloads_the_seglist_and_unlocks();
     a_project_starts_its_default_tool();
     a_bare_default_tool_is_found_on_the_command_path();
+    a_leading_slash_default_tool_is_in_the_parent_drawer();
     app_registrations_add_and_remove();
     menu_strip_lists_the_titles_and_disabled_items();
     app_vectors_take_their_arguments_from_the_documented_registers();

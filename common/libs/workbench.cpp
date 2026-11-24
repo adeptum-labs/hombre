@@ -3416,9 +3416,41 @@ bool Workbench::split_tool(const char* reference, const char* drawer,
         }
     }
     if (slash >= 0) {
-        copy_text(dir, Dos::kMaxPath, reference);
-        dir[static_cast<u32>(slash)] = '\0';
-        copy_text(name, Dos::kMaxPath, reference + slash + 1);
+        // Without a volume the path is relative to the drawer, and each
+        // leading slash steps up one level: "/Installer" is the tool in the
+        // drawer's parent.
+        char full[Dos::kMaxPath];
+        const char* rest = reference;
+        if (colon >= 0) {
+            copy_text(full, Dos::kMaxPath, reference);
+        } else {
+            copy_text(full, Dos::kMaxPath, drawer);
+            while (*rest == '/') {
+                u32 end = text_length(full);
+                while (end > 0 && full[end - 1] != '/' && full[end - 1] != ':') {
+                    --end;
+                }
+                if (end > 0 && full[end - 1] == '/') {
+                    --end;
+                }
+                full[end] = '\0';
+                ++rest;
+            }
+            char joined[Dos::kMaxPath];
+            if (!join_path(full, rest, joined)) {
+                return false;
+            }
+            copy_text(full, Dos::kMaxPath, joined);
+        }
+        u32 last = 0;
+        for (u32 i = 0; full[i] != '\0'; ++i) {
+            if (full[i] == '/' || full[i] == ':') {
+                last = i;
+            }
+        }
+        copy_text(name, Dos::kMaxPath, full + last + 1);
+        full[full[last] == ':' ? last + 1 : last] = '\0';
+        copy_text(dir, Dos::kMaxPath, full);
         return name[0] != '\0';
     }
     if (colon >= 0) {
