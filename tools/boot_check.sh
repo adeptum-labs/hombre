@@ -27,8 +27,8 @@
 # build/disk.img (made by make disk-image) is attached as a read-only
 # virtio-blk drive. --disk <file> attaches a copy of that file padded to
 # whole sectors instead, and --no-disk attaches no drive.
-# --disk1 <file> and --disk2 <file> attach copies of more disks as DF1:
-# and DF2:. --hdf <file> attaches that hard disk image itself, writable, as
+# --disk1, --disk2 and --disk3 <file> attach copies of more disks as DF1:,
+# DF2: and DF3:. --hdf <file> attaches that hard disk image itself, writable, as
 # the first hard disk, so what the boot writes stays in the file.
 # --hdf-bus ahci|nvme|nvme4k attaches it to the SATA controller, to an NVMe
 # controller, or to one with 4096-byte sectors, instead of virtio-blk.
@@ -54,7 +54,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--disk3 <file>] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -73,6 +73,7 @@ disk_mode=default
 disk_source=
 disk1_source=
 disk2_source=
+disk3_source=
 hdf=
 hdf_bus=virtio
 no_startup=false
@@ -93,6 +94,11 @@ while [[ ${1:-} == --* ]]; do
         --disk2)
             [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
             disk2_source=$2
+            shift
+            ;;
+        --disk3)
+            [[ $# -ge 2 && $2 != --* ]] || { echo "$usage" >&2; exit 2; }
+            disk3_source=$2
             shift
             ;;
         --hdf)
@@ -188,6 +194,12 @@ if [[ -n $disk2_source ]]; then
     "$tools_dir/make_disk.sh" "$disk2_source" "$disk2"
     disk_args+=(-drive "if=none,id=disk2,format=raw,readonly=on,file=$disk2"
                 -device virtio-blk-pci,disable-legacy=on,drive=disk2,addr=0x12)
+fi
+if [[ -n $disk3_source ]]; then
+    disk3=$build_dir/boot-check-disk3.img
+    "$tools_dir/make_disk.sh" "$disk3_source" "$disk3"
+    disk_args+=(-drive "if=none,id=disk3,format=raw,readonly=on,file=$disk3"
+                -device virtio-blk-pci,disable-legacy=on,drive=disk3,addr=0x13)
 fi
 # A virtio hard disk sits in PCI slot 0x18; the others go on the q35
 # machine's SATA controller or an NVMe controller of their own.
