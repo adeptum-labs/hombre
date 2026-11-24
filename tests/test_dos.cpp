@@ -694,6 +694,7 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::AssignPath, 624u);
     CHECK_EQ(dos_lvo::AssignAdd, 630u);
     CHECK_EQ(dos_lvo::RemAssignList, 636u);
+    CHECK_EQ(dos_lvo::DeviceProc, 174u);
     CHECK_EQ(dos_lvo::GetDeviceProc, 642u);
     CHECK_EQ(dos_lvo::FreeDeviceProc, 648u);
     CHECK_EQ(dos_lvo::LockDosList, 654u);
@@ -2113,6 +2114,10 @@ void a_second_drive_is_its_own_volume() {
     CHECK(port1 != 0);
     CHECK(port1 != port0);
     CHECK_EQ(r.get32((docs << 2) + fl_Task), port1);
+    // The old DeviceProc names the same port, and none for an unknown name.
+    CHECK_EQ(r.call(dos_lvo::DeviceProc, kData + 0x80), port1);
+    r.str(kData + 0x180, "Nosuch:");
+    CHECK_EQ(r.call(dos_lvo::DeviceProc, kData + 0x180), 0u);
     r.str(kData + 0x100, "DF1:Notes");
     const u32 fh = r.call(dos_lvo::Open, kData + 0x100, MODE_OLDFILE);
     CHECK(fh != 0);

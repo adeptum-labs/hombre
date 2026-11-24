@@ -5682,6 +5682,31 @@ struct DosOps {
         free_dev_proc_ptr(of(ctx), b, m.cpu.d[1]);
     }
 
+    // DeviceProc(name D1): the old call. The port of the handler for the
+    // name, 0 for none; for a name in an assign IoErr is the assign's lock,
+    // else 0.
+    static void device_proc(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        m.cpu.d[2] = 0;
+        get_device_proc(ctx, m);
+        const u32 dvp = m.cpu.d[0];
+        if (dvp == 0 || !b.ok()) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 port = b.r32(dvp + dvp_Port);
+        const u32 flags = b.r32(dvp + dvp_Flags);
+        const u32 lock = b.r32(dvp + dvp_Lock);
+        const bool keep_lock = (flags & DVPF_ASSIGN) != 0 && (flags & DVPF_UNLOCK) == 0;
+        free_dev_proc_ptr(d, b, dvp);
+        if (!b.ok()) {
+            return;
+        }
+        set_io_err(d, b, keep_lock ? lock : 0);
+        native::set_result(m, port);
+    }
+
     static void get_device_proc(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
@@ -9261,6 +9286,7 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::AssignPath, DosOps::assign_path, "AssignPath"},
     {dos_lvo::AssignAdd, DosOps::assign_add, "AssignAdd"},
     {dos_lvo::RemAssignList, DosOps::rem_assign_list, "RemAssignList"},
+    {dos_lvo::DeviceProc, DosOps::device_proc, "DeviceProc"},
     {dos_lvo::GetDeviceProc, DosOps::get_device_proc, "GetDeviceProc"},
     {dos_lvo::FreeDeviceProc, DosOps::free_device_proc, "FreeDeviceProc"},
     {dos_lvo::LockDosList, DosOps::lock_dos_list, "LockDosList"},

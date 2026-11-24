@@ -176,6 +176,7 @@ constexpr u32 AssignLate = 618;
 constexpr u32 AssignPath = 624;
 constexpr u32 AssignAdd = 630;
 constexpr u32 RemAssignList = 636;
+constexpr u32 DeviceProc = 174;
 constexpr u32 GetDeviceProc = 642;
 constexpr u32 FreeDeviceProc = 648;
 constexpr u32 LockDosList = 654;
