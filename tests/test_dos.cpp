@@ -8252,6 +8252,11 @@ void system_uses_the_shell_process_directory() {
     g_exec.set_this_task(r.proc());
 }
 
+void system_accepts_resident() {
+    Rig r;
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, r.str(kData, "resident Foo:C/Bar PURE"), 0), 0u);
+}
+
 void console_star_follows_the_process_console() {
     Rig r;
     use_noop_task_host();
@@ -8739,6 +8744,7 @@ int main() {
     a_shell_console_pair_serves_its_children();
     run_command_in_ends_the_shells_children();
     system_uses_the_shell_process_directory();
+    system_accepts_resident();
     console_star_follows_the_process_console();
     paths_belong_to_each_process();
     start_notify_signals_the_watching_task();

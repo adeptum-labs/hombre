@@ -8914,6 +8914,12 @@ struct DosOps {
         if (word[0] == '\0') {
             return false;
         }
+        // The shell keeps no list of resident commands, so Resident is
+        // accepted and changes nothing, here as at the shell.
+        if (same_name(word, w, "RESIDENT")) {
+            rc = 0;
+            return true;
+        }
         char path[Dos::kMaxPath];
         if (!d.find_command(word, path, sizeof path, d.cur().process)) {
             return false;
