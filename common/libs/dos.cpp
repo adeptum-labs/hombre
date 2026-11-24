@@ -1958,6 +1958,10 @@ struct DosOps {
                 prev = e.node;
             }
         }
+        for (const Dos::UserEntry& e : d.user_entries_) {
+            b.w32(prev + dol_Next, e.node >> 2);
+            prev = e.node;
+        }
         b.w32(prev + dol_Next, 0);
     }
 
@@ -5949,6 +5953,136 @@ struct DosOps {
         }
     }
 
+    // The bytes of a node MakeDosEntry made: the DosList and its name.
+    static u32 made_entry_bytes(Bus& b, u32 node) {
+        const u32 bstr = b.r32(node + dol_Name) << 2;
+        const u32 len = b.r8(bstr);
+        return DosList_SIZEOF + align4(1 + len + 1);
+    }
+
+    // MakeDosEntry(name D1, type D2): a DosList node of the type with a
+    // copy of the name as its BSTR; 0 with no memory.
+    static void make_dos_entry(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        char name[kMaxName];
+        if (m.cpu.d[1] == 0 || !b.string(m.cpu.d[1], name, sizeof name)) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, 0);
+            return;
+        }
+        const u32 len = length_of(name);
+        const u32 total = DosList_SIZEOF + align4(1 + len + 1);
+        const u32 node = d.exec_->alloc(total, MEMF_PUBLIC | MEMF_CLEAR);
+        if (node == 0) {
+            fail(d, b, ERROR_NO_FREE_STORE, 0);
+            return;
+        }
+        put_bstr(b, node + DosList_SIZEOF, name, kMaxName);
+        b.w32(node + dol_Type, m.cpu.d[2]);
+        b.w32(node + dol_Name, (node + DosList_SIZEOF) >> 2);
+        if (b.ok()) {
+            native::set_result(m, node);
+        }
+    }
+
+    static void forget_user_entry(Dos& d, Bus& b, u32 node) {
+        Dos::UserEntry* e =
+            d.user_entries_.find_if([node](const Dos::UserEntry& u) { return u.node == node; });
+        if (e != nullptr) {
+            d.user_entries_.remove(e);
+            relink_dos_list(d, b);
+        }
+    }
+
+    // AddDosEntry(dlist D1): puts the node in the list.
+    static void add_dos_entry(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 node = native::guest_address(m, m.cpu.d[1]);
+        if (node == 0) {
+            fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
+            return;
+        }
+        if (d.user_entries_.find_if([node](const Dos::UserEntry& u) { return u.node == node; }) !=
+            nullptr) {
+            fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
+            return;
+        }
+        Dos::UserEntry* e = d.user_entries_.add();
+        if (e == nullptr) {
+            fail(d, b, ERROR_NO_FREE_STORE, DOSFALSE);
+            return;
+        }
+        e->node = node;
+        b.w32(node + dol_Next, 0);
+        relink_dos_list(d, b);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    // RemDosEntry(dlist D1): takes a node AddDosEntry put in out again.
+    static void rem_dos_entry(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 node = native::guest_address(m, m.cpu.d[1]);
+        if (d.user_entries_.find_if([node](const Dos::UserEntry& u) { return u.node == node; }) ==
+            nullptr) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
+        forget_user_entry(d, b, node);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
+    // FreeDosEntry(dlist D1): gives a MakeDosEntry node back.
+    static void free_dos_entry(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        const u32 node = native::guest_address(m, m.cpu.d[1]);
+        if (node == 0) {
+            return;
+        }
+        forget_user_entry(d, b, node);
+        const u32 bytes = made_entry_bytes(b, node);
+        if (b.ok()) {
+            d.exec_->free(node, bytes);
+        }
+    }
+
+    // AddBuffers(name D1, number D2): changes the cache of the drive the
+    // name tells by number buffers, never below one; the new total is in
+    // IoErr.
+    static void add_buffers(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        char name[kMaxName];
+        if (!read_name(d, b, m.cpu.d[1], name)) {
+            if (b.ok()) {
+                native::set_result(m, DOSFALSE);
+            }
+            return;
+        }
+        u32 colon = 0;
+        while (name[colon] != '\0' && name[colon] != ':') {
+            ++colon;
+        }
+        u8 drive = 0;
+        if (name[colon] != ':' || (!drive_of_device(d, name, colon, drive) &&
+                                   !drive_of_volume(d, name, colon, drive))) {
+            fail(d, b, ERROR_DEVICE_NOT_MOUNTED, DOSFALSE);
+            return;
+        }
+        const i32 total = static_cast<i32>(d.buffers_[drive]) + static_cast<i32>(m.cpu.d[2]);
+        d.buffers_[drive] = total < 1 ? 1u : static_cast<u32>(total);
+        set_io_err(d, b, d.buffers_[drive]);
+        if (b.ok()) {
+            native::set_result(m, DOSTRUE);
+        }
+    }
+
     static void find_dos_entry(void*, Machine& m) {
         Bus b(m);
         u32 cur = m.cpu.d[1];
@@ -9314,7 +9448,12 @@ constexpr DosFunction kDosFunctions[] = {
     {dos_lvo::LockDosList, DosOps::lock_dos_list, "LockDosList"},
     {dos_lvo::UnLockDosList, DosOps::unlock_dos_list, "UnLockDosList"},
     {dos_lvo::AttemptLockDosList, DosOps::lock_dos_list, "AttemptLockDosList"},
+    {dos_lvo::RemDosEntry, DosOps::rem_dos_entry, "RemDosEntry"},
+    {dos_lvo::AddDosEntry, DosOps::add_dos_entry, "AddDosEntry"},
     {dos_lvo::FindDosEntry, DosOps::find_dos_entry, "FindDosEntry"},
+    {dos_lvo::MakeDosEntry, DosOps::make_dos_entry, "MakeDosEntry"},
+    {dos_lvo::FreeDosEntry, DosOps::free_dos_entry, "FreeDosEntry"},
+    {dos_lvo::AddBuffers, DosOps::add_buffers, "AddBuffers"},
     {dos_lvo::NextDosEntry, DosOps::next_dos_entry, "NextDosEntry"},
     {dos_lvo::IsFileSystem, DosOps::is_file_system, "IsFileSystem"},
     {dos_lvo::CompareDates, DosOps::compare_dates, "CompareDates"},
@@ -10058,6 +10197,10 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     }
     unknown_pkt_count_ = 0;
     notifies_.clear();
+    user_entries_.clear();
+    for (u32& buffers : buffers_) {
+        buffers = kDefaultBuffers;
+    }
     notify_reply_port_ = 0;
     now_ticks_ = nullptr;
     deferred_.clear();

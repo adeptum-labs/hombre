@@ -700,7 +700,12 @@ void layout_matches_the_ndk() {
     CHECK_EQ(dos_lvo::LockDosList, 654u);
     CHECK_EQ(dos_lvo::UnLockDosList, 660u);
     CHECK_EQ(dos_lvo::AttemptLockDosList, 666u);
+    CHECK_EQ(dos_lvo::RemDosEntry, 672u);
+    CHECK_EQ(dos_lvo::AddDosEntry, 678u);
     CHECK_EQ(dos_lvo::FindDosEntry, 684u);
+    CHECK_EQ(dos_lvo::MakeDosEntry, 696u);
+    CHECK_EQ(dos_lvo::FreeDosEntry, 702u);
+    CHECK_EQ(dos_lvo::AddBuffers, 732u);
     CHECK_EQ(dos_lvo::NextDosEntry, 690u);
     CHECK_EQ(dos_lvo::IsFileSystem, 708u);
     CHECK_EQ(dos_lvo::CompareDates, 738u);
@@ -2091,6 +2096,52 @@ std::string read_whole(Rig& r, const std::string& name) {
         text.push_back(static_cast<char>(r.get8(kData + 0x700 + i)));
     }
     return text;
+}
+
+// AddBuffers changes the cache of a drive by a number and answers the new
+// total in IoErr; an unknown device fails.
+void add_buffers_counts_per_drive() {
+    Rig r;
+    r.str(kData, "DF0:");
+    CHECK_EQ(r.call(dos_lvo::AddBuffers, kData, 10), DOSTRUE);
+    const u32 total = r.io_err();
+    CHECK(total >= 10u);
+    CHECK_EQ(r.call(dos_lvo::AddBuffers, kData, 5), DOSTRUE);
+    CHECK_EQ(r.io_err(), total + 5);
+    CHECK_EQ(r.call(dos_lvo::AddBuffers, kData, static_cast<u32>(-3)), DOSTRUE);
+    CHECK_EQ(r.io_err(), total + 2);
+    r.str(kData + 0x40, "Nosuch:");
+    CHECK_EQ(r.call(dos_lvo::AddBuffers, kData + 0x40, 5), DOSFALSE);
+}
+
+// MakeDosEntry builds a DosList node with a name, AddDosEntry makes it
+// show in the list, RemDosEntry takes it out and FreeDosEntry gives it back.
+void a_made_dos_entry_joins_the_list_and_leaves_it() {
+    Rig r;
+    const auto before = r.chunks();
+    r.str(kData, "PIPE");
+    const u32 node = r.call(dos_lvo::MakeDosEntry, kData, DLT_DEVICE);
+    CHECK(node != 0);
+    CHECK_EQ(r.get32(node + dol_Type), DLT_DEVICE);
+    const u32 name = r.get32(node + dol_Name) << 2;
+    CHECK_EQ(r.get8(name), 4u);
+
+    const u32 head = r.call(dos_lvo::LockDosList, LDF_DEVICES | LDF_READ);
+    r.str(kData + 0x40, "PIPE");
+    CHECK_EQ(r.call(dos_lvo::FindDosEntry, head, kData + 0x40, LDF_DEVICES), 0u);
+    r.call(dos_lvo::UnLockDosList, LDF_DEVICES | LDF_READ);
+
+    CHECK_EQ(r.call(dos_lvo::AddDosEntry, node), DOSTRUE);
+    const u32 head2 = r.call(dos_lvo::LockDosList, LDF_DEVICES | LDF_READ);
+    CHECK_EQ(r.call(dos_lvo::FindDosEntry, head2, kData + 0x40, LDF_DEVICES), node);
+    r.call(dos_lvo::UnLockDosList, LDF_DEVICES | LDF_READ);
+
+    CHECK_EQ(r.call(dos_lvo::RemDosEntry, node), DOSTRUE);
+    const u32 head3 = r.call(dos_lvo::LockDosList, LDF_DEVICES | LDF_READ);
+    CHECK_EQ(r.call(dos_lvo::FindDosEntry, head3, kData + 0x40, LDF_DEVICES), 0u);
+    r.call(dos_lvo::UnLockDosList, LDF_DEVICES | LDF_READ);
+    r.call(dos_lvo::FreeDosEntry, node);
+    CHECK(r.chunks() == before);
 }
 
 void a_second_drive_is_its_own_volume() {
@@ -8680,6 +8731,8 @@ void paths_belong_to_each_process() {
 
 int main() {
     a_second_drive_is_its_own_volume();
+    add_buffers_counts_per_drive();
+    a_made_dos_entry_joins_the_list_and_leaves_it();
     a_drive_without_a_disk_says_so();
     the_first_disk_wins_a_shared_name();
     a_hard_disk_partition_is_a_volume();

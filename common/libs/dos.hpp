@@ -182,7 +182,12 @@ constexpr u32 FreeDeviceProc = 648;
 constexpr u32 LockDosList = 654;
 constexpr u32 UnLockDosList = 660;
 constexpr u32 AttemptLockDosList = 666;
+constexpr u32 RemDosEntry = 672;
+constexpr u32 AddDosEntry = 678;
 constexpr u32 FindDosEntry = 684;
+constexpr u32 MakeDosEntry = 696;
+constexpr u32 FreeDosEntry = 702;
+constexpr u32 AddBuffers = 732;
 constexpr u32 NextDosEntry = 690;
 constexpr u32 IsFileSystem = 708;
 constexpr u32 CompareDates = 738;
@@ -1264,6 +1269,14 @@ private:
     LockSlot lock_slots_[kMaxLocks]{};
     LockSlot assign_lock_slots_[kMaxAssignLocks]{};
     SlotList<AssignEntry> assigns_{kMaxAssigns};
+    // DosList nodes AddDosEntry put in the list, after the assigns.
+    struct UserEntry {
+        u32 node;
+    };
+    static constexpr u32 kMaxUserEntries = 64;
+    SlotList<UserEntry> user_entries_{kMaxUserEntries};
+    static constexpr u32 kDefaultBuffers = 5;
+    u32 buffers_[kMaxDrives]{};  // the cache of each drive, in buffers
     SlotList<ArgBlock> arg_blocks_{kMaxArgBlocks};
     SlotList<AnchorSlot> anchors_{kMaxAnchors};
     u32 unknown_pkt_actions_[kMaxLoggedActions]{};
