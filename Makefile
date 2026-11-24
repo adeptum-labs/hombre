@@ -327,6 +327,9 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "mousetest: change at 250,120 size 240x160" "mousetest: newsize 200x130" \
 	    "mousetest: change at 250,120 size 200x130" "mousetest: break" \
 	    "m68k: C:mousetest returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "c g x t e s t ret" \
+	    "cgxtest: mode 51001042" "cgxtest: locked ARGB32" "cgxtest: done" \
+	    "m68k: C:cgxtest returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "t a s k t e s t ret t a s k t e s t spc 2 ret" \
 	    "tasktest: signalled" "tasktest: preempted" "tasktest: blocked wait ok" \
 	    "tasktest: run2" "tasktest: done" "m68k: C:tasktest returned 0"
@@ -560,7 +563,7 @@ $(ELF2HUNK): tools/elf2hunk.cpp
 # turns the ELF executable into a hunk file.
 M68K_AS       := m68k-linux-gnu-as
 M68K_LD       := m68k-linux-gnu-ld
-M68K_PROGRAMS := version hombretest mousetest tasktest timertest loadwb wbtest
+M68K_PROGRAMS := version hombretest mousetest tasktest timertest loadwb wbtest cgxtest
 M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
 
 define require_tool
