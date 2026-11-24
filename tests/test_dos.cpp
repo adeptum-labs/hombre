@@ -2100,6 +2100,48 @@ std::string read_whole(Rig& r, const std::string& name) {
 
 // AddBuffers changes the cache of a drive by a number and answers the new
 // total in IoErr; an unknown device fails.
+// A floppy's disk can be changed under dos: the volume name moves, locks
+// and open files of the old disk are dropped, and an empty drive has no
+// volume.
+void a_disk_can_be_swapped_in_a_drive() {
+    Rig r(build_adf("HombreTest", false, standard_files()), second_disk("Second"), 1);
+    r.str(kData, "Second:Docs");
+    const u32 old_lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(old_lock != 0);
+    r.str(kData + 0x100, "Second:Notes");
+    const u32 old_file = r.call(dos_lvo::Open, kData + 0x100, MODE_OLDFILE);
+    CHECK(old_file != 0);
+    CHECK_EQ(g_dos.disk_serial(1), 0u);
+
+    std::vector<u8> third = second_disk("Third");
+    AdfVolume third_volume{};
+    CHECK(adf_mount(third.data(), third.size(), third_volume) == FsError::Ok);
+    CHECK(g_dos.replace_disk(1, &third_volume));
+    CHECK(g_dos.has_disk(1));
+    CHECK(std::string(g_dos.volume_name(1)) == "Third");
+    CHECK_EQ(g_dos.disk_serial(1), 1u);
+    CHECK(read_whole(r, "Third:Notes") == "notes");
+    CHECK(read_whole(r, "DF1:Docs/Readme") == "on the second disk");
+    CHECK_EQ(r.call(dos_lvo::Lock, kData, SHARED_LOCK), 0u);  // Second: is gone
+    CHECK_EQ(r.call(dos_lvo::ParentDir, old_lock), 0u);
+    CHECK_EQ(r.call(dos_lvo::Read, old_file, kData + 0x700, 4), 0xFFFFFFFFu);
+
+    // The volume list shows Third: and no longer Second:.
+    const u32 head = r.call(dos_lvo::LockDosList, LDF_VOLUMES | LDF_READ);
+    r.str(kData + 0x200, "Third");
+    CHECK(r.call(dos_lvo::FindDosEntry, head, kData + 0x200, LDF_VOLUMES) != 0);
+    r.str(kData + 0x200, "Second");
+    CHECK_EQ(r.call(dos_lvo::FindDosEntry, head, kData + 0x200, LDF_VOLUMES), 0u);
+    r.call(dos_lvo::UnLockDosList, LDF_VOLUMES | LDF_READ);
+
+    CHECK(g_dos.replace_disk(1, nullptr));
+    CHECK(!g_dos.has_disk(1));
+    CHECK_EQ(g_dos.disk_serial(1), 2u);
+    r.str(kData, "Third:Notes");
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_OLDFILE), 0u);
+    CHECK(!g_dos.replace_disk(Dos::kMaxDrives, &third_volume));
+}
+
 void add_buffers_counts_per_drive() {
     Rig r;
     r.str(kData, "DF0:");
@@ -8732,6 +8774,7 @@ void paths_belong_to_each_process() {
 int main() {
     a_second_drive_is_its_own_volume();
     add_buffers_counts_per_drive();
+    a_disk_can_be_swapped_in_a_drive();
     a_made_dos_entry_joins_the_list_and_leaves_it();
     a_drive_without_a_disk_says_so();
     the_first_disk_wins_a_shared_name();

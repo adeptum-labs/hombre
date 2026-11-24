@@ -10146,6 +10146,78 @@ bool Dos::init(Machine& m, Exec& exec, const AdfVolume& volume, ConsoleWrite out
     return init(m, exec, drives, out, ctx);
 }
 
+// The volume node of a drive: filled for the disk it holds, cleared when it
+// holds none.
+void Dos::write_volume_node(Bus& b, u32 i) {
+    const u32 node = volume_node_[i];
+    const u32 name_at = node + DosList_SIZEOF;
+    if (!drives_[i].has_disk) {
+        b.w32(node + dol_Type, 0);
+        b.w32(node + dol_Task, 0);
+        b.w32(node + dol_Name, 0);
+        return;
+    }
+    const AdfVolume& disk = drives_[i].volume;
+    u8 root_buf[amiga_fs_detail::block_bytes];
+    const u8* root_block = amiga_fs_detail::block_at(disk, disk.root_block, root_buf);
+    b.w32(node + dol_Type, DLT_VOLUME);
+    b.w32(node + dol_Task, port_[i]);
+    for (u32 k = 0; k < 3; ++k) {
+        // The volume's creation date, longs 121 to 123 of the root block.
+        b.w32(node + dol_VolumeDate + k * 4,
+              root_block != nullptr ? amiga_fs_detail::long_at(root_block, 121 + k) : 0);
+    }
+    b.w32(node + dol_DiskType, ID_DOS_DISK | disk.dos_type);
+    put_bstr(b, name_at, disk.name, 30);
+    b.w32(node + dol_Name, name_at >> 2);
+}
+
+bool Dos::replace_disk(u32 drive, const AdfVolume* volume) {
+    if (m_ == nullptr || drive >= kFloppyDrives) {
+        return false;
+    }
+    const u8 vol = static_cast<u8>(drive);
+    // What the old disk had locked or open goes: a program that still holds
+    // them finds the handles dead.
+    for (LockSlot& l : lock_slots_) {
+        if (l.used && l.entry.volume == vol) {
+            l.used = false;
+            l.owner = 0;
+            l.exclusive = false;
+        }
+    }
+    for (u32 i = kConsoleOut + 1; i < kHandles; ++i) {
+        if (files_[i].stream == Stream::File && files_[i].entry.volume == vol) {
+            DosOps::close_slot(*this, i);
+        }
+    }
+    anchors_.remove_if([this, vol](AnchorSlot& a) {
+        if (a.cur_entry.volume != vol) {
+            return false;
+        }
+        DosOps::release_anchor_slot(*this, a);
+        return true;
+    });
+    notifies_.remove_if([vol](const NotifySlot& n) { return n.vol == vol; });
+
+    Drive& d = drives_[drive];
+    const bool readable =
+        volume != nullptr && (volume->image != nullptr || volume->source.read != nullptr);
+    d.has_disk = readable;
+    d.volume = readable ? *volume : AdfVolume{};
+    Bus b(*m_);
+    write_volume_node(b, drive);
+    DosOps::relink_dos_list(*this, b);
+    ++disk_serial_[drive];
+    if (readable) {
+        LogLine().text("dos: ").text(d.info.device).text(": disk changed to ")
+            .text(d.volume.name).send();
+    } else {
+        LogLine().text("dos: ").text(d.info.device).text(": disk removed").send();
+    }
+    return b.ok();
+}
+
 bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, void* ctx) {
     m_ = nullptr;
     exec_ = &exec;
@@ -10198,6 +10270,9 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     unknown_pkt_count_ = 0;
     notifies_.clear();
     user_entries_.clear();
+    for (u32& serial : disk_serial_) {
+        serial = 0;
+    }
     for (u32& buffers : buffers_) {
         buffers = kDefaultBuffers;
     }
@@ -10292,23 +10367,7 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     // A volume node for each disk, a device node for each drive in use and a
     // port for each slot.
     for (u32 i = 0; i < kMaxDrives; ++i) {
-        const u32 node = volume_node_[i];
-        const u32 name_at = node + DosList_SIZEOF;
-        if (drives_[i].has_disk) {
-            const AdfVolume& disk = drives_[i].volume;
-            u8 root_buf[amiga_fs_detail::block_bytes];
-            const u8* root_block = amiga_fs_detail::block_at(disk, disk.root_block, root_buf);
-            b.w32(node + dol_Type, DLT_VOLUME);
-            b.w32(node + dol_Task, port_[i]);
-            for (u32 k = 0; k < 3; ++k) {
-                // The volume's creation date, longs 121 to 123 of the root block.
-                b.w32(node + dol_VolumeDate + k * 4,
-                      root_block != nullptr ? amiga_fs_detail::long_at(root_block, 121 + k) : 0);
-            }
-            b.w32(node + dol_DiskType, ID_DOS_DISK | disk.dos_type);
-            put_bstr(b, name_at, disk.name, 30);
-            b.w32(node + dol_Name, name_at >> 2);
-        }
+        write_volume_node(b, i);
         if (DosOps::has_device(*this, i)) {
             const u32 device = device_node_[i];
             b.w32(device + dol_Type, DLT_DEVICE);

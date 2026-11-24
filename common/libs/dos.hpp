@@ -884,6 +884,16 @@ public:
     // hard disk slot in no use).
     u32 drive_count() const { return kMaxDrives; }
     bool has_disk(u32 drive) const { return drive < kMaxDrives && drives_[drive].has_disk; }
+
+    // Changes the disk in a floppy drive to the volume, which must stay
+    // mounted, or takes the disk out with nullptr. What the old disk had
+    // locked or open is dropped. False for a drive that is no floppy or
+    // before init.
+    bool replace_disk(u32 drive, const AdfVolume* volume);
+
+    // How many times the disk in the drive has changed since the start,
+    // for those that watch the drives.
+    u32 disk_serial(u32 drive) const { return drive < kMaxDrives ? disk_serial_[drive] : 0; }
     const char* volume_name(u32 drive) const {
         return has_disk(drive) ? drives_[drive].volume.name : "";
     }
@@ -1243,6 +1253,8 @@ private:
         DriveInfo info{};
     };
     Drive drives_[kMaxDrives]{};
+    u32 disk_serial_[kMaxDrives]{};
+    void write_volume_node(native::Bus& b, u32 drive);
     u8 boot_vol_ = kVolDf0;
     RamFs ram_{};
     ConsoleBinding consoles_[kMaxConsoles]{};
