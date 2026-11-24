@@ -42,6 +42,16 @@ using i16 = __INT16_TYPE__;
 
 namespace {
 
+// BitMap flags (graphics/gfx.h) and the CyberGraphX pixel formats a
+// BMF_SPECIALFMT AllocBitMap names in its top byte (cybergraphx).
+constexpr u32 kBmfStandard = 1u << 3;
+constexpr u32 kBmfSpecialFmt = 1u << 7;
+constexpr u32 kPixFmtLut8 = 0;
+constexpr u32 kPixFmtRgb16 = 5;
+constexpr u32 kPixFmtArgb32 = 11;
+// The depth a deep bitmap reports, by PixFmt.
+constexpr u32 kDeepDepth[] = {8, 16, 24};
+
 constexpr char kGraphicsName[] = "graphics.library";
 constexpr char kTopazName[] = "topaz.font";
 // struct GfxBase (graphics/gfxbase.h): its size as of V40, the list of the
@@ -1672,10 +1682,24 @@ struct GraphicsNatives {
 
     // GetBitMapAttr(bitmap A0, attribute D1): BMA_HEIGHT, BMA_DEPTH,
     // BMA_WIDTH or BMA_FLAGS.
-    static void get_bitmap_attr(void*, Machine& m) {
+    static void get_bitmap_attr(void* ctx, Machine& m) {
         Bus b(m);
         const u32 bitmap = m.cpu.a[0];
         u32 value = 0;
+        // A deep bitmap reports its pixel width and depth, and is not a
+        // standard planar one.
+        if (const DeepBitmap* deep = of(ctx).deep(bitmap)) {
+            const u32 attribute = m.cpu.d[1];
+            value = attribute == 0   ? deep->height
+                    : attribute == 4 ? kDeepDepth[static_cast<u32>(deep->fmt)]
+                    : attribute == 8 ? deep->width
+                    : attribute == 12 ? (b.r8(bitmap + ndk::bm_Flags) & ~kBmfStandard)
+                                      : 0;
+            if (b.ok()) {
+                native::set_result(m, value);
+            }
+            return;
+        }
         switch (m.cpu.d[1]) {
         case 0:
             value = b.r16(bitmap + ndk::bm_Rows);
@@ -1704,8 +1728,34 @@ struct GraphicsNatives {
         const u32 width = m.cpu.d[0];
         const u32 height = m.cpu.d[1];
         const u32 depth = m.cpu.d[2];
+        const u32 flags = m.cpu.d[3];
         const u32 row_bytes = ((width + 15) / 16) * 2;
         native::set_result(m, 0);
+        // A deep friend, a CyberGraphX pixel format or a depth past 8 asks
+        // for a deep bitmap, as on a graphics card.
+        PixFmt fmt = PixFmt::Lut8;
+        bool deep = true;
+        if (const DeepBitmap* friend_bm = g.deep(m.cpu.a[0])) {
+            fmt = friend_bm->fmt;
+        } else if ((flags & kBmfSpecialFmt) != 0) {
+            const u32 pixfmt = flags >> 24;
+            if (pixfmt != kPixFmtLut8 && pixfmt != kPixFmtRgb16 && pixfmt != kPixFmtArgb32) {
+                return;
+            }
+            fmt = pixfmt == kPixFmtLut8    ? PixFmt::Lut8
+                  : pixfmt == kPixFmtRgb16 ? PixFmt::Rgb16
+                                           : PixFmt::Argb32;
+        } else if (depth > 8 && depth <= 16) {
+            fmt = PixFmt::Rgb16;
+        } else if (depth > 16 && depth <= 32) {
+            fmt = PixFmt::Argb32;
+        } else {
+            deep = false;
+        }
+        if (deep) {
+            native::set_result(m, g.alloc_deep_bitmap(width, height, fmt));
+            return;
+        }
         if (g.exec_ == nullptr || depth == 0 || depth > 8 || row_bytes == 0 || height == 0 ||
             row_bytes > 0xFFFF || height > 0xFFFF) {
             return;
@@ -1748,6 +1798,10 @@ struct GraphicsNatives {
         Graphics& g = of(ctx);
         const u32 bitmap = m.cpu.a[0];
         if (bitmap == 0 || g.exec_ == nullptr) {
+            return;
+        }
+        if (g.deep(bitmap) != nullptr) {
+            g.free_deep_bitmap(bitmap);
             return;
         }
         Bus b(m);
@@ -2660,6 +2714,49 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::FindColor, GraphicsNatives::find_color, "FindColor"},
 };
 
+}
+
+u32 Graphics::alloc_deep_bitmap(u32 width, u32 height, PixFmt fmt) {
+    if (exec_ == nullptr || machine_ == nullptr || width == 0 || height == 0 ||
+        width > 0x7FFF || height > 0x7FFF) {
+        return 0;
+    }
+    const u32 row_bytes = (width * bytes_per_pixel(fmt) + 15) & ~15u;
+    const u64 pixel_bytes = u64{row_bytes} * height;
+    if (row_bytes > 0xFFFF || pixel_bytes > 0x7FFFFFFF) {
+        return 0;
+    }
+    const u32 bitmap = exec_->alloc(ndk::BitMap_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (bitmap == 0) {
+        return 0;
+    }
+    const u32 pixels =
+        exec_->alloc(static_cast<u32>(pixel_bytes), ndk::MEMF_FAST | ndk::MEMF_CLEAR);
+    DeepBitmap entry{bitmap, pixels, static_cast<u32>(pixel_bytes), width, height, row_bytes,
+                     fmt, 0};
+    if (pixels == 0 || !deep_bitmaps_.add(entry)) {
+        if (pixels != 0) {
+            exec_->free(pixels, static_cast<u32>(pixel_bytes));
+        }
+        exec_->free(bitmap, ndk::BitMap_SIZEOF);
+        return 0;
+    }
+    Bus b(*machine_);
+    b.w16(bitmap + ndk::bm_BytesPerRow, row_bytes);
+    b.w16(bitmap + ndk::bm_Rows, height);
+    b.w8(bitmap + ndk::bm_Depth, kDeepDepth[static_cast<u32>(fmt)]);
+    b.w32(bitmap + ndk::bm_Planes, pixels);
+    return bitmap;
+}
+
+void Graphics::free_deep_bitmap(u32 bitmap) {
+    const DeepBitmap* deep = deep_bitmaps_.find(bitmap);
+    if (deep == nullptr || exec_ == nullptr) {
+        return;
+    }
+    exec_->free(deep->pixels, deep->pixel_bytes);
+    exec_->free(bitmap, ndk::BitMap_SIZEOF);
+    deep_bitmaps_.remove(bitmap);
 }
 
 bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {

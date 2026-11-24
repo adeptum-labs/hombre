@@ -24,6 +24,7 @@
 #pragma once
 
 #include "../types.hpp"
+#include "deep_bitmaps.hpp"
 #include "gfx.hpp"
 #include "native.hpp"
 #include "text_blend.hpp"
@@ -163,6 +164,17 @@ public:
     // initialised. False if exec runs out of memory or native ids.
     bool init(m68k::Machine& m, Exec& exec, DisplayState& display);
 
+    // A deep bitmap of width by height pixels in fmt: its BitMap in public
+    // memory, its pixels cleared in fast memory, rows 16-byte aligned. 0,
+    // with nothing kept, when either does not fit.
+    u32 alloc_deep_bitmap(u32 width, u32 height, PixFmt fmt);
+    // Frees a bitmap alloc_deep_bitmap made; any other is left alone.
+    void free_deep_bitmap(u32 bitmap);
+    // The deep bitmap at that address, null for a planar one.
+    const DeepBitmap* deep(u32 bitmap) const { return deep_bitmaps_.find(bitmap); }
+    DeepBitmap* deep(u32 bitmap) { return deep_bitmaps_.find(bitmap); }
+    const DeepBitmaps& deep_bitmaps() const { return deep_bitmaps_; }
+
     u32 graphics_base() const { return base_; }
     u32 topaz_font() const { return topaz_; }
     // The TextAttr that names the built-in font, as Screen.Font points to one.
@@ -254,6 +266,7 @@ private:
     u32 ntsc_monitor_ = 0;
     u32 pal_monitor_ = 0;
     u32 hombre_monitor_ = 0;
+    DeepBitmaps deep_bitmaps_{};
     // The display modes of the ViewPorts registered for GetVPModeID.
     static constexpr u32 kVpModeIds = 256;
     struct VpModeId {
