@@ -267,6 +267,12 @@ public:
     u32 class_of(u32 object) const;
     bool is_object(u32 object) const;
 
+    // What answers a custom gadget's messages: its class when it is an
+    // object, else the Hook in its MutualExclude field, as cghooks.h has
+    // it. 0 when it has neither. A hook takes the messages the way a class
+    // does: Send with it in place of the class.
+    u32 custom_dispatcher(u32 gadget) const;
+
     // Sends the method message msg (in guest memory) to the object, as its
     // own class or as cl: the dispatcher's result.
     u32 do_method(u32 object, u32 msg);

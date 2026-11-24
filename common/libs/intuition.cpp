@@ -6723,7 +6723,7 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count,
         u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
         // A custom-typed gadget that is no object is a plain gadget of the
         // old kind, drawn from its borders and text.
-        if (gtype == ndk::GTYP_CUSTOMGADGET && !boopsi_.is_object(gadget)) {
+        if (gtype == ndk::GTYP_CUSTOMGADGET && boopsi_.custom_dispatcher(gadget) == 0) {
             gtype = ndk::GTYP_BOOLGADGET;
         }
         const u32 next = b.r32(gadget + ndk::gg_NextGadget);
@@ -6761,7 +6761,7 @@ void Intuition::draw_custom_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
         return;
     }
     const u32 msg[] = {ndk::GM_RENDER, info, rp, ndk::GREDRAW_REDRAW};
-    boopsi_.send(boopsi_.class_of(gadget), gadget, msg, 4);
+    boopsi_.send(boopsi_.custom_dispatcher(gadget), gadget, msg, 4);
     free_gadget_info(info);
 }
 
@@ -6783,7 +6783,7 @@ bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
             return false;
         }
         const Rect box = gtype == ndk::GTYP_CUSTOMGADGET && (gflags & ndk::GFLG_DISABLED) == 0 &&
-                                 boopsi_.is_object(gadget)
+                                 boopsi_.custom_dispatcher(gadget) != 0
                              ? resolve_gadget_box(b, w, gadget)
                              : Rect{0, 0, -1, -1};
         if (!in_rect(box, wx, wy)) {
@@ -6794,7 +6794,7 @@ bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
         const u32 point = pack_point(wx - box.x0, wy - box.y0);
         const u32 test[] = {ndk::GM_HITTEST, info, point};
         if (info == 0 ||
-            boopsi_.send(boopsi_.class_of(gadget), gadget, test, 3) != ndk::GMR_GADGETHIT) {
+            boopsi_.send(boopsi_.custom_dispatcher(gadget), gadget, test, 3) != ndk::GMR_GADGETHIT) {
             free_gadget_info(info);
             gadget = next;
             continue;
@@ -6812,7 +6812,7 @@ bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
             post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
         }
         const u32 go[] = {ndk::GM_GOACTIVE, info, event, event + kTermination, point};
-        custom_result(b, boopsi_.send(boopsi_.class_of(gadget), gadget, go, 5));
+        custom_result(b, boopsi_.send(boopsi_.custom_dispatcher(gadget), gadget, go, 5));
         return true;
     }
     return false;
@@ -6832,7 +6832,7 @@ void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code, u32 qualifier) {
     b.w16(c.event + ie_Qualifier, qualifier);
     const u32 msg[] = {ndk::GM_HANDLEINPUT, c.info, c.event, c.event + kTermination,
                        pack_point(x - w.left - box.x0, y - w.top - box.y0)};
-    custom_result(b, boopsi_.send(boopsi_.class_of(c.gadget), c.gadget, msg, 5));
+    custom_result(b, boopsi_.send(boopsi_.custom_dispatcher(c.gadget), c.gadget, msg, 5));
 }
 
 // What the active gadget answered: GMR_MEACTIVE keeps the input; any other
@@ -6851,7 +6851,7 @@ void Intuition::custom_result(Bus& b, u32 result) {
         post_intuimessage(c.window, ndk::IDCMP_GADGETUP, static_cast<u16>(code), c.gadget);
     }
     const u32 msg[] = {ndk::GM_GOINACTIVE, c.info, 0};
-    boopsi_.send(boopsi_.class_of(c.gadget), c.gadget, msg, 3);
+    boopsi_.send(boopsi_.custom_dispatcher(c.gadget), c.gadget, msg, 3);
     drop_custom_gadget();
 }
 
@@ -7652,7 +7652,7 @@ bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
         const u32 activation = b.r16(gadget + ndk::gg_Activation);
         const u32 type = b.r16(gadget + ndk::gg_GadgetType);
         u32 gtype = type & ndk::GTYP_GTYPEMASK;
-        if (gtype == ndk::GTYP_CUSTOMGADGET && !boopsi_.is_object(gadget)) {
+        if (gtype == ndk::GTYP_CUSTOMGADGET && boopsi_.custom_dispatcher(gadget) == 0) {
             gtype = ndk::GTYP_BOOLGADGET;
         }
         const u32 next = b.r32(gadget + ndk::gg_NextGadget);

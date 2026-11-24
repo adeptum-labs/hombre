@@ -8791,6 +8791,40 @@ void a_class_in_68000_code_reaches_its_superclass() {
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::FreeClass), 1u);
 }
 
+// A custom gadget made by hand, not by NewObject, names a Hook in its
+// MutualExclude field, and the hook draws it.
+void a_custom_gadget_with_a_hook_is_drawn_by_the_hook() {
+    GfxRig r;
+    put_dispatcher(r);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 120, 0, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+
+    constexpr u32 kHook = kData + 0x1B00;
+    for (u32 i = 0; i < 20; ++i) {
+        r.put8(kHook + i, 0);
+    }
+    r.put32(kHook + h_Entry, kDispatcher);
+    put_gadget(r, kGad1, 0, 20, 20, 12, 8, 0, GACT_RELVERIFY, GTYP_CUSTOMGADGET, 0);
+    r.put32(kGad1 + gg_MutualExclude, kHook);
+
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = kGad1;
+    r.cpu().d[0] = 0xFFFF;
+    r.cpu().d[1] = 1;
+    r.cpu().a[2] = 0;
+    CHECK_EQ(r.result(Base::Intuition, intuition_lvo::AddGList), 0u);
+    r.put32(kRenders, 0);
+    r.cpu().a[0] = kGad1;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshGList), ExitReason::Halt);
+    CHECK_EQ(r.get32(kRenders), 1u);
+}
+
 void a_boopsi_gadget_draws_itself_and_takes_the_click() {
     GfxRig r;
     put_dispatcher(r);
@@ -10301,6 +10335,7 @@ int main() {
     a_requester_shows_and_ends_with_its_gadget();
     boopsi_system_classes_and_gadget_objects();
     a_class_in_68000_code_reaches_its_superclass();
+    a_custom_gadget_with_a_hook_is_drawn_by_the_hook();
     a_boopsi_gadget_draws_itself_and_takes_the_click();
     a_boopsi_notify_posts_idcmpupdate();
     a_boopsi_notify_without_idcmpupdate_is_dropped();

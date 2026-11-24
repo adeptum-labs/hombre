@@ -359,6 +359,23 @@ bool Boopsi::is_object(u32 object) const {
     return b.ok() && entry != 0;
 }
 
+u32 Boopsi::custom_dispatcher(u32 gadget) const {
+    if (is_object(gadget)) {
+        return class_of(gadget);
+    }
+    if (gadget == 0 || (gadget & 1) != 0 ||
+        native::guest_address(*machine_, gadget + ndk::gg_MutualExclude + 4) == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 hook = b.r32(gadget + ndk::gg_MutualExclude);
+    if (!b.ok() || hook == 0 || (hook & 1) != 0 ||
+        native::guest_address(*machine_, hook + h_Entry + 4) == 0) {
+        return 0;
+    }
+    return b.r32(hook + h_Entry) != 0 ? hook : 0;
+}
+
 u32 Boopsi::object_bytes(u32 cl) const {
     Bus b(*machine_);
     return Object_SIZEOF + b.r16(cl + cl_InstOffset) + b.r16(cl + cl_InstSize);
