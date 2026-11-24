@@ -7939,6 +7939,33 @@ void Intuition::wheel_event(i32 steps) {
     if (steps == 0 || active_window_ == 0) {
         return;
     }
+    // Over a gadtools gadget that scrolls, such as a list view, the wheel
+    // scrolls it, as on later systems.
+    if (gadget_wheel_ != nullptr && window_at(mouse_x_, mouse_y_) == active_window_) {
+        Bus b(*machine_);
+        const WindowView w = load_window(b, active_window_);
+        u32 gadget = w.ok ? w.first_gadget : 0;
+        for (u32 step = 0; step < kMaxGadgets && gadget != 0; ++step) {
+            const u32 type = b.r16(gadget + ndk::gg_GadgetType);
+            const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+            if (!b.ok()) {
+                break;
+            }
+            if ((type & ndk::GTYP_GADTOOLS) != 0 &&
+                in_rect(resolve_gadget_box(b, w, gadget), mouse_x_ - w.left,
+                        mouse_y_ - w.top)) {
+                // Drawn as one change, as a click's redrawing is.
+                begin_batch();
+                const bool scrolled =
+                    gadget_wheel_(gadget_renderer_ctx_, active_window_, gadget, steps);
+                end_batch();
+                if (scrolled) {
+                    return;
+                }
+            }
+            gadget = next;
+        }
+    }
     const u16 code = steps > 0 ? static_cast<u16>(ndk::NM_WHEEL_UP)
                                : static_cast<u16>(ndk::NM_WHEEL_DOWN);
     const i64 abs_steps = steps > 0 ? static_cast<i64>(steps) : -static_cast<i64>(steps);

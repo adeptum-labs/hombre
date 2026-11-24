@@ -116,6 +116,13 @@ public:
     static bool release_gadget(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code) {
         return static_cast<GadTools*>(ctx)->release(window, gadget, x, y, code);
     }
+    // The wheel turned steps notches over a gadget gadtools made, up for
+    // positive: a list view, or its scroller or arrows, scrolls a row a
+    // notch and sends no message. False for any other gadget.
+    bool wheel(u32 window, u32 gadget, i32 steps);
+    static bool wheel_gadget(void* ctx, u32 window, u32 gadget, i32 steps) {
+        return static_cast<GadTools*>(ctx)->wheel(window, gadget, steps);
+    }
 
 private:
     friend struct GadToolsNatives;

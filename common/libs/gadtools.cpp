@@ -2058,6 +2058,30 @@ bool GadTools::prop_moved(u32 window, u32 gadget, u16& code) {
 // of its arrows moves it a row. The code its IDCMP_GADGETUP carries; false
 // when the click is to send none, as one on a list view's arrow or below
 // its last label.
+bool GadTools::wheel(u32 window, u32 gadget, i32 steps) {
+    if (machine_ == nullptr || gadget == 0 || steps == 0) {
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 kind = b.r16(gadget + gt_Kind);
+    const u32 list = kind == LISTVIEW_KIND ? gadget
+                     : kind == kListScrollerKind || kind == kListUpKind || kind == kListDownKind
+                         ? b.r32(gadget + gt_Owner)
+                         : 0;
+    if (list == 0 || !b.ok()) {
+        return false;
+    }
+    const u32 top = b.r32(list + gt_Total);
+    const i64 moved = static_cast<i64>(top) - steps;
+    // Past the last row sync_list puts the list back where its labels end.
+    b.w32(list + gt_Total, moved < 0 ? 0u : moved > 0xFFFF ? 0xFFFFu : static_cast<u32>(moved));
+    GadToolsNatives::sync_list(b, list);
+    if (b.r32(list + gt_Total) != top) {
+        draw_list_view(b, window, list);
+    }
+    return b.ok();
+}
+
 bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
     if (machine_ == nullptr || gadget == 0) {
         return false;

@@ -1590,6 +1590,82 @@ void a_list_view_in_a_window_reports_rows_and_scrolls_by_itself() {
     r.intuition.set_gadget_prop_code(nullptr);
 }
 
+// The wheel over a list view scrolls it a row a notch, as its arrows do,
+// with no message to the program; elsewhere in the window it stays a key.
+void the_wheel_scrolls_the_list_view_under_the_pointer() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.intuition.set_gadget_renderer(&GadTools::render_gadget, &g);
+    r.intuition.set_gadget_release(&GadTools::release_gadget);
+    r.intuition.set_gadget_prop_code(&GadTools::prop_gadget_moved);
+    r.intuition.set_gadget_wheel(&GadTools::wheel_gadget);
+    g.set_intuition(&r.intuition);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0);
+    CHECK(open_new_screen(r, kNewScreen) != 0);
+
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    put_list(r, kHead, kNodes, kEightNames, 8);
+    put_new_gadget(r, 20, 30, 120, 40, 0, 7, 0, 0);
+    const u32 list = create_gadget(
+        r, g, LISTVIEW_KIND, context,
+        r.tags(kTags, {{GTLV_Labels, kHead}, {TAG_DONE, 0}}));
+    CHECK(list != 0);
+    for (u32 i = 0; i < NewWindow_SIZEOF; ++i) {
+        r.put8(kNewWindow + i, 0);
+    }
+    r.put16(kNewWindow + nw_LeftEdge, 50);
+    r.put16(kNewWindow + nw_TopEdge, 50);
+    r.put16(kNewWindow + nw_Width, 200);
+    r.put16(kNewWindow + nw_Height, 120);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_RAWKEY);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE);
+    r.put32(kNewWindow + nw_FirstGadget, context);
+    r.cpu().a[0] = kNewWindow;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 wrp = r.get32(window + wd_RPort);
+
+    // Over the rows: down two notches, then far past the end, then up one.
+    r.intuition.pointer_event(50 + 30, 50 + 40, 0, 0, 0, true);
+    r.intuition.wheel_event(-2);
+    CHECK_EQ(list_view_top(r, g, list), 2u);
+    CHECK_EQ(get_msg(r, port), 0u);
+    // The third label is drawn in the first row.
+    CHECK(box_has_pen(r, wrp, 24, 32, 70, 39, kTextPen));
+    r.intuition.wheel_event(-20);
+    CHECK_EQ(list_view_top(r, g, list), 4u);
+    r.intuition.wheel_event(1);
+    CHECK_EQ(list_view_top(r, g, list), 3u);
+    CHECK_EQ(get_msg(r, port), 0u);
+    // Over the list's scroller too.
+    r.intuition.pointer_event(50 + 124 + 8, 50 + 30 + 5, 0, 0, 0, true);
+    r.intuition.wheel_event(3);
+    CHECK_EQ(list_view_top(r, g, list), 0u);
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    // Away from the list the wheel is a key for the program.
+    r.intuition.pointer_event(50 + 180, 50 + 100, 0, 0, 0, true);
+    r.intuition.wheel_event(-1);
+    CHECK_EQ(list_view_top(r, g, list), 0u);
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_RAWKEY);
+    CHECK_EQ(r.get16(msg + im_Code), 0x7Bu);
+    reply_msg(r, msg);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    r.intuition.set_gadget_renderer(nullptr, nullptr);
+    r.intuition.set_gadget_release(nullptr);
+    r.intuition.set_gadget_prop_code(nullptr);
+    r.intuition.set_gadget_wheel(nullptr);
+}
+
 constexpr u32 SLIDER_KIND = 11;
 constexpr u32 GTSL_Min = 0x80080026;
 constexpr u32 GTSL_Max = 0x80080027;
@@ -1816,6 +1892,7 @@ int main() {
     a_list_view_draws_its_rows_and_arrows();
     list_arrows_take_the_look_of_the_surface();
     a_list_view_in_a_window_reports_rows_and_scrolls_by_itself();
+    the_wheel_scrolls_the_list_view_under_the_pointer();
     checkboxes_toggle_and_report_their_state();
     sliders_carry_levels_and_list_views_pick_rows();
     strings_keep_a_buffer_and_scrollers_their_place();

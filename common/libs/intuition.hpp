@@ -186,6 +186,9 @@ public:
     // new state from its PropInfo and gives the code its messages carry.
     // False when the gadget keeps its messages to itself.
     using GadgetPropCode = bool (*)(void* ctx, u32 window, u32 gadget, u16& code);
+    // Turns the wheel steps notches over a gadtools gadget, up for positive;
+    // true when the gadget scrolled, so the wheel is no key for the window.
+    using GadgetWheel = bool (*)(void* ctx, u32 window, u32 gadget, i32 steps);
 
     // What CloseWorkBench and OpenWorkBench call of the Workbench: close
     // its windows for a screen reset, and open them again after it. A close
@@ -303,6 +306,7 @@ public:
     // Takes the renderer's ctx.
     void set_gadget_release(GadgetRelease release) { gadget_release_ = release; }
     void set_gadget_prop_code(GadgetPropCode code) { gadget_prop_code_ = code; }
+    void set_gadget_wheel(GadgetWheel wheel) { gadget_wheel_ = wheel; }
 
     // A string gadget being edited takes the keyboard: true while one is,
     // and a decoded key byte for it (CSI sequences for the cursor keys).
@@ -944,6 +948,7 @@ private:
     u32 pressed_bool_gadget_ = 0;  // the boolean gadget the left button holds
     GadgetRenderer gadget_renderer_ = nullptr;
     void* gadget_renderer_ctx_ = nullptr;
+    GadgetWheel gadget_wheel_ = nullptr;
     GadgetRelease gadget_release_ = nullptr;
     GadgetPropCode gadget_prop_code_ = nullptr;
     void post_prop_message(native::Bus& b, u32 window, u32 idcmp_class, u32 gadget);
