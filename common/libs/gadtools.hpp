@@ -118,10 +118,14 @@ public:
     }
     // The wheel turned steps notches over a gadget gadtools made, up for
     // positive: a list view, or its scroller or arrows, scrolls a row a
-    // notch and sends no message. False for any other gadget.
-    bool wheel(u32 window, u32 gadget, i32 steps);
-    static bool wheel_gadget(void* ctx, u32 window, u32 gadget, i32 steps) {
-        return static_cast<GadTools*>(ctx)->wheel(window, gadget, steps);
+    // notch and sends no message; a slider's level moves a step a notch, up
+    // for more, and a scroller's top a step, up towards the start, and
+    // report and code ask for the GADGETUP a drag ends with. False for any
+    // other gadget.
+    bool wheel(u32 window, u32 gadget, i32 steps, u16& code, bool& report);
+    static bool wheel_gadget(void* ctx, u32 window, u32 gadget, i32 steps, u16& code,
+                             bool& report) {
+        return static_cast<GadTools*>(ctx)->wheel(window, gadget, steps, code, report);
     }
 
 private:

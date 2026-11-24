@@ -187,8 +187,10 @@ public:
     // False when the gadget keeps its messages to itself.
     using GadgetPropCode = bool (*)(void* ctx, u32 window, u32 gadget, u16& code);
     // Turns the wheel steps notches over a gadtools gadget, up for positive;
-    // true when the gadget scrolled, so the wheel is no key for the window.
-    using GadgetWheel = bool (*)(void* ctx, u32 window, u32 gadget, i32 steps);
+    // true when the gadget takes the wheel, so it is no key for the window.
+    // report says the gadget moved and its GADGETUP is to carry code.
+    using GadgetWheel = bool (*)(void* ctx, u32 window, u32 gadget, i32 steps, u16& code,
+                                 bool& report);
 
     // What CloseWorkBench and OpenWorkBench call of the Workbench: close
     // its windows for a screen reset, and open them again after it. A close
@@ -307,6 +309,9 @@ public:
     void set_gadget_release(GadgetRelease release) { gadget_release_ = release; }
     void set_gadget_prop_code(GadgetPropCode code) { gadget_prop_code_ = code; }
     void set_gadget_wheel(GadgetWheel wheel) { gadget_wheel_ = wheel; }
+    // The window gets the mouse wheel as IDCMP_RAWKEY whether or not its
+    // IDCMP asks for the keys.
+    void take_wheel(u32 window);
 
     // A string gadget being edited takes the keyboard: true while one is,
     // and a decoded key byte for it (CSI sequences for the cursor keys).
@@ -604,6 +609,7 @@ private:
         u32 user_port = 0;
         bool user_port_owned = false;
         WindowHook size_hook = nullptr;
+        bool takes_wheel = false;
         void* size_ctx = nullptr;
         // A NEWSIZE is queued and not yet replied to, and the size the last
         // NEWSIZE reported.
@@ -775,7 +781,7 @@ private:
     // window's bar when that changes.
     void light_bar_button(bool lit);
     bool post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress = 0,
-                           u32 iaddress_bytes = 0, u16 qualifier = 0);
+                           u32 iaddress_bytes = 0, u16 qualifier = 0, bool unasked = false);
     void post_mouse_button(u16 code);
     // The IDCMPFlags of an open window, 0 for any other.
     u32 window_idcmp(u32 window) const;

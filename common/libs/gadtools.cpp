@@ -2058,12 +2058,37 @@ bool GadTools::prop_moved(u32 window, u32 gadget, u16& code) {
 // of its arrows moves it a row. The code its IDCMP_GADGETUP carries; false
 // when the click is to send none, as one on a list view's arrow or below
 // its last label.
-bool GadTools::wheel(u32 window, u32 gadget, i32 steps) {
+bool GadTools::wheel(u32 window, u32 gadget, i32 steps, u16& code, bool& report) {
+    report = false;
     if (machine_ == nullptr || gadget == 0 || steps == 0) {
         return false;
     }
     Bus b(*machine_);
     const u32 kind = b.r16(gadget + gt_Kind);
+    if (kind == SLIDER_KIND || kind == SCROLLER_KIND) {
+        u64 top = 0;
+        u64 total = 0;
+        u64 visible = 0;
+        GadToolsNatives::scroller_span(b, gadget, top, total, visible);
+        const i64 range = total > visible ? static_cast<i64>(total - visible) : 0;
+        i64 moved = static_cast<i64>(top) + (kind == SLIDER_KIND ? steps : -steps);
+        moved = moved < 0 ? 0 : moved > range ? range : moved;
+        if (!b.ok()) {
+            return false;
+        }
+        if (static_cast<u64>(moved) == top) {
+            return true;
+        }
+        const i32 min = kind == SLIDER_KIND ? static_cast<i16>(b.r16(gadget + gt_Min)) : 0;
+        b.w32(gadget + gt_Number, static_cast<u32>(min + static_cast<i32>(moved)));
+        GadToolsNatives::sync_scroller(b, gadget);
+        if (window != 0 && intuition_ != nullptr) {
+            intuition_->refresh_glist(gadget, window, 1);
+        }
+        prop_moved(window, gadget, code);
+        report = b.ok();
+        return true;
+    }
     const u32 list = kind == LISTVIEW_KIND ? gadget
                      : kind == kListScrollerKind || kind == kListUpKind || kind == kListDownKind
                          ? b.r32(gadget + gt_Owner)

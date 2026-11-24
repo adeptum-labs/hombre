@@ -1884,7 +1884,92 @@ void a_slider_in_a_window_draws_its_level_again_when_it_changes() {
     r.intuition.set_gadget_prop_code(nullptr);
 }
 
+// The wheel over a slider moves its level a step a notch, up for more, and
+// over a scroller its top a step, up towards the start: each sends the
+// program the GADGETUP a drag ends with, carrying the new value. At its end
+// the gadget stays and sends nothing.
+void the_wheel_moves_sliders_and_scrollers() {
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.intuition.set_gadget_renderer(&GadTools::render_gadget, &g);
+    r.intuition.set_gadget_prop_code(&GadTools::prop_gadget_moved);
+    r.intuition.set_gadget_wheel(&GadTools::wheel_gadget);
+    g.set_intuition(&r.intuition);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0);
+    CHECK(open_new_screen(r, kNewScreen) != 0);
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    r.str(kFormat, "%3lu");
+    put_new_gadget(r, 60, 30, 120, 10, 0, 1, 0, 0);
+    const u32 slider = create_gadget(
+        r, g, SLIDER_KIND, context,
+        r.tags(kTags, {{GTSL_Min, 0}, {GTSL_Max, 9}, {GTSL_Level, 5}, {GTSL_MaxLevelLen, 3},
+                       {GTSL_LevelFormat, kFormat}, {TAG_DONE, 0}}));
+    CHECK(slider != 0);
+    put_new_gadget(r, 60, 60, 120, 10, 0, 2, 0, 0);
+    const u32 scroller = create_gadget(
+        r, g, SCROLLER_KIND, slider,
+        r.tags(kTags, {{GTSC_Top, 0}, {GTSC_Total, 20}, {GTSC_Visible, 5}, {TAG_DONE, 0}}));
+    CHECK(scroller != 0);
+    for (u32 i = 0; i < NewWindow_SIZEOF; ++i) {
+        r.put8(kNewWindow + i, 0);
+    }
+    r.put16(kNewWindow + nw_LeftEdge, 50);
+    r.put16(kNewWindow + nw_TopEdge, 50);
+    r.put16(kNewWindow + nw_Width, 200);
+    r.put16(kNewWindow + nw_Height, 120);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_RAWKEY);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE);
+    r.put32(kNewWindow + nw_FirstGadget, context);
+    r.cpu().a[0] = kNewWindow;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 wrp = r.get32(window + wd_RPort);
+    const std::string five = pixels_of(r, wrp, 28, 30, 51, 39);
+
+    const auto expect_up = [&](u32 gadget, u32 code) {
+        const u32 msg = get_msg(r, port);
+        CHECK(msg != 0);
+        if (msg == 0) {
+            return;
+        }
+        CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETUP);
+        CHECK_EQ(r.get16(msg + im_Code), code);
+        CHECK_EQ(r.get32(msg + im_IAddress), gadget);
+        reply_msg(r, msg);
+        CHECK_EQ(get_msg(r, port), 0u);
+    };
+    r.intuition.pointer_event(50 + 100, 50 + 34, 0, 0, 0, true);
+    r.intuition.wheel_event(2);
+    expect_up(slider, 7);
+    CHECK(pixels_of(r, wrp, 28, 30, 51, 39) != five);
+    r.intuition.wheel_event(-3);
+    expect_up(slider, 4);
+    r.intuition.wheel_event(-10);
+    expect_up(slider, 0);
+    r.intuition.wheel_event(-1);
+    CHECK_EQ(get_msg(r, port), 0u);
+
+    r.intuition.pointer_event(50 + 100, 50 + 64, 0, 0, 0, true);
+    r.intuition.wheel_event(-3);
+    expect_up(scroller, 3);
+    r.intuition.wheel_event(-30);
+    expect_up(scroller, 15);
+    r.intuition.wheel_event(1);
+    expect_up(scroller, 14);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    r.intuition.set_gadget_prop_code(nullptr);
+    r.intuition.set_gadget_wheel(nullptr);
+}
+
 int main() {
+    the_wheel_moves_sliders_and_scrollers();
     a_slider_draws_its_level_beside_its_box();
     a_slider_shows_what_its_display_function_makes_of_the_level();
     a_slider_in_a_window_draws_its_level_again_when_it_changes();

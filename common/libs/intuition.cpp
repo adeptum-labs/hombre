@@ -3933,7 +3933,7 @@ void Intuition::remove_window_messages(u32 port, u32 window) {
 }
 
 bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iaddress,
-                                  u32 iaddress_bytes, u16 qualifier) {
+                                  u32 iaddress_bytes, u16 qualifier, bool unasked) {
     if (!window_open(window)) {
         return false;
     }
@@ -3943,7 +3943,7 @@ bool Intuition::post_intuimessage(u32 window, u32 idcmp_class, u16 code, u32 iad
     }
     Bus b(*machine_);
     const u32 idcmp = b.r32(window + ndk::wd_IDCMPFlags);
-    if (!b.ok() || (idcmp & idcmp_class) == 0) {
+    if (!b.ok() || ((idcmp & idcmp_class) == 0 && !unasked)) {
         return false;
     }
     if (messages_.size() >= kMaxMessages) {
@@ -7956,10 +7956,18 @@ void Intuition::wheel_event(i32 steps) {
                         mouse_y_ - w.top)) {
                 // Drawn as one change, as a click's redrawing is.
                 begin_batch();
-                const bool scrolled =
-                    gadget_wheel_(gadget_renderer_ctx_, active_window_, gadget, steps);
+                u16 code = 0;
+                bool report = false;
+                const u32 window = active_window_;
+                const bool taken =
+                    gadget_wheel_(gadget_renderer_ctx_, window, gadget, steps, code, report);
                 end_batch();
-                if (scrolled) {
+                if (taken) {
+                    // A slider or scroller tells the program, as when a
+                    // drag of its knob ends.
+                    if (report) {
+                        post_intuimessage(window, ndk::IDCMP_GADGETUP, code, gadget);
+                    }
                     return;
                 }
             }
@@ -7969,10 +7977,18 @@ void Intuition::wheel_event(i32 steps) {
     const u16 code = steps > 0 ? static_cast<u16>(ndk::NM_WHEEL_UP)
                                : static_cast<u16>(ndk::NM_WHEEL_DOWN);
     const i64 abs_steps = steps > 0 ? static_cast<i64>(steps) : -static_cast<i64>(steps);
+    const WindowRecord* rec = find_window_record(active_window_);
+    const bool unasked = rec != nullptr && rec->takes_wheel;
     for (i64 i = 0; i < abs_steps; ++i) {
-        if (!post_intuimessage(active_window_, ndk::IDCMP_RAWKEY, code)) {
+        if (!post_intuimessage(active_window_, ndk::IDCMP_RAWKEY, code, 0, 0, 0, unasked)) {
             break;
         }
+    }
+}
+
+void Intuition::take_wheel(u32 window) {
+    if (WindowRecord* rec = find_window_record(window); rec != nullptr) {
+        rec->takes_wheel = true;
     }
 }
 
