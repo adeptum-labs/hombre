@@ -35,6 +35,10 @@ constexpr u8 line_status_transmit_empty = 0x20;
 // Receives every character written to the port, when set.
 inline void (*mirror)(char) = nullptr;
 
+// A line has been started and not ended, so an interrupt that writes now
+// would break into it.
+inline volatile bool mid_line = false;
+
 inline void init() {
     outb(com1 + 1, 0x00);  // no interrupts
     outb(com1 + 3, 0x80);  // unlock the baud rate divisor
@@ -45,10 +49,34 @@ inline void init() {
     outb(com1 + 4, 0x0B);  // DTR, RTS and OUT2
 }
 
-inline void write_char(char c) {
+inline void send(char c) {
     while (!(inb(com1 + 5) & line_status_transmit_empty)) {
     }
     outb(com1, static_cast<u8>(c));
+}
+
+// A whole line from an interrupt, which only the port gets: the mirror draws
+// on the screen. False, with nothing written, while a line is unfinished.
+inline bool write_line_from_interrupt(const char* line) {
+    if (mid_line) {
+        return false;
+    }
+    for (; *line; ++line) {
+        send(*line);
+    }
+    send('\n');
+    return true;
+}
+
+inline void write_char(char c) {
+    // Marked before the first character leaves, and unmarked after the last.
+    if (c != '\n') {
+        mid_line = true;
+    }
+    send(c);
+    if (c == '\n') {
+        mid_line = false;
+    }
     if (mirror != nullptr) {
         mirror(c);
     }
