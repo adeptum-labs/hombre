@@ -122,6 +122,7 @@ public:
         u64 budget_left = 0;
         u32 run_depth = 0;
         const char* native = nullptr;
+        bool stop = false;
     };
 
     using PreemptHook = void (*)(void* ctx);
@@ -177,16 +178,34 @@ public:
         preempt_ctx_ = ctx;
     }
 
-    RunState save_run_state() const { return RunState{budget_left_, run_depth_, native_}; }
+    RunState save_run_state() const {
+        return RunState{budget_left_, run_depth_, native_, stop_};
+    }
 
     void restore_run_state(const RunState& state) {
         budget_left_ = state.budget_left;
         run_depth_ = state.run_depth;
         native_ = state.native;
+        stop_ = state.stop;
     }
 
     // The name of the native the running task is in, null outside one.
     const char* current_native() const { return native_; }
+
+    // How many runs are inside one another; 0 outside 68000 code.
+    u32 run_depth() const { return run_depth_; }
+
+    // Ends the running task's 68000 code, at every depth, with Stopped,
+    // before its next block.
+    void request_stop() { stop_ = true; }
+
+    // Called once, before the next block at any depth, after
+    // raise_attention, which an interrupt may call.
+    void set_attention_hook(PreemptHook fn, void* ctx) {
+        attention_hook_ = fn;
+        attention_ctx_ = ctx;
+    }
+    void raise_attention() { attention_ = true; }
 
 private:
     static constexpr u32 kSlotBits = 13;
@@ -212,6 +231,10 @@ private:
     u64 budget_left_ = 0;  // blocks the outermost run has left
     u32 run_depth_ = 0;
     const char* native_ = nullptr;
+    bool stop_ = false;
+    volatile bool attention_ = false;
+    PreemptHook attention_hook_ = nullptr;
+    void* attention_ctx_ = nullptr;
     PreemptHook preempt_hook_ = nullptr;
     void* preempt_ctx_ = nullptr;
     u32 blocks_ = 0;

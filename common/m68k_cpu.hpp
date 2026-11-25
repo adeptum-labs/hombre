@@ -40,7 +40,8 @@ enum class ExitReason : u32 {
     AddressError,
     Privilege,
     Unimplemented,
-    Break
+    Break,
+    Stopped
 };
 
 // The enumerator's name, for logs; "?" for a value outside the enum.
@@ -59,6 +60,7 @@ constexpr const char* exit_reason_name(ExitReason why) {
     case ExitReason::Privilege: return "Privilege";
     case ExitReason::Unimplemented: return "Unimplemented";
     case ExitReason::Break: return "Break";
+    case ExitReason::Stopped: return "Stopped";
     }
     return "?";
 }

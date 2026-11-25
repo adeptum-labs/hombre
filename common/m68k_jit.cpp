@@ -1543,6 +1543,11 @@ bool Jit::init(const CodeRegion& region, Machine& machine) {
     run_depth_ = 0;
     preempt_hook_ = nullptr;
     preempt_ctx_ = nullptr;
+    native_ = nullptr;
+    stop_ = false;
+    attention_ = false;
+    attention_hook_ = nullptr;
+    attention_ctx_ = nullptr;
     flush();
     return true;
 }
@@ -1751,6 +1756,18 @@ ExitReason Jit::run(u64 max_blocks) {
     cpu.exit = ExitReason::None;
     u64 count = 0;
     while (cpu.exit == ExitReason::None) {
+        if (attention_) {
+            attention_ = false;
+            if (attention_hook_ != nullptr) {
+                attention_hook_(attention_ctx_);
+            }
+        }
+        if (stop_) {
+            cpu.exit = ExitReason::Stopped;
+        }
+        if (cpu.exit != ExitReason::None) {
+            break;
+        }
         if (count == max_blocks || budget_left_ == 0) {
             if (run_depth_ > 1) {
                 LogLine().text("m68k: block budget used up in a call from a native").send();
@@ -1778,7 +1795,9 @@ ExitReason Jit::run(u64 max_blocks) {
             dispatch(aline);
         }
     }
-    --run_depth_;
+    if (--run_depth_ == 0) {
+        stop_ = false;
+    }
     return cpu.exit;
 }
 
