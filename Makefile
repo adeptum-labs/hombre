@@ -200,6 +200,8 @@ $(foreach n,$(FAULT_TESTS),$(eval $(call FAULT_VARIANT,$(n))))
 # AUDIODEV is QEMU's sound backend for the HD Audio controller: pa
 # (PulseAudio and PipeWire), alsa, sdl, or none for silence.
 AUDIODEV ?= pa
+# SMP is the number of processors run gives the machine.
+SMP ?= 4
 
 run: image disk-image
 	cp $(OVMF)/OVMF_VARS_4M.fd $(BUILD)/OVMF_VARS-run.fd
@@ -230,7 +232,7 @@ run: image disk-image
 	    n=$$((n + 1)); \
 	done; \
 	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G -no-reboot \
-	    -serial stdio \
+	    -smp $(SMP) -serial stdio \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF)/OVMF_CODE_4M.fd \
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS-run.fd \
 	    -drive format=raw,snapshot=on,file=$(IMAGE) \

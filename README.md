@@ -91,7 +91,8 @@ make run DISK="path/to/Workbench.dms"
 
 `DISK=` is the floppy in DF0:, a DMS archive or a raw ADF image. `DISK1=`,
 `DISK2=` and `DISK3=` put disks in DF1: to DF3:. Without `DISK=`, Hombre
-boots a generated test disk.
+boots a generated test disk. The machine has four processors; `SMP=`
+sets another number.
 
 Hombre ships no AmigaOS files. Use your own, legally owned AmigaOS disks.
 
