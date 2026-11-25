@@ -50,6 +50,10 @@ software, on modern hardware and in virtual machines.
 - Starts programs such as Clock and Calculator from the AmigaOS 3.1 disks.
 - A modern window look: shaded title bars, knob-style buttons with the 3.1
   symbols and soft shadows, in the colours of your palette.
+- A system monitor on F12, a Workbench-style window that runs outside the
+  Amiga system: processor and memory use, the tasks with their registers,
+  suspend, end and reboot, and floppy images swapped in DF0: to DF3:. It
+  opens even over a program that hangs the Amiga side.
 - A 64-bit kernel with UEFI boot, preemptive multitasking, and USB keyboard
   and mouse.
 
