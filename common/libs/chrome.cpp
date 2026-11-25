@@ -24,6 +24,8 @@
 #include "chrome.hpp"
 
 #include "boopsi.hpp"
+#include "chrome_amiga.hpp"
+#include "chrome_paint.hpp"
 #include "chrome_palette.hpp"
 #include "graphics.hpp"
 #include "intuition.hpp"
@@ -44,7 +46,6 @@ using sysimage::TextPen;
 namespace {
 
 constexpr u32 kMaxTitleChars = 255;
-constexpr i32 kBarButtonRadius = 2;
 
 struct RpState {
     u8 fg = 0;
@@ -81,21 +82,9 @@ u32 rastport_depth(Bus& b, u32 rp) {
     return b.ok() ? depth : 0;
 }
 
-constexpr i32 min_i32(i32 a, i32 b) { return a < b ? a : b; }
-
-constexpr i32 max_i32(i32 a, i32 b) { return a > b ? a : b; }
-
-// The pens the modern look draws in on a screen of depth planes: a chrome pen
-// of chrome_palette.hpp through its place on that screen.
-struct Look {
-    u32 depth;
-
-    constexpr u8 operator()(u8 chrome_pen) const { return physical_pen(chrome_pen, depth); }
-};
-
-// The guest string at text, at most kMaxTitleChars of it, cut to the whole
-// characters that fit in room pixels in font. How many there are.
-u32 read_fitting(Graphics& graphics, Bus& b, u32 font, u32 text, i32 room, u8* out) {
+// The guest string at text, at most kMaxTitleChars of it. How many bytes it
+// holds, or none when the bus cannot read it.
+u32 read_title(Bus& b, u32 text, u8* out) {
     u32 length = 0;
     while (text != 0 && length < kMaxTitleChars) {
         const u8 c = static_cast<u8>(b.r8(text + length));
@@ -104,242 +93,7 @@ u32 read_fitting(Graphics& graphics, Bus& b, u32 font, u32 text, i32 room, u8* o
         }
         out[length++] = c;
     }
-    return b.ok() && room > 0 ? graphics.text_fit(font, out, length, room) : 0;
-}
-
-void draw_title(Graphics& graphics, Bus& b, u32 rp, u32 title, i32 x, i32 x1,
-                const Metrics& metrics) {
-    u8 chars[kMaxTitleChars];
-    const u32 length = read_fitting(graphics, b, metrics.font, title, x1 - x + 1, chars);
-    if (length != 0) {
-        graphics.move(rp, x, metrics.title_baseline());
-        graphics.plain_text_in(rp, metrics.font, chars, length);
-    }
-}
-
-void draw_outline_box(Graphics& graphics, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1, u8 pen) {
-    graphics.set_pens(rp, pen, 0, ndk::JAM2);
-    graphics.rect_fill(rp, x0, y0, x1, y0);
-    graphics.rect_fill(rp, x0, y1, x1, y1);
-    graphics.rect_fill(rp, x0, y0, x0, y1);
-    graphics.rect_fill(rp, x1, y0, x1, y1);
-}
-
-void draw_frame_box(Graphics& graphics, u32 rp, const Rect& box, u8 fill_pen, u8 border_pen) {
-    graphics.set_pens(rp, fill_pen, 0, ndk::JAM2);
-    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
-    draw_outline_box(graphics, rp, box.x0, box.y0, box.x1, box.y1, border_pen);
-}
-
-// The size gadget, as on 3.1: a corner pointing to the bottom right with a
-// small light box inside it.
-void draw_size_gadget(Graphics& graphics, u32 rp, const Look& look, i32 width, i32 height) {
-    if (width < static_cast<i32>(kSizeBorderRight) ||
-        height < static_cast<i32>(kSizeBorderBottom)) {
-        return;
-    }
-    // The glyph sits in the middle of the corner the two borders share.
-    const i32 right = width - 1 - (static_cast<i32>(kSizeBorderRight) - 7) / 2;
-    const i32 bottom = height - 1 - (static_cast<i32>(kSizeBorderBottom) - 7) / 2;
-    graphics.set_pens(rp, look(kFrameDark), 0, ndk::JAM2);
-    graphics.rect_fill(rp, right, bottom - 6, right, bottom);
-    graphics.rect_fill(rp, right - 6, bottom, right, bottom);
-    draw_frame_box(graphics, rp, Rect{right - 3, bottom - 3, right, bottom}, look(kFrameLight),
-                   look(kFrameDark));
-}
-
-i32 rounded_inset(i32 d, i32 radius) {
-    if (radius >= 2) {
-        if (d == 0) {
-            return 2;
-        }
-        if (d == 1) {
-            return 1;
-        }
-        return 0;
-    }
-    if (radius == 1 && d == 0) {
-        return 1;
-    }
-    return 0;
-}
-
-void draw_rounded_outline(Graphics& graphics, u32 rp, const Rect& box, i32 radius, u8 pen) {
-    graphics.set_pens(rp, pen, 0, ndk::JAM2);
-    for (i32 y = box.y0; y <= box.y1; ++y) {
-        const i32 dy = min_i32(y - box.y0, box.y1 - y);
-        const i32 ins = rounded_inset(dy, radius);
-        const i32 lx = box.x0 + ins;
-        const i32 rx = box.x1 - ins;
-        if (dy == 0) {
-            if (lx <= rx) {
-                graphics.rect_fill(rp, lx, y, rx, y);
-            }
-        } else {
-            const i32 prev_ins = rounded_inset(dy - 1, radius);
-            const i32 inner_lx = box.x0 + prev_ins - 1;
-            const i32 inner_rx = box.x1 - prev_ins + 1;
-            const i32 left_end = max_i32(lx, inner_lx);
-            const i32 right_start = min_i32(rx, inner_rx);
-            graphics.rect_fill(rp, lx, y, left_end, y);
-            graphics.rect_fill(rp, right_start, y, rx, y);
-        }
-    }
-}
-
-// The body of a title-bar button, in the look of the sliders' knobs:
-// rounded, outlined and shaded from top to bottom. Held down, it takes the
-// shading of a held knob.
-void draw_bar_button_body(Graphics& graphics, u32 rp, const Look& look, const Rect& box,
-                          bool pressed) {
-    const u8 shade = pressed ? kActiveBar2 : kKnob0;
-    const i32 steps = pressed ? 4 : 3;
-    const i32 inner_h = box.y1 - box.y0 - 1;
-    for (i32 y = box.y0 + 1; y < box.y1; ++y) {
-        const i32 dy = min_i32(y - box.y0, box.y1 - y);
-        const i32 ins = max_i32(1, rounded_inset(dy, kBarButtonRadius));
-        const u8 pen = look(static_cast<u8>(shade + ((y - box.y0 - 1) * steps) / inner_h));
-        graphics.set_pens(rp, pen, 0, ndk::JAM2);
-        graphics.rect_fill(rp, box.x0 + ins, y, box.x1 - ins, y);
-    }
-    draw_rounded_outline(graphics, rp, box, kBarButtonRadius, look(kFrameDark));
-}
-
-// The close button: as on 3.1, a small light square outlined in the dark
-// pen in the middle of the body. Held down, the two swap.
-void draw_close_button(Graphics& graphics, u32 rp, const Look& look, const Metrics& metrics,
-                       bool active, bool pressed) {
-    const Rect box = close_button_box(metrics);
-    draw_bar_button_body(graphics, rp, look, box, pressed);
-    u8 line = look(active ? kFrameDark : kTitleInactive);
-    u8 face = look(kFrameLight);
-    if (pressed) {
-        const u8 swap = line;
-        line = face;
-        face = swap;
-    }
-    const i32 cx = (box.x0 + box.x1) / 2;
-    const i32 cy = (box.y0 + box.y1) / 2;
-    draw_frame_box(graphics, rp, Rect{cx - 3, cy - 2, cx + 3, cy + 2}, face, line);
-}
-
-// The depth button: two overlapping sheets, the light one in front of the
-// shaded one.
-void draw_depth_button(Graphics& graphics, u32 rp, const Look& look, i32 width,
-                       const Metrics& metrics, bool active, bool pressed) {
-    const Rect box = depth_button_box(width, metrics);
-    draw_bar_button_body(graphics, rp, look, box, pressed);
-    const u8 line = look(pressed ? kFrameLight : (active ? kFrameDark : kTitleInactive));
-    const i32 cx = (box.x0 + box.x1) / 2;
-    const i32 cy = (box.y0 + box.y1) / 2;
-    const Rect behind{cx - 3, cy - 3, cx + 1, cy + 1};
-    if (pressed) {
-        // The sheet behind lets the held body's shading show through.
-        draw_outline_box(graphics, rp, behind.x0, behind.y0, behind.x1, behind.y1, line);
-    } else {
-        draw_frame_box(graphics, rp, behind, look(kKnob2), line);
-    }
-    draw_frame_box(graphics, rp, Rect{cx - 1, cy - 1, cx + 3, cy + 3}, look(kFrameLight), line);
-}
-
-// The zoom button: a large sheet with a small light one in its top left
-// corner.
-void draw_zoom_button(Graphics& graphics, u32 rp, const Look& look, const Rect& box, bool active,
-                      bool pressed) {
-    draw_bar_button_body(graphics, rp, look, box, pressed);
-    const u8 line = look(pressed ? kFrameLight : (active ? kFrameDark : kTitleInactive));
-    const i32 cx = (box.x0 + box.x1) / 2;
-    const i32 cy = (box.y0 + box.y1) / 2;
-    const Rect sheet{cx - 3, cy - 3, cx + 3, cy + 3};
-    if (pressed) {
-        // The sheet lets the held body's shading show through.
-        draw_outline_box(graphics, rp, sheet.x0, sheet.y0, sheet.x1, sheet.y1, line);
-    } else {
-        draw_frame_box(graphics, rp, sheet, look(kKnob2), line);
-    }
-    draw_frame_box(graphics, rp, Rect{sheet.x0, sheet.y0, cx, cy}, look(kFrameLight), line);
-}
-
-void draw_knob(Graphics& graphics, u32 rp, const Look& look, const Rect& knob, u16 pflags,
-               u16 gflags) {
-    const i32 kw = knob.x1 - knob.x0 + 1;
-    const i32 kh = knob.y1 - knob.y0 + 1;
-    if (kw <= 0 || kh <= 0) {
-        return;
-    }
-    const i32 max_rx = (kw - 1) / 2;
-    const i32 max_ry = (kh - 1) / 2;
-    const i32 radius = min_i32(2, min_i32(max_rx, max_ry));
-
-    const bool horiz_only = (pflags & ndk::FREEHORIZ) != 0 && (pflags & ndk::FREEVERT) == 0;
-    const bool selected = (gflags & ndk::GFLG_SELECTED) != 0;
-
-    const u8 grad_base = selected ? kActiveBar2 : kKnob0;
-    const i32 grad_steps = selected ? 4 : 3;
-
-    if (horiz_only) {
-        const i32 inner_w = kw - 2;
-        if (inner_w > 0) {
-            for (i32 x = knob.x0 + 1; x <= knob.x1 - 1; ++x) {
-                const i32 dx = min_i32(x - knob.x0, knob.x1 - x);
-                const i32 ins = max_i32(1, rounded_inset(dx, radius));
-                const i32 y0 = knob.y0 + ins;
-                const i32 y1 = knob.y1 - ins;
-                if (y0 <= y1) {
-                    const i32 step = ((x - (knob.x0 + 1)) * grad_steps) / inner_w;
-                    graphics.set_pens(rp, look(static_cast<u8>(grad_base + step)), 0, ndk::JAM2);
-                    graphics.rect_fill(rp, x, y0, x, y1);
-                }
-            }
-        }
-    } else {
-        const i32 inner_h = kh - 2;
-        if (inner_h > 0) {
-            for (i32 y = knob.y0 + 1; y <= knob.y1 - 1; ++y) {
-                const i32 dy = min_i32(y - knob.y0, knob.y1 - y);
-                const i32 ins = max_i32(1, rounded_inset(dy, radius));
-                const i32 x0 = knob.x0 + ins;
-                const i32 x1 = knob.x1 - ins;
-                if (x0 <= x1) {
-                    const i32 step = ((y - (knob.y0 + 1)) * grad_steps) / inner_h;
-                    graphics.set_pens(rp, look(static_cast<u8>(grad_base + step)), 0, ndk::JAM2);
-                    graphics.rect_fill(rp, x0, y, x1, y);
-                }
-            }
-        }
-    }
-
-    draw_rounded_outline(graphics, rp, knob, radius, look(kFrameDark));
-
-    const i32 cx = (knob.x0 + knob.x1) / 2;
-    const i32 cy = (knob.y0 + knob.y1) / 2;
-    if (!horiz_only && kh >= 12) {
-        i32 gx0 = knob.x0 + 2 <= knob.x1 - 2 ? knob.x0 + 2 : knob.x0 + 1;
-        i32 gx1 = knob.x0 + 2 <= knob.x1 - 2 ? knob.x1 - 2 : knob.x1 - 1;
-        if (gx1 - gx0 + 1 > 5) {
-            gx0 = cx - 2;
-            gx1 = cx + 2;
-        }
-        if (gx0 <= gx1) {
-            graphics.set_pens(rp, look(kFrameDark), 0, ndk::JAM2);
-            graphics.rect_fill(rp, gx0, cy - 2, gx1, cy - 2);
-            graphics.rect_fill(rp, gx0, cy, gx1, cy);
-            graphics.rect_fill(rp, gx0, cy + 2, gx1, cy + 2);
-        }
-    } else if (horiz_only && kw >= 12) {
-        i32 gy0 = knob.y0 + 2 <= knob.y1 - 2 ? knob.y0 + 2 : knob.y0 + 1;
-        i32 gy1 = knob.y0 + 2 <= knob.y1 - 2 ? knob.y1 - 2 : knob.y1 - 1;
-        if (gy1 - gy0 + 1 > 5) {
-            gy0 = cy - 2;
-            gy1 = cy + 2;
-        }
-        if (gy0 <= gy1) {
-            graphics.set_pens(rp, look(kFrameDark), 0, ndk::JAM2);
-            graphics.rect_fill(rp, cx - 2, gy0, cx - 2, gy1);
-            graphics.rect_fill(rp, cx, gy0, cx, gy1);
-            graphics.rect_fill(rp, cx + 2, gy0, cx + 2, gy1);
-        }
-    }
+    return b.ok() ? length : 0;
 }
 
 // A one-pixel edge round the box: raised when light is the pen of its top
@@ -367,14 +121,6 @@ void draw_classic_knob(Graphics& graphics, u32 rp, const Rect& knob, bool select
     draw_bevel(graphics, rp, knob, pens[ShinePen], pens[ShadowPen]);
 }
 
-// The title between the bar buttons, or the frame where a button is missing.
-void draw_bar_title(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w, u32 pen) {
-    const Metrics& metrics = w.metrics;
-    graphics.set_pens(rp, pen, 0, ndk::JAM1);
-    draw_title(graphics, b, rp, w.title, title_left(w.flags, metrics),
-               title_right(w.width, w.flags, metrics), metrics);
-}
-
 // How the system images show a gadget of a window that is active or not,
 // held down or not.
 u32 gadget_state(bool active, bool pressed) {
@@ -390,7 +136,8 @@ u32 gadget_state(bool active, bool pressed) {
 // line is the one under the bar. The gadgets are the system images, each in
 // a cell as high as the bar, from the window's top line to the line under
 // the bar. An outer cell reaches the window's edge.
-void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) {
+void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const Surface& surface,
+                        const WindowChrome& w) {
     const u16* pens = w.pens.pen;
     const i32 right = w.width - 1;
     const i32 bottom = w.height - 1;
@@ -456,7 +203,10 @@ void draw_classic_frame(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
         sysimage::draw(graphics, b, rp, ndk::SIZEIMAGE, corner, gadget_state(w.active, false),
                        pens);
     }
-    draw_bar_title(graphics, b, rp, w, w.active ? pens[FillTextPen] : pens[TextPen]);
+    u8 chars[kMaxTitleChars];
+    const Title title{chars, read_title(b, w.title, chars)};
+    paint_bar_title(surface, w, title,
+                    static_cast<u8>(w.active ? pens[FillTextPen] : pens[TextPen]));
 }
 
 // The menu separator on screens of eight planes: a dark line over a light
@@ -563,10 +313,12 @@ struct MenuTarget {
 void draw_guest_text(const MenuTarget& t, u8 pen, u32 font, i32 x, i32 baseline, u32 text,
                      i32 right) {
     u8 chars[kMaxTitleChars];
-    const u32 length = read_fitting(t.graphics, t.b, font, text, right - x + 1, chars);
-    if (length != 0) {
+    const i32 room = right - x + 1;
+    const u32 length = read_title(t.b, text, chars);
+    const u32 fitting = t.b.ok() && room > 0 ? t.graphics.text_fit(font, chars, length, room) : 0;
+    if (fitting != 0) {
         t.graphics.text_on(t.b, t.bitmap, t.bitmap_addr, t.clip, pen, font, x, baseline, chars,
-                           length);
+                           fitting);
     }
 }
 
@@ -819,113 +571,35 @@ void draw_menu_box(const MenuTarget& t, const Rect& box, bool hangs,
     draw_box_frame(b, bitmap, clip, box, hangs, pens.modern, pens.frame);
 }
 
-void draw_modern_bar(Graphics& graphics, Bus& b, u32 rp, const Look& look,
-                     const WindowChrome& w) {
-    const i32 left = 1;
-    const i32 right = w.width - 2;
-    const Metrics& metrics = w.metrics;
-    const i32 line = metrics.bar_height();
-
-    const bool rounded =
-        (w.flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0 && w.width >= 7;
-    if (rounded) {
-        graphics.set_pens(rp, look(kFrameDark), 0, ndk::JAM2);
-        graphics.rect_fill(rp, 2, 1, 2, 1);
-        graphics.rect_fill(rp, w.width - 3, 1, w.width - 3, 1);
-        graphics.rect_fill(rp, 1, 2, 1, 2);
-        graphics.rect_fill(rp, w.width - 2, 2, w.width - 2, 2);
-
-        graphics.set_pens(rp, look(kFrameLight), 0, ndk::JAM2);
-        graphics.rect_fill(rp, 3, 1, w.width - 4, 1);
-    } else {
-        graphics.set_pens(rp, look(kFrameLight), 0, ndk::JAM2);
-        graphics.rect_fill(rp, left, 1, right, 1);
-    }
-
-    const u8 base = w.active ? kActiveBar0 : kInactiveBar0;
-    const i32 steps = w.active ? 8 : 6;
-    const i32 rows = line - 2;
-    for (i32 y = 2; y < line; ++y) {
-        const i32 step = ((y - 2) * steps) / rows;
-        const i32 row_left = (rounded && y == 2) ? 2 : left;
-        const i32 row_right = (rounded && y == 2) ? w.width - 3 : right;
-        graphics.set_pens(rp, look(static_cast<u8>(base + step)), 0, ndk::JAM2);
-        graphics.rect_fill(rp, row_left, y, row_right, y);
-    }
-    graphics.set_pens(rp, look(kFrameDark), 0, ndk::JAM2);
-    graphics.rect_fill(rp, left, line, right, line);
-
-    if ((w.flags & ndk::WFLG_CLOSEGADGET) != 0) {
-        draw_close_button(graphics, rp, look, metrics, w.active, w.pressed == BarButton::Close);
-    }
-    if ((w.flags & ndk::WFLG_HASZOOM) != 0) {
-        draw_zoom_button(graphics, rp, look, zoom_button_box(w.width, w.flags, metrics), w.active,
-                         w.pressed == BarButton::Zoom);
-    }
-    if ((w.flags & ndk::WFLG_DEPTHGADGET) != 0) {
-        draw_depth_button(graphics, rp, look, w.width, metrics, w.active,
-                          w.pressed == BarButton::Depth);
-    }
-    draw_bar_title(graphics, b, rp, w, look(w.active ? kTitleActive : kTitleInactive));
+void amiga_fill(void* ctx, const Rect& box, u8 pen) {
+    AmigaSurface& state = *static_cast<AmigaSurface*>(ctx);
+    state.graphics.set_pens(state.rp, pen, 0, ndk::JAM2);
+    state.graphics.rect_fill(state.rp, box.x0, box.y0, box.x1, box.y1);
 }
 
-// The frame of a window as the modern look has it: the outline, the bar
-// and the borders, and the size gadget.
-void draw_modern_frame(Graphics& graphics, Bus& b, u32 rp, const Look& look,
-                       const WindowChrome& w, bool rounded) {
-    const i32 right = w.width - 1;
-    const i32 bottom = w.height - 1;
-
-    if (rounded) {
-        graphics.set_pens(rp, look(kFrameDark), 0, ndk::JAM2);
-        graphics.rect_fill(rp, 3, 0, right - 3, 0);
-        graphics.rect_fill(rp, 0, bottom, right, bottom);
-        graphics.rect_fill(rp, 0, 3, 0, bottom);
-        graphics.rect_fill(rp, right, 3, right, bottom);
-        graphics.rect_fill(rp, 2, 1, 2, 1);
-        graphics.rect_fill(rp, right - 2, 1, right - 2, 1);
-        graphics.rect_fill(rp, 1, 2, 1, 2);
-        graphics.rect_fill(rp, right - 1, 2, right - 1, 2);
-    } else {
-        draw_outline_box(graphics, rp, 0, 0, right, bottom, look(kFrameDark));
-    }
-
-    if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
-        draw_modern_bar(graphics, b, rp, look, w);
-
-        const i32 body_top = static_cast<i32>(w.border_top);
-        const i32 body_bottom = bottom - 1;
-        if (body_top <= body_bottom && w.width >= 3) {
-            graphics.set_pens(rp, look(kFrameLight), 0, ndk::JAM2);
-            graphics.rect_fill(rp, 1, body_top, 1, body_bottom);
-
-            graphics.set_pens(rp, look(kInactiveBar5), 0, ndk::JAM2);
-            if (w.border_left > 2) {
-                const i32 lx1 = min_i32(static_cast<i32>(w.border_left) - 1, right - 1);
-                if (2 <= lx1) {
-                    graphics.rect_fill(rp, 2, body_top, lx1, body_bottom);
-                }
-            }
-            if (w.border_right >= 2) {
-                const i32 rx0 = max_i32(w.width - static_cast<i32>(w.border_right), 2);
-                if (rx0 <= right - 1) {
-                    graphics.rect_fill(rp, rx0, body_top, right - 1, body_bottom);
-                }
-            }
-            if (w.border_bottom >= 2) {
-                const i32 by0 = max_i32(w.height - static_cast<i32>(w.border_bottom), body_top);
-                if (by0 <= body_bottom && 2 <= right - 1) {
-                    graphics.rect_fill(rp, 2, by0, right - 1, body_bottom);
-                }
-            }
-        }
-
-        if ((w.flags & ndk::WFLG_SIZEGADGET) != 0) {
-            draw_size_gadget(graphics, rp, look, w.width, w.height);
-        }
-    }
+u32 amiga_text_fit(void* ctx, u32 font, const u8* chars, u32 count, i32 room) {
+    return static_cast<AmigaSurface*>(ctx)->graphics.text_fit(font, chars, count, room);
 }
 
+i32 amiga_text_width(void* ctx, u32 font, const u8* chars, u32 count) {
+    return static_cast<i32>(
+        static_cast<AmigaSurface*>(ctx)->graphics.text_width(font, chars, count));
+}
+
+void amiga_text(void* ctx, u32 font, i32 x, i32 baseline, u8 pen, const u8* chars, u32 count) {
+    if (count == 0) {
+        return;
+    }
+    AmigaSurface& state = *static_cast<AmigaSurface*>(ctx);
+    state.graphics.set_pens(state.rp, pen, 0, ndk::JAM1);
+    state.graphics.move(state.rp, x, baseline);
+    state.graphics.plain_text_in(state.rp, font, chars, count);
+}
+
+}
+
+Surface amiga_surface(AmigaSurface& state, u32 depth) {
+    return Surface{&state, depth, amiga_fill, amiga_text_fit, amiga_text_width, amiga_text};
 }
 
 // The pen of row y of a screen title bar of bar_height rows, shaded from
@@ -940,8 +614,9 @@ void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title,
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const Look look{rastport_depth(b, rp)};
-    const bool modern = style_for_depth(look.depth) == Style::Modern;
+    const u32 depth = rastport_depth(b, rp);
+    const Look look{depth};
+    const bool modern = style_for_depth(depth) == Style::Modern;
     const i32 right = static_cast<i32>(width) - 1;
     const i32 line = metrics.bar_height();
 
@@ -960,9 +635,12 @@ void draw_screen_bar(Graphics& graphics, Bus& b, u32 rp, u32 width, u32 title,
     }
 
     if (title != 0) {
-        graphics.set_pens(rp, modern ? look(kMenuLabelPen) : pens.pen[BarDetailPen], 0,
-                          ndk::JAM1);
-        draw_title(graphics, b, rp, title, 1, right, metrics);
+        u8 chars[kMaxTitleChars];
+        AmigaSurface state{graphics, rp};
+        const Title text{chars, read_title(b, title, chars)};
+        paint_title(amiga_surface(state, depth), text, 1, right,
+                    modern ? look(kMenuLabelPen) : static_cast<u8>(pens.pen[BarDetailPen]),
+                    metrics);
     }
     restore_rp(b, rp, saved);
 }
@@ -972,11 +650,15 @@ void draw_window_bar(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w) 
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const Look look{rastport_depth(b, rp)};
-    if (style_for_depth(look.depth) == Style::Modern) {
-        draw_modern_bar(graphics, b, rp, look, w);
+    const u32 depth = rastport_depth(b, rp);
+    AmigaSurface state{graphics, rp};
+    const Surface surface = amiga_surface(state, depth);
+    if (style_for_depth(depth) == Style::Modern) {
+        u8 chars[kMaxTitleChars];
+        const Title title{chars, read_title(b, w.title, chars)};
+        paint_modern_bar(surface, w, title);
     } else {
-        draw_classic_frame(graphics, b, rp, w);
+        draw_classic_frame(graphics, b, rp, surface, w);
     }
     restore_rp(b, rp, saved);
 }
@@ -987,48 +669,20 @@ void draw_window_chrome(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& 
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const Look look{rastport_depth(b, rp)};
-    const bool modern = style_for_depth(look.depth) == Style::Modern;
-    const i32 right = w.width - 1;
-    const i32 bottom = w.height - 1;
-
-    const bool rounded = modern &&
-                         (w.flags & (ndk::WFLG_BORDERLESS | ndk::WFLG_BACKDROP)) == 0 &&
-                         w.width >= 7 && w.height >= 4;
-    graphics.set_pens(rp, 0, 0, ndk::JAM2);
-    if (keep != nullptr && keep->x0 <= keep->x1 && keep->y0 <= keep->y1) {
-        // Only clear areas outside the preserved interior; borders are redrawn below.
-        if (keep->x1 < right) {
-            graphics.rect_fill(rp, keep->x1 + 1, 0, right, bottom);
-        }
-        if (keep->y1 < bottom) {
-            graphics.rect_fill(rp, 0, keep->y1 + 1, right, bottom);
-        }
-        if (rounded) {
-            graphics.rect_fill(rp, 0, 0, 2, 0);
-            graphics.rect_fill(rp, 0, 1, 1, 1);
-            graphics.rect_fill(rp, 0, 2, 0, 2);
-            graphics.rect_fill(rp, right - 2, 0, right, 0);
-            graphics.rect_fill(rp, right - 1, 1, right, 1);
-            graphics.rect_fill(rp, right, 2, right, 2);
-        }
+    const u32 depth = rastport_depth(b, rp);
+    AmigaSurface state{graphics, rp};
+    const Surface surface = amiga_surface(state, depth);
+    const bool shows_title = (w.flags & ndk::WFLG_BORDERLESS) == 0;
+    if (style_for_depth(depth) == Style::Modern) {
+        u8 chars[kMaxTitleChars];
+        const Title title{chars, shows_title ? read_title(b, w.title, chars) : 0};
+        paint_modern_window(surface, w, title, keep);
     } else {
-        graphics.rect_fill(rp, 0, 0, right, bottom);
-    }
-
-    if (modern) {
-        draw_modern_frame(graphics, b, rp, look, w, rounded);
-    } else if ((w.flags & ndk::WFLG_BORDERLESS) == 0) {
-        draw_classic_frame(graphics, b, rp, w);
-    }
-
-    const i32 ix0 = static_cast<i32>(w.border_left);
-    const i32 iy0 = static_cast<i32>(w.border_top);
-    const i32 ix1 = w.width - static_cast<i32>(w.border_right) - 1;
-    const i32 iy1 = w.height - static_cast<i32>(w.border_bottom) - 1;
-    if (keep == nullptr && ix0 <= ix1 && iy0 <= iy1) {
-        graphics.set_pens(rp, 0, 0, ndk::JAM2);
-        graphics.rect_fill(rp, ix0, iy0, ix1, iy1);
+        paint_window_clear(surface, w, keep, false);
+        if (shows_title) {
+            draw_classic_frame(graphics, b, rp, surface, w);
+        }
+        paint_window_interior(surface, w, keep);
     }
 
     restore_rp(b, rp, saved);
@@ -1088,31 +742,19 @@ void draw_prop_gadget(Graphics& graphics, Bus& b, u32 rp, const PropChrome& g) {
         return;
     }
     const RpState saved = save_rp(b, rp);
-    const Look look{rastport_depth(b, rp)};
-    const bool modern = style_for_depth(look.depth) == Style::Modern;
-    const u16* pens = g.pens.pen;
-    const bool borderless = (g.pflags & ndk::PROPBORDERLESS) != 0;
-
-    if (modern) {
-        graphics.set_pens(rp, look(kTrack), 0, ndk::JAM2);
-        graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
-        if (!borderless) {
-            graphics.set_pens(rp, look(kFrameDark), 0, ndk::JAM2);
-            graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y0);
-            graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x0, g.box.y1);
-        }
+    const u32 depth = rastport_depth(b, rp);
+    if (style_for_depth(depth) == Style::Modern) {
+        AmigaSurface state{graphics, rp};
+        paint_modern_prop(amiga_surface(state, depth), g);
     } else {
+        const u16* pens = g.pens.pen;
+        const bool borderless = (g.pflags & ndk::PROPBORDERLESS) != 0;
         graphics.set_pens(rp, pens[BackgroundPen], 0, ndk::JAM2);
         graphics.rect_fill(rp, g.box.x0, g.box.y0, g.box.x1, g.box.y1);
         if (!borderless) {
             draw_bevel(graphics, rp, g.box, pens[ShadowPen], pens[ShinePen]);
         }
-    }
-
-    if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1) {
-        if (modern) {
-            draw_knob(graphics, rp, look, g.knob, g.pflags, g.gflags);
-        } else {
+        if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1) {
             draw_classic_knob(graphics, rp, g.knob, (g.gflags & ndk::GFLG_SELECTED) != 0, pens);
         }
     }
