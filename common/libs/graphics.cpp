@@ -952,22 +952,17 @@ struct GraphicsNatives {
         Graphics& g = of(ctx);
         Bus b(m);
         const auto word = [&](u32 r) { return static_cast<i32>(static_cast<i16>(r & 0xFFFF)); };
-        const u32 src = m.cpu.a[0];
-        const u32 bitmap = b.r32(src + ndk::rp_BitMap);
-        const u32 layer = b.r32(src + ndk::rp_Layer);
-        i32 x = word(m.cpu.d[0]);
-        i32 y = word(m.cpu.d[1]);
-        // A layer over a bitmap of its own, as a window's is, starts at that
-        // bitmap's corner; any other sits at its place on the screen.
-        if (layer != 0 && b.r32(layer + ndk::ly_SuperBitMap) != bitmap) {
-            x += static_cast<i16>(b.r16(layer + ndk::ly_MinX));
-            y += static_cast<i16>(b.r16(layer + ndk::ly_MinY));
-        }
-        if (!b.ok() || bitmap == 0) {
+        // The source starts where its layer lies in the bitmap: a window's
+        // at its place in the window's own bitmap, any other at its place on
+        // the screen.
+        const View v = raster::load_rastport(b, m.cpu.a[0]);
+        if (!b.ok() || !v.ok) {
             return;
         }
-        g.blt_bitmap_rastport(bitmap, x, y, m.cpu.a[1], word(m.cpu.d[2]), word(m.cpu.d[3]),
-                              word(m.cpu.d[4]), word(m.cpu.d[5]), m.cpu.d[6] & 0xFF);
+        g.blt_bitmap_rastport(v.bitmap_addr, word(m.cpu.d[0]) + v.origin_x,
+                              word(m.cpu.d[1]) + v.origin_y, m.cpu.a[1], word(m.cpu.d[2]),
+                              word(m.cpu.d[3]), word(m.cpu.d[4]), word(m.cpu.d[5]),
+                              m.cpu.d[6] & 0xFF);
     }
 
     static void set_rgb4(void* ctx, Machine& m) {
@@ -1368,6 +1363,15 @@ struct GraphicsNatives {
     // Drawing finishes before each call returns: there is no blitter to
     // wait for.
     static void wait_blit(void*, Machine&) {}
+
+    // A native that draws is never interrupted, so a layer needs no lock, as
+    // with layers.library's LockLayer; an attempt to get one always does.
+    static void lock_layer_rom(void*, Machine&) {}
+    static void attempt_lock_layer_rom(void*, Machine& m) { native::set_result(m, 1); }
+
+    // SyncSBitMap(layer A0), CopySBitMap(layer A0).
+    static void sync_sbitmap(void* ctx, Machine& m) { of(ctx).sync_super_bitmap(m.cpu.a[0]); }
+    static void copy_sbitmap(void* ctx, Machine& m) { of(ctx).copy_super_bitmap(m.cpu.a[0]); }
 
     // BltBitMapRastPort(src A0, x D0, y D1, rp A1, x D2, y D3, width D4,
     // height D5, minterm D6).
@@ -2768,6 +2772,12 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::InitArea, GraphicsNatives::init_area, "InitArea"},
     {graphics_lvo::InitTmpRas, GraphicsNatives::init_tmp_ras, "InitTmpRas"},
     {graphics_lvo::WaitBlit, GraphicsNatives::wait_blit, "WaitBlit"},
+    {graphics_lvo::LockLayerRom, GraphicsNatives::lock_layer_rom, "LockLayerRom"},
+    {graphics_lvo::UnlockLayerRom, GraphicsNatives::lock_layer_rom, "UnlockLayerRom"},
+    {graphics_lvo::AttemptLockLayerRom, GraphicsNatives::attempt_lock_layer_rom,
+     "AttemptLockLayerRom"},
+    {graphics_lvo::SyncSBitMap, GraphicsNatives::sync_sbitmap, "SyncSBitMap"},
+    {graphics_lvo::CopySBitMap, GraphicsNatives::copy_sbitmap, "CopySBitMap"},
     {graphics_lvo::ScrollRasterBF, GraphicsNatives::scroll_raster_bf, "ScrollRasterBF"},
     {graphics_lvo::SetRPAttrsA, GraphicsNatives::set_rp_attrs, "SetRPAttrsA"},
     {graphics_lvo::GetRPAttrsA, GraphicsNatives::get_rp_attrs, "GetRPAttrsA"},
@@ -3243,6 +3253,49 @@ void Graphics::blt_bitmap_rastport(u32 src_addr, i32 sx, i32 sy, u32 rp, i32 dx,
     }
     blit(b, src_addr, sx, sy, v, &v.clip, dx + v.origin_x, dy + v.origin_y, width, height,
          minterm, b.r8(rp + ndk::rp_Mask));
+}
+
+// The part of a super bitmap a layer shows starts at the layer's scroll
+// offset and is as large as the layer, past what the clip leaves out.
+void Graphics::copy_super_bitmap(u32 layer) {
+    if (machine_ == nullptr || layer == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 rp = b.r32(layer + ndk::ly_rp);
+    const u32 super = b.r32(layer + ndk::ly_SuperBitMap);
+    if (!b.ok() || rp == 0 || super == 0 || b.r32(rp + ndk::rp_BitMap) == super) {
+        return;
+    }
+    const View v = raster::load_rastport(b, rp);
+    if (!v.ok) {
+        return;
+    }
+    blit(b, super, static_cast<i16>(b.r16(layer + ndk::ly_Scroll_X)),
+         static_cast<i16>(b.r16(layer + ndk::ly_Scroll_Y)), v, &v.clip, v.clip.x0, v.clip.y0,
+         v.clip.x1 - v.clip.x0 + 1, v.clip.y1 - v.clip.y0 + 1, 0xC0, 0xFF);
+}
+
+void Graphics::sync_super_bitmap(u32 layer) {
+    if (machine_ == nullptr || layer == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 rp = b.r32(layer + ndk::ly_rp);
+    const u32 super = b.r32(layer + ndk::ly_SuperBitMap);
+    if (!b.ok() || rp == 0 || super == 0 || b.r32(rp + ndk::rp_BitMap) == super) {
+        return;
+    }
+    const View v = raster::load_rastport(b, rp);
+    View to{};
+    if (!v.ok || !raster::load_bitmap(b, super, to.bitmap)) {
+        return;
+    }
+    to.bitmap_addr = super;
+    blit(b, v.bitmap_addr, v.clip.x0, v.clip.y0, to, nullptr,
+         static_cast<i16>(b.r16(layer + ndk::ly_Scroll_X)),
+         static_cast<i16>(b.r16(layer + ndk::ly_Scroll_Y)), v.clip.x1 - v.clip.x0 + 1,
+         v.clip.y1 - v.clip.y0 + 1, 0xC0, 0xFF);
 }
 
 u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const raster::Clip* clip,

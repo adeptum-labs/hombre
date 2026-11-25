@@ -97,6 +97,11 @@ constexpr u32 SetAPen = 342;
 constexpr u32 SetBPen = 348;
 constexpr u32 SetDrMd = 354;
 constexpr u32 InitBitMap = 390;
+constexpr u32 LockLayerRom = 432;
+constexpr u32 UnlockLayerRom = 438;
+constexpr u32 SyncSBitMap = 444;
+constexpr u32 CopySBitMap = 450;
+constexpr u32 AttemptLockLayerRom = 654;
 constexpr u32 ScrollRaster = 396;
 constexpr u32 InitTmpRas = 468;
 constexpr u32 AskFont = 474;
@@ -262,6 +267,12 @@ public:
                    u32 minterm, u32 mask);
     void blt_bitmap_rastport(u32 src, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy, i32 width,
                              i32 height, u32 minterm);
+    // CopySBitMap: the layer shows its super bitmap again, from the scroll
+    // offset on. SyncSBitMap: the super bitmap takes what the layer shows,
+    // so it holds all of the layer's drawing. Neither does anything for a
+    // layer without a super bitmap of its own.
+    void copy_super_bitmap(u32 layer);
+    void sync_super_bitmap(u32 layer);
     // The colour of pen index of the ColorMap, eight bits a gun. False for
     // a bad map or a pen it has not.
     bool color_of(u32 colormap, u32 index, u8& red, u8& green, u8& blue);

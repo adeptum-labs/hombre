@@ -289,10 +289,14 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
     return true;
 }
 
-// Reads the RastPort's BitMap and, when it has a layer, the layer's clip: a
-// layer over the bitmap itself clips to the layer's size, any other layer
-// clips at its screen position. A region installed in the layer clips
-// further, its coordinates relative to the layer's top left corner.
+// Reads the RastPort's BitMap and, when it has a layer, the layer's clip. A
+// window's layer draws into the window's own bitmap, whose corner is the
+// window's: the layer starts where it lies inside the window, as the inner
+// layer of a GimmeZeroZero window does past the borders. Another layer over
+// the bitmap itself clips to the layer's size, any other clips at its
+// screen position. A super bitmap layer reaches no further than its BitMap
+// past the scroll offset. A region installed in the layer clips further,
+// its coordinates relative to the layer's top left corner.
 inline RastPortView load_rastport(native::Bus& bus, u32 rp) {
     RastPortView view{};
     if (rp == 0) {
@@ -310,7 +314,24 @@ inline RastPortView load_rastport(native::Bus& bus, u32 rp) {
         const i32 min_y = static_cast<i16>(bus.r16(layer + ndk::ly_MinY));
         const i32 max_x = static_cast<i16>(bus.r16(layer + ndk::ly_MaxX));
         const i32 max_y = static_cast<i16>(bus.r16(layer + ndk::ly_MaxY));
-        if (bus.r32(layer + ndk::ly_SuperBitMap) == bitmap) {
+        const u32 window = bus.r32(layer + ndk::ly_Window);
+        const u32 super = bus.r32(layer + ndk::ly_SuperBitMap);
+        if (window != 0) {
+            view.origin_x = min_x - static_cast<i16>(bus.r16(window + ndk::wd_LeftEdge));
+            view.origin_y = min_y - static_cast<i16>(bus.r16(window + ndk::wd_TopEdge));
+            i32 width = max_x - min_x + 1;
+            i32 height = max_y - min_y + 1;
+            if (super != 0 && super != bitmap) {
+                const i32 room_x = static_cast<i32>(bus.r16(super + ndk::bm_BytesPerRow)) * 8 -
+                                   static_cast<i16>(bus.r16(layer + ndk::ly_Scroll_X));
+                const i32 room_y = static_cast<i32>(bus.r16(super + ndk::bm_Rows)) -
+                                   static_cast<i16>(bus.r16(layer + ndk::ly_Scroll_Y));
+                width = room_x < width ? room_x : width;
+                height = room_y < height ? room_y : height;
+            }
+            view.clip = Clip{view.origin_x, view.origin_y, view.origin_x + width - 1,
+                             view.origin_y + height - 1};
+        } else if (super == bitmap) {
             view.clip = Clip{0, 0, max_x - min_x, max_y - min_y};
         } else {
             view.origin_x = min_x;
