@@ -36,6 +36,7 @@ namespace hombre {
 using m68k::Machine;
 using native::Bus;
 using native::LogLine;
+using namespace gadtools_defs;
 
 namespace {
 
@@ -110,43 +111,10 @@ constexpr u32 kMaxPaletteColors = 256;
 constexpr u16 kOptBorder = 0x1;
 constexpr u16 kOptScaled = 0x4;
 
-// Gadget kinds (libraries/gadtools.h).
-constexpr u32 GENERIC_KIND = 0;
-constexpr u32 BUTTON_KIND = 1;
-constexpr u32 CHECKBOX_KIND = 2;
-constexpr u32 INTEGER_KIND = 3;
-constexpr u32 LISTVIEW_KIND = 4;
-constexpr u32 NUMBER_KIND = 6;
-constexpr u32 CYCLE_KIND = 7;
-constexpr u32 PALETTE_KIND = 8;
-constexpr u32 SCROLLER_KIND = 9;
-constexpr u32 SLIDER_KIND = 11;
-constexpr u32 STRING_KIND = 12;
-constexpr u32 TEXT_KIND = 13;
-constexpr u32 kKinds = 14;
 // The parts of a list view, which no program asks for.
 constexpr u32 kListScrollerKind = 0x80;
 constexpr u32 kListUpKind = 0x81;
 constexpr u32 kListDownKind = 0x82;
-
-// struct NewGadget.
-constexpr u32 ng_LeftEdge = 0;
-constexpr u32 ng_TopEdge = 2;
-constexpr u32 ng_Width = 4;
-constexpr u32 ng_Height = 6;
-constexpr u32 ng_GadgetText = 8;
-constexpr u32 ng_TextAttr = 12;
-constexpr u32 ng_GadgetID = 16;
-constexpr u32 ng_Flags = 18;
-constexpr u32 ng_VisualInfo = 22;
-constexpr u32 ng_UserData = 26;
-
-// Label placement, ng_Flags.
-constexpr u32 PLACETEXT_LEFT = 0x1;
-constexpr u32 PLACETEXT_RIGHT = 0x2;
-constexpr u32 PLACETEXT_ABOVE = 0x4;
-constexpr u32 PLACETEXT_BELOW = 0x8;
-constexpr u32 PLACETEXT_IN = 0x10;
 
 // The tags of the gadgets gadtools makes.
 constexpr u32 GA_Disabled = 0x8003000E;
@@ -167,8 +135,6 @@ constexpr u32 GTPA_ColorTable = 0x80080052;
 constexpr u32 GTSC_Top = 0x80080015;
 constexpr u32 GTSC_Total = 0x80080016;
 constexpr u32 GTSC_Visible = 0x80080017;
-constexpr u32 GTST_String = 0x8008002D;
-constexpr u32 GTST_MaxChars = 0x8008002E;
 constexpr u32 GTIN_Number = 0x8008002F;
 constexpr u32 GTIN_MaxChars = 0x80080030;
 constexpr u32 PGA_Freedom = 0x80031001;

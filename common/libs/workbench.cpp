@@ -295,6 +295,7 @@ constexpr u32 kMenuCount = sizeof kMenus / sizeof kMenus[0];
 constexpr u32 kMenuWorkbench = 0;
 constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
+constexpr i32 kRequestMargin = 8;
 constexpr u32 kItemBackdrop = 0;
 constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
@@ -2825,21 +2826,32 @@ void Workbench::show_error(const char* what, const char* name, u32 error) {
     show_requester("Workbench Request", text);
 }
 
-// A requester with the text and an Ok button. Only the running desktop
-// shows one: it waits for the button, which nothing presses in a test.
 void Workbench::show_requester(const char* title, const char* text) {
+    easy(title, text, "Ok");
+}
+
+bool Workbench::confirm(const char* title, const char* text) {
+    if (answer_ != nullptr) {
+        return answer_(answer_ctx_, title, text, nullptr, 0);
+    }
+    return easy(title, text, "Ok|Cancel") == 1;
+}
+
+// Only the running desktop shows a requester: it waits for a button, which
+// nothing presses in a test.
+i32 Workbench::easy(const char* title, const char* text, const char* gadgets) {
     if (!running_ || machine_ == nullptr || exec_ == nullptr || intuition_ == nullptr) {
-        return;
+        return 0;
     }
     constexpr char kFormat[] = "%s";
-    constexpr char kGadgets[] = "Ok";
     const u32 title_bytes = text_length(title) + 1;
     const u32 text_bytes = text_length(text) + 1;
-    const u32 bytes =
-        ndk::EasyStruct_SIZEOF + 4 + sizeof kFormat + sizeof kGadgets + title_bytes + text_bytes;
+    const u32 gadgets_bytes = text_length(gadgets) + 1;
+    const u32 bytes = ndk::EasyStruct_SIZEOF + 4 + sizeof kFormat + gadgets_bytes + title_bytes +
+                      text_bytes;
     const u32 block = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (block == 0) {
-        return;
+        return 0;
     }
     Bus b(*machine_);
     const u32 args = block + ndk::EasyStruct_SIZEOF;
@@ -2853,7 +2865,7 @@ void Workbench::show_requester(const char* title, const char* text) {
         return start;
     };
     const u32 format_at = put(kFormat, sizeof kFormat);
-    const u32 gadgets_at = put(kGadgets, sizeof kGadgets);
+    const u32 gadgets_at = put(gadgets, gadgets_bytes);
     const u32 title_at = put(title, title_bytes);
     const u32 text_at = put(text, text_bytes);
     b.w32(block + ndk::es_StructSize, ndk::EasyStruct_SIZEOF);
@@ -2864,10 +2876,174 @@ void Workbench::show_requester(const char* title, const char* text) {
     b.w32(args, text_at);
     const DrawerWindow* root = find_window(kRootWindow);
     const u32 window = root != nullptr ? root->window : 0;
-    if (b.ok()) {
-        intuition_->easy_request(window, block, 0, args);
-    }
+    const i32 answer = b.ok() ? intuition_->easy_request(window, block, 0, args) : 0;
     exec_->free(block, bytes);
+    return answer;
+}
+
+bool Workbench::ask_text(const char* title, const char* prompt, const char* initial, char* out,
+                         u32 size) {
+    if (out == nullptr || size == 0) {
+        return false;
+    }
+    if (answer_ != nullptr) {
+        copy_text(out, size, initial);
+        return answer_(answer_ctx_, title, prompt, out, size);
+    }
+    TextRequest request{};
+    if (!running_ || !open_text_request(title, prompt, initial, size, request)) {
+        return false;
+    }
+    Bus b(*machine_);
+    const u32 bit = b.r8(b.r32(request.window + ndk::wd_UserPort) + ndk::mp_SigBit);
+    Reply reply = Reply::Cancelled;
+    while (b.ok() && bit < 32 &&
+           (reply = text_request_input(request, out, size)) == Reply::Waiting &&
+           exec_->wait_for(1u << bit, ~u64(0)) != 0) {
+    }
+    close_text_request(request);
+    return reply == Reply::Accepted;
+}
+
+// A prompt above a string gadget, with Ok and Cancel buttons under it, sized
+// by the screen's font.
+bool Workbench::open_text_request(const char* title, const char* prompt, const char* initial,
+                                  u32 size, TextRequest& request) {
+    using namespace gadtools_defs;
+    if (machine_ == nullptr || exec_ == nullptr || intuition_ == nullptr || gadtools_ == nullptr ||
+        graphics_ == nullptr || screen_ == 0 || size < 2) {
+        return false;
+    }
+    constexpr u32 kTagWords = 6;
+    constexpr char kOk[] = "Ok";
+    constexpr char kCancel[] = "Cancel";
+    const u32 title_bytes = text_length(title) + 1;
+    const u32 prompt_bytes = text_length(prompt) + 1;
+    const u32 initial_bytes = text_length(initial) + 1;
+    const u32 bytes = ndk::NewWindow_SIZEOF + NewGadget_SIZEOF + kTagWords * 4 + 4 + sizeof kOk +
+                      sizeof kCancel + title_bytes + prompt_bytes + initial_bytes;
+    const u32 block = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    if (block == 0) {
+        return false;
+    }
+    request = TextRequest{};
+    request.block = block;
+    request.block_bytes = bytes;
+    Bus b(*machine_);
+    const u32 new_window = block;
+    const u32 new_gadget = new_window + ndk::NewWindow_SIZEOF;
+    const u32 tags = new_gadget + NewGadget_SIZEOF;
+    const u32 list = tags + kTagWords * 4;
+    u32 at = list + 4;
+    auto put = [&](const char* part, u32 length) {
+        const u32 start = at;
+        for (u32 i = 0; i < length; ++i) {
+            b.w8(at + i, static_cast<u8>(part[i]));
+        }
+        at += length;
+        return start;
+    };
+    const u32 ok_at = put(kOk, sizeof kOk);
+    const u32 cancel_at = put(kCancel, sizeof kCancel);
+    const u32 title_at = put(title, title_bytes);
+    const u32 prompt_at = put(prompt, prompt_bytes);
+    const u32 initial_at = put(initial, initial_bytes);
+    b.w32(tags, GTST_String);
+    b.w32(tags + 4, initial_at);
+    b.w32(tags + 8, GTST_MaxChars);
+    b.w32(tags + 12, size - 1);
+
+    const Graphics::FontMetrics font =
+        graphics_->font_metrics(intuition_->font_of_screen(screen_));
+    const i32 bar_height = static_cast<i32>(b.r8(screen_ + ndk::sc_BarHeight));
+    const i32 width = 40 * font.x_size;
+    const i32 gadget_height = font.y_size + 6;
+    const i32 string_top = bar_height + font.y_size + 10;
+    const i32 button_top = string_top + gadget_height + kRequestMargin;
+    const i32 button_width = 9 * font.x_size;
+
+    request.gadgets = gadtools_->create_context(list);
+    u32 previous = request.gadgets;
+    auto add = [&](u32 kind, u16 id, i32 left, i32 top, i32 gadget_width, u32 label, u32 place,
+                   u32 gadget_tags) {
+        b.w16(new_gadget + ng_LeftEdge, static_cast<u32>(left));
+        b.w16(new_gadget + ng_TopEdge, static_cast<u32>(top));
+        b.w16(new_gadget + ng_Width, static_cast<u32>(gadget_width));
+        b.w16(new_gadget + ng_Height, static_cast<u32>(gadget_height));
+        b.w32(new_gadget + ng_GadgetText, label);
+        b.w16(new_gadget + ng_GadgetID, id);
+        b.w32(new_gadget + ng_Flags, place);
+        previous = gadtools_->create_gadget(kind, previous, new_gadget, gadget_tags);
+        return previous;
+    };
+    request.string = add(STRING_KIND, kRequestString, kRequestMargin, string_top,
+                         width - 2 * kRequestMargin, prompt_at, PLACETEXT_ABOVE, tags);
+    add(BUTTON_KIND, kRequestOk, kRequestMargin, button_top, button_width, ok_at, PLACETEXT_IN, 0);
+    add(BUTTON_KIND, kRequestCancel, width - kRequestMargin - button_width, button_top,
+        button_width, cancel_at, PLACETEXT_IN, 0);
+
+    b.w16(new_window + ndk::nw_LeftEdge, kCascadeX);
+    b.w16(new_window + ndk::nw_TopEdge, static_cast<u32>(2 * bar_height));
+    b.w16(new_window + ndk::nw_Width, static_cast<u32>(width));
+    b.w16(new_window + ndk::nw_Height,
+          static_cast<u32>(button_top + gadget_height + kRequestMargin));
+    b.w8(new_window + ndk::nw_BlockPen, 1);
+    b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_GADGETUP);
+    b.w32(new_window + ndk::nw_Flags, ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET |
+                                          ndk::WFLG_CLOSEGADGET | ndk::WFLG_ACTIVATE);
+    b.w32(new_window + ndk::nw_FirstGadget, request.gadgets);
+    b.w32(new_window + ndk::nw_Title, title_at);
+    b.w32(new_window + ndk::nw_Screen, screen_);
+    b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
+    request.window =
+        b.ok() && previous != 0 ? intuition_->open_window(new_window, 0) : 0;
+    if (request.window == 0) {
+        LogLine().text("workbench: could not ask for ").text(prompt).send();
+        close_text_request(request);
+        return false;
+    }
+    gadtools_->refresh_window(request.window);
+    intuition_->activate_string(request.string, request.window);
+    return true;
+}
+
+Workbench::Reply Workbench::text_request_input(const TextRequest& request, char* out, u32 size) {
+    Bus b(*machine_);
+    const u32 port = b.r32(request.window + ndk::wd_UserPort);
+    u32 message = 0;
+    while (b.ok() && port != 0 && (message = exec_->get_message(port)) != 0) {
+        const u32 idcmp_class = b.r32(message + ndk::im_Class);
+        const u32 code = b.r16(message + ndk::im_Code);
+        const u32 gadget = b.r32(message + ndk::im_IAddress);
+        exec_->reply_message(message);
+        if (idcmp_class == ndk::IDCMP_CLOSEWINDOW) {
+            return Reply::Cancelled;
+        }
+        if (idcmp_class != ndk::IDCMP_GADGETUP) {
+            continue;
+        }
+        const u32 id = b.r16(gadget + ndk::gg_GadgetID);
+        if (id == kRequestCancel) {
+            return Reply::Cancelled;
+        }
+        if (id == kRequestOk || (id == kRequestString && code == '\r')) {
+            const u32 info = b.r32(request.string + ndk::gg_SpecialInfo);
+            return b.string(b.r32(info + ndk::si_Buffer), out, size) ? Reply::Accepted
+                                                                      : Reply::Cancelled;
+        }
+    }
+    return b.ok() && port != 0 ? Reply::Waiting : Reply::Cancelled;
+}
+
+void Workbench::close_text_request(TextRequest& request) {
+    if (request.window != 0) {
+        intuition_->close_window(request.window);
+    }
+    gadtools_->free_gadgets(request.gadgets);
+    if (request.block != 0) {
+        exec_->free(request.block, request.block_bytes);
+    }
+    request = TextRequest{};
 }
 
 // --- snapshots -----------------------------------------------------------

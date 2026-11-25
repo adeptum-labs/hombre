@@ -74,6 +74,50 @@ constexpr u32 GT_GetGadgetAttrsA = 174;
 
 }
 
+// The parts of libraries/gadtools.h that ROM code making gadgets shares
+// with the library.
+namespace gadtools_defs {
+
+// Gadget kinds (libraries/gadtools.h).
+constexpr u32 GENERIC_KIND = 0;
+constexpr u32 BUTTON_KIND = 1;
+constexpr u32 CHECKBOX_KIND = 2;
+constexpr u32 INTEGER_KIND = 3;
+constexpr u32 LISTVIEW_KIND = 4;
+constexpr u32 NUMBER_KIND = 6;
+constexpr u32 CYCLE_KIND = 7;
+constexpr u32 PALETTE_KIND = 8;
+constexpr u32 SCROLLER_KIND = 9;
+constexpr u32 SLIDER_KIND = 11;
+constexpr u32 STRING_KIND = 12;
+constexpr u32 TEXT_KIND = 13;
+constexpr u32 kKinds = 14;
+
+// struct NewGadget.
+constexpr u32 ng_LeftEdge = 0;
+constexpr u32 ng_TopEdge = 2;
+constexpr u32 ng_Width = 4;
+constexpr u32 ng_Height = 6;
+constexpr u32 ng_GadgetText = 8;
+constexpr u32 ng_TextAttr = 12;
+constexpr u32 ng_GadgetID = 16;
+constexpr u32 ng_Flags = 18;
+constexpr u32 ng_VisualInfo = 22;
+constexpr u32 ng_UserData = 26;
+constexpr u32 NewGadget_SIZEOF = 30;
+
+// Label placement, ng_Flags.
+constexpr u32 PLACETEXT_LEFT = 0x1;
+constexpr u32 PLACETEXT_RIGHT = 0x2;
+constexpr u32 PLACETEXT_ABOVE = 0x4;
+constexpr u32 PLACETEXT_BELOW = 0x8;
+constexpr u32 PLACETEXT_IN = 0x10;
+
+constexpr u32 GTST_String = 0x8008002D;
+constexpr u32 GTST_MaxChars = 0x8008002E;
+
+}
+
 class GadTools {
 public:
     // Makes gadtools.library and adds it to exec's library list. exec must

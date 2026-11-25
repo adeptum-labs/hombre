@@ -298,6 +298,43 @@ public:
     u32 icon_font() const;
     u32 system_font() const;
 
+    // Answers confirm and ask_text in place of the user: text holds the
+    // initial line of ask_text and takes the entered one, and is null for
+    // confirm. False cancels.
+    using Answer = bool (*)(void* ctx, const char* title, const char* body, char* text,
+                            u32 size);
+    void set_answer(Answer answer, void* ctx) {
+        answer_ = answer;
+        answer_ctx_ = ctx;
+    }
+
+    // A requester with Ok and Cancel buttons; true for Ok.
+    bool confirm(const char* title, const char* text);
+
+    // Asks for a line of text, starting from initial; true for Ok or
+    // Return, with the line in out.
+    bool ask_text(const char* title, const char* prompt, const char* initial, char* out,
+                  u32 size);
+
+    // The window of ask_text, apart so that its input can be fed one step
+    // at a time.
+    struct TextRequest {
+        u32 window = 0;
+        u32 gadgets = 0;  // the first of its gadget list
+        u32 string = 0;
+        u32 block = 0;  // the strings and structs the gadgets keep
+        u32 block_bytes = 0;
+    };
+    static constexpr u16 kRequestString = 1;
+    static constexpr u16 kRequestOk = 2;
+    static constexpr u16 kRequestCancel = 3;
+    enum class Reply : u8 { Waiting, Accepted, Cancelled };
+    bool open_text_request(const char* title, const char* prompt, const char* initial, u32 size,
+                           TextRequest& request);
+    // Handles the input waiting at the request's window.
+    Reply text_request_input(const TextRequest& request, char* out, u32 size);
+    void close_text_request(TextRequest& request);
+
     // The window's scroll gadget with the GadgetID id; 0 when it has none.
     u32 scroll_gadget(u32 window_id, u16 id) const;
     Extent extent(u32 window_id) const;
@@ -522,6 +559,9 @@ private:
     bool screen_origin(u32 window_id, i32& x, i32& y) const;
     void show_error(const char* what, const char* name, u32 error);
     void show_requester(const char* title, const char* text);
+    // EasyRequest over the desktop with the text and the buttons of
+    // gadgets, giving its answer; 0 when none can be shown.
+    i32 easy(const char* title, const char* text, const char* gadgets);
     const IconEntry* icon_at(u32 window_id, i32 x, i32 y) const;
     void start_wbstartup();
 
@@ -548,6 +588,8 @@ private:
     Intuition* intuition_ = nullptr;
     GadTools* gadtools_ = nullptr;
     Icon* icon_ = nullptr;
+    Answer answer_ = nullptr;
+    void* answer_ctx_ = nullptr;
     u32 base_ = 0;
     u32 process_ = 0;
     u32 screen_ = 0;

@@ -2915,6 +2915,89 @@ void snapshot_and_unsnapshot_store_the_icon_place() {
     CHECK(logged("workbench: cannot snapshot Tool: Disk is write-protected"));
 }
 
+// The screen position of a point of a request's gadget.
+std::pair<i32, i32> gadget_point(const Rig& r, const Workbench::TextRequest& request, u16 id) {
+    u32 gadget = request.gadgets;
+    while (gadget != 0 && r.get16(gadget + ndk::gg_GadgetID) != id) {
+        gadget = r.get32(gadget);
+    }
+    CHECK(gadget != 0);
+    const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
+    return {word(request.window + ndk::wd_LeftEdge) + word(gadget + ndk::gg_LeftEdge) + 4,
+            word(request.window + ndk::wd_TopEdge) + word(gadget + ndk::gg_TopEdge) + 4};
+}
+
+void click_gadget(Rig& r, const Workbench::TextRequest& request, u16 id) {
+    const std::pair<i32, i32> at = gadget_point(r, request, id);
+    g_intuition.pointer_event(at.first, at.second, 1, 1, 0, true);
+    g_intuition.pointer_event(at.first, at.second, 0, 0, 1, false);
+}
+
+void a_text_request_answers_return_and_its_buttons() {
+    Rig r;
+    r.workbench.open_desktop();
+    char text[32]{};
+    Workbench::TextRequest request{};
+    const auto open = [&] {
+        CHECK(r.workbench.open_text_request("Rename", "New name", "Old", sizeof text, request));
+        CHECK(r.workbench.text_request_input(request, text, sizeof text) ==
+              Workbench::Reply::Waiting);
+    };
+    const auto answered = [&](Workbench::Reply want) {
+        CHECK(r.workbench.text_request_input(request, text, sizeof text) == want);
+        r.workbench.close_text_request(request);
+        CHECK_EQ(request.window, 0u);
+    };
+    open();
+    const u32 free = r.free_bytes();
+    // Return in the string gadget, which is being edited from the start.
+    g_intuition.string_key('\r');
+    answered(Workbench::Reply::Accepted);
+    CHECK(std::string(text) == "Old");
+    CHECK(r.free_bytes() > free);
+
+    text[0] = '\0';
+    open();
+    click_gadget(r, request, Workbench::kRequestOk);
+    answered(Workbench::Reply::Accepted);
+    CHECK(std::string(text) == "Old");
+
+    open();
+    click_gadget(r, request, Workbench::kRequestCancel);
+    answered(Workbench::Reply::Cancelled);
+
+    // Opening and closing it again and again keeps no memory.
+    open();
+    r.workbench.close_text_request(request);
+    const u32 before = r.free_bytes();
+    open();
+    r.workbench.close_text_request(request);
+    CHECK_EQ(r.free_bytes(), before);
+}
+
+void a_set_answer_stands_in_for_the_requesters() {
+    Rig r;
+    r.workbench.open_desktop();
+    char text[32]{};
+    // Without a user to answer, a requester is cancelled.
+    CHECK(!r.workbench.confirm("Delete", "Really?"));
+    CHECK(!r.workbench.ask_text("Rename", "New name", "Old", text, sizeof text));
+    std::string seen;
+    r.workbench.set_answer(
+        [](void* ctx, const char* title, const char*, char* out, u32 size) {
+            *static_cast<std::string*>(ctx) += title;
+            if (out != nullptr && size > 4) {
+                __builtin_memcpy(out, "New", 4);
+            }
+            return true;
+        },
+        &seen);
+    CHECK(r.workbench.confirm("Delete", "Really?"));
+    CHECK(r.workbench.ask_text("Rename", "New name", "Old", text, sizeof text));
+    CHECK(std::string(text) == "New");
+    CHECK(seen == "DeleteRename");
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -3581,6 +3664,8 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    a_text_request_answers_return_and_its_buttons();
+    a_set_answer_stands_in_for_the_requesters();
     a_window_snapshot_is_used_when_the_window_opens_again();
     a_reset_closes_and_reopens_the_windows();
     more_drawers_open_than_the_old_table_held();
