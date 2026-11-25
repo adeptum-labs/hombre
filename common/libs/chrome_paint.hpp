@@ -60,4 +60,22 @@ void paint_modern_prop(const Surface&, const PropChrome&);
 // The characters of the title that fit from x to x1, on the title baseline.
 void paint_title(const Surface&, const Title&, i32 x, i32 x1, u8 pen, const Metrics&);
 
+// The pens of a requester on screens of the modern look, and the SHINEPEN,
+// SHADOWPEN, BACKGROUNDPEN and TEXTPEN of the screen's DrawInfo on the
+// others.
+struct BoxPens {
+    u8 light;
+    u8 dark;
+    u8 paper;
+    u8 text;
+};
+
+BoxPens requester_pens(u32 depth, const DrawInfoPens&);
+
+// Paper with a two-pixel bevel, the light edge top left unless recessed.
+void paint_box(const Surface&, const Rect&, const BoxPens&, bool recessed);
+// The text that fits, centred in the box.
+void paint_label(const Surface&, const Rect&, const u8* chars, u32 length, u8 pen,
+                 const Metrics&);
+
 }

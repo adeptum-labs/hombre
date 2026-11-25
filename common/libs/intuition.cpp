@@ -25,6 +25,8 @@
 
 #include "../hid_mouse.hpp"
 #include "chrome.hpp"
+#include "chrome_amiga.hpp"
+#include "chrome_paint.hpp"
 #include "chrome_palette.hpp"
 #include "display_modes.hpp"
 #include "exec.hpp"
@@ -461,59 +463,6 @@ constexpr i32 smaller(i32 a, i32 b) { return a < b ? a : b; }
 
 constexpr i32 larger(i32 a, i32 b) { return a > b ? a : b; }
 
-// The pens of a requester on screens of the modern look, and the SHINEPEN,
-// SHADOWPEN, BACKGROUNDPEN and TEXTPEN of the screen's DrawInfo on the
-// others.
-struct RequesterPens {
-    u8 light;
-    u8 dark;
-    u8 paper;
-    u8 text;
-};
-
-RequesterPens requester_pens(u32 depth, const chrome::DrawInfoPens& drawinfo) {
-    if (chrome::style_for_depth(depth) == chrome::Style::Modern) {
-        return RequesterPens{chrome::physical_pen(chrome::kFrameLight, depth),
-                             chrome::physical_pen(chrome::kFrameDark, depth),
-                             chrome::physical_pen(chrome::kInactiveBar0, depth),
-                             chrome::physical_pen(chrome::kFrameDark, depth)};
-    }
-    const u16* pens = drawinfo.pen;
-    return RequesterPens{static_cast<u8>(pens[sysimage::ShinePen]),
-                         static_cast<u8>(pens[sysimage::ShadowPen]),
-                         static_cast<u8>(pens[sysimage::BackgroundPen]),
-                         static_cast<u8>(pens[sysimage::TextPen])};
-}
-
-// A bevel of two pixels around the paper: the top and left edges in the
-// light pen and the bottom and right in the dark, or the other way round
-// for a recessed box.
-void draw_requester_box(Graphics& graphics, u32 rp, const Rect& box, const RequesterPens& pens,
-                        bool recessed) {
-    if (box.x1 < box.x0 || box.y1 < box.y0) {
-        return;
-    }
-    graphics.set_pens(rp, pens.paper, 0, ndk::JAM2);
-    graphics.rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
-    const u8 top = recessed ? pens.dark : pens.light;
-    const u8 bottom = recessed ? pens.light : pens.dark;
-    for (i32 inset = 0; inset < 2; ++inset) {
-        const i32 x0 = box.x0 + inset;
-        const i32 y0 = box.y0 + inset;
-        const i32 x1 = box.x1 - inset;
-        const i32 y1 = box.y1 - inset;
-        if (x0 > x1 || y0 > y1) {
-            break;
-        }
-        graphics.set_pens(rp, top, 0, ndk::JAM2);
-        graphics.rect_fill(rp, x0, y0, x1, y0);
-        graphics.rect_fill(rp, x0, y0, x0, y1);
-        graphics.set_pens(rp, bottom, 0, ndk::JAM2);
-        graphics.rect_fill(rp, x0, y1, x1, y1);
-        graphics.rect_fill(rp, x1, y0, x1, y1);
-    }
-}
-
 // The characters of the text that fit in room pixels in font, from x on
 // the baseline.
 void draw_requester_text(Graphics& graphics, u32 rp, i32 x, i32 baseline, const char* text,
@@ -526,22 +475,6 @@ void draw_requester_text(Graphics& graphics, u32 rp, i32 x, i32 baseline, const 
     graphics.set_pens(rp, pen, 0, ndk::JAM1);
     graphics.move(rp, x, baseline);
     graphics.plain_text_in(rp, font, chars, shown);
-}
-
-void draw_requester_label(Graphics& graphics, u32 rp, const Rect& box, const char* text,
-                          u32 length, u8 pen, const chrome::Metrics& style) {
-    const i32 width = box.x1 - box.x0 + 1;
-    const i32 height = box.y1 - box.y0 + 1;
-    const i32 room = width - 4;
-    if (height < style.font_height) {
-        return;
-    }
-    const u8* chars = reinterpret_cast<const u8*>(text);
-    const u32 shown = graphics.text_fit(style.font, chars, length, room);
-    const i32 span = static_cast<i32>(graphics.text_width(style.font, chars, shown));
-    const i32 x = box.x0 + (width - span) / 2;
-    const i32 baseline = box.y0 + (height - style.font_height) / 2 + style.font_baseline;
-    draw_requester_text(graphics, rp, x, baseline, text, shown, room, pen, style.font);
 }
 
 void refresh_full(DisplayState& display, Machine& m, u32 screen, u32 width, u32 height) {
@@ -4828,11 +4761,13 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
     if (b.ok() && rp != 0) {
         const u32 depth = b.r8(b.r32(rp + ndk::rp_BitMap) + ndk::bm_Depth);
         const ScreenRecord* srec = find_screen_record(screen);
-        const RequesterPens pens = requester_pens(
+        const chrome::BoxPens pens = chrome::requester_pens(
             depth, screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)));
         begin_batch();
+        chrome::AmigaSurface state{*graphics_, rp};
+        const chrome::Surface surface = chrome::amiga_surface(state, depth);
         if (text_box.x1 >= text_box.x0 && text_box.y1 >= text_box.y0) {
-            draw_requester_box(*graphics_, rp, text_box, pens, true);
+            chrome::paint_box(surface, text_box, pens, true);
             for (u32 i = 0; i < text_count; ++i) {
                 const i32 x = text_box.x0 + kRequesterTextPad + text[i].left;
                 const i32 top = text_box.y0 + kRequesterTextPad + text[i].top;
@@ -4845,9 +4780,10 @@ u32 Intuition::build_requester(u32 window, u32 title, const RequesterText* text,
             }
         }
         for (u32 i = 0; i < req.button_count; ++i) {
-            draw_requester_box(*graphics_, rp, req.buttons[i], pens, false);
-            draw_requester_label(*graphics_, rp, req.buttons[i], req.labels[i],
-                                 req.label_length[i], pens.text, style);
+            chrome::paint_box(surface, req.buttons[i], pens, false);
+            chrome::paint_label(surface, req.buttons[i],
+                                reinterpret_cast<const u8*>(req.labels[i]),
+                                req.label_length[i], pens.text, style);
         }
         end_batch();
     }
@@ -5029,12 +4965,15 @@ void Intuition::draw_requester_button(u32 window, const Requester& req, u32 inde
     if (!b.ok() || srec == nullptr) {
         return;
     }
-    const RequesterPens pens = requester_pens(
+    const chrome::BoxPens pens = chrome::requester_pens(
         depth, screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)));
     begin_batch();
-    draw_requester_box(*graphics_, rp, req.buttons[index], pens, pressed);
-    draw_requester_label(*graphics_, rp, req.buttons[index], req.labels[index],
-                         req.label_length[index], pens.text, window_metrics(window));
+    chrome::AmigaSurface state{*graphics_, rp};
+    const chrome::Surface surface = chrome::amiga_surface(state, depth);
+    chrome::paint_box(surface, req.buttons[index], pens, pressed);
+    chrome::paint_label(surface, req.buttons[index],
+                        reinterpret_cast<const u8*>(req.labels[index]),
+                        req.label_length[index], pens.text, window_metrics(window));
     end_batch();
 }
 

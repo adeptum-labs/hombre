@@ -366,6 +366,60 @@ void paint_title(const Surface& surface, const Title& title, i32 x, i32 x1, u8 p
     }
 }
 
+BoxPens requester_pens(u32 depth, const DrawInfoPens& drawinfo) {
+    if (style_for_depth(depth) == Style::Modern) {
+        return BoxPens{physical_pen(kFrameLight, depth), physical_pen(kFrameDark, depth),
+                       physical_pen(kInactiveBar0, depth), physical_pen(kFrameDark, depth)};
+    }
+    const u16* pens = drawinfo.pen;
+    return BoxPens{static_cast<u8>(pens[sysimage::ShinePen]),
+                   static_cast<u8>(pens[sysimage::ShadowPen]),
+                   static_cast<u8>(pens[sysimage::BackgroundPen]),
+                   static_cast<u8>(pens[sysimage::TextPen])};
+}
+
+// A bevel of two pixels around the paper: the top and left edges in the
+// light pen and the bottom and right in the dark, or the other way round
+// for a recessed box.
+void paint_box(const Surface& surface, const Rect& box, const BoxPens& pens, bool recessed) {
+    if (box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
+    fill(surface, box.x0, box.y0, box.x1, box.y1, pens.paper);
+    const u8 top = recessed ? pens.dark : pens.light;
+    const u8 bottom = recessed ? pens.light : pens.dark;
+    for (i32 inset = 0; inset < 2; ++inset) {
+        const i32 x0 = box.x0 + inset;
+        const i32 y0 = box.y0 + inset;
+        const i32 x1 = box.x1 - inset;
+        const i32 y1 = box.y1 - inset;
+        if (x0 > x1 || y0 > y1) {
+            break;
+        }
+        fill(surface, x0, y0, x1, y0, top);
+        fill(surface, x0, y0, x0, y1, top);
+        fill(surface, x0, y1, x1, y1, bottom);
+        fill(surface, x1, y0, x1, y1, bottom);
+    }
+}
+
+void paint_label(const Surface& surface, const Rect& box, const u8* chars, u32 length, u8 pen,
+                 const Metrics& style) {
+    const i32 width = box.x1 - box.x0 + 1;
+    const i32 height = box.y1 - box.y0 + 1;
+    const i32 room = width - 4;
+    if (height < style.font_height) {
+        return;
+    }
+    const u32 shown = surface.text_fit(surface.ctx, style.font, chars, length, room);
+    const i32 span = surface.text_width(surface.ctx, style.font, chars, shown);
+    const i32 x = box.x0 + (width - span) / 2;
+    const i32 baseline = box.y0 + (height - style.font_height) / 2 + style.font_baseline;
+    if (shown != 0) {
+        surface.text(surface.ctx, style.font, x, baseline, pen, chars, shown);
+    }
+}
+
 // The title between the bar buttons, or the frame where a button is missing.
 void paint_bar_title(const Surface& surface, const WindowChrome& w, const Title& title,
                      u8 pen) {
