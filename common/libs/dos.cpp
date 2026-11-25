@@ -1395,7 +1395,7 @@ struct DosOps {
         u32 days;
         u32 minute;
         u32 tick;
-        const char* comment;
+        char comment[Dos::kMaxComment + 1];
         u32 comment_len;
         u32 owner;
     };
@@ -1417,16 +1417,18 @@ struct DosOps {
             out.days = n.date.days;
             out.minute = n.date.minute;
             out.tick = n.date.tick;
-            out.comment = n.comment;
             const u32 clen = length_of(n.comment);
-            out.comment_len = clen < 79 ? clen : 79;
+            out.comment_len = clen < Dos::kMaxComment ? clen : Dos::kMaxComment;
+            for (u32 i = 0; i < out.comment_len; ++i) {
+                out.comment[i] = n.comment[i];
+            }
+            out.comment[out.comment_len] = '\0';
             out.owner = n.owner;
             return 0;
         }
         if (entry.volume == Dos::kVolRomFonts) {
             out = FsMeta{};
             out.type = ST_ROOT;
-            out.comment = "";
             return 0;
         }
         using namespace amiga_fs_detail;
@@ -1451,8 +1453,11 @@ struct DosOps {
         out.minute = long_at(header, block_longs - 22);
         out.tick = long_at(header, block_longs - 21);
         const u8* comment = header + (block_longs - 46) * 4;
-        out.comment_len = comment[0] < 79 ? comment[0] : 79;
-        out.comment = reinterpret_cast<const char*>(comment + 1);
+        out.comment_len = comment[0] < Dos::kMaxComment ? comment[0] : Dos::kMaxComment;
+        for (u32 i = 0; i < out.comment_len; ++i) {
+            out.comment[i] = static_cast<char>(comment[1 + i]);
+        }
+        out.comment[out.comment_len] = '\0';
         out.owner = 0;
         return 0;
     }
@@ -2550,6 +2555,32 @@ struct DosOps {
             base = slot->path;
         }
         return apply_relative_path(base, name, out, error);
+    }
+
+    // What name stands for, with its entry for a file or drawer; Missing,
+    // kept as IoErr, when there is nothing by that name.
+    static Dos::TargetKind find_named(Dos& d, const char* name, DirEntry& entry) {
+        if (d.m_ == nullptr || name == nullptr) {
+            return Dos::TargetKind::Missing;
+        }
+        Bus b(*d.m_);
+        u8 vol = Dos::kVolDf0;
+        char resolved[Dos::kMaxPath];
+        u32 error = 0;
+        if (!resolve_public(d, b, name, vol, resolved, error)) {
+            return Dos::TargetKind::Missing;
+        }
+        if (resolved[0] == '\0') {
+            return Dos::TargetKind::VolumeRoot;
+        }
+        const u32 err = fs_find(d, vol, resolved, entry);
+        if (err != 0) {
+            if (b.ok()) {
+                d.set_last_error(err);
+            }
+            return Dos::TargetKind::Missing;
+        }
+        return entry.is_dir ? Dos::TargetKind::Dir : Dos::TargetKind::File;
     }
 
     // Resolves a name for a public call, keeping a failure as IoErr.
@@ -10645,35 +10676,34 @@ u32 Dos::load_seg(const char* path) {
     return seglist;
 }
 
-Dos::Target Dos::examine(const char* name) {
-    Target target;
-    if (m_ == nullptr || name == nullptr) {
-        return target;
-    }
-    Bus b(*m_);
-    u8 vol = kVolDf0;
-    char resolved[kMaxPath];
-    u32 error = 0;
-    if (!DosOps::resolve(*this, b, name, vol, resolved, error)) {
-        if (b.ok()) {
-            set_last_error(error);
-        }
-        return target;
-    }
-    if (resolved[0] == '\0') {
-        target.kind = TargetKind::VolumeRoot;
-        return target;
-    }
+Dos::FileInfo Dos::file_info(const char* name) {
+    FileInfo info;
     DirEntry entry{};
-    const u32 err = DosOps::fs_find(*this, vol, resolved, entry);
-    if (err != 0) {
-        if (b.ok()) {
-            set_last_error(err);
-        }
-        return target;
+    info.kind = DosOps::find_named(*this, name, entry);
+    if (info.kind != TargetKind::File && info.kind != TargetKind::Dir) {
+        return info;
     }
-    target.kind = entry.is_dir ? TargetKind::Dir : TargetKind::File;
-    target.size = entry.is_dir ? 0 : DosOps::fs_size(*this, entry);
+    DosOps::FsMeta meta{};
+    const u32 error = DosOps::fs_meta(*this, entry, meta);
+    if (error != 0) {
+        set_last_error(error);
+        return FileInfo{};
+    }
+    info.protection = meta.protection;
+    info.size = info.kind == TargetKind::File ? DosOps::fs_size(*this, entry) : 0;
+    info.blocks = meta.num_blocks;
+    info.days = meta.days;
+    info.minutes = meta.minute;
+    info.ticks = meta.tick;
+    __builtin_memcpy(info.comment, meta.comment, sizeof info.comment);
+    return info;
+}
+
+Dos::Target Dos::examine(const char* name) {
+    DirEntry entry{};
+    Target target;
+    target.kind = DosOps::find_named(*this, name, entry);
+    target.size = target.kind == TargetKind::File ? DosOps::fs_size(*this, entry) : 0;
     return target;
 }
 

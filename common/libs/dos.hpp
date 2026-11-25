@@ -771,6 +771,7 @@ public:
     static constexpr u32 kStackBytes = 4096;
     static constexpr u32 kMaxArgs = 512;    // bytes of a command's argument line
     static constexpr u32 kMaxPath = 256;    // bytes of a resolved path, NUL included
+    static constexpr u32 kMaxComment = 79;  // bytes of a FileInfoBlock comment
     static constexpr u32 kMaxFiles = 16;    // files and console streams a program opens
     static constexpr u32 kMaxLocks = 128;
     static constexpr u32 kMaxPathDirs = 16;  // directories in the CLI command search path
@@ -866,6 +867,24 @@ public:
     // names no mounted volume. A name that is not there reports Missing,
     // with IoErr ERROR_OBJECT_NOT_FOUND.
     Target examine(const char* name);
+
+    // What Examine fills a FileInfoBlock with: the type, protection bits,
+    // size, blocks, date and comment of an object. A volume root has none of
+    // them; it is only named as such.
+    struct FileInfo {
+        TargetKind kind = TargetKind::Missing;
+        u32 protection = 0;
+        u32 size = 0;
+        u32 blocks = 0;
+        u32 days = 0;
+        u32 minutes = 0;
+        u32 ticks = 0;
+        char comment[kMaxComment + 1]{};
+    };
+
+    // The same look-up as examine, filling in the details a FileInfoBlock
+    // gives. Sets IoErr as examine does.
+    FileInfo file_info(const char* name);
 
     // Reads the whole of the file name into data, at most capacity bytes,
     // setting got, error and IoErr. False unless the whole file was read;

@@ -3386,6 +3386,55 @@ void the_public_calls_change_paths_on_ram_and_partitions() {
     CHECK_SOUND(disk.volume);
 }
 
+void file_info_reports_what_examine_fills() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk;
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    g_dos.set_clock(disk_clock);
+    u32 error = 0;
+    const u8 data[] = {'a', 'b', 'c'};
+
+    CHECK(g_dos.write_file("RAM:Info", data, 3, error));
+    CHECK(g_dos.set_protection_bits("RAM:Info", 0x11B1, error));
+    CHECK(g_dos.set_file_comment("RAM:Info", "ram comment", error));
+    const Dos::FileInfo ram = g_dos.file_info("RAM:Info");
+    CHECK(ram.kind == Dos::TargetKind::File);
+    CHECK_EQ(ram.protection, 0x11B1u);
+    CHECK_EQ(ram.size, 3u);
+    CHECK_EQ(ram.blocks, 1u);
+    CHECK_EQ(ram.days, 1000u);
+    CHECK_EQ(ram.minutes, 61u);
+    CHECK_EQ(ram.ticks, 7u);
+    CHECK(std::string(ram.comment) == "ram comment");
+    CHECK_EQ(g_dos.examine("RAM:Info").size, ram.size);
+
+    CHECK(g_dos.make_dir("RAM:InfoDir", error));
+    const Dos::FileInfo dir = g_dos.file_info("RAM:InfoDir");
+    CHECK(dir.kind == Dos::TargetKind::Dir);
+    CHECK_EQ(dir.size, 0u);
+    CHECK_EQ(dir.blocks, 0u);
+    CHECK(g_dos.file_info("RAM:").kind == Dos::TargetKind::VolumeRoot);
+
+    const Dos::FileInfo missing = g_dos.file_info("RAM:NoInfo");
+    CHECK(missing.kind == Dos::TargetKind::Missing);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_NOT_FOUND);
+
+    // A partition file gives the same details Examine's FileInfoBlock has.
+    CHECK(g_dos.write_file("DH0:Info", data, 3, error));
+    CHECK(g_dos.set_protection_bits("DH0:Info", 0x11B1, error));
+    CHECK(g_dos.set_file_comment("DH0:Info", "disk comment", error));
+    const Dos::FileInfo partition = g_dos.file_info("DH0:Info");
+    CHECK(partition.kind == Dos::TargetKind::File);
+    CHECK_EQ(partition.protection, 0x11B1u);
+    CHECK_EQ(partition.size, 3u);
+    CHECK_EQ(partition.blocks, 1u);
+    CHECK_EQ(partition.days, 1000u);
+    CHECK_EQ(partition.minutes, 61u);
+    CHECK_EQ(partition.ticks, 7u);
+    CHECK(std::string(partition.comment) == "disk comment");
+    CHECK_SOUND(disk.volume);
+}
+
 void a_file_that_does_not_fit_is_not_left_behind() {
     Floppy df0(build_adf("HombreTest", false, standard_files()));
     DiskPartition disk(1, 64);
@@ -8924,6 +8973,7 @@ int main() {
     a_disk_that_cannot_be_written_refuses_every_change();
     the_public_calls_write_and_delete_files_on_a_partition();
     the_public_calls_change_paths_on_ram_and_partitions();
+    file_info_reports_what_examine_fills();
     a_file_that_does_not_fit_is_not_left_behind();
     set_var_saves_to_envarc_on_a_writable_boot_partition();
     layout_matches_the_ndk();
