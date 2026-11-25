@@ -20,6 +20,8 @@ software, on modern hardware and in virtual machines.
   virtio, SATA and NVMe.
 - PAL, NTSC and widescreen modes up to 3840x2160, in 8, 16 and 24-bit.
 - A system monitor on F12 to stop a hung program or swap floppies.
+- Resource tracking: a program that is killed gives back its windows, files
+  and memory.
 - A 64-bit kernel with UEFI boot and preemptive multitasking.
 
 ## Documentation
@@ -37,6 +39,10 @@ The wiki has the full story:
   what runs today and what comes next.
 - **[Supported hardware](https://github.com/adeptum-labs/hombre/wiki/Supported-Hardware)**:
   the processor, firmware, display, input and disks Hombre needs.
+- **[The kernel](https://github.com/adeptum-labs/hombre/wiki/Kernel)**:
+  what it does and the data it keeps, with diagrams.
+- **[Resource tracking](https://github.com/adeptum-labs/hombre/wiki/Resource-Tracking)**:
+  what Hombre gives back when a program ends or is killed.
 - **[System monitor](https://github.com/adeptum-labs/hombre/wiki/System-Monitor)**:
   what F12 shows and does, with screenshots.
 - **[HombreShell](https://github.com/adeptum-labs/hombre/wiki/HombreShell)**:
