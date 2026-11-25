@@ -28,6 +28,7 @@
 #include "../dos_date.hpp"
 #include "../format.hpp"
 
+#include <algorithm>
 #include <initializer_list>
 
 namespace hombre {
@@ -45,6 +46,9 @@ constexpr char kProcessName[] = "Workbench";
 constexpr char kBackdropName[] = "Workbench";
 constexpr char kRamDiskName[] = "Ram Disk";
 constexpr char kWbStartupDrawer[] = "SYS:WBStartup";
+constexpr char kBackdropFile[] = ".backdrop";
+// More than any list of left out icons needs.
+constexpr u32 kMaxBackdropBytes = 16384;
 
 // struct DiskObject (workbench/workbench.h): the Gadget comes first.
 constexpr u32 do_Gadget = 4;
@@ -326,7 +330,7 @@ constexpr MenuItemSpec kWindowItems[] = {
 constexpr MenuItemSpec kIconsItems[] = {
     {"Open", true},          {"Copy", true},         {"Rename...", true},
     {"Information...", true}, {"Snapshot", true},    {"Unsnapshot", true},
-    {"Leave Out", false},    {"Put Away", false},     {"Delete...", true},
+    {"Leave Out", true},     {"Put Away", true},      {"Delete...", true},
     {"Format Disk...", false}, {"Empty Trash", false},
 };
 
@@ -356,6 +360,8 @@ constexpr u32 kItemIconCopy = 1;
 constexpr u32 kItemIconRename = 2;
 constexpr u32 kItemIconInformation = 3;
 constexpr u32 kItemIconUnsnapshot = 5;
+constexpr u32 kItemIconLeaveOut = 6;
+constexpr u32 kItemIconPutAway = 7;
 constexpr u32 kItemIconDelete = 8;
 constexpr u32 kSubAll = 1;
 constexpr u32 kNoSub = 31;
@@ -1296,6 +1302,7 @@ void Workbench::free_icons(u32 owner) {
         if (icon.owned && icon.object != 0) {
             icon_->free_object(icon.object);
         }
+        std::erase_if(left_out_, [&](const LeftOut& out) { return out.icon == icon.id; });
         return true;
     });
 }
@@ -1328,6 +1335,10 @@ void Workbench::add_volume(const char* label, const char* icon_path, u8 drive) {
         place_root_icon(*root, *icon);
     }
     LogLine().text("workbench: volume ").text(label).send();
+    char volume[Dos::kMaxPath];
+    if (volume_root(*icon, volume)) {
+        add_left_outs(volume);
+    }
 }
 
 // A disk in every drive that holds one, the floppy drives first, then the
@@ -1391,13 +1402,17 @@ void Workbench::refresh_volumes() {
             }
             close_drawer(drawer->id);
         }
-        if (drag_.armed && drag_.icon == stale->id) {
-            cancel_drag();
+        const u32 gone = stale->id;
+        for (;;) {
+            const auto out = std::find_if(left_out_.begin(), left_out_.end(), [&](const LeftOut& o) {
+                return starts_with_ci(o.drawer, by_name) || starts_with_ci(o.drawer, by_device);
+            });
+            if (out == left_out_.end()) {
+                break;
+            }
+            remove_root_icon(out->icon);
         }
-        if (root->clicks.selected() == stale->id) {
-            root->clicks.clear();
-        }
-        icons_.remove(stale);
+        remove_root_icon(gone);
         changed = true;
     }
     const usize before = icons_.size();
@@ -1565,7 +1580,7 @@ bool Workbench::icon_target_path(const DrawerWindow& window, const IconEntry& ic
     if (window.id == kRootWindow && icon.type == kDisk) {
         return volume_root(icon, out);
     }
-    return join_path(window.path, icon.file, out);
+    return join_path(drawer_of(window, icon), icon.file, out);
 }
 
 // The path of the icon's .info without the suffix: "Name:Disk" for a disk.
@@ -1575,7 +1590,7 @@ bool Workbench::icon_path(const DrawerWindow& window, const IconEntry& icon,
         char volume[Dos::kMaxPath];
         return icon_target_path(window, icon, volume) && join_path(volume, "Disk", out);
     }
-    return join_path(window.path, icon.file, out);
+    return join_path(drawer_of(window, icon), icon.file, out);
 }
 
 void Workbench::open_drawer_window(const char* path, const char* name, u32 object,
@@ -2709,7 +2724,7 @@ void Workbench::open_icon(u32 window_id, u32 icon_id) {
     if (window == nullptr || icon == nullptr) {
         return;
     }
-    const char* drawer = window->path;
+    const char* drawer = drawer_of(*window, *icon);
     switch (icon->type) {
     case kDisk:
     case kDrawer:
@@ -2874,7 +2889,7 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
         draw_window(to->id);
         return;
     }
-    if (icon.type != kTool && icon.type != kProject) {
+    if ((icon.type != kTool && icon.type != kProject) || left_out(icon.id) != nullptr) {
         LogLine().text("workbench: ").text(icon.name).text(" cannot be moved there").send();
         return;
     }
@@ -4188,6 +4203,227 @@ void Workbench::ask_command() {
     }
 }
 
+// --- left out icons ------------------------------------------------------
+
+const Workbench::LeftOut* Workbench::left_out(u32 icon_id) const {
+    for (const LeftOut& out : left_out_) {
+        if (out.icon == icon_id) {
+            return &out;
+        }
+    }
+    return nullptr;
+}
+
+const char* Workbench::drawer_of(const DrawerWindow& window, const IconEntry& icon) const {
+    const LeftOut* out = left_out(icon.id);
+    return out != nullptr ? out->drawer : window.path;
+}
+
+void Workbench::remove_root_icon(u32 icon_id) {
+    IconEntry* icon = find_icon(icon_id);
+    if (icon == nullptr) {
+        return;
+    }
+    if (drag_.armed && drag_.icon == icon_id) {
+        cancel_drag();
+    }
+    if (DrawerWindow* root = find_window(kRootWindow);
+        root != nullptr && root->clicks.selected() == icon_id) {
+        root->clicks.clear();
+    }
+    if (icon->owned && icon->object != 0) {
+        icon_->free_object(icon->object);
+    }
+    std::erase_if(left_out_, [&](const LeftOut& out) { return out.icon == icon_id; });
+    icons_.remove(icon);
+}
+
+bool Workbench::backdrop_entry(const char* path, char (&file)[Dos::kMaxPath],
+                               char (&line)[Dos::kMaxPath]) const {
+    u32 colon = 0;
+    while (path[colon] != '\0' && path[colon] != ':') {
+        ++colon;
+    }
+    if (path[colon] != ':' || colon + sizeof kBackdropFile + 1 > Dos::kMaxPath) {
+        return false;
+    }
+    copy_text(file, sizeof file, path);
+    copy_text(file + colon + 1, sizeof kBackdropFile, kBackdropFile);
+    copy_text(line, sizeof line, path + colon);
+    return true;
+}
+
+bool Workbench::set_backdrop_line(const char* file, const char* line, bool listed, u32& error) {
+    const Dos::Target target = dos_->examine(file);
+    const u32 size = target.kind == Dos::TargetKind::File ? target.size : 0;
+    if (size > kMaxBackdropBytes) {
+        error = ERROR_OBJECT_TOO_LARGE;
+        return false;
+    }
+    std::vector<u8> old(size);
+    u32 got = 0;
+    if (size != 0 && !dos_->read_file(file, old.data(), size, got, error)) {
+        return false;
+    }
+    // Every other line stays as it is.
+    std::vector<u8> text;
+    const u32 length = text_length(line);
+    for (u32 start = 0, end = 0; start < got; start = end + 1) {
+        for (end = start; end < got && old[end] != '\n'; ++end) {
+        }
+        u32 same = 0;
+        while (same < length && start + same < end &&
+               upper_ascii(static_cast<char>(old[start + same])) == upper_ascii(line[same])) {
+            ++same;
+        }
+        if (same != length || start + same != end) {
+            text.insert(text.end(), old.begin() + start, old.begin() + end);
+            text.push_back('\n');
+        }
+    }
+    if (listed) {
+        text.insert(text.end(), line, line + length);
+        text.push_back('\n');
+    }
+    if (text.empty()) {
+        return size == 0 && target.kind == Dos::TargetKind::Missing
+                   ? true
+                   : dos_->delete_file(file, error);
+    }
+    return dos_->write_file(file, text.data(), static_cast<u32>(text.size()), error);
+}
+
+bool Workbench::add_left_out(const char* drawer, const char* file) {
+    const DrawerWindow* root = find_window(kRootWindow);
+    char path[Dos::kMaxPath];
+    if (root == nullptr || !join_path(drawer, file, path)) {
+        return false;
+    }
+    for (const LeftOut& out : left_out_) {
+        const IconEntry* icon = find_icon(out.icon);
+        if (icon != nullptr && same_ci(out.drawer, drawer) && same_ci(icon->file, file)) {
+            return true;
+        }
+    }
+    const u32 object = icon_->load_object(path);
+    if (object == 0) {
+        return false;
+    }
+    IconEntry* icon = take_icon(kRootWindow);
+    if (icon == nullptr) {
+        icon_->free_object(object);
+        LogLine().text("workbench: icon table full").send();
+        return false;
+    }
+    Bus b(*machine_);
+    icon->object = object;
+    icon->owned = true;
+    icon->type = static_cast<u8>(b.r8(object + do_Type));
+    copy_text(icon->name, sizeof icon->name, file);
+    copy_text(icon->file, sizeof icon->file, file);
+    LeftOut out;
+    out.icon = icon->id;
+    copy_text(out.drawer, sizeof out.drawer, drawer);
+    left_out_.push_back(out);
+    measure(*icon);
+    place_root_icon(*root, *icon);
+    LogLine().text("workbench: left out ").text(path).send();
+    return true;
+}
+
+void Workbench::add_left_outs(const char* volume) {
+    char list[Dos::kMaxPath];
+    if (!join_path(volume, kBackdropFile, list)) {
+        return;
+    }
+    const Dos::Target target = dos_->examine(list);
+    if (target.kind != Dos::TargetKind::File || target.size > kMaxBackdropBytes) {
+        return;
+    }
+    std::vector<u8> text(target.size);
+    u32 got = 0;
+    u32 error = 0;
+    if (target.size == 0 || !dos_->read_file(list, text.data(), target.size, got, error)) {
+        return;
+    }
+    // Each line names a file from the volume's root: ":Drawer/File".
+    for (u32 start = 0, end = 0; start < got; start = end + 1) {
+        for (end = start; end < got && text[end] != '\n'; ++end) {
+        }
+        if (text[start] != ':' || end - start >= Dos::kMaxPath) {
+            continue;
+        }
+        char name[Dos::kMaxPath]{};
+        __builtin_memcpy(name, text.data() + start + 1, end - start - 1);
+        char path[Dos::kMaxPath];
+        if (!join_path(volume, name, path)) {
+            continue;
+        }
+        u32 leaf = text_length(volume);
+        for (u32 i = leaf; path[i] != '\0'; ++i) {
+            leaf = path[i] == '/' ? i + 1 : leaf;
+        }
+        char file[32];
+        if (path[leaf] == '\0' || text_length(path + leaf) >= sizeof file) {
+            continue;
+        }
+        copy_text(file, sizeof file, path + leaf);
+        // The drawer ends before the '/', or with the volume's ':'.
+        path[path[leaf - 1] == '/' ? leaf - 1 : leaf] = '\0';
+        add_left_out(path, file);
+    }
+}
+
+bool Workbench::leave_out(u32 window_id, u32 icon_id) {
+    const IconEntry* icon = file_icon(window_id, icon_id);
+    if (icon == nullptr) {
+        const IconEntry* other = find_icon(icon_id);
+        show_error("cannot leave out", other != nullptr ? other->name : "?",
+                   ERROR_OBJECT_WRONG_TYPE);
+        return false;
+    }
+    const DrawerWindow& window = *find_window(window_id);
+    char drawer[Dos::kMaxPath];
+    char file[32];
+    copy_text(drawer, sizeof drawer, window.path);
+    copy_text(file, sizeof file, icon->file);
+    char path[Dos::kMaxPath];
+    char list[Dos::kMaxPath];
+    char line[Dos::kMaxPath];
+    u32 error = ERROR_INVALID_COMPONENT_NAME;
+    if (!join_path(drawer, file, path) || !backdrop_entry(path, list, line) ||
+        !set_backdrop_line(list, line, true, error)) {
+        show_error("cannot leave out", file, error);
+        return false;
+    }
+    if (!add_left_out(drawer, file)) {
+        return false;
+    }
+    draw_window(kRootWindow);
+    return true;
+}
+
+bool Workbench::put_away(u32 icon_id) {
+    const LeftOut* out = left_out(icon_id);
+    const IconEntry* icon = find_icon(icon_id);
+    if (out == nullptr || icon == nullptr) {
+        return false;
+    }
+    char path[Dos::kMaxPath];
+    char list[Dos::kMaxPath];
+    char line[Dos::kMaxPath];
+    u32 error = ERROR_INVALID_COMPONENT_NAME;
+    if (!join_path(out->drawer, icon->file, path) || !backdrop_entry(path, list, line) ||
+        !set_backdrop_line(list, line, false, error)) {
+        show_error("cannot put away", icon->name, error);
+        return false;
+    }
+    remove_root_icon(icon_id);
+    draw_window(kRootWindow);
+    LogLine().text("workbench: put away ").text(path).send();
+    return true;
+}
+
 // --- snapshots -----------------------------------------------------------
 
 bool Workbench::snapshot_icon(u32 window_id, u32 icon_id) {
@@ -4197,7 +4433,8 @@ bool Workbench::snapshot_icon(u32 window_id, u32 icon_id) {
         return false;
     }
     IconEntry& icon = *found;
-    if (!icon.owned || icon.type == kAppIcon || icon.object == 0) {
+    // The place a left out icon has in its .info is the one in its drawer.
+    if (!icon.owned || icon.type == kAppIcon || icon.object == 0 || left_out(icon.id) != nullptr) {
         LogLine().text("workbench: ").text(icon.name).text(" keeps no snapshot").send();
         return false;
     }
@@ -4225,7 +4462,7 @@ bool Workbench::unsnapshot_icon(u32 window_id, u32 icon_id) {
         return false;
     }
     IconEntry& icon = *found;
-    if (!icon.owned || icon.type == kAppIcon || icon.object == 0) {
+    if (!icon.owned || icon.type == kAppIcon || icon.object == 0 || left_out(icon.id) != nullptr) {
         LogLine().text("workbench: ").text(icon.name).text(" keeps no snapshot").send();
         return false;
     }
@@ -4439,6 +4676,10 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             snapshot_icon(window_id, selected);
         } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {
             unsnapshot_icon(window_id, selected);
+        } else if (item == kItemIconLeaveOut && selected != kNoIcon) {
+            leave_out(window_id, selected);
+        } else if (item == kItemIconPutAway && selected != kNoIcon) {
+            put_away(selected);
         } else if (item == kItemIconDelete && selected != kNoIcon) {
             ask_delete(window_id, selected);
         }

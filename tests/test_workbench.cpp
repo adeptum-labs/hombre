@@ -3863,6 +3863,70 @@ void an_icon_without_a_place_keeps_clear_of_the_others() {
     CHECK(loose.left >= kept.left + kept.width || loose.top >= kept.top + kept.height);
 }
 
+std::string ram_text(const std::string& path) {
+    u8 data[256]{};
+    u32 got = 0;
+    u32 error = 0;
+    if (!g_dos.read_file(path.c_str(), data, sizeof data, got, error)) {
+        return "";
+    }
+    return std::string(reinterpret_cast<char*>(data), got);
+}
+
+void leave_out_keeps_an_icon_on_the_root_window() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    put_ram_drawer(r, "Box");
+    put_ram_project("Note");
+    r.rescan("Ram Disk:");
+    CHECK(r.workbench.leave_out(w.ram, r.find_icon_in(w.ram, "Note")));
+    CHECK(ram_text("RAM:.backdrop") == ":Note\n");
+    const u32 out = r.find_icon_in(0, "Note");
+    CHECK(out != Workbench::kNoIcon);
+    CHECK(r.find_icon_in(w.ram, "Note") != Workbench::kNoIcon);
+    // Once is enough.
+    CHECK(r.workbench.leave_out(w.ram, r.find_icon_in(w.ram, "Note")));
+    CHECK(ram_text("RAM:.backdrop") == ":Note\n");
+
+    // An icon in a drawer is listed with its path from the volume.
+    r.workbench.open_icon(w.ram, r.find_icon_in(w.ram, "Box"));
+    const u32 box = r.find_window("Ram Disk:Box");
+    CHECK(r.workbench.leave_out(box, r.find_icon_in(box, "One")));
+    CHECK(ram_text("RAM:.backdrop") == ":Note\n:Box/One\n");
+
+    // A left out icon keeps no snapshot and is no file to delete.
+    CHECK(!r.workbench.snapshot_icon(0, out));
+    CHECK(!r.workbench.delete_icon(0, out));
+    CHECK(!r.workbench.put_away(r.find_icon_in(0, "Ram Disk")));
+
+    CHECK(r.workbench.put_away(out));
+    CHECK(ram_text("RAM:.backdrop") == ":Box/One\n");
+    CHECK_EQ(r.find_icon_in(0, "Note"), Workbench::kNoIcon);
+    CHECK(r.workbench.put_away(r.find_icon_in(0, "One")));
+    CHECK(!r.exists("RAM:.backdrop"));
+    CHECK(!r.workbench.leave_out(w.tools, r.find_icon_in(w.tools, "Tool")));
+    CHECK(logged("workbench: cannot leave out Tool: Disk is write-protected"));
+}
+
+void the_backdrop_file_brings_icons_back() {
+    Rig r;
+    u32 error = 0;
+    r.make_dir("RAM:Box");
+    put_ram_project("Box/One");
+    put_ram_project("Note");
+    const std::string list = ":Box/One\n:Gone\n:note\n";
+    CHECK(g_dos.write_file("RAM:.backdrop", reinterpret_cast<const u8*>(list.data()),
+                           static_cast<u32>(list.size()), error));
+    r.workbench.open_desktop();
+    CHECK(r.find_icon_in(0, "One") != Workbench::kNoIcon);
+    CHECK(r.find_icon_in(0, "note") != Workbench::kNoIcon);
+    CHECK_EQ(r.find_icon_in(0, "Gone"), Workbench::kNoIcon);
+    // Put Away drops its line whatever its case; the others stay.
+    click_icon(r, 0, r.find_icon_in(0, "note"));
+    r.workbench.menu_pick(0, icons_pick(7));
+    CHECK(ram_text("RAM:.backdrop") == ":Box/One\n:Gone\n");
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -4529,6 +4593,8 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    leave_out_keeps_an_icon_on_the_root_window();
+    the_backdrop_file_brings_icons_back();
     an_icon_without_a_place_keeps_clear_of_the_others();
     execute_command_hands_the_line_to_a_shell();
     copy_duplicates_a_file_or_a_drawer_under_a_new_name();

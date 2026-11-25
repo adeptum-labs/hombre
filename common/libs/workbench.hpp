@@ -500,6 +500,17 @@ public:
     // cannot be copied, which leaves no part of the copy.
     bool copy_icon(u32 window_id, u32 icon_id);
 
+    // Icons > Leave Out: shows the icon of the drawer window on the root
+    // window too and lists it in its volume's .backdrop file, which brings
+    // it back with the volume. False, shown, for a disk or an AppIcon and
+    // when the file cannot be written.
+    bool leave_out(u32 window_id, u32 icon_id);
+
+    // Icons > Put Away: takes a left out icon off the root window and out
+    // of its volume's .backdrop. False for any other icon and, shown, when
+    // the file cannot be written.
+    bool put_away(u32 icon_id);
+
     // Opens the window the icon of window window_id stands for, or
     // brings the window already open for it to the front.
     void open_drawer(u32 window_id, const IconEntry& icon);
@@ -572,6 +583,29 @@ private:
         char path[Dos::kMaxPath]{};
         bool is_dir = false;
     };
+
+    // The drawer of a left out icon, which the root window shows.
+    struct LeftOut {
+        u32 icon = 0;
+        char drawer[Dos::kMaxPath]{};
+    };
+
+    const LeftOut* left_out(u32 icon_id) const;
+    // The drawer the icon's file is in: its window's, or the one a left out
+    // icon came from.
+    const char* drawer_of(const DrawerWindow& window, const IconEntry& icon) const;
+    // The .backdrop of the volume path is on and the line that names path
+    // in it.
+    bool backdrop_entry(const char* path, char (&file)[Dos::kMaxPath],
+                        char (&line)[Dos::kMaxPath]) const;
+    // Rewrites the .backdrop file with or without the line.
+    bool set_backdrop_line(const char* file, const char* line, bool listed, u32& error);
+    // Shows the icon of the object file of drawer on the root window,
+    // unless it is there.
+    bool add_left_out(const char* drawer, const char* file);
+    // The icons the .backdrop of the volume "Name:" lists.
+    void add_left_outs(const char* volume);
+    void remove_root_icon(u32 icon_id);
 
     // A drawer close_for_reset closed: how to find it again and where its
     // window stood.
@@ -791,6 +825,7 @@ private:
     bool running_ = false;
     bool desktop_open_ = false;
     bool backdrop_ = true;
+    std::vector<LeftOut> left_out_;
     SlotList<IconEntry> icons_{kMaxIcons};
     u32 last_icon_id_ = 0;  // the id of the icon made last
     SlotList<DrawerWindow> windows_{kMaxWindows};
