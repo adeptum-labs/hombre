@@ -1657,6 +1657,13 @@ const u8* Jit::translate(u32 pc) {
     return nullptr;
 }
 
+void Jit::run_native(const NativeSlot& slot) {
+    const char* const outer = native_;
+    native_ = slot.name;
+    slot.fn(slot.ctx, *machine_);
+    native_ = outer;
+}
+
 bool Jit::call_native(u16 id) {
     if (machine_ == nullptr || id < 2 || id >= kNatives || natives_[id].fn == nullptr) {
         return false;
@@ -1679,7 +1686,7 @@ bool Jit::call_native(u16 id) {
         .hex(cpu.a[1])
         .send();
 #endif
-    slot.fn(slot.ctx, *machine_);
+    run_native(slot);
 #ifdef HOMBRE_TRACE_NATIVES
     LogLine().text("  -> d0=").hex(cpu.d[0]).send();
 #endif
@@ -1721,7 +1728,7 @@ void Jit::dispatch(u32 opcode) {
         .hex(cpu.a[1])
         .send();
 #endif
-    slot.fn(slot.ctx, *machine_);
+    run_native(slot);
 #ifdef HOMBRE_TRACE_NATIVES
     LogLine().text("  -> d0=").hex(cpu.d[0]).send();
 #endif

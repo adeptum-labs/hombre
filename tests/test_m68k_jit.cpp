@@ -26,6 +26,7 @@
 #include "m68k_jit.hpp"
 #include "test_guest.hpp"
 
+#include <cstring>
 #include <initializer_list>
 #include <string>
 #include <sys/mman.h>
@@ -406,6 +407,7 @@ int g_native_calls = 0;
 void native_seven(void* ctx, Machine& m) {
     CHECK(ctx == &g_native_calls);
     ++g_native_calls;
+    CHECK(std::strcmp(m.jit->current_native(), "seven") == 0);
     m.cpu.d[0] = 7;
 }
 
@@ -416,6 +418,7 @@ void native_nested(void* ctx, Machine& m) {
     CHECK_EQ(m.cpu.exit, ExitReason::None);
     CHECK_EQ(m.cpu.a[7], sp);
     m.cpu.d[3] += 1;
+    CHECK(std::strcmp(m.jit->current_native(), "nested") == 0);
 }
 
 void natives_are_called_by_their_aline_opcode() {
@@ -429,6 +432,7 @@ void natives_are_called_by_their_aline_opcode() {
     r.program(kCode, {0x4EB8, 0x3000, 0x2200});
     CHECK_EQ(r.go(), ExitReason::Halt);
     CHECK_EQ(g_native_calls, 1);
+    CHECK(g_jit.current_native() == nullptr);
     CHECK_EQ(r.cpu().d[1], 7u);
     CHECK_EQ(r.cpu().a[7], kStack);
 

@@ -121,6 +121,7 @@ public:
     struct RunState {
         u64 budget_left = 0;
         u32 run_depth = 0;
+        const char* native = nullptr;
     };
 
     using PreemptHook = void (*)(void* ctx);
@@ -176,12 +177,16 @@ public:
         preempt_ctx_ = ctx;
     }
 
-    RunState save_run_state() const { return RunState{budget_left_, run_depth_}; }
+    RunState save_run_state() const { return RunState{budget_left_, run_depth_, native_}; }
 
     void restore_run_state(const RunState& state) {
         budget_left_ = state.budget_left;
         run_depth_ = state.run_depth;
+        native_ = state.native;
     }
+
+    // The name of the native the running task is in, null outside one.
+    const char* current_native() const { return native_; }
 
 private:
     static constexpr u32 kSlotBits = 13;
@@ -196,6 +201,7 @@ private:
     const u8* lookup(u32 pc) const;
     const u8* translate(u32 pc);
     void dispatch(u32 opcode);
+    void run_native(const NativeSlot& slot);
 
     Machine* machine_ = nullptr;
     CodeRegion region_{};
@@ -205,6 +211,7 @@ private:
     u32 address_mask_ = 0xFFFFFFFF;
     u64 budget_left_ = 0;  // blocks the outermost run has left
     u32 run_depth_ = 0;
+    const char* native_ = nullptr;
     PreemptHook preempt_hook_ = nullptr;
     void* preempt_ctx_ = nullptr;
     u32 blocks_ = 0;

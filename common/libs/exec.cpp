@@ -3445,6 +3445,17 @@ bool Exec::task_info(u32 slot, TaskInfo& out) const {
     return true;
 }
 
+bool Exec::task_context(u32 slot, m68k::CpuState& cpu, const char*& native) const {
+    TaskInfo info;
+    if (!task_info(slot, info)) {
+        return false;
+    }
+    const bool running = info.state == TaskState::Running;
+    cpu = running ? m_->cpu : tasks_[slot].cpu;
+    native = running ? m_->jit->current_native() : tasks_[slot].run_state.native;
+    return true;
+}
+
 u32 Exec::create_port() {
     if (m_ == nullptr) {
         return 0;

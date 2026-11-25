@@ -548,6 +548,11 @@ public:
     // and Disable. Reads only, for the system monitor. False otherwise.
     bool task_info(u32 slot, TaskInfo& out) const;
 
+    // The 68000 registers of the task in slot, live for the running one and
+    // as saved for another, and the native it is in, null outside one. Reads
+    // only; false for a slot without a task.
+    bool task_context(u32 slot, m68k::CpuState& cpu, const char*& native) const;
+
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
     // tc_SigRecvd SetSignal and Wait use. It may be set before init and is
     // kept across it.

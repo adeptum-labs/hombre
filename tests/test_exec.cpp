@@ -4199,11 +4199,23 @@ void task_info_reports_the_occupying_slots_only() {
     CHECK(!info.forbid);
     CHECK(!info.disable);
 
+    // The registers are the live ones of the running task and the saved
+    // ones of another.
+    r.cpu().d[3] = 0x1234;
+    CpuState registers;
+    const char* native = "unset";
+    CHECK(g_exec.task_context(0, registers, native));
+    CHECK_EQ(registers.d[3], 0x1234u);
+    CHECK(native == nullptr);
+    CHECK(g_exec.task_context(1, registers, native));
+    CHECK_EQ(registers.pc, 0x2000u);
+    CHECK(!g_exec.task_context(2, registers, native));
+
     // A name out of reach is empty and leaves the interrupted CPU alone.
     const ExitReason exit = r.cpu().exit;
     r.put32(child + LN_NAME, kTestGuestBytes);
     CHECK(g_exec.task_info(1, info));
-    CHECK_EQ(info.name[0], 0u);
+    CHECK_EQ(info.name[0], '\0');
     CHECK(r.cpu().exit == exit);
 }
 
