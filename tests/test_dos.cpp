@@ -3435,6 +3435,27 @@ void file_info_reports_what_examine_fills() {
     CHECK_SOUND(disk.volume);
 }
 
+void a_replacement_that_does_not_fit_keeps_the_old_bytes() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk(1, 64);
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    const u8 old[] = {'o', 'l', 'd'};
+    const std::vector<u8> too_much(40000, 7);
+    u32 error = 0;
+    CHECK(g_dos.replace_file("DH0:Kept", old, 3, error));
+    CHECK(!g_dos.replace_file("DH0:Kept", too_much.data(), 40000, error));
+    CHECK_EQ(error, ERROR_DISK_FULL);
+    CHECK_EQ(r.io_err(), ERROR_DISK_FULL);
+    u8 back[3]{};
+    u32 got = 0;
+    CHECK(g_dos.read_file("DH0:Kept", back, 3, got, error));
+    CHECK(std::string(reinterpret_cast<char*>(back), got) == "old");
+    // A file that was not there is not left behind.
+    CHECK(!g_dos.replace_file("DH0:Huge", too_much.data(), 40000, error));
+    CHECK(g_dos.examine("DH0:Huge").kind == Dos::TargetKind::Missing);
+    CHECK_SOUND(disk.volume);
+}
+
 void a_file_that_does_not_fit_is_not_left_behind() {
     Floppy df0(build_adf("HombreTest", false, standard_files()));
     DiskPartition disk(1, 64);
@@ -8974,6 +8995,7 @@ int main() {
     the_public_calls_write_and_delete_files_on_a_partition();
     the_public_calls_change_paths_on_ram_and_partitions();
     file_info_reports_what_examine_fills();
+    a_replacement_that_does_not_fit_keeps_the_old_bytes();
     a_file_that_does_not_fit_is_not_left_behind();
     set_var_saves_to_envarc_on_a_writable_boot_partition();
     layout_matches_the_ndk();

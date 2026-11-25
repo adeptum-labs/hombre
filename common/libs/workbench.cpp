@@ -4300,7 +4300,7 @@ bool Workbench::set_backdrop_line(const char* file, const char* line, bool liste
                    ? true
                    : dos_->delete_file(file, error);
     }
-    return dos_->write_file(file, text.data(), static_cast<u32>(text.size()), error);
+    return dos_->replace_file(file, text.data(), static_cast<u32>(text.size()), error);
 }
 
 bool Workbench::add_left_out(const char* drawer, const char* file) {

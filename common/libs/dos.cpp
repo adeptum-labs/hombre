@@ -26,6 +26,8 @@
 #include "../amiga_fs_write.hpp"
 #include "../hunk.hpp"
 
+#include <vector>
+
 namespace hombre {
 
 using m68k::CpuState;
@@ -10943,6 +10945,23 @@ bool Dos::write_file(const char* name, const u8* data, u32 bytes, u32& error) {
         return false;
     }
     return true;
+}
+
+bool Dos::replace_file(const char* name, const u8* data, u32 bytes, u32& error) {
+    const Target old = examine(name);
+    std::vector<u8> kept(old.kind == TargetKind::File ? old.size : 0);
+    u32 got = 0;
+    u32 ignored = 0;
+    const bool restore = old.kind == TargetKind::File &&
+                         (old.size == 0 || read_file(name, kept.data(), old.size, got, ignored));
+    if (write_file(name, data, bytes, error)) {
+        return true;
+    }
+    if (restore) {
+        write_file(name, kept.data(), got, ignored);
+        set_last_error(error);
+    }
+    return false;
 }
 
 bool Dos::delete_file(const char* name, u32& error) {

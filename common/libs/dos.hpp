@@ -963,6 +963,10 @@ public:
     // otherwise.
     bool write_file(const char* name, const u8* data, u32 bytes, u32& error);
 
+    // write_file for a file whose bytes are worth keeping: when the new
+    // ones cannot be written, the old ones are written back.
+    bool replace_file(const char* name, const u8* data, u32 bytes, u32& error);
+
     // Deletes the file name, on RAM: or a disk that can be written.
     bool delete_file(const char* name, u32& error);
 

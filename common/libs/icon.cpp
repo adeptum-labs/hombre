@@ -1219,7 +1219,7 @@ u32 Icon::write_object(Bus& b, const char* text, u32 disk_object, u32& error) {
         error = ndk::ERROR_OBJECT_TOO_LARGE;
         return 0;
     }
-    return dos_->write_file(path, file_, w.pos, error) ? 1 : 0;
+    return dos_->replace_file(path, file_, w.pos, error) ? 1 : 0;
 }
 
 u32 Icon::delete_disk_object(Bus& b, u32 name) {
