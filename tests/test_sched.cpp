@@ -263,6 +263,40 @@ void switch_to_returns_bool_and_rejects_invalid_targets() {
     CHECK_EQ(s.current(), rdy);
 }
 
+void a_suspended_task_is_not_run_until_resumed() {
+    Scheduler s;
+    s.init(0x1000);
+    const i32 high = s.add(0x2000, 5);
+    const i32 equal = s.add(0x3000, 0);
+    s.suspend(high);
+    CHECK_EQ(s.pick_next(), equal);
+    CHECK(!s.should_switch_now());
+    CHECK(s.should_preempt());
+    CHECK(!s.switch_to(high));
+    // A waiting one stays held back when it is woken.
+    CHECK(s.switch_to(equal));
+    s.wait(equal);
+    s.suspend(equal);
+    s.wake(equal);
+    CHECK(s.slot(equal).state == TaskState::Ready);
+    CHECK_EQ(s.pick_next(), 0);
+    // The running task, suspended, is due to be left even for a lower one.
+    CHECK(s.switch_to(0));
+    s.resume(equal);
+    CHECK(s.switch_to(equal));
+    s.suspend(equal);
+    CHECK(s.should_switch_now());
+    CHECK(s.switch_to(0));
+    CHECK(s.slot(equal).state == TaskState::Ready);
+    CHECK(s.slot(equal).suspended);
+    s.resume(high);
+    CHECK_EQ(s.pick_next(), high);
+    // Releasing a slot forgets that it was suspended.
+    s.remove(equal);
+    s.release(equal);
+    CHECK(!s.slot(equal).suspended);
+}
+
 }  // namespace
 
 int main() {
@@ -274,5 +308,6 @@ int main() {
     set_priority_requeues();
     find_across_states();
     switch_to_returns_bool_and_rejects_invalid_targets();
+    a_suspended_task_is_not_run_until_resumed();
     return check::finish("test_sched");
 }

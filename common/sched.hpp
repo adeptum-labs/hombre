@@ -46,6 +46,8 @@ public:
         i8 priority = 0;
         TaskState state = TaskState::Free;
         u64 seq = 0;
+        // Held back from running, whatever its state, until resumed.
+        bool suspended = false;
     };
 
     // Resets the table and places the boot task in slot 0 as Running with
@@ -114,6 +116,21 @@ public:
         }
     }
 
+    void suspend(i32 id) {
+        if (occupied(id)) {
+            slots_[id].suspended = true;
+        }
+    }
+
+    // A resumed task that is Ready joins the back of its priority's queue.
+    void resume(i32 id) {
+        if (!occupied(id) || !slots_[id].suspended) {
+            return;
+        }
+        slots_[id].suspended = false;
+        slots_[id].seq = next_seq_++;
+    }
+
     // Updates priority, re-queueing at the back of the new priority if Ready,
     // and returns the previous priority.
     i8 set_priority(i32 id, i8 pri) {
@@ -145,7 +162,7 @@ public:
         i32 best = -1;
         for (u32 i = 0; i < kMaxTasks; ++i) {
             const Slot& s = slots_[i];
-            if (s.state != TaskState::Ready) {
+            if (!runnable(s)) {
                 continue;
             }
             if (best < 0 || s.priority > slots_[best].priority ||
@@ -161,7 +178,7 @@ public:
     // Waiting and Removed tasks keep their state. False if next_id is not
     // valid and Ready.
     bool switch_to(i32 next_id) {
-        if (!valid_id(next_id) || slots_[next_id].state != TaskState::Ready) {
+        if (!valid_id(next_id) || !runnable(slots_[next_id])) {
             return false;
         }
         if (valid_id(current_) && slots_[current_].state == TaskState::Running) {
@@ -188,12 +205,12 @@ public:
 
     // True at time-slice end when a Ready task has priority >= the running one.
     bool should_preempt() const {
-        if (!valid_id(current_) || slots_[current_].state != TaskState::Running) {
+        if (!current_may_run()) {
             return pick_next() >= 0;
         }
         const i8 cur_pri = slots_[current_].priority;
         for (u32 i = 0; i < kMaxTasks; ++i) {
-            if (slots_[i].state == TaskState::Ready && slots_[i].priority >= cur_pri) {
+            if (runnable(slots_[i]) && slots_[i].priority >= cur_pri) {
                 return true;
             }
         }
@@ -202,12 +219,12 @@ public:
 
     // True when a Ready task has strictly higher priority than the running one.
     bool should_switch_now() const {
-        if (!valid_id(current_) || slots_[current_].state != TaskState::Running) {
+        if (!current_may_run()) {
             return pick_next() >= 0;
         }
         const i8 cur_pri = slots_[current_].priority;
         for (u32 i = 0; i < kMaxTasks; ++i) {
-            if (slots_[i].state == TaskState::Ready && slots_[i].priority > cur_pri) {
+            if (runnable(slots_[i]) && slots_[i].priority > cur_pri) {
                 return true;
             }
         }
@@ -231,6 +248,18 @@ public:
 
 private:
     static bool valid_id(i32 id) { return id >= 0 && static_cast<u32>(id) < kMaxTasks; }
+
+    static bool runnable(const Slot& s) { return s.state == TaskState::Ready && !s.suspended; }
+
+    bool occupied(i32 id) const {
+        return valid_id(id) && slots_[id].state != TaskState::Free &&
+               slots_[id].state != TaskState::Removed;
+    }
+
+    bool current_may_run() const {
+        return valid_id(current_) && slots_[current_].state == TaskState::Running &&
+               !slots_[current_].suspended;
+    }
 
     Slot slots_[kMaxTasks]{};
     i32 current_ = -1;
