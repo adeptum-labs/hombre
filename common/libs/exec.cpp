@@ -2969,6 +2969,14 @@ u32 Exec::free_bytes(u32 attributes) const {
     return total;
 }
 
+u32 Exec::total_bytes(u32 attributes) const {
+    u32 total = 0;
+    for (u32 i = 0; i < region_count_; ++i) {
+        total += accepts(regions_[i], attributes) ? regions_[i].upper - regions_[i].lower : 0;
+    }
+    return total;
+}
+
 u32 Exec::type_of_mem(u32 addr) const {
     if (m_ == nullptr) {
         return 0;
@@ -3398,6 +3406,43 @@ void Exec::set_this_task(u32 task_addr) {
             b.w8(task_addr + TC_IDNESTCNT, b.r8(base_ + IDNestCnt));
         }
     }
+}
+
+bool Exec::task_info(u32 slot, TaskInfo& out) const {
+    if (m_ == nullptr || slot >= Scheduler::kMaxTasks) {
+        return false;
+    }
+    const Scheduler::Slot& s = sched_.slot(slot);
+    if (s.state != TaskState::Ready && s.state != TaskState::Running &&
+        s.state != TaskState::Waiting) {
+        return false;
+    }
+    out = TaskInfo{};
+    out.task_addr = s.task_addr;
+    out.state = s.state;
+    out.priority = s.priority;
+
+    // The monitor reads from the interrupt: a fault must not reach the CPU
+    // of the code it interrupted, so it lands in a copy.
+    m68k::Machine probe = *m_;
+    u32 td = 0xFF;
+    u32 id = 0xFF;
+    if (s.state == TaskState::Running) {
+        probe.mem.read8(base_ + TDNestCnt, td);
+        probe.mem.read8(base_ + IDNestCnt, id);
+    } else {
+        td = tasks_[slot].td_nest;
+        id = tasks_[slot].id_nest;
+    }
+    out.forbid = td != 0xFF;
+    out.disable = id != 0xFF;
+
+    native::Bus b(probe);
+    const u32 name = s.task_addr != 0 ? b.r32(s.task_addr + LN_NAME) : 0;
+    if (name != 0 && !b.string(name, out.name, sizeof out.name - 1) && !b.ok()) {
+        out.name[0] = '\0';
+    }
+    return true;
 }
 
 u32 Exec::create_port() {

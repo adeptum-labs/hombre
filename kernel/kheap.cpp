@@ -84,6 +84,10 @@ void kheap_init(PhysAllocator& pages, u64 direct_map_base) {
     heap.init(&grow, &page_source);
 }
 
+usize kheap_bytes_in_use() { return heap.bytes_in_use(); }
+
+usize kheap_arena_bytes() { return heap.arena_bytes(); }
+
 }
 
 using namespace hombre;

@@ -34,4 +34,10 @@ namespace hombre {
 // one that finds no memory, prints a message and halts the kernel.
 void kheap_init(PhysAllocator& pages, u64 direct_map_base);
 
+// Bytes the kernel heap holds in allocated blocks, and the bytes it has
+// taken from the page allocator, for the system monitor. Both are 0 before
+// kheap_init.
+usize kheap_bytes_in_use();
+usize kheap_arena_bytes();
+
 }

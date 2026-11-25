@@ -104,6 +104,22 @@ void init_ok_and_counts() {
     CHECK_EQ(alloc.free_page_count(), kFreeAfterInit);
 }
 
+void managed_page_count_leaves_out_holes_and_the_bitmap() {
+    Ram ram;
+    PhysAllocator alloc;
+    CHECK(init_default(alloc, ram));
+    CHECK_EQ(alloc.managed_page_count(), kFreeAfterInit);
+
+    // Allocating and freeing changes only what is free.
+    const u64 phys = alloc.alloc_pages(4);
+    CHECK(phys != 0);
+    CHECK_EQ(alloc.free_page_count(), kFreeAfterInit - 4);
+    CHECK_EQ(alloc.managed_page_count(), kFreeAfterInit);
+    alloc.free_pages(phys, 4);
+    CHECK_EQ(alloc.free_page_count(), kFreeAfterInit);
+    CHECK_EQ(alloc.managed_page_count(), kFreeAfterInit);
+}
+
 void alloc_is_zeroed() {
     Ram ram;
     ram.fill(0xAA);
@@ -505,6 +521,7 @@ void bitmap_run_may_span_adjacent_regions() {
 
 int main() {
     init_ok_and_counts();
+    managed_page_count_leaves_out_holes_and_the_bitmap();
     alloc_is_zeroed();
     alloc_contiguous_across_free_holes();
     alloc_fills_runs_exactly();

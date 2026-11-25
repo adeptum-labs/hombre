@@ -122,6 +122,7 @@ public:
                     set_bit(managed_, p);
                 }
                 free_pages_ += next - page;
+                managed_pages_ += next - page;
             }
             page = next;
         }
@@ -130,6 +131,7 @@ public:
             clear_bit(managed_, p);
         }
         free_pages_ -= table_pages;
+        managed_pages_ -= table_pages;
         return true;
     }
 
@@ -204,6 +206,11 @@ public:
     }
 
     u64 free_page_count() const { return free_pages_; }
+
+    // Pages the allocator manages: those in a usable region it covers
+    // entirely, less the pages its bitmaps take and any holes between the
+    // usable regions.
+    u64 managed_page_count() const { return managed_pages_; }
 
     // The pointer for a physical address, through the ToPtr given to init,
     // so the owner of an allocation can fill it. nullptr before init.
@@ -300,6 +307,7 @@ private:
     u8* managed_ = nullptr;
     u64 total_pages_ = 0;
     u64 free_pages_ = 0;
+    u64 managed_pages_ = 0;
     ToPtr to_ptr_ = nullptr;
     void* ctx_ = nullptr;
 };

@@ -393,6 +393,16 @@ struct MessageHook {
     void* ctx;
 };
 
+// A task the scheduler holds, as the system monitor reports it.
+struct TaskInfo {
+    u32 task_addr = 0;
+    char name[32]{};
+    TaskState state = TaskState::Free;
+    i8 priority = 0;
+    bool forbid = false;
+    bool disable = false;
+};
+
 class Exec {
 public:
     // Builds ExecBase and exec's memory list in guest memory, stores the
@@ -410,6 +420,10 @@ public:
     // every MEMF_PUBLIC, MEMF_CHIP and MEMF_FAST bit of attributes; all free
     // memory for MEMF_ANY, as a title bar reports it.
     u32 free_bytes(u32 attributes = ndk::MEMF_ANY) const;
+
+    // The bytes of the regions whose attributes contain every memory-type
+    // bit of attributes, headers included, as free_bytes selects them.
+    u32 total_bytes(u32 attributes = ndk::MEMF_ANY) const;
 
     // Allocates from the free list of the first region, fast before chip,
     // whose attributes contain every MEMF_PUBLIC, MEMF_CHIP and MEMF_FAST
@@ -528,6 +542,11 @@ public:
     void leave_nested_run();
 
     const Scheduler& scheduler() const { return sched_; }
+
+    // Fills out with the task in scheduler slot when it is Ready, Running or
+    // Waiting: its address, name, state, priority and whether it holds Forbid
+    // and Disable. Reads only, for the system monitor. False otherwise.
+    bool task_info(u32 slot, TaskInfo& out) const;
 
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
     // tc_SigRecvd SetSignal and Wait use. It may be set before init and is

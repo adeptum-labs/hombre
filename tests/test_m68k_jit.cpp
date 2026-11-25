@@ -469,6 +469,22 @@ void flush_drops_translations() {
     CHECK_EQ(r.cpu().d[0], 2u);
 }
 
+void code_region_accessors_report_used_and_total() {
+    Rig r(1 << 16);
+    CHECK_EQ(g_jit.code_total(), usize{1} << 16);
+    const usize after_init = g_jit.code_used();
+    CHECK(after_init > 0);
+    CHECK(after_init <= g_jit.code_total());
+
+    r.program(kCode, {0x7001});  // MOVEQ #1,D0
+    CHECK_EQ(r.go(), ExitReason::Halt);
+    CHECK(g_jit.code_used() > after_init);
+    CHECK(g_jit.code_used() <= g_jit.code_total());
+
+    g_jit.flush();
+    CHECK_EQ(g_jit.code_used(), after_init);
+}
+
 void small_region_flushes_and_completes() {
     // The program below translates to far more than 4 KiB, so the region
     // fills and is flushed several times on the way.
@@ -1891,6 +1907,7 @@ int main() {
     endless_loop_runs_out_of_budget();
     natives_are_called_by_their_aline_opcode();
     flush_drops_translations();
+    code_region_accessors_report_used_and_total();
     small_region_flushes_and_completes();
     call_guest_returns_through_the_stub();
     addressing_modes_read();

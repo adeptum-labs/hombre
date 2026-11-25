@@ -763,6 +763,20 @@ void avail_mem_counts_the_matching_regions() {
     CHECK_EQ(avail_through_vector(r, MEMF_CHIP), chip_free - 64);
 }
 
+void total_bytes_counts_the_region_sizes() {
+    Rig r;
+    CHECK_EQ(g_exec.total_bytes(MEMF_CHIP), r.region_bytes(MEMF_CHIP));
+    CHECK_EQ(g_exec.total_bytes(MEMF_FAST), r.region_bytes(MEMF_FAST));
+    CHECK_EQ(g_exec.total_bytes(), r.region_bytes(MEMF_ANY));
+    CHECK_EQ(g_exec.total_bytes(MEMF_CHIP), g_exec.total_bytes(MEMF_CHIP | MEMF_PUBLIC));
+    CHECK(g_exec.total_bytes(MEMF_CHIP) >= g_exec.free_bytes(MEMF_CHIP));
+
+    // Allocating does not change a region's size.
+    const u32 chip_total = g_exec.total_bytes(MEMF_CHIP);
+    CHECK(g_exec.alloc(64, MEMF_CHIP) != 0);
+    CHECK_EQ(g_exec.total_bytes(MEMF_CHIP), chip_total);
+}
+
 void type_of_mem_names_the_region() {
     Rig r;
     const u32 chip = g_exec.alloc(64, MEMF_CHIP);
@@ -4138,6 +4152,61 @@ void yield_in_native_and_per_task_state() {
     CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
 }
 
+void task_info_reports_the_occupying_slots_only() {
+    Rig r;
+    const u32 boot = make_test_task(r, kData);
+    r.put32(boot + LN_NAME, r.str(kNames, "boot"));
+    const u32 child =
+        setup_child_task(r, kData + 0x100, kData + 0x2000, 3, "child", kNames + 0x20);
+    CHECK_EQ(g_exec.spawn(child, 0x2000, 0, false), child);
+
+    TaskInfo info;
+    CHECK(g_exec.task_info(0, info));
+    CHECK_EQ(info.task_addr, boot);
+    CHECK(std::strcmp(info.name, "boot") == 0);
+    CHECK(info.state == TaskState::Running);
+    CHECK_EQ(info.priority, 0);
+    CHECK(!info.forbid);
+    CHECK(!info.disable);
+
+    CHECK(g_exec.task_info(1, info));
+    CHECK_EQ(info.task_addr, child);
+    CHECK(std::strcmp(info.name, "child") == 0);
+    CHECK(info.state == TaskState::Ready);
+    CHECK_EQ(info.priority, 3);
+
+    // Free slots and slots past the table have nothing to report.
+    CHECK(!g_exec.task_info(2, info));
+    CHECK(!g_exec.task_info(Scheduler::kMaxTasks, info));
+
+    // The running task's Forbid and Disable come from ExecBase.
+    ExecTest::set_task_nests(g_exec, 0, 0xFF, 0xFF);
+    ExecTest::set_task_nests(g_exec, 1, 0xFF, 0xFF);
+    r.put8(r.base() + TDNestCnt, 0);
+    r.put8(r.base() + IDNestCnt, 2);
+    CHECK(g_exec.task_info(0, info));
+    CHECK(info.forbid);
+    CHECK(info.disable);
+
+    // The others come from the counters saved with the task.
+    r.put8(r.base() + TDNestCnt, 0xFF);
+    r.put8(r.base() + IDNestCnt, 0xFF);
+    ExecTest::set_task_nests(g_exec, 1, 1, 0xFF);
+    CHECK(g_exec.task_info(1, info));
+    CHECK(info.forbid);
+    CHECK(!info.disable);
+    CHECK(g_exec.task_info(0, info));
+    CHECK(!info.forbid);
+    CHECK(!info.disable);
+
+    // A name out of reach is empty and leaves the interrupted CPU alone.
+    const ExitReason exit = r.cpu().exit;
+    r.put32(child + LN_NAME, kTestGuestBytes);
+    CHECK(g_exec.task_info(1, info));
+    CHECK_EQ(info.name[0], 0u);
+    CHECK(r.cpu().exit == exit);
+}
+
 // --- devices and IORequests ---------------------------------------------
 
 struct FakeDevState {
@@ -4533,6 +4602,7 @@ int main() {
     requirements_choose_the_region();
     full_fast_memory_falls_back_to_chip();
     avail_mem_counts_the_matching_regions();
+    total_bytes_counts_the_region_sizes();
     type_of_mem_names_the_region();
     free_mem_returns_blocks_to_their_region();
     lists_through_vectors();
@@ -4613,6 +4683,7 @@ int main() {
     every_registered_timer_hook_runs();
     every_registered_drop_hook_sees_a_removed_task();
     yield_in_native_and_per_task_state();
+    task_info_reports_the_occupying_slots_only();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();
     guest_68k_device_vectors_use_call_guest();

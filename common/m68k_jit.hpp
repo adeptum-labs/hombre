@@ -166,6 +166,10 @@ public:
     // addresses they are given, so that they see what translated code sees.
     u32 address_mask() const { return address_mask_; }
 
+    // Bytes of the code region that hold translated code, and its size.
+    usize code_used() const { return used_; }
+    usize code_total() const { return region_.bytes; }
+
     // Called at the top of the run loop when run_depth_ == 1.
     void set_preempt_hook(PreemptHook fn, void* ctx) {
         preempt_hook_ = fn;

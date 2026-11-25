@@ -124,6 +124,22 @@ void constinit_heap_allocates_once_initialised() {
     CHECK_EQ(g_constinit_heap.bytes_in_use(), 0u);
 }
 
+void heap_figures_follow_the_blocks() {
+    Rig rig;
+    CHECK_EQ(rig.heap.bytes_in_use(), 0u);
+    CHECK_EQ(rig.heap.arena_bytes(), 0u);
+
+    void* block = rig.heap.alloc(1000);
+    CHECK(block != nullptr);
+    CHECK(rig.heap.bytes_in_use() >= 1000);
+    const usize arena = rig.heap.arena_bytes();
+    CHECK(rig.heap.bytes_in_use() <= arena);
+
+    rig.heap.free(block);
+    CHECK_EQ(rig.heap.bytes_in_use(), 0u);
+    CHECK_EQ(rig.heap.arena_bytes(), arena);
+}
+
 void heap_without_a_callback_gives_nothing() {
     Heap heap;
     CHECK(heap.alloc(8) == nullptr);
@@ -295,6 +311,7 @@ void random_alloc_and_free_keeps_every_block_intact() {
 
 int main() {
     constinit_heap_allocates_once_initialised();
+    heap_figures_follow_the_blocks();
     heap_without_a_callback_gives_nothing();
     every_result_has_the_requested_alignment();
     smaller_alignments_are_raised_to_16_and_bad_ones_refused();
