@@ -12,48 +12,15 @@ software, on modern hardware and in virtual machines.
 
 - Runs unmodified Amiga 68000 programs through a built-in 68k to x86-64
   translator.
-- Native AmigaOS libraries written in C++: exec, dos, intuition, graphics,
-  layers, gadtools, icon, workbench, utility, keymap and version, with
-  timer.device, console.device, audio.device and scsi.device, and
-  cybergraphics.library for programs written for graphics cards. No
-  Kickstart ROM needed.
-- Reads real Amiga floppy images, ADF and DMS, in DF0: to DF3:, next to a
-  writable Ram Disk.
-- Hard disks: RDB-partitioned hard disk images (HDF), and Amiga partitions
-  inside an MBR or GPT disk, on virtio, SATA (AHCI) and NVMe. The
-  partitions mount as DH0: and on, can be written, and Hombre boots from
-  the bootable one with the highest boot priority, as an Amiga does.
-- HDToolBox from the 3.1 Install disk sees the disks through scsi.device.
-- Boots with a splash and a progress bar, then runs the boot disk's
-  `S:Startup-Sequence`, as an Amiga does.
-- A Workbench desktop: drawers, framed icons as on 3.1, icon drag and drop,
-  snapshot, sliders and scroll arrows, menus, backdrop on and off.
-- The Workbench file operations: new drawers, copy, rename, delete, leave
-  out and empty the Trashcan, an Information window for protection bits,
-  comments, stack and tool types, and Execute Command.
-- Preferences from the 3.1 Extras disk: Palette recolours the whole system,
-  WBPattern gives the Workbench a backdrop pattern or picture, Font sets the
-  system fonts, Pointer the mouse pointer, Input the double-click time, and
-  ScreenMode reopens the Workbench in another mode.
-- Every standard PAL and NTSC screen mode, Low, High and Super-High Res,
-  plain and laced, in up to 256 colours, scaled to fill the display.
-- HOMBRE screen modes: PC and widescreen sizes from 800x600 to 3840x2160,
-  720p, 1080p and 1440p among them, in 256 colours, 16-bit and 24-bit, with
-  square pixels, the depth picked by ScreenMode's Colors slider. The Workbench runs in them through ScreenMode prefs, and
-  CyberGraphX programs draw on them. In QEMU and VirtualBox the display
-  switches to each mode's size; elsewhere a mode of the display's own
-  size is shown pixel for pixel.
-- Built-in topaz and Hasklig fonts, Hasklig antialiased on 256-colour
-  screens.
-- HombreShell, a native shell with the Workbench 3.1 builtins that runs the
-  3.1 `C:` commands and AmigaDOS scripts.
-- Starts programs such as Clock and Calculator from the AmigaOS 3.1 disks.
-- A modern window look: shaded title bars, knob-style buttons with the 3.1
-  symbols and soft shadows, in the colours of your palette.
-- A system monitor on F12, outside the Amiga system, to stop a hung program
-  or swap floppies.
-- A 64-bit kernel with UEFI boot, preemptive multitasking, and USB keyboard
-  and mouse.
+- Native AmigaOS libraries and devices written in C++. No Kickstart ROM
+  needed.
+- A Workbench desktop with file operations and the 3.1 Preferences editors.
+- HombreShell, which runs the 3.1 `C:` commands and AmigaDOS scripts.
+- ADF and DMS floppy images, and writable Amiga hard disk partitions on
+  virtio, SATA and NVMe.
+- PAL, NTSC and widescreen modes up to 3840x2160, in 8, 16 and 24-bit.
+- A system monitor on F12 to stop a hung program or swap floppies.
+- A 64-bit kernel with UEFI boot and preemptive multitasking.
 
 ## Documentation
 
