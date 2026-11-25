@@ -1281,11 +1281,14 @@ private:
         char path[kMaxPath];  // from the root, components separated by '/'
     };
 
+    // owner is the command that called ReadArgs, as cur_owner gives it, 0
+    // once that command has ended by itself.
     struct ArgBlock {
         u32 rdargs;
         u32 block;
         u32 bytes;
         bool owns_rdargs;
+        u8 owner;
     };
 
     // A StartNotify request that has not been ended yet, with the name it

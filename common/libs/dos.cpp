@@ -8585,7 +8585,7 @@ struct DosOps {
             d.arg_blocks_.remove(result);
             return;
         }
-        *result = Dos::ArgBlock{rdargs, block, bytes, make_rdargs};
+        *result = Dos::ArgBlock{rdargs, block, bytes, make_rdargs, d.cur_owner()};
         native::set_result(m, rdargs);
     }
 
@@ -8613,6 +8613,30 @@ struct DosOps {
         if (owned) {
             d.exec_->free(rdargs, RDA_SIZEOF);
         }
+    }
+
+    // What ReadArgs gave the command owner and FreeArgs did not take back.
+    // With release it is freed, for a command that was ended before it
+    // could call FreeArgs; otherwise the command ended by itself and left it
+    // to whoever still uses it, so it only stops being the command's.
+    static void end_args_of(Dos& d, u8 owner, bool release) {
+        if (owner == 0) {
+            return;
+        }
+        d.arg_blocks_.remove_if([&](Dos::ArgBlock& a) {
+            if (a.owner != owner) {
+                return false;
+            }
+            if (!release) {
+                a.owner = 0;
+                return false;
+            }
+            d.exec_->free(a.block, a.bytes);
+            if (a.owns_rdargs) {
+                d.exec_->free(a.rdargs, RDA_SIZEOF);
+            }
+            return true;
+        });
     }
 
     static void find_arg(void* ctx, Machine& m) {
@@ -10122,6 +10146,8 @@ void Dos::process_ended(u32 task, bool self) {
     m_->mem.read32(p.process + pr_COS, cos);
     DosOps::cleanup_command(*this, p.process, current_dir, cis, cos,
                             static_cast<u8>(index + 1));
+    // The owner goes to the next process in this slot.
+    DosOps::end_args_of(*this, static_cast<u8>(index + 1), !self);
     // cleanup_command keeps the process's current directory lock for this:
     // it goes only if the process owns it.
     const i64 dir_slot = DosOps::lock_slot(*this, current_dir);
@@ -11336,7 +11362,8 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
     m_->mem.read32(p.cli + cli_Module, module);
     u32 link_now = first_link;
     m_->mem.read32(seglist << 2, link_now);
-    if (module != seglist || link_now != first_link) {
+    const bool detached = module != seglist || link_now != first_link;
+    if (detached) {
         exec_->detach_tasks_of(p.process);
     }
     // Ending the boot task's children and restoring its nest counts switches
@@ -11349,6 +11376,12 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
     exec_->reset_task_state(p.process);
     DosOps::cleanup_command(*this, p.process, saved_current_dir, saved_cis, saved_cos,
                             static_cast<u8>(index + 1));
+    // A command that did not end by itself, as one the system monitor ended,
+    // never reaches its FreeArgs. One whose processes outlive it may have
+    // handed them its arguments.
+    const bool ended_by_itself =
+        why == ExitReason::Returned || (why == ExitReason::Halt && p.exited);
+    DosOps::end_args_of(*this, static_cast<u8>(index + 1), !ended_by_itself && !detached);
     if (input != 0) {
         m_->mem.write32(p.process + pr_CIS, saved_cis);
     }

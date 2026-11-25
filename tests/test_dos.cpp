@@ -6179,6 +6179,45 @@ void leaked_match_anchor_is_reclaimed_after_command() {
     CHECK(r.chunks() == before);
 }
 
+// A command ended before its FreeArgs, as the system monitor ends one,
+// leaves nothing of what ReadArgs made. One that returns without FreeArgs
+// keeps its arguments, and a later command's end leaves them alone.
+void read_args_of_an_ended_command_are_freed() {
+    Asm spin;
+    spin.open_dos().move_l(kTemplate, 1).move_l(kArray, 2).moveq(0, 3).dos(dos_lvo::ReadArgs);
+    spin.store_d0(kOut).label("spin").op({0x60FE});
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"C/ArgsSpin", hunk_file(spin.build())});
+    Rig r(files);
+    r.str(kTemplate, "NAME");
+
+    const auto before = r.chunks();
+    const u32 avail_before = exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC);
+    u32 result = 0;
+    for (u32 i = 0; i < 3; ++i) {
+        r.put32(kOut, 0);
+        CHECK(!g_dos.run_command("C:ArgsSpin", "file", result, 100));
+        CHECK_EQ(r.cpu().exit, ExitReason::Budget);
+        r.cpu().exit = ExitReason::None;
+        CHECK(r.get32(kOut) != 0);
+        CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+        CHECK(r.chunks() == before);
+    }
+
+    CHECK(g_dos.run_command("C:Args", "kept", result, kBlocks));
+    const u32 kept = r.get32(kOut);
+    const u32 kept_name = r.get32(kArray);
+    CHECK(kept != 0);
+    CHECK(r.read_str(kept_name) == "kept");
+    CHECK(!g_dos.run_command("C:ArgsSpin", "other", result, 100));
+    r.cpu().exit = ExitReason::None;
+    CHECK(r.read_str(kept_name) == "kept");
+    r.call(dos_lvo::FreeArgs, kept);
+    CHECK(!logged_containing("which ReadArgs did not return"));
+    CHECK_EQ(exec_call(r, exec_lvo::AvailMem, 0, MEMF_PUBLIC), avail_before);
+    CHECK(r.chunks() == before);
+}
+
 void leaked_lock_and_file_are_reclaimed() {
     auto build_leak = [](bool exit_via_dos) {
         Asm a;
@@ -9292,6 +9331,7 @@ int main() {
     fault_text_api();
     fail_level_and_return_code();
     leaked_match_anchor_is_reclaimed_after_command();
+    read_args_of_an_ended_command_are_freed();
     leaked_lock_and_file_are_reclaimed();
     current_dir_restored_after_command();
     many_locks_with_assigns_and_path();
