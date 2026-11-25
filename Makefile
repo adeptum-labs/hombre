@@ -231,7 +231,7 @@ run: image disk-image
 	    fi; \
 	    n=$$((n + 1)); \
 	done; \
-	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G -no-reboot \
+	qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G \
 	    -smp $(SMP) -serial stdio \
 	    -drive if=pflash,format=raw,readonly=on,file=$(OVMF)/OVMF_CODE_4M.fd \
 	    -drive if=pflash,format=raw,file=$(BUILD)/OVMF_VARS-run.fd \
