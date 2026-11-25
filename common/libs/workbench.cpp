@@ -3907,6 +3907,10 @@ bool Workbench::collect_tree(const char* path, std::vector<TreeEntry>& out, u32&
             error = ERROR_INVALID_COMPONENT_NAME;
             return false;
         }
+        if (out.size() > kMaxTreeEntries) {
+            error = ERROR_NO_FREE_STORE;
+            return false;
+        }
     }
     return true;
 }
@@ -4131,10 +4135,15 @@ void Workbench::ask_delete(u32 window_id, u32 icon_id) {
     const IconEntry* icon = file_icon(window_id, icon_id);
     char path[Dos::kMaxPath];
     std::vector<TreeEntry> tree;
-    u32 error = 0;
-    if (icon == nullptr || !icon_path(*find_window(window_id), *icon, path) ||
-        !collect_tree(path, tree, error)) {
+    u32 error = ERROR_INVALID_COMPONENT_NAME;
+    if (icon == nullptr) {
+        // Refused, and shown, there.
         delete_icon(window_id, icon_id);
+        return;
+    }
+    // Nothing is deleted that could not be asked about.
+    if (!icon_path(*find_window(window_id), *icon, path) || !collect_tree(path, tree, error)) {
+        show_error("cannot delete", icon->name, error);
         return;
     }
     Message message;
@@ -5545,10 +5554,11 @@ bool Workbench::close_for_reset() {
 
 bool Workbench::quit() {
     reap_tools();
-    if (desktop_open_ && !tools_.empty()) {
-        constexpr char kRunning[] =
-            "Cannot quit while programs started\nfrom the Workbench are running";
-        LogLine().text("workbench: cannot quit, programs are running").send();
+    // A program that registered an application icon, window or menu item
+    // would lose it.
+    if (desktop_open_ && (!tools_.empty() || !apps_.empty())) {
+        constexpr char kRunning[] = "Cannot quit while programs are using\nthe Workbench";
+        LogLine().text("workbench: cannot quit, programs are using it").send();
         show_requester("Workbench Request", kRunning);
         return false;
     }

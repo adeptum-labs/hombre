@@ -87,6 +87,8 @@ public:
     static constexpr u32 kMaxTools = 256;
     static constexpr u32 kMaxApps = 1024;
     static constexpr u32 kMaxDirEntries = 64;
+    // The most objects a drawer to copy or delete may hold.
+    static constexpr u32 kMaxTreeEntries = 8192;
     // The most window messages a pass over the ports handles.
     static constexpr u32 kMaxMessagesPerPump = 64;
     static constexpr u32 kNoIcon = 0xFFFFFFFF;
@@ -520,7 +522,8 @@ public:
     bool empty_trash(u32 window_id, u32 icon_id);
 
     // Workbench > Quit: closes the desktop for good, which ends its task.
-    // False, shown, while programs it started run, and when none is open.
+    // False, shown, while programs it started run or have application
+    // icons, windows or menu items, and when no desktop is open.
     bool quit();
     bool quit_pending() const { return quit_pending_; }
 

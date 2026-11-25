@@ -4119,7 +4119,17 @@ void quit_waits_for_the_programs_it_started() {
     CHECK(!r.workbench.tools().empty());
     CHECK(!r.workbench.quit());
     CHECK(r.workbench.desktop_open());
-    CHECK(logged("workbench: cannot quit, programs are running"));
+    CHECK(logged("workbench: cannot quit, programs are using it"));
+}
+
+void quit_waits_for_registrations() {
+    Rig r;
+    r.workbench.open_desktop();
+    const u32 item = r.workbench.add_app_menu_item(1, 0, 0, 0, 0);
+    CHECK(item != 0);
+    CHECK(!r.workbench.quit());
+    CHECK(r.workbench.remove_app_menu_item(item));
+    CHECK(r.workbench.quit());
 }
 
 void reset_wb_reopens_the_windows() {
@@ -4805,6 +4815,7 @@ int main() {
     last_message_keeps_the_error_shown_last();
     quit_closes_the_desktop_and_it_can_open_again();
     quit_waits_for_the_programs_it_started();
+    quit_waits_for_registrations();
     reset_wb_reopens_the_windows();
     leave_out_keeps_an_icon_on_the_root_window();
     a_left_out_icon_follows_its_file();
