@@ -56,6 +56,7 @@ constexpr u8 kWBDisk = 1;
 constexpr u8 kWBDrawer = 2;
 constexpr u8 kWBTool = 3;
 constexpr u8 kWBProject = 4;
+constexpr u8 kWBGarbage = 5;
 constexpr u32 kNoIconPosition = 0x80000000;
 constexpr i32 kDefaultDrawerWidth = 320;
 constexpr i32 kDefaultDrawerHeight = 160;
@@ -78,6 +79,7 @@ constexpr u16 CHECKED = 0x0100;
 constexpr u32 it_IText = 12;
 
 // struct DiskObject and its DrawerData's NewWindow
+constexpr u32 do_Type = 48;
 constexpr u32 do_DefaultTool = 50;
 constexpr u32 do_ToolTypes = 54;
 constexpr u32 do_CurrentX = 58;
@@ -349,7 +351,8 @@ bool read_image_block(void* ctx, u32 block, u8* out) {
 class Rig {
 public:
     explicit Rig(const std::vector<AdfFile>& files = test_files(),
-                 std::vector<u8> second = {}, u32 second_drive = 1, u32 depth = 2)
+                 std::vector<u8> second = {}, u32 second_drive = 1, u32 depth = 2,
+                 u32 screen_height = 400)
         : memory_(kTestGuestBytes),
           image_(build_adf("HombreTest", false, files)),
           second_image_(std::move(second)) {
@@ -399,7 +402,7 @@ public:
         g_intuition.set_gadget_release(&GadTools::release_gadget);
         CHECK(workbench.init(m, g_exec, g_dos, g_graphics, g_intuition, g_gadtools, g_icon));
         m.cpu.a[7] = kStack;
-        screen = open_screen(depth);
+        screen = open_screen(depth, screen_height);
         g_intuition.set_default_screen(screen);
     }
 
@@ -448,9 +451,9 @@ public:
         return s;
     }
 
-    u32 open_screen(u32 depth) {
+    u32 open_screen(u32 depth, u32 height) {
         put16(kData + ns_Width, 640);
-        put16(kData + ns_Height, 400);
+        put16(kData + ns_Height, height);
         put16(kData + ns_Depth, depth);
         put16(kData + ns_Type, CUSTOMSCREEN);
         const u32 opened = g_intuition.open_screen(kData, 0);
@@ -3114,6 +3117,35 @@ bool info_checked(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
     return (r.get16(info_gadget(r, request, id) + ndk::gg_Flags) & GFLG_SELECTED) != 0;
 }
 
+bool info_disabled(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    return (r.get16(info_gadget(r, request, id) + ndk::gg_Flags) & ndk::GFLG_DISABLED) != 0;
+}
+
+// Where a GadTools gadget keeps its label and where the label goes.
+constexpr u32 kGadgetPlace = 46;
+constexpr u32 kGadgetLabel = 48;
+
+std::string info_label(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    return r.str(r.get32(info_gadget(r, request, id) + kGadgetLabel));
+}
+
+u32 info_place(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    return r.get16(info_gadget(r, request, id) + kGadgetPlace);
+}
+
+struct GadgetBox {
+    i32 left;
+    i32 top;
+    i32 width;
+    i32 height;
+};
+
+GadgetBox gadget_box(const Rig& r, u32 gadget) {
+    const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
+    return {word(gadget + ndk::gg_LeftEdge), word(gadget + ndk::gg_TopEdge),
+            word(gadget + ndk::gg_Width), word(gadget + ndk::gg_Height)};
+}
+
 std::string info_gadget_text(const Rig& r, u32 gadget) {
     const u32 string_info = r.get32(gadget + ndk::gg_SpecialInfo);
     return r.str(r.get32(string_info + ndk::si_Buffer));
@@ -3155,7 +3187,7 @@ void click_info_row(Rig& r, const Workbench::InfoRequest& request, u32 row) {
     const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
     const Graphics::FontMetrics font =
         g_graphics.font_metrics(g_intuition.font_of_screen(r.screen));
-    const i32 row_height = font.y_size + 6;
+    const i32 row_height = font.y_size + 1;
     const i32 x = word(request.window + ndk::wd_LeftEdge) + word(list + ndk::gg_LeftEdge) + 4;
     const i32 y = word(request.window + ndk::wd_TopEdge) + word(list + ndk::gg_TopEdge) +
                   gadtools_defs::kListViewFrame + static_cast<i32>(row) * row_height +
@@ -3224,37 +3256,49 @@ void the_information_window_shows_a_file() {
     const TwoWindows w = open_tools_and_ram(r);
     const u32 note = r.find_icon_in(w.ram, "Note");
 
+    // The title is the drawer the file is in, the name and type one line.
     Workbench::InfoRequest request{};
     CHECK(r.workbench.open_info(w.ram, note, request));
     CHECK(request.has_object);
-    CHECK(r.window_title(request.window) == "Information");
+    CHECK(r.window_title(request.window) == "Ram Disk:");
     CHECK_EQ(r.get32(request.window + wd_Flags) & WFLG_CLOSEGADGET, WFLG_CLOSEGADGET);
 
-    CHECK(info_value(r, request, Workbench::kInfoName) == "Name: Note");
-    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Project");
-    CHECK(info_value(r, request, Workbench::kInfoSize) == "Size: 1 bytes");
-    CHECK(info_value(r, request, Workbench::kInfoBlocks) == "Blocks: 1");
-    CHECK(info_value(r, request, Workbench::kInfoDate).rfind("Date: ", 0) == 0);
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Note (Project)");
+    CHECK(info_label(r, request, Workbench::kInfoBlocks) == "Blocks:");
+    CHECK(info_value(r, request, Workbench::kInfoBlocks) == "1");
+    CHECK(info_label(r, request, Workbench::kInfoBytes) == "Bytes:");
+    CHECK(info_value(r, request, Workbench::kInfoBytes) == "1");
+    CHECK(info_label(r, request, Workbench::kInfoDate) == "Last Changed:");
+    CHECK(!info_value(r, request, Workbench::kInfoDate).empty());
+    CHECK(info_label(r, request, Workbench::kInfoComment) == "Comment:");
     CHECK(info_comment(r, request) == "old note");
+    CHECK(info_label(r, request, Workbench::kInfoStack) == "Stack:");
     CHECK_EQ(info_stack(r, request), 4096);
+    CHECK(info_label(r, request, Workbench::kInfoDefaultTool) == "Default Tool:");
     CHECK(info_default_tool(r, request).empty());
     CHECK_EQ(request.row_count, 0u);
-    CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
+    CHECK(info_label(r, request, Workbench::kInfoToolTypes) == "Tool Types:");
     CHECK(!info_checked(r, request, Workbench::kInfoScript));
     CHECK(info_checked(r, request, Workbench::kInfoArchived));
     CHECK(info_checked(r, request, Workbench::kInfoReadable));
     CHECK(info_checked(r, request, Workbench::kInfoWritable));
     CHECK(info_checked(r, request, Workbench::kInfoExecutable));
     CHECK(!info_checked(r, request, Workbench::kInfoDeletable));
+    CHECK(!info_disabled(r, request, Workbench::kInfoScript));
+    CHECK(!info_disabled(r, request, Workbench::kInfoComment));
+    // A disk's lines are not a file's.
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoUsed), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoStatus), 0u);
 
-    // It fits the 640 by 400 screen with room below the buttons.
+    // It fits the 640 by 400 screen with all its rows of tool types.
     const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
     const i32 left = word(request.window + ndk::wd_LeftEdge);
     const i32 top = word(request.window + ndk::wd_TopEdge);
     const i32 width = word(request.window + ndk::wd_Width);
     const i32 height = word(request.window + ndk::wd_Height);
     CHECK(left >= 0 && top >= 0 && left + width <= 640 && top + height <= 400);
-    CHECK(height < 300);
+    CHECK(height < 260);
+    CHECK_EQ(request.visible_rows, Workbench::kInfoToolTypeRows);
     CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
     r.workbench.close_dialog(request);
     CHECK_EQ(request.window, 0u);
@@ -3267,6 +3311,123 @@ void the_information_window_shows_a_file() {
     CHECK(r.workbench.open_info(w.ram, note, request));
     r.workbench.close_dialog(request);
     CHECK_EQ(r.free_bytes(), before);
+}
+
+void the_information_window_is_laid_out_around_the_image() {
+    Rig r;
+    put_ram_typed("Typed", {"ONE=1"});
+    const TwoWindows w = open_tools_and_ram(r);
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, r.find_icon_in(w.ram, "Typed"), request));
+    const auto box = [&](u16 id) { return gadget_box(r, info_gadget(r, request, id)); };
+    const i32 width = static_cast<i16>(r.get16(request.window + ndk::wd_Width));
+    const i32 height = static_cast<i16>(r.get16(request.window + ndk::wd_Height));
+
+    // The check boxes go down the right edge, a row each, in this order.
+    const u16 boxes[] = {Workbench::kInfoScript,   Workbench::kInfoArchived,
+                         Workbench::kInfoReadable, Workbench::kInfoWritable,
+                         Workbench::kInfoExecutable, Workbench::kInfoDeletable};
+    const i32 pitch = box(boxes[1]).top - box(boxes[0]).top;
+    CHECK(pitch >= box(boxes[0]).height);
+    for (u32 i = 0; i < 6; ++i) {
+        const GadgetBox at = box(boxes[i]);
+        CHECK_EQ(at.left + at.width, width - 8);
+        CHECK_EQ(at.top, box(boxes[0]).top + static_cast<i32>(i) * pitch);
+        CHECK_EQ(info_place(r, request, boxes[i]), gadtools_defs::PLACETEXT_LEFT);
+    }
+    // The left block shares their rows: blocks, bytes, then the stack.
+    CHECK_EQ(box(Workbench::kInfoBlocks).top, box(Workbench::kInfoArchived).top);
+    CHECK_EQ(box(Workbench::kInfoBytes).top, box(Workbench::kInfoReadable).top);
+    CHECK_EQ(box(Workbench::kInfoBlocks).left, box(Workbench::kInfoStack).left);
+    const GadgetBox stack = box(Workbench::kInfoStack);
+    CHECK(stack.top >= box(Workbench::kInfoWritable).top);
+    CHECK(stack.top + stack.height <= box(Workbench::kInfoDeletable).top);
+    CHECK_EQ(box(Workbench::kInfoDate).top, box(Workbench::kInfoDeletable).top);
+
+    // The frame stands between the stack and the labels of the boxes, the
+    // name in the middle above it.
+    CHECK(request.frame_left > stack.left + stack.width);
+    CHECK(request.frame_left + request.frame_width <
+          box(Workbench::kInfoExecutable).left - 10 * 8);
+    CHECK(request.frame_width > 100);
+    CHECK(request.frame_top + request.frame_height <= box(Workbench::kInfoDeletable).top);
+    const GadgetBox name = box(Workbench::kInfoName);
+    CHECK(name.top + name.height <= request.frame_top);
+    const i32 off_middle =
+        2 * name.left + name.width - (2 * request.frame_left + request.frame_width);
+    CHECK(off_middle >= -1 && off_middle <= 1);
+    // It is recessed, and the image is drawn in the middle of it.
+    const i32 x1 = request.frame_left + request.frame_width - 1;
+    const i32 y1 = request.frame_top + request.frame_height - 1;
+    CHECK_EQ(r.window_pixel(request.window, request.frame_left, request.frame_top), 1u);
+    CHECK_EQ(r.window_pixel(request.window, x1, y1), 2u);
+    u32 drawn = 0;
+    for (i32 y = request.frame_top + 1; y < y1; ++y) {
+        for (i32 x = request.frame_left + 1; x < x1; ++x) {
+            drawn += r.window_pixel(request.window, x, y) != 0 ? 1 : 0;
+        }
+    }
+    CHECK(drawn > 0);
+    CHECK_EQ(r.window_pixel(request.window, request.frame_left + 2, request.frame_top + 2), 0u);
+
+    // Under the rows: the comment, the default tool and the tool types
+    // share a column, their labels left of them.
+    const GadgetBox comment = box(Workbench::kInfoComment);
+    const GadgetBox tool = box(Workbench::kInfoDefaultTool);
+    const GadgetBox list = box(Workbench::kInfoToolTypes);
+    const GadgetBox edit = box(Workbench::kInfoTool);
+    CHECK(comment.top >= box(Workbench::kInfoDeletable).top + pitch);
+    CHECK(tool.top >= comment.top + comment.height);
+    CHECK(list.top >= tool.top + tool.height);
+    CHECK_EQ(comment.left, box(Workbench::kInfoDate).left);
+    CHECK_EQ(tool.left, comment.left);
+    CHECK_EQ(list.left, comment.left);
+    CHECK_EQ(comment.left + comment.width, width - 8);
+    for (const u16 id : {Workbench::kInfoComment, Workbench::kInfoDefaultTool,
+                         Workbench::kInfoToolTypes, Workbench::kInfoStack,
+                         Workbench::kInfoBlocks, Workbench::kInfoDate}) {
+        CHECK_EQ(info_place(r, request, id), gadtools_defs::PLACETEXT_LEFT);
+    }
+    // The string that edits a row is right under the rows, as wide as the
+    // list with its scroller, with New and Del left of it.
+    CHECK_EQ(edit.top, list.top + list.height);
+    CHECK_EQ(edit.left, list.left);
+    CHECK_EQ(edit.left + edit.width, width - 8);
+    const GadgetBox add = box(Workbench::kInfoNew);
+    const GadgetBox del = box(Workbench::kInfoDel);
+    CHECK_EQ(add.top, edit.top);
+    CHECK_EQ(del.top, edit.top);
+    CHECK_EQ(add.left, 8);
+    CHECK(del.left > add.left + add.width);
+    CHECK(del.left + del.width < edit.left);
+    // Save and Cancel are the last row, at the two edges.
+    const GadgetBox save = box(Workbench::kInfoSave);
+    const GadgetBox cancel = box(Workbench::kInfoCancel);
+    CHECK(save.top >= edit.top + edit.height);
+    CHECK_EQ(cancel.top, save.top);
+    CHECK_EQ(save.left, 8);
+    CHECK_EQ(cancel.left + cancel.width, width - 8);
+    CHECK(save.top + save.height < height);
+    r.workbench.close_dialog(request);
+}
+
+void the_information_window_groups_the_digits_of_a_size() {
+    Rig r;
+    u32 error = 0;
+    const std::vector<u8> bytes(83248, 'x');
+    CHECK(g_dos.write_file("RAM:Big", bytes.data(), static_cast<u32>(bytes.size()), error));
+    const u32 object = g_icon.default_object(kWBTool);
+    CHECK(object != 0);
+    CHECK(g_icon.save_object("RAM:Big", object, error));
+    g_icon.free_object(object);
+    const TwoWindows w = open_tools_and_ram(r);
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, r.find_icon_in(w.ram, "Big"), request));
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Big (Tool)");
+    CHECK(info_value(r, request, Workbench::kInfoBytes) == "83 248");
+    // A tool has no default tool to name.
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDefaultTool), 0u);
+    r.workbench.close_dialog(request);
 }
 
 void a_check_box_and_the_comment_save_to_the_file() {
@@ -3295,6 +3456,7 @@ void a_check_box_and_the_comment_save_to_the_file() {
     // The comment the window shows can be edited and saved.
     CHECK(r.workbench.open_info(w.ram, note, request));
     CHECK(info_comment(r, request) == "old note");
+    CHECK(g_intuition.activate_string(request.comment_gadget, request.window));
     g_intuition.string_key('!');
     click_info(r, request, Workbench::kInfoSave);
     CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
@@ -3310,6 +3472,7 @@ void information_saves_only_what_changed() {
     const u32 proj = r.find_icon_in(w.tools, "Proj");
     Workbench::InfoRequest request{};
     CHECK(r.workbench.open_info(w.tools, proj, request));
+    CHECK(r.window_title(request.window) == "HombreTest:Tools");
     click_info(r, request, Workbench::kInfoSave);
     CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
     CHECK(r.workbench.save_info(request));
@@ -3337,6 +3500,7 @@ void information_cancels_without_changing_anything() {
 
     Workbench::InfoRequest request{};
     CHECK(r.workbench.open_info(w.ram, note, request));
+    CHECK(g_intuition.activate_string(request.comment_gadget, request.window));
     g_intuition.string_key('!');
     click_info(r, request, Workbench::kInfoScript);
     click_info(r, request, Workbench::kInfoCancel);
@@ -3355,25 +3519,63 @@ void the_information_window_shows_a_drawer() {
     CHECK(object != 0);
     CHECK(g_icon.save_object("RAM:Box", object, error));
     g_icon.free_object(object);
+    // The script and execute bits, which a drawer has no box for.
+    CHECK(g_dos.set_protection_bits("RAM:Box", 0x42, error));
+    CHECK(g_dos.make_dir("RAM:Trashcan", error));
+    const u32 trashcan = g_icon.default_object(kWBGarbage);
+    CHECK(trashcan != 0);
+    CHECK(g_icon.save_object("RAM:Trashcan", trashcan, error));
+    g_icon.free_object(trashcan);
     const TwoWindows w = open_tools_and_ram(r);
     const u32 box = r.find_icon_in(w.ram, "Box");
     CHECK(box != Workbench::kNoIcon);
 
-    // A drawer has no size to show, but a date, check boxes and a comment.
+    // A drawer has no sizes or stack and no Script or Executable box, but
+    // a date, the other check boxes in their rows, a comment and tool types.
     Workbench::InfoRequest request{};
     CHECK(r.workbench.open_info(w.ram, box, request));
-    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Drawer");
-    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoSize), 0u);
-    CHECK(info_gadget_at(r, request, Workbench::kInfoDate) != 0u);
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Box (Drawer)");
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoBlocks), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoBytes), 0u);
+    CHECK(!info_value(r, request, Workbench::kInfoDate).empty());
     CHECK(info_gadget_at(r, request, Workbench::kInfoComment) != 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoScript), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoExecutable), 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoArchived) != 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoReadable) != 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoWritable) != 0u);
     CHECK(info_gadget_at(r, request, Workbench::kInfoDeletable) != 0u);
     CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoStack), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDefaultTool), 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
+    const i32 pitch = gadget_box(r, info_gadget(r, request, Workbench::kInfoReadable)).top -
+                      gadget_box(r, info_gadget(r, request, Workbench::kInfoArchived)).top;
+    CHECK_EQ(gadget_box(r, info_gadget(r, request, Workbench::kInfoDeletable)).top,
+             gadget_box(r, info_gadget(r, request, Workbench::kInfoWritable)).top + 2 * pitch);
+
+    // A box that changes leaves the bits without one as they were.
+    click_info(r, request, Workbench::kInfoArchived);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    CHECK_EQ(g_dos.file_info("RAM:Box").protection, 0x52u);
+    r.workbench.close_dialog(request);
+
+    // A Trashcan shows what a drawer does, under its own type.
+    CHECK(r.workbench.open_info(w.ram, r.find_icon_in(w.ram, "Trashcan"), request));
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Trashcan (Trashcan)");
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoBlocks), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoStack), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoScript), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoExecutable), 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoDeletable) != 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoComment) != 0u);
     CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDefaultTool), 0u);
     CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
     r.workbench.close_dialog(request);
 }
 
-void information_shows_an_icon_without_an_object_and_refuses_disks() {
+void information_shows_an_icon_without_an_object() {
     Rig r;
     u32 error = 0;
     const u32 object = g_icon.default_object(kWBTool);
@@ -3385,27 +3587,38 @@ void information_shows_an_icon_without_an_object_and_refuses_disks() {
     const u32 lonely = r.find_icon_in(w.ram, "Lonely");
     CHECK(lonely != Workbench::kNoIcon);
 
-    // Only the .info is there: the name and type, but no size, date, check
-    // boxes or comment, and Save has nothing to write.
+    // Only the .info is there: the window is a tool's, with no sizes or
+    // date to show and its check boxes and comment ghosted, and Save has
+    // nothing to write.
     Workbench::InfoRequest request{};
     CHECK(r.workbench.open_info(w.ram, lonely, request));
     CHECK(!request.has_object);
-    CHECK(info_value(r, request, Workbench::kInfoName) == "Name: Lonely");
-    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Tool");
-    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoSize), 0u);
-    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDate), 0u);
-    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoComment), 0u);
-    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoScript), 0u);
-    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDeletable), 0u);
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Lonely (Tool)");
+    CHECK(info_value(r, request, Workbench::kInfoBlocks).empty());
+    CHECK(info_value(r, request, Workbench::kInfoBytes).empty());
+    CHECK(info_value(r, request, Workbench::kInfoDate).empty());
+    CHECK(info_disabled(r, request, Workbench::kInfoComment));
+    for (const u16 id : {Workbench::kInfoScript, Workbench::kInfoArchived,
+                         Workbench::kInfoReadable, Workbench::kInfoWritable,
+                         Workbench::kInfoExecutable, Workbench::kInfoDeletable}) {
+        CHECK(info_disabled(r, request, id));
+        CHECK(!info_checked(r, request, id));
+        click_info(r, request, id);
+        CHECK(!info_checked(r, request, id));
+    }
+    CHECK(!info_disabled(r, request, Workbench::kInfoStack));
     click_info(r, request, Workbench::kInfoSave);
     CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
     CHECK(r.workbench.save_info(request));
     CHECK(!r.exists("RAM:Lonely"));
     r.workbench.close_dialog(request);
 
-    // A disk's icon is no file to show.
-    CHECK(!r.workbench.open_info(0, r.find_icon_in(0, "Ram Disk"), request));
-    CHECK(logged("workbench: cannot show Ram Disk: Error 212"));
+    // A disk's icon in a drawer and an icon that is not there are nothing
+    // to show.
+    CHECK(!r.workbench.open_info(w.tools, r.find_icon_in(w.tools, "Fake"), request));
+    CHECK(logged("workbench: cannot show Fake: Error 212"));
+    CHECK(!r.workbench.open_info(w.ram, Workbench::kNoIcon, request));
+    CHECK(logged("workbench: cannot show ?: Error 212"));
 }
 
 void the_information_window_shows_a_tool_and_a_project() {
@@ -3418,24 +3631,27 @@ void the_information_window_shows_a_tool_and_a_project() {
     Workbench::InfoRequest request{};
     CHECK(r.workbench.open_info(w.tools, tool, request));
     CHECK(!request.has_object);
-    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Tool");
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Tool (Tool)");
     CHECK_EQ(info_stack(r, request), 4096);
     CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDefaultTool), 0u);
     CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
     CHECK_EQ(request.row_count, 0u);
+    const i32 tool_height = static_cast<i16>(r.get16(request.window + ndk::wd_Height));
     r.workbench.close_dialog(request);
 
-    // The project shows its default tool, stack and tool types.
+    // The project shows its default tool, stack and tool types, and is a
+    // row taller for the default tool.
     const u32 typed = r.find_icon_in(w.ram, "Typed");
     CHECK(r.workbench.open_info(w.ram, typed, request));
     CHECK(request.has_object);
-    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Project");
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Typed (Project)");
     CHECK(info_default_tool(r, request) == "OldTool");
     CHECK_EQ(info_stack(r, request), 4096);
     CHECK_EQ(request.row_count, 3u);
     CHECK(info_row(r, request, 0) == "ONE=1");
     CHECK(info_row(r, request, 1) == "TWO=2");
     CHECK(info_row(r, request, 2) == "THREE=3");
+    CHECK(static_cast<i16>(r.get16(request.window + ndk::wd_Height)) > tool_height);
     r.workbench.close_dialog(request);
 }
 
@@ -3447,7 +3663,11 @@ void tool_types_are_picked_edited_added_and_deleted() {
     Workbench::InfoRequest request{};
     CHECK(r.workbench.open_info(w.ram, typed, request));
 
-    // With no row selected, Del and Return do nothing.
+    // With no row selected, Del and the string are ghosted and do nothing;
+    // New is not.
+    CHECK(info_disabled(r, request, Workbench::kInfoDel));
+    CHECK(info_disabled(r, request, Workbench::kInfoTool));
+    CHECK(!info_disabled(r, request, Workbench::kInfoNew));
     click_info(r, request, Workbench::kInfoDel);
     CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
     CHECK_EQ(request.row_count, 3u);
@@ -3457,12 +3677,16 @@ void tool_types_are_picked_edited_added_and_deleted() {
     CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
     CHECK_EQ(request.row_count, 3u);
     CHECK(info_row(r, request, 0) == "ONE=1");
+    CHECK(info_tool_editor(r, request).empty());
 
-    // A picked row's text is put in the string gadget.
+    // A picked row's text is put in the string gadget, which works on it
+    // with Del from then on.
     click_info_row(r, request, 1);
     CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
     CHECK_EQ(request.selected, 1u);
     CHECK(info_tool_editor(r, request) == "TWO=2");
+    CHECK(!info_disabled(r, request, Workbench::kInfoDel));
+    CHECK(!info_disabled(r, request, Workbench::kInfoTool));
 
     // Return in it replaces the row.
     type_info_text("X");
@@ -3495,8 +3719,29 @@ void tool_types_are_picked_edited_added_and_deleted() {
           (std::vector<std::string>{"ONE=1", "TWO=2X", "THREE=3"}));
     g_icon.free_object(object);
 
-    // New and Del keep no memory either.
+    // With the last row deleted there is none to work on: both are
+    // ghosted again, until New adds one.
     typed = r.find_icon_in(w.ram, "Typed");
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    click_info_row(r, request, 0);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    for (u32 left = 3; left > 0; --left) {
+        CHECK(!info_disabled(r, request, Workbench::kInfoDel));
+        click_info(r, request, Workbench::kInfoDel);
+        CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+        CHECK_EQ(request.row_count, left - 1);
+    }
+    CHECK_EQ(request.selected, Workbench::kNoToolType);
+    CHECK(info_disabled(r, request, Workbench::kInfoDel));
+    CHECK(info_disabled(r, request, Workbench::kInfoTool));
+    CHECK(info_tool_editor(r, request).empty());
+    click_info(r, request, Workbench::kInfoNew);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK(!info_disabled(r, request, Workbench::kInfoDel));
+    CHECK(!info_disabled(r, request, Workbench::kInfoTool));
+    r.workbench.close_dialog(request);
+
+    // New and Del keep no memory either.
     CHECK(r.workbench.open_info(w.ram, typed, request));
     r.workbench.close_dialog(request);
     const u32 before = r.free_bytes();
@@ -3677,6 +3922,135 @@ void an_icon_without_an_object_saves_its_icon_fields() {
     CHECK_EQ(r.get32(object + do_StackSize), 2048u);
     CHECK(object_tool_types(r, object) == (std::vector<std::string>{"LONE=1"}));
     g_icon.free_object(object);
+}
+
+void the_information_window_shows_a_disk() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    (void)w;
+    const u32 ram = r.find_icon_in(0, "Ram Disk");
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(0, ram, request));
+    CHECK(request.has_object);
+    CHECK(request.is_disk);
+    CHECK(r.window_title(request.window) == "Ram Disk:");
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Ram Disk (Volume)");
+
+    // Its blocks, those used and free and the size of one, each on a row,
+    // the date it was made and whether it can be written.
+    u32 blocks = 0;
+    u32 used = 0;
+    CHECK(g_dos.volume_usage("RAM:", blocks, used));
+    CHECK(info_label(r, request, Workbench::kInfoBlocks) == "Blocks:");
+    CHECK(info_value(r, request, Workbench::kInfoBlocks) == std::to_string(blocks));
+    CHECK(info_label(r, request, Workbench::kInfoUsed) == "Used:");
+    CHECK(info_value(r, request, Workbench::kInfoUsed) == std::to_string(used));
+    CHECK(info_label(r, request, Workbench::kInfoFree) == "Free:");
+    CHECK(info_value(r, request, Workbench::kInfoFree) == std::to_string(blocks - used));
+    CHECK(info_label(r, request, Workbench::kInfoBlockSize) == "Block size:");
+    CHECK(info_value(r, request, Workbench::kInfoBlockSize) == "512");
+    CHECK(info_label(r, request, Workbench::kInfoDate) == "Created:");
+    CHECK(!info_value(r, request, Workbench::kInfoDate).empty());
+    CHECK(info_label(r, request, Workbench::kInfoStatus) == "Status:");
+    CHECK(info_value(r, request, Workbench::kInfoStatus) == "Read/Write");
+    const auto top_of = [&](u16 id) { return gadget_box(r, info_gadget(r, request, id)).top; };
+    const i32 pitch = top_of(Workbench::kInfoUsed) - top_of(Workbench::kInfoBlocks);
+    CHECK(pitch > 0);
+    CHECK_EQ(top_of(Workbench::kInfoFree), top_of(Workbench::kInfoUsed) + pitch);
+    CHECK_EQ(top_of(Workbench::kInfoBlockSize), top_of(Workbench::kInfoFree) + pitch);
+    CHECK_EQ(top_of(Workbench::kInfoDate), top_of(Workbench::kInfoBlockSize) + pitch);
+    CHECK_EQ(top_of(Workbench::kInfoStatus), top_of(Workbench::kInfoDate));
+
+    // It has no file's lines, check boxes or comment, but a default tool
+    // and tool types.
+    for (const u16 id : {Workbench::kInfoBytes, Workbench::kInfoStack, Workbench::kInfoComment,
+                         Workbench::kInfoScript, Workbench::kInfoArchived,
+                         Workbench::kInfoReadable, Workbench::kInfoWritable,
+                         Workbench::kInfoExecutable, Workbench::kInfoDeletable}) {
+        CHECK_EQ(info_gadget_at(r, request, id), 0u);
+    }
+    CHECK(info_gadget_at(r, request, Workbench::kInfoDefaultTool) != 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
+    CHECK(request.frame_width > 100);
+
+    // Saved unchanged it writes nothing; a tool type added gives the Ram
+    // Disk a Disk.info, which its icon then shows.
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    CHECK(!r.exists("RAM:Disk.info"));
+    r.workbench.close_dialog(request);
+    CHECK(r.workbench.open_info(0, ram, request));
+    click_info(r, request, Workbench::kInfoNew);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    type_info_text("KEEP=1");
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    CHECK(r.exists("RAM:Disk.info"));
+    const u32 object = load_ram_object("Disk");
+    CHECK(object != 0);
+    CHECK_EQ(r.get8(object + do_Type), kWBDisk);
+    CHECK(object_tool_types(r, object) == (std::vector<std::string>{"KEEP=1"}));
+    g_icon.free_object(object);
+    CHECK(r.workbench.open_info(0, ram, request));
+    CHECK_EQ(request.row_count, 1u);
+    CHECK(info_row(r, request, 0) == "KEEP=1");
+    r.workbench.close_dialog(request);
+
+    // A disk that cannot be written says so.
+    const u32 floppy = r.find_icon_in(0, "HombreTest");
+    CHECK(r.workbench.open_info(0, floppy, request));
+    CHECK(r.window_title(request.window) == "HombreTest:");
+    CHECK(info_value(r, request, Workbench::kInfoName) == "HombreTest (Volume)");
+    CHECK(info_value(r, request, Workbench::kInfoBlocks) == "1 758");
+    CHECK(info_value(r, request, Workbench::kInfoBlockSize) == "488");
+    CHECK(info_value(r, request, Workbench::kInfoStatus) == "Read Only");
+    r.workbench.close_dialog(request);
+
+    // Opening and closing a disk's window keeps no memory.
+    const u32 before = r.free_bytes();
+    CHECK(r.workbench.open_info(0, ram, request));
+    r.workbench.close_dialog(request);
+    CHECK_EQ(r.free_bytes(), before);
+}
+
+void the_information_window_fits_a_short_screen() {
+    for (const u32 screen_height : {200u, 256u}) {
+        Rig r(test_files(), {}, 1, 2, screen_height);
+        put_ram_typed("Typed", {"ONE=1", "TWO=2", "THREE=3", "FOUR=4", "FIVE=5", "SIX=6"});
+        r.workbench.open_desktop();
+        r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+        const u32 ram = r.find_window("Ram Disk:");
+        CHECK(ram != Workbench::kNoWindow);
+
+        // The project's window is the tallest: it stays on the screen, with
+        // fewer rows of tool types on the shorter one, all its gadgets
+        // inside it.
+        Workbench::InfoRequest request{};
+        CHECK(r.workbench.open_info(ram, r.find_icon_in(ram, "Typed"), request));
+        const i32 top = static_cast<i16>(r.get16(request.window + ndk::wd_TopEdge));
+        const i32 height = static_cast<i16>(r.get16(request.window + ndk::wd_Height));
+        CHECK(top >= 0);
+        CHECK(top + height <= static_cast<i32>(screen_height));
+        CHECK(request.visible_rows >= 1u);
+        if (screen_height == 200) {
+            CHECK(request.visible_rows < Workbench::kInfoToolTypeRows);
+        } else {
+            CHECK_EQ(request.visible_rows, Workbench::kInfoToolTypeRows);
+        }
+        const GadgetBox save = gadget_box(r, info_gadget(r, request, Workbench::kInfoSave));
+        CHECK(save.top + save.height < height);
+
+        // The rows that do not show are scrolled to.
+        click_info_row(r, request, 0);
+        CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+        CHECK_EQ(request.selected, 0u);
+        CHECK(info_tool_editor(r, request) == "ONE=1");
+        r.workbench.close_dialog(request);
+    }
 }
 
 // A drawer in RAM: holding a file and a drawer with a file, with its icon.
@@ -4868,6 +5242,8 @@ int main() {
     a_text_request_answers_return_and_its_buttons();
     a_set_answer_stands_in_for_the_requesters();
     the_information_window_shows_a_file();
+    the_information_window_is_laid_out_around_the_image();
+    the_information_window_groups_the_digits_of_a_size();
     a_check_box_and_the_comment_save_to_the_file();
     information_saves_only_what_changed();
     information_cancels_without_changing_anything();
@@ -4879,7 +5255,9 @@ int main() {
     information_saves_the_icon_fields();
     information_cancels_the_icon_fields();
     an_icon_without_an_object_saves_its_icon_fields();
-    information_shows_an_icon_without_an_object_and_refuses_disks();
+    information_shows_an_icon_without_an_object();
+    the_information_window_shows_a_disk();
+    the_information_window_fits_a_short_screen();
     a_window_snapshot_is_used_when_the_window_opens_again();
     a_reset_closes_and_reopens_the_windows();
     more_drawers_open_than_the_old_table_held();

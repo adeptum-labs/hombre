@@ -173,22 +173,23 @@ constexpr u32 kProtectScript = 1u << 6;
 struct ProtectionBox {
     u16 id;
     u32 bit;
-    bool denies;  // checked while the bit is clear
+    bool denies;     // checked while the bit is clear
+    bool on_drawer;  // a drawer has the box too
     const char* label;
 };
 
+// The boxes from the top down, a row each.
 constexpr ProtectionBox kProtectionBoxes[] = {
-    {Workbench::kInfoScript, kProtectScript, false, "Script"},
-    {Workbench::kInfoArchived, kProtectArchive, false, "Archived"},
-    {Workbench::kInfoReadable, kProtectRead, true, "Readable"},
-    {Workbench::kInfoWritable, kProtectWrite, true, "Writable"},
-    {Workbench::kInfoExecutable, kProtectExecute, true, "Executable"},
-    {Workbench::kInfoDeletable, kProtectDelete, true, "Deletable"},
+    {Workbench::kInfoScript, kProtectScript, false, false, "Script"},
+    {Workbench::kInfoArchived, kProtectArchive, false, true, "Archived"},
+    {Workbench::kInfoReadable, kProtectRead, true, true, "Readable"},
+    {Workbench::kInfoWritable, kProtectWrite, true, true, "Writable"},
+    {Workbench::kInfoExecutable, kProtectExecute, true, false, "Executable"},
+    {Workbench::kInfoDeletable, kProtectDelete, true, true, "Deletable"},
 };
 constexpr u32 kProtectionBoxCount = sizeof kProtectionBoxes / sizeof kProtectionBoxes[0];
-constexpr u32 kProtectionColumns = 2;
-constexpr u32 kProtectionRows =
-    (kProtectionBoxCount + kProtectionColumns - 1) / kProtectionColumns;
+// The characters of the longest of the labels.
+constexpr i32 kProtectionLabelChars = 10;
 
 // The type a Workbench object has, as the information window names it.
 const char* object_type_name(u8 type) {
@@ -201,6 +202,8 @@ const char* object_type_name(u8 type) {
         return "Project";
     case Workbench::kGarbage:
         return "Trashcan";
+    case Workbench::kDisk:
+        return "Volume";
     default:
         return "Unknown";
     }
@@ -464,6 +467,19 @@ struct Message {
         format_u64(digits, sizeof digits, value, 10);
         return add(digits);
     }
+    // The number with a space between its thousands.
+    Message& grouped(u64 value) {
+        char digits[24];
+        format_u64(digits, sizeof digits, value, 10);
+        const u32 count = text_length(digits);
+        for (u32 i = 0; i < count && at + 2 < sizeof text; ++i) {
+            if (i != 0 && (count - i) % 3 == 0) {
+                text[at++] = ' ';
+            }
+            text[at++] = digits[i];
+        }
+        return *this;
+    }
 };
 
 // Writes a tag list from pairs of tag and data, ending it with TAG_DONE.
@@ -493,6 +509,7 @@ public:
           font_(graphics.font_metrics(intuition.font_of_screen(screen))),
           bar_height_(static_cast<i32>(bus_.r8(screen + ndk::sc_BarHeight))),
           screen_width_(static_cast<i32>(bus_.r16(screen + ndk::sc_Width))),
+          screen_height_(static_cast<i32>(bus_.r16(screen + ndk::sc_Height))),
           columns_(columns) {
         u32 bytes = kList + 4;
         for (const char* text : strings) {
@@ -520,6 +537,8 @@ public:
     i32 char_width() const { return font_.x_size; }
     i32 font_height() const { return font_.y_size; }
     i32 top() const { return bar_height_ + kMargin; }
+    // The rows a window can take under the screen's bar.
+    i32 room_below_bar() const { return screen_height_ - bar_height_ - 1; }
     // The room after the strings, which a dialog lays out itself.
     u32 extra() const { return extra_; }
 
@@ -558,25 +577,33 @@ public:
         return previous_;
     }
 
-    // The accepting button on the left and Cancel on the right.
-    void buttons(i32 top, u32 accept, u32 cancel) {
+    // The accepting button on the left and Cancel on the right, each
+    // columns characters wide.
+    void buttons(i32 top, u32 accept, u32 cancel, i32 columns = 9) {
         using namespace gadtools_defs;
-        const i32 button = 9 * font_.x_size;
+        const i32 button = columns * font_.x_size;
         add(BUTTON_KIND, Workbench::kDialogAccept, kMargin, top, button, accept, PLACETEXT_IN);
         add(BUTTON_KIND, Workbench::kDialogCancel, width() - kMargin - button, top, button,
             cancel, PLACETEXT_IN);
     }
 
-    // Opens the window and draws its gadgets; height is what they take.
-    bool open(u32 title, i32 height) {
+    // Opens the window and draws its gadgets; height is what they take,
+    // with bottom rows under them. A window that would pass the bottom of
+    // the screen opens further up.
+    bool open(u32 title, i32 height, i32 bottom = kMargin) {
         if (previous_ == 0) {
             return false;
         }
         const u32 window = dialog_.block;
+        const i32 rows = height + bottom;
+        i32 top = 2 * bar_height_;
+        if (top + rows > screen_height_) {
+            top = screen_height_ > rows ? screen_height_ - rows : 0;
+        }
         bus_.w16(window + ndk::nw_LeftEdge, kCascadeX);
-        bus_.w16(window + ndk::nw_TopEdge, static_cast<u32>(2 * bar_height_));
+        bus_.w16(window + ndk::nw_TopEdge, static_cast<u32>(top));
         bus_.w16(window + ndk::nw_Width, static_cast<u32>(width()));
-        bus_.w16(window + ndk::nw_Height, static_cast<u32>(height + kMargin));
+        bus_.w16(window + ndk::nw_Height, static_cast<u32>(rows));
         bus_.w8(window + ndk::nw_BlockPen, 1);
         bus_.w32(window + ndk::nw_IDCMPFlags, ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_GADGETUP);
         bus_.w32(window + ndk::nw_Flags, ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET |
@@ -605,6 +632,7 @@ private:
     Graphics::FontMetrics font_;
     i32 bar_height_;
     i32 screen_width_;
+    i32 screen_height_;
     i32 columns_;
     u32 extra_ = 0;
     u32 at_ = 0;
@@ -622,7 +650,9 @@ constexpr u32 kInfoDefaultAt = kInfoRowsAt + kInfoRowBytes;
 constexpr u32 kInfoOriginalDefaultAt = kInfoDefaultAt + Workbench::kMaxDefaultToolLength + 1;
 constexpr u32 kInfoTagsAt =
     kInfoOriginalDefaultAt + Workbench::kMaxDefaultToolLength + 1;
-constexpr u32 kInfoExtraBytes = kInfoTagsAt + kInfoTagWords * 4;
+// The Region the image is cut off at while it is drawn.
+constexpr u32 kInfoClipAt = kInfoTagsAt + kInfoTagWords * 4;
+constexpr u32 kInfoExtraBytes = kInfoClipAt + kClipBytes;
 // The most entries a tool type array can hold, its 64K .info bounding it.
 constexpr u32 kMaxToolTypeTail = Icon::kMaxInfoBytes / 5;
 
@@ -3328,12 +3358,21 @@ Workbench::Reply Workbench::text_request_input(const TextRequest& request, char*
     });
 }
 
-// A window of lines that say what the icon stands for, its stack, default
-// tool and tool types, a check box for each protection bit it has one for,
-// a comment to edit and Save and Cancel buttons.
+// The information window, laid out as the 3.1 one. The check boxes go down
+// the right edge, a row each; the lines of the left block share those rows
+// and the framed image stands between the two, under the name. The date is
+// on the last of the rows, and the string gadgets, the tool types and the
+// buttons follow below. A short screen gets fewer rows of tool types.
 bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     using namespace gadtools_defs;
+    const DrawerWindow* window = find_window(window_id);
     const IconEntry* icon = file_icon(window_id, icon_id);
+    if (icon == nullptr && window != nullptr && window_id == kRootWindow) {
+        // A disk on the desktop.
+        const IconEntry* disk = find_icon(icon_id);
+        icon = disk != nullptr && disk->owner == kRootWindow && disk->type == kDisk ? disk
+                                                                                   : nullptr;
+    }
     if (icon == nullptr) {
         const IconEntry* other = find_icon(icon_id);
         show_error("cannot show", other != nullptr ? other->name : "?",
@@ -3343,39 +3382,66 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     if (!can_show_dialog() || icon->object == 0) {
         return false;
     }
+    const bool is_disk = icon->type == kDisk;
     char path[Dos::kMaxPath];
-    if (!icon_path(*find_window(window_id), *icon, path)) {
+    char drawer[Dos::kMaxPath];
+    if (!icon_path(*window, *icon, path)) {
+        return false;
+    }
+    if (!is_disk) {
+        copy_text(drawer, sizeof drawer, drawer_of(*window, *icon));
+    } else if (!volume_root(*icon, drawer)) {
         return false;
     }
     Bus b(*machine_);
-    const Dos::FileInfo info = dos_->file_info(path);
-    const bool has_object = info.kind != Dos::TargetKind::Missing;
-    const bool is_file = info.kind == Dos::TargetKind::File;
+    Dos::FileInfo info{};
+    Dos::VolumeInfo volume{};
+    bool has_object = false;
+    if (is_disk) {
+        has_object = dos_->volume_info(drawer, volume);
+    } else {
+        info = dos_->file_info(path);
+        has_object = info.kind != Dos::TargetKind::Missing;
+    }
+    // An icon that stands for nothing but its .info shows what its type has.
+    const bool as_file = !is_disk && (has_object ? info.kind == Dos::TargetKind::File
+                                                 : icon->type == kTool || icon->type == kProject);
     const bool show_stack = icon->type == kTool || icon->type == kProject;
-    const bool show_default_tool = icon->type == kProject;
-    const bool show_tool_types = icon->type == kTool || icon->type == kProject ||
-                                 icon->type == kDrawer || icon->type == kGarbage;
+    const bool show_default_tool = icon->type == kProject || is_disk;
+    const bool show_tool_types = show_stack || is_disk || icon->type == kDrawer ||
+                                 icon->type == kGarbage;
 
     Message name_line;
-    name_line.add("Name: ").add(icon->name);
-    Message type_line;
-    type_line.add("Type: ").add(object_type_name(icon->type));
-    Message size_line;
+    name_line.add(icon->name).add(" (").add(object_type_name(icon->type)).add(")");
+    // A file's blocks and bytes; a disk's blocks, those used and free and
+    // the bytes of one.
     Message blocks_line;
-    if (is_file) {
-        size_line.add("Size: ").number(info.size).add(" bytes");
-        blocks_line.add("Blocks: ").number(info.blocks);
+    Message second_line;
+    Message free_line;
+    Message block_size_line;
+    if (is_disk && has_object) {
+        blocks_line.grouped(volume.blocks);
+        second_line.grouped(volume.used);
+        free_line.grouped(volume.blocks > volume.used ? volume.blocks - volume.used : 0);
+        block_size_line.grouped(volume.block_bytes);
+    } else if (has_object && as_file) {
+        blocks_line.grouped(info.blocks);
+        second_line.grouped(info.size);
     }
     Message date_line;
     if (has_object) {
         char date[LEN_DATSTRING];
         char time[LEN_DATSTRING];
-        const DosStamp stamp{info.days, info.minutes, info.ticks};
+        const DosStamp stamp = is_disk ? DosStamp{volume.days, volume.minutes, volume.ticks}
+                                       : DosStamp{info.days, info.minutes, info.ticks};
         if (dos_format_date(stamp, FORMAT_DEF, 0, 0, date, sizeof date, nullptr, 0, time,
                             sizeof time) != 0) {
-            date_line.add("Date: ").add(date).add(" ").add(time);
+            date_line.add(date).add(" ").add(time);
         }
     }
+    const char* status = !is_disk || !has_object ? ""
+                         : volume.writable       ? "Read/Write"
+                                                 : "Read Only";
     char default_tool[kMaxDefaultToolLength + 1]{};
     const u32 default_ptr = b.r32(icon->object + do_DefaultTool);
     for (u32 i = 0; default_ptr != 0 && i < kMaxDefaultToolLength; ++i) {
@@ -3394,7 +3460,10 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     copy_text(request.comment_text, sizeof request.comment_text, info.comment);
     request.protection = info.protection;
     request.has_object = has_object;
+    request.is_disk = is_disk;
+    request.drive = icon->drive;
     request.window_id = window_id;
+    request.icon_id = icon_id;
     request.show_stack = show_stack;
     request.show_default_tool = show_default_tool;
     request.show_tool_types = show_tool_types;
@@ -3402,13 +3471,14 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     static_assert(kProtectionBoxCount == 6);
     DialogBuilder dialog(
         *machine_, *exec_, *graphics_, *intuition_, *gadtools_, screen_, request,
-        {name_line.text, type_line.text, size_line.text, blocks_line.text, date_line.text,
-         default_tool,
-         "Information", "Comment", "Save", "Cancel", info.comment, "Default Tool", "Stack",
-         "Tool Types", "New", "Del", "", kProtectionBoxes[0].label, kProtectionBoxes[1].label,
+        {name_line.text, blocks_line.text, second_line.text, free_line.text,
+         block_size_line.text, date_line.text, status, default_tool, drawer, info.comment,
+         "Blocks:", "Bytes:", "Used:", "Free:", "Block size:", "Stack:", "Last Changed:",
+         "Created:", "Status:", "Comment:", "Default Tool:", "Tool Types:", "New", "Del",
+         "Save", "Cancel", "", kProtectionBoxes[0].label, kProtectionBoxes[1].label,
          kProtectionBoxes[2].label, kProtectionBoxes[3].label, kProtectionBoxes[4].label,
          kProtectionBoxes[5].label},
-        kInfoExtraBytes, 52);
+        kInfoExtraBytes, 58);
     if (dialog.extra() == 0) {
         close_dialog(request);
         return false;
@@ -3447,97 +3517,198 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     request.original_row_count = request.row_count;
     link_tool_types(request);
 
+    // The columns: a label ends a gap before its gadget, the labels of the
+    // left block before value_left, those of the rows below before
+    // field_left, and those of the check boxes before box_left.
+    constexpr i32 kLeftLabelChars = 11;   // "Block size:"
+    constexpr i32 kFieldLabelChars = 13;  // "Last Changed:"
+    constexpr i32 kValueChars = 12;
+    constexpr i32 kStatusChars = 10;      // "Read/Write"
+    constexpr i32 kRowGap = 4;
+    constexpr i32 kBottom = 6;
     const i32 margin = DialogBuilder::kMargin;
-    const i32 column = (dialog.inner_width() - margin) / 2;
-    const i32 right_x = margin + column + margin;
-    i32 left_top = dialog.top();
-    i32 right_top = dialog.top();
-    const auto line = [&](u16 id, const char* text) {
-        dialog.add(TEXT_KIND, id, margin, left_top, column, 0, 0,
-                   dialog.tags({GTTX_Text, dialog.put(text)}));
-        left_top += dialog.line_height();
+    const i32 cell = dialog.char_width();
+    const i32 font_h = dialog.font_height();
+    const i32 gadget_h = dialog.line_height();
+    const i32 right = dialog.width() - margin;
+    const i32 box_w = static_cast<i32>(kCheckBoxWidth);
+    const i32 box_h = static_cast<i32>(kCheckBoxHeight);
+    const i32 row_h = std::max(box_h, font_h + 3);
+    const i32 rows_top = dialog.top() - 4;
+    const i32 box_left = right - box_w;
+    const i32 box_labels_left = box_left - kGadgetLabelGap - kProtectionLabelChars * cell;
+    const i32 value_left = margin + kLeftLabelChars * cell + kGadgetLabelGap;
+    const i32 field_left = margin + kFieldLabelChars * cell + kGadgetLabelGap;
+    const i32 field_width = right - field_left;
+    const auto row_top = [&](i32 row) { return rows_top + row * row_h; };
+    const auto text_line = [&](u16 id, i32 left, i32 row, i32 width, const char* label,
+                               const char* text) {
+        dialog.add(TEXT_KIND, id, left, row_top(row), std::max(width, cell), dialog.put(label),
+                   PLACETEXT_LEFT, dialog.tags({GTTX_Text, dialog.put(text)}), row_h);
     };
-    line(kInfoName, name_line.text);
-    line(kInfoType, type_line.text);
-    if (is_file) {
-        line(kInfoSize, size_line.text);
-        line(kInfoBlocks, blocks_line.text);
-    }
-    if (has_object) {
-        line(kInfoDate, date_line.text);
-    }
-    if (show_default_tool) {
-        right_top += dialog.font_height() + 4;
-        request.default_tool_gadget = dialog.add(
-            STRING_KIND, kInfoDefaultTool, right_x, right_top, column,
-            dialog.put("Default Tool"), PLACETEXT_ABOVE,
-            dialog.tags({GTST_String, dialog.put(default_tool), GTST_MaxChars,
-                         kMaxDefaultToolLength}));
-        right_top += dialog.line_height();
+
+    // The frame of the image, between the left block and the labels of
+    // the check boxes, and the name in the middle above it. A long name
+    // moves left to stay clear of the first check box's label.
+    request.frame_left = value_left + (kValueChars + 1) * cell + 4;
+    request.frame_top = rows_top + font_h + 3;
+    request.frame_width = box_labels_left - 5 - request.frame_left;
+    request.frame_height = row_top(5) - 2 - request.frame_top;
+    const u32 font = intuition_->font_of_screen(screen_);
+    const i32 name_span = static_cast<i32>(graphics_->text_width(
+        font, reinterpret_cast<const u8*>(name_line.text), text_length(name_line.text)));
+    const i32 name_limit =
+        as_file ? box_left - kGadgetLabelGap -
+                      (static_cast<i32>(text_length(kProtectionBoxes[0].label)) + 1) * cell
+                : right;
+    i32 name_left = request.frame_left + (request.frame_width - name_span) / 2;
+    name_left = std::max(margin, std::min(name_left, name_limit - name_span));
+    dialog.add(TEXT_KIND, kInfoName, name_left, rows_top,
+               std::max(cell, std::min(name_span, name_limit - name_left)), 0, 0,
+               dialog.tags({GTTX_Text, dialog.put(name_line.text)}), font_h + 2);
+
+    const i32 value_width = kValueChars * cell;
+    if (is_disk) {
+        text_line(kInfoBlocks, value_left, 1, value_width, "Blocks:", blocks_line.text);
+        text_line(kInfoUsed, value_left, 2, value_width, "Used:", second_line.text);
+        text_line(kInfoFree, value_left, 3, value_width, "Free:", free_line.text);
+        text_line(kInfoBlockSize, value_left, 4, value_width, "Block size:",
+                  block_size_line.text);
+    } else if (as_file) {
+        text_line(kInfoBlocks, value_left, 1, value_width, "Blocks:", blocks_line.text);
+        text_line(kInfoBytes, value_left, 2, value_width, "Bytes:", second_line.text);
     }
     if (show_stack) {
-        right_top += dialog.font_height() + 4;
+        // In the middle of the two rows above the date.
         request.stack_gadget = dialog.add(
-            INTEGER_KIND, kInfoStack, right_x, right_top, column, dialog.put("Stack"),
-            PLACETEXT_ABOVE,
+            INTEGER_KIND, kInfoStack, value_left, row_top(3) + (2 * row_h - gadget_h) / 2,
+            value_width, dialog.put("Stack:"), PLACETEXT_LEFT,
             dialog.tags({GTIN_Number, static_cast<u32>(stack), GTIN_MaxChars, 10}));
-        right_top += dialog.line_height();
+    }
+    for (u32 i = 0; !is_disk && i < kProtectionBoxCount; ++i) {
+        const ProtectionBox& box = kProtectionBoxes[i];
+        if (!as_file && !box.on_drawer) {
+            continue;
+        }
+        const bool set = (info.protection & box.bit) != 0;
+        dialog.add(CHECKBOX_KIND, box.id, box_left,
+                   row_top(static_cast<i32>(i)) + (row_h - box_h) / 2, 0,
+                   dialog.put(box.label), PLACETEXT_LEFT,
+                   dialog.tags({GTCB_Checked, has_object && box.denies != set ? 1u : 0u,
+                                ndk::GA_Disabled, has_object ? 0u : 1u}));
+    }
+    // The date shares the last row with the Deletable box, or with
+    // whether a disk can be written.
+    i32 date_right = box_labels_left;
+    if (is_disk) {
+        const i32 status_left = right - kStatusChars * cell;
+        text_line(kInfoStatus, status_left, 5, kStatusChars * cell, "Status:", status);
+        date_right = status_left - kGadgetLabelGap - 7 * cell;
+    }
+    text_line(kInfoDate, field_left, 5, date_right - cell - field_left,
+              is_disk ? "Created:" : "Last Changed:", date_line.text);
+
+    i32 top = row_top(static_cast<i32>(kProtectionBoxCount)) + 3;
+    if (!is_disk) {
+        request.comment_gadget = dialog.add(
+            STRING_KIND, kInfoComment, field_left, top, field_width, dialog.put("Comment:"),
+            PLACETEXT_LEFT,
+            dialog.tags({GTST_String, dialog.put(info.comment), GTST_MaxChars,
+                         Dos::kMaxComment, ndk::GA_Disabled, has_object ? 0u : 1u}));
+        top += gadget_h + kRowGap;
+    }
+    if (show_default_tool) {
+        request.default_tool_gadget = dialog.add(
+            STRING_KIND, kInfoDefaultTool, field_left, top, field_width,
+            dialog.put("Default Tool:"), PLACETEXT_LEFT,
+            dialog.tags({GTST_String, dialog.put(default_tool), GTST_MaxChars,
+                         kMaxDefaultToolLength}));
+        top += gadget_h + kRowGap;
     }
     if (show_tool_types) {
+        // As many rows as the screen has room for under its bar, with the
+        // string, the buttons and the bottom edge below them.
+        const i32 item_h = font_h + 1;
+        const i32 below = 2 * kListViewFrame + gadget_h + kRowGap + gadget_h + kBottom;
+        const i32 rows = std::clamp((dialog.room_below_bar() - top - below) / item_h, 1,
+                                    static_cast<i32>(kInfoToolTypeRows));
+        const i32 list_h = rows * item_h + 2 * kListViewFrame;
+        request.visible_rows = static_cast<u32>(rows);
+        // The list view puts the string that edits the selected row under
+        // its rows; New and Del stand left of it, and Del and the string
+        // are ghosted until a row is selected.
         request.tool_gadget = dialog.add(
-            STRING_KIND, kInfoTool, right_x, right_top, column, 0, 0,
-            dialog.tags({GTST_String, request.empty_text, GTST_MaxChars, kMaxToolTypeLength}));
-        constexpr i32 kToolTypeRows = 3;
-        const i32 list_h = kToolTypeRows * dialog.line_height() + 2 * kListViewFrame;
-        right_top += dialog.font_height() + 4;
+            STRING_KIND, kInfoTool, field_left, top + list_h, field_width, 0, 0,
+            dialog.tags({GTST_String, request.empty_text, GTST_MaxChars, kMaxToolTypeLength,
+                         ndk::GA_Disabled, 1}));
         request.tool_types_gadget = dialog.add(
-            LISTVIEW_KIND, kInfoToolTypes, right_x, right_top, column,
-            dialog.put("Tool Types"), PLACETEXT_ABOVE,
+            LISTVIEW_KIND, kInfoToolTypes, field_left, top, field_width,
+            dialog.put("Tool Types:"), PLACETEXT_LEFT,
             dialog.tags({GTLV_Labels, request.list, GTLV_ShowSelected, request.tool_gadget,
-                         GTLV_ItemHeight, static_cast<u32>(dialog.line_height())}),
-            list_h + dialog.line_height());
-        right_top += list_h + dialog.line_height();
-        const i32 button = 6 * dialog.char_width();
-        dialog.add(BUTTON_KIND, kInfoNew, right_x, right_top, button, dialog.put("New"),
+                         GTLV_ItemHeight, static_cast<u32>(item_h)}),
+            list_h + gadget_h);
+        const i32 button = (kFieldLabelChars * cell + 2) / 2;
+        dialog.add(BUTTON_KIND, kInfoNew, margin, top + list_h, button, dialog.put("New"),
                    PLACETEXT_IN);
-        dialog.add(BUTTON_KIND, kInfoDel, right_x + column - button, right_top, button,
-                   dialog.put("Del"), PLACETEXT_IN);
-        right_top += dialog.line_height();
+        request.delete_gadget = dialog.add(
+            BUTTON_KIND, kInfoDel, margin + button + 2, top + list_h, button,
+            dialog.put("Del"), PLACETEXT_IN, dialog.tags({ndk::GA_Disabled, 1}));
+        top += list_h + gadget_h + kRowGap;
     }
-
-    i32 top = (left_top > right_top ? left_top : right_top) + margin;
-    if (has_object) {
-        for (u32 i = 0; i < kProtectionBoxCount; ++i) {
-            const ProtectionBox& box = kProtectionBoxes[i];
-            const bool set = (info.protection & box.bit) != 0;
-            const i32 column_at = static_cast<i32>(i % kProtectionColumns);
-            const i32 row = static_cast<i32>(i / kProtectionColumns);
-            dialog.add(CHECKBOX_KIND, box.id, margin + column_at * 20 * dialog.char_width(),
-                       top + row * dialog.line_height(), 0, dialog.put(box.label),
-                       PLACETEXT_RIGHT,
-                       dialog.tags({GTCB_Checked, box.denies != set ? 1u : 0u}));
-        }
-        top += static_cast<i32>(kProtectionRows) * dialog.line_height() + dialog.font_height() + 4;
-        request.comment_gadget = dialog.add(
-            STRING_KIND, kInfoComment, margin, top, dialog.inner_width(),
-            dialog.put("Comment"), PLACETEXT_ABOVE,
-            dialog.tags({GTST_String, dialog.put(info.comment), GTST_MaxChars,
-                         Dos::kMaxComment}));
-        top += dialog.line_height();
-    }
-    top += margin;
     const u32 save_at = dialog.put("Save");
     const u32 cancel_at = dialog.put("Cancel");
-    dialog.buttons(top, save_at, cancel_at);
-    if (!dialog.open(dialog.put("Information"), top + dialog.line_height())) {
+    dialog.buttons(top, save_at, cancel_at, 8);
+    if (!dialog.open(dialog.put(drawer), top + gadget_h, kBottom)) {
         LogLine().text("workbench: could not show information for ").text(icon->name).send();
         close_dialog(request);
         return false;
     }
-    if (request.comment_gadget != 0) {
-        intuition_->activate_string(request.comment_gadget, request.window);
-    }
+    draw_info_image(request, icon->object, extra + kInfoClipAt);
     return true;
+}
+
+// The frame is recessed: dark along the top and left, light along the
+// bottom and right.
+void Workbench::draw_info_image(const InfoRequest& request, u32 object, u32 clip) {
+    const i32 inner_width = request.frame_width - 2;
+    const i32 inner_height = request.frame_height - 2;
+    if (inner_width <= 0 || inner_height <= 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 rp = b.r32(request.window + ndk::wd_RPort);
+    const i32 x0 = request.frame_left;
+    const i32 y0 = request.frame_top;
+    const i32 x1 = x0 + request.frame_width - 1;
+    const i32 y1 = y0 + request.frame_height - 1;
+    graphics_->set_pens(rp, kFrameShadowPen, 0, ndk::JAM1);
+    graphics_->rect_fill(rp, x0, y0, x1 - 1, y0);
+    graphics_->rect_fill(rp, x0, y0, x0, y1 - 1);
+    graphics_->set_pens(rp, kFrameShinePen, 0, ndk::JAM1);
+    graphics_->rect_fill(rp, x0 + 1, y1, x1, y1);
+    graphics_->rect_fill(rp, x1, y0 + 1, x1, y1);
+    const IconArt art = art_of(b, object);
+    if (art.render == 0) {
+        return;
+    }
+    // The Region's box is the inside of the frame; its one rectangle is
+    // relative to the box.
+    const u32 rect = clip + ndk::Region_SIZEOF;
+    b.w16(clip + ndk::rg_bounds, static_cast<u32>(x0 + 1));
+    b.w16(clip + ndk::rg_bounds + 2, static_cast<u32>(y0 + 1));
+    b.w16(clip + ndk::rg_bounds + 4, static_cast<u32>(x1 - 1));
+    b.w16(clip + ndk::rg_bounds + 6, static_cast<u32>(y1 - 1));
+    b.w32(clip + ndk::rg_RegionRectangle, rect);
+    b.w32(rect + ndk::rr_Next, 0);
+    b.w32(rect + ndk::rr_Prev, 0);
+    b.w16(rect + ndk::rr_bounds, 0);
+    b.w16(rect + ndk::rr_bounds + 2, 0);
+    b.w16(rect + ndk::rr_bounds + 4, static_cast<u32>(inner_width - 1));
+    b.w16(rect + ndk::rr_bounds + 6, static_cast<u32>(inner_height - 1));
+    const InnerClip inside(*machine_, rp, clip);
+    intuition_->draw_image(rp, art.render,
+                           x0 + 1 + (inner_width - art.width) / 2 - art.left,
+                           y0 + 1 + (inner_height - art.height) / 2 - art.top);
 }
 
 // Makes the exec List of the rows anew.
@@ -3575,6 +3746,20 @@ void Workbench::show_tool_types(InfoRequest& request, u32 selected) {
                                  selected});
     gadtools_->set_gadget_attrs(request.tool_types_gadget, request.window, tags);
     request.selected = selected;
+    set_tool_type_editing(request, selected != kNoToolType);
+}
+
+void Workbench::set_tool_type_editing(InfoRequest& request, bool editing) {
+    if (request.editing == editing) {
+        return;
+    }
+    Bus b(*machine_);
+    for (const u32 gadget : {request.tool_gadget, request.delete_gadget}) {
+        gadtools_->set_gadget_attrs(
+            gadget, request.window,
+            write_tags(b, request.tags, {ndk::GA_Disabled, editing ? 0u : 1u}));
+    }
+    request.editing = editing;
 }
 
 void Workbench::add_tool_type(InfoRequest& request) {
@@ -3653,6 +3838,7 @@ Workbench::Reply Workbench::info_input(InfoRequest& request) {
         }
         if (id == kInfoToolTypes && code < request.row_count) {
             request.selected = code;
+            set_tool_type_editing(request, true);
             intuition_->activate_string(request.tool_gadget, request.window);
         } else if (id == kInfoNew) {
             add_tool_type(request);
@@ -3705,7 +3891,12 @@ bool Workbench::save_icon_info(InfoRequest& request, bool& changed, u32& error) 
         return true;
     }
 
-    const u32 object = icon_->load_object(request.path);
+    u32 object = icon_->load_object(request.path);
+    if (object == 0 && request.is_disk) {
+        // A disk without a Disk.info gets one of the shape it shows.
+        object = request.drive == kNoDrive ? icon_->ram_disk_object()
+                                           : icon_->default_object(kDisk);
+    }
     if (object == 0) {
         error = dos_->last_error();
         if (error == 0) {
@@ -3792,18 +3983,23 @@ bool Workbench::save_info(InfoRequest& request) {
     u32 error = 0;
     bool changed = false;
     if (request.has_object && request.comment_gadget != 0) {
-        auto checked = [&](u16 id) {
-            for (u32 gadget = request.gadgets, i = 0; gadget != 0 && i < 32;
+        const auto box_gadget = [&](u16 id) {
+            for (u32 gadget = request.gadgets, i = 0; gadget != 0 && i < 64;
                  ++i, gadget = b.r32(gadget + ndk::gg_NextGadget)) {
                 if (b.r16(gadget + ndk::gg_GadgetID) == id) {
-                    return (b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_SELECTED) != 0;
+                    return gadget;
                 }
             }
-            return false;
+            return u32{0};
         };
+        // A bit without a check box stays as the object has it.
         u32 protection = request.protection;
         for (const ProtectionBox& box : kProtectionBoxes) {
-            const bool allowed = checked(box.id);
+            const u32 gadget = box_gadget(box.id);
+            if (gadget == 0) {
+                continue;
+            }
+            const bool allowed = (b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_SELECTED) != 0;
             const bool set = box.denies ? !allowed : allowed;
             protection = set ? protection | box.bit : protection & ~box.bit;
         }
@@ -3836,7 +4032,9 @@ bool Workbench::save_info(InfoRequest& request) {
         return false;
     }
     if (info_changed) {
-        if (DrawerWindow* window = find_window(request.window_id); window != nullptr) {
+        if (request.is_disk) {
+            reload_disk_icon(request);
+        } else if (DrawerWindow* window = find_window(request.window_id); window != nullptr) {
             update_window(*window);
         }
         changed = true;
@@ -3845,6 +4043,22 @@ bool Workbench::save_info(InfoRequest& request) {
         LogLine().text("workbench: saved ").text(request.path).send();
     }
     return true;
+}
+
+void Workbench::reload_disk_icon(const InfoRequest& request) {
+    IconEntry* icon = find_icon(request.icon_id);
+    if (icon == nullptr || icon->owner != kRootWindow || icon->type != kDisk) {
+        return;
+    }
+    const u32 fresh = icon_->load_object(request.path);
+    if (fresh == 0) {
+        return;
+    }
+    if (icon->owned && icon->object != 0) {
+        icon_->free_object(icon->object);
+    }
+    icon->object = fresh;
+    icon->owned = true;
 }
 
 void Workbench::show_information(u32 window_id, u32 icon_id) {

@@ -127,6 +127,11 @@ constexpr u32 GTLV_MakeVisible = 0x8008004E;
 
 // The frame around the rows of a list view.
 constexpr i32 kListViewFrame = 2;
+// The gap between a gadget and a label beside it.
+constexpr i32 kGadgetLabelGap = 8;
+// The size of a check box that is not scaled.
+constexpr u32 kCheckBoxWidth = 26;
+constexpr u32 kCheckBoxHeight = 11;
 
 }
 

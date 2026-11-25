@@ -186,10 +186,6 @@ constexpr u32 kFillPen = 3;
 constexpr u32 kFillTextPen = 2;
 constexpr u32 kTextPen = 1;
 constexpr u32 kBackgroundPen = 0;
-// The gap between a gadget and a label beside it.
-constexpr i32 kLabelGap = 8;
-constexpr u32 kCheckBoxWidth = 26;
-constexpr u32 kCheckBoxHeight = 11;
 
 // The 3.1 default pens of a bevel box: SHINEPEN and SHADOWPEN.
 constexpr u32 kShinePen = 2;
@@ -1639,7 +1635,7 @@ TextOrigin text_origin(u32 place, i32 span, const Rect& whole, i32 inner_width, 
         return {whole.x0 + (inner_width - span) / 2, baseline};
     }
     if ((place & PLACETEXT_RIGHT) != 0) {
-        return {whole.x1 + 1 + kLabelGap, baseline};
+        return {whole.x1 + 1 + kGadgetLabelGap, baseline};
     }
     const i32 centred = whole.x0 + (whole.x1 - whole.x0 + 1 - span) / 2;
     if ((place & PLACETEXT_ABOVE) != 0) {
@@ -1648,7 +1644,7 @@ TextOrigin text_origin(u32 place, i32 span, const Rect& whole, i32 inner_width, 
     if ((place & PLACETEXT_BELOW) != 0) {
         return {centred, whole.y1 + 3 + cell.baseline};
     }
-    return {whole.x0 - span - kLabelGap, baseline};
+    return {whole.x0 - span - kGadgetLabelGap, baseline};
 }
 
 // Whether the first conversion of the RawDoFmt format at fmt takes a word,

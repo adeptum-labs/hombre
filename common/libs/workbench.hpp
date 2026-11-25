@@ -364,19 +364,27 @@ public:
     // Handles the input waiting at the request's window.
     Reply text_request_input(const TextRequest& request, char* out, u32 size);
 
-    // The window of Icons > Information: the name and type of what the icon
-    // stands for, the size and blocks of a file, its date, a check box for
-    // each protection bit it has one for, its comment, and the icon's own
-    // stack, default tool and tool types. path finds the object again when
-    // it is saved, name names it in an error; protection, comment_text and
-    // the original_ fields are what the window opened with. has_object is
-    // false for an icon that stands for nothing but its .info.
+    // The window of Icons > Information, laid out as the 3.1 one. Its title
+    // is the drawer the object is in. The name and type stand above the
+    // framed image, with the blocks, bytes and stack to its left and a
+    // check box for each protection bit down the right edge, their labels
+    // left of them. Under those come the date, the comment, a project's or
+    // disk's default tool, and the tool types with New, Del and the string
+    // that edits the selected one, then Save and Cancel. A drawer has no
+    // sizes, stack, Script or Executable box; a disk shows its blocks, how
+    // many are used and free, the size of one, the date it was made and
+    // whether it can be written, and has no check boxes or comment.
+    // path finds the object again when it is saved, name names it in an
+    // error; protection, comment_text and the original_ fields are what
+    // the window opened with. has_object is false for an icon that stands
+    // for nothing but its .info, whose check boxes and comment are ghosted.
     struct InfoRequest : Dialog {
         u32 comment_gadget = 0;
         u32 stack_gadget = 0;
         u32 default_tool_gadget = 0;
         u32 tool_types_gadget = 0;  // the list view of the rows
         u32 tool_gadget = 0;        // the string editing the selected row
+        u32 delete_gadget = 0;      // Del, ghosted with the string
         u32 list = 0;               // the exec List of the rows, in extra
         u32 rows = 0;               // the row strings, in extra
         u32 default_text = 0;       // the default tool string, in extra
@@ -384,22 +392,36 @@ public:
         u32 tags = 0;               // the tag list of gadget changes, in extra
         u32 empty_text = 0;
         u32 window_id = 0;
+        u32 icon_id = 0;
         u32 row_count = 0;
         u32 original_row_count = 0;
         u32 original_stack = 0;
         u32 selected = kNoToolType;
+        u32 visible_rows = 0;       // the rows the list view shows at once
+        // The frame around the image, in the window.
+        i32 frame_left = 0;
+        i32 frame_top = 0;
+        i32 frame_width = 0;
+        i32 frame_height = 0;
         char path[Dos::kMaxPath]{};
         char name[32]{};
         char comment_text[Dos::kMaxComment + 1]{};
         u32 protection = 0;
+        u8 drive = kNoDrive;
         bool has_object = false;
+        bool is_disk = false;
         bool show_stack = false;
         bool show_default_tool = false;
         bool show_tool_types = false;
+        // Whether a row is selected for Del and the string to work on.
+        bool editing = false;
         // The tool type of the .info each row is, kNewToolType for a row
         // that was added or changed.
         u8 origin[kMaxToolTypes]{};
     };
+    // The most rows of tool types the window shows at once; a short screen
+    // gets fewer.
+    static constexpr u32 kInfoToolTypeRows = 7;
     static constexpr u16 kInfoComment = 1;
     static constexpr u16 kInfoSave = kDialogAccept;
     static constexpr u16 kInfoCancel = kDialogCancel;
@@ -410,8 +432,8 @@ public:
     static constexpr u16 kInfoExecutable = 8;
     static constexpr u16 kInfoDeletable = 9;
     static constexpr u16 kInfoName = 10;
-    static constexpr u16 kInfoType = 11;
-    static constexpr u16 kInfoSize = 12;
+    static constexpr u16 kInfoBlocks = 11;
+    static constexpr u16 kInfoBytes = 12;
     static constexpr u16 kInfoDate = 13;
     static constexpr u16 kInfoStack = 14;
     static constexpr u16 kInfoDefaultTool = 15;
@@ -419,17 +441,21 @@ public:
     static constexpr u16 kInfoTool = 17;
     static constexpr u16 kInfoNew = 18;
     static constexpr u16 kInfoDel = 19;
-    static constexpr u16 kInfoBlocks = 20;
+    static constexpr u16 kInfoUsed = 20;
+    static constexpr u16 kInfoFree = 21;
+    static constexpr u16 kInfoBlockSize = 22;
+    static constexpr u16 kInfoStatus = 23;
+    // False, shown, for an icon that is no file, drawer or disk.
     bool open_info(u32 window_id, u32 icon_id, InfoRequest& request);
     // Handles the input waiting at the information window: Accepted for
     // Save, Cancelled for Cancel or the close gadget.
     Reply info_input(InfoRequest& request);
-    // Writes the protection bits and the comment that changed. False, shown,
-    // when one cannot be written; nothing is written for an icon without an
-    // object or when nothing changed.
+    // Writes the protection bits and the comment that changed, and the
+    // stack, default tool and tool types into the .info. False, shown, when
+    // one cannot be written; nothing is written when nothing changed.
     bool save_info(InfoRequest& request);
     // The Icons > Information menu item: opens the window, waits for Save or
-    // Cancel, saves on Save and closes it. A disk's icon is refused.
+    // Cancel, saves on Save and closes it.
     void show_information(u32 window_id, u32 icon_id);
 
     // The window's scroll gadget with the GadgetID id; 0 when it has none.
@@ -763,6 +789,13 @@ private:
     void edit_tool_type(InfoRequest& request);
     void commit_tool_type(InfoRequest& request);
     void drop_empty_tool_types(InfoRequest& request);
+    // Del and the string under the rows are ghosted unless editing.
+    void set_tool_type_editing(InfoRequest& request, bool editing);
+    // The frame of the information window's image and the icon's image in
+    // the middle of it, cut off at the frame through the Region at clip.
+    void draw_info_image(const InfoRequest& request, u32 object, u32 clip);
+    // The disk's icon on the desktop takes the .info that was written.
+    void reload_disk_icon(const InfoRequest& request);
     // Writes the stack, default tool and tool types the information window
     // changed into the icon's .info; changed tells whether it wrote it.
     bool save_icon_info(InfoRequest& request, bool& changed, u32& error);
