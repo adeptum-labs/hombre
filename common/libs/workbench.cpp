@@ -62,9 +62,15 @@ constexpr u32 do_ToolWindow = 70;
 constexpr u32 do_StackSize = 74;
 constexpr u32 kNoIconPosition = 0x80000000;
 
-// struct DrawerData after its NewWindow: where the window was scrolled to.
+// struct DrawerData after its NewWindow: where the window was scrolled to
+// and which icons its window shows.
 constexpr u32 dd_CurrentX = 48;
 constexpr u32 dd_CurrentY = 52;
+constexpr u32 dd_Flags = 56;
+constexpr u32 DDFLAGS_SHOWDEFAULT = 0;  // as the window it was opened from
+constexpr u32 DDFLAGS_SHOWICONS = 1;
+constexpr u32 DDFLAGS_SHOWALL = 2;
+static_assert(DDFLAGS_SHOWDEFAULT == 0 && DDFLAGS_SHOWICONS == 1 && DDFLAGS_SHOWALL == 2);
 constexpr u32 kMinStack = 4096;
 
 // struct Image (intuition/intuition.h).
@@ -100,9 +106,11 @@ constexpr u16 MENUTOGGLE = 0x0008;
 constexpr u16 CHECKED = 0x0100;
 
 // struct Menu and struct MenuItem (intuition/intuition.h).
+constexpr u32 mu_NextMenu = 0;
 constexpr u32 mu_FirstItem = 18;
 constexpr u32 mi_NextItem = 0;
 constexpr u32 mi_Flags = 12;
+constexpr u32 mi_SubItem = 28;
 
 // struct WBStartup and struct WBArg (workbench/startup.h).
 constexpr u32 sm_Message = 0;
@@ -299,6 +307,10 @@ struct MenuItemSpec {
     bool toggle = false;  // a check mark each pick turns on or off
     const MenuItemSpec* subs = nullptr;  // the items of its submenu
     u32 sub_count = 0;
+    // A check mark that stays on when picked; the check-marked items of a
+    // submenu exclude each other.
+    bool check = false;
+    bool checked = false;  // its check mark when the strip is built
 };
 
 struct MenuSpec {
@@ -318,6 +330,11 @@ constexpr MenuItemSpec kSnapshotItems[] = {
     {"All", true},
 };
 
+constexpr MenuItemSpec kShowItems[] = {
+    {"Only Icons", true, false, nullptr, 0, true, true},
+    {"All Files", true, false, nullptr, 0, true},
+};
+
 constexpr MenuItemSpec kWindowItems[] = {
     {"New Drawer", true},
     {"Open Parent", true},
@@ -326,7 +343,7 @@ constexpr MenuItemSpec kWindowItems[] = {
     {"Select Contents", true},
     {"Clean Up", true},
     {"Snapshot", true, false, kSnapshotItems, sizeof kSnapshotItems / sizeof kSnapshotItems[0]},
-    {"Show", false},
+    {"Show", true, false, kShowItems, sizeof kShowItems / sizeof kShowItems[0]},
     {"View By", false},
 };
 
@@ -365,6 +382,8 @@ constexpr u32 kItemExecute = 1;
 constexpr u32 kItemNewDrawer = 0;
 constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
+constexpr u32 kItemWindowShow = 7;
+constexpr u32 kShowItemCount = 2;  // Only Icons and All Files
 constexpr u32 kItemIconSnapshot = 4;
 constexpr u32 kItemIconCopy = 1;
 constexpr u32 kItemIconRename = 2;
@@ -374,6 +393,7 @@ constexpr u32 kItemIconLeaveOut = 6;
 constexpr u32 kItemIconPutAway = 7;
 constexpr u32 kItemIconDelete = 8;
 constexpr u32 kSubAll = 1;
+constexpr u32 kSubAllFiles = 1;
 constexpr u32 kNoSub = 31;
 
 constexpr u32 text_length(const char* text) {
@@ -973,30 +993,41 @@ u32 Workbench::build_menu_strip() {
         label_at += length + 1;
         return start;
     };
-    auto put_entry = [&](u8 type, const char* label, u16 flags) {
+    auto put_entry = [&](u8 type, const char* label, u16 flags, u32 exclude) {
         b.w8(at + nm_Type, type);
         b.w32(at + nm_Label, label != nullptr ? put_label(label) : 0);
         b.w32(at + nm_CommKey, 0);
         b.w16(at + nm_Flags, flags);
-        b.w32(at + nm_MutualExclude, 0);
+        b.w32(at + nm_MutualExclude, exclude);
         b.w32(at + nm_UserData, 0);
         at += NewMenu_SIZEOF;
     };
     for (u32 m = 0; m < kMenuCount; ++m) {
-        put_entry(NM_TITLE, kMenus[m].title, 0);
+        put_entry(NM_TITLE, kMenus[m].title, 0, 0);
         for (u32 i = 0; i < kMenus[m].count; ++i) {
             const MenuItemSpec& spec = kMenus[m].items[i];
             u16 flags = spec.enabled ? 0 : kDisabled;
             if (spec.toggle) {
                 flags |= CHECKIT | MENUTOGGLE | (backdrop_ ? CHECKED : 0);
             }
-            put_entry(NM_ITEM, spec.label, flags);
+            put_entry(NM_ITEM, spec.label, flags, 0);
             for (u32 k = 0; k < spec.sub_count; ++k) {
-                put_entry(NM_SUB, spec.subs[k].label, spec.subs[k].enabled ? 0 : kDisabled);
+                const MenuItemSpec& sub = spec.subs[k];
+                u16 sub_flags = sub.enabled ? 0 : kDisabled;
+                u32 exclude = 0;
+                if (sub.check) {
+                    sub_flags |= CHECKIT | (sub.checked ? CHECKED : 0);
+                    for (u32 n = 0; n < spec.sub_count; ++n) {
+                        if (n != k && spec.subs[n].check) {
+                            exclude |= 1u << n;
+                        }
+                    }
+                }
+                put_entry(NM_SUB, sub.label, sub_flags, exclude);
             }
         }
     }
-    put_entry(NM_END, nullptr, 0);
+    put_entry(NM_END, nullptr, 0, 0);
     if (!b.ok()) {
         exec_->free(block, bytes);
         return 0;
@@ -1170,7 +1201,7 @@ void Workbench::open_root() {
     u32 idcmp;
     if (backdrop_) {
         idcmp = ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | kIdcmpMenuPick |
-                kIdcmpRefreshWindow;
+                kIdcmpRefreshWindow | ndk::IDCMP_ACTIVEWINDOW;
         b.w32(new_window + ndk::nw_Flags, ndk::WFLG_BACKDROP | ndk::WFLG_BORDERLESS |
                                                ndk::WFLG_WBENCHWINDOW);
     } else {
@@ -1178,7 +1209,7 @@ void Workbench::open_root() {
         b.w8(new_window + ndk::nw_BlockPen, 1);
         idcmp = ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE | ndk::IDCMP_NEWSIZE |
                 ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP | kIdcmpMenuPick |
-                kIdcmpRefreshWindow;
+                kIdcmpRefreshWindow | ndk::IDCMP_ACTIVEWINDOW;
         b.w32(new_window + ndk::nw_FirstGadget, gadgets);
         b.w32(new_window + ndk::nw_Flags,
               ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET | ndk::WFLG_SIZEGADGET |
@@ -1275,6 +1306,58 @@ u32 Workbench::backdrop_item() const {
     return b.ok() ? item : 0;
 }
 
+// The Window menu's Show submenu item at index: 0 Only Icons, 1 All Files.
+u32 Workbench::show_item(u32 index) const {
+    if (menu_ == 0) {
+        return 0;
+    }
+    Bus b(*machine_);
+    const u32 menu = b.r32(menu_ + mu_NextMenu);  // the Window menu
+    if (menu == 0) {
+        return 0;
+    }
+    u32 item = b.r32(menu + mu_FirstItem);
+    for (u32 i = 0; i < kItemWindowShow && item != 0; ++i) {
+        item = b.r32(item + mi_NextItem);
+    }
+    if (item == 0) {
+        return 0;
+    }
+    item = b.r32(item + mi_SubItem);
+    for (u32 i = 0; i < index && item != 0; ++i) {
+        item = b.r32(item + mi_NextItem);
+    }
+    return b.ok() ? item : 0;
+}
+
+// Sets the Show check marks to the setting, touching no other flag, as
+// set_backdrop does with its own.
+void Workbench::set_show_marks(bool all) {
+    Bus b(*machine_);
+    for (u32 i = 0; i < kShowItemCount; ++i) {
+        const u32 item = show_item(i);
+        if (item == 0) {
+            return;
+        }
+        const u16 flags = static_cast<u16>(b.r16(item + mi_Flags));
+        const bool checked = (i == kSubAllFiles) == all;
+        b.w16(item + mi_Flags, checked ? flags | CHECKED : flags & ~CHECKED);
+    }
+}
+
+void Workbench::pick_show(u32 window_id, bool all) {
+    DrawerWindow* window = find_window(window_id);
+    if (window == nullptr) {
+        return;
+    }
+    // The root window shows only icons, whatever the menu says.
+    if (window->id != kRootWindow && window->show_all != all) {
+        window->show_all = all;
+        update_window(*window);
+    }
+    set_show_marks(window->id != kRootWindow && window->show_all);
+}
+
 void Workbench::set_backdrop(bool on) {
     DrawerWindow* old_root = find_window(kRootWindow);
     if (!desktop_open_ || old_root == nullptr || on == backdrop_) {
@@ -1307,6 +1390,10 @@ void Workbench::set_backdrop(bool on) {
         Bus b(*machine_);
         const u16 flags = static_cast<u16>(b.r16(item + mi_Flags));
         b.w16(item + mi_Flags, backdrop_ ? flags | CHECKED : flags & ~CHECKED);
+    }
+    // A root window that took the activation shows only icons.
+    if (intuition_->active_window() == root->window) {
+        set_show_marks(false);
     }
     LogLine().text("workbench: backdrop ").text(backdrop_ ? "on" : "off").send();
 }
@@ -1552,6 +1639,48 @@ void Workbench::add_dir_icon(const DrawerWindow& drawer, const char* entry, bool
     measure(*icon);
 }
 
+// The type of the icon a file without an .info gets: a drawer for a
+// drawer, a tool for a loadable program, a project for anything else.
+u8 Workbench::plain_type(const char* path, bool is_dir) const {
+    if (is_dir) {
+        return kDrawer;
+    }
+    u8 magic[4]{};
+    if (dos_->read_head(path, magic, sizeof magic) && magic[0] == 0x00 && magic[1] == 0x00 &&
+        magic[2] == 0x03 && magic[3] == 0xF3) {
+        return kTool;
+    }
+    return kProject;
+}
+
+void Workbench::add_plain_icon(const DrawerWindow& drawer, const char* name, bool is_dir) {
+    if (text_length(name) >= sizeof(IconEntry::file)) {
+        return;
+    }
+    char path[Dos::kMaxPath];
+    if (!join_path(drawer.path, name, path)) {
+        return;
+    }
+    const u8 type = plain_type(path, is_dir);
+    const u32 object = icon_->default_object(type);
+    if (object == 0) {
+        return;
+    }
+    IconEntry* icon = take_icon(drawer.id);
+    if (icon == nullptr) {
+        icon_->free_object(object);
+        LogLine().text("workbench: icon table full").send();
+        return;
+    }
+    icon->object = object;
+    icon->owned = true;
+    icon->plain = true;
+    icon->type = type;
+    copy_text(icon->name, sizeof icon->name, name);
+    copy_text(icon->file, sizeof icon->file, name);
+    measure(*icon);
+}
+
 void Workbench::fill_drawer(DrawerWindow& drawer) {
     cancel_drag();
     free_icons(drawer.id);
@@ -1567,33 +1696,80 @@ void Workbench::fill_drawer(DrawerWindow& drawer) {
     };
     u32 error = 0;
     dos_->list_dir(drawer.path, visit, &collect, error);
+    if (drawer.show_all && drawer.id != kRootWindow) {
+        struct Listing {
+            char name[32];
+            bool is_dir;
+        };
+        std::vector<Listing> plain;
+        struct CollectPlain {
+            Workbench* self;
+            const DrawerWindow* drawer;
+            std::vector<Listing>* out;
+        } collect_plain{this, &drawer, &plain};
+        auto visit_plain = [](void* at, const char* name, bool is_dir) {
+            const CollectPlain& c = *static_cast<const CollectPlain*>(at);
+            if (!is_dir && ends_with_ci(name, ".info")) {
+                return;
+            }
+            char path[Dos::kMaxPath];
+            char info[Dos::kMaxPath];
+            if (!join_path(c.drawer->path, name, path) || !info_path(path, info) ||
+                c.self->dos_->examine(info).kind != Dos::TargetKind::Missing) {
+                return;
+            }
+            Listing entry{};
+            entry.is_dir = is_dir;
+            if (text_length(name) >= sizeof entry.name) {
+                return;
+            }
+            copy_text(entry.name, sizeof entry.name, name);
+            c.out->push_back(entry);
+        };
+        dos_->list_dir(drawer.path, visit_plain, &collect_plain, error);
+        std::sort(plain.begin(), plain.end(),
+                  [](const Listing& a, const Listing& b) { return less_ci(a.name, b.name); });
+        for (const Listing& entry : plain) {
+            add_plain_icon(drawer, entry.name, entry.is_dir);
+        }
+    }
     place_icons(drawer);
 }
 
 void Workbench::place_icons(const DrawerWindow& drawer) {
     const i32 label_height = label_metrics().y_size;
+    // The icons go down the columns. All Files, which has many, fills rows
+    // across the window instead, so it scrolls downwards, in cells wide
+    // enough for the names under them.
+    const bool across = drawer.show_all;
     i32 cell_width = 16;
     i32 cell_height = 16;
     for (const IconEntry& icon : icons_) {
         if (icon.owner != drawer.id) {
             continue;
         }
-        cell_width = icon.width + kCellGapX > cell_width ? icon.width + kCellGapX : cell_width;
+        const i32 span = across ? std::max(icon.width, label_span(icon)) : icon.width;
+        cell_width = std::max(span + kCellGapX, cell_width);
         cell_height = icon.height + label_height + kCellGapY > cell_height
                           ? icon.height + label_height + kCellGapY
                           : cell_height;
     }
-    i32 rows = (drawer.inner_height - kGridMarginY) / cell_height;
-    if (rows < 1) {
-        rows = 1;
+    i32 run = across ? (drawer.inner_width - kGridMarginX) / cell_width
+                     : (drawer.inner_height - kGridMarginY) / cell_height;
+    if (run < 1) {
+        run = 1;
     }
-    // Whether the icon at left, top would cover one with a place of its own.
+    // Whether the icon at left, top would cover one with a place of its own,
+    // in rows counting the frames both icons stand in.
+    const i32 frame_x = across ? 2 * kFrameOutX : 0;
+    const i32 frame_y = across ? 2 * kFrameOutY : 0;
     const auto taken = [&](const IconEntry& icon, i32 left, i32 top) {
         for (const IconEntry& other : icons_) {
-            if (other.owner == drawer.id && other.placed && left < other.left + other.width &&
-                other.left < left + icon.width &&
-                top < other.top + other.height + label_height &&
-                other.top < top + icon.height + label_height) {
+            if (other.owner == drawer.id && other.placed &&
+                left < other.left + other.width + frame_x &&
+                other.left < left + icon.width + frame_x &&
+                top < other.top + other.height + label_height + frame_y &&
+                other.top < top + icon.height + label_height + frame_y) {
                 return true;
             }
         }
@@ -1605,10 +1781,11 @@ void Workbench::place_icons(const DrawerWindow& drawer) {
             continue;
         }
         do {
-            icon.left =
-                kGridMarginX + static_cast<i32>(slot / static_cast<u32>(rows)) * cell_width;
-            icon.top =
-                kGridMarginY + static_cast<i32>(slot % static_cast<u32>(rows)) * cell_height;
+            const i32 along = static_cast<i32>(slot % static_cast<u32>(run));
+            const i32 line = static_cast<i32>(slot / static_cast<u32>(run));
+            icon.left = kGridMarginX + (across ? along : line) * cell_width +
+                        (across ? (cell_width - kCellGapX - icon.width) / 2 : 0);
+            icon.top = kGridMarginY + (across ? line : along) * cell_height;
             ++slot;
         } while (taken(icon, icon.left, icon.top));
     }
@@ -1627,7 +1804,8 @@ void Workbench::open_drawer(u32 window_id, const IconEntry& icon) {
     // Snapshot since the icon was read counts.
     char info[Dos::kMaxPath];
     const u32 fresh = icon_path(*window, icon, info) ? icon_->load_object(info) : 0;
-    open_drawer_window(path, icon.name, fresh != 0 ? fresh : icon.object);
+    open_drawer_window(path, icon.name, fresh != 0 ? fresh : icon.object, nullptr,
+                       window->show_all);
     if (fresh != 0) {
         icon_->free_object(fresh);
     }
@@ -1655,7 +1833,7 @@ bool Workbench::icon_path(const DrawerWindow& window, const IconEntry& icon,
 }
 
 void Workbench::open_drawer_window(const char* path, const char* name, u32 object,
-                                   const DrawerBox* box) {
+                                   const DrawerBox* box, bool inherit_all) {
     const DrawerWindow* existing = windows_.find_if([&](const DrawerWindow& w) {
         return w.id != kRootWindow && same_ci(w.path, path);
     });
@@ -1674,6 +1852,7 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     i32 height = 0;
     i32 scroll_x = 0;
     i32 scroll_y = 0;
+    bool show_all = inherit_all;
     if (box != nullptr) {
         left = box->left;
         top = box->top;
@@ -1688,6 +1867,16 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
             height = static_cast<i16>(b.r16(drawer_data + ndk::nw_Height));
             scroll_x = static_cast<i32>(b.r32(drawer_data + dd_CurrentX));
             scroll_y = static_cast<i32>(b.r32(drawer_data + dd_CurrentY));
+            // Only a revision 1 icon keeps the DrawerData flags.
+            const u32 user_data = b.r32(object + do_Gadget + ndk::gg_UserData);
+            if ((user_data & 0xFF) == 1) {
+                const u32 flags = b.r32(drawer_data + dd_Flags);
+                if (flags == DDFLAGS_SHOWALL) {
+                    show_all = true;
+                } else if (flags == DDFLAGS_SHOWICONS) {
+                    show_all = false;
+                }
+            }
         }
     }
     if (width <= 0) {
@@ -1769,8 +1958,8 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     // The gauge's face is the border's, which follows the window's state.
     const u32 idcmp = ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_MOUSEBUTTONS | ndk::IDCMP_MOUSEMOVE |
                       ndk::IDCMP_NEWSIZE | ndk::IDCMP_GADGETDOWN | ndk::IDCMP_GADGETUP |
-                      kIdcmpMenuPick | kIdcmpRefreshWindow |
-                      (gauge != 0 ? ndk::IDCMP_ACTIVEWINDOW | ndk::IDCMP_INACTIVEWINDOW : 0u);
+                      kIdcmpMenuPick | kIdcmpRefreshWindow | ndk::IDCMP_ACTIVEWINDOW |
+                      (gauge != 0 ? ndk::IDCMP_INACTIVEWINDOW : 0u);
     // The window keeps a copy of its title, so the one built here goes
     // back with the NewWindow.
     const u32 window = b.ok() ? open_window_on_port(new_window, idcmp, name) : 0;
@@ -1792,9 +1981,12 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     // The view a snapshot kept; drawing keeps it inside the icons.
     drawer.scroll_x = scroll_x;
     drawer.scroll_y = scroll_y;
+    drawer.show_all = show_all;
     fill_drawer(drawer);
     layout_gauge(drawer);
     draw_window(drawer.id);
+    // The drawer opened as the active window.
+    set_show_marks(drawer.show_all);
     LogLine().text("workbench: opened ").text(name).send();
 }
 
@@ -3037,7 +3229,7 @@ void Workbench::open_parent(u32 window_id) {
         copy_text(icon_path, sizeof icon_path, parent);
     }
     const u32 object = icon_path[0] != '\0' ? icon_->load_object(icon_path) : 0;
-    open_drawer_window(parent, name, object);
+    open_drawer_window(parent, name, object, nullptr, window->show_all);
     if (object != 0) {
         icon_->free_object(object);
     }
@@ -3144,14 +3336,18 @@ bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to
         show_error("cannot copy", icon.file, error);
         return false;
     }
-    const u32 object = icon_->load_object(src);
-    bool saved = false;
-    if (object != 0) {
-        Bus b(*machine_);
-        b.w32(object + do_CurrentX, static_cast<u32>(left));
-        b.w32(object + do_CurrentY, static_cast<u32>(top));
-        saved = b.ok() && icon_->save_object(dst, object, error);
-        icon_->free_object(object);
+    // A plain icon has no .info to take along or to write.
+    bool saved = true;
+    if (!icon.plain) {
+        const u32 object = icon_->load_object(src);
+        saved = false;
+        if (object != 0) {
+            Bus b(*machine_);
+            b.w32(object + do_CurrentX, static_cast<u32>(left));
+            b.w32(object + do_CurrentY, static_cast<u32>(top));
+            saved = b.ok() && icon_->save_object(dst, object, error);
+            icon_->free_object(object);
+        }
     }
     if (!saved) {
         u32 ignored = 0;
@@ -3166,7 +3362,7 @@ bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to
     char src_info[Dos::kMaxPath];
     u32 ignored = 0;
     dos_->delete_file(src, ignored);
-    if (info_path(src, src_info)) {
+    if (!icon.plain && info_path(src, src_info)) {
         dos_->delete_file(src_info, ignored);
     }
     move_left_outs(src, dst);
@@ -4694,6 +4890,11 @@ bool Workbench::leave_out(u32 window_id, u32 icon_id) {
                    ERROR_OBJECT_WRONG_TYPE);
         return false;
     }
+    // An icon without an .info cannot come back with the volume.
+    if (icon->plain) {
+        LogLine().text("workbench: ").text(icon->name).text(" cannot be left out").send();
+        return false;
+    }
     const DrawerWindow& window = *find_window(window_id);
     char drawer[Dos::kMaxPath];
     char file[32];
@@ -4870,7 +5071,8 @@ bool Workbench::unsnapshot_icon(u32 window_id, u32 icon_id) {
         return false;
     }
     IconEntry& icon = *found;
-    if (!icon.owned || icon.type == kAppIcon || icon.object == 0 || left_out(icon.id) != nullptr) {
+    if (icon.plain || !icon.owned || icon.type == kAppIcon || icon.object == 0 ||
+        left_out(icon.id) != nullptr) {
         LogLine().text("workbench: ").text(icon.name).text(" keeps no snapshot").send();
         return false;
     }
@@ -4936,6 +5138,11 @@ bool Workbench::snapshot_window(u32 window_id, bool all) {
         b.w16(data + ndk::nw_Height, b.r16(drawer.window + ndk::wd_Height));
         b.w32(data + dd_CurrentX, static_cast<u32>(drawer.scroll_x));
         b.w32(data + dd_CurrentY, static_cast<u32>(drawer.scroll_y));
+        b.w32(data + dd_Flags, drawer.show_all ? DDFLAGS_SHOWALL : DDFLAGS_SHOWICONS);
+        // The revision byte makes the save write the DrawerData flags.
+        const u32 gadget = object + do_Gadget;
+        const u32 user_data = b.r32(gadget + ndk::gg_UserData);
+        b.w32(gadget + ndk::gg_UserData, (user_data & ~0xFFu) | 1u);
         saved = b.ok() && icon_->save_object(path, object, error);
     }
     icon_->free_object(object);
@@ -4950,7 +5157,7 @@ bool Workbench::snapshot_window(u32 window_id, bool all) {
         // requester to be answered, and other tasks may remove icons then.
         std::vector<u32> ids;
         for (const IconEntry& icon : icons_) {
-            if (icon.owner == window_id) {
+            if (icon.owner == window_id && !icon.plain) {
                 ids.push_back(icon.id);
             }
         }
@@ -5074,6 +5281,8 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             clean_up(window_id);
         } else if (item == kItemWindowSnapshot && sub != kNoSub) {
             snapshot_window(window_id, sub == kSubAll);
+        } else if (item == kItemWindowShow && sub != kNoSub) {
+            pick_show(window_id, sub == kSubAllFiles);
         }
     } else if (menu == kMenuTools) {
         if (item == kItemResetWb && close_for_reset()) {
@@ -5138,9 +5347,13 @@ void Workbench::handle_message(u32 message) {
         draw_window(window_id);
     } else if (idcmp_class == ndk::IDCMP_ACTIVEWINDOW ||
                idcmp_class == ndk::IDCMP_INACTIVEWINDOW) {
-        // The border changed its face under the gauge.
+        // The border changed its face under the gauge; the menu's Show
+        // marks follow the window that became active.
         if (DrawerWindow* w = find_window(window_id); w != nullptr) {
             layout_gauge(*w);
+            if (idcmp_class == ndk::IDCMP_ACTIVEWINDOW) {
+                set_show_marks(w->id != kRootWindow && w->show_all);
+            }
         }
     } else if (scroll_id != 0 &&
                (idcmp_class == ndk::IDCMP_GADGETDOWN || idcmp_class == ndk::IDCMP_GADGETUP ||
@@ -5726,6 +5939,7 @@ void Workbench::open_desktop() {
     if (!has_window(kRootWindow)) {
         return;
     }
+    set_show_marks(false);
     add_volume_icons();
     load_patterns();
     dos_->set_file_closed(&Workbench::file_closed, this);
@@ -5757,6 +5971,7 @@ bool Workbench::close_for_reset() {
         drawer.top = static_cast<i16>(b.r16(w.window + ndk::wd_TopEdge));
         drawer.width = static_cast<i16>(b.r16(w.window + ndk::wd_Width));
         drawer.height = static_cast<i16>(b.r16(w.window + ndk::wd_Height));
+        drawer.show_all = w.show_all;
     }
     while (const DrawerWindow* drawer = windows_.find_if(
                [](const DrawerWindow& w) { return w.id != kRootWindow; })) {
@@ -5812,9 +6027,10 @@ void Workbench::open_after_reset() {
     place_root_icons(*root);
     draw_window(kRootWindow);
     refresh_title();
+    set_show_marks(false);
     for (const RememberedDrawer& drawer : remembered_) {
         const DrawerBox box{drawer.left, drawer.top, drawer.width, drawer.height};
-        open_drawer_window(drawer.path, drawer.name, 0, &box);
+        open_drawer_window(drawer.path, drawer.name, 0, &box, drawer.show_all);
     }
     remembered_.clear();
 }

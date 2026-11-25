@@ -44,14 +44,15 @@
 // disks in the floppy drives and hard disk partitions and of the Ram Disk,
 // and a drawer window for every icon opened. The root window is a backdrop
 // until the Workbench menu's Backdrop item turns it into an ordinary window.
-// A drawer shows the "<name>.info" files of its directory; opening an icon
-// starts its program with a WBStartup message. An icon dragged within its
+// A drawer shows the "<name>.info" files of its directory, or with Show >
+// All Files an icon for everything beside them; opening an icon starts its
+// program with a WBStartup message. An icon dragged within its
 // window takes the new place; dropped on another drawer, or a drawer's or
 // disk's icon, its file moves there on the same volume and is copied to
 // another. A window with
 // borders scrolls over its icons with the sliders and arrows in its right
 // and bottom borders. Snapshot keeps an icon's place, or a drawer window's
-// box and scroll, in the .info. The other
+// box, scroll and Show setting, in the .info. The other
 // vectors register application windows, icons and menu items, or rescan a
 // drawer. WBConfig, IPrefs' private call, hands over the icon and system
 // fonts and makes the Workbench read the backdrop pattern prefs again.
@@ -124,6 +125,8 @@ public:
         u32 id = 0;
         bool placed = false;  // left and top are the icon's own position
         bool owned = false;   // the DiskObject is this library's to free
+        // A file or drawer shown by All Files because it has no .info.
+        bool plain = false;
         u8 type = 0;
         u32 owner = 0;  // the id of the window the icon belongs to
         u32 object = 0;
@@ -185,6 +188,8 @@ public:
         // The drawer point shown at the inner area's top-left corner.
         i32 scroll_x = 0;
         i32 scroll_y = 0;
+        // All Files: an icon for every file and drawer without an .info.
+        bool show_all = false;
         // The block of its scroll gadgets, the window's gadget list; 0 for
         // a backdrop, which has none.
         u32 gadgets = 0;
@@ -664,6 +669,7 @@ private:
         i32 top = 0;
         i32 width = 0;
         i32 height = 0;
+        bool show_all = false;
     };
 
     // The box open_drawer_window opens a drawer at instead of the one its
@@ -704,15 +710,20 @@ private:
     u32 open_window_on_port(u32 new_window, u32 idcmp, const char* zoom_title = nullptr);
     u32 make_zoom_tags(u32 new_window, const char* title);
     void open_drawer_window(const char* path, const char* name, u32 object,
-                            const DrawerBox* box = nullptr);
+                            const DrawerBox* box = nullptr, bool inherit_all = false);
     void release_tool(RunningTool& tool);
     void open_root();
     void place_root_icon(const DrawerWindow& root, IconEntry& icon);
     void place_root_icons(const DrawerWindow& root);
     void read_position(IconEntry& icon);
     u32 backdrop_item() const;
+    u32 show_item(u32 index) const;
+    void set_show_marks(bool all);
+    void pick_show(u32 window_id, bool all);
     void add_volume_icons();
     void add_dir_icon(const DrawerWindow& drawer, const char* entry, bool is_dir);
+    void add_plain_icon(const DrawerWindow& drawer, const char* name, bool is_dir);
+    u8 plain_type(const char* path, bool is_dir) const;
     void add_volume(const char* label, const char* icon_path, u8 drive);
     void add_drive_volume(u32 drive);
     bool volume_root(const IconEntry& icon, char (&out)[Dos::kMaxPath]) const;

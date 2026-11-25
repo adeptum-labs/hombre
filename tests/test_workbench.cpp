@@ -68,6 +68,7 @@ constexpr u32 mu_MenuName = 14;
 constexpr u32 mu_FirstItem = 18;
 constexpr u32 mi_NextItem = 0;
 constexpr u32 mi_Flags = 12;
+constexpr u32 mi_MutualExclude = 14;
 constexpr u32 mi_ItemFill = 18;
 constexpr u32 mi_SubItem = 28;
 constexpr u16 MENUENABLED = 0x0001;
@@ -79,6 +80,7 @@ constexpr u16 CHECKED = 0x0100;
 constexpr u32 it_IText = 12;
 
 // struct DiskObject and its DrawerData's NewWindow
+constexpr u32 do_Gadget = 4;
 constexpr u32 do_Type = 48;
 constexpr u32 do_DefaultTool = 50;
 constexpr u32 do_ToolTypes = 54;
@@ -86,6 +88,7 @@ constexpr u32 do_CurrentX = 58;
 constexpr u32 do_CurrentY = 62;
 constexpr u32 do_DrawerData = 66;
 constexpr u32 do_StackSize = 74;
+constexpr u32 dd_Flags = 56;
 
 // struct WBStartup and struct WBArg
 constexpr u32 sm_Process = 20;
@@ -154,7 +157,7 @@ struct Info {
     }
 };
 
-void put_gadget(Info& f, u32 width, u32 height) {
+void put_gadget(Info& f, u32 width, u32 height, u32 user_data = 1) {
     f.u32v(0);  // NextGadget
     f.word(0);  // LeftEdge
     f.word(0);  // TopEdge
@@ -169,7 +172,7 @@ void put_gadget(Info& f, u32 width, u32 height) {
     f.u32v(0);  // MutualExclude
     f.u32v(0);  // SpecialInfo
     f.word(0);  // GadgetID
-    f.u32v(1);  // UserData: WB_DISKREVISION
+    f.u32v(user_data);  // UserData: WB_DISKREVISION
 }
 
 void put_image(Info& f, u32 width, u32 height, u32 depth, u32 rows) {
@@ -192,10 +195,10 @@ void put_image(Info& f, u32 width, u32 height, u32 depth, u32 rows) {
 // the old DrawerData NewWindow, default_tool a DefaultTool string after the
 // image.
 void put_header(Info& f, u8 type, i32 current_x, i32 current_y, bool drawer_data,
-                bool default_tool) {
+                bool default_tool, u32 revision = 1) {
     f.word(0xE310);
     f.word(1);
-    put_gadget(f, 32, 12);
+    put_gadget(f, 32, 12, revision);
     f.byte(type);
     f.byte(0);
     f.u32v(default_tool ? 1 : 0);
@@ -215,9 +218,10 @@ std::vector<u8> icon_info(u8 type, i32 current_x, i32 current_y) {
 }
 
 std::vector<u8> drawer_icon_info(i32 current_x, i32 current_y, i32 left, i32 top, i32 width,
-                                 i32 height, i32 scroll_x = 0, i32 scroll_y = 0) {
+                                 i32 height, i32 scroll_x = 0, i32 scroll_y = 0,
+                                 u32 dd_flags = 0, u32 revision = 1) {
     Info f;
-    put_header(f, kWBDrawer, current_x, current_y, true, false);
+    put_header(f, kWBDrawer, current_x, current_y, true, false, revision);
     // OldDrawerData: the NewWindow of the drawer.
     f.word(static_cast<u32>(left));
     f.word(static_cast<u32>(top));
@@ -241,8 +245,10 @@ std::vector<u8> drawer_icon_info(i32 current_x, i32 current_y, i32 left, i32 top
     f.u32v(static_cast<u32>(scroll_y));  // CurrentY
     put_image(f, 32, 12, 2, 12);
     // The OS 2 disk revision follows the other parts.
-    f.u32v(0);  // dd_Flags
-    f.word(0);  // dd_ViewModes
+    if (revision != 0) {
+        f.u32v(dd_flags);  // dd_Flags
+        f.word(0);         // dd_ViewModes
+    }
     return std::move(f.bytes);
 }
 
@@ -5137,6 +5143,510 @@ void the_root_window_has_a_zoom_gadget_only_when_it_is_not_a_backdrop() {
              WFLG_HASZOOM);
 }
 
+// --- Window > Show -------------------------------------------------------
+
+u32 show_parent(const Rig& r) {
+    const u32 window_menu = r.get32(r.workbench.menu() + mu_NextMenu);
+    u32 item = r.get32(window_menu + mu_FirstItem);
+    for (u32 i = 0; i < 7; ++i) {
+        item = r.get32(item + mi_NextItem);
+    }
+    return item;
+}
+
+u32 show_entry(const Rig& r, u32 index) {
+    u32 item = r.get32(show_parent(r) + mi_SubItem);
+    for (u32 i = 0; i < index; ++i) {
+        item = r.get32(item + mi_NextItem);
+    }
+    return item;
+}
+
+constexpr u32 show_pick(u32 sub) { return 1 | (7 << 5) | (sub << 11); }
+
+void the_show_menu_offers_only_icons_and_all_files() {
+    Rig r;
+    r.workbench.open_desktop();
+    const u32 show = show_parent(r);
+    CHECK(r.str(r.get32(r.get32(show + mi_ItemFill) + it_IText)) == "Show");
+    CHECK_EQ(r.get16(show + mi_Flags) & ITEMENABLED, ITEMENABLED);
+    const u32 only = r.get32(show + mi_SubItem);
+    const u32 all = r.get32(only + mi_NextItem);
+    CHECK(only != 0 && all != 0);
+    CHECK(r.str(r.get32(r.get32(only + mi_ItemFill) + it_IText)) == "Only Icons");
+    CHECK(r.str(r.get32(r.get32(all + mi_ItemFill) + it_IText)) == "All Files");
+    CHECK_EQ(r.get32(all + mi_NextItem), 0u);
+    for (u32 item : {only, all}) {
+        const u16 flags = r.get16(item + mi_Flags);
+        CHECK_EQ(flags & ITEMENABLED, ITEMENABLED);
+        CHECK_EQ(flags & CHECKIT, CHECKIT);
+        CHECK_EQ(flags & MENUTOGGLE, 0);
+    }
+    CHECK_EQ(r.get16(only + mi_Flags) & CHECKED, CHECKED);
+    CHECK_EQ(r.get16(all + mi_Flags) & CHECKED, 0u);
+    CHECK_EQ(r.get32(only + mi_MutualExclude), 2u);
+    CHECK_EQ(r.get32(all + mi_MutualExclude), 1u);
+}
+
+void the_show_items_toggle_a_drawer_and_follow_the_active_window() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 volume = r.find_window("HombreTest:");
+    CHECK(volume != Workbench::kNoWindow);
+    CHECK(!r.workbench.window(volume).show_all);
+    CHECK_EQ(r.get16(show_entry(r, 0) + mi_Flags) & CHECKED, CHECKED);
+    CHECK_EQ(r.get16(show_entry(r, 1) + mi_Flags) & CHECKED, 0u);
+    CHECK_EQ(r.find_icon_in(volume, "S"), Workbench::kNoIcon);
+
+    // All Files adds an icon for what has no .info, after the others and
+    // in name order.
+    r.workbench.menu_pick(volume, show_pick(1));
+    CHECK(r.workbench.window(volume).show_all);
+    CHECK_EQ(r.get16(show_entry(r, 0) + mi_Flags) & CHECKED, 0u);
+    CHECK_EQ(r.get16(show_entry(r, 1) + mi_Flags) & CHECKED, CHECKED);
+    const u32 s = r.find_icon_in(volume, "S");
+    const u32 tiny2 = r.find_icon_in(volume, "Tiny2");
+    const u32 utilities = r.find_icon_in(volume, "Utilities");
+    CHECK(s != Workbench::kNoIcon && tiny2 != Workbench::kNoIcon &&
+          utilities != Workbench::kNoIcon);
+    CHECK(r.workbench.icon(s).plain);
+    CHECK_EQ(r.workbench.icon(s).type, kWBDrawer);
+    CHECK_EQ(r.workbench.icon(tiny2).type, kWBTool);
+    CHECK_EQ(r.workbench.icon(utilities).type, kWBDrawer);
+    // .info files are no files of their own.
+    CHECK_EQ(r.find_icon_in(volume, "Disk"), Workbench::kNoIcon);
+    CHECK_EQ(r.find_icon_in(volume, "Tools.info"), Workbench::kNoIcon);
+    std::vector<std::string> plain_names;
+    for (const Workbench::IconEntry& icon : r.workbench.icons()) {
+        if (icon.owner != volume) {
+            continue;
+        }
+        if (icon.plain) {
+            plain_names.push_back(icon.name);
+        } else {
+            CHECK(plain_names.empty());
+        }
+    }
+    CHECK(plain_names == std::vector<std::string>({"S", "Tiny2", "Utilities"}));
+    // All Files fills rows across the window: the icons without a place
+    // stay inside its width.
+    for (const Workbench::IconEntry& icon : r.workbench.icons()) {
+        if (icon.owner == volume && !icon.placed) {
+            CHECK(icon.left + icon.width <= r.workbench.window(volume).inner_width);
+        }
+    }
+    // The refilled window drew the new icon.
+    const Workbench::DrawerWindow& w = r.workbench.window(volume);
+    const Workbench::IconEntry& s_icon = r.workbench.icon(s);
+    CHECK_EQ(r.window_pixel(w.window, w.inner_left + s_icon.left, w.inner_top + s_icon.top), 1u);
+
+    // Picking the checked item changes nothing, the icons included.
+    const usize before = r.workbench.icons().size();
+    r.workbench.menu_pick(volume, show_pick(1));
+    CHECK_EQ(r.workbench.icons().size(), before);
+    CHECK_EQ(r.find_icon_in(volume, "S"), s);
+    CHECK(r.workbench.window(volume).show_all);
+
+    // Only Icons takes them away again.
+    r.workbench.menu_pick(volume, show_pick(0));
+    CHECK(!r.workbench.window(volume).show_all);
+    CHECK_EQ(r.find_icon_in(volume, "S"), Workbench::kNoIcon);
+    CHECK_EQ(r.get16(show_entry(r, 0) + mi_Flags) & CHECKED, CHECKED);
+    r.workbench.menu_pick(volume, show_pick(1));
+
+    // The root window always shows only icons, even when it is active and
+    // All Files is picked.
+    r.click(Workbench::kRootWindow, 2, 2);
+    CHECK_EQ(r.get16(show_entry(r, 0) + mi_Flags) & CHECKED, CHECKED);
+    // Intuition checks the picked item before the desktop sees the pick.
+    const u32 root_only = show_entry(r, 0);
+    const u32 root_all = show_entry(r, 1);
+    r.put16(root_only + mi_Flags, r.get16(root_only + mi_Flags) & ~CHECKED);
+    r.put16(root_all + mi_Flags, r.get16(root_all + mi_Flags) | CHECKED);
+    r.workbench.menu_pick(Workbench::kRootWindow, show_pick(1));
+    CHECK(!r.workbench.window(Workbench::kRootWindow).show_all);
+    CHECK_EQ(r.get16(root_only + mi_Flags) & CHECKED, CHECKED);
+    CHECK_EQ(r.get16(root_all + mi_Flags) & CHECKED, 0u);
+
+    // Active again, the drawer's All Files shows.
+    r.click(volume, 2, 2);
+    CHECK_EQ(r.get16(show_entry(r, 1) + mi_Flags) & CHECKED, CHECKED);
+
+    // A plain drawer opens, with the setting of the window it came from.
+    const u32 s_again_id = r.find_icon_in(volume, "S");
+    CHECK(s_again_id != Workbench::kNoIcon);
+    const Workbench::IconEntry& s_again = r.workbench.icon(s_again_id);
+    r.click(volume, s_again.left + 1, s_again.top + 1);
+    r.click(volume, s_again.left + 1, s_again.top + 1);
+    const u32 s_window = r.find_window("HombreTest:S");
+    CHECK(s_window != Workbench::kNoWindow);
+    CHECK(r.workbench.window(s_window).show_all);
+    const u32 startup = r.find_icon_in(s_window, "Startup-Sequence");
+    CHECK(startup != Workbench::kNoIcon);
+    CHECK_EQ(r.workbench.icon(startup).type, kWBProject);
+}
+
+void a_drawer_opens_with_the_show_setting_in_its_icon() {
+    const i32 nowhere = static_cast<i32>(kNoIconPosition);
+    std::vector<AdfFile> files = test_files();
+    files.push_back({"Wide.info", drawer_icon_info(nowhere, nowhere, 30, 50, 300, 120, 0, 0, 2)});
+    files.push_back(
+        {"Wide/Inner.info", drawer_icon_info(nowhere, nowhere, 30, 50, 300, 120, 0, 0, 0)});
+    files.push_back({"Wide/Inner/Loose", text("plain")});
+    files.push_back(
+        {"Wide/Strict.info", drawer_icon_info(nowhere, nowhere, 30, 50, 300, 120, 0, 0, 1)});
+    files.push_back({"Wide/Strict/Hidden", text("plain")});
+    files.push_back({"Wide/Bare", text("plain")});
+    Rig r(files);
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 volume = r.find_window("HombreTest:");
+    r.workbench.open_icon(volume, r.find_icon_in(volume, "Wide"));
+    const u32 wide = r.find_window("HombreTest:Wide");
+    CHECK(wide != Workbench::kNoWindow);
+    CHECK(r.workbench.window(wide).show_all);
+    CHECK_EQ(r.get16(show_entry(r, 1) + mi_Flags) & CHECKED, CHECKED);
+    CHECK(r.find_icon_in(wide, "Bare") != Workbench::kNoIcon);
+
+    // 0 is the setting of the window it was opened from.
+    r.workbench.open_icon(wide, r.find_icon_in(wide, "Inner"));
+    const u32 inner = r.find_window("HombreTest:Wide/Inner");
+    CHECK(inner != Workbench::kNoWindow);
+    CHECK(r.workbench.window(inner).show_all);
+    CHECK(r.find_icon_in(inner, "Loose") != Workbench::kNoIcon);
+
+    // 1 is only icons, whatever the window it was opened from.
+    r.workbench.open_icon(wide, r.find_icon_in(wide, "Strict"));
+    const u32 strict = r.find_window("HombreTest:Wide/Strict");
+    CHECK(strict != Workbench::kNoWindow);
+    CHECK(!r.workbench.window(strict).show_all);
+    CHECK(r.find_icon_in(strict, "Hidden") == Workbench::kNoIcon);
+    CHECK_EQ(r.get16(show_entry(r, 1) + mi_Flags) & CHECKED, 0u);
+
+    // Opened from the root, a drawer with 0 shows only icons.
+    r.workbench.close_drawer(volume);
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 again = r.find_window("HombreTest:");
+    r.workbench.open_icon(again, r.find_icon_in(again, "Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kNoWindow);
+    CHECK(!r.workbench.window(tools).show_all);
+}
+
+void a_window_snapshot_stores_the_show_setting() {
+    Rig r;
+    r.workbench.open_desktop();
+    put_ram_project("Note");
+    u32 error = 0;
+    const u8 byte = 'x';
+    CHECK(g_dos.write_file("RAM:Bare", &byte, 1, error));
+    r.workbench.open_icon(0, r.find_icon("Ram Disk"));
+    const u32 ram = r.find_window("Ram Disk:");
+    CHECK(ram != Workbench::kNoWindow);
+    r.workbench.menu_pick(ram, show_pick(1));
+    CHECK(r.workbench.window(ram).show_all);
+    CHECK(r.find_icon_in(ram, "Bare") != Workbench::kNoIcon);
+
+    // Window > Snapshot > Window.
+    r.workbench.menu_pick(ram, 1 | (6 << 5) | (0 << 11));
+    u32 object = g_icon.load_object("RAM:Disk");
+    CHECK(object != 0);
+    u32 data = r.get32(object + do_DrawerData);
+    CHECK(data != 0);
+    CHECK_EQ(r.get32(data + dd_Flags), 2u);
+    CHECK_EQ(r.get32(object + do_Gadget + gg_UserData) & 0xFF, 1u);
+    g_icon.free_object(object);
+
+    // The drawer opens again with the setting.
+    r.workbench.close_drawer(ram);
+    r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+    const u32 again = r.find_window("Ram Disk:");
+    CHECK(again != Workbench::kNoWindow);
+    CHECK(r.workbench.window(again).show_all);
+    CHECK(r.find_icon_in(again, "Bare") != Workbench::kNoIcon);
+
+    // Only Icons snapshots as 1.
+    r.workbench.menu_pick(again, show_pick(0));
+    r.workbench.menu_pick(again, 1 | (6 << 5) | (0 << 11));
+    object = g_icon.load_object("RAM:Disk");
+    CHECK(object != 0);
+    data = r.get32(object + do_DrawerData);
+    CHECK(data != 0);
+    CHECK_EQ(r.get32(data + dd_Flags), 1u);
+    g_icon.free_object(object);
+}
+
+void an_old_style_drawer_icon_keeps_the_show_setting() {
+    const i32 nowhere = static_cast<i32>(kNoIconPosition);
+    Rig r;
+    r.workbench.open_desktop();
+    u32 error = 0;
+    r.make_dir("RAM:Old");
+    const std::vector<u8> old_info =
+        drawer_icon_info(nowhere, nowhere, 30, 50, 300, 120, 0, 0, 0, 0);
+    CHECK(g_dos.write_file("RAM:Old.info", old_info.data(), static_cast<u32>(old_info.size()),
+                           error));
+    const std::vector<u8> one_info = icon_info(kWBTool, 10, 10);
+    CHECK(g_dos.write_file("RAM:Old/One.info", one_info.data(),
+                           static_cast<u32>(one_info.size()), error));
+    const std::vector<u8> bare = text("plain");
+    CHECK(g_dos.write_file("RAM:Old/Bare", bare.data(), static_cast<u32>(bare.size()), error));
+    r.workbench.open_icon(0, r.find_icon_in(0, "Ram Disk"));
+    const u32 volume = r.find_window("Ram Disk:");
+    r.workbench.open_icon(volume, r.find_icon_in(volume, "Old"));
+    const u32 old = r.find_window("Ram Disk:Old");
+    CHECK(old != Workbench::kNoWindow);
+    CHECK(!r.workbench.window(old).show_all);
+    CHECK(r.find_icon_in(old, "Bare") == Workbench::kNoIcon);
+    r.workbench.menu_pick(old, show_pick(1));
+    CHECK(r.workbench.window(old).show_all);
+    CHECK(r.workbench.snapshot_window(old, false));
+
+    // The revision byte makes the flags part of the saved icon.
+    const u32 object = g_icon.load_object("RAM:Old");
+    CHECK(object != 0);
+    CHECK_EQ(r.get32(object + do_Gadget + gg_UserData) & 0xFF, 1u);
+    const u32 data = r.get32(object + do_DrawerData);
+    CHECK(data != 0);
+    CHECK_EQ(r.get32(data + dd_Flags), 2u);
+    CHECK_EQ(r.get16(data + nw_LeftEdge), 30u);
+    CHECK_EQ(r.get16(data + nw_Width), 300u);
+    g_icon.free_object(object);
+
+    r.workbench.close_drawer(old);
+    r.workbench.open_icon(volume, r.find_icon_in(volume, "Old"));
+    const u32 again = r.find_window("Ram Disk:Old");
+    CHECK(again != Workbench::kNoWindow);
+    CHECK(r.workbench.window(again).show_all);
+    CHECK(r.find_icon_in(again, "Bare") != Workbench::kNoIcon);
+}
+
+void plain_icons_come_after_the_real_ones_in_name_order() {
+    Rig r;
+    r.workbench.open_desktop();
+    u32 error = 0;
+    r.make_dir("RAM:Names");
+    const u32 drawer = g_icon.default_object(kWBDrawer);
+    CHECK(g_icon.save_object("RAM:Names", drawer, error));
+    g_icon.free_object(drawer);
+    r.make_dir("RAM:Names/dir");
+    const std::vector<u8> a_info = icon_info(kWBTool, 10, 10);
+    const std::vector<u8> d_info = icon_info(kWBTool, 40, 10);
+    const std::vector<u8> mixed_info = icon_info(kWBTool, 70, 10);
+    CHECK(g_dos.write_file("RAM:Names/A.info", a_info.data(),
+                           static_cast<u32>(a_info.size()), error));
+    CHECK(g_dos.write_file("RAM:Names/D.info", d_info.data(),
+                           static_cast<u32>(d_info.size()), error));
+    CHECK(g_dos.write_file("RAM:Names/MIXED.INFO", mixed_info.data(),
+                           static_cast<u32>(mixed_info.size()), error));
+    const std::vector<u8> b = text("b");
+    const std::vector<u8> e = text("e");
+    const std::vector<u8> c = hunk_rts();
+    CHECK(g_dos.write_file("RAM:Names/b", b.data(), static_cast<u32>(b.size()), error));
+    CHECK(g_dos.write_file("RAM:Names/c", c.data(), static_cast<u32>(c.size()), error));
+    CHECK(g_dos.write_file("RAM:Names/E", e.data(), static_cast<u32>(e.size()), error));
+    CHECK(g_dos.write_file("RAM:Names/mixed", b.data(), static_cast<u32>(b.size()), error));
+
+    r.workbench.open_icon(0, r.find_icon("Ram Disk"));
+    const u32 ram = r.find_window("Ram Disk:");
+    r.workbench.open_icon(ram, r.find_icon_in(ram, "Names"));
+    const u32 names = r.find_window("Ram Disk:Names");
+    CHECK(names != Workbench::kNoWindow);
+    r.workbench.menu_pick(names, show_pick(1));
+
+    std::vector<std::string> plain_names;
+    for (const Workbench::IconEntry& icon : r.workbench.icons()) {
+        if (icon.owner != names) {
+            continue;
+        }
+        if (icon.plain) {
+            plain_names.push_back(icon.name);
+        } else {
+            CHECK(plain_names.empty());
+        }
+    }
+    CHECK(plain_names == std::vector<std::string>({"b", "c", "dir", "E"}));
+    const u32 b_icon = r.find_icon_in(names, "b");
+    const u32 c_icon = r.find_icon_in(names, "c");
+    const u32 dir_icon = r.find_icon_in(names, "dir");
+    const u32 e_icon = r.find_icon_in(names, "E");
+    CHECK(b_icon != Workbench::kNoIcon && c_icon != Workbench::kNoIcon &&
+          dir_icon != Workbench::kNoIcon && e_icon != Workbench::kNoIcon);
+    CHECK_EQ(r.workbench.icon(b_icon).type, kWBProject);
+    CHECK_EQ(r.workbench.icon(c_icon).type, kWBTool);
+    CHECK_EQ(r.workbench.icon(dir_icon).type, kWBDrawer);
+    CHECK_EQ(r.workbench.icon(e_icon).type, kWBProject);
+    // The .info matches its file without regard to case.
+    CHECK_EQ(r.find_icon_in(names, "mixed"), Workbench::kNoIcon);
+    CHECK(r.find_icon_in(names, "MIXED") != Workbench::kNoIcon);
+}
+
+void a_plain_icon_is_copied_renamed_and_deleted() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    u32 error = 0;
+    const u8 byte = 'x';
+    CHECK(g_dos.write_file("RAM:Plain", &byte, 1, error));
+    r.rescan("Ram Disk:");
+    CHECK_EQ(r.find_icon_in(w.ram, "Plain"), Workbench::kNoIcon);
+    r.workbench.menu_pick(w.ram, show_pick(1));
+    const u32 plain = r.find_icon_in(w.ram, "Plain");
+    CHECK(plain != Workbench::kNoIcon);
+    CHECK(r.workbench.icon(plain).plain);
+    CHECK_EQ(r.workbench.icon(plain).type, kWBProject);
+    CHECK(!r.exists("RAM:Plain.info"));
+
+    // It drags within its window like any other icon.
+    const Workbench::IconEntry start = r.workbench.icon(plain);
+    r.drag(w.ram, start.left + 3, start.top + 3, r.screen_x(w.ram, start.left + 7),
+           r.screen_y(w.ram, start.top + 7));
+    CHECK_EQ(r.workbench.icon(plain).left, start.left + 4);
+    CHECK_EQ(r.workbench.icon(plain).top, start.top + 4);
+
+    // Icons > Copy needs no .info and writes none.
+    r.click(w.ram, start.left + 7, start.top + 7);
+    r.workbench.menu_pick(w.ram, icons_pick(1));
+    CHECK(logged("workbench: copied Ram Disk:Plain to Ram Disk:copy_of_Plain"));
+    CHECK(r.exists("RAM:copy_of_Plain"));
+    CHECK(!r.exists("RAM:copy_of_Plain.info"));
+    const u32 copy = r.find_icon_in(w.ram, "copy_of_Plain");
+    CHECK(copy != Workbench::kNoIcon);
+    CHECK(r.workbench.icon(copy).plain);
+
+    // Rename and delete it without an .info appearing.
+    CHECK(r.workbench.rename_icon(w.ram, copy, "Renamed"));
+    CHECK(r.exists("RAM:Renamed"));
+    CHECK(!r.exists("RAM:Renamed.info"));
+    CHECK(!r.exists("RAM:copy_of_Plain"));
+    const u32 renamed = r.find_icon_in(w.ram, "Renamed");
+    CHECK(renamed != Workbench::kNoIcon);
+    CHECK(r.workbench.delete_icon(w.ram, renamed));
+    CHECK(!r.exists("RAM:Renamed"));
+    CHECK(!r.exists("RAM:Renamed.info"));
+}
+
+void a_plain_icon_moves_and_copies_between_drawers() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+
+    // All Files shows the tool without an .info; to another volume it is
+    // copied without one.
+    r.workbench.menu_pick(w.tools, show_pick(1));
+    const u32 tiny = r.find_icon_in(w.tools, "Tiny");
+    CHECK(tiny != Workbench::kNoIcon);
+    CHECK(r.workbench.icon(tiny).plain);
+    const Workbench::IconEntry t = r.workbench.icon(tiny);
+    r.drag(w.tools, t.left + 3, t.top + 3, r.screen_x(w.ram, 153), r.screen_y(w.ram, 43));
+    CHECK(logged("workbench: copied HombreTest:Tools/Tiny to Ram Disk:"));
+    CHECK(r.exists("RAM:Tiny"));
+    CHECK(!r.exists("RAM:Tiny.info"));
+    CHECK(r.exists("HombreTest:Tools/Tiny"));
+
+    // On one volume a drop on a drawer moves it.
+    r.workbench.menu_pick(w.ram, show_pick(1));
+    u32 error = 0;
+    r.make_dir("RAM:Box");
+    const u32 drawer = g_icon.default_object(kWBDrawer);
+    CHECK(g_icon.save_object("RAM:Box", drawer, error));
+    g_icon.free_object(drawer);
+    const u8 byte = 'x';
+    CHECK(g_dos.write_file("RAM:Moved", &byte, 1, error));
+    r.rescan("Ram Disk:");
+    const u32 moved = r.find_icon_in(w.ram, "Moved");
+    const u32 box_id = r.find_icon_in(w.ram, "Box");
+    CHECK(moved != Workbench::kNoIcon && box_id != Workbench::kNoIcon);
+    const Workbench::IconEntry m = r.workbench.icon(moved);
+    const Workbench::IconEntry box = r.workbench.icon(box_id);
+    r.drag(w.ram, m.left + 3, m.top + 3, r.screen_x(w.ram, box.left + 3),
+           r.screen_y(w.ram, box.top + 3));
+    CHECK(logged("workbench: moved Ram Disk:Moved to Ram Disk:Box"));
+    CHECK(!r.exists("RAM:Moved"));
+    CHECK(r.exists("RAM:Box/Moved"));
+    CHECK(!r.exists("RAM:Box/Moved.info"));
+}
+
+void snapshots_and_leave_out_treat_a_plain_icon() {
+    Rig r;
+    put_ram_project("Note");
+    const TwoWindows w = open_tools_and_ram(r);
+    u32 error = 0;
+    const u8 byte = 'x';
+    CHECK(g_dos.write_file("RAM:Bare", &byte, 1, error));
+    r.workbench.menu_pick(w.ram, show_pick(1));
+    const u32 bare = r.find_icon_in(w.ram, "Bare");
+    CHECK(bare != Workbench::kNoIcon);
+
+    // Leave Out is refused with a log line, not a requester.
+    r.click(w.ram, r.workbench.icon(bare).left + 1, r.workbench.icon(bare).top + 1);
+    r.workbench.menu_pick(w.ram, icons_pick(6));
+    CHECK(logged("workbench: Bare cannot be left out"));
+    CHECK(std::string(r.workbench.last_message()).empty());
+    CHECK(!r.exists("RAM:.backdrop"));
+    CHECK(!r.exists("RAM:Bare.info"));
+
+    // Unsnapshot keeps no snapshot.
+    CHECK(!r.workbench.unsnapshot_icon(w.ram, bare));
+    CHECK(logged("workbench: Bare keeps no snapshot"));
+    CHECK(!r.exists("RAM:Bare.info"));
+
+    // Snapshot All skips the plain icon but keeps the others' places.
+    const u32 note = r.find_icon_in(w.ram, "Note");
+    CHECK(note != Workbench::kNoIcon);
+    r.workbench.menu_pick(w.ram, 1 | (6 << 5) | (1 << 11));
+    CHECK(!r.exists("RAM:Bare.info"));
+    CHECK(r.saved_place("RAM:Note") ==
+          std::make_pair(static_cast<u32>(r.workbench.icon(note).left),
+                         static_cast<u32>(r.workbench.icon(note).top)));
+    const u32 disk = g_icon.load_object("RAM:Disk");
+    CHECK(disk != 0);
+    const u32 disk_data = r.get32(disk + do_DrawerData);
+    CHECK(disk_data != 0);
+    CHECK_EQ(r.get32(disk_data + dd_Flags), 2u);
+    g_icon.free_object(disk);
+
+    // Snapshot on the plain icon writes its .info; a refill makes it a
+    // normal icon.
+    CHECK(r.workbench.snapshot_icon(w.ram, bare));
+    CHECK(r.exists("RAM:Bare.info"));
+    CHECK(r.workbench.icon(bare).plain);
+    r.rescan("Ram Disk:");
+    const u32 normal = r.find_icon_in(w.ram, "Bare");
+    CHECK(normal != Workbench::kNoIcon);
+    CHECK(!r.workbench.icon(normal).plain);
+}
+
+void a_reset_keeps_each_drawers_show_setting() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    u32 error = 0;
+    const u8 byte = 'x';
+    CHECK(g_dos.write_file("RAM:Bare", &byte, 1, error));
+    r.workbench.menu_pick(w.ram, show_pick(1));
+    CHECK(r.find_icon_in(w.ram, "Bare") != Workbench::kNoIcon);
+    CHECK(!r.workbench.window(w.tools).show_all);
+
+    // Update keeps the setting and shows a new file.
+    CHECK(g_dos.write_file("RAM:Late", &byte, 1, error));
+    r.workbench.menu_pick(w.ram, 1 | (3 << 5) | (31 << 11));
+    const u32 late = r.find_icon_in(w.ram, "Late");
+    CHECK(late != Workbench::kNoIcon);
+    CHECK(r.workbench.icon(late).plain);
+    CHECK(!r.exists("RAM:Late.info"));
+
+    // Tools > ResetWB.
+    r.workbench.menu_pick(0, 3 | (0 << 5) | (31 << 11));
+    const u32 ram = r.find_window("Ram Disk:");
+    CHECK(ram != Workbench::kNoWindow);
+    CHECK(r.workbench.window(ram).show_all);
+    CHECK(r.find_icon_in(ram, "Bare") != Workbench::kNoIcon);
+    CHECK(r.find_icon_in(ram, "Late") != Workbench::kNoIcon);
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kNoWindow);
+    CHECK(!r.workbench.window(tools).show_all);
+    CHECK_EQ(r.find_icon_in(tools, "Tiny"), Workbench::kNoIcon);
+}
+
 // On a 24-bit HOMBRE screen, whose BitMap says depth 24 but which has 256
 // pens, a volume window still gets its fuel gauge.
 void the_fuel_gauge_shows_on_a_24_bit_screen() {
@@ -5185,6 +5695,16 @@ int main() {
     app_registrations_add_and_remove();
     an_app_icons_object_outlives_an_ended_program();
     menu_strip_lists_the_titles_and_disabled_items();
+    the_show_menu_offers_only_icons_and_all_files();
+    the_show_items_toggle_a_drawer_and_follow_the_active_window();
+    a_drawer_opens_with_the_show_setting_in_its_icon();
+    a_window_snapshot_stores_the_show_setting();
+    an_old_style_drawer_icon_keeps_the_show_setting();
+    plain_icons_come_after_the_real_ones_in_name_order();
+    a_plain_icon_is_copied_renamed_and_deleted();
+    a_plain_icon_moves_and_copies_between_drawers();
+    snapshots_and_leave_out_treat_a_plain_icon();
+    a_reset_keeps_each_drawers_show_setting();
     app_vectors_take_their_arguments_from_the_documented_registers();
     a_drawer_window_keeps_its_title_when_the_memory_it_came_from_is_reused();
     open_parent_opens_the_drawer_above();
