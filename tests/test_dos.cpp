@@ -3269,6 +3269,105 @@ void the_public_calls_write_and_delete_files_on_a_partition() {
     CHECK_SOUND(disk.volume);
 }
 
+void the_public_calls_change_paths_on_ram_and_partitions() {
+    Floppy df0(build_adf("HombreTest", false, standard_files()));
+    DiskPartition disk;
+    Rig r(with_partitions(&df0.volume, {&disk}));
+    u32 error = 99;
+    const u32 fib = kData + 0x800;
+    const u8 x[] = {'x'};
+
+    // make_dir: a new directory on each volume that can be written, not one
+    // that is there, and none on a disk that cannot.
+    CHECK(g_dos.make_dir("RAM:Made", error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.examine("RAM:Made").kind == Dos::TargetKind::Dir);
+    CHECK(!g_dos.make_dir("RAM:Made", error));
+    CHECK_EQ(error, ERROR_OBJECT_EXISTS);
+    CHECK_EQ(r.io_err(), ERROR_OBJECT_EXISTS);
+    CHECK(g_dos.make_dir("DH0:Made", error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.examine("DH0:Made").kind == Dos::TargetKind::Dir);
+    CHECK(!g_dos.make_dir("DH0:No/Sub", error));
+    CHECK_EQ(error, ERROR_DIR_NOT_FOUND);
+    CHECK(!g_dos.make_dir("DF0:Made", error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+
+    // rename_path: to a new name, not onto a name that is taken, not across
+    // volumes and not on a disk that cannot be written.
+    CHECK(g_dos.write_file("RAM:Before", x, 1, error));
+    CHECK(g_dos.rename_path("RAM:Before", "RAM:After", error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.examine("RAM:Before").kind == Dos::TargetKind::Missing);
+    CHECK(g_dos.examine("RAM:After").kind == Dos::TargetKind::File);
+    CHECK(!g_dos.rename_path("RAM:After", "RAM:Made", error));
+    CHECK_EQ(error, ERROR_OBJECT_EXISTS);
+    CHECK(!g_dos.rename_path("RAM:Nope", "RAM:Elsewhere", error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK(g_dos.write_file("DH0:Before", x, 1, error));
+    CHECK(g_dos.rename_path("DH0:Before", "DH0:After", error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.examine("DH0:Before").kind == Dos::TargetKind::Missing);
+    CHECK(g_dos.examine("DH0:After").kind == Dos::TargetKind::File);
+    CHECK(!g_dos.rename_path("DH0:After", "DH0:Made", error));
+    CHECK_EQ(error, ERROR_OBJECT_EXISTS);
+    CHECK(!g_dos.rename_path("DH0:After", "RAM:After", error));
+    CHECK_EQ(error, ERROR_RENAME_ACROSS_DEVICES);
+    CHECK(!g_dos.rename_path("DF0:C/Echo", "DF0:C/Moved", error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+
+    // set_protection_bits and set_file_comment: kept where Examine shows
+    // them, refused for a missing object, and for a disk that cannot be
+    // written.
+    CHECK(g_dos.set_protection_bits("RAM:After", 0x0F, error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.set_file_comment("RAM:After", "ram note", error));
+    CHECK_EQ(error, 0u);
+    CHECK(examine_name(r, "RAM:After", fib));
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x0Fu);
+    CHECK(r.read_str(fib + fib_Comment) == "ram note");
+    CHECK(!g_dos.set_protection_bits("RAM:Nope", 0, error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK(!g_dos.set_file_comment("RAM:Nope", "x", error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK(g_dos.set_protection_bits("DH0:After", 0x50, error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.set_file_comment("DH0:After", "disk note", error));
+    CHECK_EQ(error, 0u);
+    CHECK(examine_name(r, "DH0:After", fib));
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x50u);
+    CHECK(r.read_str(fib + fib_Comment) == "disk note");
+    CHECK(!g_dos.set_protection_bits("DH0:Nope", 0, error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK(!g_dos.set_file_comment("DH0:Nope", "x", error));
+    CHECK_EQ(error, ERROR_OBJECT_NOT_FOUND);
+    CHECK(!g_dos.set_protection_bits("DF0:C/Echo", 0, error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+    CHECK(!g_dos.set_file_comment("DF0:C/Echo", "x", error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+
+    // A null argument is missing, and a comment longer than a header keeps
+    // is too big on every volume.
+    CHECK(!g_dos.rename_path(nullptr, "RAM:After", error));
+    CHECK_EQ(error, ERROR_REQUIRED_ARG_MISSING);
+    CHECK(!g_dos.make_dir(nullptr, error));
+    CHECK_EQ(error, ERROR_REQUIRED_ARG_MISSING);
+    CHECK(!g_dos.set_protection_bits(nullptr, 0, error));
+    CHECK_EQ(error, ERROR_REQUIRED_ARG_MISSING);
+    CHECK(!g_dos.set_file_comment("RAM:After", nullptr, error));
+    CHECK_EQ(error, ERROR_REQUIRED_ARG_MISSING);
+    const std::string fitting(RamFs::kMaxComment, 'c');
+    CHECK(g_dos.set_file_comment("RAM:After", fitting.c_str(), error));
+    CHECK_EQ(error, 0u);
+    const std::string too_long(RamFs::kMaxComment + 1, 'c');
+    CHECK(!g_dos.set_file_comment("RAM:After", too_long.c_str(), error));
+    CHECK_EQ(error, ERROR_COMMENT_TOO_BIG);
+    CHECK(!g_dos.set_file_comment("DH0:After", too_long.c_str(), error));
+    CHECK_EQ(error, ERROR_COMMENT_TOO_BIG);
+    CHECK_EQ(r.io_err(), ERROR_COMMENT_TOO_BIG);
+    CHECK_SOUND(disk.volume);
+}
+
 void a_file_that_does_not_fit_is_not_left_behind() {
     Floppy df0(build_adf("HombreTest", false, standard_files()));
     DiskPartition disk(1, 64);
@@ -8806,6 +8905,7 @@ int main() {
     a_full_partition_says_so_and_info_follows_the_blocks();
     a_disk_that_cannot_be_written_refuses_every_change();
     the_public_calls_write_and_delete_files_on_a_partition();
+    the_public_calls_change_paths_on_ram_and_partitions();
     a_file_that_does_not_fit_is_not_left_behind();
     set_var_saves_to_envarc_on_a_writable_boot_partition();
     layout_matches_the_ndk();

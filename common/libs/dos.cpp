@@ -2552,6 +2552,27 @@ struct DosOps {
         return apply_relative_path(base, name, out, error);
     }
 
+    // Resolves a name for a public call, keeping a failure as IoErr.
+    static bool resolve_public(Dos& d, Bus& b, const char* name, u8& vol,
+                               char (&out)[Dos::kMaxPath], u32& error) {
+        if (resolve(d, b, name, vol, out, error)) {
+            return true;
+        }
+        if (b.ok()) {
+            d.set_last_error(error);
+        }
+        return false;
+    }
+
+    // Ends a public call: true for no error, any other is kept as IoErr.
+    static bool end_public(Dos& d, u32 error) {
+        if (error != 0) {
+            d.set_last_error(error);
+        }
+        return error == 0;
+    }
+
+
     // Resolves a name and looks it up on the volume.
     static bool locate(Dos& d, Bus& b, const char* name, u8& vol, char (&path)[Dos::kMaxPath],
                        DirEntry& entry, u32& error, u32 process = 0) {
@@ -7470,6 +7491,63 @@ struct DosOps {
         }
     }
 
+    // Moves the object at old_resolved to new_resolved on one volume, with the
+    // locks and notifications a rename changes. Returns the IoErr code.
+    static u32 rename_resolved(Dos& d, Bus& b, u8 old_vol, const char* old_resolved,
+                               u8 new_vol, const char* new_resolved) {
+        if (old_vol != new_vol) {
+            return ERROR_RENAME_ACROSS_DEVICES;
+        }
+        if (old_vol != Dos::kVolRam) {
+            const u32 disk_err = rename_disk_object(d, old_vol, old_resolved, new_resolved);
+            if (disk_err == 0) {
+                refresh_disk_paths(d, b, old_vol);
+                notify_changed(d, old_vol, old_resolved);
+                notify_changed(d, new_vol, new_resolved);
+            }
+            return disk_err;
+        }
+        u32 old_node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(old_resolved, old_node);
+        if (find_err != 0) {
+            return find_err;
+        }
+        if (old_node == 0) {
+            return ERROR_OBJECT_IN_USE;
+        }
+        if (new_resolved[0] == '\0') {
+            return ERROR_OBJECT_EXISTS;
+        }
+        char new_parent_path[Dos::kMaxPath];
+        const char* new_leaf = nullptr;
+        split_parent_and_leaf(new_resolved, new_parent_path, new_leaf);
+        u32 new_parent = RamFs::kNone;
+        const u32 p_err = d.ram_.find_path(new_parent_path, new_parent);
+        if (p_err != 0) {
+            return p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err;
+        }
+        if (!d.ram_.node(new_parent).is_dir) {
+            return ERROR_DIR_NOT_FOUND;
+        }
+        const u32 old_parent = d.ram_.parent(old_node);
+        char prev_name[RamFs::kMaxName + 1];
+        copy_cstr(prev_name, d.ram_.node(old_node).name, sizeof prev_name);
+        const u32 err = d.ram_.rename(old_node, new_parent, new_leaf);
+        if (err != 0) {
+            return err;
+        }
+        if (!ram_subtree_paths_fit(d.ram_, old_node)) {
+            d.ram_.rename(old_node, old_parent, prev_name);
+            return ERROR_INVALID_COMPONENT_NAME;
+        }
+        update_renamed_paths(d, b, old_node);
+        if (b.ok()) {
+            notify_changed(d, old_vol, old_resolved);
+            notify_changed(d, new_vol, new_resolved);
+        }
+        return 0;
+    }
+
     static bool rename_impl(Dos& d, Bus& b, u32 old_lock, const char* old_name, u32 new_lock,
                             const char* new_name, u8 zero_vol = kBootVolume) {
         u8 old_vol = Dos::kVolDf0;
@@ -7489,67 +7567,15 @@ struct DosOps {
             }
             return false;
         }
-        if (old_vol != new_vol) {
-            fail(d, b, ERROR_RENAME_ACROSS_DEVICES, DOSFALSE);
-            return false;
-        }
-        if (old_vol != Dos::kVolRam) {
-            const u32 disk_err = rename_disk_object(d, old_vol, old_resolved, new_resolved);
-            if (disk_err == 0) {
-                refresh_disk_paths(d, b, old_vol);
-                notify_changed(d, old_vol, old_resolved);
-                notify_changed(d, new_vol, new_resolved);
-            }
-            return finish_change(d, b, disk_err);
-        }
-        u32 old_node = RamFs::kNone;
-        const u32 find_err = d.ram_.find_path(old_resolved, old_node);
-        if (find_err != 0) {
-            fail(d, b, find_err, DOSFALSE);
-            return false;
-        }
-        if (old_node == 0) {
-            fail(d, b, ERROR_OBJECT_IN_USE, DOSFALSE);
-            return false;
-        }
-        if (new_resolved[0] == '\0') {
-            fail(d, b, ERROR_OBJECT_EXISTS, DOSFALSE);
-            return false;
-        }
-        char new_parent_path[Dos::kMaxPath];
-        const char* new_leaf = nullptr;
-        split_parent_and_leaf(new_resolved, new_parent_path, new_leaf);
-        u32 new_parent = RamFs::kNone;
-        const u32 p_err = d.ram_.find_path(new_parent_path, new_parent);
-        if (p_err != 0) {
-            fail(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err, DOSFALSE);
-            return false;
-        }
-        if (!d.ram_.node(new_parent).is_dir) {
-            fail(d, b, ERROR_DIR_NOT_FOUND, DOSFALSE);
-            return false;
-        }
-        const u32 old_parent = d.ram_.parent(old_node);
-        char prev_name[RamFs::kMaxName + 1];
-        copy_cstr(prev_name, d.ram_.node(old_node).name, sizeof prev_name);
-        const u32 err = d.ram_.rename(old_node, new_parent, new_leaf);
+        const u32 err = rename_resolved(d, b, old_vol, old_resolved, new_vol, new_resolved);
         if (err != 0) {
-            fail(d, b, err, DOSFALSE);
+            return finish_change(d, b, err);
+        }
+        if (!b.ok()) {
             return false;
         }
-        if (!ram_subtree_paths_fit(d.ram_, old_node)) {
-            d.ram_.rename(old_node, old_parent, prev_name);
-            fail(d, b, ERROR_INVALID_COMPONENT_NAME, DOSFALSE);
-            return false;
-        }
-        update_renamed_paths(d, b, old_node);
-        if (b.ok()) {
-            notify_changed(d, old_vol, old_resolved);
-            notify_changed(d, new_vol, new_resolved);
-            native::set_result(b.machine(), DOSTRUE);
-            return true;
-        }
-        return false;
+        native::set_result(b.machine(), DOSTRUE);
+        return true;
     }
 
     static void rename_lvo(void* ctx, Machine& m) {
@@ -7579,6 +7605,43 @@ struct DosOps {
         }
     }
 
+    // Makes the directory at the resolved path, tells notifications and fills
+    // entry and canonical with what a lock on it needs. Returns the IoErr code.
+    static u32 create_dir_resolved(Dos& d, u8 vol, const char* resolved, DirEntry& entry,
+                                   char (&canonical)[Dos::kMaxPath]) {
+        if (vol != Dos::kVolRam) {
+            const u32 err = create_disk_dir(d, vol, resolved, entry);
+            if (err == 0) {
+                copy_cstr(canonical, resolved, Dos::kMaxPath);
+                notify_changed(d, vol, canonical);
+            }
+            return err;
+        }
+        if (resolved[0] == '\0') {
+            return ERROR_OBJECT_EXISTS;
+        }
+        char parent_path[Dos::kMaxPath];
+        const char* leaf = nullptr;
+        split_parent_and_leaf(resolved, parent_path, leaf);
+        u32 parent_node = RamFs::kNone;
+        const u32 p_err = d.ram_.find_path(parent_path, parent_node);
+        if (p_err != 0) {
+            return p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err;
+        }
+        if (!d.ram_.node(parent_node).is_dir) {
+            return ERROR_DIR_NOT_FOUND;
+        }
+        u32 new_node = RamFs::kNone;
+        const u32 err = d.ram_.create_dir(parent_node, leaf, new_node);
+        if (err != 0) {
+            return err;
+        }
+        entry = ram_entry(d, new_node);
+        ram_node_path(d.ram_, new_node, canonical);
+        notify_changed(d, vol, canonical);
+        return 0;
+    }
+
     static bool create_dir_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
                                 u8 zero_vol = kBootVolume) {
         u8 vol = Dos::kVolDf0;
@@ -7590,60 +7653,21 @@ struct DosOps {
             }
             return false;
         }
-        if (vol != Dos::kVolRam) {
-            if (writable_disk(d, vol) && free_lock(d) < 0) {
-                table_full(d, b, "lock", Dos::kMaxLocks);
-                return false;
-            }
-            DirEntry made{};
-            const u32 disk_err = create_disk_dir(d, vol, resolved, made);
-            if (disk_err != 0) {
-                fail(d, b, disk_err, 0);
-                return false;
-            }
-            u32 disk_bptr = 0;
-            if (!alloc_user_lock(d, b, resolved, made, EXCLUSIVE_LOCK, disk_bptr)) {
-                return false;
-            }
-            notify_changed(d, vol, resolved);
-            native::set_result(b.machine(), disk_bptr);
-            return true;
-        }
-        if (resolved[0] == '\0') {
-            fail(d, b, ERROR_OBJECT_EXISTS, 0);
-            return false;
-        }
-        char parent_path[Dos::kMaxPath];
-        const char* leaf = nullptr;
-        split_parent_and_leaf(resolved, parent_path, leaf);
-        u32 parent_node = RamFs::kNone;
-        const u32 p_err = d.ram_.find_path(parent_path, parent_node);
-        if (p_err != 0) {
-            fail(d, b, p_err == ERROR_OBJECT_NOT_FOUND ? ERROR_DIR_NOT_FOUND : p_err, 0);
-            return false;
-        }
-        if (!d.ram_.node(parent_node).is_dir) {
-            fail(d, b, ERROR_DIR_NOT_FOUND, 0);
-            return false;
-        }
-        if (free_lock(d) < 0) {
+        if ((vol == Dos::kVolRam || writable_disk(d, vol)) && free_lock(d) < 0) {
             table_full(d, b, "lock", Dos::kMaxLocks);
             return false;
         }
-        u32 new_node = RamFs::kNone;
-        const u32 err = d.ram_.create_dir(parent_node, leaf, new_node);
+        DirEntry entry{};
+        char canonical[Dos::kMaxPath];
+        const u32 err = create_dir_resolved(d, vol, resolved, entry, canonical);
         if (err != 0) {
             fail(d, b, err, 0);
             return false;
         }
-        const DirEntry entry = ram_entry(d, new_node);
-        char canonical[Dos::kMaxPath];
-        ram_node_path(d.ram_, new_node, canonical);
         u32 bptr = 0;
         if (!alloc_user_lock(d, b, canonical, entry, EXCLUSIVE_LOCK, bptr)) {
             return false;
         }
-        notify_changed(d, vol, canonical);
         native::set_result(b.machine(), bptr);
         return true;
     }
@@ -7668,6 +7692,24 @@ struct DosOps {
         }
     }
 
+    // Sets the protection of the object at the resolved path. Returns the IoErr
+    // code.
+    static u32 set_protection_resolved(Dos& d, u8 vol, const char* resolved, u32 mask) {
+        if (vol != Dos::kVolRam) {
+            return change_disk_object(
+                d, vol, resolved,
+                [mask](const AdfVolume& v, u32 block, const AmigaDate& now) {
+                    return adf_set_protection(v, block, mask, now);
+                });
+        }
+        u32 node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(resolved, node);
+        if (find_err != 0) {
+            return find_err;
+        }
+        return d.ram_.set_protection(node, mask);
+    }
+
     static bool set_protection_impl(Dos& d, Bus& b, u32 base_lock, const char* name, u32 mask,
                                     u8 zero_vol = kBootVolume) {
         u8 vol = Dos::kVolDf0;
@@ -7679,27 +7721,7 @@ struct DosOps {
             }
             return false;
         }
-        if (vol != Dos::kVolRam) {
-            return finish_change(
-                d, b,
-                change_disk_object(d, vol, resolved,
-                                   [mask](const AdfVolume& v, u32 block, const AmigaDate& now) {
-                                       return adf_set_protection(v, block, mask, now);
-                                   }));
-        }
-        u32 node = RamFs::kNone;
-        const u32 find_err = d.ram_.find_path(resolved, node);
-        if (find_err != 0) {
-            fail(d, b, find_err, DOSFALSE);
-            return false;
-        }
-        const u32 err = d.ram_.set_protection(node, mask);
-        if (err != 0) {
-            fail(d, b, err, DOSFALSE);
-            return false;
-        }
-        native::set_result(b.machine(), DOSTRUE);
-        return true;
+        return finish_change(d, b, set_protection_resolved(d, vol, resolved, mask));
     }
 
     static void set_protection(void* ctx, Machine& m) {
@@ -7768,6 +7790,24 @@ struct DosOps {
         native::set_result(m, DOSTRUE);
     }
 
+    // Sets the comment of the object at the resolved path. Returns the IoErr
+    // code.
+    static u32 set_comment_resolved(Dos& d, u8 vol, const char* resolved, const char* comment) {
+        if (vol != Dos::kVolRam) {
+            return change_disk_object(
+                d, vol, resolved,
+                [comment](const AdfVolume& v, u32 block, const AmigaDate& now) {
+                    return adf_set_comment(v, block, comment, now);
+                });
+        }
+        u32 node = RamFs::kNone;
+        const u32 find_err = d.ram_.find_path(resolved, node);
+        if (find_err != 0) {
+            return find_err;
+        }
+        return d.ram_.set_comment(node, comment);
+    }
+
     static bool set_comment_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
                                  const char* comment, u8 zero_vol = kBootVolume) {
         u8 vol = Dos::kVolDf0;
@@ -7779,27 +7819,7 @@ struct DosOps {
             }
             return false;
         }
-        if (vol != Dos::kVolRam) {
-            return finish_change(
-                d, b,
-                change_disk_object(d, vol, resolved,
-                                   [comment](const AdfVolume& v, u32 block, const AmigaDate& now) {
-                                       return adf_set_comment(v, block, comment, now);
-                                   }));
-        }
-        u32 node = RamFs::kNone;
-        const u32 find_err = d.ram_.find_path(resolved, node);
-        if (find_err != 0) {
-            fail(d, b, find_err, DOSFALSE);
-            return false;
-        }
-        const u32 err = d.ram_.set_comment(node, comment);
-        if (err != 0) {
-            fail(d, b, err, DOSFALSE);
-            return false;
-        }
-        native::set_result(b.machine(), DOSTRUE);
-        return true;
+        return finish_change(d, b, set_comment_resolved(d, vol, resolved, comment));
     }
 
     static void set_comment(void* ctx, Machine& m) {
@@ -10948,6 +10968,84 @@ bool Dos::delete_file(const char* name, u32& error) {
         return false;
     }
     return true;
+}
+
+bool Dos::rename_path(const char* from, const char* to, u32& error) {
+    error = 0;
+    if (m_ == nullptr || from == nullptr || to == nullptr) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*m_);
+    u8 old_vol = kVolDf0;
+    u8 new_vol = kVolDf0;
+    char old_resolved[kMaxPath];
+    char new_resolved[kMaxPath];
+    if (!DosOps::resolve_public(*this, b, from, old_vol, old_resolved, error) ||
+        !DosOps::resolve_public(*this, b, to, new_vol, new_resolved, error)) {
+        return false;
+    }
+    error = DosOps::rename_resolved(*this, b, old_vol, old_resolved, new_vol, new_resolved);
+    return DosOps::end_public(*this, error) && b.ok();
+}
+
+bool Dos::make_dir(const char* name, u32& error) {
+    error = 0;
+    if (m_ == nullptr || name == nullptr) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolDf0;
+    char resolved[kMaxPath];
+    if (!DosOps::resolve_public(*this, b, name, vol, resolved, error)) {
+        return false;
+    }
+    DirEntry entry{};
+    char canonical[kMaxPath];
+    error = DosOps::create_dir_resolved(*this, vol, resolved, entry, canonical);
+    return DosOps::end_public(*this, error);
+}
+
+bool Dos::set_protection_bits(const char* name, u32 mask, u32& error) {
+    error = 0;
+    if (m_ == nullptr || name == nullptr) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolDf0;
+    char resolved[kMaxPath];
+    if (!DosOps::resolve_public(*this, b, name, vol, resolved, error)) {
+        return false;
+    }
+    error = DosOps::set_protection_resolved(*this, vol, resolved, mask);
+    return DosOps::end_public(*this, error);
+}
+
+bool Dos::set_file_comment(const char* name, const char* comment, u32& error) {
+    error = 0;
+    if (m_ == nullptr || name == nullptr || comment == nullptr) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    // A disk would call a comment that does not fit a bad name.
+    u32 length = 0;
+    while (length <= RamFs::kMaxComment && comment[length] != '\0') {
+        ++length;
+    }
+    if (length > RamFs::kMaxComment) {
+        error = ERROR_COMMENT_TOO_BIG;
+        return DosOps::end_public(*this, error);
+    }
+    Bus b(*m_);
+    u8 vol = kVolDf0;
+    char resolved[kMaxPath];
+    if (!DosOps::resolve_public(*this, b, name, vol, resolved, error)) {
+        return false;
+    }
+    error = DosOps::set_comment_resolved(*this, vol, resolved, comment);
+    return DosOps::end_public(*this, error);
 }
 
 bool Dos::run_command(const char* path, const char* args, u32& result, u64 max_blocks) {

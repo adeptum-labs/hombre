@@ -947,6 +947,21 @@ public:
     // Deletes the file name, on RAM: or a disk that can be written.
     bool delete_file(const char* name, u32& error);
 
+    // Renames the object named from to the name to, on RAM: or a disk that
+    // can be written.
+    bool rename_path(const char* from, const char* to, u32& error);
+
+    // Makes the directory name, on RAM: or a disk that can be written.
+    bool make_dir(const char* name, u32& error);
+
+    // Sets the protection bits of the object name, on RAM: or a disk that
+    // can be written.
+    bool set_protection_bits(const char* name, u32 mask, u32& error);
+
+    // Sets the comment of the object name, on RAM: or a disk that can be
+    // written.
+    bool set_file_comment(const char* name, const char* comment, u32& error);
+
     // Called with the path of each file that was written to when it is
     // closed, as a file notification would be. Null turns it off.
     using FileClosed = void (*)(void* ctx, const char* path);
