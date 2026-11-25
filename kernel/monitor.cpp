@@ -27,6 +27,7 @@
 #include "../common/irq_ring.hpp"
 #include "../common/monitor_hotkey.hpp"
 #include "../common/monitor_ui.hpp"
+#include "../common/port_io.hpp"
 #include "../common/serial.hpp"
 #include "acpi.hpp"
 #include "apic.hpp"
@@ -196,7 +197,38 @@ void open_monitor() {
     log_text("monitor: open");
 }
 
+// Resets the machine by the chipset's reset register, then the keyboard
+// controller's reset line, and last by faulting with no handlers left.
+[[noreturn]] void reboot() {
+    constexpr u16 kResetControl = 0xCF9;
+    constexpr u8 kHardReset = 0x02;
+    constexpr u8 kResetNow = 0x04;
+    constexpr u16 kKeyboardCommand = 0x64;
+    constexpr u8 kPulseReset = 0xFE;
+    if (serial::mid_line) {
+        serial::send('\n');
+        serial::mid_line = false;
+    }
+    serial::write_line_from_interrupt("monitor: reboot");
+    outb(kResetControl, kHardReset);
+    outb(kResetControl, kHardReset | kResetNow);
+    delay_us(10000);
+    outb(kKeyboardCommand, kPulseReset);
+    delay_us(10000);
+    struct __attribute__((packed)) {
+        u16 limit;
+        u64 base;
+    } const no_handlers{0, 0};
+    asm volatile("lidt %0; int3" : : "m"(no_handlers));
+    for (;;) {
+        asm volatile("cli; hlt");
+    }
+}
+
 void handle_request(const MonitorRequest& request) {
+    if (request.op == MonitorOp::Reboot) {
+        reboot();
+    }
     if (request.op == MonitorOp::Close) {
         close_monitor();
     } else if (request.op == MonitorOp::Inspect) {

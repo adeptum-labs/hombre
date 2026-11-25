@@ -328,6 +328,8 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "exec: suspended C:spintest" "exec: resumed C:spintest" \
 	    "exec: task C:spintest ended with Stopped" "dos: CLI 2 ended" \
 	    "m68k: C:version returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12 r y" \
+	    "monitor: open" "monitor: reboot"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "c d spc c ret c d ret c d spc shift-7 ret e c h o spc h e j ret p a t h ret w h y ret up up up spc a ret up down down spc y ret e c x o spc h i left left left left backspace h ret" \
 	    "shell: builtin cd returned 0" "HombreTest:C" "hej" \
