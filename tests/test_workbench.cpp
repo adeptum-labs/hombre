@@ -1463,7 +1463,7 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     CHECK(r.str(r.get32(r.get32(update_all + mi_ItemFill) + it_IText)) == "Update All");
     CHECK_EQ(r.get16(update_all + mi_Flags) & ITEMENABLED, ITEMENABLED);
     const u32 last_message = r.get32(update_all + mi_NextItem);
-    CHECK_EQ(r.get16(last_message + mi_Flags) & ITEMENABLED, 0u);
+    CHECK_EQ(r.get16(last_message + mi_Flags) & ITEMENABLED, ITEMENABLED);
     const u32 about = r.get32(last_message + mi_NextItem);
     CHECK(r.str(r.get32(r.get32(about + mi_ItemFill) + it_IText)) == "About...");
     CHECK_EQ(r.get16(about + mi_Flags) & ITEMENABLED, ITEMENABLED);
@@ -3927,6 +3927,123 @@ void the_backdrop_file_brings_icons_back() {
     CHECK(ram_text("RAM:.backdrop") == ":Box/One\n:Gone\n");
 }
 
+// A Trashcan in RAM: holding a file and a drawer with a file.
+void put_ram_trash(Rig& r) {
+    put_ram_drawer(r, "Trashcan");
+    u32 error = 0;
+    const u32 object = g_icon.default_object(Workbench::kGarbage);
+    CHECK(object != 0);
+    CHECK(g_icon.save_object("RAM:Trashcan", object, error));
+    g_icon.free_object(object);
+}
+
+void empty_trash_deletes_what_the_trashcan_holds() {
+    Rig r;
+    put_ram_project("Note");
+    put_ram_project("Kept");
+    put_ram_trash(r);
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 trash = r.find_icon_in(w.ram, "Trashcan");
+    CHECK(!r.workbench.empty_trash(w.ram, r.find_icon_in(w.ram, "Note")));
+    r.workbench.open_icon(w.ram, trash);
+    const u32 inside = r.find_window("Ram Disk:Trashcan");
+    CHECK(r.find_icon_in(inside, "One") != Workbench::kNoIcon);
+
+    // A project dropped on the Trashcan moves into it.
+    r.workbench.close_drawer(inside);
+    const Workbench::IconEntry from = r.workbench.icon(r.find_icon_in(w.ram, "Note"));
+    const Workbench::IconEntry can = r.workbench.icon(trash);
+    r.drag(w.ram, from.left + 3, from.top + 3, r.screen_x(w.ram, can.left + 3),
+           r.screen_y(w.ram, can.top + 3));
+    CHECK(r.exists("RAM:Trashcan/Note"));
+    CHECK(!r.exists("RAM:Note"));
+    // The drop filled the drawer anew, with new icons.
+    const u32 again = r.find_icon_in(w.ram, "Trashcan");
+
+    // Icons > Empty Trash asks first.
+    bool answer = false;
+    r.workbench.set_answer(
+        [](void* ctx, const char*, const char*, char*, u32) { return *static_cast<bool*>(ctx); },
+        &answer);
+    click_icon(r, w.ram, again);
+    r.workbench.menu_pick(w.ram, icons_pick(10));
+    CHECK(r.exists("RAM:Trashcan/Deep/Two"));
+    answer = true;
+    r.workbench.menu_pick(w.ram, icons_pick(10));
+    CHECK(!r.exists("RAM:Trashcan/Deep"));
+    CHECK(!r.exists("RAM:Trashcan/One"));
+    CHECK(r.exists("RAM:Trashcan"));
+    CHECK(r.exists("RAM:Trashcan.info"));
+    CHECK(!r.exists("RAM:Trashcan/Note"));
+    CHECK(r.exists("RAM:Kept"));
+}
+
+void last_message_keeps_the_error_shown_last() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    CHECK(std::string(r.workbench.last_message()).empty());
+    CHECK(!r.workbench.delete_icon(w.tools, r.find_icon_in(w.tools, "Tool")));
+    CHECK(std::string(r.workbench.last_message()) == "Tool: Disk is write-protected");
+}
+
+void quit_closes_the_desktop_and_it_can_open_again() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("Ram Disk"));
+    bool answer = false;
+    r.workbench.set_answer(
+        [](void* ctx, const char*, const char*, char*, u32) { return *static_cast<bool*>(ctx); },
+        &answer);
+    // Workbench > Quit asks, and the task quits after it.
+    r.workbench.menu_pick(0, 0 | (6 << 5) | (31 << 11));
+    CHECK(!r.workbench.quit_pending());
+    answer = true;
+    r.workbench.menu_pick(0, 0 | (6 << 5) | (31 << 11));
+    CHECK(r.workbench.quit_pending());
+    CHECK(r.workbench.quit());
+    CHECK(!r.workbench.desktop_open());
+    CHECK(r.workbench.windows().empty());
+    CHECK(r.workbench.icons().empty());
+    CHECK(!r.workbench.quit());
+
+    // Opened and quit again it keeps no memory.
+    r.workbench.open_desktop();
+    CHECK(r.workbench.has_window(Workbench::kRootWindow));
+    CHECK(r.find_icon("Ram Disk") != Workbench::kNoIcon);
+    CHECK(r.workbench.quit());
+    const u32 before = r.free_bytes();
+    r.workbench.open_desktop();
+    CHECK(r.workbench.quit());
+    CHECK_EQ(r.free_bytes(), before);
+}
+
+void quit_waits_for_the_programs_it_started() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 volume = r.find_window("HombreTest:");
+    r.workbench.open_icon(volume, r.find_icon_in(volume, "Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    r.workbench.open_icon(tools, r.find_icon_in(tools, "Proj"));
+    CHECK(!r.workbench.tools().empty());
+    CHECK(!r.workbench.quit());
+    CHECK(r.workbench.desktop_open());
+    CHECK(logged("workbench: cannot quit, programs are running"));
+}
+
+void reset_wb_reopens_the_windows() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("Ram Disk"));
+    const u32 first = r.workbench.window(0).window;
+    CHECK(first != 0);
+    // Tools > ResetWB.
+    r.workbench.menu_pick(0, 3 | (0 << 5) | (31 << 11));
+    CHECK(r.workbench.has_window(Workbench::kRootWindow));
+    CHECK_EQ(r.workbench.windows().size(), 2u);
+    CHECK(r.find_window("Ram Disk:") != Workbench::kNoWindow);
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -4593,6 +4710,11 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    empty_trash_deletes_what_the_trashcan_holds();
+    last_message_keeps_the_error_shown_last();
+    quit_closes_the_desktop_and_it_can_open_again();
+    quit_waits_for_the_programs_it_started();
+    reset_wb_reopens_the_windows();
     leave_out_keeps_an_icon_on_the_root_window();
     the_backdrop_file_brings_icons_back();
     an_icon_without_a_place_keeps_clear_of_the_others();

@@ -306,8 +306,8 @@ struct MenuSpec {
 
 constexpr MenuItemSpec kWorkbenchItems[] = {
     {"Backdrop", true, true}, {"Execute Command...", true}, {"Redraw All", true},
-    {"Update All", true}, {"Last Message", false},       {"About...", true},
-    {"Quit", false},
+    {"Update All", true}, {"Last Message", true},        {"About...", true},
+    {"Quit", true},
 };
 
 constexpr MenuItemSpec kSnapshotItems[] = {
@@ -331,11 +331,11 @@ constexpr MenuItemSpec kIconsItems[] = {
     {"Open", true},          {"Copy", true},         {"Rename...", true},
     {"Information...", true}, {"Snapshot", true},    {"Unsnapshot", true},
     {"Leave Out", true},     {"Put Away", true},      {"Delete...", true},
-    {"Format Disk...", false}, {"Empty Trash", false},
+    {"Format Disk...", false}, {"Empty Trash", true},
 };
 
 constexpr MenuItemSpec kToolsItems[] = {
-    {"ResetWB", false},
+    {"ResetWB", true},
 };
 
 constexpr MenuSpec kMenus[] = {
@@ -350,6 +350,13 @@ constexpr u32 kMenuCount = sizeof kMenus / sizeof kMenus[0];
 constexpr u32 kMenuWorkbench = 0;
 constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
+constexpr u32 kMenuTools = 3;
+constexpr u32 kItemUpdateAll = 3;
+constexpr u32 kItemLastMessage = 4;
+constexpr u32 kItemAbout = 5;
+constexpr u32 kItemQuit = 6;
+constexpr u32 kItemEmptyTrash = 10;
+constexpr u32 kItemResetWb = 0;
 constexpr u32 kItemBackdrop = 0;
 constexpr u32 kItemExecute = 1;
 constexpr u32 kItemNewDrawer = 0;
@@ -2728,6 +2735,7 @@ void Workbench::open_icon(u32 window_id, u32 icon_id) {
     switch (icon->type) {
     case kDisk:
     case kDrawer:
+    case kGarbage:
         open_drawer(window_id, *icon);
         break;
     case kTool:
@@ -2881,7 +2889,8 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
     if (on == &icon) {
         on = nullptr;
     }
-    const bool into_icon = on != nullptr && (on->type == kDrawer || on->type == kDisk);
+    const bool into_icon =
+        on != nullptr && (on->type == kDrawer || on->type == kDisk || on->type == kGarbage);
     if (to->id == drag.window && !into_icon) {
         icon.left = left < 0 ? 0 : left;
         icon.top = top < 0 ? 0 : top;
@@ -3120,6 +3129,7 @@ void Workbench::show_error(const char* what, const char* name, u32 error) {
         message.add("Error ").number(error);
     }
     LogLine().text("workbench: ").text(what).text(" ").text(message.text).send();
+    copy_text(last_message_, sizeof last_message_, message.text);
     show_requester("Workbench Request", message.text);
 }
 
@@ -4424,6 +4434,52 @@ bool Workbench::put_away(u32 icon_id) {
     return true;
 }
 
+bool Workbench::trash_path(u32 window_id, u32 icon_id, char (&out)[Dos::kMaxPath]) const {
+    const DrawerWindow* window = find_window(window_id);
+    const IconEntry* icon = find_icon(icon_id);
+    return window != nullptr && icon != nullptr && icon->owner == window_id &&
+           icon->type == kGarbage && icon_target_path(*window, *icon, out);
+}
+
+bool Workbench::empty_trash(u32 window_id, u32 icon_id) {
+    char path[Dos::kMaxPath];
+    if (!trash_path(window_id, icon_id, path)) {
+        return false;
+    }
+    std::vector<TreeEntry> tree;
+    u32 error = 0;
+    bool done = collect_tree(path, tree, error);
+    for (usize i = 1; i < tree.size(); ++i) {
+        if (tree[i].is_dir) {
+            close_windows_below(tree[i].path);
+        }
+    }
+    // Everything but the drawer itself, what is in a drawer first.
+    for (usize i = tree.size(); done && i > 1; --i) {
+        done = dos_->delete_object(tree[i - 1].path, error);
+    }
+    if (done) {
+        LogLine().text("workbench: emptied ").text(path).send();
+    } else {
+        show_error("cannot empty", path, error);
+    }
+    for (DrawerWindow& w : windows_) {
+        if (same_ci(w.path, path)) {
+            update_window(w);
+        }
+    }
+    return done;
+}
+
+void Workbench::ask_empty_trash(u32 window_id, u32 icon_id) {
+    char path[Dos::kMaxPath];
+    if (trash_path(window_id, icon_id, path) &&
+        confirm("Empty Trash", "Warning: you cannot get back\nwhat you delete!\nOK to empty the "
+                               "Trashcan?")) {
+        empty_trash(window_id, icon_id);
+    }
+}
+
 // --- snapshots -----------------------------------------------------------
 
 bool Workbench::snapshot_icon(u32 window_id, u32 icon_id) {
@@ -4638,10 +4694,16 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             ask_command();
         } else if (item == 2) {
             redraw_all();
-        } else if (item == 3) {
+        } else if (item == kItemUpdateAll) {
             update_all();
-        } else if (item == 5) {
+        } else if (item == kItemLastMessage) {
+            show_requester("Workbench Request",
+                           last_message_[0] != '\0' ? last_message_ : "No messages");
+        } else if (item == kItemAbout) {
             show_about();
+        } else if (item == kItemQuit) {
+            // The task quits once the pass over its messages ends.
+            quit_pending_ = confirm("Quit", "OK to quit Workbench?");
         }
     } else if (menu == kMenuWindow) {
         if (item == kItemNewDrawer) {
@@ -4661,6 +4723,10 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
         } else if (item == kItemWindowSnapshot && sub != kNoSub) {
             snapshot_window(window_id, sub == kSubAll);
         }
+    } else if (menu == kMenuTools) {
+        if (item == kItemResetWb && close_for_reset()) {
+            open_after_reset();
+        }
     } else if (menu == kMenuIcons) {
         const DrawerWindow* window = find_window(window_id);
         const u32 selected = window != nullptr ? window->clicks.selected() : kNoIcon;
@@ -4676,6 +4742,8 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             snapshot_icon(window_id, selected);
         } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {
             unsnapshot_icon(window_id, selected);
+        } else if (item == kItemEmptyTrash && selected != kNoIcon) {
+            ask_empty_trash(window_id, selected);
         } else if (item == kItemIconLeaveOut && selected != kNoIcon) {
             leave_out(window_id, selected);
         } else if (item == kItemIconPutAway && selected != kNoIcon) {
@@ -4801,6 +4869,12 @@ void Workbench::run() {
     open_desktop();
     for (;;) {
         const bool more = pump();
+        if (quit_pending_) {
+            quit_pending_ = false;
+            if (quit()) {
+                return;
+            }
+        }
         const u64 now = exec_->now_us();
         if (reopen_pending_) {
             // OpenWorkBench after a reset: the windows come back.
@@ -5290,7 +5364,10 @@ void Workbench::open_desktop() {
         LogLine().text("workbench: no message port").send();
         return;
     }
-    menu_ = build_menu_strip();
+    // A desktop that quit has its menu strip still.
+    if (menu_ == 0) {
+        menu_ = build_menu_strip();
+    }
     open_root();
     if (!has_window(kRootWindow)) {
         return;
@@ -5334,6 +5411,36 @@ bool Workbench::close_for_reset() {
     intuition_->clear_menu_strip(root->window);
     intuition_->close_window(root->window);
     release_window(*root);
+    return true;
+}
+
+bool Workbench::quit() {
+    reap_tools();
+    if (desktop_open_ && !tools_.empty()) {
+        constexpr char kRunning[] =
+            "Cannot quit while programs started\nfrom the Workbench are running";
+        LogLine().text("workbench: cannot quit, programs are running").send();
+        show_requester("Workbench Request", kRunning);
+        return false;
+    }
+    if (!close_for_reset()) {
+        return false;
+    }
+    remembered_.clear();
+    free_icons(kRootWindow);
+    dos_->set_file_closed(nullptr, nullptr);
+    intuition_->set_workbench_hooks({});
+    exec_->delete_port(reply_port_);
+    exec_->delete_port(window_port_);
+    reply_port_ = 0;
+    window_port_ = 0;
+    volume_top_ = 0;
+    next_volume_us_ = 0;
+    reopen_pending_ = false;
+    desktop_open_ = false;
+    running_ = false;
+    process_ = 0;
+    LogLine().text("workbench: quit").send();
     return true;
 }
 

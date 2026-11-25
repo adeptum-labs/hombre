@@ -511,6 +511,19 @@ public:
     // the file cannot be written.
     bool put_away(u32 icon_id);
 
+    // Icons > Empty Trash: deletes everything in the Trashcan the icon
+    // stands for. False for any other icon and, shown, when something
+    // cannot be deleted.
+    bool empty_trash(u32 window_id, u32 icon_id);
+
+    // Workbench > Quit: closes the desktop for good, which ends its task.
+    // False, shown, while programs it started run, and when none is open.
+    bool quit();
+    bool quit_pending() const { return quit_pending_; }
+
+    // The error shown last, which Workbench > Last Message shows again.
+    const char* last_message() const { return last_message_; }
+
     // Opens the window the icon of window window_id stands for, or
     // brings the window already open for it to the front.
     void open_drawer(u32 window_id, const IconEntry& icon);
@@ -715,6 +728,9 @@ private:
     void ask_rename(u32 window_id, u32 icon_id);
     void ask_new_drawer(u32 window_id);
     void ask_command();
+    void ask_empty_trash(u32 window_id, u32 icon_id);
+    // The path of the Trashcan the icon stands for.
+    bool trash_path(u32 window_id, u32 icon_id, char (&out)[Dos::kMaxPath]) const;
     bool can_show_dialog() const;
     // Handles the messages at the dialog's window: its close gadget and
     // Cancel cancel it, on_gadget answers for any other gadget let go.
@@ -783,6 +799,7 @@ private:
     RunCommand run_command_ = nullptr;
     void* run_command_ctx_ = nullptr;
     char last_command_[kMaxCommand]{};  // offered again by Execute Command
+    char last_message_[Dos::kMaxPath + 128]{};
     Answer answer_ = nullptr;
     void* answer_ctx_ = nullptr;
     u32 base_ = 0;
@@ -822,6 +839,7 @@ private:
     u64 next_refresh_us_ = 0;
     bool patterns_changed_ = false;  // WBPattern's prefs were written
     bool reopen_pending_ = false;  // OpenWorkBench asked for the windows back
+    bool quit_pending_ = false;    // Quit was picked and answered Ok
     bool running_ = false;
     bool desktop_open_ = false;
     bool backdrop_ = true;
