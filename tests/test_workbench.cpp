@@ -2998,6 +2998,87 @@ void a_set_answer_stands_in_for_the_requesters() {
     CHECK(seen == "DeleteRename");
 }
 
+// A drawer in RAM: holding a file and a drawer with a file, with its icon.
+void put_ram_drawer(Rig& r, const std::string& name) {
+    r.make_dir("RAM:" + name);
+    r.make_dir("RAM:" + name + "/Deep");
+    put_ram_project(name + "/One");
+    u32 error = 0;
+    const u8 byte = 'y';
+    CHECK(g_dos.write_file(("RAM:" + name + "/Deep/Two").c_str(), &byte, 1, error));
+    const u32 object = g_icon.default_object(kWBDrawer);
+    CHECK(object != 0);
+    CHECK(g_icon.save_object(("RAM:" + name).c_str(), object, error));
+    g_icon.free_object(object);
+}
+
+void click_icon(Rig& r, u32 window, u32 icon) {
+    const Workbench::IconEntry at = r.workbench.icon(icon);
+    r.press(window, at.left + 3, at.top + 3);
+    r.release(r.screen_x(window, at.left + 3), r.screen_y(window, at.top + 3));
+}
+
+// The number of the Icons menu's item.
+u32 icons_pick(u32 item) { return 2 | (item << 5) | (31 << 11); }
+
+void delete_removes_a_file_or_a_drawer_and_its_icon() {
+    Rig r;
+    put_ram_project("Note");
+    const TwoWindows w = open_tools_and_ram(r);
+    put_ram_drawer(r, "Box");
+    r.rescan("Ram Disk:");
+    CHECK(r.workbench.delete_icon(w.ram, r.find_icon_in(w.ram, "Note")));
+    CHECK(!r.exists("RAM:Note"));
+    CHECK(!r.exists("RAM:Note.info"));
+    CHECK_EQ(r.find_icon_in(w.ram, "Note"), Workbench::kNoIcon);
+
+    // A drawer goes with all that is in it, and its window closes.
+    r.workbench.open_icon(w.ram, r.find_icon_in(w.ram, "Box"));
+    const u32 box = r.find_window("Ram Disk:Box");
+    CHECK(box != Workbench::kNoWindow);
+    CHECK(r.workbench.delete_icon(w.ram, r.find_icon_in(w.ram, "Box")));
+    CHECK(!r.workbench.has_window(box));
+    CHECK(!r.exists("RAM:Box"));
+    CHECK(!r.exists("RAM:Box.info"));
+    CHECK(logged("workbench: deleted Ram Disk:Box"));
+}
+
+void delete_refuses_disks_and_what_cannot_be_written() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    CHECK(!r.workbench.delete_icon(0, r.find_icon_in(0, "Ram Disk")));
+    CHECK(!r.workbench.delete_icon(w.tools, r.find_icon_in(w.tools, "Tool")));
+    CHECK(logged("workbench: cannot delete Tool: Disk is write-protected"));
+    CHECK(r.find_icon_in(w.tools, "Tool") != Workbench::kNoIcon);
+}
+
+void the_delete_item_asks_before_it_deletes() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    put_ram_drawer(r, "Box");
+    r.rescan("Ram Disk:");
+    struct Asked {
+        bool answer = false;
+        std::string text;
+    } asked;
+    r.workbench.set_answer(
+        [](void* ctx, const char*, const char* body, char*, u32) {
+            Asked& a = *static_cast<Asked*>(ctx);
+            a.text = body;
+            return a.answer;
+        },
+        &asked);
+    click_icon(r, w.ram, r.find_icon_in(w.ram, "Box"));
+    r.workbench.menu_pick(w.ram, icons_pick(8));
+    CHECK(asked.text.find("OK to delete Box") != std::string::npos);
+    // One, One.info, Deep and Two.
+    CHECK(asked.text.find("and the 4 objects in it?") != std::string::npos);
+    CHECK(r.exists("RAM:Box/Deep/Two"));
+    asked.answer = true;
+    r.workbench.menu_pick(w.ram, icons_pick(8));
+    CHECK(!r.exists("RAM:Box"));
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -3664,6 +3745,9 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    delete_removes_a_file_or_a_drawer_and_its_icon();
+    delete_refuses_disks_and_what_cannot_be_written();
+    the_delete_item_asks_before_it_deletes();
     a_text_request_answers_return_and_its_buttons();
     a_set_answer_stands_in_for_the_requesters();
     a_window_snapshot_is_used_when_the_window_opens_again();

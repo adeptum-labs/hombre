@@ -275,7 +275,7 @@ constexpr MenuItemSpec kWindowItems[] = {
 constexpr MenuItemSpec kIconsItems[] = {
     {"Open", true},          {"Copy", false},         {"Rename...", false},
     {"Information...", false}, {"Snapshot", true},    {"Unsnapshot", true},
-    {"Leave Out", false},    {"Put Away", false},     {"Delete...", false},
+    {"Leave Out", false},    {"Put Away", false},     {"Delete...", true},
     {"Format Disk...", false}, {"Empty Trash", false},
 };
 
@@ -301,6 +301,7 @@ constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
 constexpr u32 kItemIconSnapshot = 4;
 constexpr u32 kItemIconUnsnapshot = 5;
+constexpr u32 kItemIconDelete = 8;
 constexpr u32 kSubAll = 1;
 constexpr u32 kNoSub = 31;
 
@@ -371,6 +372,24 @@ void copy_text(char* dst, u32 capacity, const char* src) {
 
 // The drawer and file name as one AmigaDOS path: a device stays glued to
 // the name after it.
+// The text of a requester, cut off where it does not fit.
+struct Message {
+    char text[Dos::kMaxPath + 128]{};
+    u32 at = 0;
+
+    Message& add(const char* part) {
+        for (u32 i = 0; part[i] != '\0' && at + 1 < sizeof text; ++i) {
+            text[at++] = part[i];
+        }
+        return *this;
+    }
+    Message& number(u64 value) {
+        char digits[24];
+        format_u64(digits, sizeof digits, value, 10);
+        return add(digits);
+    }
+};
+
 bool join_path(const char* drawer, const char* name, char (&out)[Dos::kMaxPath]) {
     u32 at = 0;
     const u32 drawer_len = text_length(drawer);
@@ -390,6 +409,17 @@ bool join_path(const char* drawer, const char* name, char (&out)[Dos::kMaxPath])
         out[at++] = name[i];
     }
     out[at] = '\0';
+    return true;
+}
+
+// The path of the .info beside the object at path.
+bool info_path(const char* path, char (&out)[Dos::kMaxPath]) {
+    const u32 length = text_length(path);
+    if (length + sizeof ".info" > Dos::kMaxPath) {
+        return false;
+    }
+    copy_text(out, sizeof out, path);
+    copy_text(out + length, sizeof ".info", ".info");
     return true;
 }
 
@@ -2794,8 +2824,7 @@ bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to
     char src_info[Dos::kMaxPath];
     u32 ignored = 0;
     dos_->delete_file(src, ignored);
-    if (join_path(from, icon.file, src_info) && text_length(src_info) + 6 <= sizeof src_info) {
-        copy_text(src_info + text_length(src_info), 6, ".info");
+    if (info_path(src, src_info)) {
         dos_->delete_file(src_info, ignored);
     }
     LogLine().text("workbench: moved ").text(src).text(" to ").text(to).send();
@@ -2803,27 +2832,16 @@ bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to
 }
 
 void Workbench::show_error(const char* what, const char* name, u32 error) {
-    char text[kMaxWindowTitle * 2];
-    u32 at = 0;
-    auto put = [&](const char* part) {
-        for (u32 i = 0; part[i] != '\0' && at + 1 < sizeof text; ++i) {
-            text[at++] = part[i];
-        }
-    };
-    put(name);
-    put(": ");
+    Message message;
+    message.add(name).add(": ");
     const char* reason = error_text(error);
     if (reason != nullptr) {
-        put(reason);
+        message.add(reason);
     } else {
-        char digits[16];
-        format_u64(digits, sizeof digits, error, 10);
-        put("Error ");
-        put(digits);
+        message.add("Error ").number(error);
     }
-    text[at] = '\0';
-    LogLine().text("workbench: ").text(what).text(" ").text(text).send();
-    show_requester("Workbench Request", text);
+    LogLine().text("workbench: ").text(what).text(" ").text(message.text).send();
+    show_requester("Workbench Request", message.text);
 }
 
 void Workbench::show_requester(const char* title, const char* text) {
@@ -3044,6 +3062,134 @@ void Workbench::close_text_request(TextRequest& request) {
         exec_->free(request.block, request.block_bytes);
     }
     request = TextRequest{};
+}
+
+// --- file operations -----------------------------------------------------
+
+const Workbench::IconEntry* Workbench::file_icon(u32 window_id, u32 icon_id) const {
+    const IconEntry* icon = find_icon(icon_id);
+    const bool file = find_window(window_id) != nullptr && icon != nullptr &&
+                      icon->owner == window_id && window_id != kRootWindow &&
+                      icon->type != kDisk && icon->type != kAppIcon;
+    return file ? icon : nullptr;
+}
+
+bool Workbench::collect_tree(const char* path, std::vector<TreeEntry>& out, u32& error) {
+    out.clear();
+    error = 0;
+    const Dos::TargetKind kind = dos_->examine(path).kind;
+    if (kind == Dos::TargetKind::Missing) {
+        return true;
+    }
+    TreeEntry root{};
+    copy_text(root.path, sizeof root.path, path);
+    root.is_dir = kind == Dos::TargetKind::Dir;
+    out.push_back(root);
+    // The list grows as its drawers are read, so no call nests per level.
+    struct Found {
+        std::vector<TreeEntry>* out;
+        char parent[Dos::kMaxPath];
+        bool fits;
+    } found{&out, {}, true};
+    for (usize at = 0; at < out.size(); ++at) {
+        if (!out[at].is_dir) {
+            continue;
+        }
+        copy_text(found.parent, sizeof found.parent, out[at].path);
+        const auto add = [](void* ctx, const char* name, bool is_dir) {
+            Found& f = *static_cast<Found*>(ctx);
+            TreeEntry entry{};
+            entry.is_dir = is_dir;
+            if (join_path(f.parent, name, entry.path)) {
+                f.out->push_back(entry);
+            } else {
+                f.fits = false;
+            }
+        };
+        if (!dos_->list_dir(found.parent, add, &found, error)) {
+            return false;
+        }
+        if (!found.fits) {
+            error = ERROR_INVALID_COMPONENT_NAME;
+            return false;
+        }
+    }
+    return true;
+}
+
+void Workbench::close_windows_below(const char* path) {
+    const u32 length = text_length(path);
+    std::vector<u32> below;
+    for (const DrawerWindow& w : windows_) {
+        u32 i = 0;
+        while (i < length && upper_ascii(w.path[i]) == upper_ascii(path[i])) {
+            ++i;
+        }
+        if (w.id != kRootWindow && i == length && (w.path[i] == '\0' || w.path[i] == '/')) {
+            below.push_back(w.id);
+        }
+    }
+    for (const u32 id : below) {
+        close_drawer(id);
+    }
+}
+
+bool Workbench::delete_icon(u32 window_id, u32 icon_id) {
+    const IconEntry* icon = file_icon(window_id, icon_id);
+    if (icon == nullptr) {
+        const IconEntry* other = find_icon(icon_id);
+        show_error("cannot delete", other != nullptr ? other->name : "?",
+                   ERROR_OBJECT_WRONG_TYPE);
+        return false;
+    }
+    char path[Dos::kMaxPath];
+    char info[Dos::kMaxPath];
+    char name[32];
+    copy_text(name, sizeof name, icon->name);
+    std::vector<TreeEntry> tree;
+    u32 error = ERROR_INVALID_COMPONENT_NAME;
+    bool done = icon_path(*find_window(window_id), *icon, path) &&
+                info_path(path, info) && collect_tree(path, tree, error);
+    if (done) {
+        close_windows_below(path);
+        // What is in a drawer goes before the drawer.
+        for (usize i = tree.size(); done && i > 0; --i) {
+            done = dos_->delete_object(tree[i - 1].path, error);
+        }
+    }
+    if (done && dos_->examine(info).kind != Dos::TargetKind::Missing) {
+        done = dos_->delete_object(info, error);
+    }
+    if (done) {
+        LogLine().text("workbench: deleted ").text(path).send();
+    } else {
+        show_error("cannot delete", name, error);
+    }
+    if (DrawerWindow* window = find_window(window_id); window != nullptr) {
+        update_window(*window);
+    }
+    return done;
+}
+
+void Workbench::ask_delete(u32 window_id, u32 icon_id) {
+    const IconEntry* icon = file_icon(window_id, icon_id);
+    char path[Dos::kMaxPath];
+    std::vector<TreeEntry> tree;
+    u32 error = 0;
+    if (icon == nullptr || !icon_path(*find_window(window_id), *icon, path) ||
+        !collect_tree(path, tree, error)) {
+        delete_icon(window_id, icon_id);
+        return;
+    }
+    Message message;
+    message.add("Warning: you cannot get back\nwhat you delete!\nOK to delete ").add(icon->name);
+    if (tree.size() > 1) {
+        message.add("\nand the ").number(tree.size() - 1).add(" objects in it");
+    }
+    message.add("?");
+    if (confirm("Delete", message.text)) {
+        delete_icon(window_id, icon_id);
+    }
 }
 
 // --- snapshots -----------------------------------------------------------
@@ -3287,6 +3433,8 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             snapshot_icon(window_id, selected);
         } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {
             unsnapshot_icon(window_id, selected);
+        } else if (item == kItemIconDelete && selected != kNoIcon) {
+            ask_delete(window_id, selected);
         }
     }
 }

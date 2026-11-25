@@ -386,6 +386,12 @@ public:
     u32 build_startup(u32 process, u32 seglist, const StartupArg* args, u32 nargs,
                       const char* tool_window, u32* locks, u32& lock_count, u32& bytes);
 
+    // Icons > Delete: deletes what the icon stands for, a drawer with
+    // everything in it, and the icon's .info, closing the windows of what
+    // goes. False, shown, for a disk or an AppIcon and when something
+    // cannot be deleted.
+    bool delete_icon(u32 window_id, u32 icon_id);
+
     // Opens the window the icon of window window_id stands for, or
     // brings the window already open for it to the front.
     void open_drawer(u32 window_id, const IconEntry& icon);
@@ -452,6 +458,12 @@ private:
 
     static constexpr u32 kVectors = workbench_lvo::Last / 6;
     static constexpr u32 kTaskStackBytes = 8192;
+
+    // An object of a drawer tree.
+    struct TreeEntry {
+        char path[Dos::kMaxPath]{};
+        bool is_dir = false;
+    };
 
     // A drawer close_for_reset closed: how to find it again and where its
     // window stood.
@@ -543,6 +555,15 @@ private:
     void update_all();
     // Reads a drawer window's directory again; the root window stays.
     void update_window(DrawerWindow& drawer);
+    // The object at path and, for a drawer, everything below it, each
+    // drawer before what is in it. Nothing there leaves out empty. False,
+    // with error set, when a drawer cannot be read.
+    bool collect_tree(const char* path, std::vector<TreeEntry>& out, u32& error);
+    // The icon that stands for a file or drawer the desktop may change, or
+    // null.
+    const IconEntry* file_icon(u32 window_id, u32 icon_id) const;
+    void close_windows_below(const char* path);
+    void ask_delete(u32 window_id, u32 icon_id);
     void select_contents(u32 window_id);
     void clean_up(u32 window_id);
     void open_selected(u32 window_id);
