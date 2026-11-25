@@ -27,7 +27,7 @@
 #include "../common/libs/gfx.hpp"
 #include "../common/pixel_format.hpp"
 #include "../common/libs/native.hpp"
-#include "../common/pointer_image.hpp"
+#include "../common/pointer_paint.hpp"
 #include "../common/types.hpp"
 #include "framebuffer.hpp"
 
@@ -524,26 +524,13 @@ private:
         const i64 image_top = box_y_ +
                               host_offset(pointer_y_, box_height_, applied_height_) -
                               static_cast<i64>(shape.hot_y) * pointer_pixel_height_;
-        for (u32 py = 0; py < shape.height; ++py) {
-            const i64 block_top = image_top + static_cast<i64>(py) * pointer_pixel_height_;
-            const i64 y0 = block_top > top ? block_top : top;
-            const i64 y1 = block_top + pointer_pixel_height_ < bottom
-                               ? block_top + pointer_pixel_height_
-                               : bottom;
-            for (u32 px = 0; px < shape.width && y0 < y1; ++px) {
-                const u32 pixel = shape.pixels[py][px];
-                const i64 block_left = image_left + static_cast<i64>(px) * pointer_pixel_width_;
-                const i64 x0 = block_left > left ? block_left : left;
-                const i64 x1 = block_left + pointer_pixel_width_ < right
-                                   ? block_left + pointer_pixel_width_
-                                   : right;
-                if (pixel != 0 && x0 < x1) {
-                    fb_.fill_rect(static_cast<u64>(x0), static_cast<u64>(y0),
-                                  static_cast<u64>(x1 - x0), static_cast<u64>(y1 - y0),
-                                  shape.rgb[pixel & 3]);
-                }
-            }
-        }
+        paint_pointer(shape, image_left, image_top, pointer_pixel_width_, pointer_pixel_height_,
+                      Rect{static_cast<i32>(left), static_cast<i32>(top),
+                           static_cast<i32>(right - 1), static_cast<i32>(bottom - 1)},
+                      [this](i64 x, i64 y, i64 width, i64 height, u32 rgb) {
+                          fb_.fill_rect(static_cast<u64>(x), static_cast<u64>(y),
+                                        static_cast<u64>(width), static_cast<u64>(height), rgb);
+                      });
     }
 
     // The offset of a box that fits wholly in the framebuffer, 0 when it

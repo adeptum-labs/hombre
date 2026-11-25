@@ -106,4 +106,31 @@ constexpr PointerShape default_pointer_shape() {
 
 inline constexpr PointerShape kDefaultPointerShape = default_pointer_shape();
 
+// A copy safe to draw: the default shape when from is null or a side is
+// 0, sides cut to 64.
+inline void copy_pointer_shape(const PointerShape* from, PointerShape& to) {
+    const u16 source_width = from != nullptr ? from->width : u16{0};
+    const u16 source_height = from != nullptr ? from->height : u16{0};
+    if (source_width == 0 || source_height == 0) {
+        to = kDefaultPointerShape;
+        return;
+    }
+    const u32 width =
+        static_cast<u32>(source_width) < kMaxPointerWidth ? source_width : kMaxPointerWidth;
+    const u32 height =
+        static_cast<u32>(source_height) < kMaxPointerHeight ? source_height : kMaxPointerHeight;
+    to.width = static_cast<u16>(width);
+    to.height = static_cast<u16>(height);
+    to.hot_x = from->hot_x;
+    to.hot_y = from->hot_y;
+    for (u32 y = 0; y < height; ++y) {
+        for (u32 x = 0; x < width; ++x) {
+            to.pixels[y][x] = from->pixels[y][x];
+        }
+    }
+    for (u32 i = 0; i < 4u; ++i) {
+        to.rgb[i] = from->rgb[i];
+    }
+}
+
 }
