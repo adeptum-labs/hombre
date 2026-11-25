@@ -404,6 +404,12 @@ public:
     // root window.
     bool new_drawer(u32 window_id, const char* name);
 
+    // Icons > Copy: duplicates what the icon stands for, a drawer with
+    // everything in it, and its .info under a "copy_of_" name in the same
+    // drawer. False, shown, for a disk or an AppIcon and when something
+    // cannot be copied, which leaves no part of the copy.
+    bool copy_icon(u32 window_id, u32 icon_id);
+
     // Opens the window the icon of window window_id stands for, or
     // brings the window already open for it to the front.
     void open_drawer(u32 window_id, const IconEntry& icon);
@@ -571,6 +577,12 @@ private:
     // drawer before what is in it. Nothing there leaves out empty. False,
     // with error set, when a drawer cannot be read.
     bool collect_tree(const char* path, std::vector<TreeEntry>& out, u32& error);
+    // Deletes the object at path, a drawer with everything in it.
+    bool delete_tree(const char* path, u32& error);
+    // Copies the bytes of the file at from to the new file to.
+    bool copy_file(const char* from, const char* to, u32& error);
+    // Copies the object at from and its .info to the free path to.
+    bool duplicate(const char* from, const char* to, u32& error);
     // The icon that stands for a file or drawer the desktop may change, or
     // null.
     const IconEntry* file_icon(u32 window_id, u32 icon_id) const;

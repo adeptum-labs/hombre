@@ -273,7 +273,7 @@ constexpr MenuItemSpec kWindowItems[] = {
 };
 
 constexpr MenuItemSpec kIconsItems[] = {
-    {"Open", true},          {"Copy", false},         {"Rename...", true},
+    {"Open", true},          {"Copy", true},         {"Rename...", true},
     {"Information...", false}, {"Snapshot", true},    {"Unsnapshot", true},
     {"Leave Out", false},    {"Put Away", false},     {"Delete...", true},
     {"Format Disk...", false}, {"Empty Trash", false},
@@ -301,6 +301,7 @@ constexpr u32 kItemNewDrawer = 0;
 constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
 constexpr u32 kItemIconSnapshot = 4;
+constexpr u32 kItemIconCopy = 1;
 constexpr u32 kItemIconRename = 2;
 constexpr u32 kItemIconUnsnapshot = 5;
 constexpr u32 kItemIconDelete = 8;
@@ -2790,30 +2791,8 @@ bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to
         show_error("cannot copy", icon.file, ERROR_OBJECT_EXISTS);
         return false;
     }
-    const Dos::Target source = dos_->examine(src);
-    if (source.kind != Dos::TargetKind::File) {
-        show_error("cannot copy", icon.file, ERROR_OBJECT_NOT_FOUND);
-        return false;
-    }
-    // The bytes go through exec memory: the task's stack is small.
     u32 error = 0;
-    u32 got = 0;
-    bool copied = false;
-    if (source.size == 0) {
-        copied = dos_->write_file(dst, nullptr, 0, error);
-    } else {
-        const u32 block = exec_->alloc(source.size, ndk::MEMF_PUBLIC);
-        if (block == 0) {
-            show_error("cannot copy", icon.file, ERROR_NO_FREE_STORE);
-            return false;
-        }
-        Bus b(*machine_);
-        u8* data = b.bytes_at(block, source.size);
-        copied = data != nullptr && dos_->read_file(src, data, source.size, got, error) &&
-                 dos_->write_file(dst, data, got, error);
-        exec_->free(block, source.size);
-    }
-    if (!copied) {
+    if (!copy_file(src, dst, error)) {
         show_error("cannot copy", icon.file, error);
         return false;
     }
@@ -3149,6 +3128,137 @@ void Workbench::close_windows_below(const char* path) {
     }
 }
 
+bool Workbench::delete_tree(const char* path, u32& error) {
+    std::vector<TreeEntry> tree;
+    bool done = collect_tree(path, tree, error);
+    // What is in a drawer goes before the drawer.
+    for (usize i = tree.size(); done && i > 0; --i) {
+        done = dos_->delete_object(tree[i - 1].path, error);
+    }
+    return done;
+}
+
+bool Workbench::copy_file(const char* from, const char* to, u32& error) {
+    const Dos::Target source = dos_->examine(from);
+    if (source.kind != Dos::TargetKind::File) {
+        error = ERROR_OBJECT_NOT_FOUND;
+        return false;
+    }
+    if (source.size == 0) {
+        return dos_->write_file(to, nullptr, 0, error);
+    }
+    // The bytes go through exec memory: the task's stack is small.
+    const u32 block = exec_->alloc(source.size, ndk::MEMF_PUBLIC);
+    if (block == 0) {
+        error = ERROR_NO_FREE_STORE;
+        return false;
+    }
+    Bus b(*machine_);
+    u8* data = b.bytes_at(block, source.size);
+    u32 got = 0;
+    const bool copied = data != nullptr &&
+                        dos_->read_file(from, data, source.size, got, error) &&
+                        dos_->write_file(to, data, got, error);
+    exec_->free(block, source.size);
+    return copied;
+}
+
+bool Workbench::duplicate(const char* from, const char* to, u32& error) {
+    std::vector<TreeEntry> tree;
+    if (!collect_tree(from, tree, error)) {
+        return false;
+    }
+    const u32 length = text_length(from);
+    for (const TreeEntry& entry : tree) {
+        // The same path below to as the entry has below from.
+        const char* below = entry.path + length;
+        char target[Dos::kMaxPath];
+        if (!join_path(to, *below == '/' ? below + 1 : below, target)) {
+            error = ERROR_INVALID_COMPONENT_NAME;
+            return false;
+        }
+        if (*below == '\0') {
+            copy_text(target, sizeof target, to);
+        }
+        if (entry.is_dir ? !dos_->make_dir(target, error)
+                         : !copy_file(entry.path, target, error)) {
+            return false;
+        }
+    }
+    char from_info[Dos::kMaxPath];
+    char to_info[Dos::kMaxPath];
+    if (!info_path(from, from_info) || !info_path(to, to_info)) {
+        error = ERROR_INVALID_COMPONENT_NAME;
+        return false;
+    }
+    if (dos_->examine(from_info).kind == Dos::TargetKind::Missing) {
+        return true;
+    }
+    if (!copy_file(from_info, to_info, error)) {
+        return false;
+    }
+    // The copy takes a free place, not the one of what it copies.
+    const u32 object = icon_->load_object(to);
+    if (object == 0) {
+        return true;
+    }
+    Bus b(*machine_);
+    b.w32(object + do_CurrentX, kNoIconPosition);
+    b.w32(object + do_CurrentY, kNoIconPosition);
+    const bool saved = b.ok() && icon_->save_object(to, object, error);
+    icon_->free_object(object);
+    return saved;
+}
+
+bool Workbench::copy_icon(u32 window_id, u32 icon_id) {
+    const IconEntry* icon = file_icon(window_id, icon_id);
+    if (icon == nullptr) {
+        const IconEntry* other = find_icon(icon_id);
+        show_error("cannot copy", other != nullptr ? other->name : "?", ERROR_OBJECT_WRONG_TYPE);
+        return false;
+    }
+    char name[32];
+    char file[32];
+    copy_text(name, sizeof name, icon->name);
+    copy_text(file, sizeof file, icon->file);
+    const DrawerWindow& window = *find_window(window_id);
+    char from[Dos::kMaxPath];
+    char to[Dos::kMaxPath];
+    char info[Dos::kMaxPath];
+    u32 error = ERROR_INVALID_COMPONENT_NAME;
+    bool done = icon_path(window, *icon, from);
+    for (u32 number = 1; done; ++number) {
+        Message copy;
+        copy.add("copy_");
+        if (number > 1) {
+            copy.number(number).add("_");
+        }
+        copy.add("of_").add(file);
+        // Room stays for the ".info".
+        copy.text[kMaxName - (sizeof ".info" - 1)] = '\0';
+        done = join_path(window.path, copy.text, to) && info_path(to, info);
+        if (done && dos_->examine(to).kind == Dos::TargetKind::Missing &&
+            dos_->examine(info).kind == Dos::TargetKind::Missing) {
+            break;
+        }
+    }
+    if (done && !duplicate(from, to, error)) {
+        done = false;
+        u32 ignored = 0;
+        delete_tree(to, ignored);
+        dos_->delete_object(info, ignored);
+    }
+    if (done) {
+        LogLine().text("workbench: copied ").text(from).text(" to ").text(to).send();
+    } else {
+        show_error("cannot copy", name, error);
+    }
+    if (DrawerWindow* w = find_window(window_id); w != nullptr) {
+        update_window(*w);
+    }
+    return done;
+}
+
 bool Workbench::delete_icon(u32 window_id, u32 icon_id) {
     const IconEntry* icon = file_icon(window_id, icon_id);
     if (icon == nullptr) {
@@ -3161,16 +3271,11 @@ bool Workbench::delete_icon(u32 window_id, u32 icon_id) {
     char info[Dos::kMaxPath];
     char name[32];
     copy_text(name, sizeof name, icon->name);
-    std::vector<TreeEntry> tree;
     u32 error = ERROR_INVALID_COMPONENT_NAME;
-    bool done = icon_path(*find_window(window_id), *icon, path) &&
-                info_path(path, info) && collect_tree(path, tree, error);
+    bool done = icon_path(*find_window(window_id), *icon, path) && info_path(path, info);
     if (done) {
         close_windows_below(path);
-        // What is in a drawer goes before the drawer.
-        for (usize i = tree.size(); done && i > 0; --i) {
-            done = dos_->delete_object(tree[i - 1].path, error);
-        }
+        done = delete_tree(path, error);
     }
     if (done && dos_->examine(info).kind != Dos::TargetKind::Missing) {
         done = dos_->delete_object(info, error);
@@ -3579,6 +3684,8 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
         const u32 selected = window != nullptr ? window->clicks.selected() : kNoIcon;
         if (item == 0) {
             open_selected(window_id);
+        } else if (item == kItemIconCopy && selected != kNoIcon) {
+            copy_icon(window_id, selected);
         } else if (item == kItemIconRename && selected != kNoIcon) {
             ask_rename(window_id, selected);
         } else if (item == kItemIconSnapshot && selected != kNoIcon) {

@@ -1410,7 +1410,7 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     const u32 open = r.get32(icons + mu_FirstItem);
     CHECK(r.str(r.get32(r.get32(open + mi_ItemFill) + it_IText)) == "Open");
     CHECK_EQ(r.get16(open + mi_Flags) & ITEMENABLED, ITEMENABLED);
-    CHECK_EQ(r.get16(r.get32(open + mi_NextItem) + mi_Flags) & ITEMENABLED, 0u);
+    CHECK_EQ(r.get16(r.get32(open + mi_NextItem) + mi_Flags) & ITEMENABLED, ITEMENABLED);
 
     const u32 workbench_items = r.get32(first + mu_FirstItem);
     const u32 redraw_all = r.get32(r.get32(workbench_items + mi_NextItem) + mi_NextItem);
@@ -3162,6 +3162,43 @@ void the_new_drawer_item_suggests_a_free_name() {
     CHECK(r.exists("RAM:Unnamed2"));
 }
 
+void copy_duplicates_a_file_or_a_drawer_under_a_new_name() {
+    Rig r;
+    put_ram_project("Note");
+    const TwoWindows w = open_tools_and_ram(r);
+    put_ram_drawer(r, "Box");
+    r.rescan("Ram Disk:");
+    const u32 note = r.find_icon_in(w.ram, "Note");
+    CHECK(r.workbench.copy_icon(w.ram, note));
+    CHECK(r.exists("RAM:copy_of_Note"));
+    CHECK(r.exists("RAM:copy_of_Note.info"));
+    CHECK(r.saved_place("RAM:copy_of_Note") ==
+          std::make_pair(kNoIconPosition, kNoIconPosition));
+    CHECK(r.find_icon_in(w.ram, "copy_of_Note") != Workbench::kNoIcon);
+    CHECK(r.workbench.copy_icon(w.ram, r.find_icon_in(w.ram, "Note")));
+    CHECK(r.exists("RAM:copy_2_of_Note"));
+
+    // A drawer with all that is in it, picked from the menu.
+    click_icon(r, w.ram, r.find_icon_in(w.ram, "Box"));
+    r.workbench.menu_pick(w.ram, icons_pick(1));
+    CHECK(r.exists("RAM:copy_of_Box/One.info"));
+    CHECK(r.exists("RAM:copy_of_Box/Deep/Two"));
+    CHECK(r.exists("RAM:copy_of_Box.info"));
+    CHECK(r.exists("RAM:Box/Deep/Two"));
+}
+
+void copy_refuses_disks_and_keeps_names_short() {
+    Rig r;
+    const std::string long_name(25, 'n');
+    put_ram_project(long_name);
+    const TwoWindows w = open_tools_and_ram(r);
+    CHECK(r.workbench.copy_icon(w.ram, r.find_icon_in(w.ram, long_name)));
+    CHECK(r.exists("RAM:copy_of_" + std::string(17, 'n') + ".info"));
+    CHECK(!r.workbench.copy_icon(0, r.find_icon_in(0, "Ram Disk")));
+    CHECK(!r.workbench.copy_icon(w.tools, r.find_icon_in(w.tools, "Tool")));
+    CHECK(logged("workbench: cannot copy Tool: Disk is write-protected"));
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -3828,6 +3865,8 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    copy_duplicates_a_file_or_a_drawer_under_a_new_name();
+    copy_refuses_disks_and_keeps_names_short();
     new_drawer_makes_a_drawer_with_its_icon();
     the_new_drawer_item_suggests_a_free_name();
     rename_gives_the_file_and_its_icon_the_new_name();
