@@ -306,7 +306,7 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
 	    "m68k: C:version returned 0" "shell: line: zzz" "shell: unknown command zzz" \
 	    "shell: line: \\xe5\\xe4\\xf6"
-	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12 f12 v e r s i o n ret" \
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12 x f12 v e r s i o n ret" \
 	    "monitor: open" "monitor: closed" "shell: line: version" \
 	    "m68k: C:version returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) \

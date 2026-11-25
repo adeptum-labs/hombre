@@ -24,7 +24,9 @@
 #pragma once
 
 #include "../common/cpu_meter.hpp"
+#include "../common/monitor_snapshot.hpp"
 #include "../common/types.hpp"
+#include "framebuffer.hpp"
 #include "trap_frame.hpp"
 
 // The system monitor's side of the timer interrupt. All that is called from
@@ -35,13 +37,22 @@ namespace hombre {
 struct MonitorHost {
     // The scheduler slot that runs and its task.
     void (*current_task)(i32& slot, u32& task_addr) = nullptr;
+    // Covers the Amiga display and gives the framebuffer to draw on; false
+    // when it cannot be had now.
+    bool (*take_screen)(Framebuffer& out) = nullptr;
+    // Uncovers the display, for the tasks to draw again.
+    void (*give_screen)() = nullptr;
+    // Draws the front screen from the interrupt, unless a draw is under way.
+    void (*refresh_screen)() = nullptr;
+    // Counts the polls of the tasks, which show that they run.
+    u32 (*polls)() = nullptr;
+    // Fills in what the host knows of the machine.
+    void (*snapshot)(MonitorSnapshot& out) = nullptr;
 };
 
 void monitor_set_host(const MonitorHost& host);
 
 // Called on every tick of the timer.
 void monitor_timer_tick(const TrapFrame& frame);
-
-const CpuMeter& monitor_cpu_meter();
 
 }

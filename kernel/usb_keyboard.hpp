@@ -53,14 +53,21 @@ UsbStatus usb_keyboard_status();
 // and the "usb: ..." line that says why. Before a start, the line says so.
 UsbResult usb_keyboard_result();
 
-// Sees a keyboard report in the interrupt before anything else does; false
-// keeps it back.
-using UsbKeyFilter = bool (*)(u8 (&report)[8]);
+// Sees the reports in the interrupt before anything else does: false keeps a
+// keyboard report, or all of the mouse's, back.
+struct UsbFilter {
+    bool (*key)(u8 (&report)[8]);
+    bool (*mouse)();
+};
 
 // Moves the reports the controller has into the queues the polls read. The
 // timer interrupt calls it, and once the keyboard is ready nothing else
 // touches the controller.
-void usb_pump_from_interrupt(UsbKeyFilter filter);
+void usb_pump_from_interrupt(const UsbFilter* filter);
+
+// Queues a keyboard and a mouse report with nothing held. Only a filter may
+// call it.
+void usb_deliver_release();
 
 // Returns true when a new report arrived. A failed transfer or a device that
 // went away marks the keyboard Failed. Returns false when nothing is pending.

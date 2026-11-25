@@ -130,6 +130,10 @@ constinit AmigaDisplay amiga_display{};
 constinit PointerState pointer{};
 // The default Amiga screen; 0 until it is open.
 constinit u32 amiga_screen = 0;
+// For the system monitor: whether the Amiga screen is on the display, and
+// the polls the tasks have made.
+constinit volatile bool amiga_display_ready = false;
+constinit volatile u32 task_polls = 0;
 // The key slots of the last keyboard report seen.
 constinit u8 prev_key_slots[KeyDecoder::kKeySlots]{};
 // The one keyboard's decoder.
@@ -312,6 +316,7 @@ void show_amiga_screen(const BootInfo& info) {
     display.sink = amiga_display.sink();
     amiga_display.follow_pointer_shape(display);
     intuition.screen_to_front(amiga_screen);
+    amiga_display_ready = true;
     if (usb_mouse_present()) {
         amiga_display.set_pointer_visible(machine, amiga_screen, true);
     }
@@ -700,6 +705,7 @@ void pump_audio() {
 }
 
 void task_host_poll(void*) {
+    task_polls = task_polls + 1;
     intuition.flush_palette();
     poll_mouse();
     poll_keys();
@@ -735,6 +741,31 @@ void task_host_destroy(void*, u32 id) {
 void monitor_current_task(i32& slot, u32& task_addr) {
     slot = exec.scheduler().current();
     task_addr = slot >= 0 ? exec.scheduler().slot(static_cast<u32>(slot)).task_addr : 0;
+}
+
+bool monitor_take_screen(Framebuffer& out) {
+    if (!amiga_display_ready || amiga_display.switching_mode()) {
+        return false;
+    }
+    amiga_display.set_covered(true);
+    out = amiga_display.framebuffer();
+    return true;
+}
+
+void monitor_give_screen() {
+    amiga_display.set_covered(false);
+    display.palette_dirty = true;
+}
+
+void monitor_refresh_screen() {
+    if (!amiga_display.drawing() && display.front_screen != 0) {
+        AmigaDisplay::refresh(&amiga_display, machine, display.front_screen,
+                              Rect{0, 0, 4095, 4095});
+    }
+}
+
+u32 monitor_polls() {
+    return task_polls;
 }
 
 bool task_host_slice_over(void*) {
@@ -893,7 +924,9 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         return false;
     }
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
-    monitor_set_host(MonitorHost{&monitor_current_task});
+    monitor_set_host(MonitorHost{&monitor_current_task, &monitor_take_screen,
+                                 &monitor_give_screen, &monitor_refresh_screen, &monitor_polls,
+                                 nullptr});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
         return false;
