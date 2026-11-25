@@ -54,10 +54,10 @@ UsbStatus usb_keyboard_status();
 UsbResult usb_keyboard_result();
 
 // Sees the reports in the interrupt before anything else does: false keeps a
-// keyboard report, or all of the mouse's, back.
+// report back. A mouse report is at least 3 bytes long.
 struct UsbFilter {
     bool (*key)(u8 (&report)[8]);
-    bool (*mouse)();
+    bool (*mouse)(const u8* report, u32 length);
 };
 
 // Moves the reports the controller has into the queues the polls read. The

@@ -245,6 +245,10 @@ run: image disk-image
 # Monitor key sequences, each step given a moment: suspend the second task
 # and type a command while it is held, then resume and end it.
 MONITOR_STEP    := mouse_move 0 0;mouse_move 0 0
+# The pointer to the top left corner from wherever it is, then onto the
+# monitor's close gadget, and a click.
+MONITOR_CORNER  := mouse_move -120 -120;mouse_move -120 -120;mouse_move -120 -120;mouse_move -120 -120;mouse_move -120 -120;mouse_move -120 -120
+MONITOR_CLOSE   := $(MONITOR_CORNER);mouse_move 19 17;mouse_button 1;mouse_button 0;$(MONITOR_STEP)
 TYPE_VERSION    := sendkey v;sendkey e;sendkey r;sendkey s;sendkey i;sendkey o;sendkey n;sendkey ret
 MONITOR_SELECT  := sendkey f12;$(MONITOR_STEP);sendkey down;$(MONITOR_STEP)
 MONITOR_SUSPEND := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP)
@@ -332,6 +336,11 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	tools/boot_check.sh --disk $(TEST_DISK) --smp 4 --keys "f12 x f12 v e r s i o n ret" \
 	    "monitor: open" "monitor: closed" "monitor: cpus 4" "monitor: memory chip " \
 	    "monitor: task " "acpi: 4 cpus, 1 started" "shell: line: version" \
+	    "m68k: C:version returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12" \
+	    --mouse-after "monitor: open" \
+	    --mouse "$(MONITOR_STEP);$(MONITOR_CLOSE);$(TYPE_VERSION)" \
+	    "monitor: open" "monitor: closed" "shell: line: version" \
 	    "m68k: C:version returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "r u n spc s p i n t e s t ret" \
 	    --mouse-after "spintest: spinning" \

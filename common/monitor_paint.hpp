@@ -123,7 +123,7 @@ inline void paint_group(const chrome::Surface& surface, const MonitorPart& part,
                  const chrome::BoxPens& pens, const chrome::Metrics& metrics) {
     chrome::paint_box(surface, part.box, pens, true);
     paint_left_text(surface,
-                    Rect{part.box.x0 + 6, part.box.y0, part.box.x1 - 6, part.box.y0 + 12},
+                    Rect{part.box.x0 + 8, part.box.y0 + 3, part.box.x1 - 8, part.box.y0 + 12},
                     part.text, chrome::kFrameDark, metrics);
 }
 

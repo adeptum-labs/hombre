@@ -26,6 +26,7 @@
 #include "../common/cpu_meter.hpp"
 #include "../common/monitor_snapshot.hpp"
 #include "../common/monitor_ui.hpp"
+#include "../common/pointer_image.hpp"
 #include "../common/types.hpp"
 #include "framebuffer.hpp"
 #include "trap_frame.hpp"
@@ -47,6 +48,9 @@ struct MonitorHost {
     void (*refresh_screen)() = nullptr;
     // Counts the polls of the tasks, which show that they run.
     u32 (*polls)() = nullptr;
+    // The Amiga pointer: its shape, its place on the pointer grid and the
+    // buttons held.
+    void (*pointer)(PointerShape& shape, i32& x, i32& y, u8& buttons) = nullptr;
     // Fills in what the host knows of the machine.
     void (*snapshot)(MonitorSnapshot& out) = nullptr;
     // The registers of the task in the scheduler slot, if that is still

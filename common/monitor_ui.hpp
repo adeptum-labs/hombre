@@ -133,8 +133,8 @@ private:
     static constexpr i32 kContentInset = 8;
     static constexpr i32 kGroupGap = 6;
     static constexpr i32 kTextHeight = 10;
-    static constexpr i32 kCpuGroupHeight = 54;
-    static constexpr i32 kMemoryGroupHeight = 36;
+    static constexpr i32 kCpuGroupHeight = 52;
+    static constexpr i32 kMemoryGroupHeight = 40;
     static constexpr i32 kCpuColumns = 7;
     static constexpr i32 kCpuRows = 2;
     static constexpr i32 kCpuCellWidth = 84;
@@ -1554,11 +1554,10 @@ inline void MonitorUi::layout(const MonitorSnapshot& snapshot, MonitorView& view
     uptime.add_padded((seconds / 60) % 60, 2, '0');
     uptime.add(':');
     uptime.add_padded(seconds % 60, 2, '0');
-    const i32 uptime_x1 = window.x1 - kWindowMargin;
     const i32 uptime_x0 =
-        uptime_x1 - static_cast<i32>(uptime.length) * chrome::Metrics{}.font_width + 1;
-    add_text_part(view, Rect{uptime_x0, window.y0, uptime_x1,
-                             window.y0 + chrome::Metrics{}.bar_height() - 1},
+        content_right() - static_cast<i32>(uptime.length) * chrome::Metrics{}.font_width + 1;
+    add_text_part(view,
+                  Rect{uptime_x0, status_top(), content_right(), status_top() + kTextHeight - 1},
                   uptime.text, false);
 
     const Rect cpu_box{content_left(), content_top(), content_right(),
@@ -1569,8 +1568,8 @@ inline void MonitorUi::layout(const MonitorSnapshot& snapshot, MonitorView& view
     const u32 cells = static_cast<u32>(kCpuColumns) * static_cast<u32>(kCpuRows);
     const u32 shown = cores > cells ? cells - 1 : cores;
     for (u32 i = 0; i < shown; ++i) {
-        const i32 x = content_left() + static_cast<i32>(i % kCpuColumns) * kCpuCellWidth;
-        const i32 y = cpu_box.y0 + 14 + static_cast<i32>(i / kCpuColumns) * kCpuCellHeight;
+        const i32 x = cpu_box.x0 + 8 + static_cast<i32>(i % kCpuColumns) * kCpuCellWidth;
+        const i32 y = cpu_box.y0 + 16 + static_cast<i32>(i / kCpuColumns) * kCpuCellHeight;
         const MonitorCpu& cpu = snapshot.cpus[i];
         if (!cpu.started) {
             add_text_part(view, Rect{x, y, x + kCpuCellWidth - 1, y + kCpuGaugeHeight - 1}, "off",
@@ -1592,8 +1591,8 @@ inline void MonitorUi::layout(const MonitorSnapshot& snapshot, MonitorView& view
                       percent.text, false);
     }
     if (cores > cells) {
-        const i32 x = content_left() + static_cast<i32>(shown % kCpuColumns) * kCpuCellWidth;
-        const i32 y = cpu_box.y0 + 14 + static_cast<i32>(shown / kCpuColumns) * kCpuCellHeight;
+        const i32 x = cpu_box.x0 + 8 + static_cast<i32>(shown % kCpuColumns) * kCpuCellWidth;
+        const i32 y = cpu_box.y0 + 16 + static_cast<i32>(shown / kCpuColumns) * kCpuCellHeight;
         Text<16> more;
         more.add('+');
         more.add_padded(cores - shown, 1, ' ');
@@ -1610,12 +1609,12 @@ inline void MonitorUi::layout(const MonitorSnapshot& snapshot, MonitorView& view
     Text<96> kernel;
     add_memory_kernel(snapshot, kernel);
     add_text_part(view,
-                  Rect{memory_box.x0 + 8, memory_box.y0 + 12, content_right() - 4,
-                       memory_box.y0 + 21},
+                  Rect{memory_box.x0 + 8, memory_box.y0 + 15, content_right() - 4,
+                       memory_box.y0 + 24},
                   chip.text, false);
     add_text_part(view,
-                  Rect{memory_box.x0 + 8, memory_box.y0 + 23, content_right() - 4,
-                       memory_box.y0 + 32},
+                  Rect{memory_box.x0 + 8, memory_box.y0 + 26, content_right() - 4,
+                       memory_box.y0 + 35},
                   kernel.text, false);
 
     Text<272> header;
@@ -1810,7 +1809,7 @@ inline void MonitorUi::layout(const MonitorSnapshot& snapshot, MonitorView& view
         status.add(snapshot.status);
     }
     add_text_part(view,
-                  Rect{content_left(), status_top(), content_right(),
+                  Rect{content_left(), status_top(), uptime_x0 - 8,
                        status_top() + kTextHeight - 1},
                   status.text, warning);
 

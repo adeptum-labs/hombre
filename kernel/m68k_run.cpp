@@ -774,6 +774,13 @@ u32 monitor_polls() {
     return task_polls;
 }
 
+void monitor_pointer(PointerShape& shape, i32& x, i32& y, u8& buttons) {
+    copy_pointer_shape(display.pointer, shape);
+    x = pointer.x();
+    y = pointer.y();
+    buttons = pointer.buttons();
+}
+
 void monitor_snapshot(MonitorSnapshot& out) {
     out.chip_free = exec.free_bytes(ndk::MEMF_CHIP);
     out.chip_total = exec.total_bytes(ndk::MEMF_CHIP);
@@ -1036,8 +1043,8 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
     monitor_set_host(MonitorHost{&monitor_current_task, &monitor_take_screen,
                                  &monitor_give_screen, &monitor_refresh_screen, &monitor_polls,
-                                 &monitor_snapshot, &monitor_inspect, &monitor_rescue,
-                                 &monitor_disk});
+                                 &monitor_pointer, &monitor_snapshot, &monitor_inspect,
+                                 &monitor_rescue, &monitor_disk});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
         return false;

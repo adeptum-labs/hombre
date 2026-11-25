@@ -23,10 +23,14 @@
 
 #include "monitor.hpp"
 
+#include "../common/bitmap_surface.hpp"
 #include "../common/format.hpp"
+#include "../common/hid_mouse.hpp"
 #include "../common/irq_ring.hpp"
 #include "../common/monitor_hotkey.hpp"
+#include "../common/monitor_paint.hpp"
 #include "../common/monitor_ui.hpp"
+#include "../common/pointer_paint.hpp"
 #include "../common/port_io.hpp"
 #include "../common/serial.hpp"
 #include "acpi.hpp"
@@ -48,24 +52,13 @@ constexpr u64 kSliceUs = 250;
 // How long the tasks have to poll, and so redraw their screen, after the
 // monitor closes before the interrupt draws it for them.
 constexpr u64 kRestoreUs = 100000;
-constexpr u32 kGlyph = 8;
-// A line is a glyph high with a pixel of air above and below it.
-constexpr u32 kLine = kGlyph + 2;
-constexpr u32 kColumnsPerScale = 640;
-constexpr u32 kBackground = 0x102030;
+// The rows of the window painted and shown in one piece.
+constexpr u32 kBandRows = 16;
+constexpr u32 kBands = (kMonitorHeight + kBandRows - 1) / kBandRows;
+// Around the window on a larger screen, the Workbench grey.
+constexpr u32 kBackdrop = 0xAAAAAA;
 constexpr u32 kLogLineBytes = 80;
 constexpr u32 kLogLines = 64;
-
-struct Colours {
-    u32 text;
-    u32 back;
-};
-
-// In the order of MonitorStyle.
-constexpr Colours kStyles[] = {
-    {0xD0D8E0, kBackground}, {0xFFFFFF, kBackground}, {0xFFFFFF, 0x3060A0},
-    {0x8090A0, kBackground}, {0xFFD040, kBackground},
-};
 
 // A serial line, composed whole: the timer interrupt may only write between
 // lines. Too long a line is cut rather than left unterminated.
@@ -102,15 +95,32 @@ constinit CpuMeter cpu_meter{};
 constinit MonitorHotkey hotkey{};
 constinit MonitorUi ui{};
 constinit MonitorSnapshot snapshot{};
-// What the screen should show and what has been drawn of it.
-constinit MonitorGrid grid{};
-constinit MonitorGrid shown{};
+constinit MonitorView view{};
+// The pens the window is painted into and those the screen shows, the
+// pointer aside.
+constinit u8 painted[kMonitorWidth * kMonitorHeight]{};
+constinit u8 shown[kMonitorWidth * kMonitorHeight]{};
+// A row the screen must be given again although its pens have not changed.
+constinit bool stale[kMonitorHeight]{};
+constinit u32 colours[256]{};
+constinit u32 row_colours[kMonitorWidth]{};
+constinit BitmapSurface bitmap{};
 constinit Framebuffer screen{};
+constinit MonitorPlacement place{1, 0, 0};
+// The monitor's own pointer, in the shape the system has when it opens.
+constinit PointerShape shape{};
+constinit PointerState pointer{};
+constinit MonitorMouseGate mouse_gate{};
+// Where the pointer was last drawn, in pixels of the window.
+constinit i32 drawn_x = 0;
+constinit i32 drawn_y = 0;
 constinit bool wanted = false;
 constinit bool open = false;
 constinit bool restoring = false;
-constinit u32 scale = 1;
-constinit u32 next_cell = 0;
+// The band to paint next; kBands when the window is whole.
+constinit u32 band = kBands;
+// Input has changed the window since the paint under way began.
+constinit bool repaint = false;
 constinit u64 next_render_us = 0;
 constinit u64 next_redraw_us = 0;
 constinit u64 restore_us = 0;
@@ -179,15 +189,31 @@ void open_monitor() {
     }
     open = true;
     restoring = false;
-    scale = screen.width() >= kColumnsPerScale ? screen.width() / kColumnsPerScale : 1;
-    const u32 columns = screen.width() / (kGlyph * scale);
-    const u32 rows = screen.height() / (kLine * scale);
-    grid.columns = columns < MonitorGrid::kMaxColumns ? columns : MonitorGrid::kMaxColumns;
-    grid.rows = rows < MonitorGrid::kMaxRows ? rows : MonitorGrid::kMaxRows;
-    shown.columns = grid.columns;
-    shown.rows = grid.rows;
-    screen.fill(kBackground);
+    place = monitor_placement(screen.width(), screen.height());
+    screen.fill(kBackdrop);
+    bitmap.init(painted);
+    monitor_palette(colours);
+    i32 x = kPointerGridWidth / 2;
+    i32 y = kPointerGridHeight / 2;
+    u8 buttons = 0;
+    shape = kDefaultPointerShape;
+    if (monitor_host.pointer != nullptr) {
+        monitor_host.pointer(shape, x, y, buttons);
+    }
+    pointer.init(kPointerGridWidth, kPointerGridHeight, x, y);
+    drawn_x = pointer.screen_x(kMonitorWidth);
+    drawn_y = pointer.screen_y(kMonitorHeight);
     ui.reset();
+    ui.start_mouse(drawn_x, drawn_y, buttons);
+    // The first report after this one starts from the buttons held now.
+    pointer.apply(MouseSample{buttons, 0, 0, 0});
+    mouse_gate.passes(true, buttons);
+    view.count = 0;
+    for (bool& row : stale) {
+        row = true;
+    }
+    band = kBands;
+    repaint = false;
     next_render_us = 0;
     next_redraw_us = 0;
     summary_logged = false;
@@ -262,6 +288,12 @@ void handle_request(const MonitorRequest& request) {
     }
 }
 
+// Gives the window its parts again, to be painted from the top.
+void relayout() {
+    ui.layout(snapshot, view);
+    repaint = true;
+}
+
 bool take_key_report(u8 (&report)[8]) {
     if (hotkey.take(report)) {
         if (open || wanted) {
@@ -276,11 +308,36 @@ bool take_key_report(u8 (&report)[8]) {
         return true;
     }
     handle_request(ui.key_report(report, snapshot));
+    if (open) {
+        relayout();
+    }
     return false;
 }
 
-bool mouse_report_passes() {
-    return !open;
+void take_mouse_report(const u8* report, u32 length) {
+    MouseSample sample{};
+    if (!decode_mouse_report(report, length, sample)) {
+        return;
+    }
+    const u8 held = pointer.buttons();
+    pointer.apply(sample);
+    const MonitorMouse state{pointer.screen_x(kMonitorWidth), pointer.screen_y(kMonitorHeight),
+                             sample.buttons, sample.wheel, clock_us()};
+    const MonitorRequest request = ui.mouse(state, snapshot, view);
+    handle_request(request);
+    // A move with no button held changes nothing but the pointer.
+    if (open && (request.op != MonitorOp::None || held != 0 || sample.buttons != 0 ||
+                 sample.wheel != 0)) {
+        relayout();
+    }
+}
+
+bool mouse_report_passes(const u8* report, u32 length) {
+    const bool passes = mouse_gate.passes(open, static_cast<u8>(report[0] & 7u));
+    if (open) {
+        take_mouse_report(report, length);
+    }
+    return passes;
 }
 
 // Only the boot processor runs, so its meter speaks for the machine; the
@@ -320,7 +377,8 @@ void log_inspect(const MonitorInspect& out) {
     log_lines.push(line);
 }
 
-void render(u64 now, const TrapFrame& frame) {
+// Asks the machine how it is and lays the window out to match.
+void refresh_window(u64 now, const TrapFrame& frame) {
     if (monitor_host.snapshot != nullptr) {
         monitor_host.snapshot(snapshot);
     }
@@ -334,12 +392,11 @@ void render(u64 now, const TrapFrame& frame) {
     fill_cpus(snapshot);
     fill_task_cpu(snapshot);
     snapshot.uptime_us = now;
-    ui.render(snapshot, grid);
+    ui.layout(snapshot, view);
     if (now >= next_redraw_us) {
         next_redraw_us = now + kRedrawUs;
-        // No cell holds a NUL, so every one differs and is drawn again.
-        for (MonitorCell& cell : shown.cells) {
-            cell.ch = '\0';
+        for (bool& row : stale) {
+            row = true;
         }
     }
     if (!summary_logged) {
@@ -348,35 +405,92 @@ void render(u64 now, const TrapFrame& frame) {
     }
 }
 
-void draw_cell(u32 column, u32 row, const MonitorCell& cell) {
-    const u32 width = kGlyph * scale;
-    const u32 height = kLine * scale;
-    const Colours& colours = kStyles[cell.style < 5 ? cell.style : 0];
-    screen.fill_rect(column * width, row * height, width, height, colours.back);
-    const char text[2] = {cell.ch, '\0'};
-    screen.draw_text(column * width, row * height + scale, text, colours.text, scale);
+// Gives the screen the pixels first to last of a row of the window.
+void show_span(u32 row, u32 first, u32 last) {
+    const u8* pens = shown + row * kMonitorWidth;
+    for (u32 x = first; x <= last; ++x) {
+        row_colours[x] = colours[pens[x]];
+    }
+    screen.put_row(place.left + static_cast<u64>(first) * place.scale,
+                   place.top + static_cast<u64>(row) * place.scale, row_colours + first,
+                   last - first + 1, place.scale);
 }
 
-// Draws changed cells, from where the last tick stopped, until its time is
-// up.
-void draw_slice(u64 now) {
-    const u32 cells = grid.columns * grid.rows;
-    const u64 until = now + kSliceUs;
-    for (u32 seen = 0; seen < cells; ++seen) {
-        next_cell = next_cell + 1 < cells ? next_cell + 1 : 0;
-        const u32 column = next_cell % grid.columns;
-        const u32 row = next_cell / grid.columns;
-        const MonitorCell& want = grid.at(column, row);
-        MonitorCell& have = shown.at(column, row);
-        if (want.ch == have.ch && want.style == have.style) {
+// Draws the pointer where it was last put, as far as it lies on the rows
+// first to last of the window.
+void draw_pointer(i32 first, i32 last) {
+    const i32 scale = static_cast<i32>(place.scale);
+    const i32 left = static_cast<i32>(place.left);
+    const i32 top = static_cast<i32>(place.top);
+    const Rect clip{left, top + first * scale,
+                    left + static_cast<i32>(kMonitorWidth) * scale - 1,
+                    top + (last + 1) * scale - 1};
+    paint_pointer(shape, left + (drawn_x - shape.hot_x) * scale,
+                  top + (drawn_y - shape.hot_y) * scale, scale, scale, clip,
+                  [](i64 x, i64 y, i64 width, i64 height, u32 rgb) {
+                      screen.fill_rect(static_cast<u64>(x), static_cast<u64>(y),
+                                       static_cast<u64>(width), static_cast<u64>(height), rgb);
+                  });
+}
+
+void paint_band(u32 index) {
+    const u32 first = index * kBandRows;
+    const u32 last = first + kBandRows < kMonitorHeight ? first + kBandRows - 1
+                                                        : kMonitorHeight - 1;
+    bitmap.set_clip(Rect{0, static_cast<i32>(first), static_cast<i32>(kMonitorWidth) - 1,
+                         static_cast<i32>(last)});
+    paint_monitor(bitmap.surface(), view);
+    bool changed = false;
+    for (u32 row = first; row <= last; ++row) {
+        const usize at = static_cast<usize>(row) * kMonitorWidth;
+        if (!stale[row] && __builtin_memcmp(painted + at, shown + at, kMonitorWidth) == 0) {
             continue;
         }
-        draw_cell(column, row, want);
-        have = want;
+        stale[row] = false;
+        __builtin_memcpy(shown + at, painted + at, kMonitorWidth);
+        show_span(row, 0, kMonitorWidth - 1);
+        changed = true;
+    }
+    if (changed) {
+        draw_pointer(static_cast<i32>(first), static_cast<i32>(last));
+    }
+}
+
+// Paints bands, from where the last tick stopped, until its time is up.
+void paint_slice() {
+    const u64 until = clock_us() + kSliceUs;
+    while (band < kBands) {
+        paint_band(band++);
         if (clock_us() >= until) {
             return;
         }
     }
+}
+
+i32 clamp_to(i32 value, i32 side) {
+    return value < 0 ? 0 : value >= side ? side - 1 : value;
+}
+
+// Uncovers what the pointer was over and draws it where it is now.
+void move_pointer() {
+    const i32 x = pointer.screen_x(kMonitorWidth);
+    const i32 y = pointer.screen_y(kMonitorHeight);
+    if (x == drawn_x && y == drawn_y) {
+        return;
+    }
+    constexpr i32 kWidth = static_cast<i32>(kMonitorWidth);
+    constexpr i32 kHeight = static_cast<i32>(kMonitorHeight);
+    const i32 old_left = drawn_x - shape.hot_x;
+    const i32 old_top = drawn_y - shape.hot_y;
+    const i32 first = clamp_to(old_left, kWidth);
+    const i32 last = clamp_to(old_left + shape.width - 1, kWidth);
+    const i32 bottom = clamp_to(old_top + shape.height - 1, kHeight);
+    drawn_x = x;
+    drawn_y = y;
+    for (i32 row = clamp_to(old_top, kHeight); row <= bottom; ++row) {
+        show_span(static_cast<u32>(row), static_cast<u32>(first), static_cast<u32>(last));
+    }
+    draw_pointer(0, kHeight - 1);
 }
 
 void run_monitor(const TrapFrame& frame) {
@@ -385,11 +499,14 @@ void run_monitor(const TrapFrame& frame) {
     }
     const u64 now = clock_us();
     if (open) {
-        if (now >= next_render_us) {
+        if (band == kBands && (repaint || now >= next_render_us)) {
+            repaint = false;
             next_render_us = now + kRenderUs;
-            render(now, frame);
+            refresh_window(now, frame);
+            band = 0;
         }
-        draw_slice(now);
+        paint_slice();
+        move_pointer();
     } else if (restoring && now >= restore_us) {
         restoring = false;
         if (monitor_host.polls() == polls_at_close) {

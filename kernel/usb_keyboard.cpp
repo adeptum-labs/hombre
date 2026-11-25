@@ -218,7 +218,7 @@ void usb_pump_from_interrupt(const UsbFilter* filter) {
         if (controller.poll_hid(controller.mouse(), raw, length) != Xhci::KeyEvent::Report) {
             break;
         }
-        if (length >= 3 && (filter == nullptr || filter->mouse())) {
+        if (length >= 3 && (filter == nullptr || filter->mouse(raw, length))) {
             MouseReport report{};
             __builtin_memcpy(report.bytes, raw, length < 4 ? length : 4);
             mouse_reports.push(report);
