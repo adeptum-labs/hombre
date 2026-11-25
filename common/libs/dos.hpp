@@ -937,6 +937,22 @@ public:
     // not there or names no volume.
     bool volume_usage(const char* name, u32& blocks, u32& used);
 
+    // What Info and the volume's node tell of the volume the name resolves
+    // to: its blocks and how many are used, the bytes a block holds,
+    // whether it can be written and the date it was made.
+    struct VolumeInfo {
+        u32 blocks = 0;
+        u32 used = 0;
+        u32 block_bytes = 0;
+        bool writable = false;
+        u32 days = 0;
+        u32 minutes = 0;
+        u32 ticks = 0;
+    };
+
+    // False with IoErr set when the name is not there or names no volume.
+    bool volume_info(const char* name, VolumeInfo& out);
+
     // UnLoadSeg for code that is not the guest's.
     void unload_seg(u32 seglist);
 

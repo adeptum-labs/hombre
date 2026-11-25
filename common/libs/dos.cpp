@@ -10826,8 +10826,15 @@ bool Dos::unlock_path(u32 lock) {
 }
 
 bool Dos::volume_usage(const char* name, u32& blocks, u32& used) {
-    blocks = 0;
-    used = 0;
+    VolumeInfo info;
+    const bool found = volume_info(name, info);
+    blocks = info.blocks;
+    used = info.used;
+    return found;
+}
+
+bool Dos::volume_info(const char* name, VolumeInfo& out) {
+    out = VolumeInfo{};
     if (m_ == nullptr || name == nullptr) {
         return false;
     }
@@ -10849,8 +10856,24 @@ bool Dos::volume_usage(const char* name, u32& blocks, u32& used) {
         }
         return false;
     }
-    DosOps::volume_blocks(*this, entry, blocks, used);
-    return true;
+    DosOps::volume_blocks(*this, entry, out.blocks, out.used);
+    u32 node = 0;
+    if (entry.volume == kVolRam) {
+        out.block_bytes = 512;
+        node = ram_volume_node_;
+    } else if (entry.volume == kVolRomFonts) {
+        out.block_bytes = 512;
+    } else {
+        out.block_bytes = drives_[entry.volume].volume.ffs ? 512 : 488;
+        node = volume_node_[entry.volume];
+    }
+    out.writable = DosOps::writable(*this, entry.volume);
+    if (node != 0) {
+        out.days = b.r32(node + dol_VolumeDate + ds_Days);
+        out.minutes = b.r32(node + dol_VolumeDate + ds_Minute);
+        out.ticks = b.r32(node + dol_VolumeDate + ds_Tick);
+    }
+    return b.ok();
 }
 
 void Dos::unload_seg(u32 seglist) {
