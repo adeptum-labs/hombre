@@ -3937,22 +3937,64 @@ bool Workbench::copy_file(const char* from, const char* to, u32& error) {
     return copied;
 }
 
+// The position is written over in the bytes of the .info, as writing the
+// icon anew would drop what follows the parts the icon library knows.
+void Workbench::clear_icon_position(const char* info) {
+    const Dos::Target file = dos_->examine(info);
+    if (file.kind != Dos::TargetKind::File || file.size < do_CurrentY + 4) {
+        return;
+    }
+    std::vector<u8> bytes(file.size);
+    u32 got = 0;
+    u32 error = 0;
+    if (!dos_->read_file(info, bytes.data(), file.size, got, error) || bytes[0] != 0xE3 ||
+        bytes[1] != 0x10) {
+        return;
+    }
+    for (u32 i = 0; i < 4; ++i) {
+        const u8 byte = static_cast<u8>(kNoIconPosition >> (24 - 8 * i));
+        bytes[do_CurrentX + i] = byte;
+        bytes[do_CurrentY + i] = byte;
+    }
+    if (!dos_->replace_file(info, bytes.data(), got, error)) {
+        LogLine().text("workbench: the copy keeps its place, ").text(info).send();
+    }
+}
+
+// Gives to the comment and protection of from, the comment first as the
+// protection may forbid it.
+void Workbench::copy_attributes(const char* from, const char* to) {
+    const Dos::FileInfo info = dos_->file_info(from);
+    if (info.kind == Dos::TargetKind::Missing) {
+        return;
+    }
+    u32 error = 0;
+    if (info.comment[0] != '\0') {
+        dos_->set_file_comment(to, info.comment, error);
+    }
+    dos_->set_protection_bits(to, info.protection, error);
+}
+
 bool Workbench::duplicate(const char* from, const char* to, u32& error) {
     std::vector<TreeEntry> tree;
     if (!collect_tree(from, tree, error)) {
         return false;
     }
     const u32 length = text_length(from);
-    for (const TreeEntry& entry : tree) {
-        // The same path below to as the entry has below from.
+    // The same path below to as the entry has below from.
+    const auto target_of = [&](const TreeEntry& entry, char (&out)[Dos::kMaxPath]) {
         const char* below = entry.path + length;
-        char target[Dos::kMaxPath];
-        if (!join_path(to, *below == '/' ? below + 1 : below, target)) {
+        if (*below == '\0') {
+            copy_text(out, sizeof out, to);
+            return true;
+        }
+        return join_path(to, *below == '/' ? below + 1 : below, out);
+    };
+    char target[Dos::kMaxPath];
+    for (const TreeEntry& entry : tree) {
+        if (!target_of(entry, target)) {
             error = ERROR_INVALID_COMPONENT_NAME;
             return false;
-        }
-        if (*below == '\0') {
-            copy_text(target, sizeof target, to);
         }
         if (entry.is_dir ? !dos_->make_dir(target, error)
                          : !copy_file(entry.path, target, error)) {
@@ -3965,23 +4007,21 @@ bool Workbench::duplicate(const char* from, const char* to, u32& error) {
         error = ERROR_INVALID_COMPONENT_NAME;
         return false;
     }
-    if (dos_->examine(from_info).kind == Dos::TargetKind::Missing) {
-        return true;
+    if (dos_->examine(from_info).kind != Dos::TargetKind::Missing) {
+        if (!copy_file(from_info, to_info, error)) {
+            return false;
+        }
+        // The copy takes a free place, not the one of what it copies.
+        clear_icon_position(to_info);
+        copy_attributes(from_info, to_info);
     }
-    if (!copy_file(from_info, to_info, error)) {
-        return false;
+    // Last, so that a copy that fails can still be deleted.
+    for (const TreeEntry& entry : tree) {
+        if (target_of(entry, target)) {
+            copy_attributes(entry.path, target);
+        }
     }
-    // The copy takes a free place, not the one of what it copies.
-    const u32 object = icon_->load_object(to);
-    if (object == 0) {
-        return true;
-    }
-    Bus b(*machine_);
-    b.w32(object + do_CurrentX, kNoIconPosition);
-    b.w32(object + do_CurrentY, kNoIconPosition);
-    const bool saved = b.ok() && icon_->save_object(to, object, error);
-    icon_->free_object(object);
-    return saved;
+    return true;
 }
 
 bool Workbench::copy_icon(u32 window_id, u32 icon_id) {

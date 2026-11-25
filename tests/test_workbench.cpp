@@ -3837,6 +3837,27 @@ void copy_duplicates_a_file_or_a_drawer_under_a_new_name() {
     CHECK(r.exists("RAM:Box/Deep/Two"));
 }
 
+void copy_keeps_attributes_and_all_of_the_icon() {
+    Rig r;
+    u32 error = 0;
+    const u8 byte = 'x';
+    CHECK(g_dos.write_file("RAM:Run", &byte, 1, error));
+    std::vector<u8> info = icon_info(kWBTool, 20, 30);
+    const std::string trailer = "FORMtrailer";
+    info.insert(info.end(), trailer.begin(), trailer.end());
+    CHECK(g_dos.write_file("RAM:Run.info", info.data(), static_cast<u32>(info.size()), error));
+    CHECK(g_dos.set_file_comment("RAM:Run", "kept", error));
+    CHECK(g_dos.set_protection_bits("RAM:Run", 0x41, error));
+    const TwoWindows w = open_tools_and_ram(r);
+    CHECK(r.workbench.copy_icon(w.ram, r.find_icon_in(w.ram, "Run")));
+    const Dos::FileInfo copy = g_dos.file_info("RAM:copy_of_Run");
+    CHECK_EQ(copy.protection, 0x41u);
+    CHECK(std::string(copy.comment) == "kept");
+    CHECK_EQ(g_dos.examine("RAM:copy_of_Run.info").size, static_cast<u32>(info.size()));
+    CHECK(r.saved_place("RAM:copy_of_Run") ==
+          std::make_pair(kNoIconPosition, kNoIconPosition));
+}
+
 void copy_refuses_disks_and_keeps_names_short() {
     Rig r;
     const std::string long_name(25, 'n');
@@ -4758,6 +4779,7 @@ int main() {
     an_icon_without_a_place_keeps_clear_of_the_others();
     execute_command_hands_the_line_to_a_shell();
     copy_duplicates_a_file_or_a_drawer_under_a_new_name();
+    copy_keeps_attributes_and_all_of_the_icon();
     copy_refuses_disks_and_keeps_names_short();
     new_drawer_makes_a_drawer_with_its_icon();
     the_new_drawer_item_suggests_a_free_name();

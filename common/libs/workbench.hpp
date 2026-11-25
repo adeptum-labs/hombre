@@ -721,6 +721,9 @@ private:
     bool delete_tree(const char* path, u32& error);
     // Copies the bytes of the file at from to the new file to.
     bool copy_file(const char* from, const char* to, u32& error);
+    // Takes the place away from the icon in the .info file.
+    void clear_icon_position(const char* info);
+    void copy_attributes(const char* from, const char* to);
     // Copies the object at from and its .info to the free path to.
     bool duplicate(const char* from, const char* to, u32& error);
     // The icon that stands for a file or drawer the desktop may change, or
