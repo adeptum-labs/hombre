@@ -85,9 +85,12 @@ struct LogLine {
         }
     }
 
-    void add_dec(u64 value) {
+    void add_dec(u64 value) { add_number(value, 10); }
+    void add_hex(u64 value) { add_number(value, 16); }
+
+    void add_number(u64 value, unsigned base) {
         char digits[21];
-        if (format_u64(digits, sizeof digits, value, 10) != 0) {
+        if (format_u64(digits, sizeof digits, value, base) != 0) {
             add(digits);
         }
     }
@@ -112,6 +115,9 @@ constinit u64 next_redraw_us = 0;
 constinit u64 restore_us = 0;
 constinit u32 polls_at_close = 0;
 constinit bool summary_logged = false;
+// The task Enter asked to see, and whether its registers have been logged.
+constinit MonitorRequest inspected{};
+constinit bool inspect_logged = false;
 // Lines waiting for the serial port to be between lines.
 constinit IrqRing<LogLine, kLogLines> log_lines{};
 constinit LogLine log_next{};
@@ -184,9 +190,19 @@ void open_monitor() {
     next_render_us = 0;
     next_redraw_us = 0;
     summary_logged = false;
+    inspected = MonitorRequest{};
     // The tasks must not go on thinking a key or button is held.
     usb_deliver_release();
     log_text("monitor: open");
+}
+
+void handle_request(const MonitorRequest& request) {
+    if (request.op == MonitorOp::Close) {
+        close_monitor();
+    } else if (request.op == MonitorOp::Inspect) {
+        inspected = request;
+        inspect_logged = false;
+    }
 }
 
 bool take_key_report(u8 (&report)[8]) {
@@ -202,9 +218,7 @@ bool take_key_report(u8 (&report)[8]) {
     if (!open) {
         return true;
     }
-    if (ui.key_report(report, snapshot).op == MonitorOp::Close) {
-        close_monitor();
-    }
+    handle_request(ui.key_report(report, snapshot));
     return false;
 }
 
@@ -236,9 +250,29 @@ void fill_task_cpu(MonitorSnapshot& out) {
     }
 }
 
-void render(u64 now) {
+void log_inspect(const MonitorInspect& out) {
+    LogLine line;
+    line.add("monitor: inspect ");
+    line.add(out.name);
+    line.add(" pc=");
+    line.add_hex(out.pc);
+    if (out.native[0] != '\0') {
+        line.add(" in ");
+        line.add(out.native);
+    }
+    log_lines.push(line);
+}
+
+void render(u64 now, const TrapFrame& frame) {
     if (monitor_host.snapshot != nullptr) {
         monitor_host.snapshot(snapshot);
+    }
+    if (inspected.op == MonitorOp::Inspect && monitor_host.inspect != nullptr) {
+        monitor_host.inspect(inspected.slot, inspected.task_addr, frame, snapshot.inspect);
+        if (snapshot.inspect.valid && !inspect_logged) {
+            inspect_logged = true;
+            log_inspect(snapshot.inspect);
+        }
     }
     fill_cpus(snapshot);
     fill_task_cpu(snapshot);
@@ -288,7 +322,7 @@ void draw_slice(u64 now) {
     }
 }
 
-void run_monitor() {
+void run_monitor(const TrapFrame& frame) {
     if (wanted && !open) {
         open_monitor();
     }
@@ -296,7 +330,7 @@ void run_monitor() {
     if (open) {
         if (now >= next_render_us) {
             next_render_us = now + kRenderUs;
-            render(now);
+            render(now, frame);
         }
         draw_slice(now);
     } else if (restoring && now >= restore_us) {
@@ -322,7 +356,7 @@ void monitor_set_host(const MonitorHost& host) {
     monitor_host = host;
 }
 
-void monitor_timer_tick(const TrapFrame&) {
+void monitor_timer_tick(const TrapFrame& frame) {
     static constexpr UsbFilter filter{&take_key_report, &mouse_report_passes};
     usb_pump_from_interrupt(&filter);
     write_log();
@@ -333,7 +367,7 @@ void monitor_timer_tick(const TrapFrame&) {
     u32 task = 0;
     monitor_host.current_task(slot, task);
     cpu_meter.sample(slot, task, cpu_halted());
-    run_monitor();
+    run_monitor(frame);
 }
 
 }

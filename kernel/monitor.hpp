@@ -48,6 +48,10 @@ struct MonitorHost {
     u32 (*polls)() = nullptr;
     // Fills in what the host knows of the machine.
     void (*snapshot)(MonitorSnapshot& out) = nullptr;
+    // The registers of the task in the scheduler slot, if that is still
+    // task_addr; frame is what the tick interrupted.
+    void (*inspect)(u32 slot, u32 task_addr, const TrapFrame& frame,
+                    MonitorInspect& out) = nullptr;
 };
 
 void monitor_set_host(const MonitorHost& host);

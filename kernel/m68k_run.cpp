@@ -814,6 +814,53 @@ void monitor_snapshot(MonitorSnapshot& out) {
     }
 }
 
+// A running task is where the tick found it, in translated code with the
+// address of its instruction in R15; another is where it last gave up the
+// processor.
+void monitor_inspect(u32 slot, u32 task_addr, const TrapFrame& frame, MonitorInspect& out) {
+    out = MonitorInspect{};
+    TaskInfo info;
+    m68k::CpuState cpu;
+    const char* native = nullptr;
+    if (!exec.task_info(slot, info) || info.task_addr != task_addr ||
+        !exec.task_context(slot, cpu, native)) {
+        return;
+    }
+    out.slot = slot;
+    out.task_addr = task_addr;
+    __builtin_memcpy(out.name, info.name, sizeof out.name);
+    for (u32 i = 0; i < 8; ++i) {
+        out.d[i] = cpu.d[i];
+        out.a[i] = cpu.a[i];
+    }
+    out.pc = cpu.pc;
+    out.sr = static_cast<u16>(cpu.sr);
+    for (u32 i = 0; native != nullptr && native[i] != '\0' && i + 1 < sizeof out.native; ++i) {
+        out.native[i] = native[i];
+    }
+    if (info.state == TaskState::Running) {
+        out.has_x86 = true;
+        out.rip = frame.rip;
+        out.rsp = frame.rsp;
+        out.rflags = frame.rflags;
+        if (frame.rip - kCodeExecBase < jit.code_total()) {
+            out.pc = static_cast<u32>(frame.r15);
+            out.pc_exact = true;
+        }
+    } else if (const u64 saved = task_stacks.saved_rsp(slot); saved != 0) {
+        // The switch left r15, r14, r13, r12, rbp, rbx, rflags and the
+        // return address on the task's stack.
+        constexpr u32 kFlagsWord = 6;
+        constexpr u32 kReturnWord = 7;
+        const u64* words = reinterpret_cast<const u64*>(saved);
+        out.has_x86 = true;
+        out.rip = words[kReturnWord];
+        out.rflags = words[kFlagsWord];
+        out.rsp = saved + (kReturnWord + 1) * sizeof(u64);
+    }
+    out.valid = true;
+}
+
 bool task_host_slice_over(void*) {
     return take_need_resched();
 }
@@ -973,7 +1020,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
     monitor_set_host(MonitorHost{&monitor_current_task, &monitor_take_screen,
                                  &monitor_give_screen, &monitor_refresh_screen, &monitor_polls,
-                                 &monitor_snapshot});
+                                 &monitor_snapshot, &monitor_inspect});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
         return false;
