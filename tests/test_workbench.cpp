@@ -361,6 +361,9 @@ public:
         CHECK(g_graphics.init(m, g_exec, g_display));
         CHECK(g_intuition.init(m, g_exec, g_graphics, g_display));
         CHECK(g_gadtools.init(m, g_exec, g_graphics));
+        g_gadtools.set_intuition(&g_intuition);
+        g_intuition.set_gadget_renderer(&GadTools::render_gadget, &g_gadtools);
+        g_intuition.set_gadget_release(&GadTools::release_gadget);
         CHECK(workbench.init(m, g_exec, g_dos, g_graphics, g_intuition, g_gadtools, g_icon));
         m.cpu.a[7] = kStack;
         screen = open_screen(depth);
@@ -1410,7 +1413,14 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     const u32 open = r.get32(icons + mu_FirstItem);
     CHECK(r.str(r.get32(r.get32(open + mi_ItemFill) + it_IText)) == "Open");
     CHECK_EQ(r.get16(open + mi_Flags) & ITEMENABLED, ITEMENABLED);
-    CHECK_EQ(r.get16(r.get32(open + mi_NextItem) + mi_Flags) & ITEMENABLED, ITEMENABLED);
+    const u32 copy = r.get32(open + mi_NextItem);
+    CHECK_EQ(r.get16(copy + mi_Flags) & ITEMENABLED, ITEMENABLED);
+    const u32 rename = r.get32(copy + mi_NextItem);
+    CHECK(r.str(r.get32(r.get32(rename + mi_ItemFill) + it_IText)) == "Rename...");
+    CHECK_EQ(r.get16(rename + mi_Flags) & ITEMENABLED, ITEMENABLED);
+    const u32 information = r.get32(rename + mi_NextItem);
+    CHECK(r.str(r.get32(r.get32(information + mi_ItemFill) + it_IText)) == "Information...");
+    CHECK_EQ(r.get16(information + mi_Flags) & ITEMENABLED, ITEMENABLED);
 
     const u32 workbench_items = r.get32(first + mu_FirstItem);
     const u32 redraw_all = r.get32(r.get32(workbench_items + mi_NextItem) + mi_NextItem);
@@ -2945,7 +2955,7 @@ void a_text_request_answers_return_and_its_buttons() {
     };
     const auto answered = [&](Workbench::Reply want) {
         CHECK(r.workbench.text_request_input(request, text, sizeof text) == want);
-        r.workbench.close_text_request(request);
+        r.workbench.close_dialog(request);
         CHECK_EQ(request.window, 0u);
     };
     open();
@@ -2968,10 +2978,10 @@ void a_text_request_answers_return_and_its_buttons() {
 
     // Opening and closing it again and again keeps no memory.
     open();
-    r.workbench.close_text_request(request);
+    r.workbench.close_dialog(request);
     const u32 before = r.free_bytes();
     open();
-    r.workbench.close_text_request(request);
+    r.workbench.close_dialog(request);
     CHECK_EQ(r.free_bytes(), before);
 }
 
@@ -2996,6 +3006,233 @@ void a_set_answer_stands_in_for_the_requesters() {
     CHECK(r.workbench.ask_text("Rename", "New name", "Old", text, sizeof text));
     CHECK(std::string(text) == "New");
     CHECK(seen == "DeleteRename");
+}
+
+// --- Icons > Information -------------------------------------------------
+
+u32 info_gadget_at(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    for (u32 gadget = request.gadgets; gadget != 0; gadget = r.get32(gadget)) {
+        if (r.get16(gadget + ndk::gg_GadgetID) == id) {
+            return gadget;
+        }
+    }
+    return 0;
+}
+
+u32 info_gadget(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    const u32 gadget = info_gadget_at(r, request, id);
+    CHECK(gadget != 0);
+    return gadget;
+}
+
+// Where a GadTools gadget keeps the text GTTX_Text gave it.
+constexpr u32 kGadgetText = 52;
+
+std::string info_value(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    return r.str(r.get32(info_gadget(r, request, id) + kGadgetText));
+}
+
+bool info_checked(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    return (r.get16(info_gadget(r, request, id) + ndk::gg_Flags) & GFLG_SELECTED) != 0;
+}
+
+std::string info_comment(const Rig& r, const Workbench::InfoRequest& request) {
+    const u32 string_info = r.get32(request.comment_gadget + ndk::gg_SpecialInfo);
+    return r.str(r.get32(string_info + ndk::si_Buffer));
+}
+
+void click_info(Rig& r, const Workbench::InfoRequest& request, u16 id) {
+    const u32 gadget = info_gadget(r, request, id);
+    const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
+    const i32 x = word(request.window + ndk::wd_LeftEdge) + word(gadget + ndk::gg_LeftEdge) + 4;
+    const i32 y = word(request.window + ndk::wd_TopEdge) + word(gadget + ndk::gg_TopEdge) + 4;
+    g_intuition.pointer_event(x, y, 1, 1, 0, true);
+    g_intuition.pointer_event(x, y, 0, 0, 1, false);
+}
+
+void the_information_window_shows_a_file() {
+    Rig r;
+    put_ram_project("Note");
+    u32 error = 0;
+    CHECK(g_dos.set_file_comment("RAM:Note", "old note", error));
+    CHECK(g_dos.set_protection_bits("RAM:Note", 0x11B1, error));
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 note = r.find_icon_in(w.ram, "Note");
+
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, note, request));
+    CHECK(request.has_object);
+    CHECK(r.window_title(request.window) == "Information");
+    CHECK_EQ(r.get32(request.window + wd_Flags) & WFLG_CLOSEGADGET, WFLG_CLOSEGADGET);
+
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Name: Note");
+    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Project");
+    CHECK(info_value(r, request, Workbench::kInfoSize) == "Size: 1 bytes, 1 blocks");
+    CHECK(info_value(r, request, Workbench::kInfoDate).rfind("Date: ", 0) == 0);
+    CHECK(info_comment(r, request) == "old note");
+    CHECK(!info_checked(r, request, Workbench::kInfoScript));
+    CHECK(info_checked(r, request, Workbench::kInfoArchived));
+    CHECK(info_checked(r, request, Workbench::kInfoReadable));
+    CHECK(info_checked(r, request, Workbench::kInfoWritable));
+    CHECK(info_checked(r, request, Workbench::kInfoExecutable));
+    CHECK(!info_checked(r, request, Workbench::kInfoDeletable));
+
+    // It fits the 640 by 400 screen with room below the buttons.
+    const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
+    const i32 left = word(request.window + ndk::wd_LeftEdge);
+    const i32 top = word(request.window + ndk::wd_TopEdge);
+    const i32 width = word(request.window + ndk::wd_Width);
+    const i32 height = word(request.window + ndk::wd_Height);
+    CHECK(left >= 0 && top >= 0 && left + width <= 640 && top + height <= 400);
+    CHECK(height < 300);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    r.workbench.close_dialog(request);
+    CHECK_EQ(request.window, 0u);
+    CHECK_EQ(request.gadgets, 0u);
+
+    // Opening and closing it again and again keeps no memory.
+    CHECK(r.workbench.open_info(w.ram, note, request));
+    r.workbench.close_dialog(request);
+    const u32 before = r.free_bytes();
+    CHECK(r.workbench.open_info(w.ram, note, request));
+    r.workbench.close_dialog(request);
+    CHECK_EQ(r.free_bytes(), before);
+}
+
+void a_check_box_and_the_comment_save_to_the_file() {
+    Rig r;
+    put_ram_project("Note");
+    u32 error = 0;
+    CHECK(g_dos.set_file_comment("RAM:Note", "old note", error));
+    CHECK(g_dos.set_protection_bits("RAM:Note", 0x11B1, error));
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 note = r.find_icon_in(w.ram, "Note");
+
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, note, request));
+    click_info(r, request, Workbench::kInfoScript);
+    click_info(r, request, Workbench::kInfoReadable);
+    CHECK(info_checked(r, request, Workbench::kInfoScript));
+    CHECK(!info_checked(r, request, Workbench::kInfoReadable));
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    CHECK(logged("workbench: saved Ram Disk:Note"));
+    CHECK_EQ(g_dos.file_info("RAM:Note").protection, 0x11F9u);
+    CHECK(std::string(g_dos.file_info("RAM:Note").comment) == "old note");
+    r.workbench.close_dialog(request);
+
+    // The comment the window shows can be edited and saved.
+    CHECK(r.workbench.open_info(w.ram, note, request));
+    CHECK(info_comment(r, request) == "old note");
+    g_intuition.string_key('!');
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    CHECK(std::string(g_dos.file_info("RAM:Note").comment) == "old note!");
+    CHECK_EQ(g_dos.file_info("RAM:Note").protection, 0x11F9u);
+    r.workbench.close_dialog(request);
+}
+
+void information_saves_only_what_changed() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 proj = r.find_icon_in(w.tools, "Proj");
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.tools, proj, request));
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    CHECK(!logged("workbench: cannot save Proj: Disk is write-protected"));
+    r.workbench.close_dialog(request);
+
+    // A protection bit that changed cannot be written to the floppy.
+    CHECK(r.workbench.open_info(w.tools, proj, request));
+    click_info(r, request, Workbench::kInfoScript);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(!r.workbench.save_info(request));
+    CHECK(logged("workbench: cannot save Proj: Disk is write-protected"));
+    r.workbench.close_dialog(request);
+}
+
+void information_cancels_without_changing_anything() {
+    Rig r;
+    put_ram_project("Note");
+    u32 error = 0;
+    CHECK(g_dos.set_file_comment("RAM:Note", "old", error));
+    CHECK(g_dos.set_protection_bits("RAM:Note", 0x11B1, error));
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 note = r.find_icon_in(w.ram, "Note");
+
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, note, request));
+    g_intuition.string_key('!');
+    click_info(r, request, Workbench::kInfoScript);
+    click_info(r, request, Workbench::kInfoCancel);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Cancelled);
+    r.workbench.close_dialog(request);
+    const Dos::FileInfo info = g_dos.file_info("RAM:Note");
+    CHECK_EQ(info.protection, 0x11B1u);
+    CHECK(std::string(info.comment) == "old");
+}
+
+void the_information_window_shows_a_drawer() {
+    Rig r;
+    u32 error = 0;
+    CHECK(g_dos.make_dir("RAM:Box", error));
+    const u32 object = g_icon.default_object(kWBDrawer);
+    CHECK(object != 0);
+    CHECK(g_icon.save_object("RAM:Box", object, error));
+    g_icon.free_object(object);
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 box = r.find_icon_in(w.ram, "Box");
+    CHECK(box != Workbench::kNoIcon);
+
+    // A drawer has no size to show, but a date, check boxes and a comment.
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, box, request));
+    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Drawer");
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoSize), 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoDate) != 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoComment) != 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoDeletable) != 0u);
+    r.workbench.close_dialog(request);
+}
+
+void information_shows_an_icon_without_an_object_and_refuses_disks() {
+    Rig r;
+    u32 error = 0;
+    const u32 object = g_icon.default_object(kWBTool);
+    CHECK(object != 0);
+    CHECK(g_icon.save_object("RAM:Lonely", object, error));
+    g_icon.free_object(object);
+    const TwoWindows w = open_tools_and_ram(r);
+    r.rescan("Ram Disk:");
+    const u32 lonely = r.find_icon_in(w.ram, "Lonely");
+    CHECK(lonely != Workbench::kNoIcon);
+
+    // Only the .info is there: the name and type, but no size, date, check
+    // boxes or comment, and Save has nothing to write.
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, lonely, request));
+    CHECK(!request.has_object);
+    CHECK(info_value(r, request, Workbench::kInfoName) == "Name: Lonely");
+    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Tool");
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoSize), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDate), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoComment), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoScript), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDeletable), 0u);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    CHECK(!r.exists("RAM:Lonely"));
+    r.workbench.close_dialog(request);
+
+    // A disk's icon is no file to show.
+    CHECK(!r.workbench.open_info(0, r.find_icon_in(0, "Ram Disk"), request));
+    CHECK(logged("workbench: cannot show Ram Disk: Error 212"));
 }
 
 // A drawer in RAM: holding a file and a drawer with a file, with its icon.
@@ -3907,6 +4144,12 @@ int main() {
     the_delete_item_asks_before_it_deletes();
     a_text_request_answers_return_and_its_buttons();
     a_set_answer_stands_in_for_the_requesters();
+    the_information_window_shows_a_file();
+    a_check_box_and_the_comment_save_to_the_file();
+    information_saves_only_what_changed();
+    information_cancels_without_changing_anything();
+    the_information_window_shows_a_drawer();
+    information_shows_an_icon_without_an_object_and_refuses_disks();
     a_window_snapshot_is_used_when_the_window_opens_again();
     a_reset_closes_and_reopens_the_windows();
     more_drawers_open_than_the_old_table_held();

@@ -25,7 +25,10 @@
 
 #include "chrome.hpp"
 
+#include "../dos_date.hpp"
 #include "../format.hpp"
+
+#include <initializer_list>
 
 namespace hombre {
 
@@ -151,6 +154,53 @@ constexpr u32 kClipBytes = ndk::Region_SIZEOF + ndk::RegionRectangle_SIZEOF;
 // points to.
 constexpr u32 kZoomTagBytes = 2 * ndk::ti_SIZEOF + 8;
 
+// AmigaDOS protection bits: the four that deny an access are active low, so
+// their check boxes show an allowed access; archive, pure, script and hold
+// are set flags. Only the bits with a check box in the information window
+// are here; the others stay as the object had them.
+constexpr u32 kProtectDelete = 1u << 0;
+constexpr u32 kProtectExecute = 1u << 1;
+constexpr u32 kProtectWrite = 1u << 2;
+constexpr u32 kProtectRead = 1u << 3;
+constexpr u32 kProtectArchive = 1u << 4;
+constexpr u32 kProtectScript = 1u << 6;
+
+struct ProtectionBox {
+    u16 id;
+    u32 bit;
+    bool denies;  // checked while the bit is clear
+    const char* label;
+};
+
+constexpr ProtectionBox kProtectionBoxes[] = {
+    {Workbench::kInfoScript, kProtectScript, false, "Script"},
+    {Workbench::kInfoArchived, kProtectArchive, false, "Archived"},
+    {Workbench::kInfoReadable, kProtectRead, true, "Readable"},
+    {Workbench::kInfoWritable, kProtectWrite, true, "Writable"},
+    {Workbench::kInfoExecutable, kProtectExecute, true, "Executable"},
+    {Workbench::kInfoDeletable, kProtectDelete, true, "Deletable"},
+};
+constexpr u32 kProtectionBoxCount = sizeof kProtectionBoxes / sizeof kProtectionBoxes[0];
+constexpr u32 kProtectionColumns = 2;
+constexpr u32 kProtectionRows =
+    (kProtectionBoxCount + kProtectionColumns - 1) / kProtectionColumns;
+
+// The type a Workbench object has, as the information window names it.
+const char* object_type_name(u8 type) {
+    switch (type) {
+    case Workbench::kDrawer:
+        return "Drawer";
+    case Workbench::kTool:
+        return "Tool";
+    case Workbench::kProject:
+        return "Project";
+    case Workbench::kGarbage:
+        return "Trashcan";
+    default:
+        return "Unknown";
+    }
+}
+
 // The scroll gadgets in the borders WFLG_SIZEBRIGHT and WFLG_SIZEBBOTTOM
 // make (14 pixels on the right and at the bottom), around the size gadget
 // in the corner. Their boxes follow the window's size: a RELRIGHT edge
@@ -274,7 +324,7 @@ constexpr MenuItemSpec kWindowItems[] = {
 
 constexpr MenuItemSpec kIconsItems[] = {
     {"Open", true},          {"Copy", true},         {"Rename...", true},
-    {"Information...", false}, {"Snapshot", true},    {"Unsnapshot", true},
+    {"Information...", true}, {"Snapshot", true},    {"Unsnapshot", true},
     {"Leave Out", false},    {"Put Away", false},     {"Delete...", true},
     {"Format Disk...", false}, {"Empty Trash", false},
 };
@@ -295,7 +345,6 @@ constexpr u32 kMenuCount = sizeof kMenus / sizeof kMenus[0];
 constexpr u32 kMenuWorkbench = 0;
 constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
-constexpr i32 kRequestMargin = 8;
 constexpr u32 kItemBackdrop = 0;
 constexpr u32 kItemExecute = 1;
 constexpr u32 kItemNewDrawer = 0;
@@ -304,6 +353,7 @@ constexpr u32 kItemWindowSnapshot = 6;
 constexpr u32 kItemIconSnapshot = 4;
 constexpr u32 kItemIconCopy = 1;
 constexpr u32 kItemIconRename = 2;
+constexpr u32 kItemIconInformation = 3;
 constexpr u32 kItemIconUnsnapshot = 5;
 constexpr u32 kItemIconDelete = 8;
 constexpr u32 kSubAll = 1;
@@ -400,6 +450,134 @@ struct Message {
         format_u64(digits, sizeof digits, value, 10);
         return add(digits);
     }
+};
+
+// Builds the window of a dialog, sized by the screen's font. Its block of
+// exec memory holds the NewWindow, the NewGadget and tags of the gadget
+// being made and the strings the gadgets keep.
+class DialogBuilder {
+public:
+    static constexpr i32 kMargin = 8;
+
+    DialogBuilder(m68k::Machine& m, Exec& exec, Graphics& graphics, Intuition& intuition,
+                  GadTools& gadtools, u32 screen, Workbench::Dialog& dialog,
+                  std::initializer_list<const char*> strings)
+        : bus_(m), intuition_(intuition), gadtools_(gadtools), dialog_(dialog), screen_(screen),
+          font_(graphics.font_metrics(intuition.font_of_screen(screen))),
+          bar_height_(static_cast<i32>(bus_.r8(screen + ndk::sc_BarHeight))) {
+        u32 bytes = kList + 4;
+        for (const char* text : strings) {
+            bytes += text_length(text) + 1;
+        }
+        dialog.block = exec.alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        dialog.block_bytes = bytes;
+        at_ = dialog.block + kList + 4;
+        if (dialog.block != 0) {
+            dialog.gadgets = gadtools.create_context(dialog.block + kList);
+            previous_ = dialog.gadgets;
+        }
+    }
+
+    i32 width() const { return 40 * font_.x_size; }
+    i32 inner_width() const { return width() - 2 * kMargin; }
+    i32 line_height() const { return font_.y_size + 6; }
+    i32 char_width() const { return font_.x_size; }
+    i32 font_height() const { return font_.y_size; }
+    i32 top() const { return bar_height_ + kMargin; }
+
+    // Copies one of the strings the block was sized for into it.
+    u32 put(const char* text) {
+        const u32 start = at_;
+        if (dialog_.block != 0) {
+            for (u32 i = 0; text[i] != '\0'; ++i) {
+                bus_.w8(at_++, static_cast<u8>(text[i]));
+            }
+            bus_.w8(at_++, 0);
+        }
+        return start;
+    }
+
+    // The tag list of the next gadget made, from pairs of tag and data.
+    u32 tags(std::initializer_list<u32> words) {
+        if (dialog_.block == 0) {
+            return 0;
+        }
+        u32 at = dialog_.block + kTags;
+        for (const u32 word : words) {
+            bus_.w32(at, word);
+            at += 4;
+        }
+        bus_.w32(at, ndk::TAG_DONE);
+        return dialog_.block + kTags;
+    }
+
+    u32 add(u32 kind, u16 id, i32 left, i32 top, i32 width, u32 label, u32 place,
+            u32 gadget_tags = 0) {
+        using namespace gadtools_defs;
+        if (previous_ == 0) {
+            return 0;
+        }
+        const u32 gadget = dialog_.block + kNewGadget;
+        bus_.w16(gadget + ng_LeftEdge, static_cast<u32>(left));
+        bus_.w16(gadget + ng_TopEdge, static_cast<u32>(top));
+        bus_.w16(gadget + ng_Width, static_cast<u32>(width));
+        bus_.w16(gadget + ng_Height, static_cast<u32>(line_height()));
+        bus_.w32(gadget + ng_GadgetText, label);
+        bus_.w16(gadget + ng_GadgetID, id);
+        bus_.w32(gadget + ng_Flags, place);
+        previous_ = gadtools_.create_gadget(kind, previous_, gadget, gadget_tags);
+        return previous_;
+    }
+
+    // The accepting button on the left and Cancel on the right.
+    void buttons(i32 top, u32 accept, u32 cancel) {
+        using namespace gadtools_defs;
+        const i32 button = 9 * font_.x_size;
+        add(BUTTON_KIND, Workbench::kDialogAccept, kMargin, top, button, accept, PLACETEXT_IN);
+        add(BUTTON_KIND, Workbench::kDialogCancel, width() - kMargin - button, top, button,
+            cancel, PLACETEXT_IN);
+    }
+
+    // Opens the window and draws its gadgets; height is what they take.
+    bool open(u32 title, i32 height) {
+        if (previous_ == 0) {
+            return false;
+        }
+        const u32 window = dialog_.block;
+        bus_.w16(window + ndk::nw_LeftEdge, kCascadeX);
+        bus_.w16(window + ndk::nw_TopEdge, static_cast<u32>(2 * bar_height_));
+        bus_.w16(window + ndk::nw_Width, static_cast<u32>(width()));
+        bus_.w16(window + ndk::nw_Height, static_cast<u32>(height + kMargin));
+        bus_.w8(window + ndk::nw_BlockPen, 1);
+        bus_.w32(window + ndk::nw_IDCMPFlags, ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_GADGETUP);
+        bus_.w32(window + ndk::nw_Flags, ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET |
+                                             ndk::WFLG_CLOSEGADGET | ndk::WFLG_ACTIVATE);
+        bus_.w32(window + ndk::nw_FirstGadget, dialog_.gadgets);
+        bus_.w32(window + ndk::nw_Title, title);
+        bus_.w32(window + ndk::nw_Screen, screen_);
+        bus_.w16(window + ndk::nw_Type, ndk::CUSTOMSCREEN);
+        dialog_.window = bus_.ok() ? intuition_.open_window(window, 0) : 0;
+        if (dialog_.window != 0) {
+            gadtools_.refresh_window(dialog_.window);
+        }
+        return dialog_.window != 0;
+    }
+
+private:
+    static constexpr u32 kTagWords = 5;
+    static constexpr u32 kNewGadget = ndk::NewWindow_SIZEOF;
+    static constexpr u32 kTags = kNewGadget + gadtools_defs::NewGadget_SIZEOF;
+    static constexpr u32 kList = kTags + kTagWords * 4;
+
+    Bus bus_;
+    Intuition& intuition_;
+    GadTools& gadtools_;
+    Workbench::Dialog& dialog_;
+    u32 screen_;
+    Graphics::FontMetrics font_;
+    i32 bar_height_;
+    u32 at_ = 0;
+    u32 previous_ = 0;
 };
 
 bool join_path(const char* drawer, const char* name, char (&out)[Dos::kMaxPath]) {
@@ -2902,135 +3080,15 @@ i32 Workbench::easy(const char* title, const char* text, const char* gadgets) {
     return answer;
 }
 
-bool Workbench::ask_text(const char* title, const char* prompt, const char* initial, char* out,
-                         u32 size) {
-    if (out == nullptr || size == 0) {
-        return false;
-    }
-    if (answer_ != nullptr) {
-        copy_text(out, size, initial);
-        return answer_(answer_ctx_, title, prompt, out, size);
-    }
-    TextRequest request{};
-    if (!running_ || !open_text_request(title, prompt, initial, size, request)) {
-        return false;
-    }
-    Bus b(*machine_);
-    const u32 bit = b.r8(b.r32(request.window + ndk::wd_UserPort) + ndk::mp_SigBit);
-    Reply reply = Reply::Cancelled;
-    while (b.ok() && bit < 32 &&
-           (reply = text_request_input(request, out, size)) == Reply::Waiting &&
-           exec_->wait_for(1u << bit, ~u64(0)) != 0) {
-    }
-    close_text_request(request);
-    return reply == Reply::Accepted;
+bool Workbench::can_show_dialog() const {
+    return machine_ != nullptr && exec_ != nullptr && intuition_ != nullptr &&
+           gadtools_ != nullptr && graphics_ != nullptr && dos_ != nullptr && screen_ != 0;
 }
 
-// A prompt above a string gadget, with Ok and Cancel buttons under it, sized
-// by the screen's font.
-bool Workbench::open_text_request(const char* title, const char* prompt, const char* initial,
-                                  u32 size, TextRequest& request) {
-    using namespace gadtools_defs;
-    if (machine_ == nullptr || exec_ == nullptr || intuition_ == nullptr || gadtools_ == nullptr ||
-        graphics_ == nullptr || screen_ == 0 || size < 2) {
-        return false;
-    }
-    constexpr u32 kTagWords = 6;
-    constexpr char kOk[] = "Ok";
-    constexpr char kCancel[] = "Cancel";
-    const u32 title_bytes = text_length(title) + 1;
-    const u32 prompt_bytes = text_length(prompt) + 1;
-    const u32 initial_bytes = text_length(initial) + 1;
-    const u32 bytes = ndk::NewWindow_SIZEOF + NewGadget_SIZEOF + kTagWords * 4 + 4 + sizeof kOk +
-                      sizeof kCancel + title_bytes + prompt_bytes + initial_bytes;
-    const u32 block = exec_->alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-    if (block == 0) {
-        return false;
-    }
-    request = TextRequest{};
-    request.block = block;
-    request.block_bytes = bytes;
+template <typename OnGadget>
+Workbench::Reply Workbench::dialog_input(const Dialog& dialog, OnGadget on_gadget) {
     Bus b(*machine_);
-    const u32 new_window = block;
-    const u32 new_gadget = new_window + ndk::NewWindow_SIZEOF;
-    const u32 tags = new_gadget + NewGadget_SIZEOF;
-    const u32 list = tags + kTagWords * 4;
-    u32 at = list + 4;
-    auto put = [&](const char* part, u32 length) {
-        const u32 start = at;
-        for (u32 i = 0; i < length; ++i) {
-            b.w8(at + i, static_cast<u8>(part[i]));
-        }
-        at += length;
-        return start;
-    };
-    const u32 ok_at = put(kOk, sizeof kOk);
-    const u32 cancel_at = put(kCancel, sizeof kCancel);
-    const u32 title_at = put(title, title_bytes);
-    const u32 prompt_at = put(prompt, prompt_bytes);
-    const u32 initial_at = put(initial, initial_bytes);
-    b.w32(tags, GTST_String);
-    b.w32(tags + 4, initial_at);
-    b.w32(tags + 8, GTST_MaxChars);
-    b.w32(tags + 12, size - 1);
-
-    const Graphics::FontMetrics font =
-        graphics_->font_metrics(intuition_->font_of_screen(screen_));
-    const i32 bar_height = static_cast<i32>(b.r8(screen_ + ndk::sc_BarHeight));
-    const i32 width = 40 * font.x_size;
-    const i32 gadget_height = font.y_size + 6;
-    const i32 string_top = bar_height + font.y_size + 10;
-    const i32 button_top = string_top + gadget_height + kRequestMargin;
-    const i32 button_width = 9 * font.x_size;
-
-    request.gadgets = gadtools_->create_context(list);
-    u32 previous = request.gadgets;
-    auto add = [&](u32 kind, u16 id, i32 left, i32 top, i32 gadget_width, u32 label, u32 place,
-                   u32 gadget_tags) {
-        b.w16(new_gadget + ng_LeftEdge, static_cast<u32>(left));
-        b.w16(new_gadget + ng_TopEdge, static_cast<u32>(top));
-        b.w16(new_gadget + ng_Width, static_cast<u32>(gadget_width));
-        b.w16(new_gadget + ng_Height, static_cast<u32>(gadget_height));
-        b.w32(new_gadget + ng_GadgetText, label);
-        b.w16(new_gadget + ng_GadgetID, id);
-        b.w32(new_gadget + ng_Flags, place);
-        previous = gadtools_->create_gadget(kind, previous, new_gadget, gadget_tags);
-        return previous;
-    };
-    request.string = add(STRING_KIND, kRequestString, kRequestMargin, string_top,
-                         width - 2 * kRequestMargin, prompt_at, PLACETEXT_ABOVE, tags);
-    add(BUTTON_KIND, kRequestOk, kRequestMargin, button_top, button_width, ok_at, PLACETEXT_IN, 0);
-    add(BUTTON_KIND, kRequestCancel, width - kRequestMargin - button_width, button_top,
-        button_width, cancel_at, PLACETEXT_IN, 0);
-
-    b.w16(new_window + ndk::nw_LeftEdge, kCascadeX);
-    b.w16(new_window + ndk::nw_TopEdge, static_cast<u32>(2 * bar_height));
-    b.w16(new_window + ndk::nw_Width, static_cast<u32>(width));
-    b.w16(new_window + ndk::nw_Height,
-          static_cast<u32>(button_top + gadget_height + kRequestMargin));
-    b.w8(new_window + ndk::nw_BlockPen, 1);
-    b.w32(new_window + ndk::nw_IDCMPFlags, ndk::IDCMP_CLOSEWINDOW | ndk::IDCMP_GADGETUP);
-    b.w32(new_window + ndk::nw_Flags, ndk::WFLG_DRAGBAR | ndk::WFLG_DEPTHGADGET |
-                                          ndk::WFLG_CLOSEGADGET | ndk::WFLG_ACTIVATE);
-    b.w32(new_window + ndk::nw_FirstGadget, request.gadgets);
-    b.w32(new_window + ndk::nw_Title, title_at);
-    b.w32(new_window + ndk::nw_Screen, screen_);
-    b.w16(new_window + ndk::nw_Type, ndk::CUSTOMSCREEN);
-    request.window =
-        b.ok() && previous != 0 ? intuition_->open_window(new_window, 0) : 0;
-    if (request.window == 0) {
-        LogLine().text("workbench: could not ask for ").text(prompt).send();
-        close_text_request(request);
-        return false;
-    }
-    gadtools_->refresh_window(request.window);
-    intuition_->activate_string(request.string, request.window);
-    return true;
-}
-
-Workbench::Reply Workbench::text_request_input(const TextRequest& request, char* out, u32 size) {
-    Bus b(*machine_);
-    const u32 port = b.r32(request.window + ndk::wd_UserPort);
+    const u32 port = b.r32(dialog.window + ndk::wd_UserPort);
     u32 message = 0;
     while (b.ok() && port != 0 && (message = exec_->get_message(port)) != 0) {
         const u32 idcmp_class = b.r32(message + ndk::im_Class);
@@ -3044,27 +3102,273 @@ Workbench::Reply Workbench::text_request_input(const TextRequest& request, char*
             continue;
         }
         const u32 id = b.r16(gadget + ndk::gg_GadgetID);
-        if (id == kRequestCancel) {
-            return Reply::Cancelled;
-        }
-        if (id == kRequestOk || (id == kRequestString && code == '\r')) {
-            const u32 info = b.r32(request.string + ndk::gg_SpecialInfo);
-            return b.string(b.r32(info + ndk::si_Buffer), out, size) ? Reply::Accepted
-                                                                      : Reply::Cancelled;
+        const Reply reply = id == kDialogCancel ? Reply::Cancelled : on_gadget(id, code);
+        if (reply != Reply::Waiting) {
+            return reply;
         }
     }
     return b.ok() && port != 0 ? Reply::Waiting : Reply::Cancelled;
 }
 
-void Workbench::close_text_request(TextRequest& request) {
-    if (request.window != 0) {
-        intuition_->close_window(request.window);
+template <typename Step>
+Workbench::Reply Workbench::wait_for_reply(const Dialog& dialog, Step step) {
+    Bus b(*machine_);
+    const u32 bit = b.r8(b.r32(dialog.window + ndk::wd_UserPort) + ndk::mp_SigBit);
+    Reply reply = Reply::Cancelled;
+    while (b.ok() && bit < 32 && (reply = step()) == Reply::Waiting &&
+           exec_->wait_for(1u << bit, ~u64(0)) != 0) {
     }
-    gadtools_->free_gadgets(request.gadgets);
-    if (request.block != 0) {
-        exec_->free(request.block, request.block_bytes);
+    return reply;
+}
+
+void Workbench::close_dialog(Dialog& dialog) {
+    if (dialog.window != 0) {
+        intuition_->close_window(dialog.window);
+    }
+    gadtools_->free_gadgets(dialog.gadgets);
+    if (dialog.block != 0) {
+        exec_->free(dialog.block, dialog.block_bytes);
+    }
+    dialog = Dialog{};
+}
+
+bool Workbench::ask_text(const char* title, const char* prompt, const char* initial, char* out,
+                         u32 size) {
+    if (out == nullptr || size == 0) {
+        return false;
+    }
+    if (answer_ != nullptr) {
+        copy_text(out, size, initial);
+        return answer_(answer_ctx_, title, prompt, out, size);
+    }
+    TextRequest request{};
+    if (!running_ || !open_text_request(title, prompt, initial, size, request)) {
+        return false;
+    }
+    const Reply reply =
+        wait_for_reply(request, [&] { return text_request_input(request, out, size); });
+    close_dialog(request);
+    return reply == Reply::Accepted;
+}
+
+// A prompt above a string gadget, with Ok and Cancel buttons under it.
+bool Workbench::open_text_request(const char* title, const char* prompt, const char* initial,
+                                  u32 size, TextRequest& request) {
+    using namespace gadtools_defs;
+    if (!can_show_dialog() || size < 2) {
+        return false;
     }
     request = TextRequest{};
+    DialogBuilder dialog(*machine_, *exec_, *graphics_, *intuition_, *gadtools_, screen_, request,
+                         {title, prompt, initial, "Ok", "Cancel"});
+    const u32 title_at = dialog.put(title);
+    const u32 prompt_at = dialog.put(prompt);
+    const u32 initial_at = dialog.put(initial);
+    const u32 ok_at = dialog.put("Ok");
+    const u32 cancel_at = dialog.put("Cancel");
+    // The prompt takes a line above the string gadget.
+    const i32 string_top = dialog.top() + dialog.font_height() + 2;
+    const i32 button_top = string_top + dialog.line_height() + DialogBuilder::kMargin;
+    request.string =
+        dialog.add(STRING_KIND, kRequestString, DialogBuilder::kMargin, string_top,
+                   dialog.inner_width(), prompt_at, PLACETEXT_ABOVE,
+                   dialog.tags({GTST_String, initial_at, GTST_MaxChars, size - 1}));
+    dialog.buttons(button_top, ok_at, cancel_at);
+    if (!dialog.open(title_at, button_top + dialog.line_height())) {
+        LogLine().text("workbench: could not ask for ").text(prompt).send();
+        close_dialog(request);
+        return false;
+    }
+    intuition_->activate_string(request.string, request.window);
+    return true;
+}
+
+Workbench::Reply Workbench::text_request_input(const TextRequest& request, char* out, u32 size) {
+    return dialog_input(request, [&](u32 id, u32 code) {
+        if (id != kRequestOk && (id != kRequestString || code != '\r')) {
+            return Reply::Waiting;
+        }
+        Bus b(*machine_);
+        const u32 info = b.r32(request.string + ndk::gg_SpecialInfo);
+        return b.string(b.r32(info + ndk::si_Buffer), out, size) ? Reply::Accepted
+                                                                  : Reply::Cancelled;
+    });
+}
+
+// A window of lines that say what the icon stands for, a check box for each
+// protection bit it has one for, a comment to edit and Save and Cancel
+// buttons.
+bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
+    using namespace gadtools_defs;
+    const IconEntry* icon = file_icon(window_id, icon_id);
+    if (icon == nullptr) {
+        const IconEntry* other = find_icon(icon_id);
+        show_error("cannot show", other != nullptr ? other->name : "?",
+                   ERROR_OBJECT_WRONG_TYPE);
+        return false;
+    }
+    if (!can_show_dialog()) {
+        return false;
+    }
+    char path[Dos::kMaxPath];
+    if (!icon_path(*find_window(window_id), *icon, path)) {
+        return false;
+    }
+    const Dos::FileInfo info = dos_->file_info(path);
+    const bool has_object = info.kind != Dos::TargetKind::Missing;
+    const bool is_file = info.kind == Dos::TargetKind::File;
+
+    Message name_line;
+    name_line.add("Name: ").add(icon->name);
+    Message type_line;
+    type_line.add("Type: ").add(object_type_name(icon->type));
+    Message size_line;
+    if (is_file) {
+        size_line.add("Size: ").number(info.size).add(" bytes, ").number(info.blocks).add(
+            " blocks");
+    }
+    Message date_line;
+    if (has_object) {
+        char date[LEN_DATSTRING];
+        char time[LEN_DATSTRING];
+        const DosStamp stamp{info.days, info.minutes, info.ticks};
+        if (dos_format_date(stamp, FORMAT_DEF, 0, 0, date, sizeof date, nullptr, 0, time,
+                            sizeof time) != 0) {
+            date_line.add("Date: ").add(date).add(" ").add(time);
+        }
+    }
+
+    request = InfoRequest{};
+    copy_text(request.path, sizeof request.path, path);
+    copy_text(request.name, sizeof request.name, icon->name);
+    copy_text(request.comment_text, sizeof request.comment_text, info.comment);
+    request.protection = info.protection;
+    request.has_object = has_object;
+
+    static_assert(kProtectionBoxCount == 6);
+    DialogBuilder dialog(
+        *machine_, *exec_, *graphics_, *intuition_, *gadtools_, screen_, request,
+        {name_line.text, type_line.text, size_line.text, date_line.text, "Information", "Comment",
+         "Save", "Cancel", info.comment, kProtectionBoxes[0].label, kProtectionBoxes[1].label,
+         kProtectionBoxes[2].label, kProtectionBoxes[3].label, kProtectionBoxes[4].label,
+         kProtectionBoxes[5].label});
+    const i32 margin = DialogBuilder::kMargin;
+    i32 top = dialog.top();
+    const auto line = [&](u16 id, const char* text) {
+        dialog.add(TEXT_KIND, id, margin, top, dialog.inner_width(), 0, 0,
+                   dialog.tags({GTTX_Text, dialog.put(text)}));
+        top += dialog.line_height();
+    };
+    line(kInfoName, name_line.text);
+    line(kInfoType, type_line.text);
+    if (is_file) {
+        line(kInfoSize, size_line.text);
+    }
+    if (has_object) {
+        line(kInfoDate, date_line.text);
+        top += margin;
+        for (u32 i = 0; i < kProtectionBoxCount; ++i) {
+            const ProtectionBox& box = kProtectionBoxes[i];
+            const bool set = (info.protection & box.bit) != 0;
+            const i32 column = static_cast<i32>(i % kProtectionColumns);
+            const i32 row = static_cast<i32>(i / kProtectionColumns);
+            dialog.add(CHECKBOX_KIND, box.id, margin + column * 20 * dialog.char_width(),
+                       top + row * dialog.line_height(), 0, dialog.put(box.label),
+                       PLACETEXT_RIGHT,
+                       dialog.tags({GTCB_Checked, box.denies != set ? 1u : 0u}));
+        }
+        // The comment's label takes a line above it.
+        top += static_cast<i32>(kProtectionRows) * dialog.line_height() + dialog.font_height() + 4;
+        const u32 comment_label = dialog.put("Comment");
+        const u32 comment = dialog.put(info.comment);
+        request.comment_gadget = dialog.add(
+            STRING_KIND, kInfoComment, margin, top, dialog.inner_width(), comment_label,
+            PLACETEXT_ABOVE,
+            dialog.tags({GTST_String, comment, GTST_MaxChars, Dos::kMaxComment}));
+        top += dialog.line_height();
+    }
+    top += margin;
+    const u32 save_at = dialog.put("Save");
+    const u32 cancel_at = dialog.put("Cancel");
+    dialog.buttons(top, save_at, cancel_at);
+    if (!dialog.open(dialog.put("Information"), top + dialog.line_height())) {
+        LogLine().text("workbench: could not show information for ").text(icon->name).send();
+        close_dialog(request);
+        return false;
+    }
+    if (request.comment_gadget != 0) {
+        intuition_->activate_string(request.comment_gadget, request.window);
+    }
+    return true;
+}
+
+Workbench::Reply Workbench::info_input(InfoRequest& request) {
+    return dialog_input(request, [](u32 id, u32) {
+        return id == kInfoSave ? Reply::Accepted : Reply::Waiting;
+    });
+}
+
+bool Workbench::save_info(InfoRequest& request) {
+    if (!request.has_object) {
+        return true;
+    }
+    if (machine_ == nullptr || dos_ == nullptr || request.comment_gadget == 0) {
+        return false;
+    }
+    Bus b(*machine_);
+    auto checked = [&](u16 id) {
+        for (u32 gadget = request.gadgets, i = 0; gadget != 0 && i < 32;
+             ++i, gadget = b.r32(gadget + ndk::gg_NextGadget)) {
+            if (b.r16(gadget + ndk::gg_GadgetID) == id) {
+                return (b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_SELECTED) != 0;
+            }
+        }
+        return false;
+    };
+    u32 protection = request.protection;
+    for (const ProtectionBox& box : kProtectionBoxes) {
+        const bool allowed = checked(box.id);
+        const bool set = box.denies ? !allowed : allowed;
+        protection = set ? protection | box.bit : protection & ~box.bit;
+    }
+    char comment[Dos::kMaxComment + 1]{};
+    const u32 string_info = b.r32(request.comment_gadget + ndk::gg_SpecialInfo);
+    if (!b.ok() || !b.string(b.r32(string_info + ndk::si_Buffer), comment, sizeof comment)) {
+        return false;
+    }
+    u32 error = 0;
+    bool changed = false;
+    if (protection != request.protection) {
+        if (!dos_->set_protection_bits(request.path, protection, error)) {
+            show_error("cannot save", request.name, error);
+            return false;
+        }
+        request.protection = protection;
+        changed = true;
+    }
+    if (!same_text(comment, request.comment_text)) {
+        if (!dos_->set_file_comment(request.path, comment, error)) {
+            show_error("cannot save", request.name, error);
+            return false;
+        }
+        copy_text(request.comment_text, sizeof request.comment_text, comment);
+        changed = true;
+    }
+    if (changed) {
+        LogLine().text("workbench: saved ").text(request.path).send();
+    }
+    return true;
+}
+
+void Workbench::show_information(u32 window_id, u32 icon_id) {
+    InfoRequest request{};
+    if (!running_ || !open_info(window_id, icon_id, request)) {
+        return;
+    }
+    if (wait_for_reply(request, [&] { return info_input(request); }) == Reply::Accepted) {
+        save_info(request);
+    }
+    close_dialog(request);
 }
 
 // --- file operations -----------------------------------------------------
@@ -3720,6 +4024,8 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             copy_icon(window_id, selected);
         } else if (item == kItemIconRename && selected != kNoIcon) {
             ask_rename(window_id, selected);
+        } else if (item == kItemIconInformation && selected != kNoIcon) {
+            show_information(window_id, selected);
         } else if (item == kItemIconSnapshot && selected != kNoIcon) {
             snapshot_icon(window_id, selected);
         } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {

@@ -113,6 +113,8 @@ constexpr u32 PLACETEXT_ABOVE = 0x4;
 constexpr u32 PLACETEXT_BELOW = 0x8;
 constexpr u32 PLACETEXT_IN = 0x10;
 
+constexpr u32 GTTX_Text = 0x8008000B;
+constexpr u32 GTCB_Checked = 0x80080004;
 constexpr u32 GTST_String = 0x8008002D;
 constexpr u32 GTST_MaxChars = 0x8008002E;
 

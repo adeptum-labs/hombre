@@ -332,24 +332,69 @@ public:
     bool ask_text(const char* title, const char* prompt, const char* initial, char* out,
                   u32 size);
 
-    // The window of ask_text, apart so that its input can be fed one step
-    // at a time.
-    struct TextRequest {
+    // A modal window of GadTools gadgets, apart from the loop that waits at
+    // it so that its input can be fed one step at a time.
+    struct Dialog {
         u32 window = 0;
         u32 gadgets = 0;  // the first of its gadget list
-        u32 string = 0;
-        u32 block = 0;  // the strings and structs the gadgets keep
+        u32 block = 0;    // the strings and structs the gadgets keep
         u32 block_bytes = 0;
     };
-    static constexpr u16 kRequestString = 1;
-    static constexpr u16 kRequestOk = 2;
-    static constexpr u16 kRequestCancel = 3;
+    static constexpr u16 kDialogAccept = 2;
+    static constexpr u16 kDialogCancel = 3;
     enum class Reply : u8 { Waiting, Accepted, Cancelled };
+    void close_dialog(Dialog& dialog);
+
+    // The window of ask_text.
+    struct TextRequest : Dialog {
+        u32 string = 0;
+    };
+    static constexpr u16 kRequestString = 1;
+    static constexpr u16 kRequestOk = kDialogAccept;
+    static constexpr u16 kRequestCancel = kDialogCancel;
     bool open_text_request(const char* title, const char* prompt, const char* initial, u32 size,
                            TextRequest& request);
     // Handles the input waiting at the request's window.
     Reply text_request_input(const TextRequest& request, char* out, u32 size);
-    void close_text_request(TextRequest& request);
+
+    // The window of Icons > Information: the name and type of what the icon
+    // stands for, the size and blocks of a file, its date, a check box for
+    // each protection bit it has one for, and its comment. path finds the
+    // object again when it is saved, name names it in an error; protection
+    // and comment_text are what the window opened with. has_object is false
+    // for an icon that stands for nothing but its .info.
+    struct InfoRequest : Dialog {
+        u32 comment_gadget = 0;  // the comment string gadget
+        char path[Dos::kMaxPath]{};
+        char name[32]{};
+        char comment_text[Dos::kMaxComment + 1]{};
+        u32 protection = 0;
+        bool has_object = false;
+    };
+    static constexpr u16 kInfoComment = 1;
+    static constexpr u16 kInfoSave = kDialogAccept;
+    static constexpr u16 kInfoCancel = kDialogCancel;
+    static constexpr u16 kInfoScript = 4;
+    static constexpr u16 kInfoArchived = 5;
+    static constexpr u16 kInfoReadable = 6;
+    static constexpr u16 kInfoWritable = 7;
+    static constexpr u16 kInfoExecutable = 8;
+    static constexpr u16 kInfoDeletable = 9;
+    static constexpr u16 kInfoName = 10;
+    static constexpr u16 kInfoType = 11;
+    static constexpr u16 kInfoSize = 12;
+    static constexpr u16 kInfoDate = 13;
+    bool open_info(u32 window_id, u32 icon_id, InfoRequest& request);
+    // Handles the input waiting at the information window: Accepted for
+    // Save, Cancelled for Cancel or the close gadget.
+    Reply info_input(InfoRequest& request);
+    // Writes the protection bits and the comment that changed. False, shown,
+    // when one cannot be written; nothing is written for an icon without an
+    // object or when nothing changed.
+    bool save_info(InfoRequest& request);
+    // The Icons > Information menu item: opens the window, waits for Save or
+    // Cancel, saves on Save and closes it. A disk's icon is refused.
+    void show_information(u32 window_id, u32 icon_id);
 
     // The window's scroll gadget with the GadgetID id; 0 when it has none.
     u32 scroll_gadget(u32 window_id, u16 id) const;
@@ -605,6 +650,14 @@ private:
     void ask_rename(u32 window_id, u32 icon_id);
     void ask_new_drawer(u32 window_id);
     void ask_command();
+    bool can_show_dialog() const;
+    // Handles the messages at the dialog's window: its close gadget and
+    // Cancel cancel it, on_gadget answers for any other gadget let go.
+    template <typename OnGadget>
+    Reply dialog_input(const Dialog& dialog, OnGadget on_gadget);
+    // Waits at the dialog's window until step answers.
+    template <typename Step>
+    Reply wait_for_reply(const Dialog& dialog, Step step);
     // Renames the object and its .info, both or neither.
     bool rename_with_info(const char* from, const char* to, u32& error);
     void select_contents(u32 window_id);

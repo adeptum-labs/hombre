@@ -118,10 +118,8 @@ constexpr u32 kListDownKind = 0x82;
 
 // The tags of the gadgets gadtools makes.
 constexpr u32 GA_Disabled = 0x8003000E;
-constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTTX_CopyText = 0x8008000C;
 constexpr u32 GTNM_Number = 0x8008000D;
-constexpr u32 GTCB_Checked = 0x80080004;
 constexpr u32 GTCB_Scaled = 0x80080044;
 constexpr u32 GTCY_Labels = 0x8008000E;
 constexpr u32 GTCY_Active = 0x8008000F;
