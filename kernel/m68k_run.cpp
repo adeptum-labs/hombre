@@ -181,6 +181,9 @@ struct Console {
     TypedShell typed{};
     ShellHost host{};      // what its lines and scripts run through
     bool break_script = false;  // Ctrl+D asks a running script to stop
+    // The system monitor ended a command of the script that runs: the
+    // whole script stops.
+    bool stop_script = false;
     // Where the next command's input and output go, from <, > and >>.
     char redirect_in[Shell::kMaxLine + 1]{};
     char redirect_out[Shell::kMaxLine + 1]{};
@@ -1191,6 +1194,10 @@ bool execute(Console& c, const char* path, const char* args, u32 input = 0, u32 
         dos.run_command_in(c.process, path, args, result, block_budget, input, output);
     c.command_running = false;
     c.filter.reset();
+    // Only an End from the system monitor stops a command with Stopped.
+    if (machine.cpu.exit == ExitReason::Stopped) {
+        c.stop_script = true;
+    }
     reclaim_after_program(c.process);
     intuition.flush_palette();
     if (!serial_at_line_start) {
@@ -1461,10 +1468,14 @@ bool script_capture(void* ctx, const char* line, char* out, u32 size) {
     return ok;
 }
 
+bool shell_closing(const Console& c);
+
+// Ctrl+D, an End of one of its commands from the system monitor, or the
+// close gadget of the shell's window stops a script before its next line.
 bool script_break(void* ctx) {
     Console& c = script_console(ctx);
     poll_keys();
-    const bool stop = c.break_script;
+    const bool stop = c.break_script || c.stop_script || shell_closing(c);
     c.break_script = false;
     return stop;
 }
@@ -1532,12 +1543,16 @@ u32 run_script_file(Console& c, const char* args, bool early_break) {
         poll_keys();
         c.break_script = false;
     }
+    if (script_depth == 0) {
+        c.stop_script = false;
+    }
     ++script_depth;
     ScriptRunner runner(script_host(c));
     const u32 rc = runner.run(reinterpret_cast<const char*>(text), got);
     --script_depth;
     if (script_depth == 0) {
         c.break_script = false;
+        c.stop_script = false;
     }
     return rc;
 }

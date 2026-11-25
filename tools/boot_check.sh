@@ -53,6 +53,10 @@
 # the Startup-Sequence ends, which stops the disk's S:Startup-Sequence and
 # leaves the boot shell open.
 #
+# --absent <marker>, which may be given more than once, fails the check
+# when that marker shows up on the serial console before the others are
+# all there.
+#
 # --mouse-after <marker> and --mouse "<commands>" must be given together.
 # --sound <wav> attaches an Intel HD Audio controller with an output codec
 # whose sound QEMU writes to the WAV file <wav>.
@@ -63,7 +67,7 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--smp <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--disk3 <file>] [--swappable] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--smp <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--disk3 <file>] [--swappable] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] [--absent <marker>]... <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
@@ -88,6 +92,7 @@ swappable=false
 hdf=
 hdf_bus=virtio
 no_startup=false
+absent=()
 while [[ ${1:-} == --* ]]; do
     case $1 in
         --disk)
@@ -144,6 +149,11 @@ while [[ ${1:-} == --* ]]; do
             usb_kbd=true
             usb_mouse=true
             mouse=$2
+            shift
+            ;;
+        --absent)
+            [[ $# -ge 2 && $2 != --* && -n $2 ]] || { echo "$usage" >&2; exit 2; }
+            absent+=("$2")
             shift
             ;;
         --sound)
@@ -357,8 +367,20 @@ all_markers_present() {
     done
 }
 
+# Fails the check at once when a marker that must not show up has.
+fail_on_absent() {
+    local marker
+    for marker in "${absent[@]}"; do
+        if grep -qF -- "$marker" "$serial_log"; then
+            echo "unwanted marker in $serial_log: $marker" >&2
+            exit 1
+        fi
+    done
+}
+
 for ((i = 0; i < timeout_seconds * 4; i++)); do
-    all_markers_present "$@" && exit 0
+    fail_on_absent
+    all_markers_present "$@" && { fail_on_absent; exit 0; }
     # Ctrl+D again and again from QEMU's start until the Startup-Sequence is
     # over. QEMU queues the keys until the kernel reads the keyboard, so one
     # is waiting when the script starts, however quickly the boot gets
@@ -380,6 +402,7 @@ for ((i = 0; i < timeout_seconds * 4; i++)); do
     sleep 0.25
 done
 
+fail_on_absent
 all_markers_present "$@" && exit 0
 echo "markers missing from $serial_log:" >&2
 for marker in "$@"; do

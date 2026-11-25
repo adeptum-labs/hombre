@@ -28,7 +28,8 @@
 //          <spintest.hunk> <crashtest.hunk>
 //
 // The disk is an OFS volume named HombreTest, packed as a DMS archive with
-// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the ten
+// SIMPLE tracks. It holds S/Startup-Sequence, S/EndTest (a script that
+// runs C:crashtest, then C:timertest), C/Echo, Hello and the ten
 // hunk files, as C/Version, LIBS/hombretest.library, C/mousetest,
 // C/tasktest, C/timertest, C/LoadWB, C/cgxtest, C/spintest and C/crashtest,
 // and wbtest with its icon in WBStartup, which SYS: names. The output depends
@@ -137,6 +138,7 @@ std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vecto
         {"S/Startup-Sequence", text("Echo \"Hombre test startup\"\nC:Version\n")},
         {"C/Echo", echo},
         {"Hello", text("Hello from the Hombre test disk.\n")},
+        {"S/EndTest", text("C:crashtest\nC:timertest\n")},
         {"C/Version", version},
         {"LIBS/hombretest.library", library},
         {"C/mousetest", mousetest},
