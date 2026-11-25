@@ -81,13 +81,17 @@ private:
     static constexpr i32 kTextHeight = 10;
     static constexpr i32 kCpuGroupHeight = 52;
     static constexpr i32 kMemoryGroupHeight = 40;
-    static constexpr i32 kCpuColumns = 7;
+    static constexpr i32 kCpuColumns = 6;
     static constexpr i32 kCpuRows = 2;
-    static constexpr i32 kCpuCellWidth = 84;
+    static constexpr i32 kCpuCellWidth = 98;
     static constexpr i32 kCpuCellHeight = 20;
-    static constexpr i32 kCpuGaugeWidth = 46;
+    // In a cell: the core's number, then its gauge and load, or "off".
+    static constexpr i32 kCpuIdWidth = 24;
+    static constexpr i32 kCpuGaugeOffset = 30;
+    static constexpr i32 kCpuGaugeWidth = 28;
     static constexpr i32 kCpuGaugeHeight = 12;
-    static constexpr i32 kCpuLabelOffset = 50;
+    static constexpr i32 kCpuLabelOffset = 62;
+    static constexpr i32 kCpuLabelWidth = 32;
     static constexpr i32 kRowPitch = 11;
     static constexpr i32 kScrollerWidth = 14;
     static constexpr i32 kScrollerGap = 6;
@@ -1097,24 +1101,25 @@ inline void MonitorUi::layout(const MonitorSnapshot& snapshot, MonitorView& view
         const i32 x = cpu_box.x0 + 8 + static_cast<i32>(i % kCpuColumns) * kCpuCellWidth;
         const i32 y = cpu_box.y0 + 16 + static_cast<i32>(i / kCpuColumns) * kCpuCellHeight;
         const MonitorCpu& cpu = snapshot.cpus[i];
+        const i32 y1 = y + kCpuGaugeHeight - 1;
+        Text<8> number;
+        number.add_padded(cpu.apic_id, 3, ' ');
+        add_text_part(view, Rect{x, y, x + kCpuIdWidth - 1, y1}, number.text, false);
+        const i32 left = x + kCpuGaugeOffset;
+        const i32 right = x + kCpuLabelOffset + kCpuLabelWidth - 1;
         if (!cpu.started) {
-            add_text_part(view, Rect{x, y, x + kCpuCellWidth - 1, y + kCpuGaugeHeight - 1}, "off",
-                          false);
+            add_text_part(view, Rect{left, y, right, y1}, "off", false);
             continue;
         }
         const u32 permille = cpu.busy_permille > 1000 ? 1000 : cpu.busy_permille;
-        if (MonitorPart* gauge =
-                add_part(view, MonitorPartKind::Gauge,
-                         Rect{x, y, x + kCpuGaugeWidth - 1, y + kCpuGaugeHeight - 1})) {
+        if (MonitorPart* gauge = add_part(view, MonitorPartKind::Gauge,
+                                          Rect{left, y, left + kCpuGaugeWidth - 1, y1})) {
             gauge->permille = permille;
         }
         Text<8> percent;
         percent.add_padded(permille / 10, 2, ' ');
         percent.add('%');
-        add_text_part(view,
-                      Rect{x + kCpuLabelOffset, y, x + kCpuCellWidth - 1,
-                           y + kCpuGaugeHeight - 1},
-                      percent.text, false);
+        add_text_part(view, Rect{x + kCpuLabelOffset, y, right, y1}, percent.text, false);
     }
     if (cores > cells) {
         const i32 x = cpu_box.x0 + 8 + static_cast<i32>(shown % kCpuColumns) * kCpuCellWidth;
@@ -1122,8 +1127,10 @@ inline void MonitorUi::layout(const MonitorSnapshot& snapshot, MonitorView& view
         Text<16> more;
         more.add('+');
         more.add_padded(cores - shown, 1, ' ');
-        add_text_part(view, Rect{x, y, x + kCpuCellWidth - 1, y + kCpuGaugeHeight - 1}, more.text,
-                      false);
+        add_text_part(view,
+                      Rect{x, y, x + kCpuLabelOffset + kCpuLabelWidth - 1,
+                           y + kCpuGaugeHeight - 1},
+                      more.text, false);
     }
 
     const i32 memory_top = cpu_box.y1 + 1 + kGroupGap;

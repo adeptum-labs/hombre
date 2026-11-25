@@ -191,7 +191,42 @@ void many_cores_are_summarised() {
     ui.reset();
     ui.layout(snapshot, view);
 
-    CHECK_EQ(parts_with_text(view, "+51"), 1u);
+    CHECK_EQ(parts_with_text(view, "+53"), 1u);
+}
+
+// Every core is named, and nothing in the processor group comes close enough
+// to its neighbour to read as one word.
+void cores_are_numbered_and_apart() {
+    MonitorSnapshot snapshot = sample_snapshot();
+    snapshot.cpu_count = 12;
+    for (u32 i = 0; i < snapshot.cpu_count; ++i) {
+        snapshot.cpus[i] = MonitorCpu{100 + i, i % 2 == 0, 1000};
+    }
+    MonitorView view;
+    MonitorUi ui;
+    ui.reset();
+    ui.layout(snapshot, view);
+
+    CHECK_EQ(parts_with_text(view, "100"), 1u);
+    CHECK_EQ(parts_with_text(view, "111"), 1u);
+    const MonitorPart* group = find_kind(view, MonitorPartKind::Group);
+    CHECK(group != nullptr);
+    for (u32 i = 0; i < view.count; ++i) {
+        const MonitorPart& a = view.parts[i];
+        if (a.box.y0 <= group->box.y0 || a.box.y1 >= group->box.y1) {
+            continue;
+        }
+        CHECK(a.box.x0 >= group->box.x0 + 4);
+        CHECK(a.box.x1 <= group->box.x1 - 4);
+        const i32 width = static_cast<i32>(std::string(a.text).size()) * 8;
+        CHECK(width <= a.box.x1 - a.box.x0 + 1);
+        for (u32 j = 0; j < view.count; ++j) {
+            const MonitorPart& b = view.parts[j];
+            if (i != j && b.box.y0 == a.box.y0 && b.box.x0 >= a.box.x0) {
+                CHECK(b.box.x0 > a.box.x1 + 1);
+            }
+        }
+    }
 }
 
 void set_entries(MonitorSnapshot& snapshot, const char* path,
@@ -457,6 +492,7 @@ void browsing_into_and_out_of_directories() {
 int main() {
     main_window_shows_cpu_memory_lists_and_drives();
     many_cores_are_summarised();
+    cores_are_numbered_and_apart();
     held_keys_act_once();
     requests_carry_their_fields();
     confirmations_are_accepted_and_refused();
