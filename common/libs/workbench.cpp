@@ -261,7 +261,7 @@ constexpr MenuItemSpec kSnapshotItems[] = {
 };
 
 constexpr MenuItemSpec kWindowItems[] = {
-    {"New Drawer", false},
+    {"New Drawer", true},
     {"Open Parent", true},
     {"Close", true},
     {"Update", true},
@@ -297,6 +297,7 @@ constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
 constexpr i32 kRequestMargin = 8;
 constexpr u32 kItemBackdrop = 0;
+constexpr u32 kItemNewDrawer = 0;
 constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
 constexpr u32 kItemIconSnapshot = 4;
@@ -410,6 +411,19 @@ bool join_path(const char* drawer, const char* name, char (&out)[Dos::kMaxPath])
         out[at++] = name[i];
     }
     out[at] = '\0';
+    return true;
+}
+
+// A name a file can have: not empty, not too long and no path.
+bool is_file_name(const char* name) {
+    if (name == nullptr || name[0] == '\0') {
+        return false;
+    }
+    for (u32 i = 0; name[i] != '\0'; ++i) {
+        if (name[i] == ':' || name[i] == '/' || i >= Workbench::kMaxName) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -3226,16 +3240,11 @@ bool Workbench::rename_icon(u32 window_id, u32 icon_id, const char* new_name) {
     }
     char name[32];
     copy_text(name, sizeof name, icon->name);
-    u32 length = 0;
-    bool valid = new_name != nullptr;
-    for (; valid && new_name[length] != '\0'; ++length) {
-        valid = new_name[length] != ':' && new_name[length] != '/' && length < kMaxName;
-    }
     char from[Dos::kMaxPath];
     char to[Dos::kMaxPath];
     const DrawerWindow& window = *find_window(window_id);
     u32 error = ERROR_INVALID_COMPONENT_NAME;
-    bool done = valid && length != 0 && icon_path(window, *icon, from) &&
+    bool done = is_file_name(new_name) && icon_path(window, *icon, from) &&
                 join_path(window.path, new_name, to);
     if (done) {
         close_windows_below(from);
@@ -3264,6 +3273,70 @@ void Workbench::ask_rename(u32 window_id, u32 icon_id) {
     if (ask_text("Rename", "Enter a new name", old_name, new_name, sizeof new_name) &&
         __builtin_strcmp(old_name, new_name) != 0) {
         rename_icon(window_id, icon_id, new_name);
+    }
+}
+
+bool Workbench::new_drawer(u32 window_id, const char* name) {
+    const DrawerWindow* window = window_id != kRootWindow ? find_window(window_id) : nullptr;
+    if (window == nullptr) {
+        show_error("cannot make", name != nullptr ? name : "?", ERROR_OBJECT_WRONG_TYPE);
+        return false;
+    }
+    char path[Dos::kMaxPath];
+    char info[Dos::kMaxPath];
+    u32 error = ERROR_INVALID_COMPONENT_NAME;
+    bool done = is_file_name(name) && join_path(window->path, name, path) && info_path(path, info);
+    // An icon that is there already, with no drawer, is not written over.
+    if (done && dos_->examine(info).kind != Dos::TargetKind::Missing) {
+        error = ERROR_OBJECT_EXISTS;
+        done = false;
+    }
+    done = done && dos_->make_dir(path, error);
+    if (done) {
+        const u32 object = icon_->default_object(kDrawer);
+        error = ERROR_NO_FREE_STORE;
+        done = object != 0 && icon_->save_object(path, object, error);
+        if (object != 0) {
+            icon_->free_object(object);
+        }
+        if (!done) {
+            u32 ignored = 0;
+            dos_->delete_object(path, ignored);
+        }
+    }
+    if (done) {
+        LogLine().text("workbench: made ").text(path).send();
+    } else {
+        show_error("cannot make", name != nullptr ? name : "?", error);
+    }
+    if (DrawerWindow* w = find_window(window_id); w != nullptr) {
+        update_window(*w);
+    }
+    return done;
+}
+
+void Workbench::ask_new_drawer(u32 window_id) {
+    const DrawerWindow* window = find_window(window_id);
+    if (window == nullptr || window_id == kRootWindow) {
+        return;
+    }
+    // The first "Unnamed" number that neither a file nor an icon has.
+    char suggested[kMaxName + 1];
+    for (u32 number = 1;; ++number) {
+        Message candidate;
+        candidate.add("Unnamed").number(number);
+        copy_text(suggested, sizeof suggested, candidate.text);
+        char path[Dos::kMaxPath];
+        char info[Dos::kMaxPath];
+        if (!join_path(window->path, suggested, path) || !info_path(path, info) ||
+            (dos_->examine(path).kind == Dos::TargetKind::Missing &&
+             dos_->examine(info).kind == Dos::TargetKind::Missing)) {
+            break;
+        }
+    }
+    char name[kMaxName + 1];
+    if (ask_text("New Drawer", "Enter the name of the drawer", suggested, name, sizeof name)) {
+        new_drawer(window_id, name);
     }
 }
 
@@ -3484,7 +3557,9 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             show_about();
         }
     } else if (menu == kMenuWindow) {
-        if (item == 1) {
+        if (item == kItemNewDrawer) {
+            ask_new_drawer(window_id);
+        } else if (item == 1) {
             open_parent(window_id);
         } else if (item == 2) {
             close_drawer(window_id);

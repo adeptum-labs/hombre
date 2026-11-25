@@ -1402,7 +1402,7 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     const u32 new_drawer = r.get32(windows + mu_FirstItem);
     const u32 open_parent = r.get32(new_drawer + mi_NextItem);
     CHECK(r.str(r.get32(r.get32(new_drawer + mi_ItemFill) + it_IText)) == "New Drawer");
-    CHECK_EQ(r.get16(new_drawer + mi_Flags) & ITEMENABLED, 0u);
+    CHECK_EQ(r.get16(new_drawer + mi_Flags) & ITEMENABLED, ITEMENABLED);
     CHECK(r.str(r.get32(r.get32(open_parent + mi_ItemFill) + it_IText)) == "Open Parent");
     CHECK_EQ(r.get16(open_parent + mi_Flags) & ITEMENABLED, ITEMENABLED);
     CHECK_EQ(r.get16(open_parent + mi_Flags) & ITEMTEXT, ITEMTEXT);
@@ -3133,6 +3133,35 @@ void the_rename_item_asks_for_the_name() {
     CHECK(r.exists("RAM:Memo"));
 }
 
+void new_drawer_makes_a_drawer_with_its_icon() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    CHECK(r.workbench.new_drawer(w.ram, "Box"));
+    CHECK(r.exists("RAM:Box"));
+    CHECK(r.exists("RAM:Box.info"));
+    const u32 box = r.find_icon_in(w.ram, "Box");
+    CHECK(box != Workbench::kNoIcon);
+    CHECK_EQ(r.workbench.icon(box).type, kWBDrawer);
+
+    CHECK(!r.workbench.new_drawer(w.ram, "Box"));
+    CHECK(!r.workbench.new_drawer(w.ram, "a:b"));
+    CHECK(!r.workbench.new_drawer(0, "Root"));
+    CHECK(!r.workbench.new_drawer(w.tools, "NotHere"));
+    CHECK(logged("workbench: cannot make NotHere: Disk is write-protected"));
+}
+
+void the_new_drawer_item_suggests_a_free_name() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    r.workbench.set_answer([](void*, const char*, const char*, char*, u32) { return true; },
+                           nullptr);
+    // Window > New Drawer, twice with the suggested name.
+    r.workbench.menu_pick(w.ram, 1 | (0 << 5) | (31 << 11));
+    r.workbench.menu_pick(w.ram, 1 | (0 << 5) | (31 << 11));
+    CHECK(r.exists("RAM:Unnamed1"));
+    CHECK(r.exists("RAM:Unnamed2"));
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -3799,6 +3828,8 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    new_drawer_makes_a_drawer_with_its_icon();
+    the_new_drawer_item_suggests_a_free_name();
     rename_gives_the_file_and_its_icon_the_new_name();
     a_rename_that_loses_the_icon_name_is_undone();
     the_rename_item_asks_for_the_name();

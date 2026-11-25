@@ -399,6 +399,11 @@ public:
     // disk or an AppIcon and for a name that cannot be had.
     bool rename_icon(u32 window_id, u32 icon_id, const char* new_name);
 
+    // Window > New Drawer: makes the drawer name with its icon in the
+    // window's drawer. False, shown, when either cannot be made and for the
+    // root window.
+    bool new_drawer(u32 window_id, const char* name);
+
     // Opens the window the icon of window window_id stands for, or
     // brings the window already open for it to the front.
     void open_drawer(u32 window_id, const IconEntry& icon);
@@ -572,6 +577,7 @@ private:
     void close_windows_below(const char* path);
     void ask_delete(u32 window_id, u32 icon_id);
     void ask_rename(u32 window_id, u32 icon_id);
+    void ask_new_drawer(u32 window_id);
     // Renames the object and its .info, both or neither.
     bool rename_with_info(const char* from, const char* to, u32& error);
     void select_contents(u32 window_id);
