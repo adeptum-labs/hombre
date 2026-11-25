@@ -53,6 +53,15 @@ UsbStatus usb_keyboard_status();
 // and the "usb: ..." line that says why. Before a start, the line says so.
 UsbResult usb_keyboard_result();
 
+// Sees a keyboard report in the interrupt before anything else does; false
+// keeps it back.
+using UsbKeyFilter = bool (*)(u8 (&report)[8]);
+
+// Moves the reports the controller has into the queues the polls read. The
+// timer interrupt calls it, and once the keyboard is ready nothing else
+// touches the controller.
+void usb_pump_from_interrupt(UsbKeyFilter filter);
+
 // Returns true when a new report arrived. A failed transfer or a device that
 // went away marks the keyboard Failed. Returns false when nothing is pending.
 bool usb_keyboard_poll(u8 report[8]);
@@ -63,8 +72,7 @@ void usb_keyboard_drain();
 // Returns true while a configured USB boot mouse is Ready.
 bool usb_mouse_present();
 
-// Pumps xHCI events and pops one pending mouse report (up to 4 bytes,
-// zero-padded). A failed transfer or unplugged mouse logs "usb: mouse lost" on
+// Pops one pending mouse report (up to 4 bytes, zero-padded). A failed transfer or unplugged mouse logs "usb: mouse lost" on
 // serial and clears usb_mouse_present() without affecting keyboard status.
 bool usb_mouse_poll(u8 report[4]);
 

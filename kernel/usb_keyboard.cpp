@@ -23,9 +23,11 @@
 
 #include "usb_keyboard.hpp"
 
+#include "apic.hpp"
 #include "clock.hpp"
 
 #include "../common/format.hpp"
+#include "../common/irq_ring.hpp"
 #include "../common/serial.hpp"
 #include "pci.hpp"
 #include "xhci.hpp"
@@ -40,6 +42,21 @@ constinit Xhci controllers[kMaxControllers];
 constinit u32 active_controller = 0;
 constinit UsbStatus status = UsbStatus::NoController;
 constinit char failure_text[64] = {};
+
+struct KeyReport {
+    u8 bytes[8];
+};
+
+struct MouseReport {
+    u8 bytes[4];
+};
+
+// Filled by the interrupt, emptied by the polls.
+constinit IrqRing<KeyReport, 16> key_reports{};
+constinit IrqRing<MouseReport, 32> mouse_reports{};
+// The controller is the interrupt's from the moment the keyboard is ready.
+volatile bool pumping = false;
+volatile bool keyboard_lost = false;
 constinit const char* last_message = nullptr;
 
 void write_hex4(u32 value) {
@@ -136,6 +153,8 @@ UsbResult usb_keyboard_start(MmioMapper& mmio, PhysAllocator& pages) {
             if (controllers[i].mouse_present()) {
                 write_line("usb: mouse ready");
             }
+            asm volatile("" : : : "memory");
+            pumping = true;
             return result;
         }
         if (scan == Xhci::Scan::OnlyHub) {
@@ -168,20 +187,57 @@ UsbResult usb_keyboard_result() {
     return UsbResult{status, last_message != nullptr ? last_message : "usb: not started"};
 }
 
+void usb_pump_from_interrupt(UsbKeyFilter filter) {
+    if (!pumping) {
+        return;
+    }
+    Xhci& controller = controllers[active_controller];
+    for (u32 i = 0; i < xhci::ReportQueue::kCapacity; ++i) {
+        KeyReport report{};
+        const Xhci::KeyEvent event = controller.poll_keyboard(report.bytes);
+        if (event == Xhci::KeyEvent::Lost) {
+            keyboard_lost = true;
+        }
+        if (event != Xhci::KeyEvent::Report) {
+            break;
+        }
+        // A report that finds the queue full is dropped, as the controller's
+        // own queue drops one.
+        if (filter == nullptr || filter(report.bytes)) {
+            key_reports.push(report);
+        }
+    }
+    for (u32 i = 0; i < xhci::ReportQueue::kCapacity; ++i) {
+        u8 raw[xhci::ReportQueue::kMaxReport] = {};
+        u32 length = 0;
+        if (controller.poll_hid(controller.mouse(), raw, length) != Xhci::KeyEvent::Report) {
+            break;
+        }
+        if (length >= 3) {
+            MouseReport report{};
+            __builtin_memcpy(report.bytes, raw, length < 4 ? length : 4);
+            mouse_reports.push(report);
+        }
+    }
+}
+
 bool usb_keyboard_poll(u8 report[8]) {
     if (status != UsbStatus::Ready) {
         return false;
     }
-    const Xhci::KeyEvent event = controllers[active_controller].poll_keyboard(report);
+    // Without the timer nothing else pumps.
+    if (!apic_active()) {
+        usb_pump_from_interrupt(nullptr);
+    }
     check_mouse_lost();
-    switch (event) {
-    case Xhci::KeyEvent::Report:
+    KeyReport next{};
+    if (key_reports.pop(next)) {
+        __builtin_memcpy(report, next.bytes, sizeof next.bytes);
         return true;
-    case Xhci::KeyEvent::Lost:
+    }
+    __builtin_memset(report, 0, sizeof next.bytes);
+    if (keyboard_lost) {
         publish(UsbStatus::Failed, "usb: keyboard lost");
-        return false;
-    case Xhci::KeyEvent::None:
-        break;
     }
     return false;
 }
@@ -202,22 +258,16 @@ bool usb_mouse_present() {
 
 bool usb_mouse_poll(u8 report[4]) {
     __builtin_memset(report, 0, 4);
-    Xhci& controller = controllers[active_controller];
-    for (u32 i = 0; i < xhci::ReportQueue::kCapacity; ++i) {
-        u8 raw[xhci::ReportQueue::kMaxReport] = {};
-        u32 length = 0;
-        const Xhci::KeyEvent event = controller.poll_hid(controller.mouse(), raw, length);
-        check_mouse_lost();
-        if (event != Xhci::KeyEvent::Report) {
-            return false;
-        }
-        if (length < 3) {
-            continue;
-        }
-        __builtin_memcpy(report, raw, 4);
-        return true;
+    if (!apic_active()) {
+        usb_pump_from_interrupt(nullptr);
     }
-    return false;
+    check_mouse_lost();
+    MouseReport next{};
+    if (!mouse_reports.pop(next)) {
+        return false;
+    }
+    __builtin_memcpy(report, next.bytes, sizeof next.bytes);
+    return true;
 }
 
 }

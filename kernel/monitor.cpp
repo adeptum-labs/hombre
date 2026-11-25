@@ -23,7 +23,11 @@
 
 #include "monitor.hpp"
 
+#include "../common/irq_ring.hpp"
+#include "../common/monitor_hotkey.hpp"
+#include "../common/serial.hpp"
 #include "apic.hpp"
+#include "usb_keyboard.hpp"
 
 namespace hombre {
 
@@ -31,6 +35,28 @@ namespace {
 
 constinit MonitorHost monitor_host{};
 constinit CpuMeter cpu_meter{};
+constinit MonitorHotkey hotkey{};
+constinit bool open = false;
+// Lines waiting for the serial port to be between lines.
+constinit IrqRing<const char*, 8> log_lines{};
+constinit const char* log_next = nullptr;
+
+bool take_key_report(u8 (&report)[8]) {
+    if (hotkey.take(report)) {
+        open = !open;
+        log_lines.push(open ? "monitor: open" : "monitor: closed");
+    }
+    return true;
+}
+
+void write_log() {
+    if (log_next == nullptr) {
+        log_lines.pop(log_next);
+    }
+    if (log_next != nullptr && serial::write_line_from_interrupt(log_next)) {
+        log_next = nullptr;
+    }
+}
 
 }
 
@@ -39,6 +65,8 @@ void monitor_set_host(const MonitorHost& host) {
 }
 
 void monitor_timer_tick(const TrapFrame&) {
+    usb_pump_from_interrupt(&take_key_report);
+    write_log();
     if (monitor_host.current_task == nullptr) {
         return;
     }
