@@ -79,6 +79,8 @@ constexpr u32 kViewLordAt = 34;
 constexpr u32 kActiveWindowAt = 52;
 constexpr u32 kActiveScreenAt = 56;
 constexpr u32 kFirstScreenAt = 60;
+constexpr u32 kMouseYAt = 68;
+constexpr u32 kMouseXAt = 70;
 constexpr u32 kIntuitionBaseBytes = 80;
 
 constexpr char kIntuitionName[] = "intuition.library";
@@ -505,6 +507,8 @@ struct WindowArgs {
     u32 inner_width = 0;   // the size inside the borders, when given instead
     u32 inner_height = 0;
     u32 gadgets = 0;
+    u32 super_bitmap = 0;  // the BitMap of a WFLG_SUPER_BITMAP window
+    bool super_tag = false;  // WA_SuperBitMap gave one, whatever the flags say
     bool custom_screen = false;
     bool has_zoom = false;  // WA_Zoom gave the window a zoom gadget and its other box
     Intuition::WindowBox zoom_box{};
@@ -525,6 +529,7 @@ void read_new_window(Bus& b, u32 nw, WindowArgs& a) {
     a.gadgets = b.r32(nw + ndk::nw_FirstGadget);
     a.title = b.r32(nw + ndk::nw_Title);
     a.screen = b.r32(nw + ndk::nw_Screen);
+    a.super_bitmap = b.r32(nw + ndk::nw_BitMap);
     a.min_width = b.r16(nw + ndk::nw_MinWidth);
     a.min_height = b.r16(nw + ndk::nw_MinHeight);
     a.max_width = b.r16(nw + ndk::nw_MaxWidth);
@@ -581,6 +586,13 @@ void apply_window_tag(Bus& b, WindowArgs& a, u32 tag, u32 data) {
     case ndk::WA_CustomScreen:
         a.screen = data;
         a.custom_screen = true;
+        break;
+    case ndk::WA_SuperBitMap:
+        a.super_bitmap = data;
+        a.super_tag = data != 0;
+        break;
+    case ndk::WA_GimmeZeroZero:
+        set_window_flag(a.flags, ndk::WFLG_GIMMEZEROZERO, data);
         break;
     case ndk::WA_MinWidth:
         a.min_width = data;
@@ -818,7 +830,10 @@ WindowView load_window(Bus& b, u32 window) {
     w.flags = b.r32(window + ndk::wd_Flags);
     w.title = b.r32(window + ndk::wd_Title);
     w.screen = b.r32(window + ndk::wd_WScreen);
-    w.rp = b.r32(window + ndk::wd_RPort);
+    // A GimmeZeroZero window's frame and gadgets are drawn through the
+    // RastPort of its borders; any other's through its own.
+    const u32 border_rp = b.r32(window + ndk::wd_BorderRPort);
+    w.rp = border_rp != 0 ? border_rp : b.r32(window + ndk::wd_RPort);
     w.border_left = b.r8(window + ndk::wd_BorderLeft);
     w.border_top = b.r8(window + ndk::wd_BorderTop);
     w.border_right = b.r8(window + ndk::wd_BorderRight);
@@ -2226,7 +2241,8 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
 }
 
 // The fields of the IntuitionBase past the Library node: ViewLord (a View)
-// at 34, then ActiveWindow, ActiveScreen and FirstScreen.
+// at 34, then ActiveWindow, ActiveScreen and FirstScreen, and further on
+// MouseY and MouseX.
 void Intuition::sync_base() {
     if (machine_ == nullptr || base_ == 0) {
         return;
@@ -2245,6 +2261,8 @@ void Intuition::sync_base() {
                                        : 0);
     b.w32(base_ + kActiveScreenAt, active_screen);
     b.w32(base_ + kFirstScreenAt, front_);
+    b.w16(base_ + kMouseYAt, static_cast<u32>(mouse_y_));
+    b.w16(base_ + kMouseXAt, static_cast<u32>(mouse_x_));
 }
 
 void Intuition::begin_batch() { ++batch_depth_; }
@@ -2684,10 +2702,7 @@ void Intuition::apply_screen_mode_prefs(ScreenRecord& rec) {
         put(wrec.addr + ndk::wd_MinHeight, wrec.min_h);
         put(wrec.addr + ndk::wd_MaxWidth, wrec.lim_w);
         put(wrec.addr + ndk::wd_MaxHeight, wrec.lim_h);
-        put(wrec.layer + ndk::ly_MinX, wrec.left);
-        put(wrec.layer + ndk::ly_MinY, wrec.top);
-        put(wrec.layer + ndk::ly_MaxX, wrec.left + wrec.width - 1);
-        put(wrec.layer + ndk::ly_MaxY, wrec.top + wrec.height - 1);
+        place_layers(b, wrec);
 
         const u32 window = wrec.addr;
         WindowView w = load_window(b, window);
@@ -4116,6 +4131,17 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     }
     // Only WA_Zoom gives a window its zoom gadget, whatever the flags say.
     a.flags = a.has_zoom ? a.flags | ndk::WFLG_HASZOOM : a.flags & ~ndk::WFLG_HASZOOM;
+    // WA_SuperBitMap makes a super bitmap window; without a BitMap there is
+    // none, and the window keeps what is hidden as a smart one does.
+    if (a.super_tag) {
+        a.flags = (a.flags & ~ndk::WFLG_REFRESHBITS) | ndk::WFLG_SUPER_BITMAP;
+    }
+    if ((a.flags & ndk::WFLG_REFRESHBITS) != ndk::WFLG_SUPER_BITMAP || a.super_bitmap == 0) {
+        a.super_bitmap = 0;
+        if ((a.flags & ndk::WFLG_REFRESHBITS) == ndk::WFLG_SUPER_BITMAP) {
+            a.flags &= ~ndk::WFLG_REFRESHBITS;
+        }
+    }
 
     u32 screen = 0;
     if (a.custom_screen && a.screen != 0) {
@@ -4270,12 +4296,15 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     u32 window = 0;
     u32 rp = 0;
     u32 layer = 0;
+    u32 inner_rp = 0;
+    u32 inner_layer = 0;
     u32 bitmap = 0;
     u32 planes = 0;
     u32 title = 0;
     u32 title_bytes = 0;
     u32 user_port = 0;
     bool user_port_owned = false;
+    const bool gzz = (a.flags & ndk::WFLG_GIMMEZEROZERO) != 0;
     auto fail = [&](const char* problem = "intuition: no memory for a window") -> u32 {
         if (user_port_owned && user_port != 0) {
             exec_->delete_port(user_port);
@@ -4289,6 +4318,12 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
         if (bitmap != 0) {
             graphics_->detach_deep(bitmap);
             exec_->free(bitmap, ndk::BitMap_SIZEOF);
+        }
+        if (inner_layer != 0) {
+            exec_->free(inner_layer, ndk::Layer_SIZEOF);
+        }
+        if (inner_rp != 0) {
+            exec_->free(inner_rp, ndk::RastPort_SIZEOF);
         }
         if (layer != 0) {
             exec_->free(layer, ndk::Layer_SIZEOF);
@@ -4314,6 +4349,18 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     layer = exec_->alloc(ndk::Layer_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
     if (layer == 0) {
         return fail();
+    }
+    // A GimmeZeroZero window draws through a layer of its own inside the
+    // borders, which keep the outer one.
+    if (gzz) {
+        inner_rp = exec_->alloc(ndk::RastPort_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (inner_rp == 0) {
+            return fail();
+        }
+        inner_layer = exec_->alloc(ndk::Layer_SIZEOF, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        if (inner_layer == 0) {
+            return fail();
+        }
     }
     bitmap = exec_->alloc(ndk::BitMap_SIZEOF, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
     if (bitmap == 0) {
@@ -4365,16 +4412,17 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     b.w32(window + ndk::wd_Flags, a.flags);
     b.w32(window + ndk::wd_Title, title);
     b.w32(window + ndk::wd_WScreen, screen);
-    b.w32(window + ndk::wd_RPort, rp);
+    b.w32(window + ndk::wd_RPort, gzz ? inner_rp : rp);
     b.w8(window + ndk::wd_BorderLeft, border_left);
     b.w8(window + ndk::wd_BorderTop, border_top);
     b.w8(window + ndk::wd_BorderRight, border_right);
     b.w8(window + ndk::wd_BorderBottom, border_bottom);
+    b.w32(window + ndk::wd_BorderRPort, gzz ? rp : 0);
     b.w32(window + ndk::wd_IDCMPFlags, a.idcmp);
     b.w32(window + ndk::wd_UserPort, user_port);
     b.w8(window + ndk::wd_DetailPen, a.detail);
     b.w8(window + ndk::wd_BlockPen, a.block);
-    b.w32(window + ndk::wd_WLayer, layer);
+    b.w32(window + ndk::wd_WLayer, gzz ? inner_layer : layer);
     b.w32(window + ndk::wd_IFont, srec->font);
     b.w32(window + ndk::wd_FirstGadget, a.gadgets);
     b.w32(window + ndk::wd_NextWindow, 0);
@@ -4390,16 +4438,38 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     if (srec->windows_inherit_font) {
         graphics_->set_font(rp, srec->font);
     }
+    if (gzz) {
+        graphics_->init_rastport(inner_rp);
+        b.w32(inner_rp + ndk::rp_BitMap, bitmap);
+        b.w32(inner_rp + ndk::rp_Layer, inner_layer);
+        b.w8(inner_rp + ndk::rp_FgPen, 1);
+        b.w8(inner_rp + ndk::rp_BgPen, 0);
+        b.w8(inner_rp + ndk::rp_DrawMode, ndk::JAM2);
+        b.w16(inner_rp + ndk::rp_cp_x, 0);
+        b.w16(inner_rp + ndk::rp_cp_y, 6);
+        if (srec->windows_inherit_font) {
+            graphics_->set_font(inner_rp, srec->font);
+        }
+    }
 
-    const i32 right = left + width - 1;
-    const i32 bottom = top + height - 1;
+    // The layer a program draws through keeps the super bitmap; any other
+    // is over the window's own bitmap, which holds all of it.
+    const u32 super = a.super_bitmap;
+    const u32 refresh = super != 0 ? ndk::LAYERSUPER | ndk::LAYERSMART
+                        : (a.flags & ndk::WFLG_REFRESHBITS) == ndk::WFLG_SIMPLE_REFRESH
+                            ? ndk::LAYERSIMPLE
+                            : ndk::LAYERSMART;
+    const u32 backdrop = (a.flags & ndk::WFLG_BACKDROP) != 0 ? ndk::LAYERBACKDROP : 0;
     b.w32(layer + ndk::ly_rp, rp);
-    b.w16(layer + ndk::ly_MinX, static_cast<u32>(left));
-    b.w16(layer + ndk::ly_MinY, static_cast<u32>(top));
-    b.w16(layer + ndk::ly_MaxX, static_cast<u32>(right));
-    b.w16(layer + ndk::ly_MaxY, static_cast<u32>(bottom));
-    b.w32(layer + ndk::ly_SuperBitMap, bitmap);
+    b.w32(layer + ndk::ly_SuperBitMap, super != 0 && !gzz ? super : bitmap);
     b.w32(layer + ndk::ly_Window, window);
+    b.w16(layer + ndk::ly_Flags, (gzz ? ndk::LAYERSMART : refresh) | backdrop);
+    if (gzz) {
+        b.w32(inner_layer + ndk::ly_rp, inner_rp);
+        b.w32(inner_layer + ndk::ly_SuperBitMap, super != 0 ? super : bitmap);
+        b.w32(inner_layer + ndk::ly_Window, window);
+        b.w16(inner_layer + ndk::ly_Flags, refresh | backdrop);
+    }
 
     WindowRecord* rec = window_records_.add();
     rec->addr = window;
@@ -4424,6 +4494,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     rec->rp_bytes = ndk::RastPort_SIZEOF;
     rec->layer = layer;
     rec->layer_bytes = ndk::Layer_SIZEOF;
+    rec->inner_rp = inner_rp;
+    rec->inner_layer = inner_layer;
     rec->bitmap = bitmap;
     rec->bitmap_bytes = ndk::BitMap_SIZEOF;
     rec->planes = planes;
@@ -4442,10 +4514,12 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     rec->newsize_w = width;
     rec->newsize_h = height;
     rec->zoom_box = a.zoom_box;
+    place_layers(b, *rec);
     const u32 insert_after =
         (a.flags & ndk::WFLG_BACKDROP) != 0 ? last_normal_window(*srec) : 0;
     insert_window_after(*srec, *rec, insert_after);
     write_window_links(screen);
+    write_mouse_position();
     windows_.push_back(window);
 
     begin_batch();
@@ -4458,12 +4532,20 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
         }
         post_intuimessage(window, ndk::IDCMP_ACTIVEWINDOW, 0);
     }
+    // A super bitmap layer opens showing its BitMap; a GimmeZeroZero one
+    // inside the borders drawn first, any other under them.
+    if (super != 0 && !gzz) {
+        graphics_->copy_super_bitmap(layer);
+    }
     WindowView w = load_window(b, window);
     w.rp = rp;
     chrome::draw_window_chrome(
         *graphics_, b, rp,
         to_chrome(w, active_window_ == window, held_bar_button(window), window_metrics(window),
                   screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))));
+    if (super != 0 && gzz) {
+        graphics_->copy_super_bitmap(inner_layer);
+    }
     if (a.gadgets != 0) {
         draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
     }
@@ -4569,6 +4651,12 @@ void Intuition::close_window(u32 window) {
     if (rec->bitmap != 0) {
         graphics_->detach_deep(rec->bitmap);
         exec_->free(rec->bitmap, rec->bitmap_bytes);
+    }
+    if (rec->inner_layer != 0) {
+        exec_->free(rec->inner_layer, ndk::Layer_SIZEOF);
+    }
+    if (rec->inner_rp != 0) {
+        exec_->free(rec->inner_rp, ndk::RastPort_SIZEOF);
     }
     if (rec->layer != 0) {
         exec_->free(rec->layer, rec->layer_bytes);
@@ -5735,6 +5823,7 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
     if (front_ == 0) {
         return;
     }
+    write_mouse_position();
     Bus b(*machine_);
     // An active BOOPSI gadget owns the pointer until it lets go.
     if (custom_.gadget != 0) {
@@ -5922,6 +6011,64 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
     }
 }
 
+void Intuition::place_layers(Bus& b, const WindowRecord& rec) {
+    const auto put = [&](u32 at, i32 value) { b.w16(at, static_cast<u32>(value)); };
+    put(rec.layer + ndk::ly_MinX, rec.left);
+    put(rec.layer + ndk::ly_MinY, rec.top);
+    put(rec.layer + ndk::ly_MaxX, rec.left + rec.width - 1);
+    put(rec.layer + ndk::ly_MaxY, rec.top + rec.height - 1);
+    const i32 border_left = b.r8(rec.addr + ndk::wd_BorderLeft);
+    const i32 border_top = b.r8(rec.addr + ndk::wd_BorderTop);
+    const i32 border_right = b.r8(rec.addr + ndk::wd_BorderRight);
+    const i32 border_bottom = b.r8(rec.addr + ndk::wd_BorderBottom);
+    const i32 inner_w = std::max(0, rec.width - border_left - border_right);
+    const i32 inner_h = std::max(0, rec.height - border_top - border_bottom);
+    put(rec.addr + ndk::wd_GZZWidth, inner_w);
+    put(rec.addr + ndk::wd_GZZHeight, inner_h);
+    if (rec.inner_layer != 0) {
+        put(rec.inner_layer + ndk::ly_MinX, rec.left + border_left);
+        put(rec.inner_layer + ndk::ly_MinY, rec.top + border_top);
+        put(rec.inner_layer + ndk::ly_MaxX, rec.left + border_left + inner_w - 1);
+        put(rec.inner_layer + ndk::ly_MaxY, rec.top + border_top + inner_h - 1);
+    }
+}
+
+void Intuition::write_mouse_position() {
+    if (machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    if (base_ != 0) {
+        b.w16(base_ + kMouseYAt, static_cast<u32>(mouse_y_));
+        b.w16(base_ + kMouseXAt, static_cast<u32>(mouse_x_));
+    }
+    const ScreenRecord* srec = front_ != 0 ? find_screen_record(front_) : nullptr;
+    if (srec == nullptr) {
+        return;
+    }
+    b.w16(front_ + ndk::sc_MouseY, static_cast<u32>(mouse_y_));
+    b.w16(front_ + ndk::sc_MouseX, static_cast<u32>(mouse_x_));
+    // Every window of the screen follows the pointer, active or not, as
+    // programs that watch it from a window in the back expect.
+    u32 window = srec->first_window;
+    for (u32 step = 0; step < kMaxWindows && window != 0; ++step) {
+        const WindowRecord* rec = find_window_record(window);
+        if (rec == nullptr) {
+            return;
+        }
+        const i32 x = mouse_x_ - rec->left;
+        const i32 y = mouse_y_ - rec->top;
+        const bool gzz = rec->inner_layer != 0;
+        b.w16(window + ndk::wd_MouseY, static_cast<u32>(y));
+        b.w16(window + ndk::wd_MouseX, static_cast<u32>(x));
+        b.w16(window + ndk::wd_GZZMouseX,
+              static_cast<u32>(gzz ? x - b.r8(window + ndk::wd_BorderLeft) : x));
+        b.w16(window + ndk::wd_GZZMouseY,
+              static_cast<u32>(gzz ? y - b.r8(window + ndk::wd_BorderTop) : y));
+        window = rec->next_window;
+    }
+}
+
 void Intuition::move_window_to(u32 window, i32 left, i32 top) {
     if (window == 0) {
         return;
@@ -5950,10 +6097,8 @@ void Intuition::move_window_to(u32 window, i32 left, i32 top) {
     Bus b(*machine_);
     b.w16(window + ndk::wd_LeftEdge, static_cast<u32>(left));
     b.w16(window + ndk::wd_TopEdge, static_cast<u32>(top));
-    b.w16(rec->layer + ndk::ly_MinX, static_cast<u32>(left));
-    b.w16(rec->layer + ndk::ly_MinY, static_cast<u32>(top));
-    b.w16(rec->layer + ndk::ly_MaxX, static_cast<u32>(left + rec->width - 1));
-    b.w16(rec->layer + ndk::ly_MaxY, static_cast<u32>(top + rec->height - 1));
+    place_layers(b, *rec);
+    write_mouse_position();
     begin_batch();
     compose(rec->screen, old);
     compose(rec->screen,
@@ -6001,12 +6146,20 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
                                           rec->flags);
 
     begin_batch();
+    // A super bitmap keeps what the layer showed and shows it again in the
+    // new size, past the borders of a GimmeZeroZero window or under the
+    // borders of any other.
+    const u32 inner_layer = rec->inner_layer;
+    const u32 program_layer = inner_layer != 0 ? inner_layer : rec->layer;
+    graphics_->sync_super_bitmap(program_layer);
     rec->width = width;
     rec->height = height;
     b.w16(window + ndk::wd_Width, static_cast<u32>(width));
     b.w16(window + ndk::wd_Height, static_cast<u32>(height));
-    b.w16(rec->layer + ndk::ly_MaxX, static_cast<u32>(rec->left + width - 1));
-    b.w16(rec->layer + ndk::ly_MaxY, static_cast<u32>(rec->top + height - 1));
+    place_layers(b, *rec);
+    if (inner_layer == 0) {
+        graphics_->copy_super_bitmap(program_layer);
+    }
     w.width = width;
     w.height = height;
     w.rp = rec->rp;
@@ -6015,6 +6168,9 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
         to_chrome(w, active_window_ == window, held_bar_button(window), window_metrics(window),
                   screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth))),
         &keep);
+    if (inner_layer != 0) {
+        graphics_->copy_super_bitmap(program_layer);
+    }
     if (w.first_gadget != 0) {
         draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
     }
@@ -7245,8 +7401,6 @@ constexpr u32 kReqPredrawn = 0x0002;
 constexpr u32 kReqUseImage = 0x0020;
 constexpr u32 kReqNoBackFill = 0x0040;
 constexpr u32 kReqActive = 0x2000;
-constexpr u32 wd_MouseY = 12;
-constexpr u32 wd_MouseX = 14;
 constexpr u32 wd_FirstRequest = 36;
 constexpr u32 wd_ReqCount = 44;
 constexpr u32 kIdcmpReqSet = 0x00000080;
@@ -7273,9 +7427,9 @@ bool Intuition::begin_request(u32 requester, u32 window) {
     i32 left = static_cast<i16>(b.r16(requester + rq_LeftEdge));
     i32 top = static_cast<i16>(b.r16(requester + rq_TopEdge));
     if ((flags & kReqPointRel) != 0) {
-        left = static_cast<i16>(b.r16(window + wd_MouseX)) +
+        left = static_cast<i16>(b.r16(window + ndk::wd_MouseX)) +
                static_cast<i16>(b.r16(requester + rq_RelLeft));
-        top = static_cast<i16>(b.r16(window + wd_MouseY)) +
+        top = static_cast<i16>(b.r16(window + ndk::wd_MouseY)) +
               static_cast<i16>(b.r16(requester + rq_RelTop));
     }
     if (!b.ok() || !w.ok) {

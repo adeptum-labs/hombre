@@ -1344,6 +1344,263 @@ void open_window_alloc_failure_gives_zero_and_frees() {
     }
 }
 
+// The pen of a pixel of a planar BitMap of two planes, and its setting.
+u32 bitmap_pixel(GfxRig& r, u32 bitmap, i32 x, i32 y) {
+    const u32 at =
+        static_cast<u32>(y) * r.get16(bitmap + bm_BytesPerRow) + (static_cast<u32>(x) >> 3);
+    const u32 bit = 0x80u >> (static_cast<u32>(x) & 7);
+    u32 pen = 0;
+    for (u32 plane = 0; plane < r.get8(bitmap + bm_Depth); ++plane) {
+        if ((r.get8(r.get32(bitmap + bm_Planes + plane * 4) + at) & bit) != 0) {
+            pen |= 1u << plane;
+        }
+    }
+    return pen;
+}
+
+void put_bitmap_pixel(GfxRig& r, u32 bitmap, i32 x, i32 y, u32 pen) {
+    const u32 at =
+        static_cast<u32>(y) * r.get16(bitmap + bm_BytesPerRow) + (static_cast<u32>(x) >> 3);
+    const u32 bit = 0x80u >> (static_cast<u32>(x) & 7);
+    for (u32 plane = 0; plane < r.get8(bitmap + bm_Depth); ++plane) {
+        const u32 byte = r.get32(bitmap + bm_Planes + plane * 4) + at;
+        r.put8(byte, ((pen >> plane) & 1) != 0 ? r.get8(byte) | bit : r.get8(byte) & ~bit);
+    }
+}
+
+// A cleared planar BitMap of two planes, width by height, in guest memory.
+u32 make_super_bitmap(GfxRig& r, u32 at, u32 width, u32 height) {
+    const u32 bpr = (width + 15) / 16 * 2;
+    const u32 planes = r.exec.alloc(bpr * height * 2, MEMF_CHIP | MEMF_CLEAR);
+    CHECK(planes != 0);
+    r.put16(at + bm_BytesPerRow, bpr);
+    r.put16(at + bm_Rows, height);
+    r.put8(at + bm_Flags, 0);
+    r.put8(at + bm_Depth, 2);
+    for (u32 plane = 0; plane < 8; ++plane) {
+        r.put32(at + bm_Planes + plane * 4, plane < 2 ? planes + plane * bpr * height : 0);
+    }
+    return at;
+}
+
+void fill_rastport(GfxRig& r, u32 rp, u32 pen, i32 x0, i32 y0, i32 x1, i32 y1) {
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = pen;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetAPen), ExitReason::Halt);
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = static_cast<u32>(x0);
+    r.cpu().d[1] = static_cast<u32>(y0);
+    r.cpu().d[2] = static_cast<u32>(x1);
+    r.cpu().d[3] = static_cast<u32>(y1);
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
+}
+
+void call_with_layer(GfxRig& r, u32 lvo, u32 layer) {
+    r.cpu().a[0] = layer;
+    CHECK_EQ(r.call(Base::Graphics, lvo), ExitReason::Halt);
+}
+
+// A GimmeZeroZero window draws through a RastPort and layer inside its
+// borders, at coordinates from the inner corner, and keeps the borders in a
+// RastPort of their own. The inner layer follows the window when it moves.
+void gimme_zero_zero_window_draws_inside_its_borders() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 before = heap_capacity(r);
+    const u32 tags = r.tags(kTagList, {{WA_Left, 50}, {WA_Top, 60}, {WA_Width, 200},
+                                       {WA_Height, 100},
+                                       {WA_Flags, WFLG_DRAGBAR | WFLG_CLOSEGADGET},
+                                       {WA_GimmeZeroZero, 1}, {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, 0, tags);
+    CHECK(window != 0);
+    CHECK((r.get32(window + wd_Flags) & WFLG_GIMMEZEROZERO) != 0);
+    const i32 bl = static_cast<i32>(r.get8(window + wd_BorderLeft));
+    const i32 bt = static_cast<i32>(r.get8(window + wd_BorderTop));
+    const i32 br = static_cast<i32>(r.get8(window + wd_BorderRight));
+    const i32 bb = static_cast<i32>(r.get8(window + wd_BorderBottom));
+    const u32 rp = r.get32(window + wd_RPort);
+    const u32 border_rp = r.get32(window + wd_BorderRPort);
+    const u32 layer = r.get32(window + wd_WLayer);
+    CHECK(rp != 0 && border_rp != 0 && rp != border_rp);
+    CHECK_EQ(r.get32(rp + rp_Layer), layer);
+    CHECK(r.get32(border_rp + rp_Layer) != layer);
+    CHECK_EQ(r.get32(rp + rp_BitMap), r.get32(border_rp + rp_BitMap));
+    CHECK_EQ(r.get32(layer + ly_rp), rp);
+    CHECK_EQ(r.get32(layer + ly_Window), window);
+    CHECK_EQ(r.get16(layer + ly_MinX), static_cast<u32>(50 + bl));
+    CHECK_EQ(r.get16(layer + ly_MinY), static_cast<u32>(60 + bt));
+    CHECK_EQ(r.get16(layer + ly_MaxX), static_cast<u32>(50 + 200 - br - 1));
+    CHECK_EQ(r.get16(layer + ly_MaxY), static_cast<u32>(60 + 100 - bb - 1));
+    CHECK_EQ(r.get16(window + wd_GZZWidth), static_cast<u32>(200 - bl - br));
+    CHECK_EQ(r.get16(window + wd_GZZHeight), static_cast<u32>(100 - bt - bb));
+
+    // A fill past every edge covers the inside and leaves the borders.
+    const u32 border = screen_pixel(r, screen, 50 + bl - 1, 60 + bt);
+    fill_rastport(r, rp, 3, -10, -10, 400, 400);
+    CHECK_EQ(window_pixel(r, window, 0, 0), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 50 + bl, 60 + bt), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 50 + 200 - br - 1, 60 + 100 - bb - 1), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 50 + bl - 1, 60 + bt), border);
+    CHECK(screen_pixel(r, screen, 50 + 200 - br, 60 + bt) != 3u);
+    CHECK(screen_pixel(r, screen, 50 + bl, 60 + bt - 1) != 3u);
+    CHECK(screen_pixel(r, screen, 50 + bl, 60 + 100 - bb) != 3u);
+    CHECK_EQ(screen_pixel(r, screen, 49, 60 + bt), 0u);
+
+    r.intuition.move_window_to(window, 120, 150);
+    CHECK_EQ(r.get16(layer + ly_MinX), static_cast<u32>(120 + bl));
+    CHECK_EQ(r.get16(layer + ly_MinY), static_cast<u32>(150 + bt));
+    fill_rastport(r, rp, 1, 5, 5, 5, 5);
+    CHECK_EQ(screen_pixel(r, screen, 120 + bl + 5, 150 + bt + 5), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 120 + bl + 4, 150 + bt + 5), 3u);
+
+    r.cpu().a[0] = window;
+    r.call(Base::Intuition, intuition_lvo::CloseWindow);
+    CHECK_EQ(heap_capacity(r), before);
+}
+
+// A super bitmap window shows its BitMap when it opens. Drawing reaches no
+// further than the BitMap; SyncSBitMap brings what the window shows into
+// it and CopySBitMap shows what the program wrote there itself, behind
+// other windows too.
+void super_bitmap_window_shows_and_keeps_its_bitmap() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 super = make_super_bitmap(r, kData + 0x3000, 64, 40);
+    put_bitmap_pixel(r, super, 0, 0, 1);
+    put_bitmap_pixel(r, super, 5, 3, 2);
+    const u32 tags = r.tags(kTagList, {{WA_Left, 50}, {WA_Top, 60}, {WA_InnerWidth, 80},
+                                       {WA_InnerHeight, 50}, {WA_SuperBitMap, super},
+                                       {WA_Flags, WFLG_GIMMEZEROZERO | WFLG_DRAGBAR},
+                                       {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, 0, tags);
+    CHECK(window != 0);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REFRESHBITS, WFLG_SUPER_BITMAP);
+    const i32 left = 50 + static_cast<i32>(r.get8(window + wd_BorderLeft));
+    const i32 top = 60 + static_cast<i32>(r.get8(window + wd_BorderTop));
+    const u32 rp = r.get32(window + wd_RPort);
+    const u32 layer = r.get32(window + wd_WLayer);
+    CHECK_EQ(r.get32(layer + ly_SuperBitMap), super);
+    CHECK_EQ(r.get16(layer + ly_Flags), LAYERSUPER | LAYERSMART);
+    CHECK_EQ(window_pixel(r, window, 0, 0), 1u);
+    CHECK_EQ(window_pixel(r, window, 5, 3), 2u);
+    CHECK_EQ(screen_pixel(r, screen, left + 5, top + 3), 2u);
+
+    // Past the BitMap's 64 by 40 pixels there is nothing to draw on.
+    fill_rastport(r, rp, 3, 10, 10, 79, 49);
+    CHECK_EQ(window_pixel(r, window, 63, 39), 3u);
+    CHECK_EQ(window_pixel(r, window, 64, 10), 0xFFFFFFFFu);
+    CHECK_EQ(window_pixel(r, window, 10, 40), 0xFFFFFFFFu);
+    CHECK(screen_pixel(r, screen, left + 64, top + 10) != 3u);
+    CHECK(screen_pixel(r, screen, left + 10, top + 40) != 3u);
+    CHECK_EQ(bitmap_pixel(r, super, 10, 10), 0u);
+    call_with_layer(r, graphics_lvo::SyncSBitMap, layer);
+    CHECK_EQ(bitmap_pixel(r, super, 10, 10), 3u);
+    CHECK_EQ(bitmap_pixel(r, super, 63, 39), 3u);
+    CHECK_EQ(bitmap_pixel(r, super, 5, 3), 2u);
+    CHECK_EQ(bitmap_pixel(r, super, 9, 9), 0u);
+
+    put_bitmap_pixel(r, super, 20, 20, 1);
+    CHECK_EQ(window_pixel(r, window, 20, 20), 3u);
+    call_with_layer(r, graphics_lvo::CopySBitMap, layer);
+    CHECK_EQ(window_pixel(r, window, 20, 20), 1u);
+    CHECK_EQ(screen_pixel(r, screen, left + 20, top + 20), 1u);
+
+    // Behind another window the copy changes only what still shows.
+    const u32 cover_tags = r.tags(kTagList + 0x80, {{WA_Left, left + 30}, {WA_Top, top},
+                                                    {WA_Width, 100}, {WA_Height, 80},
+                                                    {WA_Flags, WFLG_BORDERLESS}, {TAG_DONE, 0}});
+    const u32 cover = open_win_tags(r, 0, cover_tags);
+    CHECK(cover != 0);
+    fill_rastport(r, r.get32(cover + wd_RPort), 2, 0, 0, 99, 79);
+    put_bitmap_pixel(r, super, 40, 20, 1);
+    put_bitmap_pixel(r, super, 25, 20, 2);
+    call_with_layer(r, graphics_lvo::CopySBitMap, layer);
+    CHECK_EQ(screen_pixel(r, screen, left + 40, top + 20), 2u);
+    CHECK_EQ(screen_pixel(r, screen, left + 25, top + 20), 2u);
+    CHECK_EQ(screen_pixel(r, screen, left + 20, top + 20), 1u);
+    r.cpu().a[0] = cover;
+    r.call(Base::Intuition, intuition_lvo::CloseWindow);
+    CHECK_EQ(screen_pixel(r, screen, left + 40, top + 20), 1u);
+
+    // A window moved shows the same BitMap at its new place.
+    r.intuition.move_window_to(window, 200, 100);
+    const i32 moved_x = 200 + static_cast<i32>(r.get8(window + wd_BorderLeft));
+    const i32 moved_y = 100 + static_cast<i32>(r.get8(window + wd_BorderTop));
+    CHECK_EQ(screen_pixel(r, screen, moved_x + 40, moved_y + 20), 1u);
+    CHECK_EQ(screen_pixel(r, screen, moved_x + 5, moved_y + 3), 2u);
+    CHECK_EQ(screen_pixel(r, screen, left + 40, top + 20), 0u);
+}
+
+// A super bitmap window made larger shows more of its BitMap, as kept from
+// what it showed before.
+void super_bitmap_window_shows_more_of_it_when_sized() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 super = make_super_bitmap(r, kData + 0x3000, 96, 64);
+    put_bitmap_pixel(r, super, 70, 50, 2);
+    const u32 tags = r.tags(kTagList, {{WA_Left, 50}, {WA_Top, 60}, {WA_InnerWidth, 40},
+                                       {WA_InnerHeight, 30}, {WA_MaxWidth, 300},
+                                       {WA_MaxHeight, 200}, {WA_SuperBitMap, super},
+                                       {WA_Flags, WFLG_GIMMEZEROZERO | WFLG_SIZEGADGET},
+                                       {TAG_DONE, 0}});
+    const u32 window = open_win_tags(r, 0, tags);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+    fill_rastport(r, rp, 1, 0, 0, 3, 3);
+    CHECK_EQ(window_pixel(r, window, 70, 50), 0xFFFFFFFFu);
+
+    r.intuition.size_window_to(window, 150, 120);
+    CHECK_EQ(window_pixel(r, window, 70, 50), 2u);
+    CHECK_EQ(window_pixel(r, window, 3, 3), 1u);
+    CHECK_EQ(bitmap_pixel(r, super, 3, 3), 1u);
+    const i32 left = 50 + static_cast<i32>(r.get8(window + wd_BorderLeft));
+    const i32 top = 60 + static_cast<i32>(r.get8(window + wd_BorderTop));
+    CHECK_EQ(screen_pixel(r, screen, left + 70, top + 50), 2u);
+}
+
+// Every window of the front screen follows the pointer, the active one or
+// not, in MouseX and MouseY from its corner and in GZZMouseX and GZZMouseY
+// from the inner corner of a GimmeZeroZero window; the screen and the
+// IntuitionBase have it too.
+void windows_follow_the_pointer() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, 0, 0, 0, 0);
+    const u32 plain = open_win(r, kNewWindow);
+    const u32 tags = r.tags(kTagList, {{WA_Left, 300}, {WA_Top, 40}, {WA_Width, 100},
+                                       {WA_Height, 60}, {WA_GimmeZeroZero, 1},
+                                       {TAG_DONE, 0}});
+    const u32 gzz = open_win_tags(r, 0, tags);
+    CHECK(plain != 0 && gzz != 0);
+    const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
+
+    r.intuition.pointer_event(120, 30, 0, 0, 0, true);
+    CHECK_EQ(word(plain + wd_MouseX), 70);
+    CHECK_EQ(word(plain + wd_MouseY), -30);
+    CHECK_EQ(word(plain + wd_GZZMouseX), 70);
+    CHECK_EQ(word(gzz + wd_MouseX), -180);
+    CHECK_EQ(word(gzz + wd_MouseY), -10);
+    CHECK_EQ(word(gzz + wd_GZZMouseX), -180 - static_cast<i32>(r.get8(gzz + wd_BorderLeft)));
+    CHECK_EQ(word(gzz + wd_GZZMouseY), -10 - static_cast<i32>(r.get8(gzz + wd_BorderTop)));
+    CHECK_EQ(word(screen + sc_MouseX), 120);
+    CHECK_EQ(word(screen + sc_MouseY), 30);
+    CHECK_EQ(word(r.intuition.intuition_base() + 70), 120);
+    CHECK_EQ(word(r.intuition.intuition_base() + 68), 30);
+
+    // A window that moves under the pointer has it somewhere else.
+    r.intuition.move_window_to(plain, 100, 10);
+    CHECK_EQ(word(plain + wd_MouseX), 20);
+    CHECK_EQ(word(plain + wd_MouseY), 20);
+}
+
 // ClipBlit to and from a window reads and writes the window's own bitmap at
 // window coordinates, wherever the window sits on the screen: a gadget's
 // saved background comes back as it was.
@@ -10493,6 +10750,10 @@ int main() {
     open_window_taglist_reads_wa_tags();
     open_window_on_unknown_screen_gives_zero();
     clip_blit_uses_window_coordinates();
+    gimme_zero_zero_window_draws_inside_its_borders();
+    super_bitmap_window_shows_and_keeps_its_bitmap();
+    super_bitmap_window_shows_more_of_it_when_sized();
+    windows_follow_the_pointer();
     open_window_null_newwindow_gives_zero_and_faults();
     open_window_alloc_failure_gives_zero_and_frees();
     open_window_limit_gives_zero();

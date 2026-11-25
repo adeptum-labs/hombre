@@ -610,6 +610,10 @@ private:
         u32 rp_bytes = 0;
         u32 layer = 0;
         u32 layer_bytes = 0;
+        // A GimmeZeroZero window's inner RastPort and layer, which the
+        // window's RPort and WLayer are; 0 for other windows.
+        u32 inner_rp = 0;
+        u32 inner_layer = 0;
         u32 bitmap = 0;
         u32 bitmap_bytes = 0;
         u32 planes = 0;
@@ -771,6 +775,14 @@ private:
     // recomposes every pixel, as OpenWorkBench starts the screen over.
     void reset_screen(u32 screen);
     void compose(u32 screen, Rect r);
+    // Writes the window's box into its layers: the whole window into the
+    // outer one and, for a GimmeZeroZero window, what lies inside the
+    // borders into the inner one. GZZWidth and GZZHeight follow.
+    void place_layers(native::Bus& b, const WindowRecord& rec);
+    // Writes where the pointer is into the IntuitionBase, the front screen
+    // and each of its windows, relative to each one's corner, and to the
+    // inner corner in GZZMouseX and GZZMouseY.
+    void write_mouse_position();
     bool has_screen(u32 screen) const;
     // The ColorMap of the screen a BitMap is shown on: the screen's own,
     // its backdrop's or one of its windows'. 0 for any other BitMap.

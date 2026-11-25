@@ -396,6 +396,53 @@ void lock_on_a_window_bitmap_takes_screen_coordinates() {
 
 }
 
+// A super bitmap window on a deep screen shows the pens of its planar
+// BitMap in the window's colours, and SyncSBitMap brings them back as pens.
+void super_bitmap_window_on_deep_screen() {
+    GfxRig r;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 screen = open_screen(r, k800x24);
+    CHECK(screen != 0);
+    constexpr u32 kSuper = kData + 0x400;
+    constexpr u32 kBytesPerRow = 8;
+    constexpr u32 kRows = 32;
+    const u32 planes = r.exec.alloc(kBytesPerRow * kRows * 2, ndk::MEMF_CHIP | ndk::MEMF_CLEAR);
+    CHECK(planes != 0);
+    r.put16(kSuper + ndk::bm_BytesPerRow, kBytesPerRow);
+    r.put16(kSuper + ndk::bm_Rows, kRows);
+    r.put8(kSuper + ndk::bm_Depth, 2);
+    r.put32(kSuper + ndk::bm_Planes, planes);
+    r.put32(kSuper + ndk::bm_Planes + 4, planes + kBytesPerRow * kRows);
+    // Pen 2 at 5, 3: the second plane's bit.
+    r.put8(planes + kBytesPerRow * kRows + 3 * kBytesPerRow, 0x04);
+    const u32 tags = r.tags(kWindowTags, {{ndk::WA_Left, 100}, {ndk::WA_Top, 50},
+                                          {ndk::WA_InnerWidth, 64}, {ndk::WA_InnerHeight, 32},
+                                          {ndk::WA_CustomScreen, screen},
+                                          {ndk::WA_SuperBitMap, kSuper},
+                                          {ndk::WA_GimmeZeroZero, 1}, {0, 0}});
+    const u32 window = r.intuition.open_window(0, tags);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + ndk::wd_RPort);
+    const u32 layer = r.get32(window + ndk::wd_WLayer);
+    const auto pixel = [&](i32 x, i32 y) {
+        r.cpu().a[1] = rp;
+        r.cpu().d[0] = static_cast<u32>(x);
+        r.cpu().d[1] = static_cast<u32>(y);
+        return r.result(Base::Graphics, hombre::graphics_lvo::ReadPixel);
+    };
+    CHECK_EQ(pixel(5, 3), 2u);
+    CHECK_EQ(pixel(4, 3), 0u);
+
+    r.graphics.set_pens(rp, 3, 0, ndk::JAM1);
+    r.graphics.rect_fill(rp, 10, 10, 12, 12);
+    r.cpu().a[0] = layer;
+    CHECK_EQ(r.call(Base::Graphics, hombre::graphics_lvo::SyncSBitMap), ExitReason::Halt);
+    CHECK_EQ(r.get8(planes + 11 * kBytesPerRow + 1) & 0x10, 0x10u);
+    CHECK_EQ(r.get8(planes + kBytesPerRow * kRows + 11 * kBytesPerRow + 1) & 0x10, 0x10u);
+    CHECK_EQ(r.get8(planes + kBytesPerRow * kRows + 3 * kBytesPerRow), 0x04u);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
 int main() {
     listed_mode_depth_picks_the_format();
     workbench_colours_pick_the_format();
@@ -411,5 +458,6 @@ int main() {
     palette_prefs_reach_a_deep_screen();
     open_screen_fails_when_the_deep_table_is_full();
     lock_on_a_window_bitmap_takes_screen_coordinates();
+    super_bitmap_window_on_deep_screen();
     return check::finish("test_intuition_deep");
 }
