@@ -2718,6 +2718,8 @@ struct FakeHostState {
     void* on_poll_ctx = nullptr;
     bool (*on_idle)(void* ctx) = nullptr;
     void* on_idle_ctx = nullptr;
+    void (*on_switch)(void* ctx) = nullptr;
+    void* on_switch_ctx = nullptr;
     std::vector<u32> created;
     std::vector<u32> destroyed;
     std::vector<Switch> switches;
@@ -2733,7 +2735,11 @@ bool fake_create(void* ctx, u32 id) {
 }
 
 void fake_switch(void* ctx, u32 from, u32 to) {
-    static_cast<FakeHostState*>(ctx)->switches.push_back({from, to});
+    FakeHostState& s = *static_cast<FakeHostState*>(ctx);
+    s.switches.push_back({from, to});
+    if (s.on_switch != nullptr) {
+        s.on_switch(s.on_switch_ctx);
+    }
 }
 
 void fake_destroy(void* ctx, u32 id) {
@@ -4276,6 +4282,51 @@ void the_only_task_waits_while_suspended_until_resumed() {
     CHECK_EQ(g_exec.scheduler().current(), 0);
 }
 
+struct WokenWhileSuspended {
+    Rig* rig;
+    FakeHostState* host;
+    u32 child;
+    std::vector<u32> ready;
+};
+
+bool end_delay_and_resume_child(void* ctx) {
+    WokenWhileSuspended& s = *static_cast<WokenWhileSuspended*>(ctx);
+    s.host->now_us = 200;
+    g_exec.request_rescue(Rescue::Resume, 1, s.child);
+    g_exec.run_rescue();
+    return true;
+}
+
+void note_task_ready(void* ctx) {
+    WokenWhileSuspended& s = *static_cast<WokenWhileSuspended*>(ctx);
+    s.ready = s.rig->walk(g_exec.exec_base() + TaskReady);
+}
+
+// A task whose delay ends while it is suspended is on TaskReady already when
+// another takes over, and must not be put there a second time.
+void a_task_woken_while_suspended_is_queued_once() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    CHECK_EQ(g_exec.spawn(child, 0x2000, 0, false), child);
+    WokenWhileSuspended s{&r, &host, child, {}};
+    host.on_idle = &end_delay_and_resume_child;
+    host.on_idle_ctx = &s;
+    host.on_switch = &note_task_ready;
+    host.on_switch_ctx = &s;
+    g_exec.request_rescue(Rescue::Suspend, 1, child);
+    g_exec.run_rescue();
+    g_exec.request_rescue(Rescue::Suspend, 0, boot);
+    g_exec.run_rescue();
+
+    r.cpu().exit = ExitReason::None;
+    g_exec.sleep_us(100);
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK(s.ready == std::vector<u32>{boot});
+}
+
 void ending_a_task_stops_its_code_or_removes_it() {
     Rig r;
     FakeHostState host{};
@@ -4776,6 +4827,7 @@ int main() {
     task_info_reports_the_occupying_slots_only();
     a_task_holding_forbid_is_suspended_and_resumed();
     the_only_task_waits_while_suspended_until_resumed();
+    a_task_woken_while_suspended_is_queued_once();
     ending_a_task_stops_its_code_or_removes_it();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();

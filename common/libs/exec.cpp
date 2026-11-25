@@ -4011,6 +4011,9 @@ bool Exec::switch_to_task(i32 next_id) {
     Bus b(*m_);
     const u32 from_addr = tasks_[from].task_addr;
     const u32 to_addr = tasks_[next_id].task_addr;
+    // A task that was woken while it could not run, as a suspended one is,
+    // is Ready and on TaskReady already.
+    const bool was_running = sched_.slot(static_cast<u32>(from)).state == TaskState::Running;
 
     if (!sched_.switch_to(next_id)) {
         return false;
@@ -4029,7 +4032,7 @@ bool Exec::switch_to_task(i32 next_id) {
         b.w8(from_addr + TC_IDNESTCNT, id_nest);
     }
 
-    if (sched_.slot(static_cast<u32>(from)).state == TaskState::Ready && from_addr != 0) {
+    if (was_running && from_addr != 0) {
         b.w8(from_addr + TC_STATE, TS_READY);
         enqueue(b, base_ + TaskReady, from_addr);
     }
