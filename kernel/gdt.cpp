@@ -41,8 +41,8 @@ static_assert(__builtin_offsetof(Gdt, code) == kKernelCodeSelector);
 static_assert(__builtin_offsetof(Gdt, data) == kKernelDataSelector);
 static_assert(__builtin_offsetof(Gdt, tss) == kTssSelector);
 
-constexpr u64 ist_stack_size = 16 * 1024;
-constexpr u32 ist_stack_count = 3;
+constexpr u64 ist_stack_size = 32 * 1024;
+constexpr u32 ist_stack_count = 4;
 
 // All of this lives in .bss in the higher half, so it stays valid after the
 // lower half is unmapped.

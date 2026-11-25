@@ -170,6 +170,8 @@ u8 ist_for(u32 vector) {
         return kIstDoubleFault;
     case vector_machine_check:
         return kIstMachineCheck;
+    case kApicTimerVector:
+        return kIstTimer;
     default:
         return 0;
     }

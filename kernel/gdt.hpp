@@ -35,6 +35,9 @@ inline constexpr u16 kTssSelector = 0x18;
 inline constexpr u8 kIstDoubleFault = 1;
 inline constexpr u8 kIstNmi = 2;
 inline constexpr u8 kIstMachineCheck = 3;
+// The timer's own stack, so that what it does takes no room from the stack
+// it interrupts.
+inline constexpr u8 kIstTimer = 4;
 
 // Replaces the firmware's GDT with the kernel's own and loads the TSS.
 // Segment registers are reloaded except FS and GS, so a GS base set before
