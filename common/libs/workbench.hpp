@@ -340,6 +340,10 @@ public:
         u32 block = 0;    // the strings and structs the gadgets keep
         u32 block_bytes = 0;
     };
+    static constexpr u32 kMaxToolTypes = 64;
+    static constexpr u32 kMaxToolTypeLength = 127;
+    static constexpr u32 kMaxDefaultToolLength = 255;
+    static constexpr u32 kNoToolType = 0xFFFFFFFF;
     static constexpr u16 kDialogAccept = 2;
     static constexpr u16 kDialogCancel = 3;
     enum class Reply : u8 { Waiting, Accepted, Cancelled };
@@ -359,17 +363,37 @@ public:
 
     // The window of Icons > Information: the name and type of what the icon
     // stands for, the size and blocks of a file, its date, a check box for
-    // each protection bit it has one for, and its comment. path finds the
-    // object again when it is saved, name names it in an error; protection
-    // and comment_text are what the window opened with. has_object is false
-    // for an icon that stands for nothing but its .info.
+    // each protection bit it has one for, its comment, and the icon's own
+    // stack, default tool and tool types. path finds the object again when
+    // it is saved, name names it in an error; protection, comment_text and
+    // the original_ fields are what the window opened with. has_object is
+    // false for an icon that stands for nothing but its .info.
     struct InfoRequest : Dialog {
-        u32 comment_gadget = 0;  // the comment string gadget
+        u32 comment_gadget = 0;
+        u32 stack_gadget = 0;
+        u32 default_tool_gadget = 0;
+        u32 tool_types_gadget = 0;  // the list view of the rows
+        u32 tool_gadget = 0;        // the string editing the selected row
+        u32 list = 0;               // the exec List of the rows, in extra
+        u32 rows = 0;               // the row strings, in extra
+        u32 original_rows = 0;      // the rows as the window opened, in extra
+        u32 default_text = 0;       // the default tool string, in extra
+        u32 original_default = 0;   // the default tool as it opened, in extra
+        u32 tags = 0;               // the tag list of gadget changes, in extra
+        u32 empty_text = 0;
+        u32 window_id = 0;
+        u32 row_count = 0;
+        u32 original_row_count = 0;
+        u32 original_stack = 0;
+        u32 selected = kNoToolType;
         char path[Dos::kMaxPath]{};
         char name[32]{};
         char comment_text[Dos::kMaxComment + 1]{};
         u32 protection = 0;
         bool has_object = false;
+        bool show_stack = false;
+        bool show_default_tool = false;
+        bool show_tool_types = false;
     };
     static constexpr u16 kInfoComment = 1;
     static constexpr u16 kInfoSave = kDialogAccept;
@@ -384,6 +408,13 @@ public:
     static constexpr u16 kInfoType = 11;
     static constexpr u16 kInfoSize = 12;
     static constexpr u16 kInfoDate = 13;
+    static constexpr u16 kInfoStack = 14;
+    static constexpr u16 kInfoDefaultTool = 15;
+    static constexpr u16 kInfoToolTypes = 16;
+    static constexpr u16 kInfoTool = 17;
+    static constexpr u16 kInfoNew = 18;
+    static constexpr u16 kInfoDel = 19;
+    static constexpr u16 kInfoBlocks = 20;
     bool open_info(u32 window_id, u32 icon_id, InfoRequest& request);
     // Handles the input waiting at the information window: Accepted for
     // Save, Cancelled for Cancel or the close gadget.
@@ -658,6 +689,16 @@ private:
     // Waits at the dialog's window until step answers.
     template <typename Step>
     Reply wait_for_reply(const Dialog& dialog, Step step);
+    // The rows of the information window's tool types: their exec List, how
+    // they show with one selected, and what New, Del and Return do.
+    void link_tool_types(const InfoRequest& request);
+    void show_tool_types(InfoRequest& request, u32 selected);
+    void add_tool_type(InfoRequest& request);
+    void delete_tool_type(InfoRequest& request);
+    void edit_tool_type(InfoRequest& request);
+    // Writes the stack, default tool and tool types the information window
+    // changed into the icon's .info; changed tells whether it wrote it.
+    bool save_icon_info(InfoRequest& request, bool& changed, u32& error);
     // Renames the object and its .info, both or neither.
     bool rename_with_info(const char* from, const char* to, u32& error);
     void select_contents(u32 window_id);

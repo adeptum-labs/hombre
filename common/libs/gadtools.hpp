@@ -117,6 +117,16 @@ constexpr u32 GTTX_Text = 0x8008000B;
 constexpr u32 GTCB_Checked = 0x80080004;
 constexpr u32 GTST_String = 0x8008002D;
 constexpr u32 GTST_MaxChars = 0x8008002E;
+constexpr u32 GTIN_Number = 0x8008002F;
+constexpr u32 GTIN_MaxChars = 0x80080030;
+constexpr u32 GTLV_Labels = 0x80080006;
+constexpr u32 GTLV_ShowSelected = 0x80080035;
+constexpr u32 GTLV_Selected = 0x80080036;
+constexpr u32 GTLV_ItemHeight = 0x8008004D;
+constexpr u32 GTLV_MakeVisible = 0x8008004E;
+
+// The frame around the rows of a list view.
+constexpr i32 kListViewFrame = 2;
 
 }
 
@@ -139,6 +149,9 @@ public:
     // code that is not the guest's, with their arguments and results.
     u32 create_context(u32 list);
     u32 create_gadget(u32 kind, u32 previous, u32 new_gadget, u32 tags);
+    // GT_SetGadgetAttrsA for code that is not the guest's: the gadget of
+    // the window takes the tags and is drawn again. False when they fault.
+    bool set_gadget_attrs(u32 gadget, u32 window, u32 tags);
     void free_gadgets(u32 first);
     void refresh_window(u32 window);
 

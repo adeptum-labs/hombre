@@ -50,6 +50,7 @@ constexpr char kWbStartupDrawer[] = "SYS:WBStartup";
 constexpr u32 do_Gadget = 4;
 constexpr u32 do_Type = 48;
 constexpr u32 do_DefaultTool = 50;
+constexpr u32 do_ToolTypes = 54;
 constexpr u32 do_CurrentX = 58;
 constexpr u32 do_CurrentY = 62;
 constexpr u32 do_DrawerData = 66;
@@ -452,25 +453,43 @@ struct Message {
     }
 };
 
+// Writes a tag list from pairs of tag and data, ending it with TAG_DONE.
+u32 write_tags(Bus& b, u32 at, std::initializer_list<u32> words) {
+    u32 p = at;
+    for (const u32 word : words) {
+        b.w32(p, word);
+        p += 4;
+    }
+    b.w32(p, ndk::TAG_DONE);
+    return at;
+}
+
 // Builds the window of a dialog, sized by the screen's font. Its block of
 // exec memory holds the NewWindow, the NewGadget and tags of the gadget
-// being made and the strings the gadgets keep.
+// being made and the strings the gadgets keep, and room a dialog asks for.
 class DialogBuilder {
 public:
     static constexpr i32 kMargin = 8;
+    static constexpr u32 kTagWords = 10;
 
     DialogBuilder(m68k::Machine& m, Exec& exec, Graphics& graphics, Intuition& intuition,
                   GadTools& gadtools, u32 screen, Workbench::Dialog& dialog,
-                  std::initializer_list<const char*> strings)
+                  std::initializer_list<const char*> strings, u32 extra_bytes = 0,
+                  i32 columns = 40)
         : bus_(m), intuition_(intuition), gadtools_(gadtools), dialog_(dialog), screen_(screen),
           font_(graphics.font_metrics(intuition.font_of_screen(screen))),
-          bar_height_(static_cast<i32>(bus_.r8(screen + ndk::sc_BarHeight))) {
+          bar_height_(static_cast<i32>(bus_.r8(screen + ndk::sc_BarHeight))),
+          screen_width_(static_cast<i32>(bus_.r16(screen + ndk::sc_Width))),
+          columns_(columns) {
         u32 bytes = kList + 4;
         for (const char* text : strings) {
             bytes += text_length(text) + 1;
         }
-        dialog.block = exec.alloc(bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
-        dialog.block_bytes = bytes;
+        // The structs in the extra room need an even address.
+        bytes = (bytes + 3) & ~3u;
+        dialog.block = exec.alloc(bytes + extra_bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+        dialog.block_bytes = bytes + extra_bytes;
+        extra_ = dialog.block != 0 ? dialog.block + bytes : 0;
         at_ = dialog.block + kList + 4;
         if (dialog.block != 0) {
             dialog.gadgets = gadtools.create_context(dialog.block + kList);
@@ -478,12 +497,18 @@ public:
         }
     }
 
-    i32 width() const { return 40 * font_.x_size; }
+    i32 width() const {
+        const i32 wanted = columns_ * font_.x_size;
+        const i32 room = screen_width_ - 2 * kCascadeX;
+        return wanted < room ? wanted : room;
+    }
     i32 inner_width() const { return width() - 2 * kMargin; }
     i32 line_height() const { return font_.y_size + 6; }
     i32 char_width() const { return font_.x_size; }
     i32 font_height() const { return font_.y_size; }
     i32 top() const { return bar_height_ + kMargin; }
+    // The room after the strings, which a dialog lays out itself.
+    u32 extra() const { return extra_; }
 
     // Copies one of the strings the block was sized for into it.
     u32 put(const char* text) {
@@ -499,20 +524,11 @@ public:
 
     // The tag list of the next gadget made, from pairs of tag and data.
     u32 tags(std::initializer_list<u32> words) {
-        if (dialog_.block == 0) {
-            return 0;
-        }
-        u32 at = dialog_.block + kTags;
-        for (const u32 word : words) {
-            bus_.w32(at, word);
-            at += 4;
-        }
-        bus_.w32(at, ndk::TAG_DONE);
-        return dialog_.block + kTags;
+        return dialog_.block != 0 ? write_tags(bus_, dialog_.block + kTags, words) : 0;
     }
 
     u32 add(u32 kind, u16 id, i32 left, i32 top, i32 width, u32 label, u32 place,
-            u32 gadget_tags = 0) {
+            u32 gadget_tags = 0, i32 height = 0) {
         using namespace gadtools_defs;
         if (previous_ == 0) {
             return 0;
@@ -521,7 +537,7 @@ public:
         bus_.w16(gadget + ng_LeftEdge, static_cast<u32>(left));
         bus_.w16(gadget + ng_TopEdge, static_cast<u32>(top));
         bus_.w16(gadget + ng_Width, static_cast<u32>(width));
-        bus_.w16(gadget + ng_Height, static_cast<u32>(line_height()));
+        bus_.w16(gadget + ng_Height, static_cast<u32>(height > 0 ? height : line_height()));
         bus_.w32(gadget + ng_GadgetText, label);
         bus_.w16(gadget + ng_GadgetID, id);
         bus_.w32(gadget + ng_Flags, place);
@@ -564,7 +580,6 @@ public:
     }
 
 private:
-    static constexpr u32 kTagWords = 5;
     static constexpr u32 kNewGadget = ndk::NewWindow_SIZEOF;
     static constexpr u32 kTags = kNewGadget + gadtools_defs::NewGadget_SIZEOF;
     static constexpr u32 kList = kTags + kTagWords * 4;
@@ -576,9 +591,61 @@ private:
     u32 screen_;
     Graphics::FontMetrics font_;
     i32 bar_height_;
+    i32 screen_width_;
+    i32 columns_;
+    u32 extra_ = 0;
     u32 at_ = 0;
     u32 previous_ = 0;
 };
+
+// Where an information dialog keeps the tool type rows, the default tool
+// and the tag list of its later gadget changes, after its strings.
+constexpr u32 kInfoRowStride = Workbench::kMaxToolTypeLength + 1;
+constexpr u32 kInfoRowBytes = Workbench::kMaxToolTypes * kInfoRowStride;
+constexpr u32 kInfoTagWords = 10;
+constexpr u32 kInfoNodesAt = ndk::LH_SIZE;
+constexpr u32 kInfoRowsAt = kInfoNodesAt + Workbench::kMaxToolTypes * ndk::LN_SIZE;
+constexpr u32 kInfoOriginalRowsAt = kInfoRowsAt + kInfoRowBytes;
+constexpr u32 kInfoDefaultAt = kInfoOriginalRowsAt + kInfoRowBytes;
+constexpr u32 kInfoOriginalDefaultAt = kInfoDefaultAt + Workbench::kMaxDefaultToolLength + 1;
+constexpr u32 kInfoTagsAt =
+    kInfoOriginalDefaultAt + Workbench::kMaxDefaultToolLength + 1;
+constexpr u32 kInfoExtraBytes = kInfoTagsAt + kInfoTagWords * 4;
+// The most entries a tool type array can hold, its 64K .info bounding it.
+constexpr u32 kMaxToolTypeTail = Icon::kMaxInfoBytes / 5;
+
+// Copies the NUL-terminated string at from into to, at most max bytes of it.
+void copy_guest_text(Bus& b, u32 to, u32 from, u32 max) {
+    u32 i = 0;
+    for (; i < max; ++i) {
+        const u32 c = b.r8(from + i);
+        if (c == 0) {
+            break;
+        }
+        b.w8(to + i, static_cast<u8>(c));
+    }
+    b.w8(to + i, 0);
+}
+
+// Whether the text equals the string at guest up to text's NUL, a text of
+// max bytes counting equal into a longer string: the window shows no more.
+bool same_guest_prefix(Bus& b, u32 guest, const char* text, u32 max) {
+    if (guest == 0) {
+        return text[0] == '\0';
+    }
+    for (u32 i = 0;; ++i) {
+        const u32 c = b.r8(guest + i);
+        if (text[i] == '\0') {
+            return c == 0;
+        }
+        if (c != static_cast<u8>(text[i])) {
+            return false;
+        }
+        if (i + 1 == max) {
+            return true;
+        }
+    }
+}
 
 bool join_path(const char* drawer, const char* name, char (&out)[Dos::kMaxPath]) {
     u32 at = 0;
@@ -3211,9 +3278,9 @@ Workbench::Reply Workbench::text_request_input(const TextRequest& request, char*
     });
 }
 
-// A window of lines that say what the icon stands for, a check box for each
-// protection bit it has one for, a comment to edit and Save and Cancel
-// buttons.
+// A window of lines that say what the icon stands for, its stack, default
+// tool and tool types, a check box for each protection bit it has one for,
+// a comment to edit and Save and Cancel buttons.
 bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     using namespace gadtools_defs;
     const IconEntry* icon = file_icon(window_id, icon_id);
@@ -3223,25 +3290,31 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
                    ERROR_OBJECT_WRONG_TYPE);
         return false;
     }
-    if (!can_show_dialog()) {
+    if (!can_show_dialog() || icon->object == 0) {
         return false;
     }
     char path[Dos::kMaxPath];
     if (!icon_path(*find_window(window_id), *icon, path)) {
         return false;
     }
+    Bus b(*machine_);
     const Dos::FileInfo info = dos_->file_info(path);
     const bool has_object = info.kind != Dos::TargetKind::Missing;
     const bool is_file = info.kind == Dos::TargetKind::File;
+    const bool show_stack = icon->type == kTool || icon->type == kProject;
+    const bool show_default_tool = icon->type == kProject;
+    const bool show_tool_types = icon->type == kTool || icon->type == kProject ||
+                                 icon->type == kDrawer || icon->type == kGarbage;
 
     Message name_line;
     name_line.add("Name: ").add(icon->name);
     Message type_line;
     type_line.add("Type: ").add(object_type_name(icon->type));
     Message size_line;
+    Message blocks_line;
     if (is_file) {
-        size_line.add("Size: ").number(info.size).add(" bytes, ").number(info.blocks).add(
-            " blocks");
+        size_line.add("Size: ").number(info.size).add(" bytes");
+        blocks_line.add("Blocks: ").number(info.blocks);
     }
     Message date_line;
     if (has_object) {
@@ -3253,6 +3326,17 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
             date_line.add("Date: ").add(date).add(" ").add(time);
         }
     }
+    char default_tool[kMaxDefaultToolLength + 1]{};
+    const u32 default_ptr = b.r32(icon->object + do_DefaultTool);
+    for (u32 i = 0; default_ptr != 0 && i < kMaxDefaultToolLength; ++i) {
+        const u32 c = b.r8(default_ptr + i);
+        if (c == 0) {
+            break;
+        }
+        default_tool[i] = static_cast<char>(c);
+        default_tool[i + 1] = '\0';
+    }
+    const i32 stack = static_cast<i32>(b.r32(icon->object + do_StackSize));
 
     request = InfoRequest{};
     copy_text(request.path, sizeof request.path, path);
@@ -3260,47 +3344,137 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     copy_text(request.comment_text, sizeof request.comment_text, info.comment);
     request.protection = info.protection;
     request.has_object = has_object;
+    request.window_id = window_id;
+    request.show_stack = show_stack;
+    request.show_default_tool = show_default_tool;
+    request.show_tool_types = show_tool_types;
 
     static_assert(kProtectionBoxCount == 6);
     DialogBuilder dialog(
         *machine_, *exec_, *graphics_, *intuition_, *gadtools_, screen_, request,
-        {name_line.text, type_line.text, size_line.text, date_line.text, "Information", "Comment",
-         "Save", "Cancel", info.comment, kProtectionBoxes[0].label, kProtectionBoxes[1].label,
+        {name_line.text, type_line.text, size_line.text, blocks_line.text, date_line.text,
+         default_tool,
+         "Information", "Comment", "Save", "Cancel", info.comment, "Default Tool", "Stack",
+         "Tool Types", "New", "Del", "", kProtectionBoxes[0].label, kProtectionBoxes[1].label,
          kProtectionBoxes[2].label, kProtectionBoxes[3].label, kProtectionBoxes[4].label,
-         kProtectionBoxes[5].label});
+         kProtectionBoxes[5].label},
+        kInfoExtraBytes, 52);
+    if (dialog.extra() == 0) {
+        close_dialog(request);
+        return false;
+    }
+
+    const u32 extra = dialog.extra();
+    request.list = extra;
+    request.rows = extra + kInfoRowsAt;
+    request.original_rows = extra + kInfoOriginalRowsAt;
+    request.default_text = extra + kInfoDefaultAt;
+    request.original_default = extra + kInfoOriginalDefaultAt;
+    request.tags = extra + kInfoTagsAt;
+    request.empty_text = dialog.put("");
+    request.original_stack = static_cast<u32>(stack);
+    u32 default_length = 0;
+    for (; default_tool[default_length] != '\0'; ++default_length) {
+        b.w8(request.default_text + default_length,
+             static_cast<u8>(default_tool[default_length]));
+        b.w8(request.original_default + default_length,
+             static_cast<u8>(default_tool[default_length]));
+    }
+    b.w8(request.default_text + default_length, 0);
+    b.w8(request.original_default + default_length, 0);
+    if (show_tool_types) {
+        const u32 array = b.r32(icon->object + do_ToolTypes);
+        while (array != 0 && request.row_count < kMaxToolTypes) {
+            const u32 entry = b.r32(array + request.row_count * 4);
+            if (entry == 0) {
+                break;
+            }
+            const u32 row = request.rows + request.row_count * kInfoRowStride;
+            copy_guest_text(b, row, entry, kMaxToolTypeLength);
+            copy_guest_text(b, request.original_rows + request.row_count * kInfoRowStride, row,
+                            kMaxToolTypeLength);
+            ++request.row_count;
+        }
+    }
+    request.original_row_count = request.row_count;
+    link_tool_types(request);
+
     const i32 margin = DialogBuilder::kMargin;
-    i32 top = dialog.top();
+    const i32 column = (dialog.inner_width() - margin) / 2;
+    const i32 right_x = margin + column + margin;
+    i32 left_top = dialog.top();
+    i32 right_top = dialog.top();
     const auto line = [&](u16 id, const char* text) {
-        dialog.add(TEXT_KIND, id, margin, top, dialog.inner_width(), 0, 0,
+        dialog.add(TEXT_KIND, id, margin, left_top, column, 0, 0,
                    dialog.tags({GTTX_Text, dialog.put(text)}));
-        top += dialog.line_height();
+        left_top += dialog.line_height();
     };
     line(kInfoName, name_line.text);
     line(kInfoType, type_line.text);
     if (is_file) {
         line(kInfoSize, size_line.text);
+        line(kInfoBlocks, blocks_line.text);
     }
     if (has_object) {
         line(kInfoDate, date_line.text);
-        top += margin;
+    }
+    if (show_default_tool) {
+        right_top += dialog.font_height() + 4;
+        request.default_tool_gadget = dialog.add(
+            STRING_KIND, kInfoDefaultTool, right_x, right_top, column,
+            dialog.put("Default Tool"), PLACETEXT_ABOVE,
+            dialog.tags({GTST_String, dialog.put(default_tool), GTST_MaxChars,
+                         kMaxDefaultToolLength}));
+        right_top += dialog.line_height();
+    }
+    if (show_stack) {
+        right_top += dialog.font_height() + 4;
+        request.stack_gadget = dialog.add(
+            INTEGER_KIND, kInfoStack, right_x, right_top, column, dialog.put("Stack"),
+            PLACETEXT_ABOVE,
+            dialog.tags({GTIN_Number, static_cast<u32>(stack), GTIN_MaxChars, 10}));
+        right_top += dialog.line_height();
+    }
+    if (show_tool_types) {
+        request.tool_gadget = dialog.add(
+            STRING_KIND, kInfoTool, right_x, right_top, column, 0, 0,
+            dialog.tags({GTST_String, request.empty_text, GTST_MaxChars, kMaxToolTypeLength}));
+        constexpr i32 kToolTypeRows = 3;
+        const i32 list_h = kToolTypeRows * dialog.line_height() + 2 * kListViewFrame;
+        right_top += dialog.font_height() + 4;
+        request.tool_types_gadget = dialog.add(
+            LISTVIEW_KIND, kInfoToolTypes, right_x, right_top, column,
+            dialog.put("Tool Types"), PLACETEXT_ABOVE,
+            dialog.tags({GTLV_Labels, request.list, GTLV_ShowSelected, request.tool_gadget,
+                         GTLV_ItemHeight, static_cast<u32>(dialog.line_height())}),
+            list_h + dialog.line_height());
+        right_top += list_h + dialog.line_height();
+        const i32 button = 6 * dialog.char_width();
+        dialog.add(BUTTON_KIND, kInfoNew, right_x, right_top, button, dialog.put("New"),
+                   PLACETEXT_IN);
+        dialog.add(BUTTON_KIND, kInfoDel, right_x + column - button, right_top, button,
+                   dialog.put("Del"), PLACETEXT_IN);
+        right_top += dialog.line_height();
+    }
+
+    i32 top = (left_top > right_top ? left_top : right_top) + margin;
+    if (has_object) {
         for (u32 i = 0; i < kProtectionBoxCount; ++i) {
             const ProtectionBox& box = kProtectionBoxes[i];
             const bool set = (info.protection & box.bit) != 0;
-            const i32 column = static_cast<i32>(i % kProtectionColumns);
+            const i32 column_at = static_cast<i32>(i % kProtectionColumns);
             const i32 row = static_cast<i32>(i / kProtectionColumns);
-            dialog.add(CHECKBOX_KIND, box.id, margin + column * 20 * dialog.char_width(),
+            dialog.add(CHECKBOX_KIND, box.id, margin + column_at * 20 * dialog.char_width(),
                        top + row * dialog.line_height(), 0, dialog.put(box.label),
                        PLACETEXT_RIGHT,
                        dialog.tags({GTCB_Checked, box.denies != set ? 1u : 0u}));
         }
-        // The comment's label takes a line above it.
         top += static_cast<i32>(kProtectionRows) * dialog.line_height() + dialog.font_height() + 4;
-        const u32 comment_label = dialog.put("Comment");
-        const u32 comment = dialog.put(info.comment);
         request.comment_gadget = dialog.add(
-            STRING_KIND, kInfoComment, margin, top, dialog.inner_width(), comment_label,
-            PLACETEXT_ABOVE,
-            dialog.tags({GTST_String, comment, GTST_MaxChars, Dos::kMaxComment}));
+            STRING_KIND, kInfoComment, margin, top, dialog.inner_width(),
+            dialog.put("Comment"), PLACETEXT_ABOVE,
+            dialog.tags({GTST_String, dialog.put(info.comment), GTST_MaxChars,
+                         Dos::kMaxComment}));
         top += dialog.line_height();
     }
     top += margin;
@@ -3318,56 +3492,275 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     return true;
 }
 
+// Makes the exec List of the rows anew.
+void Workbench::link_tool_types(const InfoRequest& request) {
+    Bus b(*machine_);
+    b.w32(request.list + ndk::LH_HEAD, request.list + ndk::LH_TAIL);
+    b.w32(request.list + ndk::LH_TAIL, 0);
+    b.w32(request.list + ndk::LH_TAILPRED, request.list + ndk::LH_HEAD);
+    for (u32 i = 0; i < request.row_count; ++i) {
+        const u32 node = request.list + ndk::LH_SIZE + i * ndk::LN_SIZE;
+        const u32 last = b.r32(request.list + ndk::LH_TAILPRED);
+        b.w32(node + ndk::LN_SUCC, request.list + ndk::LH_TAIL);
+        b.w32(node + ndk::LN_PRED, last);
+        b.w32(last + ndk::LN_SUCC, node);
+        b.w32(request.list + ndk::LH_TAILPRED, node);
+        b.w32(node + ndk::LN_NAME, request.rows + i * kInfoRowStride);
+    }
+}
+
+// The list scrolls the selected row into view and puts its text in the
+// string gadget.
+void Workbench::show_tool_types(InfoRequest& request, u32 selected) {
+    using namespace gadtools_defs;
+    Bus b(*machine_);
+    link_tool_types(request);
+    if (selected == kNoToolType) {
+        gadtools_->set_gadget_attrs(
+            request.tool_gadget, request.window,
+            write_tags(b, request.tags, {GTST_String, request.empty_text}));
+    }
+    // The tags stop before GTLV_MakeVisible when no row is selected.
+    const u32 tags = write_tags(b, request.tags,
+                                {GTLV_Labels, request.list, GTLV_Selected, selected,
+                                 selected != kNoToolType ? GTLV_MakeVisible : ndk::TAG_DONE,
+                                 selected});
+    gadtools_->set_gadget_attrs(request.tool_types_gadget, request.window, tags);
+    request.selected = selected;
+}
+
+void Workbench::add_tool_type(InfoRequest& request) {
+    if (request.row_count >= kMaxToolTypes) {
+        return;
+    }
+    Bus b(*machine_);
+    b.w8(request.rows + request.row_count * kInfoRowStride, 0);
+    ++request.row_count;
+    show_tool_types(request, request.row_count - 1);
+    intuition_->activate_string(request.tool_gadget, request.window);
+}
+
+void Workbench::delete_tool_type(InfoRequest& request) {
+    const u32 removed = request.selected;
+    if (removed >= request.row_count) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 later = request.row_count - removed - 1;
+    u8* rows = b.bytes_at(request.rows + removed * kInfoRowStride,
+                          (later + 1) * kInfoRowStride);
+    if (rows == nullptr) {
+        return;
+    }
+    __builtin_memmove(rows, rows + kInfoRowStride, later * kInfoRowStride);
+    --request.row_count;
+    show_tool_types(request, request.row_count == 0 ? kNoToolType
+                             : later != 0          ? removed
+                                                   : removed - 1);
+}
+
+// Return in the string gadget replaces the selected row's text.
+void Workbench::edit_tool_type(InfoRequest& request) {
+    if (request.selected >= request.row_count) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 string_info = b.r32(request.tool_gadget + ndk::gg_SpecialInfo);
+    copy_guest_text(b, request.rows + request.selected * kInfoRowStride,
+                    b.r32(string_info + ndk::si_Buffer), kMaxToolTypeLength);
+    show_tool_types(request, request.selected);
+}
+
 Workbench::Reply Workbench::info_input(InfoRequest& request) {
-    return dialog_input(request, [](u32 id, u32) {
-        return id == kInfoSave ? Reply::Accepted : Reply::Waiting;
+    return dialog_input(request, [&](u32 id, u32 code) {
+        if (id == kInfoSave) {
+            return Reply::Accepted;
+        }
+        if (id == kInfoToolTypes && code < request.row_count) {
+            request.selected = code;
+            intuition_->activate_string(request.tool_gadget, request.window);
+        } else if (id == kInfoNew) {
+            add_tool_type(request);
+        } else if (id == kInfoDel) {
+            delete_tool_type(request);
+        } else if (id == kInfoTool && code == '\r') {
+            edit_tool_type(request);
+        }
+        return Reply::Waiting;
     });
 }
 
-bool Workbench::save_info(InfoRequest& request) {
-    if (!request.has_object) {
+// Writes the stack, default tool and tool types the window changed into the
+// .info. The rows and strings set on the object are this block's own, and
+// the object's pointers go back before it is freed, so it frees only its
+// own memory.
+bool Workbench::save_icon_info(InfoRequest& request, bool& changed, u32& error) {
+    changed = false;
+    error = 0;
+    Bus b(*machine_);
+    const u32 stack_info =
+        request.stack_gadget != 0 ? b.r32(request.stack_gadget + ndk::gg_SpecialInfo) : 0;
+    const i32 stack =
+        stack_info != 0 ? static_cast<i32>(b.r32(stack_info + ndk::si_LongInt)) : 0;
+    char default_tool[kMaxDefaultToolLength + 1]{};
+    if (request.show_default_tool) {
+        const u32 string_info = b.r32(request.default_tool_gadget + ndk::gg_SpecialInfo);
+        if (string_info == 0 ||
+            !b.string(b.r32(string_info + ndk::si_Buffer), default_tool, sizeof default_tool)) {
+            error = ERROR_OBJECT_WRONG_TYPE;
+            return false;
+        }
+    }
+    const bool stack_changed =
+        request.show_stack && static_cast<u32>(stack) != request.original_stack;
+    const bool default_changed =
+        request.show_default_tool &&
+        !same_guest_prefix(b, request.original_default, default_tool, kMaxDefaultToolLength);
+    bool types_changed = request.show_tool_types &&
+                         request.row_count != request.original_row_count;
+    for (u32 i = 0; request.show_tool_types && !types_changed && i < request.row_count; ++i) {
+        char row[kMaxToolTypeLength + 1]{};
+        if (!b.string(request.rows + i * kInfoRowStride, row, sizeof row)) {
+            error = ERROR_OBJECT_WRONG_TYPE;
+            return false;
+        }
+        types_changed = !same_guest_prefix(b, request.original_rows + i * kInfoRowStride, row,
+                                           kMaxToolTypeLength);
+    }
+    if (!stack_changed && !default_changed && !types_changed) {
         return true;
     }
-    if (machine_ == nullptr || dos_ == nullptr || request.comment_gadget == 0) {
+
+    const u32 object = icon_->load_object(request.path);
+    if (object == 0) {
+        error = dos_->last_error();
+        if (error == 0) {
+            error = ERROR_OBJECT_WRONG_TYPE;
+        }
+        return false;
+    }
+    const u32 object_default = b.r32(object + do_DefaultTool);
+    const u32 object_types = b.r32(object + do_ToolTypes);
+    u32 block = 0;
+    u32 block_bytes = 0;
+    if (types_changed) {
+        // Rows past the window's cap stay as the .info has them.
+        u32 original_count = 0;
+        while (object_types != 0 && original_count < kMaxToolTypeTail &&
+               b.r32(object_types + original_count * 4) != 0) {
+            ++original_count;
+        }
+        const u32 tail = original_count > kMaxToolTypes ? original_count - kMaxToolTypes : 0;
+        const u32 count = request.row_count + tail;
+        if (count != 0) {
+            block_bytes = (count + 1) * 4;
+            block = exec_->alloc(block_bytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+            if (block == 0) {
+                error = ERROR_NO_FREE_STORE;
+                icon_->free_object(object);
+                return false;
+            }
+            for (u32 i = 0; i < request.row_count; ++i) {
+                b.w32(block + i * 4, request.rows + i * kInfoRowStride);
+            }
+            for (u32 i = 0; i < tail; ++i) {
+                b.w32(block + (request.row_count + i) * 4,
+                      b.r32(object_types + (kMaxToolTypes + i) * 4));
+            }
+        }
+        b.w32(object + do_ToolTypes, block);
+    }
+    if (stack_changed) {
+        b.w32(object + do_StackSize, static_cast<u32>(stack));
+    }
+    if (default_changed) {
+        u32 length = 0;
+        for (; default_tool[length] != '\0'; ++length) {
+            b.w8(request.default_text + length, static_cast<u8>(default_tool[length]));
+        }
+        b.w8(request.default_text + length, 0);
+        b.w32(object + do_DefaultTool,
+              default_tool[0] != '\0' ? request.default_text : 0);
+    }
+    const bool saved = b.ok() && icon_->save_object(request.path, object, error);
+    b.w32(object + do_DefaultTool, object_default);
+    b.w32(object + do_ToolTypes, object_types);
+    icon_->free_object(object);
+    if (block != 0) {
+        exec_->free(block, block_bytes);
+    }
+    if (!saved) {
+        if (error == 0) {
+            error = ERROR_OBJECT_WRONG_TYPE;
+        }
+        return false;
+    }
+    request.original_stack = static_cast<u32>(stack);
+    request.original_row_count = request.row_count;
+    for (u32 i = 0; i < request.row_count; ++i) {
+        copy_guest_text(b, request.original_rows + i * kInfoRowStride,
+                        request.rows + i * kInfoRowStride, kMaxToolTypeLength);
+    }
+    copy_guest_text(b, request.original_default, request.default_text, kMaxDefaultToolLength);
+    changed = true;
+    return true;
+}
+
+bool Workbench::save_info(InfoRequest& request) {
+    if (machine_ == nullptr || dos_ == nullptr || icon_ == nullptr) {
         return false;
     }
     Bus b(*machine_);
-    auto checked = [&](u16 id) {
-        for (u32 gadget = request.gadgets, i = 0; gadget != 0 && i < 32;
-             ++i, gadget = b.r32(gadget + ndk::gg_NextGadget)) {
-            if (b.r16(gadget + ndk::gg_GadgetID) == id) {
-                return (b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_SELECTED) != 0;
-            }
-        }
-        return false;
-    };
-    u32 protection = request.protection;
-    for (const ProtectionBox& box : kProtectionBoxes) {
-        const bool allowed = checked(box.id);
-        const bool set = box.denies ? !allowed : allowed;
-        protection = set ? protection | box.bit : protection & ~box.bit;
-    }
-    char comment[Dos::kMaxComment + 1]{};
-    const u32 string_info = b.r32(request.comment_gadget + ndk::gg_SpecialInfo);
-    if (!b.ok() || !b.string(b.r32(string_info + ndk::si_Buffer), comment, sizeof comment)) {
-        return false;
-    }
     u32 error = 0;
     bool changed = false;
-    if (protection != request.protection) {
-        if (!dos_->set_protection_bits(request.path, protection, error)) {
-            show_error("cannot save", request.name, error);
+    if (request.has_object && request.comment_gadget != 0) {
+        auto checked = [&](u16 id) {
+            for (u32 gadget = request.gadgets, i = 0; gadget != 0 && i < 32;
+                 ++i, gadget = b.r32(gadget + ndk::gg_NextGadget)) {
+                if (b.r16(gadget + ndk::gg_GadgetID) == id) {
+                    return (b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_SELECTED) != 0;
+                }
+            }
+            return false;
+        };
+        u32 protection = request.protection;
+        for (const ProtectionBox& box : kProtectionBoxes) {
+            const bool allowed = checked(box.id);
+            const bool set = box.denies ? !allowed : allowed;
+            protection = set ? protection | box.bit : protection & ~box.bit;
+        }
+        char comment[Dos::kMaxComment + 1]{};
+        const u32 string_info = b.r32(request.comment_gadget + ndk::gg_SpecialInfo);
+        if (!b.ok() || !b.string(b.r32(string_info + ndk::si_Buffer), comment, sizeof comment)) {
             return false;
         }
-        request.protection = protection;
-        changed = true;
+        if (protection != request.protection) {
+            if (!dos_->set_protection_bits(request.path, protection, error)) {
+                show_error("cannot save", request.name, error);
+                return false;
+            }
+            request.protection = protection;
+            changed = true;
+        }
+        if (!same_text(comment, request.comment_text)) {
+            if (!dos_->set_file_comment(request.path, comment, error)) {
+                show_error("cannot save", request.name, error);
+                return false;
+            }
+            copy_text(request.comment_text, sizeof request.comment_text, comment);
+            changed = true;
+        }
     }
-    if (!same_text(comment, request.comment_text)) {
-        if (!dos_->set_file_comment(request.path, comment, error)) {
-            show_error("cannot save", request.name, error);
-            return false;
+    bool info_changed = false;
+    if ((request.show_stack || request.show_default_tool || request.show_tool_types) &&
+        !save_icon_info(request, info_changed, error)) {
+        show_error("cannot save", request.name, error);
+        return false;
+    }
+    if (info_changed) {
+        if (DrawerWindow* window = find_window(request.window_id); window != nullptr) {
+            update_window(*window);
         }
-        copy_text(request.comment_text, sizeof request.comment_text, comment);
         changed = true;
     }
     if (changed) {

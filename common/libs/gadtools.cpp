@@ -133,8 +133,6 @@ constexpr u32 GTPA_ColorTable = 0x80080052;
 constexpr u32 GTSC_Top = 0x80080015;
 constexpr u32 GTSC_Total = 0x80080016;
 constexpr u32 GTSC_Visible = 0x80080017;
-constexpr u32 GTIN_Number = 0x8008002F;
-constexpr u32 GTIN_MaxChars = 0x80080030;
 constexpr u32 PGA_Freedom = 0x80031001;
 constexpr u32 LORIENT_HORIZ = 1;
 // A scroller keeps its total where a palette keeps its colour table, how
@@ -166,13 +164,8 @@ constexpr u32 kMaxLevelText = 128;
 // top ordinal where a scroller keeps its total, and the number of rows it
 // shows where a scroller keeps how much shows.
 constexpr u32 GTLV_Top = 0x80080005;
-constexpr u32 GTLV_Labels = 0x80080006;
 constexpr u32 GTLV_ReadOnly = 0x80080007;
 constexpr u32 GTLV_ScrollWidth = 0x80080008;
-constexpr u32 GTLV_ShowSelected = 0x80080035;
-constexpr u32 GTLV_Selected = 0x80080036;
-constexpr u32 GTLV_ItemHeight = 0x8008004D;
-constexpr u32 GTLV_MakeVisible = 0x8008004E;
 constexpr u32 LAYOUTA_Spacing = 0x80038002;
 constexpr u16 kOptReadOnly = 0x2;
 // GTLV_ShowSelected was given: the selected row shows in the fill pens.
@@ -180,10 +173,8 @@ constexpr u16 kOptShowSelected = 0x8;
 constexpr u32 kMaxListNodes = 4096;
 constexpr u32 kNoOrdinal = 0xFFFFFFFF;
 constexpr u32 kDefaultScrollWidth = 16;
-// The height of each of a list view's two arrows, and the frame around
-// its rows.
+// The height of each of a list view's two arrows.
 constexpr i32 kListArrowHeight = 10;
-constexpr i32 kListFrame = 2;
 // The largest arrow, in pixels, painted in the look of the sliders' knobs.
 constexpr u32 kMaxArrowPixels = 64 * 16;
 constexpr u32 GTTX_Border = 0x80080039;
@@ -810,9 +801,9 @@ struct GadToolsNatives {
         i32 scroll_w = static_cast<i32>(b.r16(gadget + gt_ScrollWidth));
         scroll_w = scroll_w > width / 2 ? width / 2 : scroll_w;
         scroll_w = scroll_w < 0 ? 0 : scroll_w;
-        i32 rows = (height - show_h - 2 * kListFrame) / row_h;
+        i32 rows = (height - show_h - 2 * kListViewFrame) / row_h;
         rows = rows < 1 ? 1 : rows;
-        const i32 list_h = rows * row_h + 2 * kListFrame;
+        const i32 list_h = rows * row_h + 2 * kListViewFrame;
         b.w16(gadget + ndk::gg_Width, static_cast<u16>(width - scroll_w));
         b.w16(gadget + ndk::gg_Height, static_cast<u16>(list_h));
         b.w16(gadget + gt_Visible, static_cast<u16>(rows));
@@ -1042,14 +1033,11 @@ struct GadToolsNatives {
     // GT_SetGadgetAttrsA: the gadget at A0 of the window at A1 takes the
     // tags at A3 and is drawn again.
     static void set_gadget_attrs(void* ctx, Machine& m) {
-        GadTools& g = of(ctx);
-        const u32 gadget = m.cpu.a[0];
-        const u32 window = m.cpu.a[1];
-        if (gadget == 0) {
-            return;
-        }
-        Bus b(m);
-        apply_tags(g, b, gadget, m.cpu.a[3], false, window);
+        of(ctx).set_gadget_attrs(m.cpu.a[0], m.cpu.a[1], m.cpu.a[3]);
+    }
+
+    static void set_attrs(GadTools& g, Bus& b, u32 gadget, u32 window, u32 tags) {
+        apply_tags(g, b, gadget, tags, false, window);
         if (window != 0 && b.ok()) {
             const u32 kind = b.r16(gadget + gt_Kind);
             // Intuition draws a scroller's prop and a string's cursor.
@@ -1372,6 +1360,15 @@ u32 GadTools::create_gadget(u32 kind, u32 previous, u32 new_gadget, u32 tags) {
     }
     Bus b(*machine_);
     return GadToolsNatives::make_gadget(*this, b, kind, previous, new_gadget, tags);
+}
+
+bool GadTools::set_gadget_attrs(u32 gadget, u32 window, u32 tags) {
+    if (machine_ == nullptr || gadget == 0) {
+        return false;
+    }
+    Bus b(*machine_);
+    GadToolsNatives::set_attrs(*this, b, gadget, window, tags);
+    return b.ok();
 }
 
 void GadTools::free_gadgets(u32 first) {
@@ -1796,14 +1793,14 @@ void GadTools::draw_list(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 righ
         return;
     }
     u32 ordinal = 0;
-    i32 y = top + kListFrame;
+    i32 y = top + kListViewFrame;
     for (u32 node = b.r32(list); node != 0 && b.r32(node) != 0 && ordinal < kMaxListNodes &&
                                  b.ok();
          node = b.r32(node), ++ordinal) {
         if (ordinal < first) {
             continue;
         }
-        if (ordinal - first >= rows || y + row_h - 1 > bottom - kListFrame) {
+        if (ordinal - first >= rows || y + row_h - 1 > bottom - kListViewFrame) {
             break;
         }
         const bool chosen = ordinal == selected;
@@ -2141,7 +2138,7 @@ bool GadTools::release(u32 window, u32 gadget, i32 x, i32 y, u16& code) {
     if (kind == LISTVIEW_KIND) {
         // The row under the pointer, counted from the list's top.
         const i32 row_h = static_cast<i32>(b.r16(gadget + gt_RowHeight));
-        const i32 row = row_h > 0 && y >= kListFrame ? (y - kListFrame) / row_h : -1;
+        const i32 row = row_h > 0 && y >= kListViewFrame ? (y - kListViewFrame) / row_h : -1;
         const u32 count = list_count(b, b.r32(gadget + gt_Text));
         const u32 ordinal = b.r32(gadget + gt_Total) + static_cast<u32>(row < 0 ? 0 : row);
         if (row < 0 || static_cast<u32>(row) >= b.r16(gadget + gt_Visible) || ordinal >= count) {

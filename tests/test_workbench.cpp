@@ -78,9 +78,12 @@ constexpr u16 CHECKED = 0x0100;
 constexpr u32 it_IText = 12;
 
 // struct DiskObject and its DrawerData's NewWindow
+constexpr u32 do_DefaultTool = 50;
+constexpr u32 do_ToolTypes = 54;
 constexpr u32 do_CurrentX = 58;
 constexpr u32 do_CurrentY = 62;
 constexpr u32 do_DrawerData = 66;
+constexpr u32 do_StackSize = 74;
 
 // struct WBStartup and struct WBArg
 constexpr u32 sm_Process = 20;
@@ -249,6 +252,36 @@ std::vector<u8> project_info(const std::string& default_tool, i32 current_x, i32
     f.bytes.insert(f.bytes.end(), default_tool.begin(), default_tool.end());
     f.byte(0);
     if (f.bytes.size() % 2 != 0) {
+        f.byte(0);
+    }
+    return std::move(f.bytes);
+}
+
+// A project icon with both a default tool and tool types.
+std::vector<u8> typed_project_info(const std::string& default_tool,
+                                   const std::vector<std::string>& types, i32 stack,
+                                   i32 current_x, i32 current_y) {
+    Info f;
+    f.word(0xE310);
+    f.word(1);
+    put_gadget(f, 32, 12);
+    f.byte(kWBProject);
+    f.byte(0);
+    f.u32v(1);  // DefaultTool
+    f.u32v(1);  // ToolTypes
+    f.u32v(static_cast<u32>(current_x));
+    f.u32v(static_cast<u32>(current_y));
+    f.u32v(0);  // DrawerData
+    f.u32v(0);  // ToolWindow
+    f.u32v(static_cast<u32>(stack));
+    put_image(f, 32, 12, 1, 12);
+    f.u32v(static_cast<u32>(default_tool.size()) + 1);
+    f.bytes.insert(f.bytes.end(), default_tool.begin(), default_tool.end());
+    f.byte(0);
+    f.u32v(static_cast<u32>((types.size() + 1) * 4));
+    for (const std::string& type : types) {
+        f.u32v(static_cast<u32>(type.size()) + 1);
+        f.bytes.insert(f.bytes.end(), type.begin(), type.end());
         f.byte(0);
     }
     return std::move(f.bytes);
@@ -1576,6 +1609,20 @@ void put_ram_project(const std::string& name) {
     CHECK(object != 0);
     CHECK(g_icon.save_object(("RAM:" + name).c_str(), object, error));
     g_icon.free_object(object);
+}
+
+// A project icon with a default tool and tool types; with_object adds the
+// file it stands for, without it the icon has only the .info.
+void put_ram_typed(const std::string& name, const std::vector<std::string>& types,
+                   bool with_object = true) {
+    u32 error = 0;
+    const std::vector<u8> info = typed_project_info("OldTool", types, 4096, 10, 10);
+    CHECK(g_dos.write_file(("RAM:" + name + ".info").c_str(), info.data(),
+                           static_cast<u32>(info.size()), error));
+    if (with_object) {
+        const u8 byte = 'x';
+        CHECK(g_dos.write_file(("RAM:" + name).c_str(), &byte, 1, error));
+    }
 }
 
 void an_icon_dragged_in_its_window_takes_the_new_place() {
@@ -3036,9 +3083,31 @@ bool info_checked(const Rig& r, const Workbench::InfoRequest& request, u16 id) {
     return (r.get16(info_gadget(r, request, id) + ndk::gg_Flags) & GFLG_SELECTED) != 0;
 }
 
-std::string info_comment(const Rig& r, const Workbench::InfoRequest& request) {
-    const u32 string_info = r.get32(request.comment_gadget + ndk::gg_SpecialInfo);
+std::string info_gadget_text(const Rig& r, u32 gadget) {
+    const u32 string_info = r.get32(gadget + ndk::gg_SpecialInfo);
     return r.str(r.get32(string_info + ndk::si_Buffer));
+}
+
+std::string info_comment(const Rig& r, const Workbench::InfoRequest& request) {
+    return info_gadget_text(r, request.comment_gadget);
+}
+
+std::string info_default_tool(const Rig& r, const Workbench::InfoRequest& request) {
+    return info_gadget_text(r, info_gadget(r, request, Workbench::kInfoDefaultTool));
+}
+
+std::string info_tool_editor(const Rig& r, const Workbench::InfoRequest& request) {
+    return info_gadget_text(r, info_gadget(r, request, Workbench::kInfoTool));
+}
+
+i32 info_stack(const Rig& r, const Workbench::InfoRequest& request) {
+    const u32 gadget = info_gadget(r, request, Workbench::kInfoStack);
+    const u32 string_info = r.get32(gadget + ndk::gg_SpecialInfo);
+    return static_cast<i32>(r.get32(string_info + ndk::si_LongInt));
+}
+
+std::string info_row(const Rig& r, const Workbench::InfoRequest& request, u32 row) {
+    return r.str(request.rows + row * (Workbench::kMaxToolTypeLength + 1));
 }
 
 void click_info(Rig& r, const Workbench::InfoRequest& request, u16 id) {
@@ -3048,6 +3117,71 @@ void click_info(Rig& r, const Workbench::InfoRequest& request, u16 id) {
     const i32 y = word(request.window + ndk::wd_TopEdge) + word(gadget + ndk::gg_TopEdge) + 4;
     g_intuition.pointer_event(x, y, 1, 1, 0, true);
     g_intuition.pointer_event(x, y, 0, 0, 1, false);
+}
+
+void click_info_row(Rig& r, const Workbench::InfoRequest& request, u32 row) {
+    const u32 list = info_gadget(r, request, Workbench::kInfoToolTypes);
+    const auto word = [&](u32 at) { return static_cast<i32>(static_cast<i16>(r.get16(at))); };
+    const Graphics::FontMetrics font =
+        g_graphics.font_metrics(g_intuition.font_of_screen(r.screen));
+    const i32 row_height = font.y_size + 6;
+    const i32 x = word(request.window + ndk::wd_LeftEdge) + word(list + ndk::gg_LeftEdge) + 4;
+    const i32 y = word(request.window + ndk::wd_TopEdge) + word(list + ndk::gg_TopEdge) +
+                  gadtools_defs::kListViewFrame + static_cast<i32>(row) * row_height +
+                  row_height / 2;
+    g_intuition.pointer_event(x, y, 1, 1, 0, true);
+    g_intuition.pointer_event(x, y, 0, 0, 1, false);
+}
+
+// Types a value into an integer gadget, replacing what it held, and ends
+// the editing with Return.
+// Empties the string being edited, wherever the cursor is in it.
+void erase_string(u32 length) {
+    for (u32 i = 0; i < length; ++i) {
+        g_intuition.string_key(0x08);
+        g_intuition.string_key(0x7F);
+    }
+}
+
+void set_info_integer(Rig& r, const Workbench::InfoRequest& request, u16 id, u32 value) {
+    click_info(r, request, id);
+    erase_string(12);
+    for (const char c : std::to_string(value)) {
+        g_intuition.string_key(static_cast<u8>(c));
+    }
+    g_intuition.string_key('\r');
+}
+
+// Types text into the active string gadget and ends it with Return.
+void type_info_text(const std::string& text, bool erase = false) {
+    if (erase) {
+        erase_string(130);
+    }
+    for (const char c : text) {
+        g_intuition.string_key(static_cast<u8>(c));
+    }
+    g_intuition.string_key('\r');
+}
+
+// The icon fields an .info file has.
+u32 load_ram_object(const std::string& name) { return g_icon.load_object(("RAM:" + name).c_str()); }
+
+std::string object_default_tool(const Rig& r, u32 object) {
+    const u32 text = r.get32(object + do_DefaultTool);
+    return text != 0 ? r.str(text) : std::string();
+}
+
+std::vector<std::string> object_tool_types(const Rig& r, u32 object) {
+    std::vector<std::string> types;
+    const u32 array = r.get32(object + do_ToolTypes);
+    for (u32 i = 0; array != 0 && i < 2 * Workbench::kMaxToolTypes; ++i) {
+        const u32 entry = r.get32(array + i * 4);
+        if (entry == 0) {
+            break;
+        }
+        types.push_back(r.str(entry));
+    }
+    return types;
 }
 
 void the_information_window_shows_a_file() {
@@ -3067,9 +3201,14 @@ void the_information_window_shows_a_file() {
 
     CHECK(info_value(r, request, Workbench::kInfoName) == "Name: Note");
     CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Project");
-    CHECK(info_value(r, request, Workbench::kInfoSize) == "Size: 1 bytes, 1 blocks");
+    CHECK(info_value(r, request, Workbench::kInfoSize) == "Size: 1 bytes");
+    CHECK(info_value(r, request, Workbench::kInfoBlocks) == "Blocks: 1");
     CHECK(info_value(r, request, Workbench::kInfoDate).rfind("Date: ", 0) == 0);
     CHECK(info_comment(r, request) == "old note");
+    CHECK_EQ(info_stack(r, request), 4096);
+    CHECK(info_default_tool(r, request).empty());
+    CHECK_EQ(request.row_count, 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
     CHECK(!info_checked(r, request, Workbench::kInfoScript));
     CHECK(info_checked(r, request, Workbench::kInfoArchived));
     CHECK(info_checked(r, request, Workbench::kInfoReadable));
@@ -3197,6 +3336,9 @@ void the_information_window_shows_a_drawer() {
     CHECK(info_gadget_at(r, request, Workbench::kInfoDate) != 0u);
     CHECK(info_gadget_at(r, request, Workbench::kInfoComment) != 0u);
     CHECK(info_gadget_at(r, request, Workbench::kInfoDeletable) != 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoStack), 0u);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDefaultTool), 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
     r.workbench.close_dialog(request);
 }
 
@@ -3233,6 +3375,239 @@ void information_shows_an_icon_without_an_object_and_refuses_disks() {
     // A disk's icon is no file to show.
     CHECK(!r.workbench.open_info(0, r.find_icon_in(0, "Ram Disk"), request));
     CHECK(logged("workbench: cannot show Ram Disk: Error 212"));
+}
+
+void the_information_window_shows_a_tool_and_a_project() {
+    Rig r;
+    put_ram_typed("Typed", {"ONE=1", "TWO=2", "THREE=3"});
+    const TwoWindows w = open_tools_and_ram(r);
+
+    // The tool has no file: its icon fields still show.
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.tools, tool, request));
+    CHECK(!request.has_object);
+    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Tool");
+    CHECK_EQ(info_stack(r, request), 4096);
+    CHECK_EQ(info_gadget_at(r, request, Workbench::kInfoDefaultTool), 0u);
+    CHECK(info_gadget_at(r, request, Workbench::kInfoToolTypes) != 0u);
+    CHECK_EQ(request.row_count, 0u);
+    r.workbench.close_dialog(request);
+
+    // The project shows its default tool, stack and tool types.
+    const u32 typed = r.find_icon_in(w.ram, "Typed");
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    CHECK(request.has_object);
+    CHECK(info_value(r, request, Workbench::kInfoType) == "Type: Project");
+    CHECK(info_default_tool(r, request) == "OldTool");
+    CHECK_EQ(info_stack(r, request), 4096);
+    CHECK_EQ(request.row_count, 3u);
+    CHECK(info_row(r, request, 0) == "ONE=1");
+    CHECK(info_row(r, request, 1) == "TWO=2");
+    CHECK(info_row(r, request, 2) == "THREE=3");
+    r.workbench.close_dialog(request);
+}
+
+void tool_types_are_picked_edited_added_and_deleted() {
+    Rig r;
+    put_ram_typed("Typed", {"ONE=1", "TWO=2", "THREE=3"});
+    const TwoWindows w = open_tools_and_ram(r);
+    u32 typed = r.find_icon_in(w.ram, "Typed");
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+
+    // With no row selected, Del and Return do nothing.
+    click_info(r, request, Workbench::kInfoDel);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK_EQ(request.row_count, 3u);
+    click_info(r, request, Workbench::kInfoTool);
+    g_intuition.string_key('Z');
+    g_intuition.string_key('\r');
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK_EQ(request.row_count, 3u);
+    CHECK(info_row(r, request, 0) == "ONE=1");
+
+    // A picked row's text is put in the string gadget.
+    click_info_row(r, request, 1);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK_EQ(request.selected, 1u);
+    CHECK(info_tool_editor(r, request) == "TWO=2");
+
+    // Return in it replaces the row.
+    type_info_text("X");
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK(info_row(r, request, 1) == "TWO=2X");
+
+    // New adds an empty row at the end, selected and being edited.
+    click_info(r, request, Workbench::kInfoNew);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK_EQ(request.row_count, 4u);
+    CHECK_EQ(request.selected, 3u);
+    CHECK(info_tool_editor(r, request).empty());
+    type_info_text("FOUR=4");
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK(info_row(r, request, 3) == "FOUR=4");
+
+    // Del removes the selected row and selects the one now in its place.
+    click_info(r, request, Workbench::kInfoDel);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    CHECK_EQ(request.row_count, 3u);
+    CHECK_EQ(request.selected, 2u);
+    CHECK(info_tool_editor(r, request) == "THREE=3");
+
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    const u32 object = load_ram_object("Typed");
+    CHECK(object_tool_types(r, object) ==
+          (std::vector<std::string>{"ONE=1", "TWO=2X", "THREE=3"}));
+    g_icon.free_object(object);
+
+    // New and Del keep no memory either.
+    typed = r.find_icon_in(w.ram, "Typed");
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    r.workbench.close_dialog(request);
+    const u32 before = r.free_bytes();
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    click_info(r, request, Workbench::kInfoNew);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoDel);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    r.workbench.close_dialog(request);
+    CHECK_EQ(r.free_bytes(), before);
+}
+
+void tool_types_past_the_cap_survive_a_save() {
+    Rig r;
+    std::vector<std::string> types;
+    for (u32 i = 0; i < Workbench::kMaxToolTypes + 2; ++i) {
+        types.push_back("TYPE" + std::to_string(i));
+    }
+    put_ram_typed("Many", types);
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 many = r.find_icon_in(w.ram, "Many");
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, many, request));
+    CHECK_EQ(request.row_count, Workbench::kMaxToolTypes);
+    click_info_row(r, request, 0);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    type_info_text("X");
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    const u32 object = load_ram_object("Many");
+    const std::vector<std::string> saved = object_tool_types(r, object);
+    CHECK_EQ(saved.size(), Workbench::kMaxToolTypes + 2);
+    CHECK(saved[0] == "TYPE0X");
+    CHECK(saved[Workbench::kMaxToolTypes] == "TYPE64");
+    CHECK(saved[Workbench::kMaxToolTypes + 1] == "TYPE65");
+    g_icon.free_object(object);
+}
+
+void information_saves_the_icon_fields() {
+    Rig r;
+    put_ram_typed("Typed", {"ONE=1", "TWO=2"});
+    const TwoWindows w = open_tools_and_ram(r);
+    Workbench::InfoRequest request{};
+    u32 typed = r.find_icon_in(w.ram, "Typed");
+
+    // Stack: 4096 to 8192.
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    set_info_integer(r, request, Workbench::kInfoStack, 8192);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    u32 object = load_ram_object("Typed");
+    CHECK_EQ(r.get32(object + do_StackSize), 8192u);
+    g_icon.free_object(object);
+
+    // Default tool: OldTool to NewTool.
+    typed = r.find_icon_in(w.ram, "Typed");
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    click_info(r, request, Workbench::kInfoDefaultTool);
+    type_info_text("NewTool", true);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    object = load_ram_object("Typed");
+    CHECK(object_default_tool(r, object) == "NewTool");
+    CHECK_EQ(r.get32(object + do_StackSize), 8192u);
+    g_icon.free_object(object);
+
+    // Tool types: the first row gains Z.
+    typed = r.find_icon_in(w.ram, "Typed");
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    click_info_row(r, request, 0);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    type_info_text("Z");
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    object = load_ram_object("Typed");
+    CHECK(object_tool_types(r, object) == (std::vector<std::string>{"ONE=1Z", "TWO=2"}));
+    CHECK(object_default_tool(r, object) == "NewTool");
+    g_icon.free_object(object);
+}
+
+void information_cancels_the_icon_fields() {
+    Rig r;
+    put_ram_typed("Typed", {"ONE=1"});
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 typed = r.find_icon_in(w.ram, "Typed");
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, typed, request));
+    set_info_integer(r, request, Workbench::kInfoStack, 8192);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoDefaultTool);
+    type_info_text("Changed", true);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info_row(r, request, 0);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    type_info_text("ONE=2");
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoCancel);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Cancelled);
+    r.workbench.close_dialog(request);
+    const u32 object = load_ram_object("Typed");
+    CHECK_EQ(r.get32(object + do_StackSize), 4096u);
+    CHECK(object_default_tool(r, object) == "OldTool");
+    CHECK(object_tool_types(r, object) == (std::vector<std::string>{"ONE=1"}));
+    g_icon.free_object(object);
+}
+
+void an_icon_without_an_object_saves_its_icon_fields() {
+    Rig r;
+    put_ram_typed("Lonely", {"LONE=1"}, false);
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 lonely = r.find_icon_in(w.ram, "Lonely");
+    CHECK(lonely != Workbench::kNoIcon);
+
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, lonely, request));
+    CHECK(!request.has_object);
+    CHECK_EQ(info_stack(r, request), 4096);
+    CHECK_EQ(request.row_count, 1u);
+    CHECK(info_row(r, request, 0) == "LONE=1");
+    set_info_integer(r, request, Workbench::kInfoStack, 2048);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    CHECK(!r.exists("RAM:Lonely"));
+    const u32 object = load_ram_object("Lonely");
+    CHECK_EQ(r.get32(object + do_StackSize), 2048u);
+    CHECK(object_tool_types(r, object) == (std::vector<std::string>{"LONE=1"}));
+    g_icon.free_object(object);
 }
 
 // A drawer in RAM: holding a file and a drawer with a file, with its icon.
@@ -4173,6 +4548,12 @@ int main() {
     information_saves_only_what_changed();
     information_cancels_without_changing_anything();
     the_information_window_shows_a_drawer();
+    the_information_window_shows_a_tool_and_a_project();
+    tool_types_are_picked_edited_added_and_deleted();
+    tool_types_past_the_cap_survive_a_save();
+    information_saves_the_icon_fields();
+    information_cancels_the_icon_fields();
+    an_icon_without_an_object_saves_its_icon_fields();
     information_shows_an_icon_without_an_object_and_refuses_disks();
     a_window_snapshot_is_used_when_the_window_opens_again();
     a_reset_closes_and_reopens_the_windows();
