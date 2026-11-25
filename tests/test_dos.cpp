@@ -7510,6 +7510,39 @@ void ram_enumeration_after_delete_info_and_cleanup() {
     CHECK_EQ(r.call(dos_lvo::DeleteFile, kData + 0x40), DOSTRUE);
 }
 
+// With the drawers deferred, a Startup-Sequence finds RAM: empty and its
+// MakeDir succeeds; what it left out is made afterwards.
+void a_deferred_boot_leaves_ram_to_the_startup_sequence() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Prefs/Env-Archive/greeting", text("hello from envarc")});
+    const auto missing = [](const char* name) {
+        return g_dos.examine(name).kind == Dos::TargetKind::Missing;
+    };
+    g_dos.defer_ram_defaults();
+    {
+        Rig r(files);
+        CHECK(missing("RAM:T"));
+        CHECK(missing("RAM:Env"));
+        CHECK(missing("RAM:Clipboards"));
+        u32 error = 0;
+        CHECK(g_dos.make_dir("RAM:ENV", error));
+        CHECK(g_dos.add_ram_defaults());
+        CHECK(!missing("RAM:T"));
+        CHECK(!missing("RAM:Clipboards"));
+        // The script's own ENV: is not filled behind its back.
+        CHECK(missing("RAM:ENV/greeting"));
+        CHECK(g_dos.write_file("T:note", nullptr, 0, error));
+        CHECK(g_dos.add_ram_defaults());
+        CHECK(!missing("T:note"));
+    }
+    {
+        Rig r(files);
+        CHECK(g_dos.add_ram_defaults());
+        CHECK(!missing("ENV:greeting"));
+    }
+    g_dos.defer_ram_defaults(false);
+}
+
 void t_and_env_assigns_and_envarc_copy() {
     // Default assigns T: and ENV: and RAM:Clipboards exist on Ram Disk.
     {
@@ -9277,6 +9310,7 @@ int main() {
     ram_delete_createdir_rename_and_metadata();
     ram_exclusive_locks_and_dopkt();
     ram_enumeration_after_delete_info_and_cleanup();
+    a_deferred_boot_leaves_ram_to_the_startup_sequence();
     t_and_env_assigns_and_envarc_copy();
     global_variables();
     ram_handler_port_and_zero_dates();

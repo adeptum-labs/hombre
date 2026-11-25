@@ -1104,6 +1104,9 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         fail("console device init failed");
         return false;
     }
+    // A Startup-Sequence makes T: and ENV: itself; make_ram_defaults sees
+    // to them once it is over, or when there is none.
+    dos.defer_ram_defaults();
     if (!dos.init(machine, exec, drives, &console_write, &consoles[0])) {
         fail("dos init failed");
         return false;
@@ -1757,6 +1760,13 @@ void shell_loop(Console& c) {
 
 void shell_task(void* arg) { shell_loop(*static_cast<Console*>(arg)); }
 
+// RAM:'s drawers and assigns that no Startup-Sequence made.
+void make_ram_defaults() {
+    if (!dos.add_ram_defaults()) {
+        log_line("startup: no memory for T: and ENV:");
+    }
+}
+
 }
 
 constexpr char kAddDataTypes[] = "C:AddDataTypes";
@@ -1811,11 +1821,13 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& 
         serial::write("startup: ended, returned ");
         serial::write_dec(rc);
         serial::write("\n");
+        make_ram_defaults();
         if (boot.commands.ended()) {
             end_boot_shell(boot);
             return;
         }
     } else {
+        make_ram_defaults();
         execute(boot, path, args);
         // The datatypes on the boot disk, as a Startup-Sequence adds them:
         // datatypes.library opens only once they are listed.

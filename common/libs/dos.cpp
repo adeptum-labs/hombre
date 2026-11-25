@@ -10630,44 +10630,10 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
         }
     }
 
-    // Standard RAM: directories and T: / ENV: assigns.
-    u32 t_node = RamFs::kNone;
-    u32 env_node = RamFs::kNone;
-    u32 clip_node = RamFs::kNone;
-    if (ram_.create_dir(0, "T", t_node) != 0 || ram_.create_dir(0, "Env", env_node) != 0 ||
-        ram_.create_dir(0, "Clipboards", clip_node) != 0) {
-        m_ = nullptr;
-        return false;
-    }
-    struct RamAssign {
-        const char* name;
-        const char* path;
-        u32 node;
-    };
-    const RamAssign ram_assigns[] = {
-        {"T", "T", t_node},
-        {"ENV", "Env", env_node},
-    };
-    for (const RamAssign& ra : ram_assigns) {
-        bool table_full = false;
-        if (!DosOps::add_default_assign(*this, b, ra.name, ra.path, DosOps::ram_entry(*this, ra.node),
-                                        table_full)) {
-            m_ = nullptr;
-            return false;
-        }
-    }
     DosOps::relink_dos_list(*this, b);
-
-    if (!b.ok()) {
+    if (!b.ok() || (!ram_defaults_deferred_ && !add_ram_defaults())) {
         m_ = nullptr;
         return false;
-    }
-
-    DirEntry envarc_dir{};
-    if (DosOps::fs_find(*this, boot_vol_, "Prefs/Env-Archive", envarc_dir) == 0 &&
-        envarc_dir.is_dir) {
-        bool copy_failed = false;
-        DosOps::copy_envarc_dir(*this, "Prefs/Env-Archive", env_node, 0, copy_failed);
     }
 
     exec.set_this_task(proc.process);
@@ -10680,6 +10646,54 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     }
     exec.set_reply_handler(notify_reply_port_, DosOps::notify_reply, this);
     exec.add_program_keeper(DosOps::keep_notify_requests, this);
+    return true;
+}
+
+bool Dos::add_ram_defaults() {
+    if (m_ == nullptr) {
+        return false;
+    }
+    Bus b(*m_);
+    struct RamDefault {
+        const char* drawer;
+        const char* assign;  // nullptr for none
+    };
+    constexpr RamDefault kDefaults[] = {
+        {"T", "T"}, {"Env", "ENV"}, {"Clipboards", nullptr}};
+    u32 env_node = RamFs::kNone;
+    bool env_made = false;
+    for (const RamDefault& def : kDefaults) {
+        u32 node = RamFs::kNone;
+        const bool made = ram_.find_path(def.drawer, node) != 0;
+        if (made && ram_.create_dir(0, def.drawer, node) != 0) {
+            return false;
+        }
+        if (def.assign == nullptr) {
+            continue;
+        }
+        if (same_name(def.assign, length_of(def.assign), "ENV")) {
+            env_node = node;
+            env_made = made;
+        }
+        bool table_full = false;
+        if (DosOps::find_assign(*this, def.assign, length_of(def.assign)) == nullptr &&
+            !DosOps::add_default_assign(*this, b, def.assign, def.drawer,
+                                        DosOps::ram_entry(*this, node), table_full)) {
+            return false;
+        }
+    }
+    DosOps::relink_dos_list(*this, b);
+    if (!b.ok()) {
+        return false;
+    }
+    // The saved variables, unless a script made ENV: and so filled it.
+    DirEntry envarc_dir{};
+    if (env_made &&
+        DosOps::fs_find(*this, boot_vol_, "Prefs/Env-Archive", envarc_dir) == 0 &&
+        envarc_dir.is_dir) {
+        bool copy_failed = false;
+        DosOps::copy_envarc_dir(*this, "Prefs/Env-Archive", env_node, 0, copy_failed);
+    }
     return true;
 }
 

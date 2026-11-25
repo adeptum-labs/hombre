@@ -976,6 +976,16 @@ public:
     // end of its task would.
     void end_process(u32 process);
 
+    // Leaves RAM: empty at init, as it is on an Amiga, for a
+    // Startup-Sequence to fill; add_ram_defaults then makes up what it did
+    // not. Set before init and kept across it.
+    void defer_ram_defaults(bool deferred = true) { ram_defaults_deferred_ = deferred; }
+
+    // Makes whichever of RAM:'s T, Env and Clipboards drawers and of the
+    // T: and ENV: assigns are missing; an Env made here gets the saved
+    // variables. init calls it unless deferred. False when memory runs out.
+    bool add_ram_defaults();
+
     // Replaces the file name with the bytes; RAM: and a disk that can be
     // written are the writable volumes, and a file there protected from
     // writing or open elsewhere stays as it is. A disk file that cannot be
@@ -1341,6 +1351,7 @@ private:
     void write_volume_node(native::Bus& b, u32 drive);
     u8 boot_vol_ = kVolDf0;
     RamFs ram_{};
+    bool ram_defaults_deferred_ = false;
     ConsoleBinding consoles_[kMaxConsoles]{};
     NewShell new_shell_ = nullptr;
     void* new_shell_ctx_ = nullptr;
