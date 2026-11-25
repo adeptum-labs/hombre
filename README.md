@@ -50,10 +50,8 @@ software, on modern hardware and in virtual machines.
 - Starts programs such as Clock and Calculator from the AmigaOS 3.1 disks.
 - A modern window look: shaded title bars, knob-style buttons with the 3.1
   symbols and soft shadows, in the colours of your palette.
-- A system monitor on F12, a Workbench-style window that runs outside the
-  Amiga system: processor and memory use, the tasks with their registers,
-  suspend, end and reboot, and floppy images swapped in DF0: to DF3:. It
-  opens even over a program that hangs the Amiga side.
+- A system monitor on F12, outside the Amiga system, to stop a hung program
+  or swap floppies.
 - A 64-bit kernel with UEFI boot, preemptive multitasking, and USB keyboard
   and mouse.
 
@@ -72,6 +70,8 @@ The wiki has the full story:
   what runs today and what comes next.
 - **[Supported hardware](https://github.com/adeptum-labs/hombre/wiki/Supported-Hardware)**:
   the processor, firmware, display, input and disks Hombre needs.
+- **[System monitor](https://github.com/adeptum-labs/hombre/wiki/System-Monitor)**:
+  what F12 shows and does, with screenshots.
 - **[HombreShell](https://github.com/adeptum-labs/hombre/wiki/HombreShell)**:
   builtins, commands and keys.
 - **[Developer notes](https://github.com/adeptum-labs/hombre/wiki/Developer-Notes)**:
