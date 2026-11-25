@@ -1199,6 +1199,9 @@ bool execute(Console& c, const char* path, const char* args, u32 input = 0, u32 
         c.stop_script = true;
     }
     reclaim_after_program(c.process);
+    // Only now, with its windows closed, does what the command left go,
+    // when the system monitor ended it.
+    exec.end_program(c.process);
     intuition.flush_palette();
     if (!serial_at_line_start) {
         serial::write_char('\n');

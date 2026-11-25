@@ -367,7 +367,10 @@ struct ExecOps {
     // --- memory ----------------------------------------------------------
 
     static void alloc_mem(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).alloc(m.cpu.d[0], m.cpu.d[1]));
+        Exec& e = of(ctx);
+        const u32 block = e.alloc(m.cpu.d[0], m.cpu.d[1]);
+        e.claim_for_program(block, m.cpu.d[0]);
+        native::set_result(m, block);
     }
 
     static void free_mem(void* ctx, Machine& m) { of(ctx).free(m.cpu.a[1], m.cpu.d[0]); }
@@ -411,6 +414,7 @@ struct ExecOps {
             return;
         }
         m.mem.write32(block + 4, bytes + 8);
+        of(ctx).claim_for_program(block, bytes + 8);
         native::set_result(m, block + 8);
     }
 
@@ -1275,7 +1279,10 @@ struct ExecOps {
     }
 
     static void create_msg_port_lvo(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).create_port());
+        Exec& e = of(ctx);
+        const u32 port = e.create_port();
+        e.claim_for_program(port, MP_SIZE);
+        native::set_result(m, port);
     }
 
     static void delete_msg_port_lvo(void* ctx, Machine& m) {
@@ -2250,6 +2257,7 @@ struct ExecOps {
             e.free(req, size);
             return;
         }
+        e.claim_for_program(req, size);
         native::set_result(m, req);
     }
 
@@ -2819,6 +2827,21 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
     }
     library_count_ = 0;
     loaded_.clear();
+    for (Program& p : programs_) {
+        p = Program{};
+    }
+    next_program_ = 1;
+    program_block_count_ = 0;
+    for (Releaser& r : releasers_) {
+        r = Releaser{};
+    }
+    for (KeptList& k : kept_lists_) {
+        k = KeptList{};
+    }
+    kept_list_count_ = 0;
+    for (Keeper& k : keepers_) {
+        k = Keeper{};
+    }
     if (m.jit == nullptr || m.mem.base == nullptr || free_start < kLowestFree ||
         chip_end <= free_start || fast_end < chip_end || fast_end > m.mem.size) {
         return false;
@@ -3085,6 +3108,9 @@ void Exec::free(u32 addr, u32 bytes) {
     if (addr == 0 || bytes == 0) {
         return;
     }
+    // Whatever frees a recorded block, or part of one, ends its record: a
+    // program's end never frees it a second time.
+    drop_program_blocks(addr, bytes);
     const u32 held_by = region_holding(addr, bytes);
     if ((addr & 7) != 0 || held_by == region_count_) {
         LogLine().text("exec: FreeMem of a bad block at ").hex(addr).text(", ").dec(bytes)
@@ -3297,6 +3323,12 @@ u32 Exec::spawn(u32 task, u32 init_pc, u32 final_pc, bool detached) {
     tc.td_nest = 0xFF;
     tc.id_nest = 0xFF;
     tc.detached = detached;
+    // A task a program starts is part of it, unless a library being loaded
+    // starts it for itself.
+    const i32 creator = sched_.current();
+    if (creator >= 0 && creator != id && load_depth_ == 0) {
+        tc.program = tasks_[creator].program;
+    }
     // A detached task starts with the caller's D0 and A0, which carry a
     // command's argument line.
     if (detached) {
@@ -3950,17 +3982,21 @@ void Exec::end_for_rescue(u32 slot, const TaskInfo& info) {
     // or the Workbench, whose task outlives the command it runs, only have
     // their 68000 code ended. A task that runs none is left alone.
     if (current && m_->jit->run_depth() != 0) {
+        doom_program_of(slot);
         m_->jit->request_stop();
         if (info.state == TaskState::Waiting) {
             end_run(*m_, ExitReason::Stopped);
         }
     } else if (!current && slot == 0 && tc.run_state.run_depth != 0) {
+        doom_program_of(slot);
         tasks_[0].run_state.stop = true;
         signal_task(info.task_addr, SIGBREAKF_CTRL_C);
     } else if (!current && slot != 0 && tc.native_task && tc.run_state.run_depth != 0) {
+        doom_program_of(slot);
         stop_command_of(slot);
     } else if (!current && slot != 0 && !tc.native_task) {
         LogLine().text("exec: removing ").text(info.name).send();
+        doom_program_of(slot);
         Bus b(*m_);
         ExecOps::rem_task_id(*this, b, id);
         return;
@@ -4041,6 +4077,479 @@ void Exec::rebuild_task_lists(u32 leave_out) {
         } else if (s.state == TaskState::Waiting) {
             enqueue(b, base_ + TaskWait, addr);
         }
+    }
+}
+
+// The program the task in slot started, marked to have its blocks freed
+// once its last task is gone. A task that only took its program over from
+// its parent is not the program: ending it frees nothing.
+void Exec::doom_program_of(u32 slot) {
+    const TaskContext& tc = tasks_[slot];
+    if (!tc.program_root) {
+        return;
+    }
+    if (Program* p = find_program(tc.program)) {
+        p->doomed = true;
+    }
+}
+
+i32 Exec::slot_of(u32 task) const {
+    if (task == 0) {
+        return -1;
+    }
+    const i32 id = sched_.find(task);
+    if (id >= 0) {
+        return id;
+    }
+    return task == tasks_[0].task_addr ? 0 : -1;
+}
+
+Exec::Program* Exec::find_program(u32 id) {
+    if (id == 0) {
+        return nullptr;
+    }
+    for (Program& p : programs_) {
+        if (p.id == id) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+// A task that removed itself still runs until another takes over: its
+// program is not over before then.
+bool Exec::program_alive(u32 id) const {
+    for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
+        const TaskState st = sched_.slot(i).state;
+        const bool alive = st == TaskState::Ready || st == TaskState::Running ||
+                           st == TaskState::Waiting ||
+                           (st == TaskState::Removed && static_cast<i32>(i) == sched_.current());
+        if (alive && tasks_[i].program == id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Exec::in_program_code(const Program& p, u32 pc) const {
+    const GuestMemory& mem = m_->mem;
+    for (u32 seglist : p.code) {
+        u32 bptr = seglist;
+        for (u32 n = 0; bptr != 0 && n < kMaxSegments; ++n) {
+            const u64 link = static_cast<u64>(bptr) << 2;
+            u32 size = 0;
+            u32 next = 0;
+            if (link < 4 || link + 4 > mem.size || !mem.read32(static_cast<u32>(link - 4), size) ||
+                !mem.read32(static_cast<u32>(link), next)) {
+                break;
+            }
+            if (pc >= link + 4 && pc < link - 4 + static_cast<u64>(size)) {
+                return true;
+            }
+            bptr = next;
+        }
+    }
+    return false;
+}
+
+// The program whose code called the native that runs: the running task's,
+// when the return address on its stack lies in the program's seglists and
+// no library is being loaded. 0 otherwise.
+u32 Exec::calling_program() const {
+    if (load_depth_ != 0) {
+        return 0;
+    }
+    const i32 cur = sched_.current();
+    if (cur < 0) {
+        return 0;
+    }
+    const u32 id = tasks_[cur].program;
+    if (id == 0) {
+        return 0;
+    }
+    const Program* program = nullptr;
+    for (const Program& p : programs_) {
+        if (p.id == id) {
+            program = &p;
+        }
+    }
+    const u32 mask = m_->jit->address_mask();
+    u32 ret = 0;
+    if (program == nullptr || !m_->mem.read32(m_->cpu.a[7] & mask, ret)) {
+        return 0;
+    }
+    return in_program_code(*program, ret & mask) ? id : 0;
+}
+
+u32 Exec::begin_program(u32 task, u32 seglist, bool fresh) {
+    if (m_ == nullptr) {
+        return 0;
+    }
+    const i32 id = slot_of(native::guest_address(*m_, task));
+    if (id < 0) {
+        return 0;
+    }
+    TaskContext& tc = tasks_[id];
+    if (tc.program != 0 && fresh) {
+        if (tc.program_root) {
+            end_program(task);
+        } else {
+            tc.program = 0;
+        }
+    }
+    if (tc.program != 0) {
+        if (Program* p = find_program(tc.program)) {
+            for (u32& code : p->code) {
+                if (code == seglist) {
+                    break;
+                }
+                if (code == 0) {
+                    code = seglist;
+                    break;
+                }
+            }
+        }
+        return 0;
+    }
+    for (Program& p : programs_) {
+        if (p.id != 0) {
+            continue;
+        }
+        p = Program{};
+        p.id = next_program_++;
+        if (next_program_ == 0) {
+            next_program_ = 1;
+        }
+        p.code[0] = seglist;
+        tc.program = p.id;
+        tc.program_root = true;
+        return p.id;
+    }
+    return 0;
+}
+
+void Exec::end_program(u32 task) {
+    if (m_ == nullptr) {
+        return;
+    }
+    const i32 id = slot_of(native::guest_address(*m_, task));
+    if (id < 0 || !tasks_[id].program_root) {
+        return;
+    }
+    const u32 program = tasks_[id].program;
+    tasks_[id].program = 0;
+    tasks_[id].program_root = false;
+    // The task outlives a command the system monitor ended, so what a
+    // task's end drops goes now: a device would otherwise reply a request
+    // into the command's memory after it is freed. A command that ends by
+    // itself leaves its requests as before.
+    const Program* p = find_program(program);
+    if (p != nullptr && p->doomed) {
+        drop_timer_requests_of(tasks_[id].task_addr);
+    }
+    settle_program(program);
+}
+
+void Exec::claim_for_program(u32 addr, u32 bytes, u8 release) {
+    if (m_ == nullptr || addr == 0 || bytes == 0 || bytes > 0xFFFFFFF0u ||
+        release > kMaxReleasers || (release != 0 && releasers_[release].fn == nullptr)) {
+        return;
+    }
+    const u32 program = calling_program();
+    if (program != 0) {
+        record_program_block(addr, round8(bytes), program, release);
+    }
+}
+
+u8 Exec::add_program_releaser(void (*release)(void* ctx, u32 addr), void* ctx) {
+    if (release == nullptr) {
+        return 0;
+    }
+    for (u32 i = 1; i <= kMaxReleasers; ++i) {
+        if (releasers_[i].fn == release && releasers_[i].ctx == ctx) {
+            return static_cast<u8>(i);
+        }
+        if (releasers_[i].fn == nullptr) {
+            releasers_[i] = Releaser{release, ctx};
+            return static_cast<u8>(i);
+        }
+    }
+    return 0;
+}
+
+bool Exec::add_kept_list(u32 head, bool bptr_chain) {
+    if (head == 0 || kept_list_count_ == kMaxKeptLists) {
+        return false;
+    }
+    kept_lists_[kept_list_count_++] = KeptList{head, bptr_chain};
+    return true;
+}
+
+bool Exec::add_program_keeper(void (*keep)(void* ctx), void* ctx) {
+    if (keep == nullptr) {
+        return false;
+    }
+    for (Keeper& k : keepers_) {
+        if (k.keep == keep && k.ctx == ctx) {
+            return true;
+        }
+        if (k.keep == nullptr) {
+            k = Keeper{keep, ctx};
+            return true;
+        }
+    }
+    return false;
+}
+
+// The index of the first block at or above addr, program_block_count_ if
+// none is.
+u32 Exec::first_block_at_or_after(u32 addr) const {
+    u32 lo = 0;
+    u32 hi = program_block_count_;
+    while (lo < hi) {
+        const u32 mid = (lo + hi) / 2;
+        if (program_blocks_[mid].addr < addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return lo;
+}
+
+void Exec::erase_program_block(u32 index) {
+    for (u32 i = index + 1; i < program_block_count_; ++i) {
+        program_blocks_[i - 1] = program_blocks_[i];
+    }
+    --program_block_count_;
+}
+
+// A block that overlaps one already recorded means the record is wrong
+// somewhere: neither stays, so that neither can be freed.
+void Exec::record_program_block(u32 addr, u32 bytes, u32 program, u8 release) {
+    const u64 end = static_cast<u64>(addr) + bytes;
+    u32 at = first_block_at_or_after(addr);
+    bool overlapped = false;
+    if (at < program_block_count_ && program_blocks_[at].addr < end) {
+        erase_program_block(at);
+        overlapped = true;
+    }
+    if (at > 0 && static_cast<u64>(program_blocks_[at - 1].addr) + program_blocks_[at - 1].bytes >
+                      addr) {
+        erase_program_block(at - 1);
+        --at;
+        overlapped = true;
+    }
+    if (overlapped || program_block_count_ == kMaxProgramBlocks) {
+        return;
+    }
+    for (u32 i = program_block_count_; i > at; --i) {
+        program_blocks_[i] = program_blocks_[i - 1];
+    }
+    program_blocks_[at] = ProgramBlock{addr, bytes, program, release, false};
+    ++program_block_count_;
+}
+
+void Exec::drop_program_blocks(u32 addr, u32 bytes) {
+    if (program_block_count_ == 0) {
+        return;
+    }
+    const u64 end = static_cast<u64>(addr) + ((static_cast<u64>(bytes) + 7) & ~u64(7));
+    u32 i = end > 0xFFFFFFFFull ? program_block_count_
+                                : first_block_at_or_after(static_cast<u32>(end));
+    while (i > 0) {
+        const ProgramBlock& block = program_blocks_[i - 1];
+        if (static_cast<u64>(block.addr) + block.bytes <= addr) {
+            break;
+        }
+        erase_program_block(i - 1);
+        --i;
+    }
+}
+
+// Frees or forgets the blocks of a program that has no task left.
+void Exec::settle_program(u32 id) {
+    Program* p = find_program(id);
+    if (p == nullptr || program_alive(id)) {
+        return;
+    }
+    const bool doomed = p->doomed;
+    *p = Program{};
+    if (doomed) {
+        free_program_blocks(id);
+        return;
+    }
+    for (u32 i = 0; i < program_block_count_;) {
+        if (program_blocks_[i].program == id) {
+            erase_program_block(i);
+        } else {
+            ++i;
+        }
+    }
+}
+
+void Exec::keep_block_holding(u32 addr) {
+    const u32 at = first_block_at_or_after(addr == 0xFFFFFFFFu ? addr : addr + 1);
+    if (at == 0) {
+        return;
+    }
+    ProgramBlock& block = program_blocks_[at - 1];
+    if (static_cast<u64>(block.addr) + block.bytes > addr) {
+        block.keep = true;
+    }
+}
+
+void Exec::keep_blocks_within(u32 lo, u32 hi) {
+    if (hi <= lo) {
+        return;
+    }
+    u32 at = first_block_at_or_after(hi);
+    while (at > 0) {
+        ProgramBlock& block = program_blocks_[at - 1];
+        if (static_cast<u64>(block.addr) + block.bytes <= lo) {
+            break;
+        }
+        block.keep = true;
+        --at;
+    }
+}
+
+// Keeps the blocks that hold a node of the exec List at list, and with
+// with_messages those that hold a message queued on a port of it.
+void Exec::keep_list_nodes(u32 list, bool with_messages) {
+    constexpr u32 kMaxNodes = 4096;
+    const GuestMemory& mem = m_->mem;
+    u32 node = 0;
+    if (!mem.read32(list + LH_HEAD, node)) {
+        return;
+    }
+    for (u32 n = 0; n < kMaxNodes; ++n) {
+        u32 next = 0;
+        if (node == 0 || !mem.read32(node + LN_SUCC, next) || next == 0) {
+            return;
+        }
+        keep_block_holding(node);
+        if (with_messages) {
+            u32 message = 0;
+            mem.read32(node + mp_MsgList + LH_HEAD, message);
+            for (u32 k = 0; k < kMaxNodes; ++k) {
+                u32 after = 0;
+                if (message == 0 || !mem.read32(message + LN_SUCC, after) || after == 0) {
+                    break;
+                }
+                keep_block_holding(message);
+                message = after;
+            }
+        }
+        node = next;
+    }
+}
+
+// What may not go with a program's blocks: a task still alive and its
+// stack, a node on a system list, a message on a public port, a semaphore
+// another task waits for, a port with a reply handler, code a library
+// vector was set to and whatever a library's keeper names.
+void Exec::mark_kept_blocks() {
+    for (u32 i = 0; i < program_block_count_; ++i) {
+        program_blocks_[i].keep = false;
+    }
+    const GuestMemory& mem = m_->mem;
+    for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
+        const Scheduler::Slot s = sched_.slot(i);
+        if (s.state == TaskState::Free ||
+            (s.state == TaskState::Removed && static_cast<i32>(i) != sched_.current())) {
+            continue;
+        }
+        const u32 task = tasks_[i].task_addr != 0 ? tasks_[i].task_addr : s.task_addr;
+        if (task == 0) {
+            continue;
+        }
+        keep_block_holding(task);
+        u32 lower = 0;
+        u32 upper = 0;
+        if (mem.read32(task + TC_SPLOWER, lower) && mem.read32(task + TC_SPUPPER, upper)) {
+            keep_blocks_within(lower, upper);
+        }
+    }
+    for (u32 list : {LibList, DeviceList, ResourceList, SemaphoreList, IntrList, TaskReady,
+                     TaskWait}) {
+        keep_list_nodes(base_ + list, false);
+    }
+    keep_list_nodes(base_ + PortList, true);
+    for (u32 k = 0; k < kept_list_count_; ++k) {
+        const KeptList& kept = kept_lists_[k];
+        if (!kept.bptr_chain) {
+            keep_list_nodes(kept.head, false);
+            continue;
+        }
+        u32 bptr = 0;
+        mem.read32(kept.head, bptr);
+        for (u32 n = 0; bptr != 0 && n < 4096; ++n) {
+            const u64 node = static_cast<u64>(bptr) << 2;
+            if (node + 4 > mem.size) {
+                break;
+            }
+            keep_block_holding(static_cast<u32>(node));
+            if (!mem.read32(static_cast<u32>(node), bptr)) {
+                break;
+            }
+        }
+    }
+    for (const SemWaitQueue& q : sem_queues_) {
+        keep_block_holding(q.addr);
+    }
+    for (const ReplyHandler& h : reply_handlers_) {
+        if (h.port != 0) {
+            keep_block_holding(h.port);
+        }
+    }
+    for (u32 i = 0; i < patch_count_; ++i) {
+        keep_block_holding(patches_[i]);
+    }
+    for (const Keeper& k : keepers_) {
+        if (k.keep != nullptr) {
+            k.keep(k.ctx);
+        }
+    }
+}
+
+void Exec::free_program_blocks(u32 id) {
+    mark_kept_blocks();
+    u32 kept = 0;
+    for (u32 i = 0; i < program_block_count_;) {
+        if (program_blocks_[i].program == id && program_blocks_[i].keep) {
+            erase_program_block(i);
+            ++kept;
+        } else {
+            ++i;
+        }
+    }
+    u32 freed = 0;
+    u64 freed_bytes = 0;
+    // A library's release may free other blocks, and so drop their records:
+    // each round looks the next block up again.
+    for (;;) {
+        u32 i = 0;
+        while (i < program_block_count_ && program_blocks_[i].program != id) {
+            ++i;
+        }
+        if (i == program_block_count_) {
+            break;
+        }
+        const ProgramBlock block = program_blocks_[i];
+        erase_program_block(i);
+        ++freed;
+        freed_bytes += block.bytes;
+        if (block.release == 0) {
+            free(block.addr, block.bytes);
+        } else {
+            const Releaser& r = releasers_[block.release];
+            r.fn(r.ctx, block.addr);
+        }
+    }
+    if (freed != 0 || kept != 0) {
+        LogLine().text("exec: freed ").dec(freed).text(" blocks, ").dec(static_cast<u32>(freed_bytes))
+            .text(" bytes, of an ended program; kept ").dec(kept).send();
     }
 }
 
@@ -4180,6 +4689,8 @@ bool Exec::switch_to_task(i32 next_id) {
 }
 
 void Exec::reap_removed() {
+    u32 ended[Scheduler::kMaxTasks];
+    u32 ended_count = 0;
     for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
         if (sched_.slot(i).state == TaskState::Removed &&
             static_cast<i32>(i) != sched_.current()) {
@@ -4187,7 +4698,16 @@ void Exec::reap_removed() {
                 task_host_.destroy(task_host_.ctx, i);
             }
             sched_.release(static_cast<i32>(i));
+            if (tasks_[i].program != 0) {
+                ended[ended_count++] = tasks_[i].program;
+            }
+            tasks_[i].program = 0;
+            tasks_[i].program_root = false;
         }
+    }
+    // A program whose last task is gone is over.
+    for (u32 i = 0; i < ended_count; ++i) {
+        settle_program(ended[i]);
     }
 }
 

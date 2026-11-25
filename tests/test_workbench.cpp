@@ -1122,6 +1122,37 @@ void a_swapped_disk_changes_the_desktop() {
     CHECK(r.find_icon("Ram Disk") != Workbench::kNoIcon);
 }
 
+// The DiskObject an AppIcon shows stays when the system monitor ends the
+// program it came from: the Workbench still draws it.
+void an_app_icons_object_outlives_an_ended_program() {
+    Rig r;
+    r.workbench.open_desktop();
+    // A one-segment seglist holding the code at 0x1800 the call returns to.
+    r.put32(0x17F8, 0x808);
+    r.put32(0x17FC, 0);
+    const u32 task = g_exec.this_task();
+    CHECK(g_exec.begin_program(task, 0x17FC >> 2, true) != 0);
+    const u32 object = g_icon.default_object(kWBDisk);
+    CHECK(object != 0);
+    r.put32(kStack - 4, 0x1804);
+    r.m.cpu.a[7] = kStack - 4;
+    g_exec.claim_for_program(object, 64);
+    r.m.cpu.a[7] = kStack;
+    const u32 name = kData + 0x400;
+    for (u32 i = 0; i < 5; ++i) {
+        r.put8(name + i, static_cast<u32>("App\0"[i]));
+    }
+    CHECK(r.workbench.add_app_icon(9, 0x22, name, 0, 0, object, 0) != 0);
+
+    r.put16(0x1000, 0x60FE);
+    g_jit.flush();
+    g_exec.request_rescue(Rescue::End, static_cast<u32>(g_exec.scheduler().current()), task);
+    r.m.cpu.pc = 0x1000;
+    CHECK_EQ(g_jit.run(100), ExitReason::Stopped);
+    g_exec.end_program(task);
+    CHECK(logged("exec: freed 0 blocks, 0 bytes, of an ended program; kept 1"));
+}
+
 void app_registrations_add_and_remove() {
     Rig r;
     r.workbench.open_desktop();
@@ -4778,6 +4809,7 @@ int main() {
     a_bare_default_tool_is_found_on_the_command_path();
     a_leading_slash_default_tool_is_in_the_parent_drawer();
     app_registrations_add_and_remove();
+    an_app_icons_object_outlives_an_ended_program();
     menu_strip_lists_the_titles_and_disabled_items();
     app_vectors_take_their_arguments_from_the_documented_registers();
     a_drawer_window_keeps_its_title_when_the_memory_it_came_from_is_reused();

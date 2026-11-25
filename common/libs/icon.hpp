@@ -120,6 +120,10 @@ private:
 
     bool record(u32 addr, u32 bytes);
     void free_disk_object(u32 addr);
+    // Records an object a native hands its caller as that program's, which
+    // FreeDiskObject's way gives back when the program is ended.
+    u32 claim(u32 object);
+    static void release_object(void* ctx, u32 object);
     u32 build_object(const icon_detail::IconFile& info);
     u32 get_disk_object(native::Bus& bus, u32 name);
     u32 get_disk_object_new(native::Bus& bus, u32 name);
@@ -140,6 +144,7 @@ private:
     u32 base_ = 0;
     std::vector<Block> blocks_;
     u32 max_objects_ = kMaxObjects;
+    u8 release_id_ = 0;
     // The raw bytes of the .info file a call is working on.
     u8 file_[kMaxInfoBytes]{};
     NativeVector vectors_[kVectors]{};

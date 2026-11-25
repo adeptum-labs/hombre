@@ -254,6 +254,8 @@ MONITOR_SELECT  := sendkey f12;$(MONITOR_STEP);sendkey down;$(MONITOR_STEP)
 MONITOR_SUSPEND := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP)
 MONITOR_END     := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
 TYPE_CRASHTEST  := sendkey c;sendkey r;sendkey a;sendkey s;sendkey h;sendkey t;sendkey e;sendkey s;sendkey t;sendkey ret
+TYPE_TIMER      := sendkey c;sendkey r;sendkey a;sendkey s;sendkey h;sendkey t;sendkey e;sendkey s;sendkey t;sendkey spc;sendkey t;sendkey ret
+WAIT_4S         := $(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_STEP)
 TYPE_ENDTEST    := sendkey e;sendkey x;sendkey e;sendkey c;sendkey u;sendkey t;sendkey e;sendkey spc;sendkey s;sendkey shift-dot;sendkey e;sendkey n;sendkey d;sendkey t;sendkey e;sendkey s;sendkey t;sendkey ret
 MONITOR_KILL    := $(MONITOR_SELECT);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
 
@@ -370,6 +372,13 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    --mouse "$(MONITOR_STEP);$(TYPE_CRASHTEST);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_KILL);$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_KILL)" \
 	    "crashtest: waiting" "exec: ending HombreShell" "m68k: C:version returned 0" \
 	    "exec: closing HombreShell" "exec: task HombreShell ended" "dos: CLI 2 ended"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "n e w s h e l l ret" \
+	    --mouse-after "shell: new shell 2" \
+	    --mouse "$(MONITOR_STEP);$(TYPE_TIMER);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_KILL);$(WAIT_4S);$(WAIT_4S);$(TYPE_VERSION)" \
+	    --absent "exec: memory list is corrupt" \
+	    "crashtest: timing" "exec: ending HombreShell" \
+	    "exec: freed 2 blocks, 80 bytes, of an ended program; kept 1" \
+	    "m68k: C:version returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "n e w s h e l l ret" \
 	    --mouse-after "shell: new shell 2" \
 	    --mouse "$(MONITOR_STEP);$(TYPE_ENDTEST);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_KILL);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_KILL)" \

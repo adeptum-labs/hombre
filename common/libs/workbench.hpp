@@ -650,6 +650,9 @@ private:
     };
 
     static void task_entry(void* ctx);
+    // Names to exec the DiskObjects AppIcons show, which an ended program's
+    // end must leave.
+    static void keep_app_icons(void* ctx);
     static void file_closed(void* ctx, const char* path);
     void wake_for_patterns();
     static bool hook_close(void* ctx);

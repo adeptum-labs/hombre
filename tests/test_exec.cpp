@@ -3708,6 +3708,9 @@ struct ExecTest {
         e.tasks_[id].td_nest = td;
         e.tasks_[id].id_nest = id_nest;
     }
+    static u32 program_blocks(const Exec& e) { return e.program_block_count_; }
+    static u32 task_program(const Exec& e, u32 id) { return e.tasks_[id].program; }
+    static void set_task_program(Exec& e, u32 id, u32 program) { e.tasks_[id].program = program; }
     static void set_task_run_depth(Exec& e, u32 id, u32 depth) {
         e.tasks_[id].run_state.run_depth = depth;
     }
@@ -3717,6 +3720,646 @@ struct ExecTest {
 }  // namespace hombre
 
 namespace {
+
+// A task whose Task a program wrote over, waiting while holding Forbid and
+// Disable, is removed without faulting the task that runs, and the task
+// lists come out whole.
+void ending_a_damaged_task_leaves_the_running_task_alone() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 damaged =
+        setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "damaged", kNames);
+    const u32 healthy =
+        setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "healthy", kNames + 0x20);
+    CHECK_EQ(g_exec.spawn(damaged, 0x2000, 0, false), damaged);
+    CHECK_EQ(g_exec.spawn(healthy, 0x2000, 0, false), healthy);
+    // Both run and wait for a signal that never comes.
+    CHECK(g_exec.yield_in_native());
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 2);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    ExecTest::set_task_nests(g_exec, 1, 0, 0);
+    r.put32(damaged + LN_SUCC, 0xFFFFFFF1);
+    r.put32(damaged + LN_PRED, 0x00000003);
+
+    // The rescue runs between two blocks of the boot task's code.
+    r.put16(0x1000, 0x60FE);
+    g_jit.flush();
+    g_exec.request_rescue(Rescue::End, 1, damaged);
+    CHECK_EQ(r.go(0x1000, 50), ExitReason::Budget);
+    CHECK(logged("exec: removing damaged"));
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
+    CHECK(r.walk(r.base() + TaskWait) == std::vector<u32>{healthy});
+    CHECK(r.walk(r.base() + TaskReady).empty());
+    CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
+    CHECK_EQ(r.get8(r.base() + IDNestCnt), 0xFFu);
+
+    // A Task that leads out of memory faults the rescue only.
+    g_lines.clear();
+    r.put32(healthy + LN_SUCC, kData + 0x400);
+    g_exec.request_rescue(Rescue::End, 2, healthy);
+    r.put32(healthy + TC_SPLOWER, 0);
+    CHECK_EQ(r.go(0x1000, 50), ExitReason::Budget);
+    CHECK(g_exec.scheduler().slot(2).state == TaskState::Free);
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    (void)boot;
+}
+
+// Whether node is on the list, walking at most 64 nodes inside guest
+// memory; broken tells a walk that left it or did not end.
+bool on_task_list(Rig& r, u32 list, u32 node, bool& broken) {
+    broken = false;
+    u32 n = r.get32(list + LH_HEAD);
+    for (u32 i = 0; i < 64; ++i) {
+        if (n == 0 || n >= kTestGuestBytes - 16 || (n & 1) != 0) {
+            broken = true;
+            return false;
+        }
+        if (n == node) {
+            return true;
+        }
+        const u32 succ = r.get32(n + LN_SUCC);
+        if (succ == 0) {
+            return false;
+        }
+        n = succ;
+    }
+    broken = true;
+    return false;
+}
+
+struct IdleEnd {
+    Rig* r = nullptr;
+    u32 step = 0;
+    u32 slot = 0;
+    u32 task = 0;
+    bool damage = false;
+    u32 wake = 0;
+};
+
+// As the kernel's poll does: the monitor's request runs from the idle poll
+// of the task that waits.
+bool end_from_idle(void* ctx) {
+    IdleEnd& s = *static_cast<IdleEnd*>(ctx);
+    if (s.step == 0) {
+        s.step = 1;
+        if (s.damage) {
+            s.r->put32(s.task + LN_SUCC, 0xFFFFFFF1);
+            s.r->put32(s.task + LN_PRED, 3);
+        }
+        g_exec.request_rescue(Rescue::End, s.slot, s.task);
+        g_exec.run_rescue();
+        return true;
+    }
+    if (s.step == 1 && s.wake != 0) {
+        s.step = 2;
+        g_exec.signal_task(s.wake, 1u << 20);
+        return true;
+    }
+    return false;
+}
+
+// The running task waits, damaged, and is ended from its own idle poll:
+// its wait ends without writing through its links.
+void ending_the_damaged_running_task_from_its_wait() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 other = setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "other", kNames);
+    CHECK_EQ(g_exec.spawn(other, 0x2000, 0, false), other);
+    CHECK(g_exec.yield_in_native());
+    r.cpu().d[0] = 1u << 21;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    IdleEnd s{&r, 0, 0, boot, true, 0};
+    host.on_idle = end_from_idle;
+    host.on_idle_ctx = &s;
+    const u32 sysbase = r.get32(4);
+    const u32 low = r.get32(0);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Stopped);
+    bool broken = false;
+    CHECK(!on_task_list(r, r.base() + TaskWait, boot, broken));
+    CHECK(!broken);
+    CHECK(on_task_list(r, r.base() + TaskWait, other, broken));
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+    CHECK_EQ(r.get32(4), sysbase);
+    CHECK_EQ(r.get32(0), low);
+}
+
+// The boot task waits, damaged, and is ended while another task runs: the
+// Ctrl+C that wakes it does not write through its links.
+void ending_the_damaged_waiting_boot_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 other = setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "other", kNames);
+    CHECK_EQ(g_exec.spawn(other, 0x2000, 0, false), other);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    ExecTest::set_task_run_depth(g_exec, 0, 1);
+    r.put32(boot + LN_SUCC, 0xFFFFFFF1);
+    r.put32(boot + LN_PRED, 3);
+    const u32 sysbase = r.get32(4);
+    g_exec.request_rescue(Rescue::End, 0, boot);
+    g_exec.run_rescue();
+    CHECK(g_exec.scheduler().slot(0).state == TaskState::Ready);
+    bool broken = false;
+    CHECK(on_task_list(r, r.base() + TaskReady, boot, broken));
+    CHECK(!on_task_list(r, r.base() + TaskWait, boot, broken));
+    CHECK(!broken);
+    CHECK_EQ(r.get32(4), sysbase);
+}
+
+// Another task, damaged, is ended from the idle poll of the running task,
+// which waits: the lists built again keep the running task on TaskWait.
+void ending_a_damaged_task_from_a_waiting_tasks_poll() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 damaged = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "damaged", kNames);
+    CHECK_EQ(g_exec.spawn(damaged, 0x2000, 0, false), damaged);
+    CHECK(g_exec.yield_in_native());
+    r.cpu().d[0] = 1u << 21;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    IdleEnd s{&r, 0, 1, damaged, true, boot};
+    host.on_idle = end_from_idle;
+    host.on_idle_ctx = &s;
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 1u << 20);
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
+    const u32 list = r.base() + TaskWait;
+    CHECK_EQ(r.get32(list + LH_HEAD), list + LH_TAIL);
+    CHECK_EQ(r.get32(list + LH_TAILPRED), list + LH_HEAD);
+    CHECK(r.walk(r.base() + TaskReady).empty());
+}
+
+// --- the memory of a program ---------------------------------------------
+
+// A one-segment seglist whose code is [0x1800, 0x2000), where Rig::call
+// puts its JSR: the BPTR of the segment's link at 0x17FC.
+u32 program_segment(Rig& r) {
+    r.put32(0x17F8, 0x808);
+    r.put32(0x17FC, 0);
+    return 0x17FC >> 2;
+}
+
+// JSR -offset(A6) from 0x3000, code no program holds.
+ExitReason call_from_outside(Rig& r, u32 offset) {
+    r.code(kSub, {0x4EAE, disp(offset), 0x4EF8, 0x0400});
+    g_jit.flush();
+    r.cpu().a[6] = r.base();
+    return r.go(kSub);
+}
+
+u32 program_alloc_mem(Rig& r, u32 bytes) {
+    r.cpu().d[0] = bytes;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AllocMem), ExitReason::Halt);
+    CHECK(r.cpu().d[0] != 0);
+    return r.cpu().d[0];
+}
+
+// Ends the boot task's code from the monitor, as when it spins.
+void end_boot_code_from_the_monitor(Rig& r, u32 boot) {
+    r.put16(0x1000, 0x60FE);
+    g_jit.flush();
+    g_exec.request_rescue(Rescue::End, 0, boot);
+    CHECK_EQ(r.go(0x1000, 100), ExitReason::Stopped);
+}
+
+void an_ended_program_gives_back_what_it_asked_for() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+
+    program_alloc_mem(r, 100);
+    r.cpu().d[0] = 50;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AllocVec), ExitReason::Halt);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = IOSTD_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    CHECK(r.cpu().d[0] != 0);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 4u);
+
+    // What exec takes for itself while the program runs is not the program's.
+    const u32 own = g_exec.alloc(64, 0);
+    const u32 own_port = g_exec.create_port();
+
+    end_boot_code_from_the_monitor(r, boot);
+    // Nothing goes before the command is over.
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 4u);
+    g_exec.end_program(boot);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+    CHECK(logged("exec: freed 4 blocks, 256 bytes, of an ended program; kept 0"));
+    CHECK(!logged_containing("FreeMem of"));
+    g_exec.delete_port(own_port);
+    g_exec.free(own, 64);
+    CHECK(r.chunks() == before);
+    CHECK_EQ(ExecTest::task_program(g_exec, 0), 0u);
+}
+
+void a_program_that_ends_by_itself_keeps_what_it_left() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    const u32 left = program_alloc_mem(r, 40);
+    g_exec.end_program(boot);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+    const auto after = r.chunks();
+    CHECK(after != before);
+
+    // The next program ended from the monitor does not free it.
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    program_alloc_mem(r, 40);
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK(r.chunks() == after);
+    g_exec.free(left, 40);
+    CHECK(r.chunks() == before);
+
+    // A fresh program ends the one before it the same way.
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    const u32 again = program_alloc_mem(r, 40);
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+    g_exec.free(again, 40);
+}
+
+void only_calls_from_the_programs_code_are_recorded() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+
+    // Code outside the program's seglist, a library's, keeps its blocks.
+    r.cpu().d[0] = 24;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(call_from_outside(r, exec_lvo::AllocMem), ExitReason::Halt);
+    const u32 library_block = r.cpu().d[0];
+    // So does anything taken while a library is being loaded.
+    ExecTest::load_depth(g_exec) = 1;
+    const u32 loading_block = program_alloc_mem(r, 24);
+    ExecTest::load_depth(g_exec) = 0;
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+
+    // A task outside any program records nothing either.
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    const u32 no_program = program_alloc_mem(r, 24);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+
+    g_exec.free(library_block, 24);
+    g_exec.free(loading_block, 24);
+    g_exec.free(no_program, 24);
+    CHECK(r.chunks() == before);
+}
+
+void blocks_freed_another_way_are_not_freed_again() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    const u32 whole = program_alloc_mem(r, 64);
+    const u32 part = program_alloc_mem(r, 64);
+    r.cpu().d[0] = 32;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AllocVec), ExitReason::Halt);
+    const u32 vec = r.cpu().d[0];
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 3u);
+
+    r.cpu().a[1] = whole;
+    r.cpu().d[0] = 64;
+    CHECK_EQ(r.exec(exec_lvo::FreeMem), ExitReason::Halt);
+    // Freeing the tail of a block ends its record too: the rest is left.
+    r.cpu().a[1] = part + 32;
+    r.cpu().d[0] = 32;
+    CHECK_EQ(r.exec(exec_lvo::FreeMem), ExitReason::Halt);
+    r.cpu().a[1] = vec;
+    CHECK_EQ(r.exec(exec_lvo::FreeVec), ExitReason::Halt);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+
+    // The part's block is allocated again by someone else's code.
+    r.cpu().d[0] = 32;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(call_from_outside(r, exec_lvo::AllocMem), ExitReason::Halt);
+    const auto held = r.chunks();
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK(r.chunks() == held);
+    CHECK(!logged_containing("FreeMem of"));
+}
+
+void blocks_the_system_still_holds_are_kept() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+
+    // A public port, a public semaphore, a node on a list a library keeps
+    // and a task outside the program.
+    const u32 port = program_alloc_mem(r, MP_SIZE + 16);
+    r.put32(port + LN_NAME, r.str(kNames, "kept.port"));
+    r.put8(port + LN_PRI, 0);
+    r.put8(port + mp_Flags, PA_IGNORE);
+    r.new_list(port + mp_MsgList);
+    r.cpu().a[1] = port;
+    CHECK_EQ(r.exec(exec_lvo::AddPort), ExitReason::Halt);
+    const u32 sem = program_alloc_mem(r, SS_SIZE + 16);
+    r.put32(sem + LN_NAME, r.str(kNames + 0x20, "kept.sem"));
+    r.cpu().a[1] = sem;
+    CHECK_EQ(r.exec(exec_lvo::AddSemaphore), ExitReason::Halt);
+    const u32 list = kData + 0x600;
+    r.new_list(list);
+    CHECK(g_exec.add_kept_list(list, false));
+    const u32 node = program_alloc_mem(r, 32);
+    r.cpu().a[0] = list;
+    r.cpu().a[1] = node + 8;
+    CHECK_EQ(r.exec(exec_lvo::AddTail), ExitReason::Halt);
+    const u32 chain = kData + 0x620;
+    const u32 bnode = program_alloc_mem(r, 16);
+    r.put32(bnode, 0);
+    r.put32(chain, bnode >> 2);
+    CHECK(g_exec.add_kept_list(chain, true));
+    const u32 task_block = program_alloc_mem(r, TC_SIZE + 8);
+    setup_child_task(r, task_block, kData + 0x3000, 0, "other", kNames + 0x40);
+    CHECK_EQ(g_exec.spawn(task_block, 0x2000, 0, true), task_block);
+    // The task belongs to no program, as one the Workbench starts.
+    ExecTest::set_task_program(g_exec, 1, 0);
+    // A message queued on the public port.
+    const u32 message = program_alloc_mem(r, MN_SIZE);
+    CHECK(g_exec.post_message(port, message));
+    // A plain block goes.
+    program_alloc_mem(r, 48);
+
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK(logged("exec: freed 1 blocks, 48 bytes, of an ended program; kept 6"));
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+    r.cpu().a[1] = r.str(kNames + 0x60, "kept.port");
+    CHECK_EQ(r.exec(exec_lvo::FindPort), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], port);
+}
+
+void a_programs_tasks_share_its_blocks_until_the_last_ends() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    const u32 program = g_exec.begin_program(boot, seglist, true);
+    CHECK(program != 0);
+    const u32 child =
+        setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "helper", kNames);
+    CHECK_EQ(g_exec.spawn(child, 0x2000, 0, true), child);
+    CHECK_EQ(ExecTest::task_program(g_exec, 1), program);
+    program_alloc_mem(r, 64);
+
+    // The helper still runs: the program's blocks stay.
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 1u);
+    CHECK(r.chunks() != before);
+
+    // Ending the helper, which is not the program, frees them with it.
+    g_exec.request_rescue(Rescue::End, 1, child);
+    g_exec.run_rescue();
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+    CHECK(r.chunks() == before);
+}
+
+void ending_a_programs_task_from_the_monitor_frees_its_blocks() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r);
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    const u32 tool =
+        setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "tool", kNames);
+    CHECK_EQ(g_exec.spawn(tool, 0x2000, 0, true), tool);
+    CHECK(g_exec.begin_program(tool, seglist, true) != 0);
+
+    // The tool runs and asks for memory, then waits.
+    CHECK(g_exec.yield_in_native());
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    program_alloc_mem(r, 200);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    CHECK(g_exec.yield_in_native());
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 2u);
+
+    g_exec.request_rescue(Rescue::End, 1, tool);
+    g_exec.run_rescue();
+    CHECK(logged("exec: removing tool"));
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+    CHECK(r.chunks() == before);
+}
+
+// A command ended from the monitor leaves a timer request on its task,
+// which goes on: the request is dropped before its memory is freed, so the
+// timer never writes into a free block.
+void an_ended_commands_device_requests_go_before_its_memory() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    TimerDevice timer;
+    CHECK(timer.init(r.m, g_exec));
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = TR_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    const u32 req = r.cpu().d[0];
+    r.cpu().a[0] = r.str(kNames + 0x100, "timer.device");
+    r.cpu().d[0] = UNIT_MICROHZ;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Halt);
+    r.put16(req + io_Command, TR_ADDREQUEST);
+    r.put32(req + TR_TIME, 0);
+    r.put32(req + TR_TIME + 4, 1000);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::SendIO), ExitReason::Halt);
+    CHECK(timer.has_pending());
+
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK(!timer.has_pending());
+    host.now_us = 5000;
+    g_exec.expire_timers();
+    CHECK(!logged("exec: memory list is corrupt"));
+    CHECK(r.chunks() == before);
+}
+
+// A command that ends by itself leaves its device requests as they were.
+void a_command_that_ends_by_itself_keeps_its_requests() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    TimerDevice timer;
+    CHECK(timer.init(r.m, g_exec));
+    const u32 seglist = program_segment(r);
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    r.cpu().a[0] = port;
+    r.cpu().d[0] = TR_SIZE;
+    CHECK_EQ(r.exec(exec_lvo::CreateIORequest), ExitReason::Halt);
+    const u32 req = r.cpu().d[0];
+    r.cpu().a[0] = r.str(kNames + 0x100, "timer.device");
+    r.cpu().d[0] = UNIT_MICROHZ;
+    r.cpu().a[1] = req;
+    r.cpu().d[1] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenDevice), ExitReason::Halt);
+    r.put16(req + io_Command, TR_ADDREQUEST);
+    r.put32(req + TR_TIME, 0);
+    r.put32(req + TR_TIME + 4, 1000);
+    r.cpu().a[1] = req;
+    CHECK_EQ(r.exec(exec_lvo::SendIO), ExitReason::Halt);
+    g_exec.end_program(boot);
+    CHECK(timer.has_pending());
+    host.now_us = 5000;
+    g_exec.expire_timers();
+    CHECK_EQ(g_exec.get_message(port), req);
+}
+
+struct Keep {
+    u32 addr = 0;
+    u32 calls = 0;
+};
+
+void keep_one(void* ctx) {
+    Keep& k = *static_cast<Keep*>(ctx);
+    ++k.calls;
+    g_exec.keep_block_at(k.addr);
+}
+
+// A library that still uses a block a program gave it keeps it through a
+// keeper, as dos keeps a NotifyRequest it watches for.
+void a_keeper_keeps_what_a_library_still_uses() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    Keep keep;
+    CHECK(g_exec.add_program_keeper(&keep_one, &keep));
+    CHECK(g_exec.add_program_keeper(&keep_one, &keep));
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    const u32 watched = program_alloc_mem(r, 64);
+    keep.addr = watched + 16;
+    program_alloc_mem(r, 32);
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK_EQ(keep.calls, 1u);
+    CHECK(logged("exec: freed 1 blocks, 32 bytes, of an ended program; kept 1"));
+}
+
+struct Released {
+    std::vector<u32> addrs;
+};
+
+void note_release(void* ctx, u32 addr) {
+    static_cast<Released*>(ctx)->addrs.push_back(addr);
+    g_exec.free(addr, 40);
+}
+
+void a_librarys_object_goes_back_through_its_own_release() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    Released released;
+    const u8 id = g_exec.add_program_releaser(&note_release, &released);
+    CHECK(id != 0);
+    CHECK_EQ(g_exec.add_program_releaser(&note_release, &released), id);
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+
+    // As a library's native, called from the program's code, makes one.
+    const u32 object = g_exec.alloc(40, 0);
+    r.put32(kStack - 4, 0x1804);
+    r.cpu().a[7] = kStack - 4;
+    g_exec.claim_for_program(object, 40, id);
+    // Called from elsewhere it is not the program's.
+    r.put32(kStack - 4, 0x3004);
+    const u32 other = g_exec.alloc(40, 0);
+    g_exec.claim_for_program(other, 40, id);
+    r.cpu().a[7] = kStack;
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 1u);
+
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK(released.addrs == std::vector<u32>{object});
+    g_exec.free(other, 40);
+    CHECK(r.chunks() == before);
+}
+
+void a_full_record_leaves_further_blocks_alone() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    const auto before = r.chunks();
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    r.put32(kStack - 4, 0x1804);
+    r.cpu().a[7] = kStack - 4;
+    std::vector<u32> blocks;
+    for (u32 i = 0; i <= Exec::kMaxProgramBlocks; ++i) {
+        blocks.push_back(g_exec.alloc(8, 0));
+        g_exec.claim_for_program(blocks.back(), 8);
+    }
+    r.cpu().a[7] = kStack;
+    CHECK_EQ(ExecTest::program_blocks(g_exec), Exec::kMaxProgramBlocks);
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK_EQ(ExecTest::program_blocks(g_exec), 0u);
+    // The one past the record stays allocated, the rest are free.
+    g_exec.free(blocks.back(), 8);
+    CHECK(r.chunks() == before);
+}
 
 void body_never_runs(void*) {}
 
@@ -4412,191 +5055,6 @@ void ending_a_task_stops_its_code_or_removes_it() {
     CHECK_EQ(r.go(0x1000, 5), ExitReason::Budget);
 }
 
-// A task whose Task a program wrote over, waiting while holding Forbid and
-// Disable, is removed without faulting the task that runs, and the task
-// lists come out whole.
-void ending_a_damaged_task_leaves_the_running_task_alone() {
-    Rig r;
-    FakeHostState host{};
-    g_exec.set_task_host(make_fake_host(host));
-    const u32 boot = make_test_task(r);
-    const u32 damaged =
-        setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "damaged", kNames);
-    const u32 healthy =
-        setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "healthy", kNames + 0x20);
-    CHECK_EQ(g_exec.spawn(damaged, 0x2000, 0, false), damaged);
-    CHECK_EQ(g_exec.spawn(healthy, 0x2000, 0, false), healthy);
-    // Both run and wait for a signal that never comes.
-    CHECK(g_exec.yield_in_native());
-    CHECK_EQ(g_exec.scheduler().current(), 1);
-    r.cpu().d[0] = 1u << 20;
-    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
-    CHECK_EQ(g_exec.scheduler().current(), 2);
-    r.cpu().d[0] = 1u << 20;
-    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
-    CHECK_EQ(g_exec.scheduler().current(), 0);
-    ExecTest::set_task_nests(g_exec, 1, 0, 0);
-    r.put32(damaged + LN_SUCC, 0xFFFFFFF1);
-    r.put32(damaged + LN_PRED, 0x00000003);
-
-    // The rescue runs between two blocks of the boot task's code.
-    r.put16(0x1000, 0x60FE);
-    g_jit.flush();
-    g_exec.request_rescue(Rescue::End, 1, damaged);
-    CHECK_EQ(r.go(0x1000, 50), ExitReason::Budget);
-    CHECK(logged("exec: removing damaged"));
-    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
-    CHECK(r.walk(r.base() + TaskWait) == std::vector<u32>{healthy});
-    CHECK(r.walk(r.base() + TaskReady).empty());
-    CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
-    CHECK_EQ(r.get8(r.base() + IDNestCnt), 0xFFu);
-
-    // A Task that leads out of memory faults the rescue only.
-    g_lines.clear();
-    r.put32(healthy + LN_SUCC, kData + 0x400);
-    g_exec.request_rescue(Rescue::End, 2, healthy);
-    r.put32(healthy + TC_SPLOWER, 0);
-    CHECK_EQ(r.go(0x1000, 50), ExitReason::Budget);
-    CHECK(g_exec.scheduler().slot(2).state == TaskState::Free);
-    CHECK(r.walk(r.base() + TaskWait).empty());
-    (void)boot;
-}
-
-// Whether node is on the list, walking at most 64 nodes inside guest
-// memory; broken tells a walk that left it or did not end.
-bool on_task_list(Rig& r, u32 list, u32 node, bool& broken) {
-    broken = false;
-    u32 n = r.get32(list + LH_HEAD);
-    for (u32 i = 0; i < 64; ++i) {
-        if (n == 0 || n >= kTestGuestBytes - 16 || (n & 1) != 0) {
-            broken = true;
-            return false;
-        }
-        if (n == node) {
-            return true;
-        }
-        const u32 succ = r.get32(n + LN_SUCC);
-        if (succ == 0) {
-            return false;
-        }
-        n = succ;
-    }
-    broken = true;
-    return false;
-}
-
-struct IdleEnd {
-    Rig* r = nullptr;
-    u32 step = 0;
-    u32 slot = 0;
-    u32 task = 0;
-    bool damage = false;
-    u32 wake = 0;
-};
-
-// As the kernel's poll does: the monitor's request runs from the idle poll
-// of the task that waits.
-bool end_from_idle(void* ctx) {
-    IdleEnd& s = *static_cast<IdleEnd*>(ctx);
-    if (s.step == 0) {
-        s.step = 1;
-        if (s.damage) {
-            s.r->put32(s.task + LN_SUCC, 0xFFFFFFF1);
-            s.r->put32(s.task + LN_PRED, 3);
-        }
-        g_exec.request_rescue(Rescue::End, s.slot, s.task);
-        g_exec.run_rescue();
-        return true;
-    }
-    if (s.step == 1 && s.wake != 0) {
-        s.step = 2;
-        g_exec.signal_task(s.wake, 1u << 20);
-        return true;
-    }
-    return false;
-}
-
-// The running task waits, damaged, and is ended from its own idle poll:
-// its wait ends without writing through its links.
-void ending_the_damaged_running_task_from_its_wait() {
-    Rig r;
-    FakeHostState host{};
-    g_exec.set_task_host(make_fake_host(host));
-    const u32 boot = make_test_task(r);
-    const u32 other = setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "other", kNames);
-    CHECK_EQ(g_exec.spawn(other, 0x2000, 0, false), other);
-    CHECK(g_exec.yield_in_native());
-    r.cpu().d[0] = 1u << 21;
-    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
-    CHECK_EQ(g_exec.scheduler().current(), 0);
-    IdleEnd s{&r, 0, 0, boot, true, 0};
-    host.on_idle = end_from_idle;
-    host.on_idle_ctx = &s;
-    const u32 sysbase = r.get32(4);
-    const u32 low = r.get32(0);
-    r.cpu().d[0] = 1u << 20;
-    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Stopped);
-    bool broken = false;
-    CHECK(!on_task_list(r, r.base() + TaskWait, boot, broken));
-    CHECK(!broken);
-    CHECK(on_task_list(r, r.base() + TaskWait, other, broken));
-    CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
-    CHECK_EQ(r.get32(4), sysbase);
-    CHECK_EQ(r.get32(0), low);
-}
-
-// The boot task waits, damaged, and is ended while another task runs: the
-// Ctrl+C that wakes it does not write through its links.
-void ending_the_damaged_waiting_boot_task() {
-    Rig r;
-    FakeHostState host{};
-    g_exec.set_task_host(make_fake_host(host));
-    const u32 boot = make_test_task(r);
-    const u32 other = setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "other", kNames);
-    CHECK_EQ(g_exec.spawn(other, 0x2000, 0, false), other);
-    r.cpu().d[0] = 1u << 20;
-    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
-    CHECK_EQ(g_exec.scheduler().current(), 1);
-    ExecTest::set_task_run_depth(g_exec, 0, 1);
-    r.put32(boot + LN_SUCC, 0xFFFFFFF1);
-    r.put32(boot + LN_PRED, 3);
-    const u32 sysbase = r.get32(4);
-    g_exec.request_rescue(Rescue::End, 0, boot);
-    g_exec.run_rescue();
-    CHECK(g_exec.scheduler().slot(0).state == TaskState::Ready);
-    bool broken = false;
-    CHECK(on_task_list(r, r.base() + TaskReady, boot, broken));
-    CHECK(!on_task_list(r, r.base() + TaskWait, boot, broken));
-    CHECK(!broken);
-    CHECK_EQ(r.get32(4), sysbase);
-}
-
-// Another task, damaged, is ended from the idle poll of the running task,
-// which waits: the lists built again keep the running task on TaskWait.
-void ending_a_damaged_task_from_a_waiting_tasks_poll() {
-    Rig r;
-    FakeHostState host{};
-    g_exec.set_task_host(make_fake_host(host));
-    const u32 boot = make_test_task(r);
-    const u32 damaged = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "damaged", kNames);
-    CHECK_EQ(g_exec.spawn(damaged, 0x2000, 0, false), damaged);
-    CHECK(g_exec.yield_in_native());
-    r.cpu().d[0] = 1u << 21;
-    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
-    CHECK_EQ(g_exec.scheduler().current(), 0);
-    IdleEnd s{&r, 0, 1, damaged, true, boot};
-    host.on_idle = end_from_idle;
-    host.on_idle_ctx = &s;
-    r.cpu().d[0] = 1u << 20;
-    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
-    CHECK_EQ(r.cpu().d[0], 1u << 20);
-    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
-    const u32 list = r.base() + TaskWait;
-    CHECK_EQ(r.get32(list + LH_HEAD), list + LH_TAIL);
-    CHECK_EQ(r.get32(list + LH_TAILPRED), list + LH_HEAD);
-    CHECK(r.walk(r.base() + TaskReady).empty());
-}
-
 // --- devices and IORequests ---------------------------------------------
 
 struct FakeDevState {
@@ -5082,6 +5540,18 @@ int main() {
     ending_the_damaged_running_task_from_its_wait();
     ending_the_damaged_waiting_boot_task();
     ending_a_damaged_task_from_a_waiting_tasks_poll();
+    an_ended_program_gives_back_what_it_asked_for();
+    a_program_that_ends_by_itself_keeps_what_it_left();
+    only_calls_from_the_programs_code_are_recorded();
+    blocks_freed_another_way_are_not_freed_again();
+    blocks_the_system_still_holds_are_kept();
+    a_programs_tasks_share_its_blocks_until_the_last_ends();
+    ending_a_programs_task_from_the_monitor_frees_its_blocks();
+    a_librarys_object_goes_back_through_its_own_release();
+    an_ended_commands_device_requests_go_before_its_memory();
+    a_keeper_keeps_what_a_library_still_uses();
+    a_command_that_ends_by_itself_keeps_its_requests();
+    a_full_record_leaves_further_blocks_alone();
     ending_a_shell_stops_its_command_and_keeps_the_shell();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();

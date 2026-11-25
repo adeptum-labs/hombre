@@ -682,6 +682,23 @@ void free_disk_object_returns_the_memory() {
     CHECK_EQ(free_disk_object(r, 0), 0u);
 }
 
+void dummy_release(void*, u32) {}
+
+// With exec's table of releases full, objects still come back, unrecorded.
+void objects_come_back_when_exec_has_no_release_left() {
+    Rig r;
+    CHECK(g_exec.init(r.m, kFreeStart, kTestChipEnd, kTestGuestBytes));
+    int contexts[Exec::kMaxReleasers];
+    for (u32 i = 0; i < Exec::kMaxReleasers; ++i) {
+        CHECK(g_exec.add_program_releaser(&dummy_release, &contexts[i]) != 0);
+    }
+    CHECK(g_dos.init(r.m, g_exec, r.volume, nullptr, nullptr));
+    CHECK(g_icon.init(r.m, g_exec, g_dos));
+    const u32 obj = get_disk_object(r, "Tools/Tool");
+    CHECK(obj != 0);
+    CHECK_EQ(free_disk_object(r, obj), 0u);
+}
+
 void null_name_gives_an_empty_disk_object() {
     Rig r;
     const u32 before = r.avail_mem();
@@ -1276,6 +1293,7 @@ int main() {
     project_icon_has_both_images();
     malformed_and_missing_icons_fail();
     free_disk_object_returns_the_memory();
+    objects_come_back_when_exec_has_no_release_left();
     null_name_gives_an_empty_disk_object();
     disk_object_table_fills_without_leaking();
     disk_revision_is_the_low_byte_of_user_data();

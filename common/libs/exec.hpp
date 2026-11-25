@@ -580,7 +580,6 @@ public:
         end_hook_ctx_ = ctx;
     }
 
-
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
     // tc_SigRecvd SetSignal and Wait use. It may be set before init and is
     // kept across it.
@@ -667,6 +666,68 @@ public:
     static constexpr u32 kMaxReplyHandlers = 4;
     void set_reply_handler(u32 port, void (*handler)(void* ctx, u32 message), void* ctx);
 
+    // --- the memory of a program --------------------------------------------
+    //
+    // A program is the code dos or the Workbench starts: a command on a
+    // shell's task, or a process with a seglist of its own. The tasks it
+    // starts belong to it too. Exec records the blocks its code asks for,
+    // through AllocMem, AllocVec, CreateMsgPort and CreateIORequest and
+    // through the library calls that hand it an object of its own, as long
+    // as the call comes straight from one of its seglists and no library is
+    // being loaded. A program that ends by itself keeps what it left behind,
+    // as on an Amiga. One the system monitor ends gets its blocks freed once
+    // its last task is gone, except a block that holds a task still alive,
+    // its stack, a node on a system list or a message on a public port.
+    // Freeing a recorded block in any other way drops its record. When the
+    // record is full, further blocks are not recorded.
+    static constexpr u32 kMaxProgramBlocks = 2048;
+    static constexpr u32 kMaxProgramCode = 4;
+    static constexpr u32 kMaxReleasers = 15;
+    static constexpr u32 kMaxKeptLists = 4;
+
+    // Starts a program on task, whose code is the seglist (a BPTR), and
+    // returns its id. A task that has a program already, the one that
+    // started it or the one it took over from its parent, keeps it and only
+    // adds the seglist to its code, unless fresh is set: then the program
+    // the task started is ended as end_program ends it and a new one starts.
+    // 0 when the task is not scheduled or no program can be started.
+    u32 begin_program(u32 task, u32 seglist, bool fresh);
+
+    // Ends the program task started, once its last task is gone: its blocks
+    // are freed when the system monitor ended it and are forgotten, left
+    // allocated, otherwise. For a program the monitor ended, the device
+    // requests task issued are dropped first, as at a task's end, since the
+    // task outlives its command.
+    void end_program(u32 task);
+
+    // Records the block [addr, addr + bytes) as the running program's when
+    // the native that runs was called straight from its code. release is 0
+    // for a block exec frees, or an id add_program_releaser handed out for a
+    // library's own object.
+    void claim_for_program(u32 addr, u32 bytes, u8 release = 0);
+
+    // Registers how a library frees an object of its own that it handed a
+    // program, so that ending the program releases it as the library's free
+    // call does. Returns the id to give claim_for_program, 0 when the table
+    // is full (the objects are then not recorded). Reset on init.
+    u8 add_program_releaser(void (*release)(void* ctx, u32 addr), void* ctx);
+
+    // A list outside ExecBase whose nodes a program's blocks may hold and
+    // must keep: an exec List at head, or with bptr_chain a chain of nodes
+    // whose first longword is the BPTR of the next, starting at the BPTR at
+    // head. False when kMaxKeptLists are registered. Reset on init.
+    bool add_kept_list(u32 head, bool bptr_chain);
+
+    // A library that keeps addresses a program gave it, outside any list,
+    // names them through keep, which exec calls while it picks what an
+    // ended program's end frees; keep calls keep_block_at for each. False
+    // when kMaxKeepers are registered. Reset on init.
+    static constexpr u32 kMaxKeepers = 4;
+    bool add_program_keeper(void (*keep)(void* ctx), void* ctx);
+
+    // Keeps the program block that holds addr, if one does: for a keeper.
+    void keep_block_at(u32 addr) { keep_block_holding(addr); }
+
 private:
     friend struct ExecOps;
     friend struct ExecTest;
@@ -702,6 +763,34 @@ private:
         // Started by spawn_native: a shell or the Workbench, whose own code
         // is no program's.
         bool native_task = false;
+        // The program the task runs, 0 for none, and whether the task
+        // started it rather than taking it over from its parent.
+        u32 program = 0;
+        bool program_root = false;
+    };
+
+    struct Program {
+        u32 id = 0;  // 0 for a free entry
+        u32 code[kMaxProgramCode]{};  // seglist BPTRs
+        bool doomed = false;  // ended by the system monitor
+    };
+
+    struct ProgramBlock {
+        u32 addr = 0;
+        u32 bytes = 0;
+        u32 program = 0;
+        u8 release = 0;
+        bool keep = false;
+    };
+
+    struct Releaser {
+        void (*fn)(void* ctx, u32 addr) = nullptr;
+        void* ctx = nullptr;
+    };
+
+    struct KeptList {
+        u32 head = 0;
+        bool bptr_chain = false;
     };
 
     struct SemWaitQueue {
@@ -723,6 +812,22 @@ private:
     void stop_command_of(u32 slot);
     bool unlink_task(u32 addr);
     void rebuild_task_lists(u32 leave_out = 0);
+    void doom_program_of(u32 slot);
+    i32 slot_of(u32 task) const;
+    Program* find_program(u32 id);
+    bool program_alive(u32 id) const;
+    bool in_program_code(const Program& p, u32 pc) const;
+    u32 calling_program() const;
+    void record_program_block(u32 addr, u32 bytes, u32 program, u8 release);
+    u32 first_block_at_or_after(u32 addr) const;
+    void erase_program_block(u32 index);
+    void drop_program_blocks(u32 addr, u32 bytes);
+    void settle_program(u32 id);
+    void mark_kept_blocks();
+    void keep_block_holding(u32 addr);
+    void keep_blocks_within(u32 lo, u32 hi);
+    void keep_list_nodes(u32 list, bool with_messages);
+    void free_program_blocks(u32 id);
     bool switch_to_task(i32 next_id);
     void reap_removed();
     void remove_sem_waiter(u32 task_id);
@@ -800,6 +905,18 @@ private:
     void* task_end_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;
+    Program programs_[Scheduler::kMaxTasks]{};
+    u32 next_program_ = 1;
+    ProgramBlock program_blocks_[kMaxProgramBlocks]{};  // by address
+    u32 program_block_count_ = 0;
+    Releaser releasers_[kMaxReleasers + 1]{};  // 0 is exec's own free
+    KeptList kept_lists_[kMaxKeptLists]{};
+    u32 kept_list_count_ = 0;
+    struct Keeper {
+        void (*keep)(void* ctx) = nullptr;
+        void* ctx = nullptr;
+    };
+    Keeper keepers_[kMaxKeepers]{};
     std::vector<u32> loaded_;  // seglists of libraries exec loaded
 };
 

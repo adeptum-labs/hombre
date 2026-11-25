@@ -22,6 +22,12 @@
 | Leaves a task behind that a crash has damaged: prints a line and waits for
 | a signal that never comes, while a task it starts writes over the links of
 | its Task, which exec keeps on its list of waiting tasks, and ends.
+|
+| With an argument starting with t it instead asks timer.device for a reply
+| in eight seconds and waits for a signal that never comes, so the request
+| is still pending when something ends it. A public port it adds lies
+| between its own port and the request, so that ending it frees the two
+| apart and the request starts a free chunk of its own.
 
         .set    AllocMem, -198
         .set    AddTask, -282
@@ -31,6 +37,23 @@
         .set    OpenLibrary, -552
         .set    Write, -48
         .set    Output, -60
+        .set    OpenDevice, -444
+        .set    SendIO, -462
+        .set    CreateIORequest, -654
+        .set    CreateMsgPort, -666
+        .set    AddPort, -354
+
+        .set    mp_Flags, 14
+        .set    mp_MsgList, 20
+        .set    MP_SIZE, 34
+        .set    PA_IGNORE, 2
+
+        .set    io_Command, 28
+        .set    tv_secs, 32
+        .set    tv_micro, 36
+        .set    TR_SIZE, 40
+        .set    TR_ADDREQUEST, 9
+        .set    UNIT_MICROHZ, 0
 
         .set    LN_TYPE, 8
         .set    LN_NAME, 10
@@ -48,7 +71,8 @@
         .globl  _start
 
 _start:
-        movem.l %d2-%d3/%a2-%a3/%a5-%a6,-(%sp)
+        movem.l %d2-%d4/%a2-%a3/%a5-%a6,-(%sp)
+        move.b  (%a0),%d4
         movea.l 4.w,%a6
         lea     dosname(%pc),%a1
         moveq   #0,%d0
@@ -56,6 +80,8 @@ _start:
         tst.l   %d0
         beq.s   fail
         movea.l %d0,%a5
+        cmpi.b  #'t',%d4
+        beq.s   timer
         movea.l %a5,%a6
         jsr     Output(%a6)
         move.l  %d0,%d1
@@ -90,8 +116,58 @@ _start:
         bset    #30,%d0
         jsr     Wait(%a6)
 fail:   moveq   #RETURN_FAIL,%d0
-        movem.l (%sp)+,%d2-%d3/%a2-%a3/%a5-%a6
+        movem.l (%sp)+,%d2-%d4/%a2-%a3/%a5-%a6
         rts
+
+| The pending timer request.
+timer:  movea.l %a5,%a6
+        jsr     Output(%a6)
+        move.l  %d0,%d1
+        lea     timing(%pc),%a0
+        move.l  %a0,%d2
+        moveq   #timing_end-timing,%d3
+        jsr     Write(%a6)
+        movea.l 4.w,%a6
+        jsr     CreateMsgPort(%a6)
+        tst.l   %d0
+        beq.s   fail
+        move.l  %d0,%d4
+        moveq   #MP_SIZE,%d0
+        move.l  #MEMF_PUBLIC_CLEAR,%d1
+        jsr     AllocMem(%a6)
+        tst.l   %d0
+        beq.s   fail
+        movea.l %d0,%a1
+        lea     portname(%pc),%a0
+        move.l  %a0,LN_NAME(%a1)
+        move.b  #PA_IGNORE,mp_Flags(%a1)
+        lea     mp_MsgList+4(%a1),%a0
+        move.l  %a0,mp_MsgList(%a1)
+        lea     mp_MsgList(%a1),%a0
+        move.l  %a0,mp_MsgList+8(%a1)
+        jsr     AddPort(%a6)
+        movea.l %d4,%a0
+        moveq   #TR_SIZE,%d0
+        jsr     CreateIORequest(%a6)
+        tst.l   %d0
+        beq.s   fail
+        movea.l %d0,%a2
+        lea     timername(%pc),%a0
+        moveq   #UNIT_MICROHZ,%d0
+        movea.l %a2,%a1
+        moveq   #0,%d1
+        jsr     OpenDevice(%a6)
+        tst.l   %d0
+        bne.s   fail
+        move.w  #TR_ADDREQUEST,io_Command(%a2)
+        move.l  #8,tv_secs(%a2)
+        clr.l   tv_micro(%a2)
+        movea.l %a2,%a1
+        jsr     SendIO(%a6)
+never:  moveq   #0,%d0
+        bset    #30,%d0
+        jsr     Wait(%a6)
+        bra.s   never
 
 | The started task: the parent's node now leads nowhere.
 child:  movea.l parent(%pc),%a0
@@ -102,6 +178,10 @@ child:  movea.l parent(%pc),%a0
 parent:         .long   0
 dosname:        .asciz  "dos.library"
 childname:      .asciz  "crashtest child"
+timername:      .asciz  "timer.device"
+portname:       .asciz  "crashtest.port"
 message:        .ascii  "crashtest: waiting\n"
 message_end:
+timing:         .ascii  "crashtest: timing\n"
+timing_end:
         .even

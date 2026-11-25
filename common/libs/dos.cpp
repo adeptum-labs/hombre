@@ -2993,6 +2993,19 @@ struct DosOps {
 
     // The reply port's handler: a sent message came back, so the request may
     // send another if it waits for replies.
+    // What exec must not free with an ended program: a NotifyRequest dos
+    // still watches for, and the port it sends to.
+    static void keep_notify_requests(void* ctx) {
+        Dos& d = of(ctx);
+        for (const Dos::NotifySlot& slot : d.notifies_) {
+            d.exec_->keep_block_at(slot.request);
+            u32 port = 0;
+            if (d.m_->mem.read32(slot.request + nr_Port, port) && port != 0) {
+                d.exec_->keep_block_at(port);
+            }
+        }
+    }
+
     static void notify_reply(void* ctx, u32 message) {
         Dos& d = of(ctx);
         if (d.m_ == nullptr) {
@@ -9979,6 +9992,11 @@ bool Dos::build_process(const NewProcess& spec, u32& process_out, u32& cli_numbe
     if (spec.start && exec_->spawn(process, entry, 0, detached) == 0) {
         return rollback();
     }
+    // A process with code of its own is a program of its own; one that
+    // shares its starter's code belongs to the starter's program.
+    if (spec.start && spec.seglist != 0) {
+        exec_->begin_program(process, spec.seglist, detached);
+    }
 
     // A handle handed over with its close flag becomes the new process's, so
     // the parent's command cleanup leaves it open.
@@ -10435,6 +10453,8 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     b.w32(tasks, Dos::kMaxProcs);
     b.w32(tasks + 4, proc.process + pr_MsgPort);
     b.w32(info + di_DevInfo, volume_node_[boot_vol_] >> 2);
+    // A node a program adds to the list stays when the program is ended.
+    exec.add_kept_list(info + di_DevInfo, true);
     init_semaphore(b, info + di_DevLock);
     init_semaphore(b, info + di_EntryLock);
     init_semaphore(b, info + di_DeleteLock);
@@ -10635,6 +10655,7 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
         return false;
     }
     exec.set_reply_handler(notify_reply_port_, DosOps::notify_reply, this);
+    exec.add_program_keeper(DosOps::keep_notify_requests, this);
     return true;
 }
 
@@ -11245,6 +11266,9 @@ bool Dos::run_command_in(u32 process, const char* path, const char* args, u32& r
         exec_->set_this_task(p.process);
     }
 
+    // The command is a program of its own, which the caller ends with
+    // Exec::end_program once all it left is cleaned up.
+    exec_->begin_program(p.process, seglist, true);
     p.running = true;
     p.exited = false;
     const ExitReason why = m_->jit->call_guest((seglist << 2) + 4, max_blocks);

@@ -8882,6 +8882,60 @@ void start_notify_signals_the_watching_task() {
     r.call(dos_lvo::EndNotify, req);
 }
 
+// A NotifyRequest dos still watches for, and the port it sends to, stay
+// when the system monitor ends the program they belong to: the next change
+// of the file writes into memory that is still the request's.
+void notify_request_of_an_ended_program_is_kept() {
+    Rig r;
+    r.put32(0x17F8, 0x808);
+    r.put32(0x17FC, 0);
+    CHECK(g_exec.begin_program(r.proc(), 0x17FC >> 2, true) != 0);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+    r.cpu().d[0] = NotifyRequest_SIZEOF;
+    r.cpu().d[1] = MEMF_CLEAR;
+    CHECK_EQ(r.exec(exec_lvo::AllocMem), ExitReason::Halt);
+    const u32 req = r.cpu().d[0];
+    CHECK(req != 0);
+    r.str(kData + 0x400, "RAM:watched");
+    r.put32(req + nr_Name, kData + 0x400);
+    r.put32(req + nr_Port, port);
+    r.put32(req + nr_Flags, NRF_SEND_MESSAGE);
+    CHECK_EQ(r.call(dos_lvo::StartNotify, req), DOSTRUE);
+
+    // The monitor ends the program, which spins.
+    r.put16(0x1000, 0x60FE);
+    g_jit.flush();
+    g_exec.request_rescue(Rescue::End, static_cast<u32>(g_exec.scheduler().current()),
+                          r.proc());
+    r.m.cpu.pc = 0x1000;
+    r.m.cpu.a[7] = kStack;
+    CHECK_EQ(g_jit.run(100), ExitReason::Stopped);
+    g_exec.end_program(r.proc());
+    CHECK(logged("exec: freed 0 blocks, 0 bytes, of an ended program; kept 2"));
+
+    // Another program writes the watched file: the message reaches the
+    // kept port.
+    const u32 path = kData + 0x480;
+    const u32 buf = kData + 0x500;
+    r.str(path, "RAM:watched");
+    r.m.cpu.d[1] = path;
+    r.m.cpu.d[2] = MODE_NEWFILE;
+    CHECK_EQ(r.dos(dos_lvo::Open), ExitReason::Halt);
+    const u32 fh = r.m.cpu.d[0];
+    CHECK(fh != 0);
+    r.str(buf, "x");
+    r.m.cpu.d[1] = fh;
+    r.m.cpu.d[2] = buf;
+    r.m.cpu.d[3] = 1;
+    CHECK_EQ(r.dos(dos_lvo::Write), ExitReason::Halt);
+    r.m.cpu.d[1] = fh;
+    CHECK_EQ(r.dos(dos_lvo::Close), ExitReason::Halt);
+    CHECK_EQ(r.get32(req + nr_MsgCount), 1u);
+    CHECK(!logged("exec: memory list is corrupt"));
+}
+
 void start_notify_messages_a_port() {
     Rig r;
     CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
@@ -9215,6 +9269,7 @@ int main() {
     paths_belong_to_each_process();
     start_notify_signals_the_watching_task();
     start_notify_messages_a_port();
+    notify_request_of_an_ended_program_is_kept();
     notify_wait_reply_sends_one_message();
     notify_on_a_directory_hears_new_files();
     end_notify_stops_notifications();

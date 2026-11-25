@@ -369,7 +369,20 @@ struct GadToolsNatives {
         b.w32(vi + vi_TextAttr, attr);
         b.w32(vi + vi_Font, attr != 0 && b.ok() ? g.graphics_->open_font(attr) : 0);
         b.w32(vi + vi_Magic, kVisualInfoMagic);
-        native::set_result(m, b.ok() ? vi : 0);
+        if (!b.ok()) {
+            native::set_result(m, 0);
+            return;
+        }
+        if (g.visual_info_release_ != 0) {
+            g.exec_->claim_for_program(vi, kVisualInfoBytes, g.visual_info_release_);
+        }
+        native::set_result(m, vi);
+    }
+
+    static void release_visual_info(GadTools& g, Bus& b, u32 vi) {
+        g.graphics_->close_font(b.r32(vi + vi_Font));
+        b.w32(vi + vi_Magic, 0);
+        g.exec_->free(vi, kVisualInfoBytes);
     }
 
     static void free_visual_info(void* ctx, Machine& m) {
@@ -379,9 +392,16 @@ struct GadToolsNatives {
             return;
         }
         Bus b(m);
-        g.graphics_->close_font(b.r32(vi + vi_Font));
-        b.w32(vi + vi_Magic, 0);
-        g.exec_->free(vi, kVisualInfoBytes);
+        release_visual_info(g, b, vi);
+    }
+
+    // The VisualInfo of a program exec ends.
+    static void release_program_visual_info(void* ctx, u32 vi) {
+        GadTools& g = of(ctx);
+        Bus b(*g.machine_);
+        if (b.r32(vi + vi_Magic) == kVisualInfoMagic && b.ok()) {
+            release_visual_info(g, b, vi);
+        }
     }
 
     // The context gadget: an inert, empty gadget at the head of the list.
@@ -1125,7 +1145,16 @@ struct GadToolsNatives {
     }
 
     static void create_menus(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).create_menus(m.cpu.a[0]));
+        GadTools& g = of(ctx);
+        const u32 menu = g.create_menus(m.cpu.a[0]);
+        // The strip is one block, which exec alone gives back.
+        if (menu != 0) {
+            u32 bytes = 0;
+            if (m.mem.read32(menu - kMenuBlockHeader + 4, bytes)) {
+                g.exec_->claim_for_program(menu - kMenuBlockHeader, bytes);
+            }
+        }
+        native::set_result(m, menu);
     }
 
     static void free_menus(void* ctx, Machine& m) {
@@ -2525,6 +2554,8 @@ bool GadTools::init(Machine& m, Exec& exec, Graphics& graphics) {
     for (bool& seen : unhandled_kinds_) {
         seen = false;
     }
+    visual_info_release_ =
+        exec.add_program_releaser(&GadToolsNatives::release_program_visual_info, this);
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }

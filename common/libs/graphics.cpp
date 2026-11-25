@@ -3006,6 +3006,8 @@ bool Graphics::init(Machine& m, Exec& exec, DisplayState& display) {
     b.w32(fonts + ndk::LH_TAIL, 0);
     b.w32(fonts + ndk::LH_TAILPRED, fonts + ndk::LH_HEAD);
     b.w8(fonts + ndk::LH_TYPE, kNtFont);
+    // A font a program adds stays when the program is ended.
+    exec.add_kept_list(fonts, false);
 
     // The fonts in memory: topaz 8, drawn from the built-in glyphs, then
     // the fonts kept in the ROM.

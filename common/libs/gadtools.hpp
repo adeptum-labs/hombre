@@ -235,6 +235,9 @@ private:
 
     m68k::Machine* machine_ = nullptr;
     Exec* exec_ = nullptr;
+    // How exec gives back a VisualInfo of a program it ends; 0 when exec
+    // had no room for it.
+    u8 visual_info_release_ = 0;
     Graphics* graphics_ = nullptr;
     Intuition* intuition_ = nullptr;
     u32 base_ = 0;

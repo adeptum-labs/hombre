@@ -5241,6 +5241,8 @@ bool Workbench::start_program(const char* name, u32 seglist, const char* current
         LogLine().text("workbench: cannot start ").text(name).send();
         return false;
     }
+    // The tool is a program of its own, whatever task started it.
+    exec_->begin_program(process, seglist, true);
     if (!exec_->post_message(port, message)) {
         LogLine().text("workbench: no startup message for ").text(name).send();
     }
@@ -5666,6 +5668,16 @@ bool Workbench::update_workbench(u32 name) {
 
 // --- application registrations -------------------------------------------
 
+void Workbench::keep_app_icons(void* ctx) {
+    Workbench& w = *static_cast<Workbench*>(ctx);
+    for (const App& app : w.apps_) {
+        const IconEntry* icon = app.kind == AppKind::Icon ? w.find_icon(app.icon) : nullptr;
+        if (icon != nullptr) {
+            w.exec_->keep_block_at(icon->object);
+        }
+    }
+}
+
 u32 Workbench::record_app(AppKind kind, u32 id, u32 user) {
     if (apps_.full()) {
         LogLine().text("workbench: application table full").send();
@@ -5874,6 +5886,7 @@ bool Workbench::init(Machine& m, Exec& exec, Dos& dos, Graphics& graphics, Intui
     gadtools_ = &gadtools;
     icon_ = &icon;
     intuition.set_workbench_hooks(Intuition::WorkbenchHooks{nullptr, nullptr, nullptr});
+    exec.add_program_keeper(&Workbench::keep_app_icons, this);
     base_ = 0;
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};

@@ -757,12 +757,14 @@ struct IconNatives {
 
     static void get_disk_object(void* ctx, Machine& m) {
         Bus b(m);
-        native::set_result(m, of(ctx).get_disk_object(b, m.cpu.a[0]));
+        Icon& icon = of(ctx);
+        native::set_result(m, icon.claim(icon.get_disk_object(b, m.cpu.a[0])));
     }
 
     static void get_disk_object_new(void* ctx, Machine& m) {
         Bus b(m);
-        native::set_result(m, of(ctx).get_disk_object_new(b, m.cpu.a[0]));
+        Icon& icon = of(ctx);
+        native::set_result(m, icon.claim(icon.get_disk_object_new(b, m.cpu.a[0])));
     }
 
     static void put_disk_object(void* ctx, Machine& m) {
@@ -795,7 +797,8 @@ struct IconNatives {
     }
 
     static void get_def_disk_object(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).get_default_disk_object(m.cpu.d[0]));
+        Icon& icon = of(ctx);
+        native::set_result(m, icon.claim(icon.get_default_disk_object(m.cpu.d[0])));
     }
 
     static void put_def_disk_object(void* ctx, Machine& m) {
@@ -841,6 +844,7 @@ bool Icon::init(Machine& m, Exec& exec, Dos& dos) {
     base_ = 0;
     blocks_.clear();
     max_objects_ = kMaxObjects;
+    release_id_ = exec.add_program_releaser(&Icon::release_object, this);
     for (NativeVector& v : vectors_) {
         v = NativeVector{nullptr, nullptr};
     }
@@ -882,6 +886,25 @@ bool Icon::record(u32 addr, u32 bytes) {
     }
     blocks_.push_back(Block{addr, bytes});
     return true;
+}
+
+u32 Icon::claim(u32 object) {
+    // Without a release of its own an object is not recorded: exec's free
+    // would leave it in blocks_.
+    if (object == 0 || release_id_ == 0) {
+        return object;
+    }
+    for (const Block& block : blocks_) {
+        if (block.addr == object) {
+            exec_->claim_for_program(object, block.bytes, release_id_);
+            break;
+        }
+    }
+    return object;
+}
+
+void Icon::release_object(void* ctx, u32 object) {
+    static_cast<Icon*>(ctx)->free_disk_object(object);
 }
 
 void Icon::free_disk_object(u32 addr) {
