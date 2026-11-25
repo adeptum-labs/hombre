@@ -393,6 +393,9 @@ struct MessageHook {
     void* ctx;
 };
 
+// What the system monitor may ask of a task.
+enum class Rescue : u8 { None, Suspend, Resume, End };
+
 // A task the scheduler holds, as the system monitor reports it.
 struct TaskInfo {
     u32 task_addr = 0;
@@ -401,6 +404,7 @@ struct TaskInfo {
     i8 priority = 0;
     bool forbid = false;
     bool disable = false;
+    bool suspended = false;
 };
 
 class Exec {
@@ -553,6 +557,15 @@ public:
     // only; false for a slot without a task.
     bool task_context(u32 slot, m68k::CpuState& cpu, const char*& native) const;
 
+    // Asks that the task in slot, if it is still task_addr, be suspended,
+    // resumed or ended. Only remembers the request, so an interrupt may call
+    // it; run_rescue carries it out before the next block of 68000 code, and
+    // whatever polls in normal context calls it too. Suspending the running
+    // task takes effect at its next block outside any native, under Forbid
+    // too; ending it ends its 68000 code with Stopped.
+    void request_rescue(Rescue op, u32 slot, u32 task_addr);
+    void run_rescue();
+
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
     // tc_SigRecvd SetSignal and Wait use. It may be set before init and is
     // kept across it.
@@ -687,6 +700,8 @@ private:
                          const NativeVector* fns, u32 count, void* ctx, u32 pos_size);
     bool forbidden() const;
     void maybe_preempt();
+    void hold_while_suspended();
+    void end_for_rescue(u32 slot, const TaskInfo& info);
     bool switch_to_task(i32 next_id);
     void reap_removed();
     void remove_sem_waiter(u32 task_id);
@@ -732,6 +747,10 @@ private:
     u32 patches_[kMaxPatches]{};  // targets SetFunction put in vectors
     u32 patch_count_ = 0;
     u32 cache_bits_ = 0;  // what CacheControl was last given
+    // The request waiting for run_rescue.
+    volatile Rescue rescue_op_ = Rescue::None;
+    volatile u32 rescue_slot_ = 0;
+    volatile u32 rescue_task_ = 0;
     TaskHost task_host_{};
     struct DropHook {
         void (*fn)(void* ctx, u32 task) = nullptr;

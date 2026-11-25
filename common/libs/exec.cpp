@@ -536,6 +536,7 @@ struct ExecOps {
     // --- tasks and signals -----------------------------------------------
 
     static void preempt_hook(void* ctx) { of(ctx).maybe_preempt(); }
+    static void attention_hook(void* ctx) { of(ctx).run_rescue(); }
 
     static bool poll_idle(Exec& e) {
         if (e.task_host_.idle != nullptr) {
@@ -669,6 +670,9 @@ struct ExecOps {
         if (cur < 0 || static_cast<u32>(cur) >= Scheduler::kMaxTasks) {
             b.stop();
             return false;
+        }
+        if (e.sched_.slot(static_cast<u32>(cur)).suspended) {
+            e.hold_while_suspended();
         }
         const TaskState st = e.sched_.slot(static_cast<u32>(cur)).state;
         if (st == TaskState::Running) {
@@ -2911,6 +2915,8 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
         b.w8(task_ + TC_IDNESTCNT, 0xFF);
     }
     jit.set_preempt_hook(&ExecOps::preempt_hook, this);
+    jit.set_attention_hook(&ExecOps::attention_hook, this);
+    rescue_op_ = Rescue::None;
     jit.flush();
     if (!b.ok()) {
         m_ = nullptr;
@@ -3421,6 +3427,7 @@ bool Exec::task_info(u32 slot, TaskInfo& out) const {
     out.task_addr = s.task_addr;
     out.state = s.state;
     out.priority = s.priority;
+    out.suspended = s.suspended;
 
     // The monitor reads from the interrupt: a fault must not reach the CPU
     // of the code it interrupted, so it lands in a copy.
@@ -3862,7 +3869,100 @@ bool Exec::forbidden() const {
     return td != 0xFF || id != 0xFF;
 }
 
+void Exec::request_rescue(Rescue op, u32 slot, u32 task_addr) {
+    rescue_slot_ = slot;
+    rescue_task_ = task_addr;
+    rescue_op_ = op;
+    if (m_ != nullptr) {
+        m_->jit->raise_attention();
+    }
+}
+
+void Exec::run_rescue() {
+    const Rescue op = rescue_op_;
+    if (op == Rescue::None) {
+        return;
+    }
+    const u32 slot = rescue_slot_;
+    const u32 task = rescue_task_;
+    rescue_op_ = Rescue::None;
+    TaskInfo info;
+    if (!task_info(slot, info) || info.task_addr != task) {
+        return;
+    }
+    const i32 id = static_cast<i32>(slot);
+    if (op == Rescue::End) {
+        sched_.resume(id);
+        end_for_rescue(slot, info);
+        return;
+    }
+    if (op == Rescue::Suspend) {
+        sched_.suspend(id);
+    } else {
+        sched_.resume(id);
+        pending_switch_ = true;
+    }
+    LogLine()
+        .text(op == Rescue::Suspend ? "exec: suspended " : "exec: resumed ")
+        .text(info.name)
+        .send();
+}
+
+void Exec::end_for_rescue(u32 slot, const TaskInfo& info) {
+    const i32 id = static_cast<i32>(slot);
+    const bool current = id == sched_.current();
+    // The running task, and the boot task, which is never removed, only
+    // have their 68000 code ended.
+    if (current && m_->jit->run_depth() != 0) {
+        m_->jit->request_stop();
+        if (info.state == TaskState::Waiting) {
+            end_run(*m_, ExitReason::Stopped);
+        }
+    } else if (!current && slot == 0 && tasks_[0].run_state.run_depth != 0) {
+        tasks_[0].run_state.stop = true;
+        signal_task(info.task_addr, SIGBREAKF_CTRL_C);
+    } else if (!current && slot != 0) {
+        LogLine().text("exec: removing ").text(info.name).send();
+        Bus b(*m_);
+        ExecOps::rem_task_id(*this, b, id);
+        return;
+    } else {
+        LogLine().text("exec: cannot end ").text(info.name).send();
+        return;
+    }
+    LogLine().text("exec: ending ").text(info.name).send();
+}
+
+// Runs whatever else can, or waits, until the running slot is resumed.
+// Returns with it still suspended only when something ends its run, nothing
+// can resume it, or the host switched away for good.
+void Exec::hold_while_suspended() {
+    const i32 cur = sched_.current();
+    if (cur < 0) {
+        return;
+    }
+    while (sched_.slot(static_cast<u32>(cur)).suspended && m_->cpu.exit == ExitReason::None) {
+        const i32 next = sched_.pick_next();
+        if (next >= 0 && task_host_.switch_to != nullptr) {
+            if (!switch_to_task(next) || sched_.current() != cur) {
+                return;
+            }
+            continue;
+        }
+        if (!ExecOps::poll_idle(*this)) {
+            return;
+        }
+        expire_timers();
+        run_rescue();
+    }
+}
+
 void Exec::maybe_preempt() {
+    run_rescue();
+    const i32 cur = sched_.current();
+    if (cur >= 0 && sched_.slot(static_cast<u32>(cur)).suspended) {
+        hold_while_suspended();
+    }
     if (forbidden()) {
         return;
     }
@@ -4066,7 +4166,8 @@ void Exec::task_main(u32 id) {
         // boot task's Wait, tells that command to give up. Other tasks, the
         // Workbench's among them, see crashed children for themselves.
         const bool crashed = why != ExitReason::None && why != ExitReason::Halt &&
-                             why != ExitReason::Returned && why != ExitReason::Break;
+                             why != ExitReason::Returned && why != ExitReason::Break &&
+                             why != ExitReason::Stopped;
         if (crashed) {
             LogLine().text("exec: task ").text(name).text(" stopped at pc=").hex(m_->cpu.pc).send();
         }

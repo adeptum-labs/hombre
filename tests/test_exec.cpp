@@ -3674,6 +3674,7 @@ void shared_semaphore_nests_while_exclusive_waiter_queues() {
 
 namespace hombre {
 struct ExecTest {
+    static void preempt(Exec& e) { e.maybe_preempt(); }
     static void fill_sem_queue(Exec& e, u32 sem_addr) {
         Exec::SemWaitQueue* q = e.sem_queue(sem_addr, true);
         CHECK(q != nullptr);
@@ -4219,6 +4220,83 @@ void task_info_reports_the_occupying_slots_only() {
     CHECK(r.cpu().exit == exit);
 }
 
+// --- the monitor's requests ----------------------------------------------
+
+struct Resumer {
+    u32 task = 0;
+};
+
+bool resume_when_idle(void* ctx) {
+    g_exec.request_rescue(Rescue::Resume, 0, static_cast<Resumer*>(ctx)->task);
+    g_exec.run_rescue();
+    return true;
+}
+
+void a_task_holding_forbid_is_suspended_and_resumed() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    CHECK_EQ(g_exec.spawn(child, 0x2000, 0, false), child);
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+
+    // A request naming another task in the slot does nothing.
+    g_exec.request_rescue(Rescue::Suspend, 0, child);
+    g_exec.run_rescue();
+    CHECK(!g_exec.scheduler().slot(0).suspended);
+
+    g_exec.request_rescue(Rescue::Suspend, 0, boot);
+    // As in the translator's loop, no run has ended.
+    r.cpu().exit = ExitReason::None;
+    ExecTest::preempt(g_exec);
+    CHECK(g_exec.scheduler().slot(0).suspended);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    CHECK_EQ(host.switches.size(), 1u);
+    TaskInfo info;
+    CHECK(g_exec.task_info(0, info));
+    CHECK(info.suspended);
+
+    g_exec.request_rescue(Rescue::Resume, 0, boot);
+    g_exec.run_rescue();
+    CHECK(!g_exec.scheduler().slot(0).suspended);
+}
+
+void the_only_task_waits_while_suspended_until_resumed() {
+    Rig r;
+    FakeHostState host{};
+    Resumer resumer{make_test_task(r, kData)};
+    host.on_idle = &resume_when_idle;
+    host.on_idle_ctx = &resumer;
+    g_exec.set_task_host(make_fake_host(host));
+    g_exec.request_rescue(Rescue::Suspend, 0, resumer.task);
+    r.cpu().exit = ExitReason::None;
+    ExecTest::preempt(g_exec);
+    CHECK(!g_exec.scheduler().slot(0).suspended);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+}
+
+void ending_a_task_stops_its_code_or_removes_it() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r, kData);
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    CHECK_EQ(g_exec.spawn(child, 0x2000, 0, false), child);
+
+    g_exec.request_rescue(Rescue::End, 1, child);
+    g_exec.run_rescue();
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
+    CHECK_EQ(host.destroyed.size(), 1u);
+
+    // BRA.S to itself: only the request ends it.
+    r.put16(0x1000, 0x60FE);
+    g_exec.request_rescue(Rescue::End, 0, boot);
+    CHECK_EQ(r.go(0x1000, 100), ExitReason::Stopped);
+    CHECK(g_exec.scheduler().slot(0).state == TaskState::Running);
+    CHECK_EQ(r.go(0x1000, 5), ExitReason::Budget);
+}
+
 // --- devices and IORequests ---------------------------------------------
 
 struct FakeDevState {
@@ -4696,6 +4774,9 @@ int main() {
     every_registered_drop_hook_sees_a_removed_task();
     yield_in_native_and_per_task_state();
     task_info_reports_the_occupying_slots_only();
+    a_task_holding_forbid_is_suspended_and_resumed();
+    the_only_task_waits_while_suspended_until_resumed();
+    ending_a_task_stops_its_code_or_removes_it();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();
     guest_68k_device_vectors_use_call_guest();
