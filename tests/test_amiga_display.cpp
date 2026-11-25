@@ -302,6 +302,26 @@ bool fake_switch(u32 width, u32 height, Framebuffer& out) {
 
 // With an adapter that changes mode, a deep screen gets a display of its own
 // size, pixel for pixel, and an Amiga screen the firmware's size back.
+// While the framebuffer is covered by another's drawing, nothing reaches it,
+// and the same refresh shows the screen once it is uncovered.
+void a_covered_display_draws_nothing() {
+    Screen fb(1280, 800, 1280 * 4, kBgrx);
+    Guest amiga;
+    amiga.set_all_pixels(1);
+    AmigaDisplay display;
+    display.init(fb.framebuffer());
+    const u32 border = fb.pixel(0, 0);
+    display.set_covered(true);
+    refresh(display, amiga.machine(), kScreen, Rect{0, 0, 639, 399});
+    CHECK_EQ(fb.pixel(0, 0), border);
+    refresh(display, amiga.machine(), 0, Rect{0, 0, 639, 399});
+    CHECK_EQ(fb.pixel(640, 400), border);
+    CHECK(!display.drawing());
+    display.set_covered(false);
+    refresh(display, amiga.machine(), kScreen, Rect{0, 0, 639, 399});
+    CHECK(fb.pixel(0, 0) != border);
+}
+
 void adapter_switches_to_the_deep_screen_size_and_back() {
     Screen home(1280, 800, 1280 * 4, kBgrx);
     Screen small(80, 60, 80 * 4, kBgrx);
@@ -1083,6 +1103,7 @@ void pointer_keeps_its_host_size_in_a_low_res_mode_and_its_place_when_the_mode_c
 int main() {
     deep_screen_is_square_and_pillarboxed();
     adapter_switches_to_the_deep_screen_size_and_back();
+    a_covered_display_draws_nothing();
     scale_two_at_1280x800_and_no_border();
     wide_framebuffer_gets_a_centred_box_with_border_colour_beside_it();
     tall_framebuffer_gets_a_centred_box_with_border_colour_above_and_below_it();

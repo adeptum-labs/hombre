@@ -113,6 +113,18 @@ private:
     }
 
 public:
+    // While covered, as by the system monitor, nothing is drawn; the owner
+    // refreshes the front screen after uncovering it. An interrupt may cover
+    // the display, which then stops at the row it is on.
+    void set_covered(bool covered) { covered_ = covered; }
+
+    // A refresh is under way, or the adapter is changing mode: what an
+    // interrupt must not draw over or take the framebuffer in.
+    bool drawing() const { return drawing_ != 0; }
+    bool switching_mode() const { return switching_; }
+
+    const Framebuffer& framebuffer() const { return fb_; }
+
     DisplaySink sink() { return DisplaySink{&AmigaDisplay::refresh, this}; }
 
     // Draws the pointer in the shape state publishes, without it the arrow,
@@ -126,6 +138,10 @@ public:
     // 4096 pixels on a side is ignored.
     static void refresh(void* ctx, m68k::Machine& m, u32 screen, const Rect& dirty) {
         AmigaDisplay& display = *static_cast<AmigaDisplay*>(ctx);
+        if (display.covered_) {
+            return;
+        }
+        const Drawing drawing(display);
         if (screen == 0) {
             display.fb_.fill(kBorder);
             display.applied_screen_ = 0;
@@ -193,7 +209,7 @@ public:
         const u32 last_bx = (static_cast<u32>(first_x) + count - 1) >> 3;
         const u32 bx_count = last_bx - first_bx + 1;
         u32* row = display.row_;
-        for (i32 y = first_y; y <= last_y; ++y) {
+        for (i32 y = first_y; y <= last_y && !display.covered_; ++y) {
             const u32 rows_top = display.host_row(y);
             const u32 rows_bottom = display.host_row(y + 1);
             if (rows_top == rows_bottom) {
@@ -212,7 +228,7 @@ public:
                                        rows_bottom - rows_top, row, display.column_x_ + host_left,
                                        host_right - host_left);
         }
-        if (display.pointer_visible_) {
+        if (display.pointer_visible_ && !display.covered_) {
             display.draw_pointer(display.box_x_ + host_left, display.box_y_ + host_top,
                                  display.box_x_ + host_right, display.box_y_ + host_bottom);
         }
@@ -268,6 +284,12 @@ private:
     static constexpr u32 kBorder = 0xAAAAAA;
     static constexpr u32 kBars = 0x000000;
 
+    struct Drawing {
+        explicit Drawing(AmigaDisplay& display) : display(display) { display.drawing_ = display.drawing_ + 1; }
+        ~Drawing() { display.drawing_ = display.drawing_ - 1; }
+        AmigaDisplay& display;
+    };
+
     static u32 at_least_one(u32 value) { return value > 0 ? value : 1; }
 
     // The nominal size of the front screen's mode as state publishes it, bounded
@@ -302,6 +324,7 @@ private:
         // screen's own size, and the size it started in for an Amiga one.
         bool kind_changed = deep != applied_deep_;
         if (mode_switch_ != nullptr) {
+            switching_ = true;
             const u32 want_width = deep ? width : home_width_;
             const u32 want_height = deep ? height : home_height_;
             Framebuffer next;
@@ -318,6 +341,7 @@ private:
                 fit_amiga_box();
                 kind_changed = true;
             }
+            switching_ = false;
         }
         // A deep screen's pixels are square: it fills as much of the
         // framebuffer as its shape allows, with black beside it. An Amiga
@@ -370,7 +394,7 @@ private:
             return;
         }
         const u32 count = static_cast<u32>(last_x - first_x + 1);
-        for (i32 y = first_y; y <= last_y; ++y) {
+        for (i32 y = first_y; y <= last_y && !covered_; ++y) {
             const u32 rows_top = host_row(y);
             const u32 rows_bottom = host_row(y + 1);
             if (rows_top == rows_bottom) {
@@ -386,7 +410,7 @@ private:
             fb_.put_mapped_row(box_x_ + host_left, box_y_ + rows_top, rows_bottom - rows_top,
                                row_, column_x_ + host_left, host_right - host_left);
         }
-        if (pointer_visible_) {
+        if (pointer_visible_ && !covered_) {
             draw_pointer(box_x_ + host_left, box_y_ + host_top, box_x_ + host_right,
                          box_y_ + host_bottom);
         }
@@ -577,6 +601,9 @@ private:
     i32 pointer_y_ = 0;
     bool pointer_visible_ = false;
     const DisplayState* state_ = nullptr;
+    volatile bool covered_ = false;
+    volatile bool switching_ = false;
+    volatile u32 drawing_ = 0;
 };
 
 }
