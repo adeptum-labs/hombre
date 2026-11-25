@@ -102,6 +102,12 @@ public:
     // The Intuition WindowHook called after the window is resized.
     static void on_size(void* ctx, u32 window);
 
+    // True once the close gadget was clicked since the window opened.
+    bool close_requested() const { return close_requested_; }
+
+    // The Intuition WindowHook called when the close gadget is clicked.
+    static void on_close(void* ctx, u32 window);
+
     // The Intuition GadgetHook called when the scroll bar changes.
     static void on_gadget(void* ctx, u32 gadget, u32 vert_pot);
 
@@ -126,6 +132,7 @@ private:
     Intuition* intuition_ = nullptr;
     Graphics* graphics_ = nullptr;
     u32 window_ = 0;
+    bool close_requested_ = false;
     u32 rp_ = 0;
     u32 font_ = 0;
     u32 cell_w_ = 8;

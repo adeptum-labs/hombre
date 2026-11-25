@@ -359,6 +359,10 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    --mouse "$(MONITOR_KILL);$(MONITOR_STEP);$(MONITOR_KILL)" \
 	    "crashtest: waiting" "exec: removing C:crashtest" "is off its list" \
 	    "dos: CLI 2 ended" "exec: task C:spintest ended with Stopped" "dos: CLI 3 ended"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "n e w s h e l l ret" \
+	    --mouse-after "shell: new shell 2" \
+	    --mouse "$(MONITOR_STEP);$(MONITOR_CORNER);mouse_move 66 64;$(MONITOR_STEP);mouse_button 1;mouse_button 0;$(MONITOR_STEP)" \
+	    "exec: task HombreShell ended" "dos: CLI 2 ended"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12 r y" \
 	    "monitor: open" "monitor: reboot"
 	tools/boot_check.sh --disk $(TEST_DISK) \

@@ -1557,6 +1557,12 @@ void log_new_shell(u32 cli) {
 void shell_loop(Console& c);
 void shell_task(void* arg);
 
+// The close gadget of its window ends a shell as EndCLI does. A command
+// that runs finishes first.
+bool shell_closing(const Console& c) {
+    return c.shell.close_requested();
+}
+
 // Opens the console's window and starts its shell as a native task, which
 // runs command first when there is one.
 bool open_shell(const char* command) {
@@ -1659,7 +1665,7 @@ void shell_loop(Console& c) {
         c.line_mode = true;
     }
     while (usb_keyboard_status() == UsbStatus::Ready &&
-           (c.index == 0 || c.shell.is_open())) {
+           (c.index == 0 || c.shell.is_open()) && !shell_closing(c)) {
         task_host_poll(nullptr);
         u8 queued = 0;
         while (key_queue_pop(c, queued)) {
@@ -1673,18 +1679,18 @@ void shell_loop(Console& c) {
             } else {
                 c.line_editor.key(queued);
             }
-            if (c.commands.ended()) {
+            if (c.commands.ended() || shell_closing(c)) {
                 break;
             }
         }
-        if (c.commands.ended()) {
+        if (c.commands.ended() || shell_closing(c)) {
             break;
         }
         make_room_for_workbench(c);
         wait_for_work(c);
     }
     c.line_mode = false;
-    if (c.index == 0 && c.commands.ended()) {
+    if (c.index == 0 && (c.commands.ended() || shell_closing(c))) {
         end_boot_shell(c);
     }
     if (c.index == 0) {

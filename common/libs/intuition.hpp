@@ -301,6 +301,10 @@ public:
                        u32 height_max);
     bool window_open(u32 window) const;
     void set_size_hook(u32 window, WindowHook hook, void* ctx);
+    // Called when the window's close gadget is released over it, after the
+    // IDCMP_CLOSEWINDOW message goes out: a window of the system's own,
+    // which asks for no messages, hears the click through it.
+    void set_close_hook(u32 window, WindowHook hook, void* ctx);
     u32 add_glist(u32 window, u32 gadget, i32 position, i32 count);
     u32 remove_glist(u32 window, u32 gadget, i32 count);
     void refresh_glist(u32 gadget, u32 window, i32 count);
@@ -620,6 +624,8 @@ private:
         WindowHook size_hook = nullptr;
         bool takes_wheel = false;
         void* size_ctx = nullptr;
+        WindowHook close_hook = nullptr;
+        void* close_ctx = nullptr;
         // A NEWSIZE is queued and not yet replied to, and the size the last
         // NEWSIZE reported.
         bool newsize_pending = false;

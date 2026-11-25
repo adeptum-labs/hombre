@@ -4436,6 +4436,8 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     rec->user_port_owned = user_port_owned;
     rec->size_hook = nullptr;
     rec->size_ctx = nullptr;
+    rec->close_hook = nullptr;
+    rec->close_ctx = nullptr;
     rec->newsize_pending = false;
     rec->newsize_w = width;
     rec->newsize_h = height;
@@ -5459,6 +5461,18 @@ void Intuition::set_size_hook(u32 window, WindowHook hook, void* ctx) {
     rec->size_ctx = ctx;
 }
 
+void Intuition::set_close_hook(u32 window, WindowHook hook, void* ctx) {
+    if (!window_open(window)) {
+        return;
+    }
+    WindowRecord* rec = find_window_record(window);
+    if (rec == nullptr) {
+        return;
+    }
+    rec->close_hook = hook;
+    rec->close_ctx = ctx;
+}
+
 bool Intuition::menu_strip_ready(Bus& b) const {
     if (active_window_ == 0) {
         return false;
@@ -5845,6 +5859,10 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
                 if (gad_kind == GadgetKind::Close && (w.flags & ndk::WFLG_CLOSEGADGET) != 0 &&
                     in_rect(close_box_rect(w.left, w.top, bar), x, y)) {
                     post_intuimessage(gad_window, ndk::IDCMP_CLOSEWINDOW, 0);
+                    const WindowRecord* rec = find_window_record(gad_window);
+                    if (rec != nullptr && rec->close_hook != nullptr) {
+                        rec->close_hook(rec->close_ctx, gad_window);
+                    }
                 } else if (gad_kind == GadgetKind::Depth &&
                            (w.flags & ndk::WFLG_DEPTHGADGET) != 0 &&
                            in_rect(depth_box_rect(w.left, w.top, w.width, bar), x, y)) {

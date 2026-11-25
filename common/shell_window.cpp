@@ -192,6 +192,8 @@ bool ShellWindow::open(Machine& m, Exec& exec, Graphics& gfx, Intuition& intuiti
     text_.clear();
     mark_line_start();
     intuition.set_size_hook(window, &ShellWindow::on_size, this);
+    intuition.set_close_hook(window, &ShellWindow::on_close, this);
+    close_requested_ = false;
     intuition.set_gadget_hook(gadget, &ShellWindow::on_gadget, this);
     update_knob();
     gfx.set_pens(rp_, 1, 0, ndk::JAM2);
@@ -434,6 +436,13 @@ void ShellWindow::print_line(const char* text) {
     intuition_->end_batch();
 }
 
+void ShellWindow::on_close(void* ctx, u32 window) {
+    ShellWindow& s = *static_cast<ShellWindow*>(ctx);
+    if (window == s.window_) {
+        s.close_requested_ = true;
+    }
+}
+
 void ShellWindow::close() {
     if (is_open()) {
         intuition_->close_window(window_);
@@ -449,6 +458,7 @@ void ShellWindow::close() {
     prop_info_ = 0;
     gadget_ = 0;
     window_ = 0;
+    close_requested_ = false;
     rp_ = 0;
     columns_ = 0;
     rows_ = 0;

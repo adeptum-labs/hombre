@@ -3790,6 +3790,30 @@ void size_hook_called_per_step() {
     CHECK_EQ(g_hook_window, window);
 }
 
+// A window that asks for no messages, as the shell's, hears its close
+// gadget through the close hook, and only a release over the box counts.
+void close_hook_hears_the_close_gadget() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 60, 200, 100, WFLG_CLOSEGADGET, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    g_hook_calls = 0;
+    g_hook_window = 0;
+    r.intuition.set_close_hook(window, &count_hook, &g_hook_calls);
+    const Rect box = Intuition::close_box_rect(50, 60);
+    r.intuition.pointer_event(box.x0 + 2, box.y0 + 2, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(box.x1 + 30, box.y1 + 30, 0, 0, kMouseLeft, false);
+    CHECK_EQ(g_hook_calls, 0u);
+    r.intuition.pointer_event(box.x0 + 2, box.y0 + 2, kMouseLeft, kMouseLeft, 0, false);
+    CHECK_EQ(g_hook_calls, 0u);
+    r.intuition.pointer_event(box.x1 - 1, box.y1 - 1, 0, 0, kMouseLeft, false);
+    CHECK_EQ(g_hook_calls, 1u);
+    CHECK_EQ(g_hook_window, window);
+}
+
 void close_during_drag_ends_drag() {
     GfxRig r;
     const u32 window = open_drag_window(r, WFLG_DRAGBAR, 0, 0, 0, 0, 0);
@@ -10553,6 +10577,7 @@ int main() {
     move_posts_changewindow_only();
     drag_press_is_not_selectdown();
     size_hook_called_per_step();
+    close_hook_hears_the_close_gadget();
     close_during_drag_ends_drag();
     open_window_links_and_draws_prop_gadget();
     a_boolean_gadget_reports_its_release();
