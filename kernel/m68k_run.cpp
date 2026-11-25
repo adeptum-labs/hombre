@@ -145,6 +145,9 @@ struct TypedShell {
 
 // One shell: its window, its console callbacks and buffers, its command
 // process, and the line editor and builtins that run on it.
+// Execute Command's shell, opened with the other shells further down.
+bool run_in_new_shell(void* ctx, const char* command);
+
 struct Console {
     ShellWindow shell;
     CsiFilter filter;
@@ -160,6 +163,8 @@ struct Console {
     u32 process = 0;
     u32 cli = 0;
     Shell line_editor;
+    // A command line the shell runs as it starts, as if typed.
+    char first_line[Workbench::kMaxCommand]{};
     ShellCommands commands;
     TypedShell typed{};
     ShellHost host{};      // what its lines and scripts run through
@@ -940,6 +945,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         fail("workbench init failed");
         return false;
     }
+    workbench.set_run_command(&run_in_new_shell, nullptr);
     consoles[0].index = 0;
     consoles[0].process = dos.process();
     consoles[0].cli = 1;
@@ -1392,9 +1398,9 @@ void log_new_shell(u32 cli) {
 void shell_loop(Console& c);
 void shell_task(void* arg);
 
-// Opens the console's window and starts its shell as a native task.
-bool open_new_shell(void* ctx) {
-    (void)ctx;
+// Opens the console's window and starts its shell as a native task, which
+// runs command first when there is one.
+bool open_shell(const char* command) {
     u32 index = Dos::kMaxConsoles;
     for (u32 i = 1; i < Dos::kMaxConsoles; ++i) {
         if (!consoles[i].open) {
@@ -1416,6 +1422,12 @@ bool open_new_shell(void* ctx) {
     c.mid_line = false;
     c.filter.reset();
     key_queue_clear(c);
+    u32 length = 0;
+    for (; command != nullptr && command[length] != '\0' && length + 1 < sizeof c.first_line;
+         ++length) {
+        c.first_line[length] = command[length];
+    }
+    c.first_line[length] = '\0';
     const i32 offset = static_cast<i32>(index - 1) * 20;
     if (!c.shell.open(machine, exec, graphics, intuition, 60 + offset, 60 + offset,
                       new_shell_width, new_shell_height)) {
@@ -1443,6 +1455,16 @@ bool open_new_shell(void* ctx) {
     return true;
 }
 
+bool open_new_shell(void* ctx) {
+    (void)ctx;
+    return open_shell(nullptr);
+}
+
+bool run_in_new_shell(void* ctx, const char* command) {
+    (void)ctx;
+    return open_shell(command);
+}
+
 // EndCLI in the boot shell: its window closes and the other windows, the
 // Workbench's among them, go on running. Keys reach the console of the
 // active window; with no keyboard there is nothing more to run.
@@ -1468,6 +1490,15 @@ void shell_loop(Console& c) {
         write_shell_prompt(c);
     }
     c.line_mode = true;
+    if (c.first_line[0] != '\0') {
+        for (const char* ch = c.first_line; *ch != '\0'; ++ch) {
+            c.line_editor.key(static_cast<u8>(*ch));
+        }
+        c.first_line[0] = '\0';
+        c.line_mode = false;
+        c.line_editor.key('\n');
+        c.line_mode = true;
+    }
     while (usb_keyboard_status() == UsbStatus::Ready &&
            (c.index == 0 || c.shell.is_open())) {
         task_host_poll(nullptr);

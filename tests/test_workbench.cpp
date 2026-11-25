@@ -3199,6 +3199,35 @@ void copy_refuses_disks_and_keeps_names_short() {
     CHECK(logged("workbench: cannot copy Tool: Disk is write-protected"));
 }
 
+void execute_command_hands_the_line_to_a_shell() {
+    Rig r;
+    r.workbench.open_desktop();
+    // With no shell to run it in, the command is refused.
+    CHECK(!r.workbench.execute_command("Dir"));
+    std::vector<std::string> ran;
+    r.workbench.set_run_command(
+        [](void* ctx, const char* command) {
+            static_cast<std::vector<std::string>*>(ctx)->push_back(command);
+            return true;
+        },
+        &ran);
+    CHECK(!r.workbench.execute_command(""));
+    std::vector<std::string> offered;
+    r.workbench.set_answer(
+        [](void* ctx, const char*, const char*, char* text, u32 size) {
+            static_cast<std::vector<std::string>*>(ctx)->push_back(text);
+            CHECK(size > 16);
+            __builtin_memcpy(text, "List RAM:", 10);
+            return true;
+        },
+        &offered);
+    // Workbench > Execute Command, twice: the last line is offered again.
+    r.workbench.menu_pick(0, 0 | (1 << 5) | (31 << 11));
+    r.workbench.menu_pick(0, 0 | (1 << 5) | (31 << 11));
+    CHECK(ran == std::vector<std::string>({"List RAM:", "List RAM:"}));
+    CHECK(offered == std::vector<std::string>({"", "List RAM:"}));
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -3865,6 +3894,7 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    execute_command_hands_the_line_to_a_shell();
     copy_duplicates_a_file_or_a_drawer_under_a_new_name();
     copy_refuses_disks_and_keeps_names_short();
     new_drawer_makes_a_drawer_with_its_icon();

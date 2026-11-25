@@ -250,7 +250,7 @@ struct MenuSpec {
 };
 
 constexpr MenuItemSpec kWorkbenchItems[] = {
-    {"Backdrop", true, true}, {"Execute Command...", false}, {"Redraw All", true},
+    {"Backdrop", true, true}, {"Execute Command...", true}, {"Redraw All", true},
     {"Update All", true}, {"Last Message", false},       {"About...", true},
     {"Quit", false},
 };
@@ -297,6 +297,7 @@ constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
 constexpr i32 kRequestMargin = 8;
 constexpr u32 kItemBackdrop = 0;
+constexpr u32 kItemExecute = 1;
 constexpr u32 kItemNewDrawer = 0;
 constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
@@ -317,6 +318,14 @@ constexpr u32 text_length(const char* text) {
 }
 
 char upper_ascii(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; }
+
+bool same_text(const char* a, const char* b) {
+    u32 i = 0;
+    while (a[i] != '\0' && a[i] == b[i]) {
+        ++i;
+    }
+    return a[i] == b[i];
+}
 
 bool same_ci(const char* a, const char* b) {
     for (u32 i = 0;; ++i) {
@@ -3376,7 +3385,7 @@ void Workbench::ask_rename(u32 window_id, u32 icon_id) {
     char new_name[kMaxName + 1];
     copy_text(old_name, sizeof old_name, icon->file);
     if (ask_text("Rename", "Enter a new name", old_name, new_name, sizeof new_name) &&
-        __builtin_strcmp(old_name, new_name) != 0) {
+        !same_text(old_name, new_name)) {
         rename_icon(window_id, icon_id, new_name);
     }
 }
@@ -3442,6 +3451,27 @@ void Workbench::ask_new_drawer(u32 window_id) {
     char name[kMaxName + 1];
     if (ask_text("New Drawer", "Enter the name of the drawer", suggested, name, sizeof name)) {
         new_drawer(window_id, name);
+    }
+}
+
+bool Workbench::execute_command(const char* command) {
+    if (command == nullptr || command[0] == '\0') {
+        return false;
+    }
+    if (run_command_ == nullptr || !run_command_(run_command_ctx_, command)) {
+        show_error("cannot run", command, ERROR_NO_FREE_STORE);
+        return false;
+    }
+    LogLine().text("workbench: running ").text(command).send();
+    return true;
+}
+
+void Workbench::ask_command() {
+    char command[kMaxCommand];
+    if (ask_text("Execute a File", "Enter command and its arguments", last_command_, command,
+                 sizeof command)) {
+        copy_text(last_command_, sizeof last_command_, command);
+        execute_command(command);
     }
 }
 
@@ -3654,6 +3684,8 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
                     set_backdrop(checked);
                 }
             }
+        } else if (item == kItemExecute) {
+            ask_command();
         } else if (item == 2) {
             redraw_all();
         } else if (item == 3) {

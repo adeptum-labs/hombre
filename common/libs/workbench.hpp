@@ -93,6 +93,8 @@ public:
     static constexpr u32 kNoWindow = 0xFFFFFFFF;
     // The longest name a file can have on an Amiga disk.
     static constexpr u32 kMaxName = 30;
+    // The most bytes Execute Command takes, the ending NUL included.
+    static constexpr u32 kMaxCommand = 256;
     // The id of the root window; the id of every drawer is above it.
     static constexpr u32 kRootWindow = 0;
     static constexpr u8 kNoDrive = 0xFF;
@@ -309,6 +311,18 @@ public:
         answer_ = answer;
         answer_ctx_ = ctx;
     }
+
+    // Starts a command line in a shell of its own, as Execute Command does;
+    // false when no shell can be opened.
+    using RunCommand = bool (*)(void* ctx, const char* command);
+    void set_run_command(RunCommand run, void* ctx) {
+        run_command_ = run;
+        run_command_ctx_ = ctx;
+    }
+
+    // Workbench > Execute Command: runs the command line. False, shown, when
+    // no shell can run it, and for an empty line.
+    bool execute_command(const char* command);
 
     // A requester with Ok and Cancel buttons; true for Ok.
     bool confirm(const char* title, const char* text);
@@ -590,6 +604,7 @@ private:
     void ask_delete(u32 window_id, u32 icon_id);
     void ask_rename(u32 window_id, u32 icon_id);
     void ask_new_drawer(u32 window_id);
+    void ask_command();
     // Renames the object and its .info, both or neither.
     bool rename_with_info(const char* from, const char* to, u32& error);
     void select_contents(u32 window_id);
@@ -637,6 +652,9 @@ private:
     Intuition* intuition_ = nullptr;
     GadTools* gadtools_ = nullptr;
     Icon* icon_ = nullptr;
+    RunCommand run_command_ = nullptr;
+    void* run_command_ctx_ = nullptr;
+    char last_command_[kMaxCommand]{};  // offered again by Execute Command
     Answer answer_ = nullptr;
     void* answer_ctx_ = nullptr;
     u32 base_ = 0;
