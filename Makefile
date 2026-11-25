@@ -306,8 +306,9 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
 	    "m68k: C:version returned 0" "shell: line: zzz" "shell: unknown command zzz" \
 	    "shell: line: \\xe5\\xe4\\xf6"
-	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12 x f12 v e r s i o n ret" \
-	    "monitor: open" "monitor: closed" "shell: line: version" \
+	tools/boot_check.sh --disk $(TEST_DISK) --smp 4 --keys "f12 x f12 v e r s i o n ret" \
+	    "monitor: open" "monitor: closed" "monitor: cpus 4" "monitor: memory chip " \
+	    "monitor: task " "acpi: 4 cpus, 1 started" "shell: line: version" \
 	    "m68k: C:version returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "c d spc c ret c d ret c d spc shift-7 ret e c h o spc h e j ret p a t h ret w h y ret up up up spc a ret up down down spc y ret e c x o spc h i left left left left backspace h ret" \

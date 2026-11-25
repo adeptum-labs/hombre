@@ -66,6 +66,7 @@
 #include "boot_framebuffer.hpp"
 #include "clock.hpp"
 #include "code_region.hpp"
+#include "kheap.hpp"
 #include "rtc.hpp"
 #include "task_switch.hpp"
 #include "usb_keyboard.hpp"
@@ -107,6 +108,8 @@ constexpr u32 sigbreakf_ctrl_d = 1u << 13;
 // constructor run.
 constinit m68k::Machine machine{};
 constinit m68k::Jit jit{};
+// The page allocator start() was given, kept for the system monitor.
+constinit PhysAllocator* page_allocator = nullptr;
 constinit Exec exec{};
 constinit TimerDevice timer_device{};
 constinit AudioDevice audio_device{};
@@ -768,6 +771,49 @@ u32 monitor_polls() {
     return task_polls;
 }
 
+void monitor_snapshot(MonitorSnapshot& out) {
+    out.chip_free = exec.free_bytes(ndk::MEMF_CHIP);
+    out.chip_total = exec.total_bytes(ndk::MEMF_CHIP);
+    out.fast_free = exec.free_bytes(ndk::MEMF_FAST);
+    out.fast_total = exec.total_bytes(ndk::MEMF_FAST);
+    out.heap_used = static_cast<u32>(kheap_bytes_in_use());
+    out.heap_size = static_cast<u32>(kheap_arena_bytes());
+    out.code_used = static_cast<u32>(jit.code_used());
+    out.code_total = static_cast<u32>(jit.code_total());
+    if (page_allocator != nullptr) {
+        out.physical_free = page_allocator->free_page_count() * page_size;
+        out.physical_total = page_allocator->managed_page_count() * page_size;
+    }
+
+    out.task_count = 0;
+    for (u32 slot = 0; slot < MonitorSnapshot::kMaxTasks; ++slot) {
+        TaskInfo info;
+        if (!exec.task_info(slot, info)) {
+            continue;
+        }
+        MonitorTask& task = out.tasks[out.task_count++];
+        task.slot = slot;
+        task.task_addr = info.task_addr;
+        task.state = info.state;
+        task.priority = info.priority;
+        task.forbid = info.forbid;
+        task.disable = info.disable;
+        for (u32 i = 0; i < sizeof info.name; ++i) {
+            task.name[i] = info.name[i];
+        }
+    }
+
+    for (u32 i = 0; i < MonitorSnapshot::kDriveCount; ++i) {
+        out.drives[i].inserted = dos.has_disk(i);
+        const char* name = dos.volume_name(i);
+        u32 j = 0;
+        for (; j < sizeof out.drives[i].volume - 1 && name[j] != '\0'; ++j) {
+            out.drives[i].volume[j] = name[j];
+        }
+        out.drives[i].volume[j] = '\0';
+    }
+}
+
 bool task_host_slice_over(void*) {
     return take_need_resched();
 }
@@ -871,6 +917,7 @@ void register_console(u8 index) {
 void reclaim_after_task(void* ctx, u32 task);
 
 bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
+    page_allocator = &pages;
     // As much fast memory as the PC can spare, chip memory always.
     u32 fast_bytes = m68k::kFastBytes;
     u64 guest = 0;
@@ -926,7 +973,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
     monitor_set_host(MonitorHost{&monitor_current_task, &monitor_take_screen,
                                  &monitor_give_screen, &monitor_refresh_screen, &monitor_polls,
-                                 nullptr});
+                                 &monitor_snapshot});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
         return false;

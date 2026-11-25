@@ -920,10 +920,10 @@ inline void MonitorUi::render_memory(MonitorGrid& grid, const MonitorSnapshot& s
 
     Text<96> kernel;
     kernel.add("kernel ");
-    kernel.add_padded(snapshot.heap_used >> 20, 1, ' ');
+    add_human(kernel, snapshot.heap_used);
     kernel.add('/');
-    kernel.add_padded(snapshot.heap_size >> 20, 1, ' ');
-    kernel.add(" MiB     free ");
+    add_human(kernel, snapshot.heap_size);
+    kernel.add("     free ");
     add_human(kernel, snapshot.physical_free);
     kernel.add("     code ");
     kernel.add_padded(snapshot.code_used >> 10, 1, ' ');
@@ -938,8 +938,7 @@ inline void MonitorUi::render_header(MonitorGrid& grid, const MonitorSnapshot& s
     switch (mode_) {
     case Mode::Main:
         put_text(grid, row, 0, "TASKS", monitor_style(MonitorStyle::Title));
-        put_text(grid, row, 5, "         state  pri  cpu%",
-                 monitor_style(MonitorStyle::Normal));
+        put_text(grid, row, 24, "state  pri  cpu%", monitor_style(MonitorStyle::Normal));
         break;
     case Mode::Browser: {
         Text<272> header;
@@ -996,20 +995,20 @@ inline void MonitorUi::render_task_row(const MonitorTask& task, MonitorGrid& gri
     if (selected) {
         put_cell(grid, row, 0, '>', row_style);
     }
-    put_field(grid, row, 2, task.name, 10, row_style);
+    put_field(grid, row, 2, task.name, 20, row_style);
     if (task.forbid) {
-        put_cell(grid, row, 12, 'F', monitor_style(MonitorStyle::Warning));
+        put_cell(grid, row, 22, 'F', monitor_style(MonitorStyle::Warning));
     }
     if (task.disable) {
-        put_cell(grid, row, 13, 'D', monitor_style(MonitorStyle::Warning));
+        put_cell(grid, row, 23, 'D', monitor_style(MonitorStyle::Warning));
     }
-    put_field(grid, row, 14, state_text(task), 5, row_style);
+    put_field(grid, row, 24, state_text(task), 5, row_style);
     Text<8> priority;
     priority.add_signed(task.priority, 3, ' ');
-    put_field(grid, row, 21, priority.text, 3, row_style);
+    put_field(grid, row, 31, priority.text, 3, row_style);
     Text<8> cpu;
     add_cpu(cpu, task.cpu_permille);
-    put_field(grid, row, 26, cpu.text, 5, row_style);
+    put_field(grid, row, 36, cpu.text, 5, row_style);
 }
 
 inline void MonitorUi::render_browser(const MonitorSnapshot& snapshot, MonitorGrid& grid,

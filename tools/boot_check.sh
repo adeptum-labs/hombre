@@ -24,6 +24,8 @@
 # marker given on the command line shows up on the serial console. With
 # --fault-test <n> it boots build/hombre-fault<n>.img instead.
 #
+# --smp <n> gives the machine n processors, as -smp does to QEMU.
+#
 # build/disk.img (made by make disk-image) is attached as a read-only
 # virtio-blk drive. --disk <file> attaches a copy of that file padded to
 # whole sectors instead, and --no-disk attaches no drive.
@@ -61,13 +63,14 @@
 # apart.
 set -euo pipefail
 
-usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--disk3 <file>] [--swappable] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
+usage="usage: $0 [--no-kernel] [--no-gop] [--fault-test <n>] [--smp <n>] [--disk <file> | --no-disk] [--disk1 <file>] [--disk2 <file>] [--disk3 <file>] [--swappable] [--hdf <file> [--hdf-bus ahci|nvme|nvme4k]] [--usb-kbd] [--no-startup] [--keys <names>] [--mouse-after <marker> --mouse <commands>] [--sound <wav>] <marker>..."
 timeout_seconds=60
 ovmf_dir=/usr/share/OVMF
 tools_dir="$(dirname "$0")"
 build_dir="$tools_dir/../build"
 
 image_name=hombre.img
+smp_args=()
 vga_args=()
 usb_args=()
 sound_args=()
@@ -147,6 +150,11 @@ while [[ ${1:-} == --* ]]; do
             [[ $# -ge 2 && $2 != --* && -n $2 ]] || { echo "$usage" >&2; exit 2; }
             sound_args=(-audiodev "wav,id=snd0,path=$2" -device ich9-intel-hda
                         -device hda-output,audiodev=snd0)
+            shift
+            ;;
+        --smp)
+            [[ ${2:-} =~ ^[0-9]+$ ]] || { echo "$usage" >&2; exit 2; }
+            smp_args=(-smp "$2")
             shift
             ;;
         --no-kernel) image_name=hombre-nokernel.img ;;
@@ -267,7 +275,7 @@ cp "$ovmf_dir/OVMF_VARS_4M.fd" "$ovmf_vars"
 # -pdpe1gb: with 1 GiB pages exposed, KVM on this host fails with an internal
 # error while the firmware is still in 32-bit mode.
 qemu-system-x86_64 -enable-kvm -cpu host,-pdpe1gb -machine q35 -m 1G \
-    "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
+    "${smp_args[@]}" "${vga_args[@]}" -display none -no-reboot -serial "file:$serial_log" \
     -drive if=pflash,format=raw,readonly=on,file="$ovmf_dir/OVMF_CODE_4M.fd" \
     -drive if=pflash,format=raw,file="$ovmf_vars" \
     -drive format=raw,snapshot=on,file="$image" "${disk_args[@]}" "${usb_args[@]}" \

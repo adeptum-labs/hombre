@@ -23,12 +23,15 @@
 
 #include "monitor.hpp"
 
+#include "../common/format.hpp"
 #include "../common/irq_ring.hpp"
 #include "../common/monitor_hotkey.hpp"
 #include "../common/monitor_ui.hpp"
 #include "../common/serial.hpp"
+#include "acpi.hpp"
 #include "apic.hpp"
 #include "clock.hpp"
+#include "percpu.hpp"
 #include "usb_keyboard.hpp"
 
 namespace hombre {
@@ -49,6 +52,8 @@ constexpr u32 kGlyph = 8;
 constexpr u32 kLine = kGlyph + 2;
 constexpr u32 kColumnsPerScale = 640;
 constexpr u32 kBackground = 0x102030;
+constexpr u32 kLogLineBytes = 80;
+constexpr u32 kLogLines = 64;
 
 struct Colours {
     u32 text;
@@ -59,6 +64,33 @@ struct Colours {
 constexpr Colours kStyles[] = {
     {0xD0D8E0, kBackground}, {0xFFFFFF, kBackground}, {0xFFFFFF, 0x3060A0},
     {0x8090A0, kBackground}, {0xFFD040, kBackground},
+};
+
+// A serial line, composed whole: the timer interrupt may only write between
+// lines. Too long a line is cut rather than left unterminated.
+struct LogLine {
+    char text[kLogLineBytes] = {};
+    u32 length = 0;
+
+    void add(char c) {
+        if (length + 1 < kLogLineBytes) {
+            text[length++] = c;
+            text[length] = '\0';
+        }
+    }
+
+    void add(const char* s) {
+        for (; *s != '\0'; ++s) {
+            add(*s);
+        }
+    }
+
+    void add_dec(u64 value) {
+        char digits[21];
+        if (format_u64(digits, sizeof digits, value, 10) != 0) {
+            add(digits);
+        }
+    }
 };
 
 constinit MonitorHost monitor_host{};
@@ -79,9 +111,47 @@ constinit u64 next_render_us = 0;
 constinit u64 next_redraw_us = 0;
 constinit u64 restore_us = 0;
 constinit u32 polls_at_close = 0;
+constinit bool summary_logged = false;
 // Lines waiting for the serial port to be between lines.
-constinit IrqRing<const char*, 8> log_lines{};
-constinit const char* log_next = nullptr;
+constinit IrqRing<LogLine, kLogLines> log_lines{};
+constinit LogLine log_next{};
+constinit bool log_pending = false;
+
+void log_text(const char* text) {
+    LogLine line;
+    line.add(text);
+    log_lines.push(line);
+}
+
+// What the monitor shows, once per open; a line the full queue has no room
+// for is dropped.
+void log_summary(const MonitorSnapshot& out) {
+    LogLine cpus;
+    cpus.add("monitor: cpus ");
+    cpus.add_dec(out.cpu_count);
+    log_lines.push(cpus);
+
+    LogLine memory;
+    memory.add("monitor: memory chip ");
+    memory.add_dec(out.chip_free >> 20);
+    memory.add('/');
+    memory.add_dec(out.chip_total >> 20);
+    memory.add(" MiB fast ");
+    memory.add_dec(out.fast_free >> 20);
+    memory.add('/');
+    memory.add_dec(out.fast_total >> 20);
+    memory.add(" MiB");
+    log_lines.push(memory);
+
+    const u32 tasks =
+        out.task_count < MonitorSnapshot::kMaxTasks ? out.task_count : MonitorSnapshot::kMaxTasks;
+    for (u32 i = 0; i < tasks; ++i) {
+        LogLine task;
+        task.add("monitor: task ");
+        task.add(out.tasks[i].name);
+        log_lines.push(task);
+    }
+}
 
 void close_monitor() {
     wanted = false;
@@ -93,7 +163,7 @@ void close_monitor() {
     restoring = true;
     restore_us = clock_us() + kRestoreUs;
     polls_at_close = monitor_host.polls();
-    log_lines.push("monitor: closed");
+    log_text("monitor: closed");
 }
 
 void open_monitor() {
@@ -113,9 +183,10 @@ void open_monitor() {
     ui.reset();
     next_render_us = 0;
     next_redraw_us = 0;
+    summary_logged = false;
     // The tasks must not go on thinking a key or button is held.
     usb_deliver_release();
-    log_lines.push("monitor: open");
+    log_text("monitor: open");
 }
 
 bool take_key_report(u8 (&report)[8]) {
@@ -141,10 +212,36 @@ bool mouse_report_passes() {
     return !open;
 }
 
+// Only the boot processor runs, so its meter speaks for the machine; the
+// others are listed from the ACPI tables but idle.
+void fill_cpus(MonitorSnapshot& out) {
+    const u32 boot_apic_id = this_cpu().apic_id;
+    u32 count = 0;
+    out.cpus[count++] = MonitorCpu{boot_apic_id, true, cpu_meter.busy_permille()};
+    const AcpiProcessorList& cpus = acpi_processors();
+    for (u32 i = 0; i < cpus.count && count < MonitorSnapshot::kMaxCpus; ++i) {
+        if (cpus.apic_id[i] != boot_apic_id) {
+            out.cpus[count++] = MonitorCpu{cpus.apic_id[i], false, 0};
+        }
+    }
+    out.cpu_count = count;
+}
+
+void fill_task_cpu(MonitorSnapshot& out) {
+    const u32 count = out.task_count < MonitorSnapshot::kMaxTasks ? out.task_count
+                                                                  : MonitorSnapshot::kMaxTasks;
+    for (u32 i = 0; i < count; ++i) {
+        MonitorTask& task = out.tasks[i];
+        task.cpu_permille = cpu_meter.task_permille(task.slot, task.task_addr);
+    }
+}
+
 void render(u64 now) {
     if (monitor_host.snapshot != nullptr) {
         monitor_host.snapshot(snapshot);
     }
+    fill_cpus(snapshot);
+    fill_task_cpu(snapshot);
     snapshot.uptime_us = now;
     ui.render(snapshot, grid);
     if (now >= next_redraw_us) {
@@ -153,6 +250,10 @@ void render(u64 now) {
         for (MonitorCell& cell : shown.cells) {
             cell.ch = '\0';
         }
+    }
+    if (!summary_logged) {
+        summary_logged = true;
+        log_summary(snapshot);
     }
 }
 
@@ -207,11 +308,11 @@ void run_monitor() {
 }
 
 void write_log() {
-    if (log_next == nullptr) {
-        log_lines.pop(log_next);
+    if (!log_pending) {
+        log_pending = log_lines.pop(log_next);
     }
-    if (log_next != nullptr && serial::write_line_from_interrupt(log_next)) {
-        log_next = nullptr;
+    if (log_pending && serial::write_line_from_interrupt(log_next.text)) {
+        log_pending = false;
     }
 }
 

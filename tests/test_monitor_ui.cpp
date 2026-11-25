@@ -133,10 +133,10 @@ void layout_at_80x25() {
     CHECK(row_trimmed(grid, 0) == "HOMBRE MONITOR        up 00:12:41     F12 close");
     CHECK(row_trimmed(grid, 1) == "CPU  0 #######... 68%   1 off   2 off   3 off");
     CHECK(row_trimmed(grid, 2) == "MEM  chip 12/64 MiB   fast 40/512 MiB");
-    CHECK(row_trimmed(grid, 3) == "     kernel 3/8 MiB     free 2.1 GiB     code 4/64 KiB");
-    CHECK(row_trimmed(grid, 4) == "TASKS         state  pri  cpu%");
-    CHECK(row_trimmed(grid, 5) == "> Clock       run      0  63.0");
-    CHECK(row_trimmed(grid, 6) == "  Workbench   wait     1   0.4");
+    CHECK(row_trimmed(grid, 3) == "     kernel 3 MiB/8 MiB     free 2.1 GiB     code 4/64 KiB");
+    CHECK(row_trimmed(grid, 4) == "TASKS                   state  pri  cpu%");
+    CHECK(row_trimmed(grid, 5) == "> Clock                 run      0  63.0");
+    CHECK(row_trimmed(grid, 6) == "  Workbench             wait     1   0.4");
     for (u32 row = 7; row < 21; ++row) {
         CHECK(row_trimmed(grid, row).empty());
     }
@@ -304,7 +304,7 @@ void confirmations_are_accepted_and_refused() {
     CHECK(press(ui, snapshot, kK).op == MonitorOp::None);
     CHECK(press(ui, snapshot, kDown).op == MonitorOp::None);
     ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 5) == "> Clock       run      0  63.0");
+    CHECK(row_trimmed(grid, 5) == "> Clock                 run      0  63.0");
     CHECK(press(ui, snapshot, kY).op == MonitorOp::None);
 
     CHECK(press(ui, snapshot, kR).op == MonitorOp::None);
@@ -355,7 +355,7 @@ void inspect_view_shows_registers_and_waiting() {
 
     snapshot.task_count = 0;
     ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 4) == "TASKS         state  pri  cpu%");
+    CHECK(row_trimmed(grid, 4) == "TASKS                   state  pri  cpu%");
     CHECK(row_trimmed(grid, 5).empty());
 }
 
@@ -447,7 +447,7 @@ void browsing_into_and_out_of_directories() {
     CHECK(press(ui, snapshot, kEscape).op == MonitorOp::None);
 
     ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 4) == "TASKS         state  pri  cpu%");
+    CHECK(row_trimmed(grid, 4) == "TASKS                   state  pri  cpu%");
 }
 
 void changed_cells_visitor_reports_only_differences() {
