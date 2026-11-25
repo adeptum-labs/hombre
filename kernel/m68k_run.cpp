@@ -169,6 +169,8 @@ struct Console {
     bool line_mode = false;
     bool input_wait = false;
     bool open = false;
+    // The system monitor ended the shell at its prompt: it ends as EndCLI.
+    bool end_requested = false;
     u8 index = 0;
     u32 process = 0;
     u32 cli = 0;
@@ -906,6 +908,13 @@ u32 console_read(void* ctx, u8* buf, u32 size) {
     c.shell.begin_input();
     u32 len = 0;
     for (;;) {
+        // The system monitor ended the program that reads: the line ends.
+        if (jit.stop_requested()) {
+            if (len > 0) {
+                c.shell.end_line();
+            }
+            return 0;
+        }
         u8 ch = 0;
         if (!key_queue_pop(c, ch)) {
             if (usb_keyboard_status() != UsbStatus::Ready) {
@@ -969,6 +978,9 @@ bool console_ready(void* ctx, u32 timeout_us) {
         if (c.key_count > 0) {
             return true;
         }
+        if (jit.stop_requested()) {
+            return false;
+        }
         if (usb_keyboard_status() != UsbStatus::Ready) {
             return false;
         }
@@ -987,6 +999,7 @@ void register_console(u8 index) {
 // Prepares guest memory, the translator, exec, utility and dos. Logs one
 // line and returns false when a step fails.
 void reclaim_after_task(void* ctx, u32 task);
+bool end_shell_of(void* ctx, u32 task);
 
 bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     page_allocator = &pages;
@@ -1043,6 +1056,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         return false;
     }
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
+    exec.set_end_hook(&end_shell_of, nullptr);
     monitor_set_host(MonitorHost{&monitor_current_task, &monitor_take_screen,
                                  &monitor_give_screen, &monitor_refresh_screen, &monitor_polls,
                                  &monitor_pointer, &monitor_snapshot, &monitor_inspect,
@@ -1557,10 +1571,23 @@ void log_new_shell(u32 cli) {
 void shell_loop(Console& c);
 void shell_task(void* arg);
 
-// The close gadget of its window ends a shell as EndCLI does. A command
-// that runs finishes first.
+// The close gadget of its window, or an End from the system monitor while
+// it waits at its prompt, ends a shell as EndCLI does. A command that runs
+// finishes first.
 bool shell_closing(const Console& c) {
-    return c.shell.close_requested();
+    return c.end_requested || c.shell.close_requested();
+}
+
+// The system monitor's End of a task that runs no 68000 code: a shell's
+// ends that shell.
+bool end_shell_of(void*, u32 task) {
+    for (Console& c : consoles) {
+        if (c.open && c.process != 0 && c.process == task) {
+            c.end_requested = true;
+            return true;
+        }
+    }
+    return false;
 }
 
 // Opens the console's window and starts its shell as a native task, which
@@ -1584,6 +1611,7 @@ bool open_shell(const char* command) {
     c.line_mode = false;
     c.input_wait = false;
     c.open = false;
+    c.end_requested = false;
     c.mid_line = false;
     c.filter.reset();
     key_queue_clear(c);

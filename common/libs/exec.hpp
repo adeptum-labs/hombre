@@ -566,9 +566,20 @@ public:
     // it; run_rescue carries it out before the next block of 68000 code, and
     // whatever polls in normal context calls it too. Suspending the running
     // task takes effect at its next block outside any native, under Forbid
-    // too; ending it ends its 68000 code with Stopped.
+    // too; ending it ends its 68000 code with Stopped. Ending a shell or the
+    // boot task stops only the command it runs; one at its prompt is ended
+    // through set_end_hook. Any other task is removed, a damaged one too.
     void request_rescue(Rescue op, u32 slot, u32 task_addr);
     void run_rescue();
+
+    // Asked by an End of the boot task, a shell or the Workbench when it
+    // runs no 68000 code: true when the task's owner takes it as a request
+    // to end, as a shell's EndCLI. Kept across init.
+    void set_end_hook(bool (*hook)(void* ctx, u32 task), void* ctx) {
+        end_hook_ = hook;
+        end_hook_ctx_ = ctx;
+    }
+
 
     // The task FindTask(0) and ExecBase->ThisTask report, and whose
     // tc_SigRecvd SetSignal and Wait use. It may be set before init and is
@@ -688,6 +699,9 @@ private:
         u64 sleep_deadline_us = 0;
         void (*native_body)(void*) = nullptr;
         void* native_arg = nullptr;
+        // Started by spawn_native: a shell or the Workbench, whose own code
+        // is no program's.
+        bool native_task = false;
     };
 
     struct SemWaitQueue {
@@ -706,6 +720,7 @@ private:
     void hold_while_suspended();
     void end_for_rescue(u32 slot, const TaskInfo& info);
     void run_rescue_now();
+    void stop_command_of(u32 slot);
     bool unlink_task(u32 addr);
     void rebuild_task_lists();
     bool switch_to_task(i32 next_id);
@@ -780,6 +795,8 @@ private:
     };
     ReplyHandler reply_handlers_[kMaxReplyHandlers]{};
     void (*task_end_hook_)(void* ctx, u32 task, bool self) = nullptr;
+    bool (*end_hook_)(void* ctx, u32 task) = nullptr;
+    void* end_hook_ctx_ = nullptr;
     void* task_end_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;

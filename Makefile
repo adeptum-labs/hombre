@@ -253,6 +253,7 @@ TYPE_VERSION    := sendkey v;sendkey e;sendkey r;sendkey s;sendkey i;sendkey o;s
 MONITOR_SELECT  := sendkey f12;$(MONITOR_STEP);sendkey down;$(MONITOR_STEP)
 MONITOR_SUSPEND := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP)
 MONITOR_END     := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
+TYPE_CRASHTEST  := sendkey c;sendkey r;sendkey a;sendkey s;sendkey h;sendkey t;sendkey e;sendkey s;sendkey t;sendkey ret
 MONITOR_KILL    := $(MONITOR_SELECT);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
 
 check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(TEST_HDF4K) $(BROWSE_HDF) $(ADFTOOL) $(ZERO_DISK) $(CORRUPT_DISK)
@@ -363,6 +364,15 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    --mouse-after "shell: new shell 2" \
 	    --mouse "$(MONITOR_STEP);$(MONITOR_CORNER);mouse_move 66 64;$(MONITOR_STEP);mouse_button 1;mouse_button 0;$(MONITOR_STEP)" \
 	    "exec: task HombreShell ended" "dos: CLI 2 ended"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "n e w s h e l l ret" \
+	    --mouse-after "shell: new shell 2" \
+	    --mouse "$(MONITOR_STEP);$(TYPE_CRASHTEST);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_KILL);$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP);$(MONITOR_STEP);$(MONITOR_KILL)" \
+	    "crashtest: waiting" "exec: ending HombreShell" "m68k: C:version returned 0" \
+	    "exec: closing HombreShell" "exec: task HombreShell ended" "dos: CLI 2 ended"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12" \
+	    --mouse-after "monitor: open" \
+	    --mouse "$(MONITOR_STEP);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)" \
+	    "exec: closing Hombre Shell" "shell: boot shell ended"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12 r y" \
 	    "monitor: open" "monitor: reboot"
 	tools/boot_check.sh --disk $(TEST_DISK) \

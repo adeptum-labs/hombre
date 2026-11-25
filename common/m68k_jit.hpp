@@ -199,6 +199,10 @@ public:
     // before its next block.
     void request_stop() { stop_ = true; }
 
+    // True once request_stop was called and the running task's 68000 code
+    // has not ended yet.
+    bool stop_requested() const { return stop_; }
+
     // Called once, before the next block at any depth, after
     // raise_attention, which an interrupt may call.
     void set_attention_hook(PreemptHook fn, void* ctx) {

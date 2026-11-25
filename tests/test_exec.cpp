@@ -3708,10 +3708,74 @@ struct ExecTest {
         e.tasks_[id].td_nest = td;
         e.tasks_[id].id_nest = id_nest;
     }
+    static void set_task_run_depth(Exec& e, u32 id, u32 depth) {
+        e.tasks_[id].run_state.run_depth = depth;
+    }
+    static bool task_stop(const Exec& e, u32 id) { return e.tasks_[id].run_state.stop; }
+    static ExitReason task_exit(const Exec& e, u32 id) { return e.tasks_[id].cpu.exit; }
 };
 }  // namespace hombre
 
 namespace {
+
+void body_never_runs(void*) {}
+
+struct EndAsked {
+    std::vector<u32> tasks;
+};
+
+bool take_end(void* ctx, u32 task) {
+    static_cast<EndAsked*>(ctx)->tasks.push_back(task);
+    return true;
+}
+
+void ending_a_shell_stops_its_command_and_keeps_the_shell() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 shell =
+        setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "shell", kNames);
+    CHECK_EQ(g_exec.spawn_native(shell, &body_never_runs, nullptr, 0, true), shell);
+
+    // At its prompt it runs no 68000 code: nothing to end.
+    g_exec.request_rescue(Rescue::End, 1, shell);
+    g_exec.run_rescue();
+    CHECK(logged("exec: cannot end shell"));
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Ready);
+
+    // Its owner may take the End as EndCLI; the task ends by itself then.
+    EndAsked asked;
+    g_exec.set_end_hook(&take_end, &asked);
+    g_exec.request_rescue(Rescue::End, 1, shell);
+    g_exec.run_rescue();
+    g_exec.set_end_hook(nullptr, nullptr);
+    CHECK(asked.tasks == std::vector<u32>{shell});
+    CHECK(logged("exec: closing shell"));
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Ready);
+    CHECK(host.destroyed.empty());
+
+    // Its command waits for a signal.
+    CHECK(g_exec.yield_in_native());
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Waiting);
+    ExecTest::set_task_run_depth(g_exec, 1, 1);
+
+    g_exec.request_rescue(Rescue::End, 1, shell);
+    g_exec.run_rescue();
+    CHECK(logged("exec: ending shell"));
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Ready);
+    CHECK(ExecTest::task_stop(g_exec, 1));
+    CHECK(ExecTest::task_exit(g_exec, 1) == ExitReason::Stopped);
+    CHECK_EQ(r.get8(shell + TC_STATE), TS_READY);
+    CHECK(r.walk(r.base() + TaskReady) == std::vector<u32>{shell});
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    CHECK(host.destroyed.empty());
+    (void)boot;
+}
 
 void semaphore_wait_queue_full_logs_and_ends_run() {
     // Waiter array full on a single semaphore.
@@ -4880,6 +4944,7 @@ int main() {
     a_task_woken_while_suspended_is_queued_once();
     ending_a_task_stops_its_code_or_removes_it();
     ending_a_damaged_task_leaves_the_running_task_alone();
+    ending_a_shell_stops_its_command_and_keeps_the_shell();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();
     guest_68k_device_vectors_use_call_guest();

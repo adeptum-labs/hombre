@@ -3364,6 +3364,7 @@ u32 Exec::spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, boo
     tc.detached = detached;
     tc.native_body = body;
     tc.native_arg = arg;
+    tc.native_task = true;
     if (sched_.should_switch_now()) {
         pending_switch_ = true;
     }
@@ -3937,26 +3938,58 @@ void Exec::run_rescue_now() {
 void Exec::end_for_rescue(u32 slot, const TaskInfo& info) {
     const i32 id = static_cast<i32>(slot);
     const bool current = id == sched_.current();
-    // The running task, and the boot task, which is never removed, only
-    // have their 68000 code ended.
+    const TaskContext& tc = tasks_[slot];
+    // The running task, the boot task, which is never removed, and a shell
+    // or the Workbench, whose task outlives the command it runs, only have
+    // their 68000 code ended. A task that runs none is left alone.
     if (current && m_->jit->run_depth() != 0) {
         m_->jit->request_stop();
         if (info.state == TaskState::Waiting) {
             end_run(*m_, ExitReason::Stopped);
         }
-    } else if (!current && slot == 0 && tasks_[0].run_state.run_depth != 0) {
+    } else if (!current && slot == 0 && tc.run_state.run_depth != 0) {
         tasks_[0].run_state.stop = true;
         signal_task(info.task_addr, SIGBREAKF_CTRL_C);
-    } else if (!current && slot != 0) {
+    } else if (!current && slot != 0 && tc.native_task && tc.run_state.run_depth != 0) {
+        stop_command_of(slot);
+    } else if (!current && slot != 0 && !tc.native_task) {
         LogLine().text("exec: removing ").text(info.name).send();
         Bus b(*m_);
         ExecOps::rem_task_id(*this, b, id);
+        return;
+    } else if ((slot == 0 || tc.native_task) && end_hook_ != nullptr &&
+               end_hook_(end_hook_ctx_, info.task_addr)) {
+        LogLine().text("exec: closing ").text(info.name).send();
         return;
     } else {
         LogLine().text("exec: cannot end ").text(info.name).send();
         return;
     }
     LogLine().text("exec: ending ").text(info.name).send();
+}
+
+// Ends the 68000 code a task that is not running is in, as request_stop
+// ends the running task's: the task's next block, or the wait it is in,
+// ends with Stopped. A waiting task is woken for it.
+void Exec::stop_command_of(u32 slot) {
+    TaskContext& tc = tasks_[slot];
+    tc.run_state.stop = true;
+    tc.cpu.exit = ExitReason::Stopped;
+    const i32 id = static_cast<i32>(slot);
+    if (sched_.slot(slot).state != TaskState::Waiting) {
+        return;
+    }
+    Bus b(*m_);
+    const bool linked = tc.task_addr != 0 && unlink_task(tc.task_addr);
+    if (tc.task_addr != 0) {
+        b.w8(tc.task_addr + TC_STATE, TS_READY);
+    }
+    sched_.wake(id);
+    if (!linked) {
+        rebuild_task_lists();
+    } else {
+        enqueue(b, base_ + TaskReady, tc.task_addr);
+    }
 }
 
 // Takes a task's node off TaskReady or TaskWait. False, with nothing
