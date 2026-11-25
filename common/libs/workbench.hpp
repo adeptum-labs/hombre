@@ -622,6 +622,9 @@ private:
     // The icons the .backdrop of the volume "Name:" lists.
     void add_left_outs(const char* volume);
     void remove_root_icon(u32 icon_id);
+    // Follows a file or drawer that went from from to to with its left out
+    // icons; a null to drops them.
+    void move_left_outs(const char* from, const char* to);
 
     // A drawer close_for_reset closed: how to find it again and where its
     // window stood.

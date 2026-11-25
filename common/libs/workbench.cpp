@@ -705,6 +705,31 @@ bool info_path(const char* path, char (&out)[Dos::kMaxPath]) {
     return true;
 }
 
+// Whether path names root or something in it.
+bool at_or_below(const char* path, const char* root) {
+    u32 i = 0;
+    while (root[i] != '\0' && upper_ascii(path[i]) == upper_ascii(root[i])) {
+        ++i;
+    }
+    return root[i] == '\0' && (path[i] == '\0' || path[i] == '/');
+}
+
+// Cuts the path of a file down to its drawer, which ends before the '/' or
+// with the volume's ':', and gives the file's name. False when the path
+// names no file or one too long.
+bool split_file(char* path, char (&file)[32]) {
+    u32 leaf = 0;
+    for (u32 i = 0; path[i] != '\0'; ++i) {
+        leaf = path[i] == '/' || path[i] == ':' ? i + 1 : leaf;
+    }
+    if (leaf == 0 || path[leaf] == '\0' || text_length(path + leaf) >= sizeof file) {
+        return false;
+    }
+    copy_text(file, sizeof file, path + leaf);
+    path[path[leaf - 1] == '/' ? leaf - 1 : leaf] = '\0';
+    return true;
+}
+
 bool is_volume_root(const char* path) {
     const u32 length = text_length(path);
     return length != 0 && path[length - 1] == ':';
@@ -3114,6 +3139,7 @@ bool Workbench::transfer(const IconEntry& icon, const char* from, const char* to
     if (info_path(src, src_info)) {
         dos_->delete_file(src_info, ignored);
     }
+    move_left_outs(src, dst);
     LogLine().text("workbench: moved ").text(src).text(" to ").text(to).send();
     return true;
 }
@@ -3886,14 +3912,9 @@ bool Workbench::collect_tree(const char* path, std::vector<TreeEntry>& out, u32&
 }
 
 void Workbench::close_windows_below(const char* path) {
-    const u32 length = text_length(path);
     std::vector<u32> below;
     for (const DrawerWindow& w : windows_) {
-        u32 i = 0;
-        while (i < length && upper_ascii(w.path[i]) == upper_ascii(path[i])) {
-            ++i;
-        }
-        if (w.id != kRootWindow && i == length && (w.path[i] == '\0' || w.path[i] == '/')) {
+        if (w.id != kRootWindow && at_or_below(w.path, path)) {
             below.push_back(w.id);
         }
     }
@@ -4095,6 +4116,7 @@ bool Workbench::delete_icon(u32 window_id, u32 icon_id) {
         done = dos_->delete_object(info, error);
     }
     if (done) {
+        move_left_outs(path, nullptr);
         LogLine().text("workbench: deleted ").text(path).send();
     } else {
         show_error("cannot delete", name, error);
@@ -4170,6 +4192,7 @@ bool Workbench::rename_icon(u32 window_id, u32 icon_id, const char* new_name) {
         done = rename_with_info(from, to, error);
     }
     if (done) {
+        move_left_outs(from, to);
         LogLine().text("workbench: renamed ").text(from).text(" to ").text(new_name).send();
     } else {
         show_error("cannot rename", name, error);
@@ -4433,21 +4456,10 @@ void Workbench::add_left_outs(const char* volume) {
         char name[Dos::kMaxPath]{};
         __builtin_memcpy(name, text.data() + start + 1, end - start - 1);
         char path[Dos::kMaxPath];
-        if (!join_path(volume, name, path)) {
-            continue;
-        }
-        u32 leaf = text_length(volume);
-        for (u32 i = leaf; path[i] != '\0'; ++i) {
-            leaf = path[i] == '/' ? i + 1 : leaf;
-        }
         char file[32];
-        if (path[leaf] == '\0' || text_length(path + leaf) >= sizeof file) {
-            continue;
+        if (join_path(volume, name, path) && split_file(path, file)) {
+            add_left_out(path, file);
         }
-        copy_text(file, sizeof file, path + leaf);
-        // The drawer ends before the '/', or with the volume's ':'.
-        path[path[leaf - 1] == '/' ? leaf - 1 : leaf] = '\0';
-        add_left_out(path, file);
     }
 }
 
@@ -4468,16 +4480,66 @@ bool Workbench::leave_out(u32 window_id, u32 icon_id) {
     char list[Dos::kMaxPath];
     char line[Dos::kMaxPath];
     u32 error = ERROR_INVALID_COMPONENT_NAME;
-    if (!join_path(drawer, file, path) || !backdrop_entry(path, list, line) ||
-        !set_backdrop_line(list, line, true, error)) {
+    const usize shown = left_out_.size();
+    if (!join_path(drawer, file, path) || !backdrop_entry(path, list, line)) {
         show_error("cannot leave out", file, error);
         return false;
     }
+    // The icon comes first: a line without one would stay unseen.
     if (!add_left_out(drawer, file)) {
+        show_error("cannot leave out", file, ERROR_NO_FREE_STORE);
+        return false;
+    }
+    if (!set_backdrop_line(list, line, true, error)) {
+        if (left_out_.size() > shown) {
+            remove_root_icon(left_out_.back().icon);
+        }
+        show_error("cannot leave out", file, error);
         return false;
     }
     draw_window(kRootWindow);
     return true;
+}
+
+void Workbench::move_left_outs(const char* from, const char* to) {
+    struct Moved {
+        u32 icon;
+        char path[Dos::kMaxPath];
+    };
+    std::vector<Moved> moved;
+    for (const LeftOut& out : left_out_) {
+        const IconEntry* icon = find_icon(out.icon);
+        Moved candidate{out.icon, {}};
+        if (icon != nullptr && join_path(out.drawer, icon->file, candidate.path) &&
+            at_or_below(candidate.path, from)) {
+            moved.push_back(candidate);
+        }
+    }
+    for (const Moved& gone : moved) {
+        char list[Dos::kMaxPath];
+        char line[Dos::kMaxPath];
+        u32 error = 0;
+        if (backdrop_entry(gone.path, list, line)) {
+            set_backdrop_line(list, line, false, error);
+        }
+        remove_root_icon(gone.icon);
+        if (to == nullptr) {
+            continue;
+        }
+        // The same path below to as the icon's file had below from.
+        const char* below = gone.path + text_length(from);
+        char path[Dos::kMaxPath];
+        char file[32];
+        copy_text(path, sizeof path, to);
+        if ((*below != '/' || join_path(to, below + 1, path)) &&
+            backdrop_entry(path, list, line) && set_backdrop_line(list, line, true, error) &&
+            split_file(path, file)) {
+            add_left_out(path, file);
+        }
+    }
+    if (!moved.empty()) {
+        draw_window(kRootWindow);
+    }
 }
 
 bool Workbench::put_away(u32 icon_id) {

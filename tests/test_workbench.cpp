@@ -3967,6 +3967,38 @@ void leave_out_keeps_an_icon_on_the_root_window() {
     CHECK(logged("workbench: cannot leave out Tool: Disk is write-protected"));
 }
 
+void a_left_out_icon_follows_its_file() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.make_dir("RAM:Box");
+    u32 error = 0;
+    const u32 object = g_icon.default_object(kWBDrawer);
+    CHECK(g_icon.save_object("RAM:Box", object, error));
+    g_icon.free_object(object);
+    put_ram_project("Box/One");
+    put_ram_project("Note");
+    const TwoWindows w = open_tools_and_ram(r);
+    r.workbench.open_icon(w.ram, r.find_icon_in(w.ram, "Box"));
+    const u32 box = r.find_window("Ram Disk:Box");
+    CHECK(r.workbench.leave_out(box, r.find_icon_in(box, "One")));
+    CHECK(r.workbench.leave_out(w.ram, r.find_icon_in(w.ram, "Note")));
+
+    // Renaming a file, or a drawer above one, renames its line and icon.
+    CHECK(r.workbench.rename_icon(w.ram, r.find_icon_in(w.ram, "Note"), "Memo"));
+    CHECK(r.workbench.rename_icon(w.ram, r.find_icon_in(w.ram, "Box"), "Case"));
+    CHECK(ram_text("RAM:.backdrop") == ":Memo\n:Case/One\n");
+    CHECK(r.find_icon_in(0, "Memo") != Workbench::kNoIcon);
+    CHECK(r.find_icon_in(0, "One") != Workbench::kNoIcon);
+    CHECK_EQ(r.find_icon_in(0, "Note"), Workbench::kNoIcon);
+
+    // Deleting takes both away.
+    CHECK(r.workbench.delete_icon(w.ram, r.find_icon_in(w.ram, "Case")));
+    CHECK(r.workbench.delete_icon(w.ram, r.find_icon_in(w.ram, "Memo")));
+    CHECK(!r.exists("RAM:.backdrop"));
+    CHECK_EQ(r.find_icon_in(0, "Memo"), Workbench::kNoIcon);
+    CHECK_EQ(r.find_icon_in(0, "One"), Workbench::kNoIcon);
+}
+
 void the_backdrop_file_brings_icons_back() {
     Rig r;
     u32 error = 0;
@@ -4775,6 +4807,7 @@ int main() {
     quit_waits_for_the_programs_it_started();
     reset_wb_reopens_the_windows();
     leave_out_keeps_an_icon_on_the_root_window();
+    a_left_out_icon_follows_its_file();
     the_backdrop_file_brings_icons_back();
     an_icon_without_a_place_keeps_clear_of_the_others();
     execute_command_hands_the_line_to_a_shell();
