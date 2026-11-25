@@ -29,7 +29,6 @@
 #include <initializer_list>
 #include <string>
 #include <utility>
-#include <vector>
 
 using namespace hombre;
 
@@ -72,20 +71,32 @@ void set_text(char (&destination)[N], const char* text) {
     destination[i] = '\0';
 }
 
-std::string row_text(const MonitorGrid& grid, u32 row) {
-    std::string text;
-    for (u32 column = 0; column < grid.columns; ++column) {
-        text.push_back(grid.at(column, row).ch);
+std::string trimmed_text(const char* text) {
+    std::string trimmed(text);
+    while (!trimmed.empty() && trimmed.back() == ' ') {
+        trimmed.pop_back();
     }
-    return text;
+    return trimmed;
 }
 
-std::string row_trimmed(const MonitorGrid& grid, u32 row) {
-    std::string text = row_text(grid, row);
-    while (!text.empty() && text.back() == ' ') {
-        text.pop_back();
+u32 parts_with_text(const MonitorView& view, const char* text) {
+    const std::string wanted = trimmed_text(text);
+    u32 found = 0;
+    for (u32 i = 0; i < view.count; ++i) {
+        if (trimmed_text(view.parts[i].text) == wanted) {
+            ++found;
+        }
     }
-    return text;
+    return found;
+}
+
+const MonitorPart* find_kind(const MonitorView& view, MonitorPartKind kind) {
+    for (u32 i = 0; i < view.count; ++i) {
+        if (view.parts[i].kind == kind) {
+            return &view.parts[i];
+        }
+    }
+    return nullptr;
 }
 
 MonitorSnapshot sample_snapshot() {
@@ -121,35 +132,52 @@ MonitorSnapshot sample_snapshot() {
     return snapshot;
 }
 
-void layout_at_80x25() {
+void main_window_shows_cpu_memory_lists_and_drives() {
     const MonitorSnapshot snapshot = sample_snapshot();
-    MonitorGrid grid;
-    grid.columns = 80;
-    grid.rows = 25;
+    MonitorView view;
     MonitorUi ui;
     ui.reset();
-    ui.render(snapshot, grid);
+    ui.layout(snapshot, view);
 
-    CHECK(row_trimmed(grid, 0) == "HOMBRE MONITOR        up 00:12:41     F12 close");
-    CHECK(row_trimmed(grid, 1) == "CPU  0 #######... 68%   1 off   2 off   3 off");
-    CHECK(row_trimmed(grid, 2) == "MEM  chip 12/64 MiB   fast 40/512 MiB");
-    CHECK(row_trimmed(grid, 3) == "     kernel 3 MiB/8 MiB     free 2.1 GiB     code 4/64 KiB");
-    CHECK(row_trimmed(grid, 4) == "TASKS                   state  pri  cpu%");
-    CHECK(row_trimmed(grid, 5) == "> Clock                 run      0  63.0");
-    CHECK(row_trimmed(grid, 6) == "  Workbench             wait     1   0.4");
-    for (u32 row = 7; row < 21; ++row) {
-        CHECK(row_trimmed(grid, row).empty());
-    }
-    CHECK(row_trimmed(grid, 21) == "DF0 Workbench3.1   DF1 Extras3.1");
-    CHECK(row_trimmed(grid, 22) == "DF2 (empty)        DF3 (empty)");
-    CHECK(row_trimmed(grid, 23) == "monitor ready");
-    CHECK(row_trimmed(grid, 24) ==
-          "Tab drives  Up/Down select  Enter inspect  S suspend  K end  R reboot");
+    CHECK_EQ(parts_with_text(view, "System Monitor"), 1u);
+    CHECK_EQ(parts_with_text(view, "up 00:12:41"), 1u);
+    CHECK_EQ(parts_with_text(view, "CPU"), 1u);
+    CHECK_EQ(parts_with_text(view, "MEM"), 1u);
+    CHECK_EQ(parts_with_text(view, "chip 12/64 MiB   fast 40/512 MiB"), 1u);
+    CHECK_EQ(parts_with_text(view, "kernel 3 MiB/8 MiB     free 2.1 GiB     code 4/64 KiB"), 1u);
+    CHECK_EQ(parts_with_text(view, "TASKS                   state  pri  cpu%"), 1u);
 
-    CHECK(grid.at(0, 0).style == monitor_style(MonitorStyle::Title));
-    CHECK(grid.at(0, 5).style == monitor_style(MonitorStyle::Selected));
-    CHECK(grid.at(0, 21).style == monitor_style(MonitorStyle::Selected));
-    CHECK_EQ(row_text(grid, 0).size(), 80u);
+    const MonitorPart* gauge = find_kind(view, MonitorPartKind::Gauge);
+    CHECK(gauge != nullptr);
+    CHECK_EQ(gauge->permille, 684u);
+    CHECK_EQ(parts_with_text(view, "68%"), 1u);
+    CHECK_EQ(parts_with_text(view, "off"), 3u);
+
+    const MonitorPart* clock = view.find(MonitorAction::SelectTask, 0);
+    const MonitorPart* workbench = view.find(MonitorAction::SelectTask, 1);
+    CHECK(clock != nullptr);
+    CHECK(workbench != nullptr);
+    CHECK(clock->selected);
+    CHECK(!workbench->selected);
+    CHECK(trimmed_text(clock->text) == "  Clock                 run      0  63.0");
+    CHECK(trimmed_text(workbench->text) == "  Workbench             wait     1   0.4");
+    CHECK(view.find(MonitorAction::SelectTask, 2) == nullptr);
+
+    const MonitorPart* df0 = view.find(MonitorAction::SelectDrive, 0);
+    const MonitorPart* df1 = view.find(MonitorAction::SelectDrive, 1);
+    const MonitorPart* df2 = view.find(MonitorAction::SelectDrive, 2);
+    const MonitorPart* df3 = view.find(MonitorAction::SelectDrive, 3);
+    CHECK(df0 != nullptr);
+    CHECK(df1 != nullptr);
+    CHECK(df2 != nullptr);
+    CHECK(df3 != nullptr);
+    CHECK(df0->selected);
+    CHECK(std::string(df0->text) == "DF0 Workbench3.1");
+    CHECK(std::string(df1->text) == "DF1 Extras3.1");
+    CHECK(std::string(df2->text) == "DF2 (empty)");
+    CHECK(std::string(df3->text) == "DF3 (empty)");
+
+    CHECK_EQ(parts_with_text(view, "monitor ready"), 1u);
 }
 
 void many_cores_are_summarised() {
@@ -158,36 +186,12 @@ void many_cores_are_summarised() {
     for (u32 i = 0; i < snapshot.cpu_count; ++i) {
         snapshot.cpus[i] = MonitorCpu{i, true, 500};
     }
-    MonitorGrid grid;
-    grid.columns = 80;
-    grid.rows = 25;
+    MonitorView view;
     MonitorUi ui;
     ui.reset();
-    ui.render(snapshot, grid);
+    ui.layout(snapshot, view);
 
-    const std::string line = row_trimmed(grid, 1);
-    CHECK(line.find('+') != std::string::npos);
-    CHECK(line.size() <= 80u);
-}
-
-void tiny_grids_stay_in_bounds() {
-    const MonitorSnapshot snapshot = sample_snapshot();
-    constexpr u32 kSizes[][2] = {{1, 1}, {5, 3}, {20, 8}, {40, 12}, {80, 10}};
-    for (const auto& size : kSizes) {
-        MonitorGrid grid;
-        grid.columns = size[0];
-        grid.rows = size[1];
-        MonitorUi ui;
-        ui.reset();
-        ui.render(snapshot, grid);
-        CHECK_EQ(grid.columns, size[0]);
-        CHECK_EQ(grid.rows, size[1]);
-        for (u32 row = 0; row < grid.rows; ++row) {
-            for (u32 column = 0; column < grid.columns; ++column) {
-                CHECK(grid.at(column, row).ch != '\0');
-            }
-        }
-    }
+    CHECK_EQ(parts_with_text(view, "+51"), 1u);
 }
 
 void set_entries(MonitorSnapshot& snapshot, const char* path,
@@ -208,12 +212,10 @@ void held_keys_act_once() {
     snapshot.tasks[2] =
         MonitorTask{2, 0x3000, "Shell", TaskState::Ready, false, -1, 120, true, false};
     snapshot.task_count = 3;
-    MonitorGrid grid;
-    grid.columns = 80;
-    grid.rows = 25;
+    MonitorView view;
     MonitorUi ui;
     ui.reset();
-    ui.render(snapshot, grid);
+    ui.layout(snapshot, view);
 
     const std::array<u8, 8> down = report(kDown);
     CHECK(ui.key_report(down.data(), snapshot).op == MonitorOp::None);
@@ -286,25 +288,25 @@ void requests_carry_their_fields() {
 
 void confirmations_are_accepted_and_refused() {
     MonitorSnapshot snapshot = sample_snapshot();
-    MonitorGrid grid;
-    grid.columns = 80;
-    grid.rows = 25;
+    MonitorView view;
     MonitorUi ui;
     ui.reset();
-    ui.render(snapshot, grid);
+    ui.layout(snapshot, view);
 
     CHECK(press(ui, snapshot, kS).op == MonitorOp::None);
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 23).find("Confirm suspend of Clock") != std::string::npos);
+    ui.layout(snapshot, view);
+    const MonitorPart* dialog = find_kind(view, MonitorPartKind::Dialog);
+    CHECK(dialog != nullptr);
+    CHECK(std::string(dialog->text) == "Confirm suspend of Clock");
     CHECK(press(ui, snapshot, kN).op == MonitorOp::None);
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 23).find("Confirm") == std::string::npos);
+    ui.layout(snapshot, view);
+    CHECK(find_kind(view, MonitorPartKind::Dialog) == nullptr);
     CHECK(press(ui, snapshot, kY).op == MonitorOp::None);
 
     CHECK(press(ui, snapshot, kK).op == MonitorOp::None);
     CHECK(press(ui, snapshot, kDown).op == MonitorOp::None);
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 5) == "> Clock                 run      0  63.0");
+    ui.layout(snapshot, view);
+    CHECK(view.find(MonitorAction::SelectTask, 0)->selected);
     CHECK(press(ui, snapshot, kY).op == MonitorOp::None);
 
     CHECK(press(ui, snapshot, kR).op == MonitorOp::None);
@@ -312,23 +314,21 @@ void confirmations_are_accepted_and_refused() {
 
     CHECK(press(ui, snapshot, kS).op == MonitorOp::None);
     snapshot.task_count = 0;
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 23).find("Confirm") == std::string::npos);
+    ui.layout(snapshot, view);
+    CHECK(find_kind(view, MonitorPartKind::Dialog) == nullptr);
 }
 
 void inspect_view_shows_registers_and_waiting() {
     MonitorSnapshot snapshot = sample_snapshot();
-    MonitorGrid grid;
-    grid.columns = 80;
-    grid.rows = 25;
+    MonitorView view;
     MonitorUi ui;
     ui.reset();
-    ui.render(snapshot, grid);
+    ui.layout(snapshot, view);
 
     CHECK(press(ui, snapshot, kEnter).op == MonitorOp::Inspect);
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 4) == "INSPECT  Clock");
-    CHECK(row_trimmed(grid, 5) == "waiting for registers");
+    ui.layout(snapshot, view);
+    CHECK_EQ(parts_with_text(view, "INSPECT  Clock"), 1u);
+    CHECK_EQ(parts_with_text(view, "waiting for registers"), 1u);
 
     snapshot.inspect.valid = true;
     snapshot.inspect.slot = 0;
@@ -344,19 +344,19 @@ void inspect_view_shows_registers_and_waiting() {
     snapshot.inspect.rip = 0x1122334455667788ull;
     snapshot.inspect.rsp = 0x99AABBCCDDEEFF00ull;
     snapshot.inspect.rflags = 0x202;
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 5) == "D0 12345678  D1 00000000  D2 00000000  D3 00000000");
-    CHECK(row_trimmed(grid, 7) == "A0 00000000  A1 00000000  A2 00000000  A3 00000000");
-    CHECK(row_trimmed(grid, 8) == "A4 00000000  A5 00000000  A6 00000000  A7 0000abcd");
-    CHECK(row_trimmed(grid, 9) == "PC 00002000  SR 0010");
-    CHECK(row_trimmed(grid, 10) == "Native: dos.library/Open");
-    CHECK(row_trimmed(grid, 11) == "x86 RIP 1122334455667788  RSP 99aabbccddeeff00");
-    CHECK(row_trimmed(grid, 12) == "    RFLAGS 0000000000000202");
+    ui.layout(snapshot, view);
+    CHECK_EQ(parts_with_text(view, "D0 12345678  D1 00000000  D2 00000000  D3 00000000"), 1u);
+    CHECK_EQ(parts_with_text(view, "A0 00000000  A1 00000000  A2 00000000  A3 00000000"), 1u);
+    CHECK_EQ(parts_with_text(view, "A4 00000000  A5 00000000  A6 00000000  A7 0000abcd"), 1u);
+    CHECK_EQ(parts_with_text(view, "PC 00002000  SR 0010"), 1u);
+    CHECK_EQ(parts_with_text(view, "Native: dos.library/Open"), 1u);
+    CHECK_EQ(parts_with_text(view, "x86 RIP 1122334455667788  RSP 99aabbccddeeff00"), 1u);
+    CHECK_EQ(parts_with_text(view, "    RFLAGS 0000000000000202"), 1u);
 
     snapshot.task_count = 0;
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 4) == "TASKS                   state  pri  cpu%");
-    CHECK(row_trimmed(grid, 5).empty());
+    ui.layout(snapshot, view);
+    CHECK_EQ(parts_with_text(view, "TASKS                   state  pri  cpu%"), 1u);
+    CHECK(view.find(MonitorAction::SelectTask, 0) == nullptr);
 }
 
 void selection_follows_task_and_clamps() {
@@ -364,12 +364,10 @@ void selection_follows_task_and_clamps() {
     snapshot.tasks[2] =
         MonitorTask{2, 0x3000, "Shell", TaskState::Ready, false, -1, 120, true, false};
     snapshot.task_count = 3;
-    MonitorGrid grid;
-    grid.columns = 80;
-    grid.rows = 25;
+    MonitorView view;
     MonitorUi ui;
     ui.reset();
-    ui.render(snapshot, grid);
+    ui.layout(snapshot, view);
 
     CHECK(press(ui, snapshot, kDown).op == MonitorOp::None);
     const MonitorTask clock = snapshot.tasks[0];
@@ -395,9 +393,7 @@ void selection_follows_task_and_clamps() {
 
 void browsing_into_and_out_of_directories() {
     MonitorSnapshot snapshot = sample_snapshot();
-    MonitorGrid grid;
-    grid.columns = 80;
-    grid.rows = 25;
+    MonitorView view;
     MonitorUi ui;
     ui.reset();
 
@@ -408,10 +404,16 @@ void browsing_into_and_out_of_directories() {
     CHECK_EQ(request.path[0], '\0');
 
     set_entries(snapshot, "", {{"DH0:", true}, {"DH1:", true}});
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 4) == "BROWSE  partitions");
-    CHECK(row_trimmed(grid, 5) == "> DH0:");
-    CHECK(row_trimmed(grid, 6) == "  DH1:");
+    ui.layout(snapshot, view);
+    CHECK_EQ(parts_with_text(view, "BROWSE  partitions"), 1u);
+    const MonitorPart* first = view.find(MonitorAction::SelectEntry, 0);
+    const MonitorPart* second = view.find(MonitorAction::SelectEntry, 1);
+    CHECK(first != nullptr);
+    CHECK(second != nullptr);
+    CHECK(std::string(first->text) == "  DH0:");
+    CHECK(first->selected);
+    CHECK(std::string(second->text) == "  DH1:");
+    CHECK(!second->selected);
     request = press(ui, snapshot, kEnter);
     CHECK(request.op == MonitorOp::ListDirectory);
     CHECK(std::string(request.path) == "DH0:");
@@ -446,50 +448,20 @@ void browsing_into_and_out_of_directories() {
     CHECK_EQ(request.path[0], '\0');
     CHECK(press(ui, snapshot, kEscape).op == MonitorOp::None);
 
-    ui.render(snapshot, grid);
-    CHECK(row_trimmed(grid, 4) == "TASKS                   state  pri  cpu%");
-}
-
-void changed_cells_visitor_reports_only_differences() {
-    MonitorGrid before;
-    before.columns = 4;
-    before.rows = 3;
-    MonitorGrid after = before;
-    after.at(1, 1).ch = 'x';
-    after.at(2, 2).style = monitor_style(MonitorStyle::Warning);
-
-    std::vector<std::pair<u32, u32>> changed;
-    visit_changed_cells(before, after,
-                        [&](u32 column, u32 row, const MonitorCell& cell) {
-                            changed.emplace_back(column, row);
-                            CHECK_EQ(cell.ch, after.at(column, row).ch);
-                            CHECK_EQ(cell.style, after.at(column, row).style);
-                        });
-    CHECK_EQ(changed.size(), 2u);
-    CHECK_EQ(changed[0].first, 1u);
-    CHECK_EQ(changed[0].second, 1u);
-    CHECK_EQ(changed[1].first, 2u);
-    CHECK_EQ(changed[1].second, 2u);
-
-    std::vector<std::pair<u32, u32>> unchanged;
-    visit_changed_cells(after, after, [&](u32 column, u32 row, const MonitorCell&) {
-        unchanged.emplace_back(column, row);
-    });
-    CHECK(unchanged.empty());
+    ui.layout(snapshot, view);
+    CHECK_EQ(parts_with_text(view, "TASKS                   state  pri  cpu%"), 1u);
 }
 
 }
 
 int main() {
-    layout_at_80x25();
+    main_window_shows_cpu_memory_lists_and_drives();
     many_cores_are_summarised();
-    tiny_grids_stay_in_bounds();
     held_keys_act_once();
     requests_carry_their_fields();
     confirmations_are_accepted_and_refused();
     inspect_view_shows_registers_and_waiting();
     selection_follows_task_and_clamps();
     browsing_into_and_out_of_directories();
-    changed_cells_visitor_reports_only_differences();
     return check::finish("test_monitor_ui");
 }
