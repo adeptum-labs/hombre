@@ -91,6 +91,8 @@ public:
     static constexpr u32 kMaxMessagesPerPump = 64;
     static constexpr u32 kNoIcon = 0xFFFFFFFF;
     static constexpr u32 kNoWindow = 0xFFFFFFFF;
+    // The longest name a file can have on an Amiga disk.
+    static constexpr u32 kMaxName = 30;
     // The id of the root window; the id of every drawer is above it.
     static constexpr u32 kRootWindow = 0;
     static constexpr u8 kNoDrive = 0xFF;
@@ -392,6 +394,11 @@ public:
     // cannot be deleted.
     bool delete_icon(u32 window_id, u32 icon_id);
 
+    // Icons > Rename: gives what the icon stands for and its .info the name
+    // new_name, closing the windows of a renamed drawer. False, shown, for a
+    // disk or an AppIcon and for a name that cannot be had.
+    bool rename_icon(u32 window_id, u32 icon_id, const char* new_name);
+
     // Opens the window the icon of window window_id stands for, or
     // brings the window already open for it to the front.
     void open_drawer(u32 window_id, const IconEntry& icon);
@@ -564,6 +571,9 @@ private:
     const IconEntry* file_icon(u32 window_id, u32 icon_id) const;
     void close_windows_below(const char* path);
     void ask_delete(u32 window_id, u32 icon_id);
+    void ask_rename(u32 window_id, u32 icon_id);
+    // Renames the object and its .info, both or neither.
+    bool rename_with_info(const char* from, const char* to, u32& error);
     void select_contents(u32 window_id);
     void clean_up(u32 window_id);
     void open_selected(u32 window_id);

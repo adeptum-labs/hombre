@@ -3079,6 +3079,60 @@ void the_delete_item_asks_before_it_deletes() {
     CHECK(!r.exists("RAM:Box"));
 }
 
+void rename_gives_the_file_and_its_icon_the_new_name() {
+    Rig r;
+    put_ram_project("Note");
+    put_ram_project("Other");
+    const TwoWindows w = open_tools_and_ram(r);
+    CHECK(r.workbench.rename_icon(w.ram, r.find_icon_in(w.ram, "Note"), "Memo"));
+    CHECK(r.exists("RAM:Memo"));
+    CHECK(r.exists("RAM:Memo.info"));
+    CHECK(!r.exists("RAM:Note"));
+    CHECK(!r.exists("RAM:Note.info"));
+    const u32 memo = r.find_icon_in(w.ram, "Memo");
+    CHECK(memo != Workbench::kNoIcon);
+
+    // A name that is taken or no name leaves things as they were.
+    CHECK(!r.workbench.rename_icon(w.ram, memo, "Other"));
+    CHECK(logged("workbench: cannot rename Memo: Object already exists"));
+    CHECK(!r.workbench.rename_icon(w.ram, r.find_icon_in(w.ram, "Memo"), ""));
+    CHECK(!r.workbench.rename_icon(w.ram, r.find_icon_in(w.ram, "Memo"), "a/b"));
+    CHECK(!r.workbench.rename_icon(w.ram, r.find_icon_in(w.ram, "Memo"),
+                                   std::string(31, 'n').c_str()));
+    CHECK(r.exists("RAM:Memo"));
+    CHECK(!r.workbench.rename_icon(0, r.find_icon_in(0, "Ram Disk"), "Disk"));
+}
+
+void a_rename_that_loses_the_icon_name_is_undone() {
+    Rig r;
+    put_ram_project("Note");
+    u32 error = 0;
+    const u8 byte = 'z';
+    CHECK(g_dos.write_file("RAM:Taken.info", &byte, 1, error));
+    const TwoWindows w = open_tools_and_ram(r);
+    CHECK(!r.workbench.rename_icon(w.ram, r.find_icon_in(w.ram, "Note"), "Taken"));
+    CHECK(r.exists("RAM:Note"));
+    CHECK(r.exists("RAM:Note.info"));
+    CHECK(!r.exists("RAM:Taken"));
+}
+
+void the_rename_item_asks_for_the_name() {
+    Rig r;
+    put_ram_project("Note");
+    const TwoWindows w = open_tools_and_ram(r);
+    r.workbench.set_answer(
+        [](void*, const char*, const char*, char* text, u32 size) {
+            CHECK(std::string(text) == "Note");
+            CHECK(size > 4);
+            __builtin_memcpy(text, "Memo", 5);
+            return true;
+        },
+        nullptr);
+    click_icon(r, w.ram, r.find_icon_in(w.ram, "Note"));
+    r.workbench.menu_pick(w.ram, icons_pick(2));
+    CHECK(r.exists("RAM:Memo"));
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -3745,6 +3799,9 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    rename_gives_the_file_and_its_icon_the_new_name();
+    a_rename_that_loses_the_icon_name_is_undone();
+    the_rename_item_asks_for_the_name();
     delete_removes_a_file_or_a_drawer_and_its_icon();
     delete_refuses_disks_and_what_cannot_be_written();
     the_delete_item_asks_before_it_deletes();

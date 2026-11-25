@@ -273,7 +273,7 @@ constexpr MenuItemSpec kWindowItems[] = {
 };
 
 constexpr MenuItemSpec kIconsItems[] = {
-    {"Open", true},          {"Copy", false},         {"Rename...", false},
+    {"Open", true},          {"Copy", false},         {"Rename...", true},
     {"Information...", false}, {"Snapshot", true},    {"Unsnapshot", true},
     {"Leave Out", false},    {"Put Away", false},     {"Delete...", true},
     {"Format Disk...", false}, {"Empty Trash", false},
@@ -300,6 +300,7 @@ constexpr u32 kItemBackdrop = 0;
 constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
 constexpr u32 kItemIconSnapshot = 4;
+constexpr u32 kItemIconRename = 2;
 constexpr u32 kItemIconUnsnapshot = 5;
 constexpr u32 kItemIconDelete = 8;
 constexpr u32 kSubAll = 1;
@@ -3192,6 +3193,80 @@ void Workbench::ask_delete(u32 window_id, u32 icon_id) {
     }
 }
 
+bool Workbench::rename_with_info(const char* from, const char* to, u32& error) {
+    char from_info[Dos::kMaxPath];
+    char to_info[Dos::kMaxPath];
+    if (!info_path(from, from_info) || !info_path(to, to_info)) {
+        error = ERROR_INVALID_COMPONENT_NAME;
+        return false;
+    }
+    // An icon may stand for nothing but its .info.
+    const bool object = dos_->examine(from).kind != Dos::TargetKind::Missing;
+    if (object && !dos_->rename_path(from, to, error)) {
+        return false;
+    }
+    if (dos_->examine(from_info).kind == Dos::TargetKind::Missing ||
+        dos_->rename_path(from_info, to_info, error)) {
+        return true;
+    }
+    u32 ignored = 0;
+    if (object) {
+        dos_->rename_path(to, from, ignored);
+    }
+    return false;
+}
+
+bool Workbench::rename_icon(u32 window_id, u32 icon_id, const char* new_name) {
+    const IconEntry* icon = file_icon(window_id, icon_id);
+    if (icon == nullptr) {
+        const IconEntry* other = find_icon(icon_id);
+        show_error("cannot rename", other != nullptr ? other->name : "?",
+                   ERROR_OBJECT_WRONG_TYPE);
+        return false;
+    }
+    char name[32];
+    copy_text(name, sizeof name, icon->name);
+    u32 length = 0;
+    bool valid = new_name != nullptr;
+    for (; valid && new_name[length] != '\0'; ++length) {
+        valid = new_name[length] != ':' && new_name[length] != '/' && length < kMaxName;
+    }
+    char from[Dos::kMaxPath];
+    char to[Dos::kMaxPath];
+    const DrawerWindow& window = *find_window(window_id);
+    u32 error = ERROR_INVALID_COMPONENT_NAME;
+    bool done = valid && length != 0 && icon_path(window, *icon, from) &&
+                join_path(window.path, new_name, to);
+    if (done) {
+        close_windows_below(from);
+        done = rename_with_info(from, to, error);
+    }
+    if (done) {
+        LogLine().text("workbench: renamed ").text(from).text(" to ").text(new_name).send();
+    } else {
+        show_error("cannot rename", name, error);
+    }
+    if (DrawerWindow* w = find_window(window_id); w != nullptr) {
+        update_window(*w);
+    }
+    return done;
+}
+
+void Workbench::ask_rename(u32 window_id, u32 icon_id) {
+    const IconEntry* icon = file_icon(window_id, icon_id);
+    if (icon == nullptr) {
+        rename_icon(window_id, icon_id, "");
+        return;
+    }
+    char old_name[32];
+    char new_name[kMaxName + 1];
+    copy_text(old_name, sizeof old_name, icon->file);
+    if (ask_text("Rename", "Enter a new name", old_name, new_name, sizeof new_name) &&
+        __builtin_strcmp(old_name, new_name) != 0) {
+        rename_icon(window_id, icon_id, new_name);
+    }
+}
+
 // --- snapshots -----------------------------------------------------------
 
 bool Workbench::snapshot_icon(u32 window_id, u32 icon_id) {
@@ -3429,6 +3504,8 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
         const u32 selected = window != nullptr ? window->clicks.selected() : kNoIcon;
         if (item == 0) {
             open_selected(window_id);
+        } else if (item == kItemIconRename && selected != kNoIcon) {
+            ask_rename(window_id, selected);
         } else if (item == kItemIconSnapshot && selected != kNoIcon) {
             snapshot_icon(window_id, selected);
         } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {
