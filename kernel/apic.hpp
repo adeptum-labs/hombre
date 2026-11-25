@@ -77,4 +77,7 @@ bool take_need_resched();
 // active, or issues a single pause instruction otherwise.
 void idle_wait();
 
+// Whether the interrupted code waits halted in idle_wait.
+bool cpu_halted();
+
 }

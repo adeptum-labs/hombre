@@ -84,6 +84,7 @@ constinit volatile u32* mmio_base = nullptr;
 constinit bool timer_running = false;
 constinit u64 ticks = 0;
 constinit bool need_resched = false;
+volatile bool halted = false;
 
 void io_wait() {
     outb(0x80, 0);
@@ -287,7 +288,13 @@ void idle_wait() {
         asm volatile("pause");
         return;
     }
+    halted = true;
     asm volatile("sti; hlt" : : : "memory");
+    halted = false;
+}
+
+bool cpu_halted() {
+    return halted;
 }
 
 }

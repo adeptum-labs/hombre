@@ -24,6 +24,7 @@
 #include "boot_disk.hpp"
 #include "m68k_run.hpp"
 #include "hda.hpp"
+#include "monitor.hpp"
 #include "splash.hpp"
 
 #include "../common/console_keys.hpp"
@@ -731,6 +732,11 @@ void task_host_destroy(void*, u32 id) {
     task_stacks.destroy(id);
 }
 
+void monitor_current_task(i32& slot, u32& task_addr) {
+    slot = exec.scheduler().current();
+    task_addr = slot >= 0 ? exec.scheduler().slot(static_cast<u32>(slot)).task_addr : 0;
+}
+
 bool task_host_slice_over(void*) {
     return take_need_resched();
 }
@@ -887,6 +893,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         return false;
     }
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
+    monitor_set_host(MonitorHost{&monitor_current_task});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
         return false;

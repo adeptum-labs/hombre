@@ -27,6 +27,7 @@
 #include "apic.hpp"
 #include "descriptors.hpp"
 #include "gdt.hpp"
+#include "monitor.hpp"
 #include "trap_frame.hpp"
 
 // Bit n is set when the CPU pushes an error code for vector n. It is a macro
@@ -245,6 +246,7 @@ void write_heading(u64 vector) {
 extern "C" void trap_dispatch(TrapFrame* frame) {
     if (frame->vector == kApicTimerVector) {
         apic_handle_timer_irq();
+        monitor_timer_tick(*frame);
         return;
     }
     if (frame->vector == kApicSpuriousVector) {
