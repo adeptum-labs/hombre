@@ -23,6 +23,7 @@
 
 #include "../common/boot_info.hpp"
 #include "../common/serial.hpp"
+#include "acpi.hpp"
 #include "apic.hpp"
 #include "boot_disk.hpp"
 #include "boot_framebuffer.hpp"
@@ -208,6 +209,7 @@ extern "C" [[noreturn]] void kmain(BootInfo* info) {
         serial::write_hex(info->rsdp_phys);
         serial::write("\n");
     }
+    acpi_init(*info);
     if (info->fb.phys != 0) {
         serial::write("framebuffer: ");
         serial::write_dec(info->fb.width);
