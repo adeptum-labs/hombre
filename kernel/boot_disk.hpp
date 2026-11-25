@@ -30,6 +30,9 @@
 namespace hombre {
 
 class Dos;
+class Exec;
+struct MonitorRequest;
+struct MonitorSnapshot;
 
 // Finds the boot drive on the PCI bus (the allocator and the MMIO mapper are
 // already running, see mem_init), reads the drive, unpacks it when it is a
@@ -46,5 +49,19 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& pages, MmioMapper& mmio)
 // disk, none, or one that does not mount. Call it from the kernel's polling;
 // it does nothing before boot_disk_run has set the drives up.
 void boot_disk_poll_media(Dos& dos);
+
+// Remembers a disk request of the monitor. The timer interrupt may call it;
+// boot_disk_poll carries the request out.
+void boot_disk_request(const MonitorRequest& request);
+
+// Carries out the pending disk request, or one chunk of an insert under way,
+// and publishes the result for the monitor. It does nothing but say that a
+// request waits while exec.forbidden(), so no task is inside a file system
+// operation. Call it from normal context.
+void boot_disk_poll(Dos& dos, Exec& exec);
+
+// Copies the published listing and status into the monitor's snapshot. The
+// timer interrupt calls it; it only copies what boot_disk_poll wrote.
+void boot_disk_snapshot(MonitorSnapshot& out);
 
 }

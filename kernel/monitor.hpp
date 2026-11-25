@@ -56,6 +56,9 @@ struct MonitorHost {
     // Posts a request to suspend, resume or end a task, carried out in
     // normal context.
     void (*rescue)(const MonitorRequest& request) = nullptr;
+    // Posts a request to list a directory or put a disk in a drive or take
+    // it out, carried out in normal context.
+    void (*disk)(const MonitorRequest& request) = nullptr;
 };
 
 void monitor_set_host(const MonitorHost& host);

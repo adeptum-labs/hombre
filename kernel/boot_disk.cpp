@@ -32,8 +32,11 @@
 #include "usb_keyboard.hpp"
 
 #include "../common/amiga_fs.hpp"
+#include "../common/disk_browser.hpp"
 #include "../common/dms.hpp"
 #include "../common/libs/dos.hpp"
+#include "../common/libs/exec.hpp"
+#include "../common/monitor_ui.hpp"
 #include "../common/printable.hpp"
 #include "../common/serial.hpp"
 #include "m68k_run.hpp"
@@ -58,7 +61,10 @@ constinit VirtioBlk drive_devices[kFloppyDrives];
 constinit VirtioBlk hard_disk_devices[kMaxHardDisks];
 constinit Disk hard_disks[kMaxHardDisks]{};
 constinit HardVolume hard_volumes[kMaxHardVolumes]{};
+constinit u32 hard_volume_count = 0;
 constinit DiskUnits disk_units{};
+// The allocator the monitor's inserts take their image pages from.
+PhysAllocator* disk_allocator = nullptr;
 
 // The virtio-blk device in PCI slot kFirstDriveSlot + n is drive n; the one
 // in slot kFirstHardDiskSlot + n is hard disk n. The rest of the hard disk
@@ -71,17 +77,30 @@ constexpr u8 kLastHardDiskSlot = 0x1F;
 constexpr u64 page_size = 4096;
 constexpr u64 max_drive_bytes = 8ull << 20;
 constexpr u32 max_dms_image_bytes = 2u << 20;
+constexpr u32 max_insert_bytes = 4u << 20;
+// An insert reads this much per poll, so the machine stays responsive.
+constexpr u32 insert_chunk_bytes = 64u << 10;
 constexpr u32 startup_read_chunk = 512;
 constexpr u32 startup_print_cap = 4096;
 
-// A disk image held in memory that the direct map reaches.
+// A disk image held in memory that the direct map reaches. phys and pages
+// are the allocator's, so the pages can be given back once dos no longer
+// reads the image.
 struct Image {
-    const u8* data;
-    usize bytes;
+    const u8* data = nullptr;
+    usize bytes = 0;
+    u64 phys = 0;
+    u64 pages = 0;
 };
 
 constexpr u64 pages_for(u64 bytes) {
     return (bytes + page_size - 1) / page_size;
+}
+
+void free_image(PhysAllocator& phys_pages, const Image& image) {
+    if (image.phys != 0) {
+        phys_pages.free_pages(image.phys, image.pages);
+    }
 }
 
 // Prints value in lowercase hex, zero padded to at least `digits` digits.
@@ -157,7 +176,7 @@ bool read_drive(PhysAllocator& phys_pages, VirtioBlk& device, const char* prefix
         return false;
     }
     serial::write("virtio-blk: read ok\n");
-    drive = Image{phys_pages.to_ptr(buffer), static_cast<usize>(bytes)};
+    drive = Image{phys_pages.to_ptr(buffer), static_cast<usize>(bytes), buffer, page_count};
     return true;
 }
 
@@ -173,7 +192,8 @@ void write_dms_error(DmsError error, const DmsInfo& info, const char* prefix) {
 }
 
 // Unpacks the DMS archive in `drive` into fresh pages. Logs one line and
-// returns false on failure.
+// returns false on failure, giving back any pages it took. The archive's
+// pages stay the caller's to free.
 bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, const char* prefix,
                 Image& image) {
     DmsInfo info;
@@ -193,6 +213,12 @@ bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, const char* prefi
     const u64 work_phys = phys_pages.alloc_pages(work_pages);
     if (out_phys == 0 || work_phys == 0) {
         serial::write("disk: no memory\n");
+        if (out_phys != 0) {
+            phys_pages.free_pages(out_phys, out_pages);
+        }
+        if (work_phys != 0) {
+            phys_pages.free_pages(work_phys, work_pages);
+        }
         return false;
     }
     u8* out = phys_pages.to_ptr(out_phys);
@@ -200,8 +226,11 @@ bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, const char* prefi
     DmsWork& work = *reinterpret_cast<DmsWork*>(phys_pages.to_ptr(work_phys));
     const DmsError error =
         dms_unpack(drive.data, drive.bytes, out, info.image_bytes, work, info);
+    // The work pages are always done with; the output goes back on failure.
+    phys_pages.free_pages(work_phys, work_pages);
     if (error != DmsError::Ok) {
         write_dms_error(error, info, "");
+        phys_pages.free_pages(out_phys, out_pages);
         return false;
     }
     serial::write("disk: DMS ");
@@ -209,7 +238,7 @@ bool unpack_dms(PhysAllocator& phys_pages, const Image& drive, const char* prefi
     serial::write(", ");
     serial::write_dec(info.tracks_unpacked);
     serial::write(" tracks\n");
-    image = Image{out, info.image_bytes};
+    image = Image{out, info.image_bytes, out_phys, out_pages};
     return true;
 }
 
@@ -323,8 +352,11 @@ bool load_disk(PhysAllocator& phys_pages, MmioMapper& mmio, VirtioBlk& device,
         return false;
     }
     switch (detect_disk_format(drive.data, drive.bytes)) {
-    case DiskFormat::Dms:
-        return unpack_dms(phys_pages, drive, prefix, image);
+    case DiskFormat::Dms: {
+        const bool ok = unpack_dms(phys_pages, drive, prefix, image);
+        free_image(phys_pages, drive);
+        return ok;
+    }
     case DiskFormat::Adf:
         serial::write(prefix);
         serial::write("disk: ADF\n");
@@ -333,6 +365,7 @@ bool load_disk(PhysAllocator& phys_pages, MmioMapper& mmio, VirtioBlk& device,
     case DiskFormat::Unknown:
         serial::write(prefix);
         serial::write("disk: unknown format\n");
+        free_image(phys_pages, drive);
         return false;
     }
     return false;
@@ -380,9 +413,28 @@ bool same_address(PciAddress a, PciAddress b) {
     return a.bus == b.bus && a.device == b.device && a.function == b.function;
 }
 
-// The volumes stay mounted, and their images in memory, for good, as dos
-// needs them.
+// The volumes stay mounted for as long as dos holds their disk, and the
+// image pages behind them are given back once a replacement has dropped
+// every lock and open file of the old disk.
 constinit AdfVolume drive_volumes[kFloppyDrives]{};
+
+struct DriveImage {
+    u64 phys = 0;
+    u64 pages = 0;
+};
+
+constinit DriveImage drive_images[kFloppyDrives]{};
+
+void remember_image(u32 n, const Image& image) {
+    drive_images[n] = DriveImage{image.phys, image.pages};
+}
+
+void forget_image(PhysAllocator& phys_pages, u32 n) {
+    if (drive_images[n].phys != 0) {
+        phys_pages.free_pages(drive_images[n].phys, drive_images[n].pages);
+    }
+    drive_images[n] = DriveImage{};
+}
 
 // --- floppy media ------------------------------------------------------------
 //
@@ -452,6 +504,7 @@ void floppy_reload(Dos& dos, u32 n) {
         switch (detect_disk_format(drive.data, drive.bytes)) {
         case DiskFormat::Dms:
             loaded = unpack_dms(*watch_pages, drive, prefix, image);
+            free_image(*watch_pages, drive);
             break;
         case DiskFormat::Adf:
             serial::write(prefix);
@@ -461,20 +514,32 @@ void floppy_reload(Dos& dos, u32 n) {
         case DiskFormat::Unknown:
             serial::write(prefix);
             serial::write("disk: unknown format\n");
+            free_image(*watch_pages, drive);
             loaded = false;
             break;
         }
     }
     if (loaded && mount_disk(image, prefix, drive_volumes[n])) {
-        dos.replace_disk(n, &drive_volumes[n]);
+        if (dos.replace_disk(n, &drive_volumes[n])) {
+            forget_image(*watch_pages, n);
+            remember_image(n, image);
+        } else {
+            free_image(*watch_pages, image);
+        }
     } else {
-        dos.replace_disk(n, nullptr);
+        if (loaded) {
+            free_image(*watch_pages, image);
+        }
+        if (dos.replace_disk(n, nullptr)) {
+            forget_image(*watch_pages, n);
+        }
     }
 }
 
 }
 
 void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& mmio) {
+    disk_allocator = &phys_pages;
     pci_scan(&log_pci_function, nullptr);
     splash_progress(3, kSplashKernelSteps);
 
@@ -543,6 +608,7 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
     const u32 hard_count =
         hard_disks_mount(hard_disks, kMaxHardDisks, phys_pages, hard_volumes, kMaxHardVolumes,
                          disk_units);
+    hard_volume_count = hard_count;
     bool hard_boot = false;
     for (u32 i = 0; i < hard_count; ++i) {
         hard_boot = hard_boot || hard_volumes[i].bootable;
@@ -565,6 +631,12 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
     hda_init(mmio, phys_pages);
     splash_progress(5, kSplashKernelSteps);
     const bool df0 = boot_loaded && mount_disk(boot, "", drive_volumes[0]);
+    if (boot_loaded && !df0) {
+        free_image(phys_pages, boot);
+    }
+    if (df0) {
+        remember_image(0, boot);
+    }
     if (!df0 && !hard_boot) {
         return;
     }
@@ -589,9 +661,13 @@ void boot_disk_run(const BootInfo& info, PhysAllocator& phys_pages, MmioMapper& 
             continue;
         }
         Image image;
-        if (load_disk(phys_pages, mmio, drive_devices[n], addresses[n], prefix, image) &&
-            mount_disk(image, prefix, drive_volumes[n])) {
-            drives.volume[n] = &drive_volumes[n];
+        if (load_disk(phys_pages, mmio, drive_devices[n], addresses[n], prefix, image)) {
+            if (mount_disk(image, prefix, drive_volumes[n])) {
+                drives.volume[n] = &drive_volumes[n];
+                remember_image(n, image);
+            } else {
+                free_image(phys_pages, image);
+            }
         }
     }
     // The hard disk partitions follow the floppy drives.
@@ -629,6 +705,385 @@ void boot_disk_poll_media(Dos& dos) {
         }
         watch.signature = signature;
         floppy_reload(dos, n);
+    }
+}
+
+namespace {
+
+// The request the interrupt remembers and the results it copies: the
+// generation counts are odd while their buffer is being written, so a
+// reader that sees an odd or changed count keeps what it had.
+inline void memory_barrier() {
+    asm volatile("" ::: "memory");
+}
+
+constinit u32 request_seq = 0;
+constinit MonitorRequest pending_request{};
+constinit u32 handled_seq = 0;
+constinit u32 publish_seq = 0;
+constinit MonitorListing published_listing{};
+constinit char published_status[sizeof(MonitorSnapshot::status)]{};
+constinit MonitorListing shown_listing{};
+constinit char shown_status[sizeof(MonitorSnapshot::status)]{};
+constinit bool waiting_published = false;
+
+// One file being read into the drive's next image, a chunk per poll.
+struct InsertJob {
+    bool active = false;
+    u32 drive = 0;
+    const AdfVolume* source = nullptr;
+    DirEntry file{};
+    u32 size = 0;
+    u32 offset = 0;
+    u64 phys = 0;
+    u64 pages = 0;
+};
+
+constinit InsertJob insert{};
+
+void copy_text(char* out, u32 capacity, const char* text) {
+    u32 i = 0;
+    for (; text[i] != '\0' && i + 1 < capacity; ++i) {
+        out[i] = text[i];
+    }
+    out[i] = '\0';
+}
+
+void append_text(char* out, u32 capacity, u32& length, const char* text) {
+    for (u32 i = 0; text[i] != '\0' && length + 1 < capacity; ++i) {
+        out[length++] = text[i];
+    }
+    out[length] = '\0';
+}
+
+void append_dec(char* out, u32 capacity, u32& length, u32 value) {
+    char digits[12];
+    if (format_u64(digits, sizeof digits, value, 10) != 0) {
+        append_text(out, capacity, length, digits);
+    }
+}
+
+// Publishes the status and whether the listing is still loading; the
+// entries and the path stay as they were.
+void publish_status(const char* text, bool loading) {
+    ++publish_seq;
+    memory_barrier();
+    published_listing.loading = loading;
+    copy_text(published_status, sizeof published_status, text);
+    memory_barrier();
+    ++publish_seq;
+}
+
+void publish_error(const char* what, FsError error) {
+    char text[sizeof published_status];
+    u32 n = 0;
+    append_text(text, sizeof text, n, what);
+    append_text(text, sizeof text, n, ": ");
+    append_text(text, sizeof text, n, fs_error_name(error));
+    publish_status(text, false);
+}
+
+void abandon_insert() {
+    free_image(*disk_allocator, Image{nullptr, 0, insert.phys, insert.pages});
+    insert = InsertJob{};
+}
+
+void fail_insert(const char* why) {
+    abandon_insert();
+    publish_status(why, false);
+}
+
+bool take_request(MonitorRequest& out) {
+    for (;;) {
+        const u32 first = request_seq;
+        memory_barrier();
+        if ((first & 1) != 0) {
+            continue;
+        }
+        if (first == handled_seq) {
+            return false;
+        }
+        out = pending_request;
+        memory_barrier();
+        if (request_seq != first) {
+            continue;
+        }
+        handled_seq = first;
+        return true;
+    }
+}
+
+bool same_device(const char* a, const char* b) {
+    while (*a != '\0' &&
+           disk_browser_detail::fold_ascii(*a) == disk_browser_detail::fold_ascii(*b)) {
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+const AdfVolume* partition_volume(const char* name) {
+    for (u32 i = 0; i < hard_volume_count && i < kMaxHardVolumes; ++i) {
+        if (same_device(hard_volumes[i].device, name)) {
+            return &hard_volumes[i].volume;
+        }
+    }
+    return nullptr;
+}
+
+void publish_listing_error(const char* path, const char* error) {
+    ++publish_seq;
+    memory_barrier();
+    published_listing = MonitorListing{};
+    copy_text(published_listing.path, sizeof published_listing.path, path);
+    copy_text(published_listing.error, sizeof published_listing.error, error);
+    memory_barrier();
+    ++publish_seq;
+}
+
+void list_directory(const MonitorRequest& request) {
+    if (request.path[0] == '\0') {
+        const char* devices[kMaxHardVolumes];
+        u32 count = 0;
+        for (u32 i = 0; i < hard_volume_count && i < kMaxHardVolumes; ++i) {
+            devices[count++] = hard_volumes[i].device;
+        }
+        ++publish_seq;
+        memory_barrier();
+        disk_browser_list_partitions(devices, count, published_listing);
+        memory_barrier();
+        ++publish_seq;
+        return;
+    }
+    char partition[kDiskPartitionBytes];
+    char rest[kDiskPathBytes];
+    const AdfVolume* volume = nullptr;
+    if (disk_browser_split(request.path, partition, rest)) {
+        volume = partition_volume(partition);
+    }
+    if (volume == nullptr) {
+        publish_listing_error(request.path, "no such partition");
+        return;
+    }
+    ++publish_seq;
+    memory_barrier();
+    disk_browser_list_directory(*volume, rest, published_listing);
+    copy_text(published_listing.path, sizeof published_listing.path, request.path);
+    memory_barrier();
+    ++publish_seq;
+}
+
+void start_insert(const MonitorRequest& request) {
+    if (request.drive >= kFloppyDrives) {
+        publish_status("insert: no such drive", false);
+        return;
+    }
+    char partition[kDiskPartitionBytes];
+    char rest[kDiskPathBytes];
+    const AdfVolume* volume = nullptr;
+    if (disk_browser_split(request.path, partition, rest)) {
+        volume = partition_volume(partition);
+    }
+    if (volume == nullptr) {
+        publish_status("insert: no such partition", false);
+        return;
+    }
+    DirEntry file;
+    const FsError error = adf_find(*volume, rest, file);
+    if (error != FsError::Ok) {
+        publish_error("insert", error);
+        return;
+    }
+    if (file.is_dir) {
+        publish_status("insert: not a file", false);
+        return;
+    }
+    if (file.size > max_insert_bytes) {
+        publish_status("insert: file larger than 4 MiB", false);
+        return;
+    }
+    if (file.size == 0) {
+        publish_status("insert: empty file", false);
+        return;
+    }
+    const u64 pages = pages_for(file.size);
+    const u64 phys = disk_allocator->alloc_pages(pages);
+    if (phys == 0) {
+        publish_status("insert: no memory", false);
+        return;
+    }
+    insert = InsertJob{};
+    insert.active = true;
+    insert.drive = request.drive;
+    insert.source = volume;
+    insert.file = file;
+    insert.size = file.size;
+    insert.phys = phys;
+    insert.pages = pages;
+    publish_status("insert: reading", true);
+}
+
+void finish_insert(Dos& dos) {
+    const u32 drive = insert.drive;
+    Image image{disk_allocator->to_ptr(insert.phys), insert.size, insert.phys, insert.pages};
+    insert = InsertJob{};
+    switch (detect_disk_format(image.data, image.bytes)) {
+    case DiskFormat::Dms: {
+        Image unpacked;
+        const bool ok = unpack_dms(*disk_allocator, image, "monitor: ", unpacked);
+        free_image(*disk_allocator, image);
+        if (!ok) {
+            publish_status("insert: DMS unpack failed", false);
+            return;
+        }
+        image = unpacked;
+        break;
+    }
+    case DiskFormat::Adf:
+        break;
+    case DiskFormat::Unknown:
+        free_image(*disk_allocator, image);
+        publish_status("insert: unknown format", false);
+        return;
+    }
+    AdfVolume volume{};
+    const FsError error = adf_mount(image.data, image.bytes, volume);
+    if (error != FsError::Ok) {
+        free_image(*disk_allocator, image);
+        publish_error("insert: mount", error);
+        return;
+    }
+    if (!dos.replace_disk(drive, &volume)) {
+        free_image(*disk_allocator, image);
+        publish_status("insert: replace failed", false);
+        return;
+    }
+    forget_image(*disk_allocator, drive);
+    remember_image(drive, image);
+    char text[sizeof published_status];
+    u32 n = 0;
+    append_text(text, sizeof text, n, "inserted DF");
+    append_dec(text, sizeof text, n, drive);
+    append_text(text, sizeof text, n, ": ");
+    append_text(text, sizeof text, n, volume.name);
+    publish_status(text, false);
+}
+
+void run_insert_step(Dos& dos) {
+    const u32 left = insert.size - insert.offset;
+    const u32 want = left < insert_chunk_bytes ? left : insert_chunk_bytes;
+    u8* out = disk_allocator->to_ptr(insert.phys) + insert.offset;
+    u32 got = 0;
+    const FsError error = adf_read(*insert.source, insert.file, insert.offset, out, want, got);
+    if (error != FsError::Ok) {
+        publish_error("insert: read", error);
+        abandon_insert();
+        return;
+    }
+    if (got != want) {
+        fail_insert("insert: short read");
+        return;
+    }
+    insert.offset += got;
+    if (insert.offset == insert.size) {
+        finish_insert(dos);
+    }
+}
+
+void eject(Dos& dos, const MonitorRequest& request) {
+    if (request.drive >= kFloppyDrives) {
+        publish_status("eject: no such drive", false);
+        return;
+    }
+    if (!dos.replace_disk(request.drive, nullptr)) {
+        publish_status("eject: replace failed", false);
+        return;
+    }
+    forget_image(*disk_allocator, request.drive);
+    char text[sizeof published_status];
+    u32 n = 0;
+    append_text(text, sizeof text, n, "ejected DF");
+    append_dec(text, sizeof text, n, request.drive);
+    publish_status(text, false);
+}
+
+void run_request(Dos& dos, const MonitorRequest& request) {
+    switch (request.op) {
+    case MonitorOp::ListDirectory:
+        list_directory(request);
+        break;
+    case MonitorOp::Insert:
+        start_insert(request);
+        break;
+    case MonitorOp::Eject:
+        eject(dos, request);
+        break;
+    default:
+        break;
+    }
+}
+
+void note_waiting() {
+    if (waiting_published || (request_seq == handled_seq && !insert.active)) {
+        return;
+    }
+    waiting_published = true;
+    publish_status("disk request waiting: Forbid held", true);
+}
+
+}
+
+void boot_disk_request(const MonitorRequest& request) {
+    ++request_seq;
+    memory_barrier();
+    pending_request = request;
+    memory_barrier();
+    ++request_seq;
+}
+
+void boot_disk_poll(Dos& dos, Exec& exec) {
+    if (disk_allocator == nullptr) {
+        return;
+    }
+    if (exec.forbidden()) {
+        note_waiting();
+        return;
+    }
+    waiting_published = false;
+    MonitorRequest request;
+    if (take_request(request)) {
+        // Browsing goes on beside an insert; another change replaces it.
+        if (request.op != MonitorOp::ListDirectory) {
+            abandon_insert();
+        }
+        run_request(dos, request);
+        return;
+    }
+    if (insert.active) {
+        run_insert_step(dos);
+    }
+}
+
+void boot_disk_snapshot(MonitorSnapshot& out) {
+    const u32 first = publish_seq;
+    memory_barrier();
+    if ((first & 1) == 0) {
+        out.listing = published_listing;
+        copy_text(out.status, sizeof out.status, published_status);
+        memory_barrier();
+        if (publish_seq == first) {
+            shown_listing = out.listing;
+            copy_text(shown_status, sizeof shown_status, out.status);
+        } else {
+            out.listing = shown_listing;
+            copy_text(out.status, sizeof out.status, shown_status);
+        }
+    } else {
+        out.listing = shown_listing;
+        copy_text(out.status, sizeof out.status, shown_status);
+    }
+    if (request_seq != handled_seq) {
+        out.listing.loading = true;
     }
 }
 

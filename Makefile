@@ -39,6 +39,8 @@ PIC_DISK  := $(BUILD)/pic-disk.adf
 TEST_HDF  := $(BUILD)/test.hdf
 # The same partition inside a GPT of a disk with 4096 byte sectors.
 TEST_HDF4K := $(BUILD)/test-gpt4k.hdf
+# A bootable hard disk whose DH0: holds the test disk as Disks/test.dms.
+BROWSE_HDF := $(BUILD)/browse.hdf
 ADFTOOL   := $(BUILD)/tools/adftool
 DISK      ?= $(TEST_DISK)
 export DISK DISK1 DISK2 DISK3
@@ -246,7 +248,7 @@ MONITOR_SELECT  := sendkey f12;$(MONITOR_STEP);sendkey down;$(MONITOR_STEP)
 MONITOR_SUSPEND := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP)
 MONITOR_END     := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
 
-check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(TEST_HDF4K) $(ADFTOOL) $(ZERO_DISK) $(CORRUPT_DISK)
+check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(TEST_HDF4K) $(BROWSE_HDF) $(ADFTOOL) $(ZERO_DISK) $(CORRUPT_DISK)
 	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
 	tools/boot_check.sh --disk $(TEST_DISK) "Hombre loader" \
 	    "kernel loaded: entry=0xffffffff8010" "Hombre kernel booted" "usable memory:" \
@@ -309,6 +311,17 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "hd1: DH0: HombreTest (OFS), 16384 blocks, bootpri 0, bootable" \
 	    "startup: ended, returned 0" "shell: builtin why returned 0"
 	test "$$($(ADFTOOL) cat $(BUILD)/check.hdf note)" = "hej"
+	cp $(BROWSE_HDF) $(BUILD)/browse-check.hdf
+	tools/boot_check.sh --no-disk --hdf $(BUILD)/browse-check.hdf \
+	    --keys "f12 tab down ret ret ret ret f12 d i r spc d f 1 shift-dot ret" \
+	    "dos: DF1: disk changed to HombreTest" "monitor: insert DF1 DH0:Disks/test.dms" \
+	    "shell: line: dir df1:"
+	cp $(BROWSE_HDF) $(BUILD)/browse-check.hdf
+	tools/boot_check.sh --no-disk --hdf $(BUILD)/browse-check.hdf \
+	    --keys "f12 tab down ret ret ret ret f12 f12 tab down e f12 d i r spc d f 1 shift-dot ret" \
+	    "dos: DF1: disk changed to HombreTest" "dos: DF1: disk removed" \
+	    "monitor: insert DF1 DH0:Disks/test.dms" "monitor: eject DF1" \
+	    "shell: line: dir df1:"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "v e r s i o n ret z z z ret bracket_left apostrophe semicolon ret" \
 	    "usb: keyboard ready" "shell: ready" "shell: line: version" \
@@ -560,6 +573,12 @@ $(TEST_HDF): $(MKHDF) $(TEST_DISK)
 
 $(TEST_HDF4K): $(MKHDF) $(TEST_DISK)
 	$(MKHDF) --gpt4k $@ $(TEST_DISK)
+
+# The picture disk boots a shell from a hard disk without a Startup-Sequence
+# and leaves Disks the first drawer of the partition, where the monitor's
+# fixed key sequence finds it.
+$(BROWSE_HDF): $(MKHDF) $(TEST_DISK) $(PIC_DISK)
+	$(MKHDF) --add DH0:Disks/test.dms=$(TEST_DISK) $@ $(PIC_DISK)
 
 MKDISK    := $(BUILD)/tools/mkdisk
 

@@ -225,6 +225,20 @@ void open_monitor() {
     }
 }
 
+void log_disk_request(const MonitorRequest& request) {
+    LogLine line;
+    if (request.op == MonitorOp::Insert) {
+        line.add("monitor: insert DF");
+        line.add_dec(request.drive);
+        line.add(' ');
+        line.add(request.path);
+    } else {
+        line.add("monitor: eject DF");
+        line.add_dec(request.drive);
+    }
+    log_lines.push(line);
+}
+
 void handle_request(const MonitorRequest& request) {
     if (request.op == MonitorOp::Reboot) {
         reboot();
@@ -238,6 +252,13 @@ void handle_request(const MonitorRequest& request) {
                 request.op == MonitorOp::End) &&
                monitor_host.rescue != nullptr) {
         monitor_host.rescue(request);
+    } else if ((request.op == MonitorOp::ListDirectory || request.op == MonitorOp::Insert ||
+                request.op == MonitorOp::Eject) &&
+               monitor_host.disk != nullptr) {
+        if (request.op != MonitorOp::ListDirectory) {
+            log_disk_request(request);
+        }
+        monitor_host.disk(request);
     }
 }
 

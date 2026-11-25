@@ -552,6 +552,10 @@ public:
     // and Disable. Reads only, for the system monitor. False otherwise.
     bool task_info(u32 slot, TaskInfo& out) const;
 
+    // True while the running task holds Forbid or Disable, so code that must
+    // not run in the middle of a file system operation waits.
+    bool forbidden() const;
+
     // The 68000 registers of the task in slot, live for the running one and
     // as saved for another, and the native it is in, null outside one. Reads
     // only; false for a slot without a task.
@@ -698,7 +702,6 @@ private:
 
     u32 make_native_node(const char* name, u16 version, u8 node_type, u32 list_offset,
                          const NativeVector* fns, u32 count, void* ctx, u32 pos_size);
-    bool forbidden() const;
     void maybe_preempt();
     void hold_while_suspended();
     void end_for_rescue(u32 slot, const TaskInfo& info);

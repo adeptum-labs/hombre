@@ -717,6 +717,7 @@ void task_host_poll(void*) {
     intuition.intui_ticks();
     pump_audio();
     boot_disk_poll_media(dos);
+    boot_disk_poll(dos, exec);
 }
 
 bool hook_trampoline(void*) {
@@ -815,6 +816,7 @@ void monitor_snapshot(MonitorSnapshot& out) {
         }
         out.drives[i].volume[j] = '\0';
     }
+    boot_disk_snapshot(out);
 }
 
 // A running task is where the tick found it, in translated code with the
@@ -869,6 +871,10 @@ void monitor_rescue(const MonitorRequest& request) {
                       : request.op == MonitorOp::Resume ? Rescue::Resume
                                                         : Rescue::End;
     exec.request_rescue(op, request.slot, request.task_addr);
+}
+
+void monitor_disk(const MonitorRequest& request) {
+    boot_disk_request(request);
 }
 
 bool task_host_slice_over(void*) {
@@ -1030,7 +1036,8 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
     monitor_set_host(MonitorHost{&monitor_current_task, &monitor_take_screen,
                                  &monitor_give_screen, &monitor_refresh_screen, &monitor_polls,
-                                 &monitor_snapshot, &monitor_inspect, &monitor_rescue});
+                                 &monitor_snapshot, &monitor_inspect, &monitor_rescue,
+                                 &monitor_disk});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
         return false;
