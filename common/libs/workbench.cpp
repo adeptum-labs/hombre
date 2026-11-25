@@ -1444,14 +1444,30 @@ void Workbench::place_icons(const DrawerWindow& drawer) {
     if (rows < 1) {
         rows = 1;
     }
+    // Whether the icon at left, top would cover one with a place of its own.
+    const auto taken = [&](const IconEntry& icon, i32 left, i32 top) {
+        for (const IconEntry& other : icons_) {
+            if (other.owner == drawer.id && other.placed && left < other.left + other.width &&
+                other.left < left + icon.width &&
+                top < other.top + other.height + label_height &&
+                other.top < top + icon.height + label_height) {
+                return true;
+            }
+        }
+        return false;
+    };
     u32 slot = 0;
     for (IconEntry& icon : icons_) {
         if (icon.owner != drawer.id || icon.placed) {
             continue;
         }
-        icon.left = kGridMarginX + static_cast<i32>(slot / static_cast<u32>(rows)) * cell_width;
-        icon.top = kGridMarginY + static_cast<i32>(slot % static_cast<u32>(rows)) * cell_height;
-        ++slot;
+        do {
+            icon.left =
+                kGridMarginX + static_cast<i32>(slot / static_cast<u32>(rows)) * cell_width;
+            icon.top =
+                kGridMarginY + static_cast<i32>(slot % static_cast<u32>(rows)) * cell_height;
+            ++slot;
+        } while (taken(icon, icon.left, icon.top));
     }
 }
 

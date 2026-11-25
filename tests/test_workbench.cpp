@@ -3465,6 +3465,29 @@ void execute_command_hands_the_line_to_a_shell() {
     CHECK(offered == std::vector<std::string>({"", "List RAM:"}));
 }
 
+void an_icon_without_a_place_keeps_clear_of_the_others() {
+    Rig r;
+    put_ram_project("Loose");
+    const TwoWindows w = open_tools_and_ram(r);
+    const Workbench::IconEntry first = r.workbench.icon(r.find_icon_in(w.ram, "Loose"));
+
+    // An icon snapshot where the grid would put the other one.
+    put_ram_project("Fixed");
+    r.rescan("Ram Disk:");
+    const u32 fixed = r.find_icon_in(w.ram, "Fixed");
+    const Workbench::IconEntry at = r.workbench.icon(fixed);
+    r.drag(w.ram, at.left + 3, at.top + 3, r.screen_x(w.ram, first.left + 3),
+           r.screen_y(w.ram, first.top + 3));
+    CHECK(r.workbench.snapshot_icon(w.ram, fixed));
+    r.rescan("Ram Disk:");
+
+    const Workbench::IconEntry kept = r.workbench.icon(r.find_icon_in(w.ram, "Fixed"));
+    const Workbench::IconEntry loose = r.workbench.icon(r.find_icon_in(w.ram, "Loose"));
+    CHECK_EQ(kept.left, first.left);
+    CHECK_EQ(kept.top, first.top);
+    CHECK(loose.left >= kept.left + kept.width || loose.top >= kept.top + kept.height);
+}
+
 void window_update_rescans_the_drawer() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -4131,6 +4154,7 @@ int main() {
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
     window_update_rescans_the_drawer();
+    an_icon_without_a_place_keeps_clear_of_the_others();
     execute_command_hands_the_line_to_a_shell();
     copy_duplicates_a_file_or_a_drawer_under_a_new_name();
     copy_refuses_disks_and_keeps_names_short();
