@@ -891,6 +891,10 @@ public:
     // a file on RAM: protected from reading is not.
     bool read_file(const char* name, u8* data, u32 capacity, u32& got, u32& error);
 
+    // Reads the first bytes of the file name into data, for a look at what
+    // kind of file it is. False when it has fewer or cannot be read.
+    bool read_head(const char* name, u8* data, u32 bytes);
+
     // The drive of the boot volume.
     u32 boot_volume() const { return boot_vol_; }
 

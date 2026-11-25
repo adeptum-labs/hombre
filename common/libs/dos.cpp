@@ -2623,6 +2623,30 @@ struct DosOps {
         return true;
     }
 
+    // The entry of a file that may be read; sets error and IoErr when name
+    // is none.
+    static bool locate_readable(Dos& d, const char* name, DirEntry& entry, u32& error) {
+        Bus b(*d.m_);
+        u8 vol = Dos::kVolDf0;
+        char resolved[Dos::kMaxPath];
+        if (!locate(d, b, name, vol, resolved, entry, error)) {
+            if (b.ok()) {
+                d.set_last_error(error);
+            }
+            return false;
+        }
+        if (entry.is_dir) {
+            error = ERROR_OBJECT_WRONG_TYPE;
+        } else if (entry.volume == Dos::kVolRam && entry.header_block > 0 &&
+                   ram_denies(d, entry.header_block - 1, kFibfRead)) {
+            error = ERROR_READ_PROTECTED;
+        } else {
+            return true;
+        }
+        d.set_last_error(error);
+        return false;
+    }
+
     // --- console and files -------------------------------------------------
 
     static Dos::FileSlot make_file_slot(Dos::Stream stream, const DirEntry& entry,
@@ -10918,25 +10942,8 @@ bool Dos::read_file(const char* name, u8* data, u32 capacity, u32& got, u32& err
     if (m_ == nullptr || name == nullptr || data == nullptr) {
         return false;
     }
-    Bus b(*m_);
-    u8 vol = kVolDf0;
-    char resolved[kMaxPath];
     DirEntry entry{};
-    if (!DosOps::locate(*this, b, name, vol, resolved, entry, error)) {
-        if (b.ok()) {
-            set_last_error(error);
-        }
-        return false;
-    }
-    if (entry.is_dir) {
-        error = ERROR_OBJECT_WRONG_TYPE;
-        set_last_error(error);
-        return false;
-    }
-    if (entry.volume == kVolRam && entry.header_block > 0 &&
-        DosOps::ram_denies(*this, entry.header_block - 1, DosOps::kFibfRead)) {
-        error = ERROR_READ_PROTECTED;
-        set_last_error(error);
+    if (!DosOps::locate_readable(*this, name, entry, error)) {
         return false;
     }
     const u32 size = DosOps::fs_size(*this, entry);
@@ -10954,6 +10961,18 @@ bool Dos::read_file(const char* name, u8* data, u32 capacity, u32& got, u32& err
     }
     got = read;
     return true;
+}
+
+bool Dos::read_head(const char* name, u8* data, u32 bytes) {
+    if (m_ == nullptr || name == nullptr || data == nullptr) {
+        return false;
+    }
+    DirEntry entry{};
+    u32 error = 0;
+    u32 read = 0;
+    return DosOps::locate_readable(*this, name, entry, error) &&
+           DosOps::fs_size(*this, entry) >= bytes &&
+           DosOps::fs_read(*this, entry, 0, data, bytes, read) == 0 && read == bytes;
 }
 
 bool Dos::write_file(const char* name, const u8* data, u32 bytes, u32& error) {
