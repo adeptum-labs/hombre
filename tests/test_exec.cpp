@@ -4462,6 +4462,141 @@ void ending_a_damaged_task_leaves_the_running_task_alone() {
     (void)boot;
 }
 
+// Whether node is on the list, walking at most 64 nodes inside guest
+// memory; broken tells a walk that left it or did not end.
+bool on_task_list(Rig& r, u32 list, u32 node, bool& broken) {
+    broken = false;
+    u32 n = r.get32(list + LH_HEAD);
+    for (u32 i = 0; i < 64; ++i) {
+        if (n == 0 || n >= kTestGuestBytes - 16 || (n & 1) != 0) {
+            broken = true;
+            return false;
+        }
+        if (n == node) {
+            return true;
+        }
+        const u32 succ = r.get32(n + LN_SUCC);
+        if (succ == 0) {
+            return false;
+        }
+        n = succ;
+    }
+    broken = true;
+    return false;
+}
+
+struct IdleEnd {
+    Rig* r = nullptr;
+    u32 step = 0;
+    u32 slot = 0;
+    u32 task = 0;
+    bool damage = false;
+    u32 wake = 0;
+};
+
+// As the kernel's poll does: the monitor's request runs from the idle poll
+// of the task that waits.
+bool end_from_idle(void* ctx) {
+    IdleEnd& s = *static_cast<IdleEnd*>(ctx);
+    if (s.step == 0) {
+        s.step = 1;
+        if (s.damage) {
+            s.r->put32(s.task + LN_SUCC, 0xFFFFFFF1);
+            s.r->put32(s.task + LN_PRED, 3);
+        }
+        g_exec.request_rescue(Rescue::End, s.slot, s.task);
+        g_exec.run_rescue();
+        return true;
+    }
+    if (s.step == 1 && s.wake != 0) {
+        s.step = 2;
+        g_exec.signal_task(s.wake, 1u << 20);
+        return true;
+    }
+    return false;
+}
+
+// The running task waits, damaged, and is ended from its own idle poll:
+// its wait ends without writing through its links.
+void ending_the_damaged_running_task_from_its_wait() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 other = setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "other", kNames);
+    CHECK_EQ(g_exec.spawn(other, 0x2000, 0, false), other);
+    CHECK(g_exec.yield_in_native());
+    r.cpu().d[0] = 1u << 21;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    IdleEnd s{&r, 0, 0, boot, true, 0};
+    host.on_idle = end_from_idle;
+    host.on_idle_ctx = &s;
+    const u32 sysbase = r.get32(4);
+    const u32 low = r.get32(0);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Stopped);
+    bool broken = false;
+    CHECK(!on_task_list(r, r.base() + TaskWait, boot, broken));
+    CHECK(!broken);
+    CHECK(on_task_list(r, r.base() + TaskWait, other, broken));
+    CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+    CHECK_EQ(r.get32(4), sysbase);
+    CHECK_EQ(r.get32(0), low);
+}
+
+// The boot task waits, damaged, and is ended while another task runs: the
+// Ctrl+C that wakes it does not write through its links.
+void ending_the_damaged_waiting_boot_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 other = setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "other", kNames);
+    CHECK_EQ(g_exec.spawn(other, 0x2000, 0, false), other);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    ExecTest::set_task_run_depth(g_exec, 0, 1);
+    r.put32(boot + LN_SUCC, 0xFFFFFFF1);
+    r.put32(boot + LN_PRED, 3);
+    const u32 sysbase = r.get32(4);
+    g_exec.request_rescue(Rescue::End, 0, boot);
+    g_exec.run_rescue();
+    CHECK(g_exec.scheduler().slot(0).state == TaskState::Ready);
+    bool broken = false;
+    CHECK(on_task_list(r, r.base() + TaskReady, boot, broken));
+    CHECK(!on_task_list(r, r.base() + TaskWait, boot, broken));
+    CHECK(!broken);
+    CHECK_EQ(r.get32(4), sysbase);
+}
+
+// Another task, damaged, is ended from the idle poll of the running task,
+// which waits: the lists built again keep the running task on TaskWait.
+void ending_a_damaged_task_from_a_waiting_tasks_poll() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 damaged = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "damaged", kNames);
+    CHECK_EQ(g_exec.spawn(damaged, 0x2000, 0, false), damaged);
+    CHECK(g_exec.yield_in_native());
+    r.cpu().d[0] = 1u << 21;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    IdleEnd s{&r, 0, 1, damaged, true, boot};
+    host.on_idle = end_from_idle;
+    host.on_idle_ctx = &s;
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 1u << 20);
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
+    const u32 list = r.base() + TaskWait;
+    CHECK_EQ(r.get32(list + LH_HEAD), list + LH_TAIL);
+    CHECK_EQ(r.get32(list + LH_TAILPRED), list + LH_HEAD);
+    CHECK(r.walk(r.base() + TaskReady).empty());
+}
+
 // --- devices and IORequests ---------------------------------------------
 
 struct FakeDevState {
@@ -4944,6 +5079,9 @@ int main() {
     a_task_woken_while_suspended_is_queued_once();
     ending_a_task_stops_its_code_or_removes_it();
     ending_a_damaged_task_leaves_the_running_task_alone();
+    ending_the_damaged_running_task_from_its_wait();
+    ending_the_damaged_waiting_boot_task();
+    ending_a_damaged_task_from_a_waiting_tasks_poll();
     ending_a_shell_stops_its_command_and_keeps_the_shell();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();

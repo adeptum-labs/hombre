@@ -622,10 +622,14 @@ struct ExecOps {
                                      (recvd & e.tasks_[id].sleep_signals) != 0)
                                   : ((recvd & wanted) != 0 || (id == 0 && ctrl_c));
             if (wake) {
-                remove(b, addr);
+                const bool linked = e.unlink_task(addr);
                 b.w8(addr + TC_STATE, TS_READY);
                 e.sched_.wake(id);
-                enqueue(b, e.base_ + TaskReady, addr);
+                if (linked) {
+                    enqueue(b, e.base_ + TaskReady, addr);
+                } else {
+                    e.rebuild_task_lists();
+                }
                 if (e.sched_.should_switch_now()) {
                     e.pending_switch_ = true;
                 }
@@ -685,8 +689,8 @@ struct ExecOps {
             b.stop();
             return false;
         }
+        const bool linked = cur_addr == 0 || e.unlink_task(cur_addr);
         if (cur_addr != 0) {
-            remove(b, cur_addr);
             b.w8(cur_addr + TC_STATE, TS_RUN);
             b.w32(cur_addr + TC_SIGWAIT, 0);
         }
@@ -696,6 +700,9 @@ struct ExecOps {
         if (!e.sched_.switch_to(cur)) {
             b.stop();
             return false;
+        }
+        if (!linked) {
+            e.rebuild_task_lists();
         }
         return true;
     }
@@ -739,7 +746,7 @@ struct ExecOps {
                 if (!is_remove && cur == 0 && (signals(e, b) & SIGBREAKF_CTRL_C) != 0 &&
                     e.sched_.slot(0).state == TaskState::Waiting && !e.tasks_[0].sleeping) {
                     if (cur_addr != 0) {
-                        remove(b, cur_addr);
+                        e.unlink_task(cur_addr);
                         b.w8(cur_addr + TC_STATE, TS_READY);
                     }
                     e.sched_.wake(0);
@@ -773,7 +780,7 @@ struct ExecOps {
                     if (e.sched_.slot(0).state == TaskState::Waiting) {
                         const u32 boot_addr = e.tasks_[0].task_addr;
                         if (boot_addr != 0) {
-                            remove(b, boot_addr);
+                            e.unlink_task(boot_addr);
                             b.w8(boot_addr + TC_STATE, TS_READY);
                         }
                         e.sched_.wake(0);
@@ -888,11 +895,11 @@ struct ExecOps {
         if (id >= 0) {
             const TaskState st = e.sched_.slot(static_cast<u32>(id)).state;
             if (st == TaskState::Ready) {
-                remove(b, addr);
+                e.unlink_task(addr);
                 e.sched_.set_priority(id, new_pri);
                 enqueue(b, e.base_ + TaskReady, addr);
             } else if (st == TaskState::Waiting) {
-                remove(b, addr);
+                e.unlink_task(addr);
                 e.sched_.set_priority(id, new_pri);
                 enqueue(b, e.base_ + TaskWait, addr);
             } else {
@@ -1130,7 +1137,7 @@ struct ExecOps {
                     e.abort_to_boot_task_ = true;
                     if (e.sched_.slot(0).state == TaskState::Waiting) {
                         if (e.tasks_[0].task_addr != 0) {
-                            remove(b, e.tasks_[0].task_addr);
+                            e.unlink_task(e.tasks_[0].task_addr);
                             b.w8(e.tasks_[0].task_addr + TC_STATE, TS_READY);
                         }
                         e.sched_.wake(0);
@@ -3608,7 +3615,7 @@ void Exec::expire_timers() {
         if (sched_.slot(i).state == TaskState::Waiting) {
             const u32 addr = tasks_[i].task_addr;
             if (addr != 0) {
-                remove(b, addr);
+                unlink_task(addr);
                 b.w8(addr + TC_STATE, TS_READY);
             }
             sched_.wake(static_cast<i32>(i));
@@ -3992,9 +3999,10 @@ void Exec::stop_command_of(u32 slot) {
     }
 }
 
-// Takes a task's node off TaskReady or TaskWait. False, with nothing
-// written, when its links do not lead back to it, as when a program wrote
-// over its Task: rebuild_task_lists then puts the lists right.
+// Takes a task's node off TaskReady or TaskWait. When its links do not
+// lead back to it, as when a program wrote over its Task, nothing is
+// written through them: the lists are built again without the task, and
+// the answer is false.
 bool Exec::unlink_task(u32 addr) {
     const GuestMemory& mem = m_->mem;
     u32 succ = 0;
@@ -4005,6 +4013,7 @@ bool Exec::unlink_task(u32 addr) {
         pred == 0 || (succ & 1) != 0 || (pred & 1) != 0 || !mem.read32(succ + LN_PRED, back) ||
         !mem.read32(pred + LN_SUCC, forth) || back != addr || forth != addr) {
         LogLine().text("exec: task at ").hex(addr).text(" is off its list").send();
+        rebuild_task_lists(addr);
         return false;
     }
     Bus b(*m_);
@@ -4013,15 +4022,18 @@ bool Exec::unlink_task(u32 addr) {
 }
 
 // Builds TaskReady and TaskWait again from the scheduler, each task by its
-// priority, as they would be had nothing written over them.
-void Exec::rebuild_task_lists() {
+// priority, as they would be had nothing written over them; the task at
+// leave_out, whose node the caller takes care of, is left off.
+void Exec::rebuild_task_lists(u32 leave_out) {
     Bus b(*m_);
     new_list(b, base_ + TaskReady, NT_TASK);
     new_list(b, base_ + TaskWait, NT_TASK);
     for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
         const Scheduler::Slot s = sched_.slot(i);
         const u32 addr = tasks_[i].task_addr != 0 ? tasks_[i].task_addr : s.task_addr;
-        if (addr == 0 || static_cast<i32>(i) == sched_.current()) {
+        // The scheduler's state alone decides: the running task may be
+        // waiting, when the rescue runs from its idle poll.
+        if (addr == 0 || addr == leave_out) {
             continue;
         }
         if (s.state == TaskState::Ready) {
@@ -4136,7 +4148,7 @@ bool Exec::switch_to_task(i32 next_id) {
         enqueue(b, base_ + TaskReady, from_addr);
     }
     if (to_addr != 0) {
-        remove(b, to_addr);
+        unlink_task(to_addr);
         b.w8(to_addr + TC_STATE, TS_RUN);
     }
 
@@ -4313,14 +4325,14 @@ void Exec::end_child_tasks() {
         if (sched_.slot(0).state == TaskState::Waiting) {
             if (tasks_[0].task_addr != 0) {
                 Bus b(*m_);
-                remove(b, tasks_[0].task_addr);
+                unlink_task(tasks_[0].task_addr);
             }
             sched_.wake(0);
         }
         if (sched_.slot(0).state == TaskState::Ready) {
             if (tasks_[0].task_addr != 0) {
                 Bus b(*m_);
-                remove(b, tasks_[0].task_addr);
+                unlink_task(tasks_[0].task_addr);
             }
             sched_.switch_to(0);
         }

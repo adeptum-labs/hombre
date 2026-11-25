@@ -722,7 +722,7 @@ private:
     void run_rescue_now();
     void stop_command_of(u32 slot);
     bool unlink_task(u32 addr);
-    void rebuild_task_lists();
+    void rebuild_task_lists(u32 leave_out = 0);
     bool switch_to_task(i32 next_id);
     void reap_removed();
     void remove_sem_waiter(u32 task_id);
