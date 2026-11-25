@@ -23,6 +23,11 @@
 | WBStartup message on pr_MsgPort, writes "wbtest: <NumArgs> <arg0 name>"
 | to RAM:wbtest.txt, replies the message under Forbid and returns 0. A
 | command line start has no message to wait for and returns 20.
+|
+| Before it replies it does what the Shell icon's System/CLI does: it makes
+| itself a CLI with AllocDosObject, names its directory SYS: with
+| SetCurrentDirName and opens a shell with System("NewShell"). The reply
+| reads AbsExecBase again, which must still be there.
 
         .set    OpenLibrary, -552
         .set    CloseLibrary, -414
@@ -34,6 +39,11 @@
         .set    Open, -30
         .set    Close, -36
         .set    VFWritef, -348
+        .set    AllocDosObject, -228
+        .set    FreeDosObject, -234
+        .set    SetCurrentDirName, -558
+        .set    SystemTagList, -606
+        .set    DOS_CLI, 4
         .set    MODE_NEWFILE, 1006
         .set    pr_MsgPort, 92
         .set    pr_CLI, 172
@@ -46,7 +56,7 @@
         .globl  _start
 
 | A5 = dos.library, A4 = the Process, A3 = the WBStartup message,
-| D3 = the file handle.
+| D4 = the file handle.
 _start:
         movem.l %d2-%d4/%a2-%a6,-(%sp)
         suba.l  %a5,%a5
@@ -74,23 +84,45 @@ _start:
         beq     failed
 
         movea.l %a5,%a6
-        lea     filename(%pc),%a1
+        | A2 = the CLI this process makes for itself.
+        moveq   #DOS_CLI,%d1
+        moveq   #0,%d2
+        jsr     AllocDosObject(%a6)
+        movea.l %d0,%a2
+        tst.l   %d0
+        beq.s   opened
+        lsr.l   #2,%d0
+        move.l  %d0,pr_CLI(%a4)
+        lea     sysname(%pc),%a0
+        move.l  %a0,%d1
+        jsr     SetCurrentDirName(%a6)
+        lea     newshell(%pc),%a0
+        move.l  %a0,%d1
+        moveq   #0,%d2
+        jsr     SystemTagList(%a6)
+        clr.l   pr_CLI(%a4)
+        moveq   #DOS_CLI,%d1
+        move.l  %a2,%d2
+        jsr     FreeDosObject(%a6)
+opened:
+        lea     filename(%pc),%a0
+        move.l  %a0,%d1
         move.l  #MODE_NEWFILE,%d2
         jsr     Open(%a6)
-        move.l  %d0,%d3
+        move.l  %d0,%d4
         beq     reply
 
         | The argument array VFWritef reads: NumArgs, then the first name.
         movea.l sm_ArgList(%a3),%a0
         move.l  wa_Name(%a0),-(%sp)
         move.l  sm_NumArgs(%a3),-(%sp)
-        move.l  %d3,%d1
+        move.l  %d4,%d1
         lea     format(%pc),%a0
         move.l  %a0,%d2
-        move.l  %sp,%d4
+        move.l  %sp,%d3
         jsr     VFWritef(%a6)
         addq.l  #8,%sp
-        move.l  %d3,%d1
+        move.l  %d4,%d1
         jsr     Close(%a6)
 
         | The reply lets the Workbench unload this code, so task switches
@@ -119,4 +151,6 @@ out:
 dosname:  .asciz  "dos.library"
 filename: .asciz  "RAM:wbtest.txt"
 format:   .asciz  "wbtest: %N %S\n"
+sysname:  .asciz  "SYS:"
+newshell: .asciz  "NewShell \"CON:0/50//130/AmigaShell/CLOSE\""
         .even

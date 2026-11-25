@@ -8061,6 +8061,73 @@ void contexts_keep_their_state_apart() {
     CHECK(logged("dos: CLI 3 ended, returned 3"));
 }
 
+// A Workbench tool such as System/CLI starts without a CLI, makes one with
+// AllocDosObject and names its directory with SetCurrentDirName: the names
+// go into the buffers that CLI came with, and low memory, AbsExecBase among
+// it, stays as it was.
+void cli_of_alloc_dos_object_keeps_its_names() {
+    Rig r;
+    use_noop_task_host();
+    const u32 seglist = load_echo_seg(r);
+    const u32 tags = kData + 0x400;
+    r.str(kData + 0x500, "Tool");
+    r.put32(tags, NP_Seglist);
+    r.put32(tags + 4, seglist);
+    r.put32(tags + 8, NP_FreeSeglist);
+    r.put32(tags + 12, 0);
+    r.put32(tags + 16, NP_Name);
+    r.put32(tags + 20, kData + 0x500);
+    r.put32(tags + 24, TAG_DONE);
+    r.put32(tags + 28, 0);
+    const u32 tool = r.call(dos_lvo::CreateNewProc, tags);
+    CHECK(tool != 0);
+    CHECK_EQ(r.get32(tool + pr_CLI), 0u);
+
+    const u32 low0 = r.get32(0);
+    const u32 low4 = r.get32(4);
+    g_exec.set_this_task(tool);
+    const u32 cli = r.call(dos_lvo::AllocDosObject, DOS_CLI, 0);
+    CHECK(cli != 0);
+    for (u32 field : {cli_SetName, cli_CommandName, cli_Prompt, cli_CommandFile}) {
+        CHECK(r.get32(cli + field) != 0);
+    }
+    const u32 set_name = r.get32(cli + cli_SetName);
+    const u32 prompt = r.get32(cli + cli_Prompt);
+    const u32 command_name = r.get32(cli + cli_CommandName);
+    r.put32(tool + pr_CLI, cli >> 2);
+
+    const u32 buf = kData + 0x100;
+    r.str(kData, "SYS:");
+    CHECK_EQ(r.call(dos_lvo::SetCurrentDirName, kData), DOSTRUE);
+    r.str(kData, "%N> ");
+    CHECK_EQ(r.call(dos_lvo::SetPrompt, kData), DOSTRUE);
+    r.str(kData, "Tool");
+    CHECK_EQ(r.call(dos_lvo::SetProgramName, kData), DOSTRUE);
+    CHECK_EQ(r.get32(0), low0);
+    CHECK_EQ(r.get32(4), low4);
+    CHECK_EQ(r.get32(cli + cli_SetName), set_name);
+    CHECK_EQ(r.get32(cli + cli_Prompt), prompt);
+    CHECK_EQ(r.get32(cli + cli_CommandName), command_name);
+    CHECK_EQ(r.call(dos_lvo::GetCurrentDirName, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "SYS:");
+    CHECK_EQ(r.call(dos_lvo::GetPrompt, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "%N> ");
+    CHECK_EQ(r.call(dos_lvo::GetProgramName, buf, 64), DOSTRUE);
+    CHECK(r.read_str(buf) == "Tool");
+
+    // A CLI with no buffer for a name cannot be given that name.
+    r.put32(cli + cli_SetName, 0);
+    r.str(kData, "SYS:");
+    CHECK_EQ(r.call(dos_lvo::SetCurrentDirName, kData), DOSFALSE);
+    CHECK_EQ(r.get32(0), low0);
+    CHECK_EQ(r.get32(4), low4);
+    r.put32(cli + cli_SetName, set_name);
+
+    r.put32(tool + pr_CLI, 0);
+    r.call(dos_lvo::FreeDosObject, DOS_CLI, cli);
+    g_exec.set_this_task(r.proc());
+}
+
 void nil_reads_end_of_file_and_swallows_writes() {
     Rig r;
     r.str(kData, "NIL:");
@@ -8589,6 +8656,26 @@ void system_uses_the_shell_process_directory() {
     g_exec.set_this_task(r.proc());
 }
 
+// The Shell icon's System/CLI starts its shell with System("NewShell ..."):
+// NewShell is no file in C:, the new shell opens through the shell's hook.
+bool count_new_shell(void* ctx) {
+    ++*static_cast<u32*>(ctx);
+    return true;
+}
+
+void system_opens_a_new_shell() {
+    Rig r;
+    const u32 line = r.str(kData, "NewShell \"CON:0/50//130/AmigaShell/CLOSE\" \"S:Shell-Startup\"");
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, line, 0), 0xFFFFFFFFu);
+    u32 opened = 0;
+    g_dos.set_new_shell(count_new_shell, &opened);
+    CHECK_EQ(r.call(dos_lvo::SystemTagList, line, 0), 0u);
+    CHECK_EQ(opened, 1u);
+    CHECK_EQ(r.call(dos_lvo::Execute, r.str(kData, "newshell"), 0, 0), DOSTRUE);
+    CHECK_EQ(opened, 2u);
+    g_dos.set_new_shell(nullptr, nullptr);
+}
+
 void system_redirects_output_to_a_file() {
     std::vector<AdfFile> files = standard_files();
     files.push_back({"S/CmdS", hello_command()});
@@ -9103,6 +9190,7 @@ int main() {
     ram_handler_port_and_zero_dates();
     delay_blocks_and_wakes_with_fake_host();
     contexts_keep_their_state_apart();
+    cli_of_alloc_dos_object_keeps_its_names();
     background_process_uses_and_leaves_its_shell_output();
     nil_reads_end_of_file_and_swallows_writes();
     create_new_proc_builds_a_process();
@@ -9120,6 +9208,7 @@ int main() {
     a_shell_console_pair_serves_its_children();
     run_command_in_ends_the_shells_children();
     system_uses_the_shell_process_directory();
+    system_opens_a_new_shell();
     system_redirects_output_to_a_file();
     resident_commands_are_found_by_name();
     console_star_follows_the_process_console();

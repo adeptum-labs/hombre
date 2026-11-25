@@ -1076,6 +1076,15 @@ public:
     // null to restore immediate EOF.
     void set_console_input(ConsoleRead read, ConsoleReady ready, void* ctx);
 
+    // Opens a new shell window for a NewShell that System or Execute run;
+    // NewShell is part of the shell, not a file in C:. Without it such a
+    // command line is not found.
+    using NewShell = bool (*)(void* ctx);
+    void set_new_shell(NewShell open, void* ctx) {
+        new_shell_ = open;
+        new_shell_ctx_ = ctx;
+    }
+
     // Reads one line from the interactive console reader into out (trailing
     // newline stripped). False when no reader is set, at EOF, or invalid
     // buffer.
@@ -1313,6 +1322,8 @@ private:
     u8 boot_vol_ = kVolDf0;
     RamFs ram_{};
     ConsoleBinding consoles_[kMaxConsoles]{};
+    NewShell new_shell_ = nullptr;
+    void* new_shell_ctx_ = nullptr;
 
     // Guest addresses.
     u32 base_ = 0;

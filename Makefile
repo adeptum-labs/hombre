@@ -392,9 +392,9 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "l o a d w b ret" \
 	    "m68k: running C:loadwb" "m68k: C:loadwb returned 0" \
 	    "workbench: started" "workbench: volume HombreTest" \
-	    "workbench: started wbtest" "dos: process wbtest ended, returned 0" \
-	    "workbench: wbtest ended"
-	bash tools/log_order.sh build/serial.log "workbench: started wbtest" \
+	    "workbench: started wbtest" "shell: new shell" \
+	    "dos: process wbtest ended, returned 0" "workbench: wbtest ended"
+	bash tools/log_order.sh build/serial.log "workbench: started wbtest" "shell: new shell" \
 	    "dos: process wbtest ended, returned 0" "workbench: wbtest ended"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "n e w s h e l l ret v e r s i o n ret" \

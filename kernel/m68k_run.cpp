@@ -153,8 +153,10 @@ struct TypedShell {
 
 // One shell: its window, its console callbacks and buffers, its command
 // process, and the line editor and builtins that run on it.
-// Execute Command's shell, opened with the other shells further down.
+// Execute Command's shell, and the one a NewShell run by System opens, both
+// opened with the other shells further down.
 bool run_in_new_shell(void* ctx, const char* command);
+bool open_new_shell(void* ctx);
 
 struct Console {
     ShellWindow shell;
@@ -1104,6 +1106,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         return false;
     }
     workbench.set_run_command(&run_in_new_shell, nullptr);
+    dos.set_new_shell(&open_new_shell, nullptr);
     consoles[0].index = 0;
     consoles[0].process = dos.process();
     consoles[0].cli = 1;
@@ -1524,8 +1527,6 @@ u32 run_script_file(Console& c, const char* args, bool early_break) {
     }
     return rc;
 }
-
-bool open_new_shell(void* ctx);
 
 // The console's line editor and builtins, set up before its first line.
 void init_console_shell(Console& c) {

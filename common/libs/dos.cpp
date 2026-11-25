@@ -4535,7 +4535,10 @@ struct DosOps {
         out[copy] = '\0';
     }
 
-    static void set_cli_bstr(Dos& d, Bus& b, u32 field, u32 dest, u32 str_addr) {
+    // Copies the string into the buffer the process's CLI keeps for the
+    // field. A CLI need not be one dos made for the process: a Workbench
+    // tool may make its own with AllocDosObject.
+    static void set_cli_bstr(Dos& d, Bus& b, u32 field, u32 str_addr) {
         if (str_addr == 0) {
             fail(d, b, ERROR_REQUIRED_ARG_MISSING, DOSFALSE);
             return;
@@ -4555,8 +4558,15 @@ struct DosOps {
             fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
             return;
         }
+        const u32 dest = b.r32((cli_bptr << 2) + field) << 2;
+        if (!b.ok()) {
+            return;
+        }
+        if (dest == 0) {
+            fail(d, b, ERROR_OBJECT_NOT_FOUND, DOSFALSE);
+            return;
+        }
         put_bstr(b, dest, buf, 255);
-        b.w32((cli_bptr << 2) + field, dest >> 2);
         if (b.ok()) {
             native::set_result(b.machine(), DOSTRUE);
         }
@@ -4607,7 +4617,7 @@ struct DosOps {
     static void set_current_dir_name(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        set_cli_bstr(d, b, cli_SetName, d.cur().set_name, m.cpu.d[1]);
+        set_cli_bstr(d, b, cli_SetName, m.cpu.d[1]);
     }
 
     static void get_current_dir_name(void* ctx, Machine& m) {
@@ -4619,7 +4629,7 @@ struct DosOps {
     static void set_program_name(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        set_cli_bstr(d, b, cli_CommandName, d.cur().command_name, m.cpu.d[1]);
+        set_cli_bstr(d, b, cli_CommandName, m.cpu.d[1]);
     }
 
     // A lock on the directory of the program at path, which the caller
@@ -4681,7 +4691,7 @@ struct DosOps {
     static void set_prompt(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        set_cli_bstr(d, b, cli_Prompt, d.cur().prompt, m.cpu.d[1]);
+        set_cli_bstr(d, b, cli_Prompt, m.cpu.d[1]);
     }
 
     static void get_prompt(void* ctx, Machine& m) {
@@ -4705,13 +4715,19 @@ struct DosOps {
         }
     }
 
+    // A CLI from AllocDosObject carries its four name buffers, set name,
+    // prompt, command name and command file, right after the structure.
+    static constexpr u32 kCliNameBytes = 260;
+    static constexpr u32 kCliNameFields[] = {cli_SetName, cli_Prompt, cli_CommandName,
+                                             cli_CommandFile};
+
     static u32 dos_object_size(u32 type) {
         switch (type) {
         case DOS_FILEHANDLE: return fh_SIZEOF;
         case DOS_EXALLCONTROL: return eac_SIZEOF;
         case DOS_FIB: return fib_SIZEOF;
         case DOS_STDPKT: return sp_SIZEOF;
-        case DOS_CLI: return cli_SIZEOF;
+        case DOS_CLI: return cli_SIZEOF + 4 * kCliNameBytes;
         case DOS_RDARGS: return RDA_SIZEOF;
         default: return 0;
         }
@@ -4735,6 +4751,14 @@ struct DosOps {
             b.w32(at + sp_Msg + LN_NAME, at + sp_Pkt);
             b.w16(at + sp_Msg + mn_Length, dp_SIZEOF);
             b.w32(at + sp_Pkt + dp_Link, at + sp_Msg);
+        }
+        if (type == DOS_CLI) {
+            u32 name_at = at + cli_SIZEOF;
+            for (const u32 field : kCliNameFields) {
+                b.w32(at + field, name_at >> 2);
+                name_at += kCliNameBytes;
+            }
+            b.w32(at + cli_FailLevel, kFailLevel);
         }
         if (b.ok()) {
             native::set_result(m, at);
@@ -9239,6 +9263,12 @@ struct DosOps {
         }
         if (same_name(word, w, "RESIDENT")) {
             rc = d.resident_command(s);
+            return true;
+        }
+        // The new shell reads its own window; the window and FROM script
+        // the arguments may name are left to the shell's defaults.
+        if (same_name(word, w, "NEWSHELL") && d.new_shell_ != nullptr) {
+            rc = d.new_shell_(d.new_shell_ctx_) ? 0u : 20u;
             return true;
         }
         char clean[Dos::kMaxArgs + 1];
