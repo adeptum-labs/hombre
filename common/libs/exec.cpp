@@ -1881,8 +1881,20 @@ struct ExecOps {
         }
         b.w16(vec, native::kJmpAbsL);
         b.w32(vec + 2, function);
-        if (e.patch_count_ < Exec::kMaxPatches) {
-            e.patches_[e.patch_count_++] = function;
+        // A vector's patches stack up. Setting it back to what the last one
+        // replaced takes that one off; any other function goes on top, and
+        // those beneath stay, as the new one may call them.
+        u32 top = e.patch_count_;
+        while (top > 0 && e.patches_[top - 1].vector != vec) {
+            --top;
+        }
+        if (top > 0 && e.patches_[top - 1].replaced == function) {
+            for (u32 i = top; i < e.patch_count_; ++i) {
+                e.patches_[i - 1] = e.patches_[i];
+            }
+            --e.patch_count_;
+        } else if (e.patch_count_ < Exec::kMaxPatches) {
+            e.patches_[e.patch_count_++] = {vec, function, old};
         }
         b.w8(lib + LIB_FLAGS, static_cast<u8>(b.r8(lib + LIB_FLAGS) | LIBF_CHANGED));
         sum_library(b, lib);
@@ -4504,7 +4516,7 @@ void Exec::mark_kept_blocks() {
         }
     }
     for (u32 i = 0; i < patch_count_; ++i) {
-        keep_block_holding(patches_[i]);
+        keep_block_holding(patches_[i].function);
     }
     for (const Keeper& k : keepers_) {
         if (k.keep != nullptr) {
@@ -4869,7 +4881,7 @@ void Exec::end_child_tasks() {
 
 bool Exec::function_set_within(u32 lo, u32 hi) const {
     for (u32 i = 0; i < patch_count_; ++i) {
-        if (patches_[i] >= lo && patches_[i] < hi) {
+        if (patches_[i].function >= lo && patches_[i].function < hi) {
             return true;
         }
     }

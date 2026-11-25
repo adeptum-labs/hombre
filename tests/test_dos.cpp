@@ -3556,6 +3556,43 @@ void a_patched_vector_keeps_its_code_loaded() {
     g_lines.clear();
 }
 
+// A vector set back to the function it had, as NoFastMem does when started a
+// second time, no longer holds the seglist: it unloads.
+void a_restored_vector_lets_its_code_go() {
+    Rig r;
+    auto set_function = [&](u32 function) {
+        r.cpu().a[1] = g_exec.exec_base();
+        r.cpu().a[0] = static_cast<u32>(-static_cast<i32>(exec_lvo::SumLibrary));
+        r.cpu().d[0] = function;
+        CHECK_EQ(r.exec(exec_lvo::SetFunction), ExitReason::Halt);
+        return r.cpu().d[0];
+    };
+    // The native function first moves to a stub of its own, which stays.
+    const u32 native = set_function(kData);
+    CHECK(native != 0);
+    CHECK_EQ(set_function(native), kData);
+    const auto before = r.chunks();
+    r.str(kData, "C:Hello");
+    const u32 seg = r.call(dos_lvo::LoadSeg, kData);
+    CHECK(seg != 0);
+    CHECK_EQ(set_function((seg << 2) + 4), native);
+    CHECK_EQ(set_function(native), (seg << 2) + 4);
+    r.call(dos_lvo::UnLoadSeg, seg);
+    CHECK(r.chunks() == before);
+    CHECK(!logged_containing("kept loaded"));
+
+    // With another function set on top, which may call it, the code beneath
+    // stays loaded.
+    r.str(kData, "C:Hello");
+    const u32 under = r.call(dos_lvo::LoadSeg, kData);
+    CHECK(under != 0);
+    set_function((under << 2) + 4);
+    set_function(kData);
+    r.call(dos_lvo::UnLoadSeg, under);
+    CHECK(logged_containing("kept loaded"));
+    g_lines.clear();
+}
+
 void load_seg_and_unload_seg() {
     Rig r;
     const auto before = r.chunks();
@@ -9167,6 +9204,7 @@ int main() {
     info_on_the_volume();
     load_seg_and_unload_seg();
     a_patched_vector_keeps_its_code_loaded();
+    a_restored_vector_lets_its_code_go();
     load_seg_of_bad_hunks();
     unload_seg_of_bad_seglists();
     read_args_from_the_command_line();

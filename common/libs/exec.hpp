@@ -473,7 +473,8 @@ public:
     // be set before init and is kept across it.
     void set_idle_hook(const IdleHook& hook) { idle_ = hook; }
 
-    // True when a SetFunction made a library vector jump into [lo, hi).
+    // True when a function SetFunction put on a library vector, and has not
+    // taken off again, lies in [lo, hi).
     bool function_set_within(u32 lo, u32 hi) const;
 
     // PutMsg offers each message to this hook first. Kept across init.
@@ -869,8 +870,14 @@ private:
     SegmentLoader loader_{nullptr, nullptr};
     IdleHook idle_{nullptr, nullptr};
     MessageHook message_hook_{nullptr, nullptr};
+    // A function SetFunction put on a vector and the one it replaced there.
+    struct Patch {
+        u32 vector = 0;
+        u32 function = 0;
+        u32 replaced = 0;
+    };
     static constexpr u32 kMaxPatches = 256;
-    u32 patches_[kMaxPatches]{};  // targets SetFunction put in vectors
+    Patch patches_[kMaxPatches]{};
     u32 patch_count_ = 0;
     u32 cache_bits_ = 0;  // what CacheControl was last given
     // The request waiting for run_rescue.
