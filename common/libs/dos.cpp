@@ -7429,6 +7429,27 @@ struct DosOps {
         }
     }
 
+    // Deletes the file or empty drawer at the resolved path and tells the
+    // notifications on it. Returns the IoErr code.
+    static u32 delete_resolved(Dos& d, u8 vol, const char* resolved) {
+        u32 err = 0;
+        if (vol != Dos::kVolRam) {
+            err = delete_disk_object(d, vol, resolved, true);
+        } else if (resolved[0] == '\0') {
+            err = ERROR_OBJECT_WRONG_TYPE;
+        } else {
+            u32 node = RamFs::kNone;
+            err = d.ram_.find_path(resolved, node);
+            if (err == 0) {
+                err = node == 0 ? ERROR_OBJECT_WRONG_TYPE : d.ram_.remove(node);
+            }
+        }
+        if (err == 0) {
+            notify_changed(d, vol, resolved);
+        }
+        return err;
+    }
+
     static bool delete_file_impl(Dos& d, Bus& b, u32 base_lock, const char* name,
                                  u8 zero_vol = kBootVolume) {
         u8 vol = Dos::kVolDf0;
@@ -7440,35 +7461,7 @@ struct DosOps {
             }
             return false;
         }
-        if (vol != Dos::kVolRam) {
-            const u32 disk_err = delete_disk_object(d, vol, resolved, true);
-            if (disk_err == 0) {
-                notify_changed(d, vol, resolved);
-            }
-            return finish_change(d, b, disk_err);
-        }
-        if (resolved[0] == '\0') {
-            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
-            return false;
-        }
-        u32 node = RamFs::kNone;
-        const u32 find_err = d.ram_.find_path(resolved, node);
-        if (find_err != 0) {
-            fail(d, b, find_err, DOSFALSE);
-            return false;
-        }
-        if (node == 0) {
-            fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
-            return false;
-        }
-        const u32 err = d.ram_.remove(node);
-        if (err != 0) {
-            fail(d, b, err, DOSFALSE);
-            return false;
-        }
-        notify_changed(d, Dos::kVolRam, resolved);
-        native::set_result(b.machine(), DOSTRUE);
-        return true;
+        return finish_change(d, b, delete_resolved(d, vol, resolved));
     }
 
     static void delete_file(void* ctx, Machine& m) {
@@ -10968,6 +10961,22 @@ bool Dos::delete_file(const char* name, u32& error) {
         return false;
     }
     return true;
+}
+
+bool Dos::delete_object(const char* name, u32& error) {
+    error = 0;
+    if (m_ == nullptr || name == nullptr) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*m_);
+    u8 vol = kVolDf0;
+    char resolved[kMaxPath];
+    if (!DosOps::resolve_public(*this, b, name, vol, resolved, error)) {
+        return false;
+    }
+    error = DosOps::delete_resolved(*this, vol, resolved);
+    return DosOps::end_public(*this, error);
 }
 
 bool Dos::rename_path(const char* from, const char* to, u32& error) {

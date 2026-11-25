@@ -947,6 +947,10 @@ public:
     // Deletes the file name, on RAM: or a disk that can be written.
     bool delete_file(const char* name, u32& error);
 
+    // DeleteFile for code that is not the guest's: deletes the file or
+    // empty drawer name.
+    bool delete_object(const char* name, u32& error);
+
     // Renames the object named from to the name to, on RAM: or a disk that
     // can be written.
     bool rename_path(const char* from, const char* to, u32& error);

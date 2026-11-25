@@ -3293,6 +3293,24 @@ void the_public_calls_change_paths_on_ram_and_partitions() {
     CHECK(!g_dos.make_dir("DF0:Made", error));
     CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
 
+    // delete_object: a file or an empty drawer, not one with objects in it.
+    CHECK(g_dos.make_dir("DH0:Made/Inner", error));
+    CHECK(!g_dos.delete_object("DH0:Made", error));
+    CHECK_EQ(error, ERROR_DIRECTORY_NOT_EMPTY);
+    CHECK_EQ(r.io_err(), ERROR_DIRECTORY_NOT_EMPTY);
+    CHECK(g_dos.delete_object("DH0:Made/Inner", error));
+    CHECK_EQ(error, 0u);
+    CHECK(g_dos.examine("DH0:Made/Inner").kind == Dos::TargetKind::Missing);
+    CHECK(g_dos.make_dir("RAM:Made/Inner", error));
+    CHECK(!g_dos.delete_object("RAM:Made", error));
+    CHECK_EQ(error, ERROR_DIRECTORY_NOT_EMPTY);
+    CHECK(g_dos.delete_object("RAM:Made/Inner", error));
+    CHECK(g_dos.examine("RAM:Made/Inner").kind == Dos::TargetKind::Missing);
+    CHECK(!g_dos.delete_object("DF0:C/Echo", error));
+    CHECK_EQ(error, ERROR_DISK_WRITE_PROTECTED);
+    CHECK(!g_dos.delete_object(nullptr, error));
+    CHECK_EQ(error, ERROR_REQUIRED_ARG_MISSING);
+
     // rename_path: to a new name, not onto a name that is taken, not across
     // volumes and not on a disk that cannot be written.
     CHECK(g_dos.write_file("RAM:Before", x, 1, error));
