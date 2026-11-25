@@ -238,6 +238,14 @@ run: image disk-image
 
 # The boots attach the generated test disk whatever DISK says, so they stay
 # hermetic. The main boot expects its size in 512-byte sectors, rounded up.
+# Monitor key sequences, each step given a moment: suspend the second task
+# and type a command while it is held, then resume and end it.
+MONITOR_STEP    := mouse_move 0 0;mouse_move 0 0
+TYPE_VERSION    := sendkey v;sendkey e;sendkey r;sendkey s;sendkey i;sendkey o;sendkey n;sendkey ret
+MONITOR_SELECT  := sendkey f12;$(MONITOR_STEP);sendkey down;$(MONITOR_STEP)
+MONITOR_SUSPEND := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP)
+MONITOR_END     := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
+
 check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(TEST_HDF4K) $(ADFTOOL) $(ZERO_DISK) $(CORRUPT_DISK)
 	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
 	tools/boot_check.sh --disk $(TEST_DISK) "Hombre loader" \
@@ -314,6 +322,12 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    --mouse-after "spintest: spinning" \
 	    --mouse "sendkey f12;mouse_move 0 0;mouse_move 0 0;sendkey down;mouse_move 0 0;sendkey ret" \
 	    "monitor: inspect C:spintest pc="
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "r u n spc s p i n t e s t ret" \
+	    --mouse-after "spintest: spinning" \
+	    --mouse "$(MONITOR_SUSPEND);$(MONITOR_END);$(TYPE_VERSION)" \
+	    "exec: suspended C:spintest" "exec: resumed C:spintest" \
+	    "exec: task C:spintest ended with Stopped" "dos: CLI 2 ended" \
+	    "m68k: C:version returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "c d spc c ret c d ret c d spc shift-7 ret e c h o spc h e j ret p a t h ret w h y ret up up up spc a ret up down down spc y ret e c x o spc h i left left left left backspace h ret" \
 	    "shell: builtin cd returned 0" "HombreTest:C" "hej" \

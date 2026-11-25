@@ -709,6 +709,8 @@ void pump_audio() {
 
 void task_host_poll(void*) {
     task_polls = task_polls + 1;
+    // A request for tasks that all wait is carried out here.
+    exec.run_rescue();
     intuition.flush_palette();
     poll_mouse();
     poll_keys();
@@ -798,6 +800,7 @@ void monitor_snapshot(MonitorSnapshot& out) {
         task.priority = info.priority;
         task.forbid = info.forbid;
         task.disable = info.disable;
+        task.suspended = info.suspended;
         for (u32 i = 0; i < sizeof info.name; ++i) {
             task.name[i] = info.name[i];
         }
@@ -859,6 +862,13 @@ void monitor_inspect(u32 slot, u32 task_addr, const TrapFrame& frame, MonitorIns
         out.rsp = saved + (kReturnWord + 1) * sizeof(u64);
     }
     out.valid = true;
+}
+
+void monitor_rescue(const MonitorRequest& request) {
+    const Rescue op = request.op == MonitorOp::Suspend  ? Rescue::Suspend
+                      : request.op == MonitorOp::Resume ? Rescue::Resume
+                                                        : Rescue::End;
+    exec.request_rescue(op, request.slot, request.task_addr);
 }
 
 bool task_host_slice_over(void*) {
@@ -1020,7 +1030,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     exec.set_idle_hook(IdleHook{&hook_trampoline, nullptr});
     monitor_set_host(MonitorHost{&monitor_current_task, &monitor_take_screen,
                                  &monitor_give_screen, &monitor_refresh_screen, &monitor_polls,
-                                 &monitor_snapshot, &monitor_inspect});
+                                 &monitor_snapshot, &monitor_inspect, &monitor_rescue});
     if (!timer_device.init(machine, exec)) {
         fail("timer init failed");
         return false;

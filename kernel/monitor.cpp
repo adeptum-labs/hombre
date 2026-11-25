@@ -202,6 +202,10 @@ void handle_request(const MonitorRequest& request) {
     } else if (request.op == MonitorOp::Inspect) {
         inspected = request;
         inspect_logged = false;
+    } else if ((request.op == MonitorOp::Suspend || request.op == MonitorOp::Resume ||
+                request.op == MonitorOp::End) &&
+               monitor_host.rescue != nullptr) {
+        monitor_host.rescue(request);
     }
 }
 

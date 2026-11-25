@@ -25,6 +25,7 @@
 
 #include "../common/cpu_meter.hpp"
 #include "../common/monitor_snapshot.hpp"
+#include "../common/monitor_ui.hpp"
 #include "../common/types.hpp"
 #include "framebuffer.hpp"
 #include "trap_frame.hpp"
@@ -52,6 +53,9 @@ struct MonitorHost {
     // task_addr; frame is what the tick interrupted.
     void (*inspect)(u32 slot, u32 task_addr, const TrapFrame& frame,
                     MonitorInspect& out) = nullptr;
+    // Posts a request to suspend, resume or end a task, carried out in
+    // normal context.
+    void (*rescue)(const MonitorRequest& request) = nullptr;
 };
 
 void monitor_set_host(const MonitorHost& host);
