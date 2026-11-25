@@ -310,6 +310,10 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "monitor: open" "monitor: closed" "monitor: cpus 4" "monitor: memory chip " \
 	    "monitor: task " "acpi: 4 cpus, 1 started" "shell: line: version" \
 	    "m68k: C:version returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "r u n spc s p i n t e s t ret" \
+	    --mouse-after "spintest: spinning" \
+	    --mouse "sendkey f12;mouse_move 0 0;mouse_move 0 0;sendkey down;mouse_move 0 0;sendkey ret" \
+	    "monitor: inspect C:spintest pc="
 	tools/boot_check.sh --disk $(TEST_DISK) \
 	    --keys "c d spc c ret c d ret c d spc shift-7 ret e c h o spc h e j ret p a t h ret w h y ret up up up spc a ret up down down spc y ret e c x o spc h i left left left left backspace h ret" \
 	    "shell: builtin cd returned 0" "HombreTest:C" "hej" \
@@ -567,7 +571,8 @@ $(ELF2HUNK): tools/elf2hunk.cpp
 # turns the ELF executable into a hunk file.
 M68K_AS       := m68k-linux-gnu-as
 M68K_LD       := m68k-linux-gnu-ld
-M68K_PROGRAMS := version hombretest mousetest tasktest timertest loadwb wbtest cgxtest
+M68K_PROGRAMS := version hombretest mousetest tasktest timertest loadwb wbtest cgxtest \
+                 spintest
 M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
 
 define require_tool

@@ -25,12 +25,13 @@
 //
 //   mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk> <tasktest.hunk>
 //          <timertest.hunk> <loadwb.hunk> <wbtest.hunk> <cgxtest.hunk>
+//          <spintest.hunk>
 //
 // The disk is an OFS volume named HombreTest, packed as a DMS archive with
-// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the eight
+// SIMPLE tracks. It holds S/Startup-Sequence, C/Echo, Hello and the nine
 // hunk files, as C/Version, LIBS/hombretest.library, C/mousetest,
-// C/tasktest, C/timertest, C/LoadWB and C/cgxtest, and wbtest with its icon in
-// WBStartup, which SYS: names. The output depends on nothing but this
+// C/tasktest, C/timertest, C/LoadWB, C/cgxtest and C/spintest, and wbtest with
+// its icon in WBStartup, which SYS: names. The output depends on nothing but this
 // source and the hunk files, so two runs give identical files.
 
 #include "dms.hpp"
@@ -123,7 +124,8 @@ std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vecto
                                 const std::vector<u8>& timertest,
                                 const std::vector<u8>& loadwb,
                                 const std::vector<u8>& wbtest,
-                                const std::vector<u8>& cgxtest) {
+                                const std::vector<u8>& cgxtest,
+                                const std::vector<u8>& spintest) {
     std::vector<u8> echo(kEchoBytes);
     for (usize i = 0; i < echo.size(); ++i) {
         // A repeating run A..Z that shows where a block boundary was crossed.
@@ -140,6 +142,7 @@ std::vector<AdfFile> test_files(const std::vector<u8>& version, const std::vecto
         {"C/timertest", timertest},
         {"C/LoadWB", loadwb},
         {"C/cgxtest", cgxtest},
+        {"C/spintest", spintest},
         {"WBStartup/wbtest", wbtest},
         {"WBStartup/wbtest.info", wbtest_info()},
     };
@@ -184,11 +187,11 @@ bool write_file(const char* path, const std::vector<u8>& data) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 10) {
+    if (argc != 11) {
         std::fprintf(stderr,
                      "usage: mkdisk <out.dms> <version.hunk> <hombretest.hunk> <mousetest.hunk>"
                      " <tasktest.hunk> <timertest.hunk> <loadwb.hunk> <wbtest.hunk>"
-                     " <cgxtest.hunk>\n");
+                     " <cgxtest.hunk> <spintest.hunk>\n");
         return 2;
     }
     std::vector<u8> version;
@@ -199,17 +202,19 @@ int main(int argc, char** argv) {
     std::vector<u8> loadwb;
     std::vector<u8> wbtest;
     std::vector<u8> cgxtest;
+    std::vector<u8> spintest;
     if (!read_file(argv[2], version) || !read_file(argv[3], library) ||
         !read_file(argv[4], mousetest) || !read_file(argv[5], tasktest) ||
         !read_file(argv[6], timertest) || !read_file(argv[7], loadwb) ||
-        !read_file(argv[8], wbtest) || !read_file(argv[9], cgxtest)) {
+        !read_file(argv[8], wbtest) || !read_file(argv[9], cgxtest) ||
+        !read_file(argv[10], spintest)) {
         return 1;
     }
     try {
         const std::vector<u8> adf =
             build_adf("HombreTest", false,
                       test_files(version, library, mousetest, tasktest, timertest, loadwb,
-                                 wbtest, cgxtest));
+                                 wbtest, cgxtest, spintest));
         const std::vector<u8> dms = build_dms(adf, kSimple, kDdTrackBytes);
         return write_file(argv[1], dms) ? 0 : 1;
     } catch (const std::exception& e) {
