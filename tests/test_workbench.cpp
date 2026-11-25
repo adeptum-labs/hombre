@@ -1426,6 +1426,10 @@ void menu_strip_lists_the_titles_and_disabled_items() {
     CHECK_EQ(r.get16(about + mi_Flags) & ITEMENABLED, ITEMENABLED);
     CHECK_EQ(r.get16(about + mi_Flags) & ITEMTEXT, ITEMTEXT);
 
+    const u32 update = r.get32(r.get32(open_parent + mi_NextItem) + mi_NextItem);
+    CHECK(r.str(r.get32(r.get32(update + mi_ItemFill) + it_IText)) == "Update");
+    CHECK_EQ(r.get16(update + mi_Flags) & ITEMENABLED, ITEMENABLED);
+
     // Window > Snapshot opens Window and All; Icons > Snapshot and
     // Unsnapshot are on.
     u32 window_item = r.get32(windows + mu_FirstItem);
@@ -2911,6 +2915,17 @@ void snapshot_and_unsnapshot_store_the_icon_place() {
     CHECK(logged("workbench: cannot snapshot Tool: Disk is write-protected"));
 }
 
+void window_update_rescans_the_drawer() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    put_ram_project("Late");
+    CHECK_EQ(r.find_icon_in(w.ram, "Late"), Workbench::kNoIcon);
+
+    // Window > Update.
+    r.workbench.menu_pick(w.ram, 1 | (3 << 5) | (31 << 11));
+    CHECK(r.find_icon_in(w.ram, "Late") != Workbench::kNoIcon);
+}
+
 void a_window_snapshot_is_used_when_the_window_opens_again() {
     Rig r;
     put_ram_project("Note");
@@ -3565,6 +3580,7 @@ int main() {
     every_disk_in_a_drive_gets_an_icon();
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
+    window_update_rescans_the_drawer();
     a_window_snapshot_is_used_when_the_window_opens_again();
     a_reset_closes_and_reopens_the_windows();
     more_drawers_open_than_the_old_table_held();

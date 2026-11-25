@@ -264,7 +264,7 @@ constexpr MenuItemSpec kWindowItems[] = {
     {"New Drawer", false},
     {"Open Parent", true},
     {"Close", true},
-    {"Update", false},
+    {"Update", true},
     {"Select Contents", true},
     {"Clean Up", true},
     {"Snapshot", true, false, kSnapshotItems, sizeof kSnapshotItems / sizeof kSnapshotItems[0]},
@@ -296,6 +296,7 @@ constexpr u32 kMenuWorkbench = 0;
 constexpr u32 kMenuWindow = 1;
 constexpr u32 kMenuIcons = 2;
 constexpr u32 kItemBackdrop = 0;
+constexpr u32 kItemWindowUpdate = 3;
 constexpr u32 kItemWindowSnapshot = 6;
 constexpr u32 kItemIconSnapshot = 4;
 constexpr u32 kItemIconUnsnapshot = 5;
@@ -2999,10 +3000,14 @@ bool Workbench::snapshot_window(u32 window_id, bool all) {
 
 void Workbench::update_all() {
     for (DrawerWindow& w : windows_) {
-        if (w.id != kRootWindow) {
-            fill_drawer(w);
-            draw_window(w.id);
-        }
+        update_window(w);
+    }
+}
+
+void Workbench::update_window(DrawerWindow& drawer) {
+    if (drawer.id != kRootWindow) {
+        fill_drawer(drawer);
+        draw_window(drawer.id);
     }
 }
 
@@ -3086,6 +3091,10 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             open_parent(window_id);
         } else if (item == 2) {
             close_drawer(window_id);
+        } else if (item == kItemWindowUpdate) {
+            if (DrawerWindow* w = find_window(window_id); w != nullptr) {
+                update_window(*w);
+            }
         } else if (item == 4) {
             select_contents(window_id);
         } else if (item == 5) {
@@ -3834,8 +3843,7 @@ bool Workbench::update_workbench(u32 name) {
     if (drawer == nullptr) {
         return false;
     }
-    fill_drawer(*drawer);
-    draw_window(drawer->id);
+    update_window(*drawer);
     return true;
 }
 

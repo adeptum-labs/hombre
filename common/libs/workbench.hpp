@@ -504,6 +504,8 @@ private:
     void relayout_labels();
     void redraw_all();
     void update_all();
+    // Reads a drawer window's directory again; the root window stays.
+    void update_window(DrawerWindow& drawer);
     void select_contents(u32 window_id);
     void clean_up(u32 window_id);
     void open_selected(u32 window_id);
