@@ -28,6 +28,9 @@ software, on modern hardware and in virtual machines.
   `S:Startup-Sequence`, as an Amiga does.
 - A Workbench desktop: drawers, framed icons as on 3.1, icon drag and drop,
   snapshot, sliders and scroll arrows, menus, backdrop on and off.
+- The Workbench file operations: new drawers, copy, rename, delete, leave
+  out and empty the Trashcan, an Information window for protection bits,
+  comments, stack and tool types, and Execute Command.
 - Preferences from the 3.1 Extras disk: Palette recolours the whole system,
   WBPattern gives the Workbench a backdrop pattern or picture, Font sets the
   system fonts, Pointer the mouse pointer, Input the double-click time, and
