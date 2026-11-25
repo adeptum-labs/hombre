@@ -4348,6 +4348,56 @@ void ending_a_task_stops_its_code_or_removes_it() {
     CHECK_EQ(r.go(0x1000, 5), ExitReason::Budget);
 }
 
+// A task whose Task a program wrote over, waiting while holding Forbid and
+// Disable, is removed without faulting the task that runs, and the task
+// lists come out whole.
+void ending_a_damaged_task_leaves_the_running_task_alone() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 damaged =
+        setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "damaged", kNames);
+    const u32 healthy =
+        setup_child_task(r, kData + 0x200, kData + 0x3000, 0, "healthy", kNames + 0x20);
+    CHECK_EQ(g_exec.spawn(damaged, 0x2000, 0, false), damaged);
+    CHECK_EQ(g_exec.spawn(healthy, 0x2000, 0, false), healthy);
+    // Both run and wait for a signal that never comes.
+    CHECK(g_exec.yield_in_native());
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 2);
+    r.cpu().d[0] = 1u << 20;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    CHECK_EQ(g_exec.scheduler().current(), 0);
+    ExecTest::set_task_nests(g_exec, 1, 0, 0);
+    r.put32(damaged + LN_SUCC, 0xFFFFFFF1);
+    r.put32(damaged + LN_PRED, 0x00000003);
+
+    // The rescue runs between two blocks of the boot task's code.
+    r.put16(0x1000, 0x60FE);
+    g_jit.flush();
+    g_exec.request_rescue(Rescue::End, 1, damaged);
+    CHECK_EQ(r.go(0x1000, 50), ExitReason::Budget);
+    CHECK(logged("exec: removing damaged"));
+    CHECK(g_exec.scheduler().slot(1).state == TaskState::Free);
+    CHECK(r.walk(r.base() + TaskWait) == std::vector<u32>{healthy});
+    CHECK(r.walk(r.base() + TaskReady).empty());
+    CHECK_EQ(r.get8(r.base() + TDNestCnt), 0xFFu);
+    CHECK_EQ(r.get8(r.base() + IDNestCnt), 0xFFu);
+
+    // A Task that leads out of memory faults the rescue only.
+    g_lines.clear();
+    r.put32(healthy + LN_SUCC, kData + 0x400);
+    g_exec.request_rescue(Rescue::End, 2, healthy);
+    r.put32(healthy + TC_SPLOWER, 0);
+    CHECK_EQ(r.go(0x1000, 50), ExitReason::Budget);
+    CHECK(g_exec.scheduler().slot(2).state == TaskState::Free);
+    CHECK(r.walk(r.base() + TaskWait).empty());
+    (void)boot;
+}
+
 // --- devices and IORequests ---------------------------------------------
 
 struct FakeDevState {
@@ -4829,6 +4879,7 @@ int main() {
     the_only_task_waits_while_suspended_until_resumed();
     a_task_woken_while_suspended_is_queued_once();
     ending_a_task_stops_its_code_or_removes_it();
+    ending_a_damaged_task_leaves_the_running_task_alone();
     device_create_open_do_send_check_wait_abort();
     device_vector_calling_open_device_stops_at_the_nesting_limit();
     guest_68k_device_vectors_use_call_guest();

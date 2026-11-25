@@ -827,15 +827,19 @@ struct ExecOps {
         if (target_addr != 0) {
             e.drop_timer_requests_of(target_addr);
         }
+        bool relink = false;
         if ((slot.state == TaskState::Ready || slot.state == TaskState::Waiting) &&
             target_addr != 0) {
-            remove(b, target_addr);
+            relink = !e.unlink_task(target_addr);
         }
         e.remove_sem_waiter(static_cast<u32>(target_id));
         if (target_addr != 0) {
             b.w8(target_addr + TC_STATE, TS_REMOVED);
         }
         e.sched_.remove(target_id);
+        if (relink) {
+            e.rebuild_task_lists();
+        }
         if (e.task_end_hook_ != nullptr) {
             e.task_end_hook_(e.task_end_ctx_, target_addr, target_id == cur);
         }
@@ -3880,6 +3884,28 @@ void Exec::request_rescue(Rescue op, u32 slot, u32 task_addr) {
 
 void Exec::run_rescue() {
     const Rescue op = rescue_op_;
+    if (op == Rescue::None || m_ == nullptr) {
+        return;
+    }
+    // The rescue runs on whatever task is running: a task whose Task or
+    // lists are damaged must not fault that one. A fault on the way stays
+    // the rescue's; only the Stopped of the running task's own end counts.
+    CpuState& cpu = m_->cpu;
+    const ExitReason exit = cpu.exit;
+    const u32 trap_number = cpu.trap_number;
+    const u32 fault_addr = cpu.fault_addr;
+    run_rescue_now();
+    if (cpu.exit != exit && cpu.exit != ExitReason::Stopped) {
+        LogLine().text("exec: a fault while ending a task, at ").hex(cpu.fault_addr)
+            .text(", was ignored").send();
+        cpu.exit = exit;
+        cpu.trap_number = trap_number;
+        cpu.fault_addr = fault_addr;
+    }
+}
+
+void Exec::run_rescue_now() {
+    const Rescue op = rescue_op_;
     if (op == Rescue::None) {
         return;
     }
@@ -3931,6 +3957,46 @@ void Exec::end_for_rescue(u32 slot, const TaskInfo& info) {
         return;
     }
     LogLine().text("exec: ending ").text(info.name).send();
+}
+
+// Takes a task's node off TaskReady or TaskWait. False, with nothing
+// written, when its links do not lead back to it, as when a program wrote
+// over its Task: rebuild_task_lists then puts the lists right.
+bool Exec::unlink_task(u32 addr) {
+    const GuestMemory& mem = m_->mem;
+    u32 succ = 0;
+    u32 pred = 0;
+    u32 back = 0;
+    u32 forth = 0;
+    if (!mem.read32(addr + LN_SUCC, succ) || !mem.read32(addr + LN_PRED, pred) || succ == 0 ||
+        pred == 0 || (succ & 1) != 0 || (pred & 1) != 0 || !mem.read32(succ + LN_PRED, back) ||
+        !mem.read32(pred + LN_SUCC, forth) || back != addr || forth != addr) {
+        LogLine().text("exec: task at ").hex(addr).text(" is off its list").send();
+        return false;
+    }
+    Bus b(*m_);
+    remove(b, addr);
+    return b.ok();
+}
+
+// Builds TaskReady and TaskWait again from the scheduler, each task by its
+// priority, as they would be had nothing written over them.
+void Exec::rebuild_task_lists() {
+    Bus b(*m_);
+    new_list(b, base_ + TaskReady, NT_TASK);
+    new_list(b, base_ + TaskWait, NT_TASK);
+    for (u32 i = 0; i < Scheduler::kMaxTasks; ++i) {
+        const Scheduler::Slot s = sched_.slot(i);
+        const u32 addr = tasks_[i].task_addr != 0 ? tasks_[i].task_addr : s.task_addr;
+        if (addr == 0 || static_cast<i32>(i) == sched_.current()) {
+            continue;
+        }
+        if (s.state == TaskState::Ready) {
+            enqueue(b, base_ + TaskReady, addr);
+        } else if (s.state == TaskState::Waiting) {
+            enqueue(b, base_ + TaskWait, addr);
+        }
+    }
 }
 
 // Runs whatever else can, or waits, until the running slot is resumed.
@@ -4286,10 +4352,11 @@ void Exec::end_tasks_of(u32 parent) {
             char name[kMaxName];
             read_task_name(*m_, s.task_addr, name);
             LogLine().text("exec: ended task ").text(name).send();
+            bool relink = false;
             if (s.task_addr != 0) {
                 Bus b(*m_);
                 if (s.state == TaskState::Ready || s.state == TaskState::Waiting) {
-                    remove(b, s.task_addr);
+                    relink = !unlink_task(s.task_addr);
                 }
                 b.w8(s.task_addr + TC_STATE, TS_REMOVED);
             }
@@ -4298,6 +4365,9 @@ void Exec::end_tasks_of(u32 parent) {
                 drop_timer_requests_of(s.task_addr);
             }
             sched_.remove(static_cast<i32>(i));
+            if (relink) {
+                rebuild_task_lists();
+            }
             if (task_end_hook_ != nullptr) {
                 task_end_hook_(task_end_ctx_, s.task_addr, false);
             }

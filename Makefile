@@ -253,6 +253,7 @@ TYPE_VERSION    := sendkey v;sendkey e;sendkey r;sendkey s;sendkey i;sendkey o;s
 MONITOR_SELECT  := sendkey f12;$(MONITOR_STEP);sendkey down;$(MONITOR_STEP)
 MONITOR_SUSPEND := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP);$(TYPE_VERSION);$(MONITOR_STEP)
 MONITOR_END     := $(MONITOR_SELECT);sendkey s;$(MONITOR_STEP);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
+MONITOR_KILL    := $(MONITOR_SELECT);sendkey k;$(MONITOR_STEP);sendkey y;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP)
 
 check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HDF) $(TEST_HDF4K) $(BROWSE_HDF) $(ADFTOOL) $(ZERO_DISK) $(CORRUPT_DISK)
 	sectors=$$(( ($$(stat -c %s $(TEST_DISK)) + 511) / 512 )) && \
@@ -352,6 +353,12 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "exec: suspended C:spintest" "exec: resumed C:spintest" \
 	    "exec: task C:spintest ended with Stopped" "dos: CLI 2 ended" \
 	    "m68k: C:version returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) \
+	    --keys "r u n spc c r a s h t e s t ret r u n spc s p i n t e s t ret" \
+	    --mouse-after "spintest: spinning" \
+	    --mouse "$(MONITOR_KILL);$(MONITOR_STEP);$(MONITOR_KILL)" \
+	    "crashtest: waiting" "exec: removing C:crashtest" "is off its list" \
+	    "dos: CLI 2 ended" "exec: task C:spintest ended with Stopped" "dos: CLI 3 ended"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "f12 r y" \
 	    "monitor: open" "monitor: reboot"
 	tools/boot_check.sh --disk $(TEST_DISK) \
@@ -618,7 +625,7 @@ $(ELF2HUNK): tools/elf2hunk.cpp
 M68K_AS       := m68k-linux-gnu-as
 M68K_LD       := m68k-linux-gnu-ld
 M68K_PROGRAMS := version hombretest mousetest tasktest timertest loadwb wbtest cgxtest \
-                 spintest
+                 spintest crashtest
 M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
 
 define require_tool

@@ -705,6 +705,9 @@ private:
     void maybe_preempt();
     void hold_while_suspended();
     void end_for_rescue(u32 slot, const TaskInfo& info);
+    void run_rescue_now();
+    bool unlink_task(u32 addr);
+    void rebuild_task_lists();
     bool switch_to_task(i32 next_id);
     void reap_removed();
     void remove_sem_waiter(u32 task_id);
