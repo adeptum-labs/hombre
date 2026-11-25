@@ -618,8 +618,7 @@ constexpr u32 kInfoRowBytes = Workbench::kMaxToolTypes * kInfoRowStride;
 constexpr u32 kInfoTagWords = 10;
 constexpr u32 kInfoNodesAt = ndk::LH_SIZE;
 constexpr u32 kInfoRowsAt = kInfoNodesAt + Workbench::kMaxToolTypes * ndk::LN_SIZE;
-constexpr u32 kInfoOriginalRowsAt = kInfoRowsAt + kInfoRowBytes;
-constexpr u32 kInfoDefaultAt = kInfoOriginalRowsAt + kInfoRowBytes;
+constexpr u32 kInfoDefaultAt = kInfoRowsAt + kInfoRowBytes;
 constexpr u32 kInfoOriginalDefaultAt = kInfoDefaultAt + Workbench::kMaxDefaultToolLength + 1;
 constexpr u32 kInfoTagsAt =
     kInfoOriginalDefaultAt + Workbench::kMaxDefaultToolLength + 1;
@@ -3392,7 +3391,6 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
     const u32 extra = dialog.extra();
     request.list = extra;
     request.rows = extra + kInfoRowsAt;
-    request.original_rows = extra + kInfoOriginalRowsAt;
     request.default_text = extra + kInfoDefaultAt;
     request.original_default = extra + kInfoOriginalDefaultAt;
     request.tags = extra + kInfoTagsAt;
@@ -3416,8 +3414,7 @@ bool Workbench::open_info(u32 window_id, u32 icon_id, InfoRequest& request) {
             }
             const u32 row = request.rows + request.row_count * kInfoRowStride;
             copy_guest_text(b, row, entry, kMaxToolTypeLength);
-            copy_guest_text(b, request.original_rows + request.row_count * kInfoRowStride, row,
-                            kMaxToolTypeLength);
+            request.origin[request.row_count] = static_cast<u8>(request.row_count);
             ++request.row_count;
         }
     }
@@ -3560,6 +3557,7 @@ void Workbench::add_tool_type(InfoRequest& request) {
     }
     Bus b(*machine_);
     b.w8(request.rows + request.row_count * kInfoRowStride, 0);
+    request.origin[request.row_count] = kNewToolType;
     ++request.row_count;
     show_tool_types(request, request.row_count - 1);
     intuition_->activate_string(request.tool_gadget, request.window);
@@ -3578,22 +3576,48 @@ void Workbench::delete_tool_type(InfoRequest& request) {
         return;
     }
     __builtin_memmove(rows, rows + kInfoRowStride, later * kInfoRowStride);
+    __builtin_memmove(request.origin + removed, request.origin + removed + 1, later);
     --request.row_count;
     show_tool_types(request, request.row_count == 0 ? kNoToolType
                              : later != 0          ? removed
                                                    : removed - 1);
 }
 
-// Return in the string gadget replaces the selected row's text.
-void Workbench::edit_tool_type(InfoRequest& request) {
+// A row that shows only the start of a longer tool type stays that tool
+// type until its text is changed.
+void Workbench::commit_tool_type(InfoRequest& request) {
     if (request.selected >= request.row_count) {
         return;
     }
     Bus b(*machine_);
     const u32 string_info = b.r32(request.tool_gadget + ndk::gg_SpecialInfo);
-    copy_guest_text(b, request.rows + request.selected * kInfoRowStride,
-                    b.r32(string_info + ndk::si_Buffer), kMaxToolTypeLength);
-    show_tool_types(request, request.selected);
+    char text[kMaxToolTypeLength + 1]{};
+    const u32 row = request.rows + request.selected * kInfoRowStride;
+    if (b.string(b.r32(string_info + ndk::si_Buffer), text, sizeof text) &&
+        !same_guest_prefix(b, row, text, kMaxToolTypeLength)) {
+        copy_guest_text(b, row, b.r32(string_info + ndk::si_Buffer), kMaxToolTypeLength);
+        request.origin[request.selected] = kNewToolType;
+    }
+}
+
+// Rows added and left empty are no tool types.
+void Workbench::drop_empty_tool_types(InfoRequest& request) {
+    Bus b(*machine_);
+    for (u32 i = request.row_count; i > 0; --i) {
+        if (request.origin[i - 1] == kNewToolType &&
+            b.r8(request.rows + (i - 1) * kInfoRowStride) == 0) {
+            request.selected = i - 1;
+            delete_tool_type(request);
+        }
+    }
+}
+
+// Return in the string gadget replaces the selected row's text.
+void Workbench::edit_tool_type(InfoRequest& request) {
+    commit_tool_type(request);
+    if (request.selected < request.row_count) {
+        show_tool_types(request, request.selected);
+    }
 }
 
 Workbench::Reply Workbench::info_input(InfoRequest& request) {
@@ -3641,16 +3665,15 @@ bool Workbench::save_icon_info(InfoRequest& request, bool& changed, u32& error) 
     const bool default_changed =
         request.show_default_tool &&
         !same_guest_prefix(b, request.original_default, default_tool, kMaxDefaultToolLength);
+    if (request.show_tool_types) {
+        // The string gadget may hold a row Return was not pressed in.
+        commit_tool_type(request);
+        drop_empty_tool_types(request);
+    }
     bool types_changed = request.show_tool_types &&
                          request.row_count != request.original_row_count;
     for (u32 i = 0; request.show_tool_types && !types_changed && i < request.row_count; ++i) {
-        char row[kMaxToolTypeLength + 1]{};
-        if (!b.string(request.rows + i * kInfoRowStride, row, sizeof row)) {
-            error = ERROR_OBJECT_WRONG_TYPE;
-            return false;
-        }
-        types_changed = !same_guest_prefix(b, request.original_rows + i * kInfoRowStride, row,
-                                           kMaxToolTypeLength);
+        types_changed = request.origin[i] != i;
     }
     if (!stack_changed && !default_changed && !types_changed) {
         return true;
@@ -3685,8 +3708,13 @@ bool Workbench::save_icon_info(InfoRequest& request, bool& changed, u32& error) 
                 icon_->free_object(object);
                 return false;
             }
+            // A row that was not changed keeps the object's own string,
+            // which may be longer than the row.
             for (u32 i = 0; i < request.row_count; ++i) {
-                b.w32(block + i * 4, request.rows + i * kInfoRowStride);
+                const u32 origin = request.origin[i];
+                b.w32(block + i * 4, origin < original_count
+                                         ? b.r32(object_types + origin * 4)
+                                         : request.rows + i * kInfoRowStride);
             }
             for (u32 i = 0; i < tail; ++i) {
                 b.w32(block + (request.row_count + i) * 4,
@@ -3723,8 +3751,7 @@ bool Workbench::save_icon_info(InfoRequest& request, bool& changed, u32& error) 
     request.original_stack = static_cast<u32>(stack);
     request.original_row_count = request.row_count;
     for (u32 i = 0; i < request.row_count; ++i) {
-        copy_guest_text(b, request.original_rows + i * kInfoRowStride,
-                        request.rows + i * kInfoRowStride, kMaxToolTypeLength);
+        request.origin[i] = static_cast<u8>(i);
     }
     copy_guest_text(b, request.original_default, request.default_text, kMaxDefaultToolLength);
     changed = true;

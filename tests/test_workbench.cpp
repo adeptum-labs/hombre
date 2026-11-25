@@ -3478,6 +3478,44 @@ void tool_types_are_picked_edited_added_and_deleted() {
     CHECK_EQ(r.free_bytes(), before);
 }
 
+void a_long_tool_type_and_a_typed_one_survive_a_save() {
+    Rig r;
+    const std::string long_type(200, 'L');
+    put_ram_typed("Typed", {long_type, "TWO=2"});
+    const TwoWindows w = open_tools_and_ram(r);
+    Workbench::InfoRequest request{};
+    CHECK(r.workbench.open_info(w.ram, r.find_icon_in(w.ram, "Typed"), request));
+    // A new row typed into and saved without Return, past a long one that
+    // was only looked at.
+    click_info_row(r, request, 0);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoNew);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    for (const char c : std::string("TYPED")) {
+        g_intuition.string_key(static_cast<u8>(c));
+    }
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    u32 object = load_ram_object("Typed");
+    CHECK(object_tool_types(r, object) ==
+          std::vector<std::string>({long_type, "TWO=2", "TYPED"}));
+    g_icon.free_object(object);
+
+    // A new row left empty is not saved.
+    CHECK(r.workbench.open_info(w.ram, r.find_icon_in(w.ram, "Typed"), request));
+    click_info(r, request, Workbench::kInfoNew);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Waiting);
+    click_info(r, request, Workbench::kInfoSave);
+    CHECK(r.workbench.info_input(request) == Workbench::Reply::Accepted);
+    CHECK(r.workbench.save_info(request));
+    r.workbench.close_dialog(request);
+    object = load_ram_object("Typed");
+    CHECK_EQ(object_tool_types(r, object).size(), 3u);
+    g_icon.free_object(object);
+}
+
 void tool_types_past_the_cap_survive_a_save() {
     Rig r;
     std::vector<std::string> types;
@@ -4738,6 +4776,7 @@ int main() {
     the_information_window_shows_a_drawer();
     the_information_window_shows_a_tool_and_a_project();
     tool_types_are_picked_edited_added_and_deleted();
+    a_long_tool_type_and_a_typed_one_survive_a_save();
     tool_types_past_the_cap_survive_a_save();
     information_saves_the_icon_fields();
     information_cancels_the_icon_fields();

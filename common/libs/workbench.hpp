@@ -341,6 +341,7 @@ public:
         u32 block_bytes = 0;
     };
     static constexpr u32 kMaxToolTypes = 64;
+    static constexpr u8 kNewToolType = 0xFF;
     static constexpr u32 kMaxToolTypeLength = 127;
     static constexpr u32 kMaxDefaultToolLength = 255;
     static constexpr u32 kNoToolType = 0xFFFFFFFF;
@@ -376,7 +377,6 @@ public:
         u32 tool_gadget = 0;        // the string editing the selected row
         u32 list = 0;               // the exec List of the rows, in extra
         u32 rows = 0;               // the row strings, in extra
-        u32 original_rows = 0;      // the rows as the window opened, in extra
         u32 default_text = 0;       // the default tool string, in extra
         u32 original_default = 0;   // the default tool as it opened, in extra
         u32 tags = 0;               // the tag list of gadget changes, in extra
@@ -394,6 +394,9 @@ public:
         bool show_stack = false;
         bool show_default_tool = false;
         bool show_tool_types = false;
+        // The tool type of the .info each row is, kNewToolType for a row
+        // that was added or changed.
+        u8 origin[kMaxToolTypes]{};
     };
     static constexpr u16 kInfoComment = 1;
     static constexpr u16 kInfoSave = kDialogAccept;
@@ -746,6 +749,8 @@ private:
     void add_tool_type(InfoRequest& request);
     void delete_tool_type(InfoRequest& request);
     void edit_tool_type(InfoRequest& request);
+    void commit_tool_type(InfoRequest& request);
+    void drop_empty_tool_types(InfoRequest& request);
     // Writes the stack, default tool and tool types the information window
     // changed into the icon's .info; changed tells whether it wrote it.
     bool save_icon_info(InfoRequest& request, bool& changed, u32& error);
