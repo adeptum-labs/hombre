@@ -431,28 +431,29 @@ struct GadToolsNatives {
 
     // The context gadget: an inert, empty gadget at the head of the list.
     static void create_context(void* ctx, Machine& m) {
-        GadTools& g = of(ctx);
-        const u32 list = m.cpu.a[0];
+        native::set_result(m, of(ctx).create_context(m.cpu.a[0]));
+    }
+
+    static u32 make_context(GadTools& g, Bus& b, u32 list) {
         const u32 gadget = g.exec_->alloc(kGadgetBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (gadget == 0) {
-            native::set_result(m, 0);
-            return;
+            return 0;
         }
-        Bus b(m);
         b.w16(gadget + gg_Flags, GFLG_GADGHNONE);
         b.w16(gadget + ndk::gg_GadgetType, ndk::GTYP_GADTOOLS | ndk::GTYP_BOOLGADGET);
         b.w16(gadget + gt_Kind, GENERIC_KIND);
         if (list != 0) {
             b.w32(list, gadget);
         }
-        native::set_result(m, b.ok() ? gadget : 0);
+        return b.ok() ? gadget : 0;
     }
 
     // Frees a list made by CreateContext and CreateGadgetA.
     static void free_gadgets(void* ctx, Machine& m) {
-        GadTools& g = of(ctx);
-        Bus b(m);
-        u32 gadget = m.cpu.a[0];
+        of(ctx).free_gadgets(m.cpu.a[0]);
+    }
+
+    static void drop_gadgets(GadTools& g, Bus& b, u32 gadget) {
         for (u32 i = 0; gadget != 0 && i < kMaxChain && b.ok(); ++i) {
             const u32 next = b.r32(gadget + gg_NextGadget);
             // A gadget of the program's own in the chain is its to free.
@@ -942,20 +943,18 @@ struct GadToolsNatives {
     // at A1 and tags at A2. Buttons, text and number displays work; any
     // other kind makes a gadget that shows its frame and does nothing.
     static void create_gadget(void* ctx, Machine& m) {
-        GadTools& g = of(ctx);
-        const u32 kind = m.cpu.d[0];
-        const u32 previous = m.cpu.a[0];
-        const u32 ng = m.cpu.a[1];
+        native::set_result(m, of(ctx).create_gadget(m.cpu.d[0], m.cpu.a[0], m.cpu.a[1],
+                                                    m.cpu.a[2]));
+    }
+
+    static u32 make_gadget(GadTools& g, Bus& b, u32 kind, u32 previous, u32 ng, u32 tags) {
         if (previous == 0 || ng == 0) {
-            native::set_result(m, 0);
-            return;
+            return 0;
         }
         const u32 gadget = g.exec_->alloc(kGadgetBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
         if (gadget == 0) {
-            native::set_result(m, 0);
-            return;
+            return 0;
         }
-        Bus b(m);
         b.w16(gadget + ndk::gg_LeftEdge, b.r16(ng + ng_LeftEdge));
         b.w16(gadget + ndk::gg_TopEdge, b.r16(ng + ng_TopEdge));
         b.w16(gadget + ndk::gg_Width, b.r16(ng + ng_Width));
@@ -1032,7 +1031,7 @@ struct GadToolsNatives {
             b.w32(gadget + gt_StringInfo + ndk::si_Extension, extend);
             b.w16(gadget + gg_Flags, GFLG_GADGHNONE | ndk::GFLG_STRINGEXTEND);
         }
-        apply_tags(g, b, gadget, m.cpu.a[2], true);
+        apply_tags(g, b, gadget, tags, true);
         // A checkbox is its own size unless GTCB_Scaled takes the
         // NewGadget's.
         if (kind == CHECKBOX_KIND && (b.r16(gadget + gt_Options) & kOptScaled) == 0) {
@@ -1050,16 +1049,14 @@ struct GadToolsNatives {
             if (first == 0) {
                 g.graphics_->close_font(font);
                 g.exec_->free(gadget, kGadgetBytes);
-                native::set_result(m, 0);
-                return;
+                return 0;
             }
             sync_list(b, gadget);
             show_selected(g, b, 0, gadget);
         }
         b.w32(previous + gg_NextGadget, first);
         if (!b.ok()) {
-            native::set_result(m, 0);
-            return;
+            return 0;
         }
         if (kind == INTEGER_KIND) {
             set_integer_number(g, b, gadget, static_cast<i32>(b.r32(gadget + gt_Number)));
@@ -1075,7 +1072,7 @@ struct GadToolsNatives {
             g.unhandled_kinds_[kind] = true;
             LogLine().text("gadtools: gadget kind ").dec(kind).text(" not handled").send();
         }
-        native::set_result(m, gadget);
+        return gadget;
     }
 
     // GT_SetGadgetAttrsA: the gadget at A0 of the window at A1 takes the
@@ -1327,12 +1324,10 @@ struct GadToolsNatives {
 
     // GT_RefreshWindow: draws every gadtools gadget of the window at A0.
     static void refresh_window(void* ctx, Machine& m) {
-        GadTools& g = of(ctx);
-        const u32 window = m.cpu.a[0];
-        if (window == 0) {
-            return;
-        }
-        Bus b(m);
+        of(ctx).refresh_window(m.cpu.a[0]);
+    }
+
+    static void draw_gadgets(GadTools& g, Bus& b, u32 window) {
         const u32 rp = b.r32(window + ndk::wd_RPort);
         u32 gadget = b.r32(window + ndk::wd_FirstGadget);
         for (u32 i = 0; gadget != 0 && i < kMaxChain && b.ok(); ++i) {
@@ -1399,6 +1394,36 @@ struct GadToolsNatives {
 // array, ending at NM_END. Items follow the last title and subitems the
 // last item; bar labels become separator images. Positions come from
 // layout_menus.
+u32 GadTools::create_context(u32 list) {
+    if (machine_ == nullptr || exec_ == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    return GadToolsNatives::make_context(*this, b, list);
+}
+
+u32 GadTools::create_gadget(u32 kind, u32 previous, u32 new_gadget, u32 tags) {
+    if (machine_ == nullptr || exec_ == nullptr) {
+        return 0;
+    }
+    Bus b(*machine_);
+    return GadToolsNatives::make_gadget(*this, b, kind, previous, new_gadget, tags);
+}
+
+void GadTools::free_gadgets(u32 first) {
+    if (machine_ != nullptr && exec_ != nullptr) {
+        Bus b(*machine_);
+        GadToolsNatives::drop_gadgets(*this, b, first);
+    }
+}
+
+void GadTools::refresh_window(u32 window) {
+    if (machine_ != nullptr && window != 0) {
+        Bus b(*machine_);
+        GadToolsNatives::draw_gadgets(*this, b, window);
+    }
+}
+
 u32 GadTools::create_menus(u32 array) {
     if (machine_ == nullptr || exec_ == nullptr || array == 0) {
         return 0;

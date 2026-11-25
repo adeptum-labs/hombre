@@ -89,6 +89,13 @@ public:
     u32 create_menus(u32 array);
     bool layout_menus(u32 menu, u32 font = 0);
 
+    // CreateContext, CreateGadgetA, FreeGadgets and GT_RefreshWindow for
+    // code that is not the guest's, with their arguments and results.
+    u32 create_context(u32 list);
+    u32 create_gadget(u32 kind, u32 previous, u32 new_gadget, u32 tags);
+    void free_gadgets(u32 first);
+    void refresh_window(u32 window);
+
     // Draws a gadget gadtools made, through rp of the window, as it stands:
     // Intuition calls it when a button is pressed or let go. False for a
     // GENERIC_KIND gadget, which its program draws, as Intuition does any
