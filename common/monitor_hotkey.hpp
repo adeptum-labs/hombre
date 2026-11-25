@@ -52,4 +52,27 @@ private:
     bool held_ = false;
 };
 
+// Whether a mouse report may reach the Amiga side: never while the monitor
+// is open, and after it closes not until a report shows no button held, that
+// report included.
+class MonitorMouseGate {
+public:
+    bool passes(bool open, u8 buttons) {
+        if (open) {
+            blocked_ = true;
+            return false;
+        }
+        if (!blocked_) {
+            return true;
+        }
+        if (buttons == 0) {
+            blocked_ = false;
+        }
+        return false;
+    }
+
+private:
+    bool blocked_ = false;
+};
+
 }

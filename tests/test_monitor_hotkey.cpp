@@ -55,10 +55,27 @@ void other_keys_stay() {
     CHECK_EQ(report[3], 0x46);
 }
 
+void held_button_is_kept_until_released_after_close() {
+    MonitorMouseGate gate;
+    CHECK(!gate.passes(true, 1));
+    CHECK(!gate.passes(false, 1));
+    CHECK(!gate.passes(false, 0));
+    CHECK(gate.passes(false, 1));
+}
+
+void a_gate_that_never_saw_the_monitor_open_passes_everything() {
+    MonitorMouseGate gate;
+    CHECK(gate.passes(false, 0));
+    CHECK(gate.passes(false, 1));
+    CHECK(gate.passes(false, 0xFF));
+}
+
 }
 
 int main() {
     f12_is_taken_out_and_counts_once_a_press();
     other_keys_stay();
+    held_button_is_kept_until_released_after_close();
+    a_gate_that_never_saw_the_monitor_open_passes_everything();
     return check::finish("test_monitor_hotkey");
 }
