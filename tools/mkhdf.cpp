@@ -24,17 +24,20 @@
 
 // Builds an Amiga hard disk image with a Rigid Disk Block.
 //
-//   mkhdf <out.hdf> <adf> [<adf>...]
+//   mkhdf [--gpt4k] [--size <MiB>] [--empty <OFS|FFS> <name>]
+//         [--add <volume>:<path>=<hostfile>] <out.hdf> [<adf>...]
 //
 // Each ADF or DMS floppy image becomes a partition of its own, DH0: on, the
 // first one bootable, laid out on one surface of 32 blocks a track. Each
 // partition is formatted with the floppy's file system and volume name, is
 // at least 8 MiB, and gets a copy of the floppy's files, so it has a valid
-// bitmap and room to write to.
+// bitmap and room to write to. Files named with --add are copied into their
+// partition once every partition is made.
 
 #include "amiga_fs.hpp"
 #include "amiga_fs_write.hpp"
 #include "dms.hpp"
+#include "mkhdf_add.hpp"
 #include "rdb_writer.hpp"
 
 #include <cstdio>
@@ -160,6 +163,24 @@ bool load_floppy(const char* path, std::vector<u8>& image) {
     return true;
 }
 
+// Copies one --add host file into its already formatted partition.
+mkhdf_add::AddError add_to_partition(const mkhdf_add::AddSpec& add,
+                                     const RdbPartitionSpec& part, std::vector<u8>& disk) {
+    std::vector<u8> data;
+    mkhdf_add::AddError error = mkhdf_add::read_host_file(add.host_file, data);
+    if (error != mkhdf_add::AddError::Ok) {
+        return error;
+    }
+    Window window{&disk, part.low_cyl * kSectorsPerTrack};
+    const BlockSource source{&window, window_read, window_write};
+    const u32 blocks = (part.high_cyl - part.low_cyl + 1) * kSectorsPerTrack;
+    AdfVolume volume{};
+    if (adf_mount_partition(source, 0, blocks, 2, volume) != FsError::Ok) {
+        return mkhdf_add::AddError::Fs;
+    }
+    return mkhdf_add::add_file(volume, add.path, data, AmigaDate{0, 0, 0});
+}
+
 // The RDB disk as one GPT partition of a disk with 4096 byte sectors, as an
 // NVMe drive formatted that way has it. The partition starts at 1 MiB.
 std::vector<u8> wrap_in_gpt4k(const std::vector<u8>& rdb) {
@@ -201,12 +222,14 @@ bool parse_empty(const char* type, const char* name, EmptySpec& out) {
 void usage() {
     std::fprintf(stderr,
                  "usage: mkhdf [--gpt4k] [--size <MiB>] [--empty <OFS|FFS> <name>] "
-                 "<out.hdf> [<adf>...]\n"
+                 "[--add <volume>:<path>=<hostfile>] <out.hdf> [<adf>...]\n"
                  "  each floppy becomes a partition holding its files; the first is\n"
                  "  bootable\n"
                  "  --empty adds an empty formatted partition after them\n"
                  "  --size grows the last partition until the disk is that large\n"
-                 "  --gpt4k puts the disk in a GPT on a disk with 4096 byte sectors\n");
+                 "  --gpt4k puts the disk in a GPT on a disk with 4096 byte sectors\n"
+                 "  --add copies a host file into a partition, creating missing\n"
+                 "  folders; repeatable\n");
 }
 
 }
@@ -216,6 +239,7 @@ int main(int argc, char** argv) {
     unsigned long size_mib = 0;
     bool empty = false;
     EmptySpec empty_spec{};
+    std::vector<mkhdf_add::AddSpec> adds;
     while (argc > 1 && argv[1][0] == '-') {
         if (std::strcmp(argv[1], "--gpt4k") == 0) {
             gpt4k = true;
@@ -235,6 +259,17 @@ int main(int argc, char** argv) {
             empty = true;
             argc -= 2;
             argv += 2;
+        } else if (std::strcmp(argv[1], "--add") == 0 && argc > 2) {
+            mkhdf_add::AddSpec spec;
+            const mkhdf_add::AddError error = mkhdf_add::parse_add(argv[2], spec);
+            if (error != mkhdf_add::AddError::Ok) {
+                std::fprintf(stderr, "mkhdf: --add %s: %s\n", argv[2],
+                             mkhdf_add::add_error_name(error));
+                return 2;
+            }
+            adds.push_back(std::move(spec));
+            --argc;
+            ++argv;
         } else {
             usage();
             return 2;
@@ -312,6 +347,21 @@ int main(int argc, char** argv) {
             adf_mount_partition(source, 0, blocks, 2, to) != FsError::Ok ||
             !copy_tree(from, "", to, to.root_block)) {
             std::fprintf(stderr, "%s: cannot build its partition\n", argv[2 + i]);
+            return 1;
+        }
+    }
+    std::vector<std::string> volume_names;
+    for (const RdbPartitionSpec& part : parts) {
+        volume_names.push_back(part.name);
+    }
+    for (const mkhdf_add::AddSpec& add : adds) {
+        const int index = mkhdf_add::find_volume(volume_names, add.volume);
+        const mkhdf_add::AddError error =
+            index < 0 ? mkhdf_add::AddError::UnknownVolume
+                      : add_to_partition(add, parts[static_cast<usize>(index)], disk);
+        if (error != mkhdf_add::AddError::Ok) {
+            std::fprintf(stderr, "mkhdf: --add %s: %s\n", add.argument.c_str(),
+                         mkhdf_add::add_error_name(error));
             return 1;
         }
     }
