@@ -152,6 +152,10 @@ public:
     // True while events wait for the device's task.
     bool has_pending() const { return queue_count_ != 0; }
 
+    // True while the task is in a pass over the handlers, from taking the
+    // events off the queue to the last handler below the sink.
+    bool in_pass() const { return busy_; }
+
     // The device's task, 0 before the first handler.
     u32 task() const { return task_; }
 
@@ -202,11 +206,10 @@ private:
         u64 time_us = 0;
     };
 
-    // An IND_REMHANDLER waiting for the handler call it removed to end.
+    // An IND_REMHANDLER waiting for the pass it was made in to end.
     struct PendingRemove {
         u32 request = 0;
         u32 task = 0;
-        u32 interrupt = 0;
     };
     static constexpr u32 kMaxPending = 8;
 
@@ -215,10 +218,14 @@ private:
     bool remove_handler(u32 interrupt);
     bool installed(u32 interrupt) const;
     bool call_handler(u32 interrupt, u32& head);
-    void run_stage(bool above_sink, u32& head);
+    void run_stage(bool above_sink);
+    void drop_events_of(u32 program);
+    void sweep_dropped();
     void reply_pending();
     void log_handler(const char* what, u32 interrupt, const char* why = nullptr,
                      bool priority = false);
+    u32 overflow_victim() const;
+    void drop_queued(u32 from_head);
     u32 pop_batch(u32& count);
     u64 now_us() const;
 
@@ -238,6 +245,9 @@ private:
     u32 queue_count_ = 0;
     bool overflow_logged_ = false;
     bool busy_ = false;
+    u32 pass_head_ = 0;  // the events the rest of the pass works with
+    u32 dropped_[kMaxPassEvents]{};  // events dropped for an ended program
+    u32 dropped_count_ = 0;
     u32 running_ = 0;  // the Interrupt whose handler runs
     PendingRemove pending_[kMaxPending]{};
     u16 qualifier_ = 0;

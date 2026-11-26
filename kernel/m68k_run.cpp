@@ -588,7 +588,10 @@ void wait_for_work(const Console& c) {
     }
     // Waiting for a key is the Wait of an Amiga program, which lets
     // input.device's task run under Forbid too: the keys come through it.
-    if (input_device.has_pending() && exec.let_run(input_device.task())) {
+    // A task in the middle of a pass has taken its events off the queue
+    // and runs for the rest of the batch, the sink included.
+    if ((input_device.has_pending() || input_device.in_pass()) &&
+        exec.let_run(input_device.task())) {
         return;
     }
     if (exec.yield_in_native() && (c.key_count > 0 || other_task_ready())) {

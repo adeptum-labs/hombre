@@ -85,8 +85,43 @@ bool logged_containing(const std::string& text) {
     return false;
 }
 
+u32 logged_count(const std::string& text) {
+    u32 count = 0;
+    for (const std::string& line : g_lines) {
+        if (line.find(text) != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 void sink(void*, const InputEventData& e) {
     g_sunk.push_back(e);
+}
+
+struct PassWatch {
+    bool in_pass = false;
+    bool had_pending = false;
+};
+
+void watch_pass(void* ctx, const InputEventData&) {
+    PassWatch& watch = *static_cast<PassWatch*>(ctx);
+    watch.in_pass = g_input.in_pass();
+    watch.had_pending = g_input.has_pending();
+}
+
+struct Ending {
+    u32 program = 0;
+    bool done = false;
+};
+
+void end_program_sink(void* ctx, const InputEventData& e) {
+    g_sunk.push_back(e);
+    Ending& ending = *static_cast<Ending*>(ctx);
+    if (!ending.done) {
+        ending.done = true;
+        g_input.program_ended(ending.program);
+    }
 }
 
 bool fake_create(void*, u32) { return true; }
@@ -487,6 +522,161 @@ void a_program_that_ends_by_itself_keeps_its_handler() {
     CHECK_EQ(g_input.handler_count(), 1u);
 }
 
+void a_removal_waits_for_the_pass_to_end() {
+    Rig r;
+    constexpr u32 event = kData + 0x600;
+    constexpr u32 mark = kData + 0x640;
+    for (u32 i = 0; i < ie_SIZEOF; ++i) {
+        r.put8(event + i, 0);
+    }
+    r.put8(event + ie_Class, IECLASS_RAWKEY);
+    r.put16(event + ie_Code, 0x77);
+    r.put8(mark, 0);
+    const u32 dev = g_input.device_base();
+    const u32 req = r.request;
+    // links: MOVE.L A0,(event).L, MOVEA.L #event,A0, MOVE.L A0,D0, RTS.
+    r.code(kHandlers, {0x23C8, static_cast<u16>(event >> 16), static_cast<u16>(event), 0x207C,
+                       static_cast<u16>(event >> 16), static_cast<u16>(event), 0x2008, 0x4E75});
+    // remover: BeginIO of the removal request, then the request's node type.
+    r.code(kHandlers + 0x100,
+           {0x2F08, 0x227C, static_cast<u16>(req >> 16), static_cast<u16>(req), 0x2C7C,
+            static_cast<u16>(dev >> 16), static_cast<u16>(dev), 0x4EAE, 0xFFE2, 0x1239,
+            static_cast<u16>((req + LN_TYPE) >> 16), static_cast<u16>(req + LN_TYPE), 0x13C1,
+            static_cast<u16>(mark >> 16), static_cast<u16>(mark), 0x201F, 0x4E75});
+    const u32 adder = r.interrupt(kData + 0x500, 60, kHandlers, 0, "adder", kNames + 0x20);
+    const u32 remover =
+        r.interrupt(kData + 0x540, 55, kHandlers + 0x100, 0, "remover", kNames + 0x40);
+    CHECK_EQ(r.do_io(IND_ADDHANDLER, adder), 0);
+    CHECK_EQ(r.do_io(IND_ADDHANDLER, remover), 0);
+    r.put16(req + io_Command, IND_REMHANDLER);
+    r.put32(req + io_Data, adder);
+    r.put8(req + io_Flags, 0);
+    r.put8(req + LN_TYPE, NT_MESSAGE);
+    g_input.submit(key(0x20));
+    g_input.process();
+    // The handler saw the request unanswered inside the pass.
+    CHECK_EQ(r.get8(mark), NT_MESSAGE);
+    CHECK_EQ(g_input.handler_count(), 1u);
+    CHECK_EQ(g_input.handler(0), remover);
+    CHECK_EQ(r.get8(req + io_Error), 0u);
+    CHECK_EQ(r.get8(req + LN_TYPE), NT_REPLYMSG);
+    CHECK_EQ(g_sunk.size(), 2u);
+    CHECK_EQ(g_sunk[0].code, 0x77u);
+    CHECK_EQ(g_sunk[1].code, 0x20u);
+}
+
+void a_full_queue_keeps_releases() {
+    Rig r;
+    r.code(kHandlers, kCounter);
+    constexpr u32 count = kData + 0x400;
+    r.put32(count, 0);
+    CHECK_EQ(r.do_io(IND_ADDHANDLER,
+                     r.interrupt(kData + 0x500, 10, kHandlers, count, "counter", kNames + 0x20)),
+             0);
+    // A press, a move, then presses up to the full queue.
+    g_input.submit(key(0x20));
+    g_input.submit(move(3, 4));
+    for (u32 i = 2; i < InputDevice::kQueueCapacity; ++i) {
+        g_input.submit(key(0x30, static_cast<u16>(i)));
+    }
+    CHECK_EQ(logged_count("events lost"), 0u);
+    g_input.submit(key(0x20 | IECODE_UP_PREFIX, 0xFFFF));
+    CHECK_EQ(logged_count("input.device: events lost, the queue is full"), 1u);
+    g_input.process();
+    CHECK_EQ(g_sunk.size(), InputDevice::kQueueCapacity);
+    CHECK_EQ(g_sunk[0].code, 0x20u);
+    CHECK_EQ(g_sunk[0].qualifier, 0u);
+    // The move went, everything else stayed in order, the release last.
+    for (u32 i = 1; i + 1 < g_sunk.size(); ++i) {
+        CHECK_EQ(g_sunk[i].code, 0x30u);
+        CHECK_EQ(g_sunk[i].qualifier, i + 1);
+    }
+    CHECK_EQ(g_sunk.back().code, 0x20u | IECODE_UP_PREFIX);
+    CHECK_EQ(g_sunk.back().qualifier, 0xFFFFu);
+
+    // The queue drained, so the next overflow is logged again. With no
+    // move left, the newest press goes.
+    g_sunk.clear();
+    g_input.submit(key(0x21));
+    for (u32 i = 1; i < InputDevice::kQueueCapacity; ++i) {
+        g_input.submit(key(0x31, static_cast<u16>(i)));
+    }
+    g_input.submit(key(0x21 | IECODE_UP_PREFIX, 0xFFFF));
+    CHECK_EQ(logged_count("input.device: events lost, the queue is full"), 2u);
+    g_input.process();
+    CHECK_EQ(g_sunk.size(), InputDevice::kQueueCapacity);
+    CHECK_EQ(g_sunk[0].code, 0x21u);
+    for (u32 i = 1; i + 1 < g_sunk.size(); ++i) {
+        CHECK_EQ(g_sunk[i].code, 0x31u);
+        CHECK_EQ(g_sunk[i].qualifier, i);
+    }
+    CHECK_EQ(g_sunk.back().code, 0x21u | IECODE_UP_PREFIX);
+}
+
+void the_device_says_when_it_is_in_a_pass() {
+    Rig r;
+    r.code(kHandlers, kCounter);
+    constexpr u32 count = kData + 0x400;
+    r.put32(count, 0);
+    CHECK_EQ(r.do_io(IND_ADDHANDLER,
+                     r.interrupt(kData + 0x500, 10, kHandlers, count, "counter", kNames + 0x20)),
+             0);
+    PassWatch watch;
+    g_input.set_sink(watch_pass, &watch);
+    g_input.submit(key(0x20));
+    CHECK(!g_input.in_pass());
+    g_input.process();
+    // The batch is off the queue, but the pass still runs.
+    CHECK(watch.in_pass);
+    CHECK(!watch.had_pending);
+    CHECK(!g_input.in_pass());
+}
+
+void an_ended_program_drops_its_events_from_the_pass() {
+    Rig r;
+    const u32 seglist = program_segment(r);
+    const u32 program = g_exec.begin_program(kData, seglist, true);
+    CHECK(program != 0);
+    constexpr u32 event = kSegment + 0x300;
+    constexpr u32 seen = kData + 0x480;
+    for (u32 i = 0; i < ie_SIZEOF; ++i) {
+        r.put8(event + i, 0);
+    }
+    r.put8(event + ie_Class, IECLASS_RAWKEY);
+    r.put16(event + ie_Code, 0x77);
+    r.put32(seen, 0);
+    // The program's handler links its own event in.
+    r.code(kSegment + 0x100,
+           {0x23C8, static_cast<u16>(event >> 16), static_cast<u16>(event), 0x207C,
+            static_cast<u16>(event >> 16), static_cast<u16>(event), 0x2008, 0x4E75});
+    const u32 owner = r.interrupt(kSegment + 0x200, 60, kSegment + 0x100, 0, "program",
+                                  kSegment + 0x240);
+    // Below the sink, this one records the list it was given.
+    r.code(kHandlers, {0x23C8, static_cast<u16>(seen >> 16), static_cast<u16>(seen), 0x2008,
+                       0x4E75});
+    const u32 lower =
+        r.interrupt(kData + 0x540, 40, kHandlers, 0, "lower", kNames + 0x20);
+    CHECK_EQ(r.do_io(IND_ADDHANDLER, owner), 0);
+    CHECK_EQ(r.do_io(IND_ADDHANDLER, lower), 0);
+    Ending ending{program};
+    g_input.set_sink(end_program_sink, &ending);
+    g_input.submit(key(0x20));
+    g_input.process();
+    CHECK(ending.done);
+    CHECK_EQ(g_input.handler_count(), 1u);
+    CHECK_EQ(g_input.handler(0), lower);
+    // The sink was handed the event before the program ended; the lower
+    // handler only got the key behind it.
+    CHECK_EQ(g_sunk.size(), 2u);
+    CHECK_EQ(g_sunk[0].code, 0x77u);
+    CHECK_EQ(g_sunk[1].code, 0x20u);
+    const u32 rest = r.get32(seen);
+    CHECK(rest != 0);
+    CHECK(rest != event);
+    CHECK_EQ(r.get8(rest + ie_Class), IECLASS_RAWKEY);
+    CHECK_EQ(r.get16(rest + ie_Code), 0x20u);
+}
+
 }
 
 int main() {
@@ -498,5 +688,9 @@ int main() {
     forbid_a_handler_leaves_is_undone();
     a_program_ended_from_the_monitor_loses_its_handler();
     a_program_that_ends_by_itself_keeps_its_handler();
+    a_removal_waits_for_the_pass_to_end();
+    a_full_queue_keeps_releases();
+    the_device_says_when_it_is_in_a_pass();
+    an_ended_program_drops_its_events_from_the_pass();
     return check::finish("test_input_device");
 }

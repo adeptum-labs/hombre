@@ -45,6 +45,17 @@ void fault_null(Bus& b) {
     b.bytes_at(0, b.machine().mem.size + 1);
 }
 
+bool is_mouse_move(const InputEventData& e) {
+    return e.ie_class == IECLASS_RAWMOUSE && e.code == IECODE_NOBUTTON;
+}
+
+// A key going up or a mouse button going up: an event the queue must keep,
+// since losing it leaves the key or button down for good.
+bool is_release(const InputEventData& e) {
+    return (e.ie_class == IECLASS_RAWKEY || e.ie_class == IECLASS_RAWMOUSE) &&
+           !is_mouse_move(e) && (e.code & IECODE_UP_PREFIX) != 0;
+}
+
 // Guest memory reads and writes that leave the running task's CPU state
 // alone, for the device's own task and the hooks exec calls from any task.
 struct Mem {
@@ -147,10 +158,12 @@ struct InputOps {
             if (d.remove_handler(data)) {
                 d.log_handler("removed the", data);
             }
-            // A call into the handler that another task is in ends before
-            // the request comes back, as the device's task would take it
-            // only between two calls.
-            if (data != 0 && d.running_ == data && d.exec_->this_task() != d.task_) {
+            // As on an Amiga, the device takes requests only between
+            // passes: the program may free what the handler put in the
+            // list as soon as the reply comes back, and later stages of
+            // this pass still read it. A handler of the device's own task
+            // is inside the pass itself and is answered at once.
+            if (data != 0 && d.busy_ && d.exec_->this_task() != d.task_) {
                 for (InputDevice::PendingRemove& p : d.pending_) {
                     if (p.request == 0) {
                         b.w8(io_raw + io_Flags, flags & ~IOF_QUICK);
@@ -158,7 +171,7 @@ struct InputOps {
                         if (!b.ok()) {
                             return;
                         }
-                        p = InputDevice::PendingRemove{io_raw, d.exec_->this_task(), data};
+                        p = InputDevice::PendingRemove{io_raw, d.exec_->this_task()};
                         return;
                     }
                 }
@@ -293,6 +306,8 @@ bool InputDevice::init(Machine& m, Exec& exec) {
     queue_count_ = 0;
     overflow_logged_ = false;
     busy_ = false;
+    pass_head_ = 0;
+    dropped_count_ = 0;
     running_ = 0;
     for (PendingRemove& p : pending_) {
         p = PendingRemove{};
@@ -448,10 +463,9 @@ void InputDevice::submit(const InputEventData& event) {
         }
         return;
     }
-    if (event.ie_class == IECLASS_RAWMOUSE && event.code == IECODE_NOBUTTON &&
-        queue_count_ != 0) {
+    if (is_mouse_move(event) && queue_count_ != 0) {
         QueuedEvent& last = queue_[(queue_head_ + queue_count_ - 1) % kQueueCapacity];
-        if (last.event.ie_class == IECLASS_RAWMOUSE && last.event.code == IECODE_NOBUTTON &&
+        if (is_mouse_move(last.event) &&
             last.event.qualifier == event.qualifier && last.event.subclass == event.subclass) {
             const i32 x = last.event.x + event.x;
             const i32 y = last.event.y + event.y;
@@ -467,13 +481,43 @@ void InputDevice::submit(const InputEventData& event) {
             overflow_logged_ = true;
             LogLine().text("input.device: events lost, the queue is full").send();
         }
-        return;
+        const u32 victim = is_release(event) ? overflow_victim() : kQueueCapacity;
+        if (victim == kQueueCapacity) {
+            return;
+        }
+        drop_queued(victim);
     }
     queue_[(queue_head_ + queue_count_) % kQueueCapacity] = QueuedEvent{event, now_us()};
     ++queue_count_;
     if (task_ != 0) {
         exec_->signal_task(task_, 1u << kWakeSignal);
     }
+}
+
+// The queued event a release takes the place of: the newest mouse move,
+// whose loss only shortens the pointer's way, otherwise the newest event
+// that is not a release. kQueueCapacity when there is none.
+u32 InputDevice::overflow_victim() const {
+    u32 victim = kQueueCapacity;
+    for (u32 i = queue_count_; i > 0; --i) {
+        const QueuedEvent& q = queue_[(queue_head_ + i - 1) % kQueueCapacity];
+        if (is_mouse_move(q.event)) {
+            return i - 1;
+        }
+        if (victim == kQueueCapacity && !is_release(q.event)) {
+            victim = i - 1;
+        }
+    }
+    return victim;
+}
+
+// Takes the event at from_head off the queue, the ones after it closing up.
+void InputDevice::drop_queued(u32 from_head) {
+    for (u32 i = from_head; i + 1 < queue_count_; ++i) {
+        queue_[(queue_head_ + i) % kQueueCapacity] =
+            queue_[(queue_head_ + i + 1) % kQueueCapacity];
+    }
+    --queue_count_;
 }
 
 void InputDevice::submit_host_key(u8 usage, u8 modifiers) {
@@ -529,22 +573,23 @@ bool InputDevice::call_handler(u32 interrupt, u32& head) {
             log_handler("ended Forbid or Disable left by the", interrupt);
         }
     }
-    reply_pending();
     if (why != ExitReason::Returned) {
         if (installed(interrupt)) {
             log_handler("removed the", interrupt, m68k::exit_reason_name(why));
             remove_handler(interrupt);
         }
+        sweep_dropped();
         return false;
     }
     head = native::guest_address(m, result);
+    sweep_dropped();
     return true;
 }
 
-// Replies the IND_REMHANDLER requests whose handler call has ended.
+// Replies the IND_REMHANDLER requests the pass held.
 void InputDevice::reply_pending() {
     for (PendingRemove& p : pending_) {
-        if (p.request == 0 || p.interrupt == running_) {
+        if (p.request == 0) {
             continue;
         }
         const u32 request = p.request;
@@ -563,7 +608,7 @@ void InputDevice::reply_pending() {
 // The handlers above the sink, or those at or below it, each with the
 // events the one before returned. A handler added during the stage waits
 // for the next pass; one removed is not called.
-void InputDevice::run_stage(bool above_sink, u32& head) {
+void InputDevice::run_stage(bool above_sink) {
     u32 order[kMaxHandlers];
     u32 count = 0;
     for (u32 i = 0; i < handler_count_; ++i) {
@@ -573,8 +618,71 @@ void InputDevice::run_stage(bool above_sink, u32& head) {
     }
     for (u32 i = 0; i < count; ++i) {
         if (installed(order[i])) {
-            call_handler(order[i], head);
+            call_handler(order[i], pass_head_);
         }
+    }
+}
+
+// Takes a pass's events that lie in memory of a program the monitor ended
+// out of its list, and remembers them: a handler that was running when the
+// program ended may hand back the list it was given before.
+void InputDevice::drop_events_of(u32 program) {
+    if (!busy_ || pass_head_ == 0) {
+        return;
+    }
+    const Mem mem{*m_};
+    u32 prev = 0;
+    u32 at = pass_head_;
+    for (u32 i = 0; at != 0 && i < kMaxPassEvents; ++i) {
+        u32 next = 0;
+        if (!mem.r32(at + ie_NextEvent, next)) {
+            return;
+        }
+        next = native::guest_address(*m_, next);
+        if (exec_->program_holds(program, at)) {
+            if (dropped_count_ < kMaxPassEvents) {
+                dropped_[dropped_count_++] = at;
+            }
+            if (prev == 0) {
+                pass_head_ = next;
+            } else if (!mem.w32(prev + ie_NextEvent, next)) {
+                return;
+            }
+        } else {
+            prev = at;
+        }
+        at = next;
+    }
+}
+
+// Takes the remembered events out of the list again.
+void InputDevice::sweep_dropped() {
+    if (pass_head_ == 0 || dropped_count_ == 0) {
+        return;
+    }
+    const Mem mem{*m_};
+    u32 prev = 0;
+    u32 at = pass_head_;
+    for (u32 i = 0; at != 0 && i < kMaxPassEvents; ++i) {
+        u32 next = 0;
+        if (!mem.r32(at + ie_NextEvent, next)) {
+            return;
+        }
+        next = native::guest_address(*m_, next);
+        bool drop = false;
+        for (u32 j = 0; j < dropped_count_ && !drop; ++j) {
+            drop = dropped_[j] == at;
+        }
+        if (drop) {
+            if (prev == 0) {
+                pass_head_ = next;
+            } else if (!mem.w32(prev + ie_NextEvent, next)) {
+                return;
+            }
+        } else {
+            prev = at;
+        }
+        at = next;
     }
 }
 
@@ -606,6 +714,9 @@ u32 InputDevice::pop_batch(u32& count) {
         prev = at;
         ++count;
     }
+    if (queue_count_ == 0) {
+        overflow_logged_ = false;
+    }
     return count != 0 ? events_ : 0;
 }
 
@@ -616,22 +727,27 @@ void InputDevice::process() {
     busy_ = true;
     const Mem mem{*m_};
     while (queue_count_ != 0) {
+        pass_head_ = 0;
+        dropped_count_ = 0;
         if (queue_[queue_head_].event.ie_class == kClassHostKey) {
             const InputEventData key = queue_[queue_head_].event;
             queue_head_ = (queue_head_ + 1) % kQueueCapacity;
             --queue_count_;
+            if (queue_count_ == 0) {
+                overflow_logged_ = false;
+            }
             if (sink_ != nullptr) {
                 sink_(sink_ctx_, key);
             }
             continue;
         }
         u32 count = 0;
-        u32 head = pop_batch(count);
-        run_stage(true, head);
+        pass_head_ = pop_batch(count);
+        run_stage(true);
         // What reached the sink is read before it acts, so that nothing a
         // handler does with its own events in the meantime matters.
         u32 passed_count = 0;
-        for (u32 at = head; at != 0 && passed_count < kMaxPassEvents;) {
+        for (u32 at = pass_head_; at != 0 && passed_count < kMaxPassEvents;) {
             InputEventData e{};
             u32 cls = 0;
             u32 sub = 0;
@@ -661,9 +777,13 @@ void InputDevice::process() {
                 sink_(sink_ctx_, passed_[i]);
             }
         }
-        run_stage(false, head);
+        run_stage(false);
+        pass_head_ = 0;
+        dropped_count_ = 0;
+        reply_pending();
     }
     busy_ = false;
+    reply_pending();
 }
 
 void InputDevice::program_ended(u32 program) {
@@ -689,6 +809,7 @@ void InputDevice::program_ended(u32 program) {
             exec_->stop_code_of(task_);
         }
     }
+    drop_events_of(program);
     for (PendingRemove& p : pending_) {
         if (p.request != 0 && exec_->program_holds(program, p.request)) {
             p = PendingRemove{};
