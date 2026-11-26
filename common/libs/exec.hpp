@@ -729,6 +729,30 @@ public:
     // Keeps the program block that holds addr, if one does: for a keeper.
     void keep_block_at(u32 addr) { keep_block_holding(addr); }
 
+    // A library or device that keeps addresses a program gave it and calls
+    // them, as input.device its handlers, hears through hook of each
+    // program the system monitor ends: once when the End is asked for, and
+    // again just before the program's blocks are freed. program_holds tells
+    // it which addresses it must let go. False when kMaxKeepers hooks are
+    // registered. Reset on init.
+    bool add_program_end_hook(void (*hook)(void* ctx, u32 program), void* ctx);
+
+    // True when addr lies in a segment of the program's code or in a block
+    // exec recorded as the program's.
+    bool program_holds(u32 program, u32 addr) const;
+
+    // Ends the 68000 code the task at task is in, as an End from the system
+    // monitor ends a shell's command: its run ends with Stopped, at its next
+    // block or out of the wait it is in. A task in no 68000 code is left
+    // alone.
+    void stop_code_of(u32 task);
+
+    // Lets the Ready task at task run now, from a native of the running
+    // task that waits for it, as Wait lets other tasks run under Forbid;
+    // back once the caller is picked again. False when that task is not
+    // Ready or is the caller, or no switch could be made.
+    bool let_run(u32 task);
+
 private:
     friend struct ExecOps;
     friend struct ExecTest;
@@ -924,6 +948,12 @@ private:
         void* ctx = nullptr;
     };
     Keeper keepers_[kMaxKeepers]{};
+    struct EndHook {
+        void (*fn)(void* ctx, u32 program) = nullptr;
+        void* ctx = nullptr;
+    };
+    EndHook end_hooks_[kMaxKeepers]{};
+    void tell_program_ended(u32 id);
     std::vector<u32> loaded_;  // seglists of libraries exec loaded
 };
 

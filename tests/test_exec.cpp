@@ -4010,6 +4010,79 @@ void a_program_that_ends_by_itself_keeps_what_it_left() {
     g_exec.free(again, 40);
 }
 
+std::vector<u32> g_ended_programs;
+
+void note_ended_program(void*, u32 program) {
+    g_ended_programs.push_back(program);
+}
+
+// A device that holds what a program gave it hears of the End from the
+// monitor and again before the blocks go, and can tell what was the
+// program's.
+void program_end_hooks_hear_of_a_program_the_monitor_ends() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    g_ended_programs.clear();
+    CHECK(g_exec.add_program_end_hook(note_ended_program, nullptr));
+    CHECK(g_exec.add_program_end_hook(note_ended_program, nullptr));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+
+    // One that ends by itself is not told of.
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+    g_exec.end_program(boot);
+    CHECK(g_ended_programs.empty());
+
+    const u32 program = g_exec.begin_program(boot, seglist, true);
+    CHECK(program != 0);
+    const u32 block = program_alloc_mem(r, 64);
+    CHECK(g_exec.program_holds(program, 0x1800));
+    CHECK(g_exec.program_holds(program, 0x1FFF));
+    CHECK(!g_exec.program_holds(program, 0x2000));
+    CHECK(!g_exec.program_holds(program, 0x17FF));
+    CHECK(g_exec.program_holds(program, block));
+    CHECK(g_exec.program_holds(program, block + 63));
+    CHECK(!g_exec.program_holds(program, block + 64));
+    CHECK(!g_exec.program_holds(program + 1, block));
+    CHECK(!g_exec.program_holds(0, block));
+
+    end_boot_code_from_the_monitor(r, boot);
+    CHECK_EQ(g_ended_programs.size(), 1u);
+    CHECK_EQ(g_ended_programs[0], program);
+    g_exec.end_program(boot);
+    CHECK_EQ(g_ended_programs.size(), 2u);
+    CHECK_EQ(g_ended_programs[1], program);
+    CHECK(!g_exec.program_holds(program, block));
+}
+
+// let_run switches to a Ready task from a native that waits, Forbid or
+// not; never to the caller or a task that is not Ready.
+void let_run_switches_to_a_ready_task() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 main_task = make_test_task(r, kData);
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.cpu().a[1] = child;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK(!g_exec.let_run(main_task));
+    CHECK(!g_exec.let_run(kData + 0x200));
+    CHECK_EQ(r.exec(exec_lvo::Forbid), ExitReason::Halt);
+    CHECK(g_exec.forbidden());
+    CHECK(g_exec.let_run(child));
+    CHECK_EQ(host.switches.size(), 1u);
+    CHECK_EQ(host.switches[0].to, 1u);
+    CHECK_EQ(g_exec.scheduler().current(), 1);
+    // The child runs without the caller's Forbid.
+    CHECK(!g_exec.forbidden());
+    // A task in no 68000 code is not stopped.
+    g_exec.stop_code_of(main_task);
+    CHECK(!g_jit.stop_requested());
+}
+
 void only_calls_from_the_programs_code_are_recorded() {
     Rig r;
     FakeHostState host{};
@@ -5542,6 +5615,8 @@ int main() {
     ending_a_damaged_task_from_a_waiting_tasks_poll();
     an_ended_program_gives_back_what_it_asked_for();
     a_program_that_ends_by_itself_keeps_what_it_left();
+    program_end_hooks_hear_of_a_program_the_monitor_ends();
+    let_run_switches_to_a_ready_task();
     only_calls_from_the_programs_code_are_recorded();
     blocks_freed_another_way_are_not_freed_again();
     blocks_the_system_still_holds_are_kept();

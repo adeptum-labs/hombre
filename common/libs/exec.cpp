@@ -2854,6 +2854,9 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
     for (Keeper& k : keepers_) {
         k = Keeper{};
     }
+    for (EndHook& h : end_hooks_) {
+        h = EndHook{};
+    }
     if (m.jit == nullptr || m.mem.base == nullptr || free_start < kLowestFree ||
         chip_end <= free_start || fast_end < chip_end || fast_end > m.mem.size) {
         return false;
@@ -4102,7 +4105,93 @@ void Exec::doom_program_of(u32 slot) {
     }
     if (Program* p = find_program(tc.program)) {
         p->doomed = true;
+        tell_program_ended(p->id);
     }
+}
+
+void Exec::tell_program_ended(u32 id) {
+    for (const EndHook& h : end_hooks_) {
+        if (h.fn != nullptr) {
+            h.fn(h.ctx, id);
+        }
+    }
+}
+
+bool Exec::add_program_end_hook(void (*hook)(void* ctx, u32 program), void* ctx) {
+    if (hook == nullptr) {
+        return false;
+    }
+    for (EndHook& h : end_hooks_) {
+        if (h.fn == hook && h.ctx == ctx) {
+            return true;
+        }
+        if (h.fn == nullptr) {
+            h = EndHook{hook, ctx};
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Exec::program_holds(u32 program, u32 addr) const {
+    const Program* p = nullptr;
+    for (const Program& candidate : programs_) {
+        if (program != 0 && candidate.id == program) {
+            p = &candidate;
+        }
+    }
+    if (p == nullptr || m_ == nullptr) {
+        return false;
+    }
+    if (in_program_code(*p, addr)) {
+        return true;
+    }
+    u32 lo = 0;
+    u32 hi = program_block_count_;
+    while (lo < hi) {
+        const u32 mid = (lo + hi) / 2;
+        if (program_blocks_[mid].addr <= addr) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo == 0) {
+        return false;
+    }
+    const ProgramBlock& block = program_blocks_[lo - 1];
+    return block.program == program && static_cast<u64>(block.addr) + block.bytes > addr;
+}
+
+void Exec::stop_code_of(u32 task) {
+    if (m_ == nullptr) {
+        return;
+    }
+    const i32 id = slot_of(native::guest_address(*m_, task));
+    if (id < 0) {
+        return;
+    }
+    if (id == sched_.current()) {
+        if (m_->jit->run_depth() != 0) {
+            m_->jit->request_stop();
+        }
+        return;
+    }
+    if (tasks_[id].run_state.run_depth != 0) {
+        stop_command_of(static_cast<u32>(id));
+    }
+}
+
+bool Exec::let_run(u32 task) {
+    if (m_ == nullptr || task_host_.switch_to == nullptr) {
+        return false;
+    }
+    const i32 id = slot_of(native::guest_address(*m_, task));
+    if (id < 0 || id == sched_.current() ||
+        sched_.slot(static_cast<u32>(id)).state != TaskState::Ready) {
+        return false;
+    }
+    return switch_to_task(id);
 }
 
 i32 Exec::slot_of(u32 task) const {
@@ -4386,6 +4475,15 @@ void Exec::settle_program(u32 id) {
         return;
     }
     const bool doomed = p->doomed;
+    if (doomed) {
+        // What a device took from the program after the End goes too,
+        // while its code and blocks are still known.
+        tell_program_ended(id);
+        p = find_program(id);
+        if (p == nullptr) {
+            return;
+        }
+    }
     *p = Program{};
     if (doomed) {
         free_program_blocks(id);
