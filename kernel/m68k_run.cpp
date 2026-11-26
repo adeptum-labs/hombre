@@ -40,6 +40,7 @@
 #include "../common/libs/graphics.hpp"
 #include "../common/libs/gadtools.hpp"
 #include "../common/libs/icon.hpp"
+#include "../common/libs/input_device.hpp"
 #include "../common/libs/keymap_library.hpp"
 #include "../common/libs/layers.hpp"
 #include "../common/libs/expansion_library.hpp"
@@ -103,6 +104,9 @@ constexpr u8 ctrl_backslash = 0x1C;
 constexpr u32 key_queue_cap = 64;
 constexpr u32 sigbreakf_ctrl_c = 1u << 12;
 constexpr u32 sigbreakf_ctrl_d = 1u << 13;
+// The raw key codes NewMouse gives a notch of the wheel.
+constexpr u8 kWheelUpCode = 0x7A;
+constexpr u8 kWheelDownCode = 0x7B;
 
 // Constant initialised, so they sit in .bss (or .data) without a
 // constructor run.
@@ -126,6 +130,7 @@ constinit VersionLibrary version_library{};
 constinit ExpansionLibrary expansion_library{};
 constinit KeymapLibrary keymap_library{};
 constinit ConsoleDevice console_device{};
+constinit InputDevice input_device{};
 constinit Icon icon{};
 constinit Workbench workbench{};
 constinit DisplayState display{};
@@ -143,6 +148,8 @@ constinit u8 prev_key_slots[KeyDecoder::kKeySlots]{};
 constinit KeyDecoder typed_decoder{};
 // The same reports as Amiga raw key events, for windows that read keys.
 constinit RawKeyTracker raw_tracker{};
+// The mouse buttons the last mouse report held.
+constinit u8 raw_mouse_buttons = 0;
 
 struct Console;
 
@@ -408,6 +415,61 @@ void flush_wheel(i32 wheel) {
     intuition.wheel_event(wheel);
 }
 
+// The qualifier bits of the mouse buttons held.
+u16 button_qualifier(u8 buttons) {
+    u16 q = 0;
+    q |= (buttons & kMouseLeft) != 0 ? ndk::IEQUALIFIER_LEFTBUTTON : 0;
+    q |= (buttons & kMouseRight) != 0 ? ndk::IEQUALIFIER_RBUTTON : 0;
+    q |= (buttons & kMouseMiddle) != 0 ? ndk::IEQUALIFIER_MIDBUTTON : 0;
+    return q;
+}
+
+// What PeekQualifier reports: the keyboard and the mouse as they are.
+void update_peek_qualifier() {
+    input_device.set_qualifier(raw_tracker.qualifier() | button_qualifier(raw_mouse_buttons));
+}
+
+// A mouse report as input.device's events: a move, each button that
+// changed, then the wheel as the raw keys NewMouse gives it, a notch each.
+void submit_mouse_sample(const MouseSample& sample) {
+    const u16 keys = raw_tracker.qualifier();
+    u8 buttons = raw_mouse_buttons;
+    if (sample.dx != 0 || sample.dy != 0) {
+        InputEventData e{};
+        e.ie_class = ndk::IECLASS_RAWMOUSE;
+        e.code = ndk::IECODE_NOBUTTON;
+        e.qualifier = keys | button_qualifier(buttons) | ndk::IEQUALIFIER_RELATIVEMOUSE;
+        e.x = static_cast<i16>(sample.dx);
+        e.y = static_cast<i16>(sample.dy);
+        input_device.submit(e);
+    }
+    constexpr struct {
+        u8 bit;
+        u16 code;
+    } kButtons[] = {{kMouseLeft, ndk::IECODE_LBUTTON},
+                    {kMouseRight, ndk::IECODE_RBUTTON},
+                    {kMouseMiddle, ndk::IECODE_MBUTTON}};
+    for (const auto& button : kButtons) {
+        if (((sample.buttons ^ buttons) & button.bit) == 0) {
+            continue;
+        }
+        buttons ^= button.bit;
+        InputEventData e{};
+        e.ie_class = ndk::IECLASS_RAWMOUSE;
+        e.code = static_cast<u16>(button.code |
+                                  ((buttons & button.bit) == 0 ? ndk::IECODE_UP_PREFIX : 0));
+        e.qualifier = keys | button_qualifier(buttons) | ndk::IEQUALIFIER_RELATIVEMOUSE;
+        input_device.submit(e);
+    }
+    for (i32 n = sample.wheel; n != 0; n += n > 0 ? -1 : 1) {
+        InputEventData e{};
+        e.ie_class = ndk::IECLASS_RAWKEY;
+        e.code = n > 0 ? kWheelUpCode : kWheelDownCode;
+        e.qualifier = keys | button_qualifier(buttons);
+        input_device.submit(e);
+    }
+}
+
 void poll_mouse() {
     u8 report[4];
     bool moved = false;
@@ -417,6 +479,14 @@ void poll_mouse() {
         if (!decode_mouse_report(report, sizeof(report), sample)) {
             continue;
         }
+        if (input_device.chain_active()) {
+            submit_mouse_sample(sample);
+            raw_mouse_buttons = sample.buttons;
+            update_peek_qualifier();
+            continue;
+        }
+        raw_mouse_buttons = sample.buttons;
+        update_peek_qualifier();
         const PointerState::Update update = pointer.apply(sample);
         if (update.moved) {
             moved = true;
@@ -514,6 +584,11 @@ void make_room_for_workbench(Console& c) {
 
 void wait_for_work(const Console& c) {
     if (c.key_count > 0) {
+        return;
+    }
+    // Waiting for a key is the Wait of an Amiga program, which lets
+    // input.device's task run under Forbid too: the keys come through it.
+    if (input_device.has_pending() && exec.let_run(input_device.task())) {
         return;
     }
     if (exec.yield_in_native() && (c.key_count > 0 || other_task_ready())) {
@@ -625,6 +700,139 @@ bool active_window_reads_keys() {
     return intuition.wants_keys(window);
 }
 
+// A typed byte of a key that is no Ctrl combination: a string gadget being
+// edited takes it, else the active console unless its window reads keys as
+// IDCMP messages.
+void deliver_typed(Console& c, const u8* chars, usize count, bool window_reads_keys) {
+    if (intuition.string_active()) {
+        for (usize k = 0; k < count; ++k) {
+            intuition.string_key(chars[k]);
+        }
+    } else if (!window_reads_keys) {
+        for (usize k = 0; k < count; ++k) {
+            handle_decoded_byte(c, chars[k]);
+        }
+    }
+}
+
+// A newly pressed key under Ctrl: Ctrl+C signals the console's shell
+// process, Ctrl+D asks its script to stop, Ctrl+\ ends its console input.
+void ctrl_key(Console& c, u8 usage, u8 modifiers) {
+    if (usage == usage_key_c) {
+        if (c.command_running) {
+            exec.signal_task(c.process, sigbreakf_ctrl_c);
+        }
+    } else if (usage == usage_key_d) {
+        c.break_script = true;
+        if (c.command_running) {
+            exec.signal_task(c.process, sigbreakf_ctrl_d);
+        }
+    } else if (usage == usage_key_backslash_us || usage == usage_key_backslash_iso ||
+               keymap_se(usage, modifiers, false) == '\\') {
+        key_queue_push(c, ctrl_backslash);
+    }
+}
+
+// The keys of a report as input.device's events: the raw key events, then
+// each new key the Amiga keyboard has no code for, which only types bytes.
+void submit_keys(const u8* report, const RawKeyEvent* events, usize event_count) {
+    for (usize k = 0; k < event_count; ++k) {
+        InputEventData e{};
+        e.ie_class = ndk::IECLASS_RAWKEY;
+        e.code = events[k].code;
+        e.qualifier = events[k].qualifier | button_qualifier(raw_mouse_buttons);
+        input_device.submit(e);
+    }
+    const u8* slots = report + 2;
+    for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
+        const u8 usage = slots[s];
+        if (usage <= 1 || hid_to_amiga(usage) != kNoAmigaKey ||
+            slots_have_key(prev_key_slots, usage)) {
+            continue;
+        }
+        u8 seq[KeyDecoder::kMaxBytesPerKey];
+        if (KeyDecoder::decode(usage, report[0], false, seq) != 0) {
+            input_device.submit_host_key(usage, report[0]);
+        }
+    }
+}
+
+// What reaches the shells and Intuition once input.device's handlers are
+// done with an event, as poll_keys and poll_mouse hand it them without
+// handlers.
+void input_event(void*, const InputEventData& e) {
+    if (e.ie_class == InputDevice::kClassHostKey) {
+        Console& c = active_console();
+        last_active_console = c.index;
+        const u8 usage = static_cast<u8>(e.code);
+        const u8 modifiers = static_cast<u8>(e.qualifier);
+        if ((modifiers & (kModLCtrl | kModRCtrl)) != 0) {
+            return;
+        }
+        u8 seq[KeyDecoder::kMaxBytesPerKey];
+        const usize count = KeyDecoder::decode(usage, modifiers, false, seq);
+        deliver_typed(c, seq, count, active_window_reads_keys());
+        return;
+    }
+    if (e.ie_class == ndk::IECLASS_RAWKEY) {
+        const u8 code = static_cast<u8>(e.code);
+        if (code == kWheelUpCode || code == kWheelDownCode) {
+            flush_wheel(code == kWheelUpCode ? 1 : -1);
+            return;
+        }
+        if ((code & kAmigaKeyUp) != 0 &&
+            ((code & ~kAmigaKeyUp) == kWheelUpCode || (code & ~kAmigaKeyUp) == kWheelDownCode)) {
+            return;
+        }
+        Console& c = active_console();
+        last_active_console = c.index;
+        const u16 qualifier = e.qualifier;
+        intuition.set_qualifier(qualifier & 0x00FF);
+        const bool window_reads_keys = active_window_reads_keys();
+        if ((qualifier & kQualControl) != 0) {
+            if ((code & kAmigaKeyUp) == 0) {
+                ctrl_key(c, amiga_to_hid(code), hid_modifiers(qualifier));
+            }
+        } else {
+            u8 seq[KeyDecoder::kMaxBytesPerKey];
+            const usize count = raw_key_bytes(code, qualifier, seq);
+            deliver_typed(c, seq, count, window_reads_keys);
+        }
+        if (window_reads_keys && !intuition.string_active()) {
+            intuition.raw_key(code, qualifier);
+        }
+        return;
+    }
+    if (e.ie_class != ndk::IECLASS_RAWMOUSE) {
+        return;
+    }
+    u8 buttons = pointer.buttons();
+    const u16 code = e.code & ~ndk::IECODE_UP_PREFIX;
+    const u8 bit = code == ndk::IECODE_LBUTTON   ? kMouseLeft
+                   : code == ndk::IECODE_RBUTTON ? kMouseRight
+                   : code == ndk::IECODE_MBUTTON ? kMouseMiddle
+                                                 : 0;
+    if ((e.code & ndk::IECODE_UP_PREFIX) != 0) {
+        buttons &= static_cast<u8>(~bit);
+    } else {
+        buttons |= bit;
+    }
+    MouseSample sample{};
+    sample.buttons = buttons;
+    sample.dx = e.x;
+    sample.dy = e.y;
+    const PointerState::Update update = pointer.apply(sample);
+    if (update.moved) {
+        flush_mouse_move();
+    }
+    if (update.pressed != 0 || update.released != 0) {
+        intuition.pointer_event(pointer_screen_x(), pointer_screen_y(), pointer.buttons(),
+                                update.pressed, update.released, false);
+        log_mouse_buttons("mouse: down ", update.pressed, pointer_screen_x(), pointer_screen_y());
+        log_mouse_buttons("mouse: up ", update.released, pointer_screen_x(), pointer_screen_y());
+    }
+}
+
 // Reads the keyboard and routes each decoded byte to the active console:
 // Ctrl+C signals that console's shell process, Ctrl+\ ends its console
 // input, and every other byte waits for the console's reader or line editor.
@@ -644,6 +852,14 @@ void poll_keys() {
         const usize count = typed_decoder.feed(report, chars, sizeof(chars));
         RawKeyEvent events[RawKeyTracker::kMaxEvents];
         const usize event_count = raw_tracker.feed(report, events, RawKeyTracker::kMaxEvents);
+        update_peek_qualifier();
+        if (input_device.chain_active()) {
+            submit_keys(report, events, event_count);
+            for (usize s = 0; s < KeyDecoder::kKeySlots; ++s) {
+                prev_key_slots[s] = slots[s];
+            }
+            continue;
+        }
         intuition.set_qualifier(raw_tracker.qualifier());
         const bool window_reads_keys = active_window_reads_keys();
         if (ctrl) {
@@ -652,30 +868,10 @@ void poll_keys() {
                 if (usage == 0 || slots_have_key(prev_key_slots, usage)) {
                     continue;
                 }
-                if (usage == usage_key_c) {
-                    if (c.command_running) {
-                        exec.signal_task(c.process, sigbreakf_ctrl_c);
-                    }
-                } else if (usage == usage_key_d) {
-                    c.break_script = true;
-                    if (c.command_running) {
-                        exec.signal_task(c.process, sigbreakf_ctrl_d);
-                    }
-                } else if (usage == usage_key_backslash_us ||
-                           usage == usage_key_backslash_iso ||
-                           keymap_se(usage, report[0], false) == '\\') {
-                    key_queue_push(c, ctrl_backslash);
-                }
+                ctrl_key(c, usage, report[0]);
             }
-        } else if (intuition.string_active()) {
-            // A string gadget being edited takes the keys.
-            for (usize k = 0; k < count; ++k) {
-                intuition.string_key(chars[k]);
-            }
-        } else if (!window_reads_keys) {
-            for (usize k = 0; k < count; ++k) {
-                handle_decoded_byte(c, chars[k]);
-            }
+        } else {
+            deliver_typed(c, chars, count, window_reads_keys);
         }
         if (window_reads_keys && !intuition.string_active()) {
             for (usize k = 0; k < event_count; ++k) {
@@ -1104,6 +1300,11 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
         fail("console device init failed");
         return false;
     }
+    if (!input_device.init(machine, exec)) {
+        fail("input device init failed");
+        return false;
+    }
+    input_device.set_sink(&input_event, nullptr);
     // A Startup-Sequence makes T: and ENV: itself; make_ram_defaults sees
     // to them once it is over, or when there is none.
     dos.defer_ram_defaults();
