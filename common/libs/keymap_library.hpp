@@ -26,6 +26,7 @@
 #include "../m68k_cpu.hpp"
 #include "../types.hpp"
 #include "exec.hpp"
+#include "input_device.hpp"
 #include "native.hpp"
 #include "version.hpp"
 
@@ -103,10 +104,9 @@ constexpr u8 DPF_MOD = 0x01;
 constexpr u8 DPF_DEAD = 0x08;
 constexpr u8 DP_2DINDEXMASK = 0x0F;
 
-// struct InputEvent, and the qualifier bits it carries. The previous key
-// down codes and qualifiers sit in the ie_position union.
-constexpr u32 ie_Code = 6;
-constexpr u32 ie_Qualifier = 8;
+// struct InputEvent (see input_device.hpp), and the qualifier bits it
+// carries. The previous key down codes and qualifiers sit in the
+// ie_position union.
 constexpr u32 ie_Prev1DownCode = 14;
 constexpr u32 ie_Prev1DownQual = 15;
 constexpr u16 IEQUALIFIER_LSHIFT = 0x0001;
