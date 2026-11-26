@@ -252,6 +252,32 @@ void capacity_is_respected() {
 
 }
 
+void raw_codes_lead_back_to_their_usages() {
+    u32 mapped = 0;
+    for (u32 usage = 0; usage < 256; ++usage) {
+        const u8 code = hid_to_amiga(static_cast<u8>(usage));
+        if (code == kNoAmigaKey) {
+            continue;
+        }
+        CHECK_EQ(amiga_to_hid(code), usage);
+        CHECK_EQ(amiga_to_hid(code | kAmigaKeyUp), usage);
+        ++mapped;
+    }
+    CHECK(mapped > 80u);
+    CHECK_EQ(amiga_to_hid(0x60), 0u);  // left Shift has no usage of its own
+    CHECK_EQ(amiga_to_hid(0x77), 0u);
+}
+
+void qualifiers_give_back_a_modifier_byte() {
+    for (u32 mods = 0; mods < 256; ++mods) {
+        const u16 q = hid_qualifier(static_cast<u8>(mods), false);
+        CHECK_EQ(hid_qualifier(hid_modifiers(q), false), q);
+    }
+    CHECK_EQ(hid_modifiers(kQualControl), kModLCtrl);
+    CHECK_EQ(hid_modifiers(kQualRShift | kQualRAlt), kModRShift | kModAltGr);
+    CHECK_EQ(hid_modifiers(kQualCapsLock | kQualNumericPad), 0u);
+}
+
 int main() {
     letters_follow_the_physical_rows();
     digits_and_punctuation();
@@ -272,5 +298,7 @@ int main() {
     two_keys_in_one_report_in_slot_order();
     rollover_error_report_is_ignored();
     capacity_is_respected();
+    raw_codes_lead_back_to_their_usages();
+    qualifiers_give_back_a_modifier_byte();
     return check::finish("test_hid_rawkey");
 }

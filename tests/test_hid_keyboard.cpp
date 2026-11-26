@@ -24,6 +24,8 @@
 #include "check.hpp"
 #include "hid_keyboard.hpp"
 
+#include <initializer_list>
+
 using namespace hombre;
 
 namespace {
@@ -299,6 +301,45 @@ void six_keys_fit_the_buffer() {
 
 }
 
+// A raw key event types what the report of the same key under the same
+// modifiers types, whichever Ctrl key: input.device's events reach the
+// shells as the reports do.
+void raw_key_events_type_what_the_reports_type() {
+    u32 compared = 0;
+    for (u32 usage = 0x04; usage <= 0x64; ++usage) {
+        const u8 code = hid_to_amiga(static_cast<u8>(usage));
+        if (code == kNoAmigaKey || usage == kUsageCapsLock) {
+            continue;
+        }
+        for (u32 mods = 0; mods < 256; ++mods) {
+            for (const bool caps : {false, true}) {
+                u8 want[KeyDecoder::kMaxBytesPerKey] = {};
+                u8 got[KeyDecoder::kMaxBytesPerKey] = {};
+                const usize want_count = KeyDecoder::decode(static_cast<u8>(usage),
+                                                            static_cast<u8>(mods), caps, want);
+                const u16 qualifier = static_cast<u16>(
+                    hid_qualifier(static_cast<u8>(mods), caps) |
+                    (hid_is_keypad(static_cast<u8>(usage)) ? kQualNumericPad : 0));
+                const usize got_count = raw_key_bytes(code, qualifier, got);
+                CHECK_EQ(got_count, want_count);
+                for (usize i = 0; i < want_count; ++i) {
+                    CHECK_EQ(got[i], want[i]);
+                }
+                ++compared;
+            }
+        }
+    }
+    CHECK(compared > 80u * 512u);
+
+    // A release, Caps Lock and a code no key has type nothing.
+    u8 out[KeyDecoder::kMaxBytesPerKey] = {};
+    CHECK_EQ(raw_key_bytes(0x20 | kAmigaKeyUp, 0, out), 0u);
+    CHECK_EQ(raw_key_bytes(kAmigaCapsLock, 0, out), 0u);
+    CHECK_EQ(raw_key_bytes(0x77, 0, out), 0u);
+    CHECK_EQ(raw_key_bytes(0x20, 0, out), 1u);
+    CHECK_EQ(out[0], 'a');
+}
+
 int main() {
     single_key_press_gives_one_char();
     release_gives_nothing();
@@ -316,5 +357,6 @@ int main() {
     shift_up_down_give_t_and_s();
     page_home_end_sequences();
     six_keys_fit_the_buffer();
+    raw_key_events_type_what_the_reports_type();
     return check::finish("test_hid_keyboard");
 }

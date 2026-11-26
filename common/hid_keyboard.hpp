@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include "hid_rawkey.hpp"
 #include "keymap_se.hpp"
 #include "types.hpp"
 
@@ -50,6 +51,12 @@ public:
     // Forgets the keys held and keeps Caps Lock: for when reports were read
     // elsewhere, so the decoder no longer knows what is down.
     void release_all();
+
+    // The bytes a press of the key at usage types under the modifier byte
+    // and Caps Lock, as feed writes them; returns how many.
+    static usize decode(u8 usage, u8 modifiers, bool caps_lock, u8 out[kMaxBytesPerKey]) {
+        return decode_key(usage, modifiers, caps_lock, out);
+    }
 
 private:
     static bool contains(const u8* slots, usize count, u8 usage);
@@ -154,6 +161,21 @@ inline void KeyDecoder::release_all() {
     for (usize i = 0; i < kKeySlots; ++i) {
         held_[i] = 0;
     }
+}
+
+// The bytes the key press of a raw key event types, as KeyDecoder writes them
+// for the same key under the same qualifier; nothing for a release or a key
+// that types none.
+inline usize raw_key_bytes(u8 code, u16 qualifier, u8 out[KeyDecoder::kMaxBytesPerKey]) {
+    if ((code & kAmigaKeyUp) != 0) {
+        return 0;
+    }
+    const u8 usage = amiga_to_hid(code);
+    if (usage == 0 || usage == kUsageCapsLock) {
+        return 0;
+    }
+    return KeyDecoder::decode(usage, hid_modifiers(qualifier), (qualifier & kQualCapsLock) != 0,
+                              out);
 }
 
 }

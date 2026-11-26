@@ -120,6 +120,32 @@ constexpr u8 hid_to_amiga(u8 usage) {
 
 constexpr bool hid_is_keypad(u8 usage) { return usage >= 0x54 && usage <= 0x63; }
 
+// The HID usage whose key has the Amiga raw key code (key-up bit ignored),
+// 0 for none: the reverse of hid_to_amiga.
+constexpr u8 amiga_to_hid(u8 code) {
+    code = static_cast<u8>(code & ~kAmigaKeyUp);
+    for (u32 usage = 0x04; usage <= 0x64; ++usage) {
+        if (hid_to_amiga(static_cast<u8>(usage)) == code) {
+            return static_cast<u8>(usage);
+        }
+    }
+    return 0;
+}
+
+// A report's modifier byte that gives the keyboard qualifier bits: the left
+// key of a pair, but for Shift and Alt, whose sides the qualifier tells.
+constexpr u8 hid_modifiers(u16 qualifier) {
+    u8 m = 0;
+    m |= (qualifier & kQualLShift) != 0 ? kModLShift : 0;
+    m |= (qualifier & kQualRShift) != 0 ? kModRShift : 0;
+    m |= (qualifier & kQualControl) != 0 ? kModLCtrl : 0;
+    m |= (qualifier & kQualLAlt) != 0 ? kModLAlt : 0;
+    m |= (qualifier & kQualRAlt) != 0 ? kModAltGr : 0;
+    m |= (qualifier & kQualLCommand) != 0 ? kModLGui : 0;
+    m |= (qualifier & kQualRCommand) != 0 ? kModRGui : 0;
+    return m;
+}
+
 // The qualifier bits of the modifier byte of a report, and of Caps Lock.
 constexpr u16 hid_qualifier(u8 modifiers, bool caps_lock) {
     u16 q = 0;
