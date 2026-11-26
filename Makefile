@@ -425,6 +425,31 @@ check: image image-nokernel $(FAULT_TESTS:%=image-fault%) $(TEST_DISK) $(TEST_HD
 	    "dos: CLI 2 ended, returned 0"
 	bash tools/log_order.sh build/serial.log "shell: builtin run returned 0" \
 	    "timertest: slept" "dos: CLI 2 ended, returned 0"
+# input.device: a handler at priority 60 makes X a Y and takes the press of
+# Q out before the shell sees them, after the Z the program wrote; once it
+# is taken out, keys go straight to the shell again. A handler left by a
+# program the system monitor ends goes with it, and F12 works meanwhile. A
+# handler that never returns is taken out once its block budget is used.
+	tools/boot_check.sh --disk $(TEST_DISK) --keys "i n p u t t e s t ret" \
+	    --mouse-after "inputtest: ready" \
+	    --mouse "sendkey x;sendkey q;sendkey a;sendkey ret;$(MONITOR_STEP);$(TYPE_VERSION)" \
+	    "input.device: added the handler inputtest at" "inputtest: qualifier 0" \
+	    "inputtest: read zya" "input.device: removed the handler inputtest at" \
+	    "inputtest: done" "m68k: C:inputtest returned 0" "m68k: C:version returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) \
+	    --keys "r u n spc i n p u t t e s t spc w a i t ret" \
+	    --mouse-after "inputtest: waiting" \
+	    --mouse "$(MONITOR_KILL);$(MONITOR_STEP);$(TYPE_VERSION)" \
+	    "input.device: added the handler inputtest at" \
+	    "input.device: removed the handler inputtest at" "its program was ended" \
+	    "dos: CLI 2 ended" \
+	    "m68k: C:version returned 0"
+	tools/boot_check.sh --disk $(TEST_DISK) \
+	    --keys "r u n spc i n p u t t e s t spc s p i n ret" \
+	    --mouse-after "inputtest: waiting" \
+	    --mouse "sendkey f12;$(MONITOR_STEP);sendkey f12;$(MONITOR_STEP);$(TYPE_VERSION)" \
+	    "input.device: removed the handler inputtest at" "Budget" "monitor: open" \
+	    "monitor: closed" "m68k: C:version returned 0"
 	tools/boot_check.sh --disk $(TEST_DISK) --keys "l o a d w b ret" \
 	    "m68k: running C:loadwb" "m68k: C:loadwb returned 0" \
 	    "workbench: started" "workbench: volume HombreTest" \
@@ -654,7 +679,7 @@ $(ELF2HUNK): tools/elf2hunk.cpp
 M68K_AS       := m68k-linux-gnu-as
 M68K_LD       := m68k-linux-gnu-ld
 M68K_PROGRAMS := version hombretest mousetest tasktest timertest loadwb wbtest cgxtest \
-                 spintest crashtest
+                 spintest crashtest inputtest
 M68K_HUNKS    := $(M68K_PROGRAMS:%=$(BUILD)/m68k/%.hunk)
 
 define require_tool
