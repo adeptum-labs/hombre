@@ -6571,6 +6571,19 @@ void get_default_pub_screen_writes_workbench() {
     CHECK_EQ(r.get8(kBuffer + 9), 0u);
 }
 
+void set_default_pub_screen_keeps_the_workbench() {
+    GfxRig r;
+    for (const char* name : {"Workbench", "Other"}) {
+        r.cpu().a[0] = r.str(kBuffer, name);
+        CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetDefaultPubScreen), ExitReason::Halt);
+    }
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetDefaultPubScreen), ExitReason::Halt);
+    r.cpu().a[0] = kBuffer;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::GetDefaultPubScreen), ExitReason::Halt);
+    CHECK(r.read_str(kBuffer) == "Workbench");
+}
+
 void get_screen_draw_info_has_the_default_pens_and_topaz() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -10899,6 +10912,7 @@ int main() {
     size_box_hit_test_matches_border_placement();
     lock_pub_screen_returns_the_default_screen();
     get_default_pub_screen_writes_workbench();
+    set_default_pub_screen_keeps_the_workbench();
     get_screen_draw_info_has_the_default_pens_and_topaz();
     set_iprefs_type8_writes_the_palette_into_the_default_screen();
     set_iprefs_type7_takes_the_pointer_image_and_hands_back_the_previous_bitmap();

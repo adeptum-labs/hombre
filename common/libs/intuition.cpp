@@ -1281,6 +1281,11 @@ struct IntuitionNatives {
         }
     }
 
+    // SetDefaultPubScreen(name A0): "Workbench" is the one public screen,
+    // so it stays the default; a name no public screen has changes
+    // nothing either, as on an Amiga.
+    static void set_default_pub_screen(void*, Machine&) {}
+
     static void get_screen_data(void* ctx, Machine& m) {
         Intuition& g = of(ctx);
         Bus b(m);
@@ -2105,6 +2110,8 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
      "UnlockPubScreenList"},
     {intuition_lvo::GetDefaultPubScreen, IntuitionNatives::get_default_pub_screen,
      "GetDefaultPubScreen"},
+    {intuition_lvo::SetDefaultPubScreen, IntuitionNatives::set_default_pub_screen,
+     "SetDefaultPubScreen"},
     {intuition_lvo::OpenWindowTagList, IntuitionNatives::open_window_tag_list,
      "OpenWindowTagList"},
     {intuition_lvo::OpenScreenTagList, IntuitionNatives::open_screen_tag_list,
