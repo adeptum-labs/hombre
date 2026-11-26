@@ -3979,6 +3979,40 @@ void an_ended_program_gives_back_what_it_asked_for() {
     CHECK_EQ(ExecTest::task_program(g_exec, 0), 0u);
 }
 
+// A commodity's broker list keeps naming its port: the port of a program that
+// opened commodities.library stays, and signals no one.
+void an_ended_commodity_keeps_its_port_deaf() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    const u32 boot = make_test_task(r);
+    const u32 seglist = program_segment(r);
+    CHECK(g_exec.begin_program(boot, seglist, true) != 0);
+
+    r.str(kNames, "LIBS:commodities.library");
+    r.cpu().a[1] = kNames;
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.exec(exec_lvo::CreateMsgPort), ExitReason::Halt);
+    const u32 port = r.cpu().d[0];
+    CHECK(port != 0);
+    program_alloc_mem(r, 100);
+
+    end_boot_code_from_the_monitor(r, boot);
+    g_exec.end_program(boot);
+    CHECK(logged("exec: freed 1 blocks, 104 bytes, of an ended program; kept 1"));
+    CHECK_EQ(r.get8(port + mp_Flags), static_cast<u32>(PA_IGNORE));
+    CHECK_EQ(r.get32(port + mp_SigTask), 0u);
+
+    // A message sent to it now is queued and wakes no task.
+    const u32 message = g_exec.alloc(20, MEMF_CLEAR);
+    g_lines.clear();
+    r.cpu().a[0] = port;
+    r.cpu().a[1] = message;
+    CHECK_EQ(r.exec(exec_lvo::PutMsg), ExitReason::Halt);
+    CHECK(!logged_containing("unknown task"));
+}
+
 void a_program_that_ends_by_itself_keeps_what_it_left() {
     Rig r;
     FakeHostState host{};
@@ -5614,6 +5648,7 @@ int main() {
     ending_the_damaged_waiting_boot_task();
     ending_a_damaged_task_from_a_waiting_tasks_poll();
     an_ended_program_gives_back_what_it_asked_for();
+    an_ended_commodity_keeps_its_port_deaf();
     a_program_that_ends_by_itself_keeps_what_it_left();
     program_end_hooks_hear_of_a_program_the_monitor_ends();
     let_run_switches_to_a_ready_task();

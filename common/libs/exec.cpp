@@ -53,6 +53,7 @@ constexpr u32 kMaxSegments = 64;
 constexpr u32 kMaxInitCommands = 1u << 16;
 constexpr u32 kMaxQueued = 4096;
 constexpr char kExecName[] = "exec.library";
+constexpr char kCommodities[] = "commodities.library";
 constexpr char kExecIdString[] = "exec 60.0 (Hombre)\r\n";
 constexpr char kChipName[] = "chip memory";
 constexpr char kFastName[] = "expansion memory";
@@ -1753,6 +1754,13 @@ struct ExecOps {
             if (*p == ':' || *p == '/') {
                 has_device = has_device || *p == ':';
                 leaf = p + 1;
+            }
+        }
+        // commodities.library keeps the ports of the programs that use it, in
+        // a list exec cannot see.
+        if (b.equals(name_addr + static_cast<u32>(leaf - name), kCommodities)) {
+            if (Exec::Program* program = e.find_program(e.calling_program())) {
+                program->uses_commodities = true;
             }
         }
         const u32 list = e.base_ + LibList;
@@ -4475,6 +4483,7 @@ void Exec::settle_program(u32 id) {
         return;
     }
     const bool doomed = p->doomed;
+    const bool keep_ports = p->uses_commodities;
     if (doomed) {
         // What a device took from the program after the End goes too,
         // while its code and blocks are still known.
@@ -4486,7 +4495,7 @@ void Exec::settle_program(u32 id) {
     }
     *p = Program{};
     if (doomed) {
-        free_program_blocks(id);
+        free_program_blocks(id, keep_ports);
         return;
     }
     for (u32 i = 0; i < program_block_count_;) {
@@ -4623,8 +4632,26 @@ void Exec::mark_kept_blocks() {
     }
 }
 
-void Exec::free_program_blocks(u32 id) {
+// The message ports among the program's blocks stay, deaf: what still sends
+// to one queues on it and signals no task.
+void Exec::keep_deaf_ports(u32 id) {
+    Bus b(*m_);
+    for (u32 i = 0; i < program_block_count_; ++i) {
+        ProgramBlock& block = program_blocks_[i];
+        if (block.program == id && block.bytes == round8(MP_SIZE) &&
+            b.r8(block.addr + LN_TYPE) == NT_MSGPORT) {
+            b.w8(block.addr + mp_Flags, PA_IGNORE);
+            b.w32(block.addr + mp_SigTask, 0);
+            block.keep = true;
+        }
+    }
+}
+
+void Exec::free_program_blocks(u32 id, bool keep_ports) {
     mark_kept_blocks();
+    if (keep_ports) {
+        keep_deaf_ports(id);
+    }
     u32 kept = 0;
     for (u32 i = 0; i < program_block_count_;) {
         if (program_blocks_[i].program == id && program_blocks_[i].keep) {

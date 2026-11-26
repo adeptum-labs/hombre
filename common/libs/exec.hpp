@@ -798,6 +798,7 @@ private:
         u32 id = 0;  // 0 for a free entry
         u32 code[kMaxProgramCode]{};  // seglist BPTRs
         bool doomed = false;  // ended by the system monitor
+        bool uses_commodities = false;  // opened commodities.library
     };
 
     struct ProgramBlock {
@@ -852,7 +853,8 @@ private:
     void keep_block_holding(u32 addr);
     void keep_blocks_within(u32 lo, u32 hi);
     void keep_list_nodes(u32 list, bool with_messages);
-    void free_program_blocks(u32 id);
+    void keep_deaf_ports(u32 id);
+    void free_program_blocks(u32 id, bool keep_ports);
     bool switch_to_task(i32 next_id);
     void reap_removed();
     void remove_sem_waiter(u32 task_id);
