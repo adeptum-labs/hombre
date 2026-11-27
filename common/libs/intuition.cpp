@@ -38,6 +38,7 @@
 #include "version.hpp"
 
 #include <algorithm>
+#include <utility>
 
 namespace hombre {
 
@@ -760,6 +761,71 @@ Rect intersect_rect(const Rect& a, const Rect& b) {
         a.x1 < b.x1 ? a.x1 : b.x1,
         a.y1 < b.y1 ? a.y1 : b.y1,
     };
+}
+
+constexpr bool empty_rect(const Rect& r) {
+    return r.x1 < r.x0 || r.y1 < r.y0;
+}
+
+// The outline of a selection box is two rings of dashes, the outer one
+// through the box's corners and the inner one against it, each dash this
+// long. Where the outer ring is dark the inner one is light and the other
+// way round, so every stretch of an edge shows both colours side by side.
+constexpr i32 kDragBoxDash = 4;
+constexpr u32 kDragBoxRings = 2;
+constexpr u32 kDragBoxStrips = 4 * kDragBoxRings;
+
+// The outline of a box as strips one pixel thick, four to a ring: its top
+// and bottom rows, then its left and right columns between them, and the
+// same of the box one pixel in. A box one pixel high has no bottom row of
+// its own, one a pixel wide no right column, and one of two pixels either
+// way no inner ring, so no pixel is in two strips; a strip a box lacks is
+// empty, as all are for an empty box.
+struct BoxOutline {
+    Rect strip[kDragBoxStrips];
+};
+
+BoxOutline box_outline(Rect box) {
+    BoxOutline outline{};
+    for (u32 ring = 0; ring < kDragBoxRings; ++ring) {
+        Rect* strip = outline.strip + ring * 4;
+        strip[0] = strip[1] = strip[2] = strip[3] = Rect{0, 0, -1, -1};
+        if (empty_rect(box)) {
+            continue;
+        }
+        strip[0] = Rect{box.x0, box.y0, box.x1, box.y0};
+        if (box.y1 > box.y0) {
+            strip[1] = Rect{box.x0, box.y1, box.x1, box.y1};
+        }
+        if (box.y1 - box.y0 >= 2) {
+            strip[2] = Rect{box.x0, box.y0 + 1, box.x0, box.y1 - 1};
+            if (box.x1 > box.x0) {
+                strip[3] = Rect{box.x1, box.y0 + 1, box.x1, box.y1 - 1};
+            }
+        }
+        box = Rect{box.x0 + 1, box.y0 + 1, box.x1 - 1, box.y1 - 1};
+    }
+    return outline;
+}
+
+// For two strips that lie along one row or one column and share pixels:
+// the pixels before and after the shared ones, which only one of the two
+// has. False for any other two strips.
+bool strip_ends(const Rect& a, const Rect& b, Rect& head, Rect& tail) {
+    if (empty_rect(a) || empty_rect(b)) {
+        return false;
+    }
+    if (a.y0 == a.y1 && b.y0 == b.y1 && a.y0 == b.y0 && a.x0 <= b.x1 && b.x0 <= a.x1) {
+        head = Rect{smaller(a.x0, b.x0), a.y0, larger(a.x0, b.x0) - 1, a.y0};
+        tail = Rect{smaller(a.x1, b.x1) + 1, a.y0, larger(a.x1, b.x1), a.y0};
+        return true;
+    }
+    if (a.x0 == a.x1 && b.x0 == b.x1 && a.x0 == b.x0 && a.y0 <= b.y1 && b.y0 <= a.y1) {
+        head = Rect{a.x0, smaller(a.y0, b.y0), a.x0, larger(a.y0, b.y0) - 1};
+        tail = Rect{a.x0, smaller(a.y1, b.y1) + 1, a.x0, larger(a.y1, b.y1)};
+        return true;
+    }
+    return false;
 }
 
 // The part of the rectangle with its top-left corner at x0, y0 that lies
@@ -2172,6 +2238,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     drag_window_ = 0;
     drag_gadget_ = 0;
     icon_drag_ = IconDrag{};
+    drag_box_ = DragBox{};
     menu_.active = false;
     menu_.screen = 0;
     menu_.window = 0;
@@ -3183,13 +3250,20 @@ void Intuition::compose(u32 screen, Rect r) {
             }
         }
     }
-    if (b.ok() && icon_drag_.image != 0 && icon_drag_.screen == screen) {
+    if (b.ok() && drag_box_.screen == screen) {
+        draw_drag_box(b, dst, *srec, r);
+    }
+    if (b.ok() && icon_drag_.screen == screen) {
         raster::RastPortView view{};
         view.bitmap = dst;
         view.clip = raster::Clip{r.x0, r.y0, r.x1, r.y1};
         view.ok = true;
-        draw_image_view(b, view, icon_drag_.image, icon_drag_.x, icon_drag_.y,
-                        Complement::None, false);
+        for (usize i = 0; i < icon_drag_.icons.size() && b.ok(); ++i) {
+            if (!empty_rect(intersect_rect(icon_drag_.rects[i], r))) {
+                const DragIcon& icon = icon_drag_.icons[i];
+                draw_image_view(b, view, icon.image, icon.x, icon.y, Complement::None, false);
+            }
+        }
     }
     if (b.ok() && menu_.active && menu_.screen == screen) {
         draw_menu_overlay(b, dst, r);
@@ -3729,6 +3803,13 @@ bool Intuition::close_screen(u32 screen) {
     const u32 width = rec->width;
     const u32 height = rec->height;
 
+    // What was dragged over the screen goes with it.
+    if (icon_drag_.screen == screen) {
+        icon_drag_ = IconDrag{};
+    }
+    if (drag_box_.screen == screen) {
+        drag_box_ = DragBox{};
+    }
     screens_.erase(at);
     write_links();
     graphics_->detach_deep(screen + ndk::sc_BitMap);
@@ -6641,50 +6722,163 @@ void Intuition::report_mouse(u32 window, bool on) {
           on ? flags | ndk::WFLG_REPORTMOUSE : flags & ~ndk::WFLG_REPORTMOUSE);
 }
 
-// The box of the dragged image on its screen; empty when nothing is
-// dragged.
-Rect Intuition::icon_drag_rect(Bus& b) const {
-    if (icon_drag_.image == 0) {
-        return Rect{0, 0, -1, -1};
+// The place on its screen of a dragged image and the images chained to it;
+// empty for one that shows nothing.
+Rect Intuition::drag_icon_rect(Bus& b, const DragIcon& icon) const {
+    Rect all{0, 0, -1, -1};
+    u32 current = icon.image;
+    for (u32 step = 0; current != 0 && step < kMaxImageChain; ++step) {
+        const i32 left = icon.x + static_cast<i16>(b.r16(current + image::LeftEdge));
+        const i32 top = icon.y + static_cast<i16>(b.r16(current + image::TopEdge));
+        const i32 width = static_cast<i16>(b.r16(current + image::Width));
+        const i32 height = static_cast<i16>(b.r16(current + image::Height));
+        const u32 next = b.r32(current + image::NextImage);
+        if (!b.ok()) {
+            break;
+        }
+        if (width > 0 && height > 0) {
+            all = unite_rect(all, Rect{left, top, left + width - 1, top + height - 1});
+        }
+        current = next;
     }
-    const u32 image = icon_drag_.image;
-    const i32 left = icon_drag_.x + static_cast<i16>(b.r16(image + image::LeftEdge));
-    const i32 top = icon_drag_.y + static_cast<i16>(b.r16(image + image::TopEdge));
-    const i32 width = static_cast<i16>(b.r16(image + image::Width));
-    const i32 height = static_cast<i16>(b.r16(image + image::Height));
-    if (!b.ok() || width <= 0 || height <= 0) {
-        return Rect{0, 0, -1, -1};
-    }
-    return Rect{left, top, left + width - 1, top + height - 1};
+    return all;
 }
 
-void Intuition::set_drag_image(u32 screen, u32 image, i32 x, i32 y) {
+void Intuition::set_drag_images(u32 screen, const std::vector<DragIcon>& icons) {
     if (machine_ == nullptr) {
         return;
     }
     Bus b(*machine_);
-    const u32 old_screen = icon_drag_.screen;
-    const Rect old_rect = icon_drag_rect(b);
-    icon_drag_ = IconDrag{screen, image, x, y};
-    const Rect new_rect = icon_drag_rect(b);
-    if (old_screen != 0 && old_screen != screen) {
-        compose(old_screen, old_rect);
-        compose(screen, new_rect);
-    } else {
-        compose(screen, unite_rect(old_rect, new_rect));
+    IconDrag old = std::move(icon_drag_);
+    icon_drag_ = IconDrag{};
+    if (screen != 0 && !icons.empty()) {
+        icon_drag_.screen = screen;
+        icon_drag_.icons = icons;
+        icon_drag_.rects.reserve(icons.size());
+        for (const DragIcon& icon : icons) {
+            icon_drag_.rects.push_back(drag_icon_rect(b, icon));
+        }
+    }
+    // An image that overlaps the place it had is composed with that place
+    // in one go; every other place, left or taken, on its own.
+    std::vector<Rect> taken = icon_drag_.rects;
+    if (old.screen == icon_drag_.screen) {
+        for (usize i = 0; i < old.rects.size() && i < taken.size(); ++i) {
+            if (!empty_rect(intersect_rect(old.rects[i], taken[i]))) {
+                taken[i] = unite_rect(taken[i], old.rects[i]);
+                old.rects[i] = Rect{0, 0, -1, -1};
+            }
+        }
+    }
+    for (const Rect& vacated : old.rects) {
+        compose(old.screen, vacated);
+    }
+    for (const Rect& place : taken) {
+        compose(icon_drag_.screen, place);
     }
 }
 
-void Intuition::clear_drag_image() {
-    if (machine_ == nullptr || icon_drag_.image == 0) {
-        icon_drag_ = IconDrag{};
+void Intuition::clear_drag_images() {
+    set_drag_images(0, {});
+}
+
+void Intuition::set_drag_box(u32 screen, const Rect& box) {
+    if (machine_ == nullptr) {
         return;
     }
-    Bus b(*machine_);
-    const u32 screen = icon_drag_.screen;
-    const Rect rect = icon_drag_rect(b);
-    icon_drag_ = IconDrag{};
-    compose(screen, rect);
+    const DragBox old = drag_box_;
+    drag_box_ = screen != 0 && !empty_rect(box) ? DragBox{screen, box} : DragBox{};
+    // A strip's dashes depend on its place in the outline and on the
+    // screen column or row alone, so where an edge only grew or shrank
+    // along its line the pixels both boxes have keep their look, and the
+    // ends that came or went are all there is to compose. Any other edge is
+    // composed where it was and where it is, both of its rings in one go.
+    const BoxOutline was = box_outline(old.box);
+    const BoxOutline is = box_outline(drag_box_.box);
+    for (u32 side = 0; side < 4; ++side) {
+        bool ends_only = old.screen == drag_box_.screen;
+        Rect heads{0, 0, -1, -1};
+        Rect tails{0, 0, -1, -1};
+        Rect gone{0, 0, -1, -1};
+        Rect come{0, 0, -1, -1};
+        for (u32 ring = 0; ring < kDragBoxRings; ++ring) {
+            const Rect& before = was.strip[ring * 4 + side];
+            const Rect& after = is.strip[ring * 4 + side];
+            Rect head{};
+            Rect tail{};
+            if (empty_rect(before) && empty_rect(after)) {
+                continue;
+            }
+            if (ends_only && strip_ends(before, after, head, tail)) {
+                heads = unite_rect(heads, head);
+                tails = unite_rect(tails, tail);
+            } else {
+                ends_only = false;
+            }
+            gone = unite_rect(gone, before);
+            come = unite_rect(come, after);
+        }
+        if (ends_only) {
+            compose(drag_box_.screen, heads);
+            compose(drag_box_.screen, tails);
+        } else {
+            compose(old.screen, gone);
+            compose(drag_box_.screen, come);
+        }
+    }
+}
+
+void Intuition::clear_drag_box() {
+    set_drag_box(0, Rect{0, 0, -1, -1});
+}
+
+void Intuition::draw_drag_box(Bus& b, const raster::Bitmap& bitmap, const ScreenRecord& srec,
+                              const Rect& clip) {
+    if (empty_rect(intersect_rect(drag_box_.box, clip))) {
+        return;
+    }
+    // The dark and the light edge of a window's frame: the frame pens of
+    // the modern look, which follow the DrawInfo's SHADOWPEN and SHINEPEN,
+    // and those two pens themselves on a screen of the classic look.
+    u32 dark = chrome::physical_pen(chrome::kFrameDark, srec.depth);
+    u32 light = chrome::physical_pen(chrome::kFrameLight, srec.depth);
+    if (chrome::style_for_depth(srec.depth) != chrome::Style::Modern) {
+        const chrome::DrawInfoPens pens =
+            screen_pens(b, srec.draw_info, pen_prefs_for(srec.depth));
+        dark = pens.pen[sysimage::ShadowPen];
+        light = pens.pen[sysimage::ShinePen];
+    }
+    // Two pens that are one on a screen of few planes still have to differ.
+    const u32 pen_mask = srec.depth >= 8 ? 0xFFu : (1u << srec.depth) - 1;
+    dark &= pen_mask;
+    light &= pen_mask;
+    if (light == dark) {
+        light = dark ^ 1u;
+    }
+    const raster::Clip all{clip.x0, clip.y0, clip.x1, clip.y1};
+    const BoxOutline outline = box_outline(drag_box_.box);
+    for (u32 i = 0; i < kDragBoxStrips; ++i) {
+        const Rect part = intersect_rect(outline.strip[i], clip);
+        if (empty_rect(part)) {
+            continue;
+        }
+        // Along the strip, a run of one pen at a time: a row's dashes
+        // change with the screen column and a column's with the screen
+        // row, the inner ring's the other way round from the outer one's.
+        const bool across = i % 4 < 2;
+        const bool inner = i / 4 != 0;
+        const i32 end = across ? part.x1 : part.y1;
+        const i32 other = across ? part.y0 : part.x0;
+        i32 at = across ? part.x0 : part.y0;
+        while (at <= end && b.ok()) {
+            const i32 phase = at % (2 * kDragBoxDash);
+            const i32 last = smaller(end, at + kDragBoxDash - phase % kDragBoxDash - 1);
+            const Rect run = across ? Rect{at, other, last, other} : Rect{other, at, other, last};
+            raster::fill_rect(b, bitmap, all, run,
+                              (phase >= kDragBoxDash) != inner ? light : dark);
+            at = last + 1;
+        }
+    }
 }
 
 void Intuition::draw_sys_image(void* ctx, u32 rp, u32 which, i32 left, i32 top, i32 width,

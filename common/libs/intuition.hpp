@@ -392,11 +392,37 @@ public:
     // moves.
     void report_mouse(u32 window, bool on);
 
-    // An Image drawn above every window of the screen with its top-left
-    // corner at x, y, as the Workbench shows an icon being dragged. A new
-    // call moves it; clear_drag_image takes it away.
-    void set_drag_image(u32 screen, u32 image, i32 x, i32 y);
-    void clear_drag_image();
+    // An Image an application drags over its screen, with its top-left
+    // corner at x, y.
+    struct DragIcon {
+        u32 image;
+        i32 x;
+        i32 y;
+    };
+
+    // The Images drawn above every window of the screen and under its
+    // menus, as the Workbench shows the icons being dragged: in the order
+    // of icons, a later one over an earlier one. Each call replaces the
+    // whole set, and only the places the old and the new set take are
+    // composed again; an empty set takes the images away, as
+    // clear_drag_images does. No window's own bitmap is drawn into.
+    void set_drag_images(u32 screen, const std::vector<DragIcon>& icons);
+    void clear_drag_images();
+
+    // The box a selection is dragged out with, drawn above every window of
+    // the screen and under the dragged images and the menus: an outline
+    // through the corners of box, the screen pixels x0, y0 at its top left
+    // and x1, y1 at its bottom right, both part of the box and on the
+    // screen; a box of one pixel either way has them on one line. The
+    // outline is two rings of dashes in the screen's shadow and shine
+    // colours, the inner ring light where the outer one is dark, so it
+    // shows on whatever lies under it; a box too thin for the inner ring
+    // has the outer one alone. The dashes stay where they are on the screen
+    // while the box changes. Each call moves the box and composes only the
+    // parts of the outline that come or go, never what the box holds;
+    // clear_drag_box takes it away. No window's own bitmap is drawn into.
+    void set_drag_box(u32 screen, const Rect& box);
+    void clear_drag_box();
 
     u32 active_window() const { return active_window_; }
     u32 dropped_messages() const { return dropped_messages_; }
@@ -875,7 +901,9 @@ private:
     enum class Complement { None, Bitmap, ImagePlanes };
     void draw_image_view(native::Bus& b, const raster::RastPortView& view, u32 image, i32 left,
                          i32 top, Complement complement, bool damage);
-    Rect icon_drag_rect(native::Bus& b) const;
+    Rect drag_icon_rect(native::Bus& b, const DragIcon& icon) const;
+    void draw_drag_box(native::Bus& b, const raster::Bitmap& bitmap, const ScreenRecord& srec,
+                       const Rect& clip);
     void clear_gadget_hook(u32 gadget);
     void clear_window_gadget_hooks(u32 window);
     void log_unhandled_gadget_type(u32 gtype);
@@ -993,15 +1021,22 @@ private:
     u32 drag_window_ = 0;
     u32 drag_gadget_ = 0;
     MenuMode menu_;
-    // The image an application drags over its screen, drawn above every
-    // window: the screen, the Image and its top-left corner.
+    // The images an application drags over its screen, drawn above every
+    // window: the screen, each Image with its top-left corner and the
+    // place on the screen each took when it was set.
     struct IconDrag {
         u32 screen = 0;
-        u32 image = 0;
-        i32 x = 0;
-        i32 y = 0;
+        std::vector<DragIcon> icons;
+        std::vector<Rect> rects;
     };
     IconDrag icon_drag_;
+    // The selection box dragged out over a screen; no box while the screen
+    // is 0.
+    struct DragBox {
+        u32 screen = 0;
+        Rect box{0, 0, -1, -1};
+    };
+    DragBox drag_box_;
     i32 grab_x_ = 0;
     i32 grab_y_ = 0;
     i32 mouse_x_ = 0;

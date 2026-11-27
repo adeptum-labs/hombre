@@ -2551,7 +2551,7 @@ void report_mouse_turns_move_reports_on_and_off() {
     CHECK_EQ(get_msg(r, port), 0u);
 }
 
-void a_drag_image_is_drawn_above_the_windows_until_cleared() {
+void drag_images_are_drawn_above_the_windows_until_cleared() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
     const u32 screen = open_new(r, kNewScreen);
@@ -2559,13 +2559,15 @@ void a_drag_image_is_drawn_above_the_windows_until_cleared() {
     put_new_window(r, kNewWindow, 50, 60, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
+    const std::vector<u8> before = screen_planes(r, screen);
     const u32 inside = screen_pixel(r, screen, 80, 100);
     const u32 own = window_pixel(r, window, 71 - 50, 92 - 60);
     const u32 outside = screen_pixel(r, screen, 300, 300);
     const u32 solid = put_image(r, kData + 0x1080, 1, 2, 6, 4, 0, 0, 0, 3);
+    const u32 other = put_image(r, kData + 0x10C0, 0, 0, 6, 4, 0, 0, 0, 1);
 
     // Over the window, its corner at x, y plus the image's own offsets.
-    r.intuition.set_drag_image(screen, solid, 70, 90);
+    r.intuition.set_drag_images(screen, {{solid, 70, 90}});
     CHECK_EQ(screen_pixel(r, screen, 71, 92), 3u);
     CHECK_EQ(screen_pixel(r, screen, 76, 95), 3u);
     CHECK_EQ(screen_pixel(r, screen, 77, 95), inside);
@@ -2574,12 +2576,355 @@ void a_drag_image_is_drawn_above_the_windows_until_cleared() {
     CHECK_EQ(window_pixel(r, window, 71 - 50, 92 - 60), own);
 
     // Moving it puts back what was under the old place.
-    r.intuition.set_drag_image(screen, solid, 299, 298);
+    r.intuition.set_drag_images(screen, {{solid, 299, 298}});
     CHECK_EQ(screen_pixel(r, screen, 71, 92), inside);
     CHECK_EQ(screen_pixel(r, screen, 300, 300), 3u);
 
-    r.intuition.clear_drag_image();
+    // Several at once, a later one over an earlier one.
+    r.intuition.set_drag_images(screen, {{solid, 299, 298}, {other, 303, 301}, {solid, 69, 88}});
+    CHECK_EQ(screen_pixel(r, screen, 300, 300), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 304, 302), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 308, 304), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 71, 92), 3u);
+    CHECK_EQ(window_pixel(r, window, 71 - 50, 92 - 60), own);
+
+    // Each call replaces the whole set.
+    r.intuition.set_drag_images(screen, {{other, 303, 301}});
     CHECK_EQ(screen_pixel(r, screen, 300, 300), outside);
+    CHECK_EQ(screen_pixel(r, screen, 304, 302), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 71, 92), inside);
+
+    // An empty set takes the images away, as clear_drag_images does.
+    r.intuition.set_drag_images(screen, {});
+    CHECK(screen_planes(r, screen) == before);
+    r.intuition.set_drag_images(screen, {{solid, 70, 90}, {other, 303, 301}});
+    CHECK(screen_planes(r, screen) != before);
+    r.intuition.clear_drag_images();
+    CHECK(screen_planes(r, screen) == before);
+
+    // An image chained to a dragged one goes and comes with it.
+    const u32 far = put_image(r, kData + 0x1100, 20, 10, 2, 1, 0, 0, 0, 2);
+    const u32 near = put_image(r, kData + 0x1140, 0, 0, 2, 1, 0, 0, 0, 1, far);
+    r.intuition.set_drag_images(screen, {{near, 500, 300}});
+    CHECK_EQ(screen_pixel(r, screen, 500, 300), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 521, 310), 2u);
+    r.intuition.set_drag_images(screen, {{near, 400, 200}});
+    CHECK_EQ(screen_pixel(r, screen, 421, 210), 2u);
+    r.intuition.clear_drag_images();
+    CHECK(screen_planes(r, screen) == before);
+}
+
+// True when a refresh since the list was cleared took in the pixel.
+bool refresh_holds(GfxRig& r, i32 x, i32 y) {
+    for (const Rect& d : r.refreshes) {
+        if (x >= d.x0 && x <= d.x1 && y >= d.y0 && y <= d.y1) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void drag_images_compose_only_the_places_they_leave_and_take() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 one = put_image(r, kData + 0x1080, 0, 0, 6, 4, 0, 0, 0, 3);
+    const u32 two = put_image(r, kData + 0x10C0, 0, 0, 6, 4, 0, 0, 0, 1);
+
+    r.refreshes.clear();
+    r.intuition.set_drag_images(screen, {{one, 100, 100}, {two, 400, 300}});
+    CHECK_EQ(r.refreshes.size(), 2u);
+    CHECK(refreshed(r, screen, 100, 100, 105, 103));
+    CHECK(refreshed(r, screen, 400, 300, 405, 303));
+
+    // An image moved a little is composed with the place it left in one
+    // go; one moved far, where it was and where it is.
+    r.refreshes.clear();
+    r.intuition.set_drag_images(screen, {{one, 102, 101}, {two, 200, 50}});
+    CHECK_EQ(r.refreshes.size(), 3u);
+    CHECK(refreshed(r, screen, 100, 100, 107, 104));
+    CHECK(refreshed(r, screen, 400, 300, 405, 303));
+    CHECK(refreshed(r, screen, 200, 50, 205, 53));
+    CHECK(!refresh_holds(r, 300, 200));
+
+    r.refreshes.clear();
+    r.intuition.clear_drag_images();
+    CHECK_EQ(r.refreshes.size(), 2u);
+    CHECK(refreshed(r, screen, 102, 101, 107, 104));
+    CHECK(refreshed(r, screen, 200, 50, 205, 53));
+
+    // Nothing is left to compose.
+    r.refreshes.clear();
+    r.intuition.clear_drag_images();
+    CHECK_EQ(r.refreshes.size(), 0u);
+}
+
+// The pen at x, y of a screen 640 pixels wide in what screen_planes read of
+// its two planes.
+u32 planes_pen(const std::vector<u8>& planes, i32 x, i32 y) {
+    const usize bytes = planes.size() / 2;
+    const usize at = static_cast<usize>(y) * 80 + (static_cast<usize>(x) >> 3);
+    const u8 bit = static_cast<u8>(0x80u >> (x & 7));
+    return ((planes[at] & bit) != 0 ? 1u : 0u) | ((planes[bytes + at] & bit) != 0 ? 2u : 0u);
+}
+
+// The outline of a drag box: two rings of dashes four pixels long in
+// SHADOWPEN (1) and SHINEPEN (2), which a row takes from the screen's
+// columns and a column from its rows, the inner ring light where the outer
+// one is dark.
+void a_drag_box_is_two_rings_of_dashes_above_the_windows() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const std::vector<u8> before = screen_planes(r, screen);
+    const u32 own = window_pixel(r, window, 80 - 50, 100 - 60);
+
+    const Rect box{80, 100, 300, 250};
+    r.intuition.set_drag_box(screen, box);
+    const std::vector<u8> shown = screen_planes(r, screen);
+    CHECK_EQ(planes_pen(shown, 80, 100), 1u);
+    CHECK_EQ(planes_pen(shown, 83, 100), 1u);
+    CHECK_EQ(planes_pen(shown, 84, 100), 2u);
+    CHECK_EQ(planes_pen(shown, 87, 100), 2u);
+    CHECK_EQ(planes_pen(shown, 88, 100), 1u);
+    CHECK_EQ(planes_pen(shown, 300, 250), 2u);
+    CHECK_EQ(planes_pen(shown, 80, 104), 1u);
+    CHECK_EQ(planes_pen(shown, 80, 108), 2u);
+    CHECK_EQ(planes_pen(shown, 300, 104), 1u);
+    CHECK_EQ(planes_pen(shown, 81, 104), 2u);
+    CHECK_EQ(planes_pen(shown, 88, 101), 2u);
+    u32 unpaired = 0;
+    for (i32 x = box.x0 + 1; x < box.x1; ++x) {
+        unpaired += planes_pen(shown, x, box.y0) + planes_pen(shown, x, box.y0 + 1) != 3 ? 1 : 0;
+        unpaired += planes_pen(shown, x, box.y1) + planes_pen(shown, x, box.y1 - 1) != 3 ? 1 : 0;
+    }
+    for (i32 y = box.y0 + 2; y < box.y1 - 1; ++y) {
+        unpaired += planes_pen(shown, box.x0, y) + planes_pen(shown, box.x0 + 1, y) != 3 ? 1 : 0;
+        unpaired += planes_pen(shown, box.x1, y) + planes_pen(shown, box.x1 - 1, y) != 3 ? 1 : 0;
+    }
+    CHECK_EQ(unpaired, 0u);
+
+    // What the box holds and what lies outside it are as they were.
+    u32 changed = 0;
+    for (i32 y = 0; y < 400; ++y) {
+        for (i32 x = 0; x < 640; ++x) {
+            const bool in_box = x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1;
+            const bool held =
+                x >= box.x0 + 2 && x <= box.x1 - 2 && y >= box.y0 + 2 && y <= box.y1 - 2;
+            if ((!in_box || held) && planes_pen(shown, x, y) != planes_pen(before, x, y)) {
+                ++changed;
+            }
+        }
+    }
+    CHECK_EQ(changed, 0u);
+    // The window under its corner keeps its own bitmap.
+    CHECK_EQ(window_pixel(r, window, 80 - 50, 100 - 60), own);
+
+    r.intuition.clear_drag_box();
+    CHECK(screen_planes(r, screen) == before);
+}
+
+void a_drag_box_composes_only_the_edges_that_change() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+
+    // Each edge with its two rings, never what the box holds.
+    r.refreshes.clear();
+    r.intuition.set_drag_box(screen, Rect{100, 100, 200, 180});
+    CHECK_EQ(r.refreshes.size(), 4u);
+    CHECK(refreshed(r, screen, 100, 100, 200, 101));
+    CHECK(refreshed(r, screen, 100, 179, 200, 180));
+    CHECK(refreshed(r, screen, 100, 101, 101, 179));
+    CHECK(refreshed(r, screen, 199, 101, 200, 179));
+    CHECK(!refresh_holds(r, 150, 140));
+
+    // Dragged out from its top-left corner: the top and left edges only
+    // grow, the bottom and right ones go and come.
+    r.refreshes.clear();
+    r.intuition.set_drag_box(screen, Rect{100, 100, 230, 200});
+    CHECK_EQ(r.refreshes.size(), 6u);
+    CHECK(refreshed(r, screen, 200, 100, 230, 101));
+    CHECK(refreshed(r, screen, 100, 179, 101, 199));
+    CHECK(refreshed(r, screen, 100, 179, 200, 180));
+    CHECK(refreshed(r, screen, 100, 199, 230, 200));
+    CHECK(refreshed(r, screen, 199, 101, 200, 179));
+    CHECK(refreshed(r, screen, 229, 101, 230, 199));
+    CHECK(!refresh_holds(r, 150, 140));
+    CHECK(!refresh_holds(r, 150, 100));
+
+    // The same box again composes nothing.
+    r.refreshes.clear();
+    r.intuition.set_drag_box(screen, Rect{100, 100, 230, 200});
+    CHECK_EQ(r.refreshes.size(), 0u);
+
+    r.intuition.clear_drag_box();
+    CHECK_EQ(r.refreshes.size(), 4u);
+    CHECK(!refresh_holds(r, 150, 140));
+    r.refreshes.clear();
+    r.intuition.clear_drag_box();
+    CHECK_EQ(r.refreshes.size(), 0u);
+}
+
+// However a box got to its place, it looks as one set there afresh, and
+// taking it away leaves the screen as it was: boxes that grow, shrink and
+// move, are one, two and three pixels thin, and lie along the screen's
+// edges.
+void a_moved_drag_box_looks_as_one_set_afresh() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+    CHECK(open_win(r, kNewWindow) != 0);
+    const std::vector<u8> before = screen_planes(r, screen);
+    const Rect boxes[] = {
+        {100, 100, 200, 180}, {100, 100, 230, 200}, {100, 100, 150, 120}, {100, 100, 100, 120},
+        {100, 100, 100, 100}, {100, 100, 160, 100}, {100, 100, 101, 160}, {100, 100, 160, 102},
+        {100, 100, 103, 103}, {60, 40, 100, 100},   {61, 40, 100, 101},   {0, 0, 639, 399},
+        {0, 0, 0, 399},       {0, 0, 639, 0},       {639, 0, 639, 399},   {0, 399, 639, 399},
+        {638, 398, 639, 399}, {300, 200, 340, 230}, {296, 196, 344, 234}, {300, 200, 340, 230},
+    };
+    for (const Rect& box : boxes) {
+        r.intuition.set_drag_box(screen, box);
+        const std::vector<u8> moved = screen_planes(r, screen);
+        CHECK(moved != before);
+        r.intuition.clear_drag_box();
+        CHECK(screen_planes(r, screen) == before);
+        r.intuition.set_drag_box(screen, box);
+        CHECK(screen_planes(r, screen) == moved);
+    }
+    r.intuition.clear_drag_box();
+    CHECK(screen_planes(r, screen) == before);
+}
+
+void a_thin_drag_box_and_one_along_the_screen_edges_show() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const std::vector<u8> before = screen_planes(r, screen);
+
+    // Round the whole screen.
+    r.intuition.set_drag_box(screen, Rect{0, 0, 639, 399});
+    std::vector<u8> shown = screen_planes(r, screen);
+    CHECK_EQ(planes_pen(shown, 0, 0), 1u);
+    CHECK_EQ(planes_pen(shown, 639, 0), 2u);
+    CHECK_EQ(planes_pen(shown, 0, 399), 1u);
+    CHECK_EQ(planes_pen(shown, 639, 399), 2u);
+    CHECK_EQ(planes_pen(shown, 1, 1), 2u);
+    CHECK_EQ(planes_pen(shown, 639, 200), 1u);
+    CHECK_EQ(planes_pen(shown, 638, 200), 2u);
+    CHECK_EQ(planes_pen(shown, 320, 399), 1u);
+    CHECK_EQ(planes_pen(shown, 320, 398), 2u);
+    CHECK_EQ(planes_pen(shown, 320, 200), planes_pen(before, 320, 200));
+
+    // One pixel wide: the outer ring alone, dashed down the column.
+    r.intuition.set_drag_box(screen, Rect{10, 200, 10, 260});
+    shown = screen_planes(r, screen);
+    CHECK_EQ(planes_pen(shown, 10, 200), 1u);
+    CHECK_EQ(planes_pen(shown, 10, 204), 2u);
+    CHECK_EQ(planes_pen(shown, 10, 208), 1u);
+    CHECK_EQ(planes_pen(shown, 10, 260), 1u);
+    CHECK_EQ(planes_pen(shown, 9, 230), planes_pen(before, 9, 230));
+    CHECK_EQ(planes_pen(shown, 11, 230), planes_pen(before, 11, 230));
+    CHECK_EQ(planes_pen(shown, 0, 0), planes_pen(before, 0, 0));
+
+    // One pixel high: dashed along the row.
+    r.intuition.set_drag_box(screen, Rect{10, 300, 90, 300});
+    shown = screen_planes(r, screen);
+    CHECK_EQ(planes_pen(shown, 16, 300), 1u);
+    CHECK_EQ(planes_pen(shown, 20, 300), 2u);
+    CHECK_EQ(planes_pen(shown, 90, 300), 1u);
+    CHECK_EQ(planes_pen(shown, 16, 299), planes_pen(before, 16, 299));
+    CHECK_EQ(planes_pen(shown, 16, 301), planes_pen(before, 16, 301));
+    CHECK_EQ(planes_pen(shown, 10, 230), planes_pen(before, 10, 230));
+
+    r.intuition.clear_drag_box();
+    CHECK(screen_planes(r, screen) == before);
+}
+
+void window_redraws_stay_under_the_drag_box_and_images() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 50, 60, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 solid = put_image(r, kData + 0x1080, 0, 0, 6, 4, 0, 0, 0, 2);
+
+    r.intuition.set_drag_box(screen, Rect{64, 70, 140, 130});
+    r.intuition.set_drag_images(screen, {{solid, 70, 90}});
+    // The window draws under both.
+    fill_rastport(r, r.get32(window + wd_RPort), 3, 5, 5, 95, 75);
+    CHECK_EQ(window_pixel(r, window, 64 - 50, 70 - 60), 3u);
+    CHECK_EQ(window_pixel(r, window, 72 - 50, 92 - 60), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 64, 70), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 68, 70), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 68, 71), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 72, 92), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 100, 100), 3u);
+
+    // The images lie over the box.
+    r.intuition.set_drag_images(screen, {{solid, 62, 69}});
+    CHECK_EQ(screen_pixel(r, screen, 64, 70), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 72, 92), 3u);
+    r.intuition.clear_drag_images();
+    CHECK_EQ(screen_pixel(r, screen, 64, 70), 1u);
+
+    r.intuition.clear_drag_box();
+    CHECK_EQ(screen_pixel(r, screen, 64, 70), 3u);
+    CHECK_EQ(screen_pixel(r, screen, 68, 71), 3u);
+}
+
+// On a screen of the modern look the dashes are in the pens of the window
+// frames' dark and light edges, where physical_pen has them at its depth.
+void a_drag_box_on_a_modern_screen_takes_the_frame_pens() {
+    for (const u32 depth : {5u, 8u}) {
+        GfxRig r;
+        put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
+        const u32 screen = open_new(r, kNewScreen);
+        CHECK(screen != 0);
+        put_new_window(r, kNewWindow, 50, 60, 100, 80, WFLG_ACTIVATE, 0, 0, 0);
+        const u32 window = open_win(r, kNewWindow);
+        CHECK(window != 0);
+        const u32 dark = chrome::physical_pen(chrome::kFrameDark, depth);
+        const u32 light = chrome::physical_pen(chrome::kFrameLight, depth);
+        CHECK(dark != light);
+        const i32 probes[][2] = {{80, 100}, {84, 100}, {84, 101}, {88, 101}, {80, 104},
+                                 {300, 250}, {296, 249}, {200, 180}, {150, 100}, {153, 141}};
+        u32 under[10]{};
+        for (u32 i = 0; i < 10; ++i) {
+            under[i] = screen_pixel(r, screen, probes[i][0], probes[i][1]);
+        }
+        const u32 own = window_pixel(r, window, 80 - 50, 100 - 60);
+
+        r.intuition.set_drag_box(screen, Rect{80, 100, 300, 250});
+        CHECK_EQ(screen_pixel(r, screen, 80, 100), dark);
+        CHECK_EQ(screen_pixel(r, screen, 84, 100), light);
+        CHECK_EQ(screen_pixel(r, screen, 84, 101), dark);
+        CHECK_EQ(screen_pixel(r, screen, 88, 101), light);
+        CHECK_EQ(screen_pixel(r, screen, 80, 104), dark);
+        CHECK_EQ(screen_pixel(r, screen, 300, 250), light);
+        CHECK_EQ(screen_pixel(r, screen, 296, 249), light);
+        // Its dashes cross the window's shadow too.
+        CHECK_EQ(screen_pixel(r, screen, 150, 100), light);
+        CHECK_EQ(screen_pixel(r, screen, 200, 180), under[7]);
+        CHECK_EQ(screen_pixel(r, screen, 153, 141), under[9]);
+        CHECK_EQ(window_pixel(r, window, 80 - 50, 100 - 60), own);
+
+        r.intuition.clear_drag_box();
+        for (u32 i = 0; i < 10; ++i) {
+            CHECK_EQ(screen_pixel(r, screen, probes[i][0], probes[i][1]), under[i]);
+        }
+    }
 }
 
 void close_gadget_posts_closewindow_on_release_over_the_box() {
@@ -8087,6 +8432,37 @@ void menu_mode_ends_without_a_pick_when_the_strip_or_window_goes() {
     CHECK(!r.intuition.window_open(window));
 }
 
+// The menu bar and an open menu's box are drawn over a drag box and the
+// dragged images, which show again when menu mode ends.
+void a_menu_opens_over_the_drag_box_and_images() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_two_title_strip(r);
+    const u32 window = open_menu_window(r, WFLG_ACTIVATE, kMenuIdcmp);
+    set_strip(r, window, kMenuA);
+    const u32 solid = put_image(r, kData + 0x1100, 0, 0, 6, 4, 0, 0, 0, 3);
+
+    r.intuition.set_drag_box(screen, Rect{0, 0, 639, 60});
+    r.intuition.set_drag_images(screen, {{solid, 300, 3}});
+    CHECK_EQ(screen_pixel(r, screen, 296, 0), 1u);
+    CHECK_EQ(screen_pixel(r, screen, 302, 5), 3u);
+    const std::vector<u8> dragged = screen_planes(r, screen);
+
+    menu_press(r, 30, 50);
+    CHECK_EQ(screen_pixel(r, screen, 296, 0), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 302, 5), 2u);
+    // Below the bar the box still shows.
+    CHECK_EQ(screen_pixel(r, screen, 0, 40), 1u);
+
+    menu_release(r, 300, 200);
+    const u32 msg = window_message(r, window);
+    CHECK(msg != 0);
+    reply_msg(r, msg);
+    CHECK(screen_planes(r, screen) == dragged);
+}
+
 void open_window_logs_the_title() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -10802,7 +11178,14 @@ int main() {
     left_press_activates_the_window_and_posts_active_and_inactive();
     move_goes_to_the_active_window_only_with_reportmouse();
     report_mouse_turns_move_reports_on_and_off();
-    a_drag_image_is_drawn_above_the_windows_until_cleared();
+    drag_images_are_drawn_above_the_windows_until_cleared();
+    drag_images_compose_only_the_places_they_leave_and_take();
+    a_drag_box_is_two_rings_of_dashes_above_the_windows();
+    a_drag_box_composes_only_the_edges_that_change();
+    a_moved_drag_box_looks_as_one_set_afresh();
+    a_thin_drag_box_and_one_along_the_screen_edges_show();
+    window_redraws_stay_under_the_drag_box_and_images();
+    a_drag_box_on_a_modern_screen_takes_the_frame_pens();
     close_gadget_posts_closewindow_on_release_over_the_box();
     close_gadget_release_elsewhere_does_nothing();
     close_gadget_without_idcmp_does_nothing();
@@ -10952,6 +11335,7 @@ int main() {
     menu_on_a_shallow_modern_screen_highlights_ghosts_and_restores();
     menu_rmbtrap_window_still_gets_menudown_and_menuup();
     menu_mode_ends_without_a_pick_when_the_strip_or_window_goes();
+    a_menu_opens_over_the_drag_box_and_images();
     open_window_logs_the_title();
     draw_image_reads_plane_pick_and_plane_on_off();
     erase_image_clears_the_image_box();

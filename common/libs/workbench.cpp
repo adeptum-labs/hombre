@@ -3233,7 +3233,8 @@ void Workbench::drag_to(u32 window_id, i32 mx, i32 my) {
         return;
     }
     // The image's corner goes where the icon's corner would be.
-    intuition_->set_drag_image(screen_, art.render, sx - drag_.grab_x, sy - drag_.grab_y);
+    intuition_->set_drag_images(
+        screen_, {Intuition::DragIcon{art.render, sx - drag_.grab_x, sy - drag_.grab_y}});
 }
 
 void Workbench::end_drag(u32 window_id, i32 mx, i32 my) {
@@ -3273,7 +3274,7 @@ void Workbench::cancel_drag() {
     if (drawer != nullptr) {
         intuition_->report_mouse(drawer->window, false);
     }
-    intuition_->clear_drag_image();
+    intuition_->clear_drag_images();
     drag_ = IconDrag{};
 }
 
