@@ -1983,8 +1983,8 @@ struct IntuitionNatives {
     }
 
     // The GadgetInfo goes where the method has it: after the MethodID for
-    // a GM_ method, after the tag list for ndk::OM_NEW, ndk::OM_SET, ndk::OM_NOTIFY and
-    // ndk::OM_UPDATE.
+    // every method but ndk::OM_NEW, ndk::OM_SET, ndk::OM_NOTIFY and
+    // ndk::OM_UPDATE, which take it after their tag list.
     static void do_gadget_method(void* ctx, Machine& m) {
         Intuition& in = of(ctx);
         Bus b(m);
@@ -1994,11 +1994,11 @@ struct IntuitionNatives {
             return;
         }
         const u32 info = m.cpu.a[1] != 0 ? in.make_gadget_info(m.cpu.a[1]) : 0;
-        if (method < 0x100) {
-            b.w32(msg + 4, info);
-        } else if (method == ndk::OM_NEW || method == ndk::OM_SET || method == ndk::OM_NOTIFY ||
-                   method == ndk::OM_UPDATE) {
+        if (method == ndk::OM_NEW || method == ndk::OM_SET || method == ndk::OM_NOTIFY ||
+            method == ndk::OM_UPDATE) {
             b.w32(msg + 8, info);
+        } else {
+            b.w32(msg + 4, info);
         }
         const u32 result = b.ok() ? in.boopsi_.do_method(m.cpu.a[0], msg) : 0;
         in.free_gadget_info(info);

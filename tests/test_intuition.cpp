@@ -9985,6 +9985,51 @@ void removing_the_active_custom_gadget_ends_its_input() {
     CHECK(bo.free_class(cl));
 }
 
+// DTM_CLEARSELECTED from datatypes is outside the OM_ group and takes the
+// GadgetInfo as the second long word, where the class reads it before it
+// sends a GM_RENDER.
+void do_gadget_method_gives_every_method_its_gadget_info() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 window = open_win(r, kNewWindow);
+    CHECK(window != 0);
+    const u32 cl = bo.find_class_named("gadgetclass");
+    const u32 gadget = bo.new_object(cl, 0, r.tags(kTagList, {{TAG_DONE, 0}}));
+    CHECK(gadget != 0);
+
+    constexpr u32 kDtmClearSelected = 0x606;
+    constexpr u32 kMessage = kData + 0x2600;
+    const auto call = [&](u32 method) {
+        for (u32 i = 0; i < 4; ++i) {
+            r.put32(kMessage + i * 4, 0);
+        }
+        r.put32(kMessage, method);
+        r.cpu().a[0] = gadget;
+        r.cpu().a[1] = window;
+        r.cpu().a[2] = 0;
+        r.cpu().a[3] = kMessage;
+        CHECK_EQ(r.call(Base::Intuition, intuition_lvo::DoGadgetMethodA), ExitReason::Halt);
+    };
+
+    call(kDtmClearSelected);
+    CHECK(r.get32(kMessage + 4) != 0);
+    CHECK_EQ(r.get32(kMessage + 8), 0u);
+    call(GM_RENDER);
+    CHECK(r.get32(kMessage + 4) != 0);
+    CHECK_EQ(r.get32(kMessage + 8), 0u);
+    call(OM_SET);
+    CHECK_EQ(r.get32(kMessage + 4), 0u);
+    CHECK(r.get32(kMessage + 8) != 0);
+    call(OM_UPDATE);
+    CHECK_EQ(r.get32(kMessage + 4), 0u);
+    CHECK(r.get32(kMessage + 8) != 0);
+
+    bo.dispose_object(gadget);
+}
+
 void a_boopsi_notify_posts_idcmpupdate() {
     GfxRig r;
     Boopsi& bo = r.intuition.boopsi();
@@ -11448,6 +11493,7 @@ int main() {
     a_custom_gadget_with_a_hook_is_drawn_by_the_hook();
     a_boopsi_gadget_draws_itself_and_takes_the_click();
     removing_the_active_custom_gadget_ends_its_input();
+    do_gadget_method_gives_every_method_its_gadget_info();
     a_boopsi_notify_posts_idcmpupdate();
     a_boopsi_notify_without_idcmpupdate_is_dropped();
     a_boopsi_notify_chains_through_an_object_target();
