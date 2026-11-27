@@ -8037,6 +8037,15 @@ bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
             gadget = next;
             continue;
         }
+        // A gadtools gadget takes what the press chooses before it is drawn,
+        // and gives the code of its GADGETDOWN.
+        u16 code = 0;
+        bool reports = true;
+        if ((type & ndk::GTYP_GADTOOLS) != 0 && gadget_press_ != nullptr) {
+            const Rect box = resolve_gadget_box(b, w, gadget);
+            reports = gadget_press_(gadget_renderer_ctx_, window, gadget, wx - box.x0,
+                                    wy - box.y0, code);
+        }
         // A gadget that toggles its own state takes it when let go; its
         // release callback turns GFLG_SELECTED over.
         const bool toggles = (type & ndk::GTYP_GADTOOLS) != 0 &&
@@ -8048,8 +8057,8 @@ bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
         pressed_gadget_window_ = window;
         pressed_gadget_ = GadgetKind::Bool;
         pressed_bool_gadget_ = gadget;
-        if ((activation & ndk::GACT_IMMEDIATE) != 0) {
-            post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
+        if ((activation & ndk::GACT_IMMEDIATE) != 0 && reports) {
+            post_intuimessage(window, ndk::IDCMP_GADGETDOWN, code, gadget);
         }
         return true;
     }

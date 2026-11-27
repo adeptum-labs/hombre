@@ -277,6 +277,7 @@ void open_amiga_screen(const BootInfo& info) {
     splash_progress(8, kSplashKernelSteps);
     intuition.set_gadget_renderer(&GadTools::render_gadget, &gadtools);
     intuition.set_gadget_release(&GadTools::release_gadget);
+    intuition.set_gadget_press(&GadTools::press_gadget);
     intuition.set_gadget_prop_code(&GadTools::prop_gadget_moved);
     intuition.set_gadget_wheel(&GadTools::wheel_gadget);
     gadtools.set_intuition(&intuition);

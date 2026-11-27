@@ -2102,7 +2102,106 @@ void the_wheel_moves_sliders_and_scrollers() {
     r.intuition.set_gadget_wheel(nullptr);
 }
 
+// A set of radio buttons: one button a label, the labels to the right of
+// the buttons, a row a button high and LAYOUTA_Spacing apart. The chosen
+// one holds a dot in the fill pen; a click on another chooses it and sends
+// IDCMP_GADGETDOWN with its ordinal, and GTMX_Active sets and reads it.
+void mx_gadgets_show_their_choices_and_report_the_one_clicked() {
+    constexpr u32 MX_KIND = 5;
+    constexpr u32 GTMX_Labels = 0x80080009;
+    constexpr u32 GTMX_Active = 0x8008000A;
+    constexpr u32 kLeft = 1;
+    constexpr i32 kRow = 9 + 4;
+    GfxRig r;
+    GadTools g;
+    init_gadtools(r, g);
+    r.intuition.set_gadget_renderer(&GadTools::render_gadget, &g);
+    r.intuition.set_gadget_press(&GadTools::press_gadget);
+    r.intuition.set_gadget_release(&GadTools::release_gadget);
+    g.set_intuition(&r.intuition);
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0);
+    CHECK(open_new_screen(r, kNewScreen) != 0);
+
+    r.cpu().a[0] = kList;
+    const u32 context = gt_result(r, g, gadtools_lvo::CreateContext);
+    const u32 labels = kText;
+    r.str(kText + 0x10, "Normal");
+    r.str(kText + 0x20, "Selected");
+    r.put32(labels, kText + 0x10);
+    r.put32(labels + 4, kText + 0x20);
+    r.put32(labels + 8, 0);
+    // The NewGadget's label is no title without GTMX_TitlePlace.
+    r.str(kLabel, "Undo");
+    put_new_gadget(r, 20, 30, 75, 11, kLabel, 4, PLACETEXT_RIGHT, 0);
+    const u32 mx = create_gadget(
+        r, g, MX_KIND, context,
+        r.tags(kTags, {{GTMX_Labels, labels}, {GTMX_Active, 0}, {LAYOUTA_Spacing, 4},
+                       {TAG_DONE, 0}}));
+    CHECK(mx != 0);
+    CHECK(!logged("gadtools: gadget kind 5 not handled"));
+    CHECK_EQ(r.get16(mx + gg_Width), 17u);
+    CHECK_EQ(r.get16(mx + gg_Height), static_cast<u32>(kRow + 9));
+    CHECK_EQ(r.get16(mx + gg_Activation) & GACT_IMMEDIATE, static_cast<u32>(GACT_IMMEDIATE));
+
+    for (u32 i = 0; i < NewWindow_SIZEOF; ++i) {
+        r.put8(kNewWindow + i, 0);
+    }
+    r.put16(kNewWindow + nw_LeftEdge, 50);
+    r.put16(kNewWindow + nw_TopEdge, 50);
+    r.put16(kNewWindow + nw_Width, 200);
+    r.put16(kNewWindow + nw_Height, 120);
+    r.put8(kNewWindow + nw_BlockPen, 1);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETUP | IDCMP_GADGETDOWN);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE);
+    r.put32(kNewWindow + nw_FirstGadget, context);
+    r.cpu().a[0] = kNewWindow;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    CHECK(window != 0);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 wrp = r.get32(window + wd_RPort);
+    // The first button chosen, the second not; each label to the right.
+    CHECK_EQ(read_pixel(r, wrp, 20 + 8, 30 + 4), kFillPen);
+    CHECK_EQ(read_pixel(r, wrp, 20 + 8, 30 + kRow + 4), 0u);
+    CHECK(box_has_pen(r, wrp, 20 + 17 + 1, 30, 20 + 17 + 60, 30 + 8, kTextPen));
+    CHECK(box_has_pen(r, wrp, 20 + 17 + 1, 30 + kRow, 20 + 17 + 60, 30 + kRow + 8, kTextPen));
+    // No title to the left or above it.
+    CHECK(!box_has_pen(r, wrp, 8, 30, 19, 30 + kRow + 8, kTextPen));
+
+    // A click on the second button.
+    r.intuition.pointer_event(50 + 20 + 8, 50 + 30 + kRow + 4, kLeft, kLeft, 0, true);
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_GADGETDOWN);
+    CHECK_EQ(r.get16(msg + im_Code), 1u);
+    CHECK_EQ(r.get32(msg + im_IAddress), mx);
+    reply_msg(r, msg);
+    r.intuition.pointer_event(50 + 20 + 8, 50 + 30 + kRow + 4, 0, 0, kLeft, false);
+    CHECK_EQ(get_msg(r, port), 0u);
+    CHECK_EQ(read_pixel(r, wrp, 20 + 8, 30 + 4), 0u);
+    CHECK_EQ(read_pixel(r, wrp, 20 + 8, 30 + kRow + 4), kFillPen);
+
+    r.cpu().a[0] = mx;
+    r.cpu().a[3] = r.tags(kTags, {{GTMX_Active, kAnswer}, {TAG_DONE, 0}});
+    CHECK_EQ(gt_result(r, g, gadtools_lvo::GT_GetGadgetAttrsA), 1u);
+    CHECK_EQ(r.get32(kAnswer), 1u);
+    r.cpu().a[0] = mx;
+    r.cpu().a[1] = window;
+    r.cpu().a[3] = r.tags(kTags, {{GTMX_Active, 0}, {TAG_DONE, 0}});
+    gt_result(r, g, gadtools_lvo::GT_SetGadgetAttrsA);
+    CHECK_EQ(read_pixel(r, wrp, 20 + 8, 30 + 4), kFillPen);
+    CHECK_EQ(read_pixel(r, wrp, 20 + 8, 30 + kRow + 4), 0u);
+
+    r.cpu().a[0] = window;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = context;
+    gt_result(r, g, gadtools_lvo::FreeGadgets);
+    r.intuition.set_gadget_renderer(nullptr, nullptr);
+    r.intuition.set_gadget_press(nullptr);
+    r.intuition.set_gadget_release(nullptr);
+}
+
 int main() {
+    mx_gadgets_show_their_choices_and_report_the_one_clicked();
     the_wheel_moves_sliders_and_scrollers();
     a_slider_draws_its_level_beside_its_box();
     a_slider_shows_what_its_display_function_makes_of_the_level();

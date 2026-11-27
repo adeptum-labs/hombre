@@ -187,6 +187,10 @@ public:
     // gadget takes its new state and sets the code of its GADGETUP. False
     // when the click is to send no GADGETUP.
     using GadgetRelease = bool (*)(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code);
+    // A click on a GTYP_GADTOOLS gadget at x, y of its box: the gadget takes
+    // what the click chooses and sets the code of its GADGETDOWN. False
+    // when the click is to send no GADGETDOWN.
+    using GadgetPress = bool (*)(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code);
     // A GTYP_GADTOOLS prop gadget of the window moved: the gadget takes its
     // new state from its PropInfo and gives the code its messages carry.
     // False when the gadget keeps its messages to itself.
@@ -321,6 +325,7 @@ public:
     }
     // Takes the renderer's ctx.
     void set_gadget_release(GadgetRelease release) { gadget_release_ = release; }
+    void set_gadget_press(GadgetPress press) { gadget_press_ = press; }
     void set_gadget_prop_code(GadgetPropCode code) { gadget_prop_code_ = code; }
     void set_gadget_wheel(GadgetWheel wheel) { gadget_wheel_ = wheel; }
     // The window gets the mouse wheel as IDCMP_RAWKEY whether or not its
@@ -1012,6 +1017,7 @@ private:
     void* gadget_renderer_ctx_ = nullptr;
     GadgetWheel gadget_wheel_ = nullptr;
     GadgetRelease gadget_release_ = nullptr;
+    GadgetPress gadget_press_ = nullptr;
     GadgetPropCode gadget_prop_code_ = nullptr;
     void post_prop_message(native::Bus& b, u32 window, u32 idcmp_class, u32 gadget);
     // The window the left button drags, and the pointer's offset from its

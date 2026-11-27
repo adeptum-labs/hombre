@@ -84,6 +84,7 @@ constexpr u32 BUTTON_KIND = 1;
 constexpr u32 CHECKBOX_KIND = 2;
 constexpr u32 INTEGER_KIND = 3;
 constexpr u32 LISTVIEW_KIND = 4;
+constexpr u32 MX_KIND = 5;
 constexpr u32 NUMBER_KIND = 6;
 constexpr u32 CYCLE_KIND = 7;
 constexpr u32 PALETTE_KIND = 8;
@@ -187,6 +188,13 @@ public:
     static bool release_gadget(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code) {
         return static_cast<GadTools*>(ctx)->release(window, gadget, x, y, code);
     }
+    // A click on a gadget gadtools made, at x, y of its box: a set of radio
+    // buttons chooses the one under it and gives its ordinal as the code of
+    // its IDCMP_GADGETDOWN. False when the click sends none.
+    bool press(u32 window, u32 gadget, i32 x, i32 y, u16& code);
+    static bool press_gadget(void* ctx, u32 window, u32 gadget, i32 x, i32 y, u16& code) {
+        return static_cast<GadTools*>(ctx)->press(window, gadget, x, y, code);
+    }
     // The wheel turned steps notches over a gadget gadtools made, up for
     // positive: a list view, or its scroller or arrows, scrolls a row a
     // notch and sends no message; a slider's level moves a step a notch, up
@@ -217,6 +225,7 @@ private:
     void draw_cycle(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                     i32 bottom, i32 baseline, bool selected, u32 font);
     void draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom, bool selected);
+    void draw_mx(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 width, u32 font);
     void draw_palette(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,
                       i32 bottom);
     void draw_list(native::Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 right,

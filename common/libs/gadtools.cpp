@@ -170,6 +170,23 @@ constexpr u32 LAYOUTA_Spacing = 0x80038002;
 constexpr u16 kOptReadOnly = 0x2;
 // GTLV_ShowSelected was given: the selected row shows in the fill pens.
 constexpr u16 kOptShowSelected = 0x8;
+// A set of radio buttons keeps its labels where a cycle gadget does, how
+// many there are in its count and the chosen one in its number. Its rows
+// are spaced by GTMX_Spacing added to the font's height, or by
+// LAYOUTA_Spacing added to a button's; the space given is kept where a
+// list view keeps its spacing, the distance from row to row where a list
+// view keeps its row height, and the place of its title, 0 for none,
+// where a slider keeps the place of its level.
+constexpr u32 GTMX_Labels = 0x80080009;
+constexpr u32 GTMX_Active = 0x8008000A;
+constexpr u32 GTMX_Spacing = 0x8008003D;
+constexpr u32 GTMX_Scaled = 0x80080045;
+constexpr u32 GTMX_TitlePlace = 0x80080047;
+constexpr u16 kOptFontSpacing = 0x10;
+constexpr u16 kOptImageSpacing = 0x20;
+// The size of a button not scaled, MX_WIDTH by MX_HEIGHT.
+constexpr u32 kMxWidth = 17;
+constexpr u32 kMxHeight = 9;
 constexpr u32 kMaxListNodes = 4096;
 constexpr u32 kNoOrdinal = 0xFFFFFFFF;
 constexpr u32 kDefaultScrollWidth = 16;
@@ -534,6 +551,7 @@ struct GadToolsNatives {
                 break;
             }
             case GTCB_Scaled:
+            case GTMX_Scaled:
                 if (creating) {
                     b.w16(gadget + gt_Options,
                           data != 0 ? options | kOptScaled : options & ~kOptScaled);
@@ -541,8 +559,31 @@ struct GadToolsNatives {
                 break;
             case GTNM_Number:
             case GTCY_Active:
+            case GTMX_Active:
             case GTPA_Color:
                 b.w32(gadget + gt_Number, data);
+                break;
+            case GTMX_Labels:
+                if (creating) {
+                    u32 count = 0;
+                    while (data != 0 && count < kMaxCycleLabels &&
+                           b.r32(data + count * 4) != 0 && b.ok()) {
+                        ++count;
+                    }
+                    b.w32(gadget + gt_Text, data);
+                    b.w16(gadget + gt_Count, count);
+                }
+                break;
+            case GTMX_Spacing:
+                if (creating) {
+                    b.w16(gadget + gt_Spacing, data > 0x7FFF ? 0x7FFF : data);
+                    b.w16(gadget + gt_Options, options | kOptFontSpacing);
+                }
+                break;
+            case GTMX_TitlePlace:
+                if (creating && (data & 0x1F) != 0) {
+                    b.w16(gadget + gt_LevelPlace, data & 0x1F);
+                }
                 break;
             case GTCY_Labels: {
                 u32 count = 0;
@@ -646,8 +687,10 @@ struct GadToolsNatives {
                 }
                 break;
             case LAYOUTA_Spacing:
-                if (creating) {
+                // GTMX_Spacing wins over it.
+                if (creating && (options & kOptFontSpacing) == 0) {
                     b.w16(gadget + gt_Spacing, data > 0x7FFF ? 0x7FFF : data);
+                    b.w16(gadget + gt_Options, options | kOptImageSpacing);
                 }
                 break;
             case GTSC_Visible:
@@ -923,6 +966,33 @@ struct GadToolsNatives {
                                                     m.cpu.a[2]));
     }
 
+    // A set of radio buttons is one gadget over all its buttons, one below
+    // the other, MX_WIDTH by MX_HEIGHT each unless GTMX_Scaled makes them
+    // the NewGadget's size. Rows are GTMX_Spacing plus the font's height
+    // apart, or LAYOUTA_Spacing plus a button's height; with neither, a
+    // row more than the font's height. The NewGadget's label is a title
+    // only where GTMX_TitlePlace puts it.
+    static void lay_out_mx(GadTools& g, Bus& b, u32 gadget, u32 font) {
+        const u16 options = static_cast<u16>(b.r16(gadget + gt_Options));
+        const bool scaled = (options & kOptScaled) != 0;
+        const i32 width = scaled ? static_cast<i16>(b.r16(gadget + ndk::gg_Width)) : kMxWidth;
+        const i32 height =
+            scaled ? static_cast<i16>(b.r16(gadget + ndk::gg_Height)) : kMxHeight;
+        const i32 font_height = g.graphics_->font_metrics(font).y_size;
+        const i32 spacing = static_cast<i16>(b.r16(gadget + gt_Spacing));
+        const i32 pitch = (options & kOptFontSpacing) != 0    ? font_height + spacing
+                          : (options & kOptImageSpacing) != 0 ? height + spacing
+                                                              : font_height + 1;
+        const u32 count = b.r16(gadget + gt_Count);
+        b.w16(gadget + ndk::gg_Width, static_cast<u32>(width));
+        b.w16(gadget + ndk::gg_Height,
+              count != 0 ? static_cast<u32>(static_cast<i32>(count - 1) * pitch + height) : 0);
+        b.w16(gadget + gt_RowHeight, static_cast<u32>(pitch));
+        if (b.r16(gadget + gt_LevelPlace) == 0) {
+            b.w32(gadget + gt_Label, 0);
+        }
+    }
+
     static u32 make_gadget(GadTools& g, Bus& b, u32 kind, u32 previous, u32 ng, u32 tags) {
         if (previous == 0 || ng == 0) {
             return 0;
@@ -942,8 +1012,10 @@ struct GadToolsNatives {
                             kind == LISTVIEW_KIND;
         // A checkbox turns its own state over when it is let go, an integer
         // gadget takes only numbers and a minus sign.
+        // A radio button chooses as it is pressed.
         const u32 activation =
             kind == CHECKBOX_KIND ? ndk::GACT_RELVERIFY | ndk::GACT_TOGGLESELECT
+            : kind == MX_KIND     ? ndk::GACT_IMMEDIATE
             : clicks              ? ndk::GACT_RELVERIFY
                                   : 0;
         b.w16(gadget + ndk::gg_Activation,
@@ -1017,6 +1089,9 @@ struct GadToolsNatives {
         if (kind == LISTVIEW_KIND && (b.r16(gadget + gt_Options) & kOptReadOnly) != 0) {
             b.w16(gadget + ndk::gg_Activation, 0);
         }
+        if (kind == MX_KIND) {
+            lay_out_mx(g, b, gadget, font);
+        }
         u32 first = gadget;
         if (kind == LISTVIEW_KIND) {
             // The parts come before the list itself, which is the gadget
@@ -1041,7 +1116,7 @@ struct GadToolsNatives {
         }
         if (kind != GENERIC_KIND && kind != BUTTON_KIND && kind != CHECKBOX_KIND &&
             kind != INTEGER_KIND && kind != TEXT_KIND && kind != NUMBER_KIND &&
-            kind != CYCLE_KIND && kind != PALETTE_KIND &&
+            kind != CYCLE_KIND && kind != PALETTE_KIND && kind != MX_KIND &&
             kind != SCROLLER_KIND && kind != STRING_KIND && kind != SLIDER_KIND &&
             kind != LISTVIEW_KIND && kind < kKinds &&
             !g.unhandled_kinds_[kind]) {
@@ -1100,7 +1175,8 @@ struct GadToolsNatives {
             } else if (tag == GTTX_Text) {
                 b.w32(data, b.r32(gadget + gt_Text));
                 ++answered;
-            } else if (tag == GTNM_Number || tag == GTCY_Active || tag == GTPA_Color) {
+            } else if (tag == GTNM_Number || tag == GTCY_Active || tag == GTMX_Active ||
+                       tag == GTPA_Color) {
                 b.w32(data, b.r32(gadget + gt_Number));
                 ++answered;
             } else if (tag == GTIN_Number) {
@@ -1985,6 +2061,85 @@ void GadTools::draw_palette(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 r
     }
 }
 
+// A set of radio buttons: each button as sysiclass's MXIMAGE in the default
+// pens, the chosen one holding its dot, with its label to its left or, with
+// PLACETEXT_RIGHT, to its right; the title, when it has one, beside them all.
+void GadTools::draw_mx(Bus& b, u32 rp, u32 gadget, i32 left, i32 top, i32 width, u32 font) {
+    Graphics& gfx = *graphics_;
+    u16 pens[sysimage::kPenCount];
+    sysimage::read_pens(b, 0, pens);
+    const Graphics::FontMetrics cell = gfx.font_metrics(font);
+    const u32 count = b.r16(gadget + gt_Count);
+    const u32 active = b.r32(gadget + gt_Number);
+    const u32 labels = b.r32(gadget + gt_Text);
+    const i32 pitch = static_cast<i16>(b.r16(gadget + gt_RowHeight));
+    const i32 height = static_cast<i16>(b.r16(gadget + ndk::gg_Height));
+    const u8 underscore = static_cast<u8>(b.r8(gadget + gt_Underscore));
+    const u32 place = (b.r16(gadget + gt_Place) & PLACETEXT_RIGHT) != 0 ? PLACETEXT_RIGHT
+                                                                         : PLACETEXT_LEFT;
+    if (count == 0 || !b.ok()) {
+        return;
+    }
+    const i32 button_height = height - static_cast<i32>(count - 1) * pitch;
+    char label[128];
+    for (u32 i = 0; i < count && b.ok(); ++i) {
+        const i32 y = top + static_cast<i32>(i) * pitch;
+        const Rect box{left, y, left + width - 1, y + button_height - 1};
+        sysimage::draw(gfx, b, rp, ndk::MXIMAGE, box,
+                       i == active ? ndk::IDS_SELECTED : ndk::IDS_NORMAL, pens);
+        const u32 chars = read_label(b, b.r32(labels + i * 4), underscore, label, sizeof label);
+        if (chars == 0) {
+            continue;
+        }
+        const u8* text = reinterpret_cast<const u8*>(label);
+        const i32 span = static_cast<i32>(gfx.text_width(font, text, chars));
+        const i32 baseline = y + (button_height - cell.y_size) / 2 + cell.baseline;
+        const TextOrigin at = text_origin(place, span, box, width, baseline, cell);
+        gfx.set_pens(rp, kTextPen, 0, ndk::JAM1);
+        gfx.move(rp, at.x, at.y);
+        gfx.plain_text_in(rp, font, text, chars);
+    }
+    const u32 title_place = b.r16(gadget + gt_LevelPlace);
+    const u32 title_chars =
+        read_label(b, b.r32(gadget + gt_Label), underscore, label, sizeof label);
+    if (title_place == 0 || title_chars == 0) {
+        return;
+    }
+    const u8* title = reinterpret_cast<const u8*>(label);
+    const i32 span = static_cast<i32>(gfx.text_width(font, title, title_chars));
+    const Rect whole{left, top, left + width - 1, top + height - 1};
+    const i32 baseline = top + (button_height - cell.y_size) / 2 + cell.baseline;
+    const TextOrigin at = text_origin(title_place, span, whole, width, baseline, cell);
+    gfx.set_pens(rp, kTextPen, 0, ndk::JAM1);
+    gfx.move(rp, at.x, at.y);
+    gfx.plain_text_in(rp, font, title, title_chars);
+}
+
+bool GadTools::press(u32 window, u32 gadget, i32, i32 y, u16& code) {
+    if (machine_ == nullptr || gadget == 0) {
+        return true;
+    }
+    Bus b(*machine_);
+    if (b.r16(gadget + gt_Kind) != MX_KIND) {
+        return b.ok();
+    }
+    // The button of the row under the pointer, the last for a click below
+    // the last button's top.
+    const u32 count = b.r16(gadget + gt_Count);
+    const i32 pitch = static_cast<i16>(b.r16(gadget + gt_RowHeight));
+    if (count == 0 || pitch <= 0 || !b.ok()) {
+        return false;
+    }
+    const i32 row = y < 0 ? 0 : y / pitch;
+    const u32 chosen = static_cast<u32>(row) < count ? static_cast<u32>(row) : count - 1;
+    b.w32(gadget + gt_Number, chosen);
+    code = static_cast<u16>(chosen);
+    if (window != 0) {
+        render(window, b.r32(window + ndk::wd_RPort), gadget);
+    }
+    return b.ok();
+}
+
 // A checkbox: a raised box filled with the background, and a check mark
 // in the text pen when selected.
 void GadTools::draw_checkbox(u32 rp, i32 left, i32 top, i32 right, i32 bottom,
@@ -2425,6 +2580,11 @@ bool GadTools::render(u32 window, u32 rp, u32 gadget) {
     Graphics& gfx = *graphics_;
     const i32 right = left + width - 1;
     const i32 bottom = top + height - 1;
+    if (kind == MX_KIND) {
+        draw_mx(b, rp, gadget, left, top, width, b.r32(gadget + gt_Font));
+        ghost(rp, flags, left, top, right, bottom);
+        return true;
+    }
     if (kind == kListUpKind || kind == kListDownKind) {
         draw_list_arrow(b, rp, left, top, width, height, kind == kListDownKind,
                         (flags & ndk::GFLG_SELECTED) != 0);
