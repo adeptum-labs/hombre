@@ -5086,6 +5086,38 @@ void a_gadget_without_relverify_stays_selected_when_let_go() {
     CHECK_EQ(classes[0], IDCMP_GADGETDOWN);
 }
 
+// Intuition's own complement highlight turns over the two low planes alone,
+// on a screen of eight planes as on one of two: pen 0 becomes 3 and pen 5
+// becomes 6. A program's own COMPLEMENT fill still turns over every plane.
+void complement_highlights_turn_over_the_two_low_planes() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_gadget(r, kGad1, 0, 20, 20, 40, 20, 0, GACT_IMMEDIATE, GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    const u32 rp = r.get32(window + wd_RPort);
+    r.graphics.set_pens(rp, 5, 0, JAM1);
+    r.graphics.rect_fill(rp, 40, 30, 59, 39);
+    r.put8(rp + rp_Mask, 0xFF);
+
+    press(r, 80, 80);
+    release(r, 80, 80);
+    CHECK_EQ(window_pixel(r, window, 25, 25), 3u);
+    CHECK_EQ(window_pixel(r, window, 45, 35), 6u);
+    // The program's pens and mask are as they were.
+    CHECK_EQ(r.get8(rp + rp_FgPen), 5u);
+    CHECK_EQ(r.get8(rp + rp_DrawMode), static_cast<u32>(JAM1));
+    CHECK_EQ(r.get8(rp + rp_Mask), 0xFFu);
+
+    r.graphics.set_pens(rp, 1, 0, COMPLEMENT);
+    r.graphics.rect_fill(rp, 100, 30, 109, 39);
+    CHECK_EQ(window_pixel(r, window, 105, 35), 0xFFu);
+}
+
 void gadget_list_cycle_is_bounded() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -6376,7 +6408,7 @@ void chrome_pens_find_their_place_on_every_depth() {
     CHECK_EQ(chrome_pen_on(15, 8), 15u);
 
     bool used[32]{};
-    for (u32 logical = chrome::kScreenBar0; logical < chrome::kComplementMirrorBase; ++logical) {
+    for (u32 logical = chrome::kScreenBar0; logical < chrome::kTopPenBase; ++logical) {
         const u32 pen = chrome_pen_on(logical, 5);
         CHECK(pen >= 16 && pen <= 27);
         used[pen] = true;
@@ -6384,8 +6416,8 @@ void chrome_pens_find_their_place_on_every_depth() {
     for (u32 pen = 16; pen <= 27; ++pen) {
         CHECK(used[pen]);
     }
-    for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-        CHECK_EQ(chrome_pen_on(chrome::mirror_pen(static_cast<u8>(pen)), 5), 28 + pen);
+    for (u32 pen = 0; pen < chrome::kTopPens; ++pen) {
+        CHECK_EQ(chrome_pen_on(chrome::top_pen(static_cast<u8>(pen)), 5), 28 + pen);
     }
 
     const auto same = [](u32 a, u32 b) { return chrome_pen_on(a, 5) == chrome_pen_on(b, 5); };
@@ -6527,7 +6559,7 @@ void shallow_modern_screens_draw_prop_gadgets_in_the_mapped_pens() {
 
 // Each pen of the chrome range holds the colour of the chrome pen it stands
 // for on an eight-plane screen, the pens below it keep the base palette and
-// the colour cube, and the top four pens keep the colours of 0 to 3.
+// the colour cube, and the top four pens take the colours of 4 to 7.
 void shallow_modern_screens_hold_the_chrome_colours_at_the_mapped_pens() {
     GfxRig full;
     put_new_screen(full, kNewScreen, 640, 400, 8, 0, 1, 0);
@@ -6557,9 +6589,9 @@ void shallow_modern_screens_hold_the_chrome_colours_at_the_mapped_pens() {
             CHECK_EQ(chrome_pen_on(logical, depth), pen);
             CHECK_EQ(colormap_rgb24(r, map, pen), colormap_rgb24(full, full_map, logical));
         }
-        for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-            CHECK_EQ(colormap_rgb24(r, map, pens - chrome::kComplementMirrorPens + pen),
-                     colormap_rgb24(r, map, pen));
+        for (u32 pen = 0; pen < chrome::kTopPens; ++pen) {
+            CHECK_EQ(colormap_rgb24(r, map, pens - chrome::kTopPens + pen),
+                     colormap_rgb24(r, map, 4 + pen));
         }
     }
 }
@@ -7898,9 +7930,10 @@ void chrome_palette_follows_the_default_screen_pens() {
     CHECK_EQ(colormap_rgb24(r, map, chrome::kActiveBar7), 0x0000B3u);
 }
 
-// The top four pens of a screen of 16 colours or more keep the colours of
-// 0..3, so a complemented icon of four colours looks as on two planes.
-void complement_mirrors_follow_the_low_pens() {
+// The top four pens of a screen of 16 colours or more take the colours of
+// pens 4..7, the colours 4..7 of an eight-colour icon, and follow them when
+// Palette prefs set them; a prefs entry for a top pen itself wins.
+void top_pens_follow_pens_four_to_seven() {
     for (const u32 depth : {4u, 5u, 6u, 7u, 8u}) {
         GfxRig r;
         put_new_screen(r, kNewScreen, 640, 400, depth, 0, 1, 0);
@@ -7908,24 +7941,40 @@ void complement_mirrors_follow_the_low_pens() {
         CHECK(screen != 0);
         r.intuition.set_default_screen(screen);
         const u32 map = r.get32(screen + sc_ViewPort + vp_ColorMap);
-        const u32 first = (1u << depth) - chrome::kComplementMirrorPens;
+        const u32 first = (1u << depth) - chrome::kTopPens;
 
-        const auto mirrors_match = [&] {
-            for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-                CHECK_EQ(colormap_rgb24(r, map, first + pen), colormap_rgb24(r, map, pen));
+        const auto tops_match = [&](u32 skip) {
+            for (u32 pen = 0; pen < chrome::kTopPens; ++pen) {
+                if (pen != skip) {
+                    CHECK_EQ(colormap_rgb24(r, map, first + pen),
+                             colormap_rgb24(r, map, 4 + pen));
+                }
             }
         };
-        mirrors_match();
+        tops_match(chrome::kTopPens);
+        // None of them is one of the four low pens.
+        for (u32 pen = 0; pen < chrome::kTopPens; ++pen) {
+            CHECK(colormap_rgb24(r, map, first + pen) != colormap_rgb24(r, map, pen));
+        }
 
-        const u32 colours[chrome::kComplementMirrorPens] = {0x112233, 0x445566, 0x778899,
-                                                            0xAABBCC};
-        for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-            const u32 size = put_palette_pref(r, pen, (colours[pen] >> 8) & 0xFF00,
+        const u32 colours[chrome::kTopPens] = {0x112233, 0x445566, 0x778899, 0xAABBCC};
+        for (u32 pen = 0; pen < chrome::kTopPens; ++pen) {
+            const u32 size = put_palette_pref(r, 4 + pen, (colours[pen] >> 8) & 0xFF00,
                                              colours[pen] & 0xFF00,
                                              (colours[pen] << 8) & 0xFF00);
             set_iprefs(r, kIPrefs, size, 8);
-            mirrors_match();
+            tops_match(chrome::kTopPens);
+            CHECK_EQ(colormap_rgb24(r, map, first + pen), colours[pen]);
         }
+        // An entry for the first top pen itself keeps it apart from pen 4.
+        const u32 size = put_palette_pref(r, first, 0x1100, 0x2200, 0x3300);
+        set_iprefs(r, kIPrefs, size, 8);
+        CHECK_EQ(colormap_rgb24(r, map, first), 0x112233u);
+        const u32 again = put_palette_pref(r, 4, 0xFF00, 0, 0);
+        set_iprefs(r, kIPrefs, again, 8);
+        CHECK_EQ(colormap_rgb24(r, map, 4), 0xFF0000u);
+        CHECK_EQ(colormap_rgb24(r, map, first), 0x112233u);
+        tops_match(0);
     }
 }
 
@@ -8938,12 +8987,12 @@ void draw_image_complemented_inverts_the_pens_in_the_image_planes() {
     CHECK_EQ(screen_pixel(r, screen, 10, 14), 2u);
     CHECK_EQ(screen_pixel(r, screen, 11, 14), 3u);
 
-    // An image without data is its PlaneOnOff pen, complemented in every
-    // plane.
+    // An image without data is its PlaneOnOff pen, complemented in the two
+    // low planes.
     const u32 solid = put_image(r, kData + 0x1100, 0, 0, 4, 1, 0, 0, 0, 1);
     r.intuition.draw_image_complemented(rp, solid, 20, 10);
-    CHECK_EQ(screen_pixel(r, screen, 20, 10), 6u);
-    CHECK_EQ(screen_pixel(r, screen, 23, 10), 6u);
+    CHECK_EQ(screen_pixel(r, screen, 20, 10), 2u);
+    CHECK_EQ(screen_pixel(r, screen, 23, 10), 2u);
 }
 
 }
@@ -11488,6 +11537,7 @@ int main() {
     disabled_gadget_ignores_input();
     a_boolean_gadget_takes_the_click_from_the_window();
     a_gadget_without_relverify_stays_selected_when_let_go();
+    complement_highlights_turn_over_the_two_low_planes();
     gadget_list_cycle_is_bounded();
     close_during_knob_drag();
     wheel_event_posts_newmouse_rawkey();
@@ -11560,7 +11610,7 @@ int main() {
     open_workbench_keeps_the_screen_when_memory_runs_out();
     shallow_screens_draw_the_chrome_in_the_classic_pens();
     chrome_palette_follows_the_default_screen_pens();
-    complement_mirrors_follow_the_low_pens();
+    top_pens_follow_pens_four_to_seven();
     menu_strip_vectors_write_the_window_field();
     item_address_follows_the_menu_numbers();
     menu_right_press_opens_the_bar_and_the_second_item_picks();

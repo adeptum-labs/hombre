@@ -75,23 +75,22 @@ constexpr u8 kTrack = 249;
 constexpr u8 kTitleActive = 250;
 constexpr u8 kTitleInactive = 251;
 
-// COMPLEMENT inverts every bit of an eight-plane pixel, so pen n draws in
-// pen 0xFF - n. Pens 252..255 take the colours of 0..3, so pen 0 turns the
-// colour of 3 and pen 1 that of 2, as a complemented four-colour image
-// does on two planes, where 0 and 3 swap and 1 and 2 swap.
-constexpr u8 kComplementMirrorBase = 252;
-constexpr u32 kComplementMirrorPens = 4;
+// The top four pens of a screen of 16 colours or more, 252..255 on eight
+// planes, take the colours of pens 4..7: an icon of eight colours names
+// them as its colours 4..7, as the eight-colour icons of 3.x do.
+constexpr u8 kTopPenBase = 252;
+constexpr u32 kTopPens = 4;
 
-// The top pen that keeps the colour of pen, one of 0..3.
-constexpr u8 mirror_pen(u8 pen) {
-    return static_cast<u8>(kComplementMirrorBase + pen);
+// The top pen of the four, n of 0..3, which has the colour of pen 4 + n.
+constexpr u8 top_pen(u8 pen) {
+    return static_cast<u8>(kTopPenBase + pen);
 }
 
 // The chrome pens above, kScreenBar0 to 255, are the pens of a screen of
 // eight planes. A screen of fewer planes draws them through physical_pen,
 // which gives each its place in the screen's 2^planes pens. Seven and six
 // planes keep the whole range at the top of the ColorMap. Five have room for
-// the four mirrors there, as the complement of 0x1F, and 12 pens below them,
+// the four top pens there and 12 pens below them,
 // which the 32 other chrome pens share. The pens below kScreenBar0 are the
 // base palette's and stay where they are.
 constexpr u32 kChromePens = 256 - kScreenBar0;
@@ -120,7 +119,7 @@ constexpr u32 kPens = kKnobBase - kFirstPen + 1;
 // The pen of each chrome pen from kScreenBar0 to kTitleInactive. The screen
 // bar goes two and two, the active bar by 3, 2 and 3 steps, the inactive bar
 // by 3 and 3, and the knob by 2 and 1.
-constexpr u8 kPen[kComplementMirrorBase - kScreenBar0] = {
+constexpr u8 kPen[kTopPenBase - kScreenBar0] = {
     // The screen bar.
     kBarLight, kBarLight, kBarDark, kBarDark,
     // The menu's paper, label, lit and ghost.
@@ -149,7 +148,7 @@ constexpr u8 physical_pen(u8 logical, u32 depth) {
     if (logical < kScreenBar0 || depth < 5) {
         return logical;
     }
-    if (depth == 5 && logical < kComplementMirrorBase) {
+    if (depth == 5 && logical < kTopPenBase) {
         return five_planes::kPen[logical - kScreenBar0];
     }
     const u32 pens = depth < 8 ? 1u << depth : 256;
@@ -164,8 +163,8 @@ constexpr u32 logical_pen(u32 physical, u32 depth) {
         return 0;
     }
     const u32 pens = 1u << depth;
-    const bool mirror = physical + kComplementMirrorPens >= pens;
-    if (mirror || (depth >= 6 && physical + kChromePens >= pens)) {
+    const bool top = physical + kTopPens >= pens;
+    if (top || (depth >= 6 && physical + kChromePens >= pens)) {
         return physical + (256 - pens);
     }
     if (depth == 5 && physical >= five_planes::kFirstPen) {
@@ -183,18 +182,18 @@ constexpr bool pen_map_holds() {
         for (u32 logical = kScreenBar0; logical < 256; ++logical) {
             const u32 physical = physical_pen(static_cast<u8>(logical), depth);
             // Every chrome pen lands in the chrome range of the screen, the
-            // mirrors on its top four pens, and takes the colour of a chrome
+            // top pens on its top four pens, and takes the colour of a chrome
             // pen that lands on the same pen.
-            const bool mirror = logical >= kComplementMirrorBase;
+            const bool top = logical >= kTopPenBase;
             if (physical < first || physical >= pens ||
-                (physical + kComplementMirrorPens >= pens) != mirror ||
+                (physical + kTopPens >= pens) != top ||
                 physical_pen(static_cast<u8>(logical_pen(physical, depth)), depth) != physical) {
                 return false;
             }
         }
-        for (u32 pen = 0; pen < kComplementMirrorPens; ++pen) {
-            if (physical_pen(mirror_pen(static_cast<u8>(pen)), depth) !=
-                pens - kComplementMirrorPens + pen) {
+        for (u32 pen = 0; pen < kTopPens; ++pen) {
+            if (physical_pen(top_pen(static_cast<u8>(pen)), depth) !=
+                pens - kTopPens + pen) {
                 return false;
             }
         }
@@ -208,7 +207,7 @@ static_assert(detail::pen_map_holds());
 static_assert(physical_pen(kScreenBar0, 7) == 92 && physical_pen(255, 7) == 127);
 static_assert(physical_pen(kScreenBar0, 6) == 28 && physical_pen(255, 6) == 63);
 static_assert(physical_pen(kScreenBar0, 8) == kScreenBar0 && physical_pen(255, 8) == 255);
-static_assert(physical_pen(mirror_pen(0), 5) == 28 && physical_pen(mirror_pen(3), 5) == 31);
+static_assert(physical_pen(top_pen(0), 5) == 28 && physical_pen(top_pen(3), 5) == 31);
 static_assert(physical_pen(3, 5) == 3 && physical_pen(15, 8) == 15);
 
 namespace detail {
@@ -277,9 +276,9 @@ constexpr u32 kChromePalette[kChromeCount] = {
 };
 
 // The colours palette_from_pens computes: the screen bar and menu pens
-// through the window chrome, pens kDerivedBase to kComplementMirrorBase - 1.
+// through the window chrome, pens kDerivedBase to kTopPenBase - 1.
 constexpr u32 kDerivedBase = kScreenBar0;
-constexpr u32 kDerivedCount = kComplementMirrorBase - kDerivedBase;
+constexpr u32 kDerivedCount = kTopPenBase - kDerivedBase;
 
 static_assert(kChromePalette[kActiveBar0 - kChromeBase] == 0x6D9BE0u);
 static_assert(kChromePalette[kActiveBar7 - kChromeBase] == 0x2F5DA6u);
@@ -287,7 +286,7 @@ static_assert(kChromePalette[kInactiveBar0 - kChromeBase] == 0xE6E8ECu);
 static_assert(kChromePalette[kInactiveBar5 - kChromeBase] == 0xBFC3CAu);
 static_assert(kChromePalette[kTitleInactive - kChromeBase] == 0x4A4F57u);
 
-// Computes the colours of pens kDerivedBase..kComplementMirrorBase - 1 from
+// Computes the colours of pens kDerivedBase..kTopPenBase - 1 from
 // the colours of a screen's DrawInfo pens, in DrawInfo's order in pen_rgb:
 // the bars shade the FILLPEN and BACKGROUNDPEN colours, the frames take
 // SHADOWPEN and SHINEPEN, and the screen bar and menu take BARBLOCKPEN and

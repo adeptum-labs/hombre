@@ -834,6 +834,7 @@ private:
     bool move_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after);
     void activate_window(u32 window);
     void set_active_window(u32 window);
+    void complement_box(native::Bus& b, u32 rp, const Rect& box);
     static bool bar_behind_text(void* ctx, u32 rp, u32 bg, const Rect& box, Rect& keep);
     // SetPointer and ClearPointer: the window's own pointer from the sprite
     // data at sprite, or none.
@@ -912,8 +913,8 @@ private:
     void draw_image_mode(u32 rp, u32 image, i32 left, i32 top, u32 state, u32 draw_info);
     static void draw_sys_image(void* ctx, u32 rp, u32 which, i32 left, i32 top, i32 width,
                                i32 height, u32 state, u32 draw_info);
-    // How draw_image_view complements an image: not, in every plane of the
-    // bitmap, or in the planes the image has.
+    // How draw_image_view complements an image: not, in the two low planes
+    // as Intuition's highlights do, or in those and the planes the image has.
     enum class Complement { None, Bitmap, ImagePlanes };
     void draw_image_view(native::Bus& b, const raster::RastPortView& view, u32 image, i32 left,
                          i32 top, Complement complement, bool damage);

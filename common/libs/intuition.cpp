@@ -122,6 +122,11 @@ constexpr u32 kBasePalette[8] = {
     0xA0A6B0, 0x1C1E22, 0xFFFFFF, 0x3D6FB6, 0x7A7E86, 0xC9CDD4, 0xAA907C, 0xFFA997,
 };
 constexpr u32 kCubeLevels[6] = {0x00, 0x33, 0x66, 0x99, 0xCC, 0xFF};
+// The pen whose colour the first of the top four pens takes.
+constexpr u32 kTopPenSource = 4;
+// The planes Intuition's own complement highlights turn over: the two of a
+// four-colour image.
+constexpr u32 kHighlightPlanes = 3;
 
 // The colour pen has on a screen of depth planes unless a program changes it:
 // the base palette, then the colour cube, and from where the screen's chrome
@@ -144,26 +149,29 @@ constexpr u32 default_palette_rgb24(u32 pen, u32 depth) {
     if (chrome_pen < chrome::kChromeBase) {
         return chrome::kMenuPalette[chrome_pen - chrome::kMenuPaperPen];
     }
-    if (chrome_pen < chrome::kComplementMirrorBase) {
+    if (chrome_pen < chrome::kTopPenBase) {
         return chrome::kChromePalette[chrome_pen - chrome::kChromeBase];
     }
-    return kBasePalette[chrome_pen - chrome::kComplementMirrorBase];
+    return kBasePalette[kTopPenSource + chrome_pen - chrome::kTopPenBase];
 }
 
-// Keeps the top four pens of a screen of 16 colours or more the colours of
-// 0..3: COMPLEMENT turns pen n into the pen 2^depth - 1 - n, which for 0..3
-// is one of them, so a selected icon of four colours looks as on two planes.
-// Eight colours have no pens to spare for them.
-void write_complement_mirrors(Bus& b, u32 depth, u32 colors, u32 low_colors) {
+// Gives the top four pens of a screen of 16 colours or more the colours of
+// pens 4..7, the colours 4..7 of an eight-colour icon, except a pen own
+// names, which keeps its own. Eight colours are pens 0..7 themselves.
+void write_top_pens(Bus& b, u32 depth, u32 colors, u32 low_colors, const bool* own) {
     if (depth < 4 || depth > 8 || colors == 0) {
         return;
     }
-    const u32 first = (1u << depth) - chrome::kComplementMirrorPens;
-    for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-        const u32 mirror = first + pen;
-        b.w16(colors + mirror * 2, b.r16(colors + pen * 2));
+    const u32 first = (1u << depth) - chrome::kTopPens;
+    for (u32 i = 0; i < chrome::kTopPens; ++i) {
+        const u32 top = first + i;
+        const u32 pen = kTopPenSource + i;
+        if (own != nullptr && own[top]) {
+            continue;
+        }
+        b.w16(colors + top * 2, b.r16(colors + pen * 2));
         if (low_colors != 0) {
-            b.w16(low_colors + mirror * 2, b.r16(low_colors + pen * 2));
+            b.w16(low_colors + top * 2, b.r16(low_colors + pen * 2));
         }
     }
 }
@@ -181,7 +189,7 @@ void write_default_palette(Bus& b, u32 depth, u32 colors, u32 low_colors, const 
         b.w16(colors + i * 2, ((r8 >> 4) << 8) | ((g8 >> 4) << 4) | (b8 >> 4));
         b.w16(low_colors + i * 2, ((r8 & 0xF) << 8) | ((g8 & 0xF) << 4) | (b8 & 0xF));
     }
-    write_complement_mirrors(b, depth, colors, low_colors);
+    write_top_pens(b, depth, colors, low_colors, prefs_set);
 }
 
 // STDSCREENWIDTH and STDSCREENHEIGHT: -1 as a tag value, which a 16-bit
@@ -2568,14 +2576,6 @@ void Intuition::store_palette_prefs(u32 prefs, u32 size) {
     if (pointer_changed && display_->pointer != nullptr) {
         redraw_pointer();
     }
-    for (u32 pen = 0; pen < chrome::kComplementMirrorPens; ++pen) {
-        if (!palette_prefs_set_[pen]) {
-            continue;
-        }
-        const u32 mirror = chrome::mirror_pen(static_cast<u8>(pen));
-        palette_prefs_[mirror] = palette_prefs_[pen];
-        palette_prefs_set_[mirror] = true;
-    }
 }
 
 // Type 9: a count, a kind (0 for screens of four colours or fewer, 1 for
@@ -3057,7 +3057,7 @@ void Intuition::apply_palette_prefs(ScreenRecord& rec) {
     }
     if (machine_ != nullptr) {
         Bus b(*machine_);
-        write_complement_mirrors(b, rec.depth, rec.colors, rec.low_colors);
+        write_top_pens(b, rec.depth, rec.colors, rec.low_colors, palette_prefs_set_);
     }
     // A deep screen's pens draw in graphics' copy of the palette.
     if (graphics_ != nullptr && rec.surface.deep) {
@@ -3110,14 +3110,14 @@ void Intuition::update_chrome_palette(u32 screen) {
     chrome::palette_from_pens(pen_rgb, palette);
     // A pen shared by several chrome pens has the colour of the one it takes
     // its colour from.
-    for (u32 chrome_pen = chrome::kDerivedBase; chrome_pen < chrome::kComplementMirrorBase;
+    for (u32 chrome_pen = chrome::kDerivedBase; chrome_pen < chrome::kTopPenBase;
          ++chrome_pen) {
         const u32 pen = chrome::physical_pen(static_cast<u8>(chrome_pen), rec->depth);
         if (chrome::logical_pen(pen, rec->depth) == chrome_pen) {
             write_colormap_rgb(*rec, pen, palette[chrome_pen - chrome::kDerivedBase]);
         }
     }
-    write_complement_mirrors(b, rec->depth, rec->colors, rec->low_colors);
+    write_top_pens(b, rec->depth, rec->colors, rec->low_colors, palette_prefs_set_);
     if (rec->surface.deep) {
         graphics_->palettes_changed();
     }
@@ -7151,15 +7151,15 @@ void Intuition::draw_image_view(Bus& b, const raster::RastPortView& view, u32 im
         Rect area{0, 0, -1, -1};
         if (width > 0 && height > 0 && depth >= 0 && depth <= 8 &&
             clip_image_rect(view, origin_x + img_left, origin_y + img_top, width, height, area)) {
-            // A complemented image has every pen of its box inverted in the
-            // planes the bitmap has.
+            // A complemented image has every pen of its box turned over in
+            // the two low planes, as Intuition's highlights are.
             const u32 pen_mask =
                 view.bitmap.depth >= 8 ? 0xFFu : (1u << view.bitmap.depth) - 1;
             if (data == 0 || depth == 0) {
-                const Rect filled =
-                    raster::fill_rect(b, view.bitmap, view.clip, area,
-                                      complement != Complement::None ? ~plane_on_off & pen_mask
-                                                                     : plane_on_off);
+                const Rect filled = raster::fill_rect(
+                    b, view.bitmap, view.clip, area,
+                    complement != Complement::None ? (plane_on_off ^ kHighlightPlanes) & pen_mask
+                                                   : plane_on_off);
                 if (b.ok() && damage) {
                     report_image_damage(view, filled);
                 }
@@ -7187,7 +7187,7 @@ void Intuition::draw_image_view(Bus& b, const raster::RastPortView& view, u32 im
                     // those keeps an image's pens among its own, so a
                     // selected icon of four colours looks the same on every
                     // depth.
-                    u32 flip = pen_mask;
+                    u32 flip = kHighlightPlanes & pen_mask;
                     if (complement == Complement::ImagePlanes) {
                         flip = 3;
                         for (u32 bit = 0; bit < 8; ++bit) {
@@ -7529,8 +7529,7 @@ void Intuition::draw_string_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
         const i32 x = box.x0 + span(at);
         const i32 cursor = cursor_width(at, length);
         if (x + cursor - 1 <= box.x1) {
-            graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
-            graphics_->rect_fill(rp, x, top, x + cursor - 1, top + cell.y_size - 1);
+            complement_box(b, rp, Rect{x, top, x + cursor - 1, top + cell.y_size - 1});
         }
     }
     graphics_->set_pens(rp, fg, bg, mode);
@@ -7973,8 +7972,7 @@ void Intuition::draw_requester_gadget(Bus& b, const Block& block, u32 gadget) {
     IntuitionNatives::itext_chain(*this, b, rp, b.r32(gadget + ndk::gg_GadgetText), box.x0,
                                   box.y0);
     if (selected && highlight == ndk::GFLG_GADGHCOMP) {
-        graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
-        graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
+        complement_box(b, rp, box);
     }
 }
 
@@ -8053,9 +8051,7 @@ void Intuition::release_requester_gadget(Bus& b, u32 window, i32 x, i32 y) {
         const u32 bg = b.r8(rec->rp + ndk::rp_BgPen);
         const u32 mode = b.r8(rec->rp + ndk::rp_DrawMode);
         if ((b.r16(gadget + ndk::gg_Flags) & ndk::GFLG_GADGHIGHBITS) == ndk::GFLG_GADGHCOMP) {
-            const Rect box = requester_gadget_box(b, *block, gadget);
-            graphics_->set_pens(rec->rp, 0xFF, 0, ndk::COMPLEMENT);
-            graphics_->rect_fill(rec->rp, box.x0, box.y0, box.x1, box.y1);
+            complement_box(b, rec->rp, requester_gadget_box(b, *block, gadget));
         } else {
             draw_requester_gadget(b, *block, gadget);
         }
@@ -8204,12 +8200,33 @@ void Intuition::complement_gadget(Bus& b, u32 window, u32 rp, u32 gadget) {
     if (!w.ok || box.x1 < box.x0 || box.y1 < box.y0) {
         return;
     }
+    complement_box(b, rp, box);
+}
+
+// Intuition's own highlight: the box complemented in the two low planes
+// alone, so pen n becomes n ^ 3. Four-colour imagery swaps 0 with 3 and 1
+// with 2 as on two planes, whatever the depth, and a higher pen keeps its
+// upper bits, as pens 4..7 swap among themselves. The RastPort's pens,
+// draw mode, mask and area pattern stay the program's.
+void Intuition::complement_box(Bus& b, u32 rp, const Rect& box) {
+    if (rp == 0 || box.x1 < box.x0 || box.y1 < box.y0) {
+        return;
+    }
     const u32 fg = b.r8(rp + ndk::rp_FgPen);
     const u32 bg = b.r8(rp + ndk::rp_BgPen);
     const u32 mode = b.r8(rp + ndk::rp_DrawMode);
+    const u32 mask = b.r8(rp + ndk::rp_Mask);
+    const u32 pattern = b.r32(rp + ndk::rp_AreaPtrn);
+    if (!b.ok()) {
+        return;
+    }
+    b.w8(rp + ndk::rp_Mask, kHighlightPlanes);
+    b.w32(rp + ndk::rp_AreaPtrn, 0);
     graphics_->set_pens(rp, 0xFF, 0, ndk::COMPLEMENT);
     graphics_->rect_fill(rp, box.x0, box.y0, box.x1, box.y1);
     graphics_->set_pens(rp, fg, bg, mode);
+    b.w8(rp + ndk::rp_Mask, mask);
+    b.w32(rp + ndk::rp_AreaPtrn, pattern);
 }
 
 bool Intuition::hit_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
