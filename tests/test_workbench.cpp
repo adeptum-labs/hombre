@@ -35,6 +35,7 @@
 #include "ofs_writer.hpp"
 #include "test_guest.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <sys/mman.h>
@@ -515,9 +516,8 @@ public:
         return m.cpu.d[0];
     }
 
-    // The pen at x, y of the window's own bitmap.
-    u32 window_pixel(u32 window, i32 x, i32 y) const {
-        const u32 bitmap = get32(get32(window + wd_RPort) + rp_BitMap);
+    // The pen at x, y of a bitmap.
+    u32 bitmap_pixel(u32 bitmap, i32 x, i32 y) const {
         const u32 at = static_cast<u32>(y) * get16(bitmap + bm_BytesPerRow) +
                        (static_cast<u32>(x) >> 3);
         const u32 mask = 0x80u >> (static_cast<u32>(x) & 7);
@@ -528,6 +528,16 @@ public:
             }
         }
         return pen;
+    }
+
+    // The pen at x, y of the window's own bitmap.
+    u32 window_pixel(u32 window, i32 x, i32 y) const {
+        return bitmap_pixel(get32(get32(window + wd_RPort) + rp_BitMap), x, y);
+    }
+
+    // The pen at x, y of the screen's composed bitmap.
+    u32 screen_pixel(u32 screen, i32 x, i32 y) const {
+        return bitmap_pixel(screen + sc_BitMap, x, y);
     }
 
     // A gadget's box in its window, its edges and size taken from the
@@ -1937,6 +1947,134 @@ void a_drag_ends_when_its_window_is_filled_again() {
     const u32 proj = r.find_icon_in(w.tools, "Proj");
     CHECK_EQ(r.workbench.icon(proj).left, 60);
     CHECK_EQ(r.workbench.icon(proj).top, 80);
+}
+
+void a_box_selects_the_icons_it_touches() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 window = r.workbench.window(w.tools).window;
+    const u32 free = r.find_icon_in(w.tools, "Free");
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    const i32 corner_x = r.screen_x(w.tools, 150);
+    const i32 corner_y = r.screen_y(w.tools, 60);
+    const u32 plain = r.screen_pixel(r.screen, corner_x, corner_y);
+
+    // A box from the empty corner over Free and Tool.
+    r.press(w.tools, 150, 60);
+    r.move_held(r.screen_x(w.tools, 5), r.screen_y(w.tools, 5));
+    CHECK(r.workbench.box().active);
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 2u);
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(free));
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(tool));
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, WFLG_REPORTMOUSE);
+    CHECK(r.screen_pixel(r.screen, corner_x, corner_y) != plain);
+
+    // Shrinking the box drops the icon it left.
+    r.move_held(r.screen_x(w.tools, 5), r.screen_y(w.tools, 45));
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(tool));
+    CHECK(!r.workbench.window(w.tools).clicks.is_selected(free));
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 1u);
+
+    // The release takes the box away and leaves the selection.
+    r.release(r.screen_x(w.tools, 5), r.screen_y(w.tools, 45));
+    CHECK(!r.workbench.box().armed);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, 0u);
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(tool));
+    CHECK_EQ(r.screen_pixel(r.screen, corner_x, corner_y), plain);
+}
+
+void a_box_adds_to_the_selection_with_shift() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    const u32 free = r.find_icon_in(w.tools, "Free");
+    r.click(w.tools, 103, 43);
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(tool));
+
+    g_intuition.set_qualifier(1);
+    r.press(w.tools, 50, 30);
+    g_intuition.set_qualifier(0);
+    r.move_held(r.screen_x(w.tools, 5), r.screen_y(w.tools, 5));
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 2u);
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected()[0], tool);
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected()[1], free);
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(tool));
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(free));
+    r.release(r.screen_x(w.tools, 5), r.screen_y(w.tools, 5));
+}
+
+void a_box_without_shift_starts_from_nothing() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    const u32 free = r.find_icon_in(w.tools, "Free");
+    r.click(w.tools, 103, 43);
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(tool));
+
+    r.press(w.tools, 50, 30);
+    r.move_held(r.screen_x(w.tools, 5), r.screen_y(w.tools, 5));
+    CHECK(!r.workbench.window(w.tools).clicks.is_selected(tool));
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(free));
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 1u);
+    r.release(r.screen_x(w.tools, 5), r.screen_y(w.tools, 5));
+}
+
+void a_box_is_clamped_to_the_inner_area() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 free = r.find_icon_in(w.tools, "Free");
+    const u32 put = r.find_icon_in(w.tools, "Put");
+    r.press(w.tools, 5, 5);
+    r.move_held(r.screen_x(w.tools, 2000), r.screen_y(w.tools, 2000));
+    CHECK(r.workbench.box().active);
+    CHECK(r.workbench.window(w.tools).clicks.is_selected(free));
+    // Put is below the visible inner area and so outside the clamped box.
+    CHECK(!r.workbench.window(w.tools).clicks.is_selected(put));
+    r.release(r.screen_x(w.tools, 2000), r.screen_y(w.tools, 2000));
+}
+
+void a_one_pixel_move_arms_a_box_without_activating_it() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    r.press(w.tools, 50, 30);
+    CHECK(r.workbench.box().armed);
+    CHECK(!r.workbench.box().active);
+    r.move_held(r.screen_x(w.tools, 51), r.screen_y(w.tools, 30));
+    CHECK(r.workbench.box().armed);
+    CHECK(!r.workbench.box().active);
+    r.release(r.screen_x(w.tools, 51), r.screen_y(w.tools, 30));
+    CHECK(!r.workbench.box().armed);
+}
+
+void a_box_on_the_root_window_selects_disks() {
+    Rig r;
+    r.workbench.open_desktop();
+    const u32 disk = r.find_icon("HombreTest");
+    const u32 ram = r.find_icon("Ram Disk");
+    const Workbench::IconEntry a = r.workbench.icon(disk);
+    const Workbench::IconEntry b = r.workbench.icon(ram);
+    const i32 right = std::max(a.left + a.width, b.left + b.width) + 2;
+    const i32 bottom = std::max(a.top + a.height, b.top + b.height) + 2;
+    r.press(0, 0, 0);
+    r.move_held(r.screen_x(0, right), r.screen_y(0, bottom));
+    CHECK(r.workbench.box().active);
+    CHECK(r.workbench.window(0).clicks.is_selected(disk));
+    CHECK(r.workbench.window(0).clicks.is_selected(ram));
+    CHECK_EQ(r.workbench.window(0).clicks.selected().size(), 2u);
+    r.release(r.screen_x(0, right), r.screen_y(0, bottom));
+    CHECK(!r.workbench.box().armed);
+}
+
+void a_rescan_ends_a_box() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 window = r.workbench.window(w.tools).window;
+    r.press(w.tools, 50, 30);
+    r.move_held(r.screen_x(w.tools, 5), r.screen_y(w.tools, 5));
+    CHECK(r.workbench.box().active);
+    r.rescan("HombreTest:Tools");
+    CHECK(!r.workbench.box().armed);
+    CHECK_EQ(r.get32(window + wd_Flags) & WFLG_REPORTMOUSE, 0u);
 }
 
 void a_dragged_disk_keeps_its_place_over_a_backdrop_toggle() {
@@ -6026,6 +6164,13 @@ int main() {
     an_icon_dragged_in_its_window_takes_the_new_place();
     a_dragged_file_is_copied_moved_or_refused();
     a_drag_ends_when_its_window_is_filled_again();
+    a_box_selects_the_icons_it_touches();
+    a_box_adds_to_the_selection_with_shift();
+    a_box_without_shift_starts_from_nothing();
+    a_box_is_clamped_to_the_inner_area();
+    a_one_pixel_move_arms_a_box_without_activating_it();
+    a_box_on_the_root_window_selects_disks();
+    a_rescan_ends_a_box();
     a_dragged_disk_keeps_its_place_over_a_backdrop_toggle();
     a_disk_icon_inside_a_drawer_is_no_volume();
     a_resized_drawer_clips_its_icons_and_keeps_their_places();

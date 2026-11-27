@@ -47,10 +47,11 @@
 // A drawer shows the "<name>.info" files of its directory, or with Show >
 // All Files an icon for everything beside them; opening an icon starts its
 // program with a WBStartup message. A click selects an icon, Shift-click
-// adds one or takes it away, and a click on empty space clears them. An
-// icon dragged within its window takes the new place; dropped on another
-// drawer, or a drawer's or disk's icon, its file moves there on the same
-// volume and is copied to another. A window with
+// adds one or takes it away, and a click on empty space clears them.
+// Dragging the button from empty space draws a box that selects the icons
+// it touches. An icon dragged within its window takes the new place;
+// dropped on another drawer, or a drawer's or disk's icon, its file moves
+// there on the same volume and is copied to another. A window with
 // borders scrolls over its icons with the sliders and arrows in its right
 // and bottom borders. Snapshot keeps an icon's place, or a drawer window's
 // box, scroll and Show setting, in the .info. The other
@@ -268,6 +269,23 @@ public:
         i32 start_x = 0;
         i32 start_y = 0;
     };
+
+    // A selection box dragged out from empty space: armed by the press and
+    // active once the pointer moved further than kDragThreshold. start is
+    // the press in drawer and screen coordinates, base the selection the
+    // press left and touched the icons the box added, in the order they
+    // entered.
+    struct BoxDrag {
+        bool armed = false;
+        bool active = false;
+        u32 window = kNoWindow;
+        i32 start_x = 0;
+        i32 start_y = 0;
+        i32 start_screen_x = 0;
+        i32 start_screen_y = 0;
+        std::vector<u32> base;
+        std::vector<u32> touched;
+    };
     static constexpr i32 kDragThreshold = 2;
 
     enum class AppKind : u8 { Window = 1, Icon = 2, MenuItem = 3 };
@@ -315,6 +333,7 @@ public:
     const SlotList<RunningTool>& tools() const { return tools_; }
     const SlotList<App>& apps() const { return apps_; }
     const IconDrag& drag() const { return drag_; }
+    const BoxDrag& box() const { return box_; }
     // The TextFont of the icon text font and of the system font IPrefs
     // passed over; 0 is the built-in font.
     u32 icon_font() const;
@@ -862,9 +881,21 @@ private:
     bool copy_one_icon(u32 window_id, u32 icon_id);
     bool delete_one_icon(u32 window_id, u32 icon_id);
     void mouse_click(u32 window_id, i32 mx, i32 my, bool shift, u64 now_us);
+    void start_icon_drag(u32 window_id, i32 mx, i32 my, i32 x, i32 y, const IconEntry& hit);
+    // A press on empty space inside the inner area starts the selection box.
+    void start_box(u32 window_id, i32 mx, i32 my, i32 x, i32 y);
     void drag_to(u32 window_id, i32 mx, i32 my);
+    void drag_icon_to(u32 window_id, i32 mx, i32 my);
+    void drag_box_to(u32 window_id, i32 mx, i32 my);
     void end_drag(u32 window_id, i32 mx, i32 my);
+    void end_icon_drag(u32 window_id, i32 mx, i32 my);
+    void end_box();
     void cancel_drag();
+    void cancel_box();
+    // The box in drawer coordinates, the pointer clamped to the inner area.
+    Rect box_rect(const DrawerWindow& window, i32 mx, i32 my) const;
+    // Sets the selection to the box's base, then the icons it touches.
+    void select_box(u32 window_id, const Rect& area);
     void drop(const IconDrag& drag, i32 sx, i32 sy);
     bool transfer(const IconEntry& icon, const char* from, const char* to, i32 left, i32 top);
     bool icon_path(const DrawerWindow& window, const IconEntry& icon,
@@ -960,6 +991,7 @@ private:
     SlotList<RunningTool> tools_{kMaxTools};
     SlotList<App> apps_{kMaxApps};
     IconDrag drag_{};
+    BoxDrag box_{};
     NativeVector vectors_[kVectors]{};
 };
 

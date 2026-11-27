@@ -415,6 +415,10 @@ bool same_text(const char* a, const char* b) {
     return a[i] == b[i];
 }
 
+bool listed(const std::vector<u32>& ids, u32 id) {
+    return std::find(ids.begin(), ids.end(), id) != ids.end();
+}
+
 bool same_ci(const char* a, const char* b) {
     for (u32 i = 0;; ++i) {
         if (upper_ascii(a[i]) != upper_ascii(b[i])) {
@@ -1173,6 +1177,9 @@ void Workbench::set_clip(const DrawerWindow& w, const Rect& area) {
 // Gives back the window record, its clip Region, its scroll gadgets and
 // its fuel gauge; the window itself is the caller's to close first.
 void Workbench::release_window(DrawerWindow& w) {
+    if (box_.armed && box_.window == w.id) {
+        cancel_box();
+    }
     if (w.clip != 0) {
         exec_->free(w.clip, kClipBytes);
     }
@@ -3175,21 +3182,57 @@ void Workbench::mouse_click(u32 window_id, i32 mx, i32 my, bool shift, u64 now_u
     case ClickAction::None:
         break;
     }
-    // The press that does not open the icon may start dragging it.
+    if (hit == nullptr) {
+        const bool inside = mx >= drawer->inner_left &&
+                            mx < drawer->inner_left + drawer->inner_width &&
+                            my >= drawer->inner_top &&
+                            my < drawer->inner_top + drawer->inner_height;
+        if (inside) {
+            start_box(window_id, mx, my, x, y);
+        }
+        return;
+    }
+    if (action == ClickAction::Open) {
+        return;
+    }
+    start_icon_drag(window_id, mx, my, x, y, *hit);
+}
+
+void Workbench::start_icon_drag(u32 window_id, i32 mx, i32 my, i32 x, i32 y,
+                                const IconEntry& hit) {
     i32 origin_x = 0;
     i32 origin_y = 0;
-    if (hit == nullptr || action == ClickAction::Open ||
-        !screen_origin(window_id, origin_x, origin_y)) {
+    if (!screen_origin(window_id, origin_x, origin_y)) {
         return;
     }
     drag_ = IconDrag{};
     drag_.armed = true;
     drag_.window = window_id;
-    drag_.icon = hit_id;
-    drag_.grab_x = x - hit->left;
-    drag_.grab_y = y - hit->top;
+    drag_.icon = hit.id;
+    drag_.grab_x = x - hit.left;
+    drag_.grab_y = y - hit.top;
     drag_.start_x = origin_x + mx;
     drag_.start_y = origin_y + my;
+    if (const DrawerWindow* drawer = find_window(window_id); drawer != nullptr) {
+        intuition_->report_mouse(drawer->window, true);
+    }
+}
+
+void Workbench::start_box(u32 window_id, i32 mx, i32 my, i32 x, i32 y) {
+    DrawerWindow* drawer = find_window(window_id);
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    if (drawer == nullptr || !screen_origin(window_id, origin_x, origin_y)) {
+        return;
+    }
+    box_ = BoxDrag{};
+    box_.armed = true;
+    box_.window = window_id;
+    box_.start_x = x;
+    box_.start_y = y;
+    box_.start_screen_x = origin_x + mx;
+    box_.start_screen_y = origin_y + my;
+    box_.base = drawer->clicks.selected();
     intuition_->report_mouse(drawer->window, true);
 }
 
@@ -3207,9 +3250,14 @@ bool Workbench::screen_origin(u32 window_id, i32& x, i32& y) const {
 }
 
 void Workbench::drag_to(u32 window_id, i32 mx, i32 my) {
-    if (!drag_.armed || window_id != drag_.window) {
-        return;
+    if (drag_.armed && window_id == drag_.window) {
+        drag_icon_to(window_id, mx, my);
+    } else if (box_.armed && window_id == box_.window) {
+        drag_box_to(window_id, mx, my);
     }
+}
+
+void Workbench::drag_icon_to(u32 window_id, i32 mx, i32 my) {
     i32 origin_x = 0;
     i32 origin_y = 0;
     if (!screen_origin(window_id, origin_x, origin_y)) {
@@ -3237,27 +3285,104 @@ void Workbench::drag_to(u32 window_id, i32 mx, i32 my) {
         screen_, {Intuition::DragIcon{art.render, sx - drag_.grab_x, sy - drag_.grab_y}});
 }
 
-void Workbench::end_drag(u32 window_id, i32 mx, i32 my) {
+void Workbench::drag_box_to(u32 window_id, i32 mx, i32 my) {
+    DrawerWindow* drawer = find_window(window_id);
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    if (drawer == nullptr || !screen_origin(window_id, origin_x, origin_y)) {
+        return;
+    }
+    const i32 sx = origin_x + mx;
+    const i32 sy = origin_y + my;
+    if (!box_.active) {
+        const i32 dx = sx - box_.start_screen_x;
+        const i32 dy = sy - box_.start_screen_y;
+        if (dx <= kDragThreshold && dx >= -kDragThreshold && dy <= kDragThreshold &&
+            dy >= -kDragThreshold) {
+            return;
+        }
+        box_.active = true;
+    }
+    const Rect area = box_rect(*drawer, mx, my);
+    select_box(window_id, area);
+    const i32 shift_x = origin_x + drawer->inner_left - drawer->scroll_x;
+    const i32 shift_y = origin_y + drawer->inner_top - drawer->scroll_y;
+    const Rect inner = inner_area(*drawer);
+    const Rect shown{
+        std::max(area.x0 + shift_x, origin_x + inner.x0),
+        std::max(area.y0 + shift_y, origin_y + inner.y0),
+        std::min(area.x1 + shift_x, origin_x + inner.x1),
+        std::min(area.y1 + shift_y, origin_y + inner.y1)};
+    if (shown.x1 < shown.x0 || shown.y1 < shown.y0) {
+        intuition_->clear_drag_box();
+    } else {
+        intuition_->set_drag_box(screen_, shown);
+    }
+}
+
+Rect Workbench::box_rect(const DrawerWindow& drawer, i32 mx, i32 my) const {
+    const i32 right = std::max(drawer.inner_left, drawer.inner_left + drawer.inner_width - 1);
+    const i32 bottom = std::max(drawer.inner_top, drawer.inner_top + drawer.inner_height - 1);
+    const i32 px = std::clamp(mx, drawer.inner_left, right);
+    const i32 py = std::clamp(my, drawer.inner_top, bottom);
+    const i32 x = px - drawer.inner_left + drawer.scroll_x;
+    const i32 y = py - drawer.inner_top + drawer.scroll_y;
+    return Rect{std::min(box_.start_x, x), std::min(box_.start_y, y),
+                std::max(box_.start_x, x), std::max(box_.start_y, y)};
+}
+
+void Workbench::select_box(u32 window_id, const Rect& area) {
     DrawerWindow* drawer = find_window(window_id);
     if (drawer == nullptr) {
         return;
     }
-    i32 origin_x = 0;
-    i32 origin_y = 0;
-    if (drag_.armed && window_id == drag_.window) {
-        const IconDrag ended = drag_;
-        const bool placed = screen_origin(window_id, origin_x, origin_y);
-        cancel_drag();
-        if (ended.active) {
-            // A drag applies nothing a release would and is no first click
-            // of a double click.
-            drawer->clicks.forget();
-            if (placed) {
-                drop(ended, origin_x + mx, origin_y + my);
-            }
-            return;
+    const std::vector<u32> before = drawer->clicks.selected();
+    const auto hits = [&](const IconEntry& icon) {
+        return icon.owner == window_id && area.x0 < icon.left + icon.width &&
+               area.x1 >= icon.left && area.y0 < icon.top + icon.height &&
+               area.y1 >= icon.top;
+    };
+    std::vector<u32> touched;
+    for (const u32 id : box_.touched) {
+        const IconEntry* icon = find_icon(id);
+        if (icon != nullptr && hits(*icon) && !listed(box_.base, id)) {
+            touched.push_back(id);
         }
-    } else if (drag_.armed) {
+    }
+    for (const IconEntry& icon : icons_) {
+        if (!hits(icon) || listed(box_.base, icon.id) || listed(touched, icon.id)) {
+            continue;
+        }
+        touched.push_back(icon.id);
+    }
+    box_.touched = touched;
+    drawer->clicks.clear();
+    for (const u32 id : box_.base) {
+        // An icon removed while the box is out stays out of the selection.
+        if (find_icon(id) != nullptr) {
+            drawer->clicks.add(id);
+        }
+    }
+    for (const u32 id : touched) {
+        drawer->clicks.add(id);
+    }
+    repaint_selection(window_id, before);
+}
+
+void Workbench::end_drag(u32 window_id, i32 mx, i32 my) {
+    if (drag_.armed && window_id == drag_.window) {
+        end_icon_drag(window_id, mx, my);
+        return;
+    }
+    if (box_.armed && window_id == box_.window) {
+        end_box();
+        return;
+    }
+    if (drag_.armed || box_.armed) {
+        return;
+    }
+    DrawerWindow* drawer = find_window(window_id);
+    if (drawer == nullptr) {
         return;
     }
     const std::vector<u32> before = drawer->clicks.selected();
@@ -3266,16 +3391,69 @@ void Workbench::end_drag(u32 window_id, i32 mx, i32 my) {
     }
 }
 
-void Workbench::cancel_drag() {
-    if (!drag_.armed) {
+void Workbench::end_icon_drag(u32 window_id, i32 mx, i32 my) {
+    DrawerWindow* drawer = find_window(window_id);
+    if (drawer == nullptr) {
         return;
     }
-    const DrawerWindow* drawer = find_window(drag_.window);
+    const IconDrag ended = drag_;
+    i32 origin_x = 0;
+    i32 origin_y = 0;
+    const bool placed = screen_origin(window_id, origin_x, origin_y);
+    cancel_drag();
+    if (ended.active) {
+        // A drag applies nothing a release would and is no first click of a
+        // double click.
+        drawer->clicks.forget();
+        if (placed) {
+            drop(ended, origin_x + mx, origin_y + my);
+        }
+        return;
+    }
+    const std::vector<u32> before = drawer->clicks.selected();
+    if (drawer->clicks.release()) {
+        repaint_selection(window_id, before);
+    }
+}
+
+void Workbench::end_box() {
+    if (!box_.armed) {
+        return;
+    }
+    DrawerWindow* drawer = find_window(box_.window);
     if (drawer != nullptr) {
         intuition_->report_mouse(drawer->window, false);
     }
-    intuition_->clear_drag_images();
-    drag_ = IconDrag{};
+    if (box_.active && drawer != nullptr) {
+        // A box is no first click of a double click.
+        drawer->clicks.forget();
+    }
+    intuition_->clear_drag_box();
+    box_ = BoxDrag{};
+}
+
+void Workbench::cancel_drag() {
+    if (drag_.armed) {
+        const DrawerWindow* drawer = find_window(drag_.window);
+        if (drawer != nullptr) {
+            intuition_->report_mouse(drawer->window, false);
+        }
+        intuition_->clear_drag_images();
+        drag_ = IconDrag{};
+    }
+    cancel_box();
+}
+
+void Workbench::cancel_box() {
+    if (!box_.armed) {
+        return;
+    }
+    const DrawerWindow* drawer = find_window(box_.window);
+    if (drawer != nullptr) {
+        intuition_->report_mouse(drawer->window, false);
+    }
+    intuition_->clear_drag_box();
+    box_ = BoxDrag{};
 }
 
 // Where a dragged icon lands: its own window takes it at the new place; a
