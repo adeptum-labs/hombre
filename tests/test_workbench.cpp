@@ -1856,6 +1856,13 @@ void put_ram_typed(const std::string& name, const std::vector<std::string>& type
     }
 }
 
+// One click with Shift held at x, y of the window's inner area.
+void shift_click_at(Rig& r, u32 window, i32 x, i32 y) {
+    g_intuition.set_qualifier(1);
+    r.click(window, x, y);
+    g_intuition.set_qualifier(0);
+}
+
 void an_icon_dragged_in_its_window_takes_the_new_place() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -2044,6 +2051,122 @@ void a_one_pixel_move_arms_a_box_without_activating_it() {
     CHECK(!r.workbench.box().active);
     r.release(r.screen_x(w.tools, 51), r.screen_y(w.tools, 30));
     CHECK(!r.workbench.box().armed);
+}
+
+void selected_icons_drag_together() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    const u32 free = r.find_icon_in(w.tools, "Free");
+    r.click(w.tools, 103, 43);
+    shift_click_at(r, w.tools, 11, 11);
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 2u);
+
+    r.press(w.tools, 103, 43);
+    r.move_held(r.screen_x(w.tools, 120), r.screen_y(w.tools, 60));
+    r.release(r.screen_x(w.tools, 123), r.screen_y(w.tools, 63));
+    CHECK_EQ(r.workbench.icon(tool).left, 120);
+    CHECK_EQ(r.workbench.icon(tool).top, 60);
+    CHECK_EQ(r.workbench.icon(free).left, 28);
+    CHECK_EQ(r.workbench.icon(free).top, 28);
+    CHECK(r.workbench.icon(tool).placed);
+    CHECK(r.workbench.icon(free).placed);
+}
+
+void a_dragged_group_keeps_its_offset_at_the_edge() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    const u32 free = r.find_icon_in(w.tools, "Free");
+    r.click(w.tools, 103, 43);
+    shift_click_at(r, w.tools, 11, 11);
+
+    r.press(w.tools, 103, 43);
+    r.move_held(r.screen_x(w.tools, 13), r.screen_y(w.tools, 13));
+    r.release(r.screen_x(w.tools, 13), r.screen_y(w.tools, 13));
+    CHECK_EQ(r.workbench.icon(free).left, 0);
+    CHECK_EQ(r.workbench.icon(free).top, 0);
+    CHECK_EQ(r.workbench.icon(tool).left, 92);
+    CHECK_EQ(r.workbench.icon(tool).top, 32);
+    CHECK_EQ(r.workbench.icon(tool).left - r.workbench.icon(free).left, 92);
+    CHECK_EQ(r.workbench.icon(tool).top - r.workbench.icon(free).top, 32);
+}
+
+void two_projects_dragged_to_a_window_arrive_there() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    r.click(w.tools, 63, 83);
+    shift_click_at(r, w.tools, 93, 83);
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 2u);
+
+    r.press(w.tools, 63, 83);
+    r.move_held(r.screen_x(w.ram, 153), r.screen_y(w.ram, 43));
+    r.release(r.screen_x(w.ram, 153), r.screen_y(w.ram, 43));
+    CHECK(r.exists("RAM:Proj"));
+    CHECK(r.exists("RAM:Lost"));
+    const u32 proj = r.find_icon_in(w.ram, "Proj");
+    const u32 lost = r.find_icon_in(w.ram, "Lost");
+    CHECK(proj != Workbench::kNoIcon);
+    CHECK(lost != Workbench::kNoIcon);
+    CHECK_EQ(r.workbench.icon(proj).left, 150);
+    CHECK_EQ(r.workbench.icon(proj).top, 40);
+    CHECK_EQ(r.workbench.icon(lost).left, 180);
+    CHECK_EQ(r.workbench.icon(lost).top, 40);
+    CHECK(r.saved_place("RAM:Proj") == std::make_pair(150u, 40u));
+    CHECK(r.saved_place("RAM:Lost") == std::make_pair(180u, 40u));
+}
+
+void two_projects_dropped_on_a_drawer_icon_go_into_it() {
+    Rig r;
+    put_ram_project("Note");
+    put_ram_project("Other");
+    r.make_dir("RAM:Box");
+    u32 error = 0;
+    const u32 drawer = g_icon.default_object(kWBDrawer);
+    CHECK(drawer != 0);
+    CHECK(g_icon.save_object("RAM:Box", drawer, error));
+    g_icon.free_object(drawer);
+    const TwoWindows w = open_tools_and_ram(r);
+    const Workbench::IconEntry note = r.workbench.icon(r.find_icon_in(w.ram, "Note"));
+    const Workbench::IconEntry other = r.workbench.icon(r.find_icon_in(w.ram, "Other"));
+    const Workbench::IconEntry box = r.workbench.icon(r.find_icon_in(w.ram, "Box"));
+
+    r.click(w.ram, note.left + 3, note.top + 3);
+    shift_click_at(r, w.ram, other.left + 3, other.top + 3);
+    r.press(w.ram, note.left + 3, note.top + 3);
+    r.move_held(r.screen_x(w.ram, box.left + 3), r.screen_y(w.ram, box.top + 3));
+    r.release(r.screen_x(w.ram, box.left + 3), r.screen_y(w.ram, box.top + 3));
+    CHECK(!r.exists("RAM:Note"));
+    CHECK(!r.exists("RAM:Other"));
+    CHECK(r.exists("RAM:Box/Note"));
+    CHECK(r.exists("RAM:Box/Other"));
+    CHECK(r.saved_place("RAM:Box/Note") ==
+          std::make_pair(kNoIconPosition, kNoIconPosition));
+    CHECK(r.saved_place("RAM:Box/Other") ==
+          std::make_pair(kNoIconPosition, kNoIconPosition));
+    CHECK_EQ(r.find_icon_in(w.ram, "Note"), Workbench::kNoIcon);
+    CHECK_EQ(r.find_icon_in(w.ram, "Other"), Workbench::kNoIcon);
+}
+
+void a_shift_press_on_a_selected_icon_drags_the_selection() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    const u32 free = r.find_icon_in(w.tools, "Free");
+    r.click(w.tools, 103, 43);
+    shift_click_at(r, w.tools, 11, 11);
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 2u);
+
+    g_intuition.set_qualifier(1);
+    r.press(w.tools, 103, 43);
+    g_intuition.set_qualifier(0);
+    r.move_held(r.screen_x(w.tools, 120), r.screen_y(w.tools, 60));
+    r.release(r.screen_x(w.tools, 123), r.screen_y(w.tools, 63));
+    CHECK_EQ(r.workbench.icon(tool).left, 120);
+    CHECK_EQ(r.workbench.icon(tool).top, 60);
+    CHECK_EQ(r.workbench.icon(free).left, 28);
+    CHECK_EQ(r.workbench.icon(free).top, 28);
+    CHECK_EQ(r.workbench.window(w.tools).clicks.selected().size(), 2u);
 }
 
 void a_box_on_the_root_window_selects_disks() {
@@ -6164,6 +6287,11 @@ int main() {
     an_icon_dragged_in_its_window_takes_the_new_place();
     a_dragged_file_is_copied_moved_or_refused();
     a_drag_ends_when_its_window_is_filled_again();
+    selected_icons_drag_together();
+    a_dragged_group_keeps_its_offset_at_the_edge();
+    two_projects_dragged_to_a_window_arrive_there();
+    two_projects_dropped_on_a_drawer_icon_go_into_it();
+    a_shift_press_on_a_selected_icon_drags_the_selection();
     a_box_selects_the_icons_it_touches();
     a_box_adds_to_the_selection_with_shift();
     a_box_without_shift_starts_from_nothing();

@@ -3258,9 +3258,10 @@ void Workbench::drag_to(u32 window_id, i32 mx, i32 my) {
 }
 
 void Workbench::drag_icon_to(u32 window_id, i32 mx, i32 my) {
+    DrawerWindow* drawer = find_window(window_id);
     i32 origin_x = 0;
     i32 origin_y = 0;
-    if (!screen_origin(window_id, origin_x, origin_y)) {
+    if (drawer == nullptr || !screen_origin(window_id, origin_x, origin_y)) {
         return;
     }
     const i32 sx = origin_x + mx;
@@ -3273,16 +3274,32 @@ void Workbench::drag_icon_to(u32 window_id, i32 mx, i32 my) {
             return;
         }
         drag_.active = true;
+        drag_.icons = drawer->clicks.selected();
+        if (!listed(drag_.icons, drag_.icon)) {
+            drag_.icons.push_back(drag_.icon);
+        }
     }
-    Bus b(*machine_);
-    const IconEntry* icon = find_icon(drag_.icon);
-    const IconArt art = art_of(b, icon != nullptr ? icon->object : 0);
-    if (art.render == 0) {
+    const IconEntry* anchor = find_icon(drag_.icon);
+    if (anchor == nullptr) {
         return;
     }
-    // The image's corner goes where the icon's corner would be.
-    intuition_->set_drag_images(
-        screen_, {Intuition::DragIcon{art.render, sx - drag_.grab_x, sy - drag_.grab_y}});
+    Bus b(*machine_);
+    std::vector<Intuition::DragIcon> images;
+    for (const u32 id : drag_.icons) {
+        const IconEntry* icon = find_icon(id);
+        if (icon == nullptr) {
+            continue;
+        }
+        const IconArt art = art_of(b, icon->object);
+        if (art.render == 0) {
+            continue;
+        }
+        // Every image keeps the icon's place from the anchor's.
+        images.push_back(Intuition::DragIcon{art.render,
+                                            sx - drag_.grab_x + (icon->left - anchor->left),
+                                            sy - drag_.grab_y + (icon->top - anchor->top)});
+    }
+    intuition_->set_drag_images(screen_, images);
 }
 
 void Workbench::drag_box_to(u32 window_id, i32 mx, i32 my) {
@@ -3456,70 +3473,155 @@ void Workbench::cancel_box() {
     box_ = BoxDrag{};
 }
 
-// Where a dragged icon lands: its own window takes it at the new place; a
-// drawer or disk icon, or another drawer's window, takes the file.
+bool Workbench::drag_holds(u32 icon_id) const {
+    if (!drag_.armed) {
+        return false;
+    }
+    if (drag_.icon == icon_id || listed(drag_.icons, icon_id)) {
+        return true;
+    }
+    const DrawerWindow* window = find_window(drag_.window);
+    return window != nullptr && window->clicks.is_selected(icon_id);
+}
+
+// Where the dragged icons land: their own window gives them their new
+// places; a drawer or disk icon, or another drawer's window, takes their
+// files.
 void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
-    IconEntry* dragged = find_icon(drag.icon);
+    const IconEntry* anchor = find_icon(drag.icon);
     const DrawerWindow* source = find_window(drag.window);
-    if (dragged == nullptr || dragged->owner != drag.window || source == nullptr) {
+    if (anchor == nullptr || anchor->owner != drag.window || source == nullptr) {
         return;
     }
-    IconEntry& icon = *dragged;
+    const i32 anchor_left = anchor->left;
+    const i32 anchor_top = anchor->top;
+    std::vector<u32> ids = drag.icons;
+    if (!listed(ids, drag.icon)) {
+        ids.push_back(drag.icon);
+    }
+    // The values are read after the first transfer, which may take files
+    // away.
+    std::vector<IconEntry> moving;
+    for (const u32 id : ids) {
+        const IconEntry* icon = find_icon(id);
+        if (icon != nullptr && icon->owner == drag.window) {
+            moving.push_back(*icon);
+        }
+    }
+    if (moving.empty()) {
+        return;
+    }
     const u32 under = intuition_->window_under(sx, sy);
     const DrawerWindow* to =
         windows_.find_if([&](const DrawerWindow& w) { return w.window == under; });
     i32 origin_x = 0;
     i32 origin_y = 0;
     if (to == nullptr || !screen_origin(to->id, origin_x, origin_y)) {
-        LogLine().text("workbench: ").text(icon.name).text(" dropped nowhere").send();
+        LogLine().text("workbench: ").text(anchor->name).text(" dropped nowhere").send();
         return;
     }
     const i32 px = sx - origin_x - to->inner_left + to->scroll_x;
     const i32 py = sy - origin_y - to->inner_top + to->scroll_y;
-    const i32 left = px - drag.grab_x;
-    const i32 top = py - drag.grab_y;
-    const IconEntry* on = icon_at(to->id, px, py);
-    if (on == &icon) {
-        on = nullptr;
+    const i32 drop_left = px - drag.grab_x;
+    const i32 drop_top = py - drag.grab_y;
+    i32 min_left = drop_left + (moving.front().left - anchor_left);
+    i32 min_top = drop_top + (moving.front().top - anchor_top);
+    for (const IconEntry& icon : moving) {
+        min_left = std::min(min_left, drop_left + (icon.left - anchor_left));
+        min_top = std::min(min_top, drop_top + (icon.top - anchor_top));
+    }
+    // The group shifts as one when it would leave the window at its edge.
+    const i32 shift_left = min_left < 0 ? -min_left : 0;
+    const i32 shift_top = min_top < 0 ? -min_top : 0;
+    const auto new_left = [&](const IconEntry& icon) {
+        return drop_left + (icon.left - anchor_left) + shift_left;
+    };
+    const auto new_top = [&](const IconEntry& icon) {
+        return drop_top + (icon.top - anchor_top) + shift_top;
+    };
+    // The topmost icon under the pointer that is not one of the dragged.
+    const IconEntry* on = nullptr;
+    for (usize i = icons_.size(); i > 0; --i) {
+        const IconEntry& icon = icons_[i - 1];
+        if (icon.owner == to->id && !listed(ids, icon.id) && px >= icon.left &&
+            px < icon.left + icon.width && py >= icon.top && py < icon.top + icon.height) {
+            on = &icon;
+            break;
+        }
     }
     const bool into_icon =
         on != nullptr && (on->type == kDrawer || on->type == kDisk || on->type == kGarbage);
     if (to->id == drag.window && !into_icon) {
-        icon.left = left < 0 ? 0 : left;
-        icon.top = top < 0 ? 0 : top;
-        icon.placed = true;
+        for (const IconEntry& placed : moving) {
+            if (IconEntry* icon = find_icon(placed.id); icon != nullptr) {
+                icon->left = new_left(placed);
+                icon->top = new_top(placed);
+                icon->placed = true;
+            }
+        }
         draw_window(to->id);
         return;
     }
-    if ((icon.type != kTool && icon.type != kProject) || left_out(icon.id) != nullptr) {
-        LogLine().text("workbench: ").text(icon.name).text(" cannot be moved there").send();
-        return;
-    }
-    char dest[Dos::kMaxPath];
-    if (into_icon) {
-        if (!icon_target_path(*to, *on, dest)) {
-            return;
+    struct Touched {
+        char path[Dos::kMaxPath];
+    };
+    std::vector<Touched> touched;
+    const auto remember = [&](const char* path) {
+        for (const Touched& seen : touched) {
+            if (same_ci(seen.path, path)) {
+                return;
+            }
         }
-    } else if (to->id == kRootWindow) {
-        LogLine().text("workbench: ").text(icon.name).text(" cannot be left out").send();
-        return;
-    } else {
-        copy_text(dest, sizeof dest, to->path);
-    }
+        Touched entry{};
+        copy_text(entry.path, sizeof entry.path, path);
+        touched.push_back(entry);
+    };
     char from[Dos::kMaxPath];
     copy_text(from, sizeof from, source->path);
-    if (same_ci(dest, from)) {
-        return;
+    bool moved = false;
+    for (const IconEntry& icon : moving) {
+        if ((icon.type != kTool && icon.type != kProject) || left_out(icon.id) != nullptr) {
+            LogLine().text("workbench: ").text(icon.name).text(" cannot be moved there").send();
+            continue;
+        }
+        char dest[Dos::kMaxPath];
+        if (into_icon) {
+            if (!icon_target_path(*to, *on, dest)) {
+                continue;
+            }
+        } else if (to->id == kRootWindow) {
+            LogLine().text("workbench: ").text(icon.name).text(" cannot be left out").send();
+            continue;
+        } else {
+            copy_text(dest, sizeof dest, to->path);
+        }
+        if (same_ci(dest, from)) {
+            continue;
+        }
+        const i32 left = into_icon ? static_cast<i32>(kNoIconPosition) : new_left(icon);
+        const i32 top = into_icon ? static_cast<i32>(kNoIconPosition) : new_top(icon);
+        if (!transfer(icon, from, dest, left, top)) {
+            continue;
+        }
+        moved = true;
+        remember(from);
+        remember(dest);
     }
-    // The windows are filled again, so the icon is copied first.
-    const IconEntry moving = icon;
-    const i32 keep_left = into_icon ? static_cast<i32>(kNoIconPosition) : (left < 0 ? 0 : left);
-    const i32 keep_top = into_icon ? static_cast<i32>(kNoIconPosition) : (top < 0 ? 0 : top);
-    if (!transfer(moving, from, dest, keep_left, keep_top)) {
+    if (!moved) {
         return;
     }
     for (DrawerWindow& w : windows_) {
-        if (w.id != kRootWindow && (same_ci(w.path, from) || same_ci(w.path, dest))) {
+        if (w.id == kRootWindow) {
+            continue;
+        }
+        bool affected = false;
+        for (const Touched& path : touched) {
+            if (same_ci(w.path, path.path)) {
+                affected = true;
+                break;
+            }
+        }
+        if (affected) {
             fill_drawer(w);
             draw_window(w.id);
         }
@@ -5261,7 +5363,7 @@ void Workbench::remove_root_icon(u32 icon_id) {
     if (icon == nullptr) {
         return;
     }
-    if (drag_.armed && drag_.icon == icon_id) {
+    if (drag_holds(icon_id)) {
         cancel_drag();
     }
     if (DrawerWindow* root = find_window(kRootWindow); root != nullptr) {
@@ -6657,7 +6759,7 @@ void Workbench::drop_app_icon(const App& app) {
     if (icon == nullptr || icon->owner != kRootWindow) {
         return;
     }
-    if (drag_.armed && drag_.icon == app.icon) {
+    if (drag_holds(app.icon)) {
         cancel_drag();
     }
     icons_.remove(icon);

@@ -49,12 +49,12 @@
 // program with a WBStartup message. A click selects an icon, Shift-click
 // adds one or takes it away, and a click on empty space clears them.
 // Dragging the button from empty space draws a box that selects the icons
-// it touches. An icon dragged within its window takes the new place;
-// dropped on another drawer, or a drawer's or disk's icon, its file moves
-// there on the same volume and is copied to another. A window with
-// borders scrolls over its icons with the sliders and arrows in its right
-// and bottom borders. Snapshot keeps an icon's place, or a drawer window's
-// box, scroll and Show setting, in the .info. The other
+// it touches. The selected icons dragged within their window take their
+// new places; dropped on another drawer, or a drawer's or disk's icon,
+// their files move there on the same volume and are copied to another. A
+// window with borders scrolls over its icons with the sliders and arrows
+// in its right and bottom borders. Snapshot keeps an icon's place, or a
+// drawer window's box, scroll and Show setting, in the .info. The other
 // vectors register application windows, icons and menu items, or rescan a
 // drawer. WBConfig, IPrefs' private call, hands over the icon and system
 // fonts and makes the Workbench read the backdrop pattern prefs again.
@@ -256,9 +256,11 @@ public:
         char name[32]{};
     };
 
-    // An icon held by the left button: armed by the press on it, active
-    // once the pointer has moved further than kDragThreshold. grab is the
-    // pointer's offset from the icon's corner; the start is on the screen.
+    // The icons held by the left button: armed by the press on the anchor,
+    // active once the pointer moved further than kDragThreshold. grab is
+    // the pointer's offset from the anchor's corner and start the press on
+    // the screen. icons is the window's selection when the drag became
+    // active, the anchor always among them.
     struct IconDrag {
         bool armed = false;
         bool active = false;
@@ -268,6 +270,7 @@ public:
         i32 grab_y = 0;
         i32 start_x = 0;
         i32 start_y = 0;
+        std::vector<u32> icons;
     };
 
     // A selection box dragged out from empty space: armed by the press and
@@ -892,6 +895,8 @@ private:
     void end_box();
     void cancel_drag();
     void cancel_box();
+    // Whether an armed drag has icon_id among the icons it would drag.
+    bool drag_holds(u32 icon_id) const;
     // The box in drawer coordinates, the pointer clamped to the inner area.
     Rect box_rect(const DrawerWindow& window, i32 mx, i32 my) const;
     // Sets the selection to the box's base, then the icons it touches.
