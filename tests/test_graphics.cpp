@@ -25,6 +25,7 @@
 #include "gfx_rig.hpp"
 #include "libs/chrome_palette.hpp"
 #include "libs/display_modes.hpp"
+#include "libs/layers.hpp"
 #include "libs/rom_fonts.hpp"
 #include "libs/text_blend.hpp"
 #include "libs/utility.hpp"
@@ -1551,6 +1552,75 @@ void superbitmap_layer_clips_to_size() {
     }
     CHECK_EQ(read_pixel(r, s.rp, 100, 40), 0xFFFFFFFFu);
     CHECK_EQ(read_pixel(r, s.rp, 90, 50), 0xFFFFFFFFu);
+}
+
+// A layer a program makes over a BitMap of its own draws from the layer's
+// top left corner and stays inside it, through the layer's RastPort and
+// through one of the program's that names the layer.
+void a_programs_own_layer_draws_inside_its_bounds() {
+    GfxRig r;
+    Layers layers;
+    CHECK(layers.init(r.machine, r.exec));
+    layers.set_graphics(r.graphics);
+    const Surface s = make_sized_surface(r, kBitmap, kRastPort, 100, 50);
+    const u32 free_before = r.exec.free_bytes(MEMF_PUBLIC);
+
+    CHECK_EQ(r.call_at(layers.base(), layers_lvo::NewLayerInfo), ExitReason::Halt);
+    const u32 info = r.cpu().d[0];
+    CHECK(info != 0);
+
+    auto create = [&](u32 flags) {
+        r.cpu().a[0] = info;
+        r.cpu().a[1] = s.bitmap;
+        r.cpu().a[2] = 0;
+        r.cpu().d[0] = 10;
+        r.cpu().d[1] = 5;
+        r.cpu().d[2] = 29;
+        r.cpu().d[3] = 14;
+        r.cpu().d[4] = flags;
+        CHECK_EQ(r.call_at(layers.base(), layers_lvo::CreateUpfrontLayer), ExitReason::Halt);
+        return r.cpu().d[0];
+    };
+    // A super bitmap layer is refused.
+    CHECK_EQ(create(LAYERSUPER | LAYERSMART), 0u);
+    const u32 layer = create(LAYERSIMPLE);
+    CHECK(layer != 0);
+    CHECK_EQ(r.get16(layer + ly_MinX), 10u);
+    CHECK_EQ(r.get16(layer + ly_MinY), 5u);
+    CHECK_EQ(r.get16(layer + ly_MaxX), 29u);
+    CHECK_EQ(r.get16(layer + ly_MaxY), 14u);
+    CHECK_EQ(r.get16(layer + ly_Flags), LAYERSIMPLE);
+    const u32 rp = r.get32(layer + ly_rp);
+    CHECK(rp != 0);
+    CHECK_EQ(r.get32(rp + rp_BitMap), s.bitmap);
+    CHECK_EQ(r.get32(rp + rp_Layer), layer);
+
+    r.graphics.set_pens(rp, 1, 0, JAM2);
+    rect_fill(r, rp, -5, -5, 60, 60);
+    r.graphics.set_pens(s.rp, 2, 0, JAM2);
+    r.put32(s.rp + rp_Layer, layer);
+    rect_fill(r, s.rp, 18, 8, 40, 40);
+    r.put32(s.rp + rp_Layer, 0);
+    for (i32 y = 0; y < 50; ++y) {
+        for (i32 x = 0; x < 100; ++x) {
+            const bool inside = x >= 10 && x <= 29 && y >= 5 && y <= 14;
+            const u32 expected = !inside ? 0u : (x >= 28 && y >= 13 ? 2u : 1u);
+            CHECK_EQ(read_pixel(r, s.rp, x, y), expected);
+        }
+    }
+
+    auto remove = [&](u32 which) {
+        r.cpu().a[0] = 0;
+        r.cpu().a[1] = which;
+        CHECK_EQ(r.call_at(layers.base(), layers_lvo::DeleteLayer), ExitReason::Halt);
+        return r.cpu().d[0];
+    };
+    CHECK_EQ(remove(layer), 1u);
+    // A layer that is gone, or was never made here, is left alone.
+    CHECK_EQ(remove(layer), 0u);
+    r.cpu().a[0] = info;
+    CHECK_EQ(r.call_at(layers.base(), layers_lvo::DisposeLayerInfo), ExitReason::Halt);
+    CHECK_EQ(r.exec.free_bytes(MEMF_PUBLIC), free_before);
 }
 
 struct RecordedDamage {
@@ -3258,6 +3328,7 @@ int main() {
     null_rastport_faults_cleanly();
     superbitmap_layer_draws_window_relative();
     superbitmap_layer_clips_to_size();
+    a_programs_own_layer_draws_inside_its_bounds();
     damage_sink_gets_private_bitmap_rect();
     superbitmap_bad_pointer_is_bus_error();
     palette_calls_defer_until_flush();

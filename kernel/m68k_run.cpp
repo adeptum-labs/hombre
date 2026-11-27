@@ -271,6 +271,7 @@ void open_amiga_screen(const BootInfo& info) {
         fail("graphics init failed");
         return;
     }
+    layers.set_graphics(graphics);
     intuition.set_clock(&clock_us);
     intuition.set_keymap_library(&keymap_library);
     splash_progress(8, kSplashKernelSteps);

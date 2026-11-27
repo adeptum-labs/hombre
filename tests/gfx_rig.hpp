@@ -184,13 +184,16 @@ public:
     }
 
     // JSR -lvo(A6) with A6 = the library base, from hand-written 68000 code.
-    ExitReason call(Base which, u32 lvo) {
+    ExitReason call(Base which, u32 lvo) { return call_at(base(which), lvo); }
+
+    // The same for a library the rig itself does not hold.
+    ExitReason call_at(u32 library, u32 lvo) {
         put16(kCall, 0x4EAE);
         put16(kCall + 2, disp(lvo));
         put16(kCall + 4, 0x4EF8);  // JMP $400.w
         put16(kCall + 6, 0x0400);
         jit.flush();
-        machine.cpu.a[6] = base(which);
+        machine.cpu.a[6] = library;
         machine.cpu.a[7] = kStack;
         machine.cpu.pc = kCall;
         return jit.run(1000000);
