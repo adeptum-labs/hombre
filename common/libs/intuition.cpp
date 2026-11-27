@@ -3467,7 +3467,9 @@ void Intuition::write_links() {
     }
 }
 
-// Writes the guest window list from the records, head first.
+// Writes the guest window list from the records, head first, and chains
+// the windows' layers in the screen's Layer_Info in the same order, front
+// to back: a GimmeZeroZero window's inner layer before its border layer.
 void Intuition::write_window_links(u32 screen) {
     ScreenRecord* srec = find_screen_record(screen);
     if (srec == nullptr) {
@@ -3475,6 +3477,18 @@ void Intuition::write_window_links(u32 screen) {
     }
     Bus b(*machine_);
     b.w32(screen + ndk::sc_FirstWindow, srec->first_window);
+    u32 above = 0;
+    const auto chain = [&](u32 layer) {
+        b.w32(layer + ndk::ly_front, above);
+        b.w32(layer + ndk::ly_back, 0);
+        if (above == 0) {
+            b.w32(screen + ndk::sc_LayerInfo + ndk::li_top_layer, layer);
+        } else {
+            b.w32(above + ndk::ly_back, layer);
+        }
+        above = layer;
+    };
+    b.w32(screen + ndk::sc_LayerInfo + ndk::li_top_layer, 0);
     u32 window = srec->first_window;
     for (u32 step = 0; step < kMaxWindows && window != 0; ++step) {
         WindowRecord* rec = find_window_record(window);
@@ -3482,6 +3496,12 @@ void Intuition::write_window_links(u32 screen) {
             return;
         }
         b.w32(window + ndk::wd_NextWindow, rec->next_window);
+        if (rec->inner_layer != 0) {
+            chain(rec->inner_layer);
+        }
+        if (rec->layer != 0) {
+            chain(rec->layer);
+        }
         window = rec->next_window;
     }
 }

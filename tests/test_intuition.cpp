@@ -3965,6 +3965,66 @@ void depth_gadget_repaints() {
     CHECK_EQ(screen_pixel(r, screen, 150, 120), 0u);
 }
 
+// The screen's Layer_Info lists its windows' layers front to back, as
+// WhichLayer and programs walking ly_back read them, and follows the
+// windows as they change depth, open and close.
+void screen_layer_info_follows_window_depth() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 info = screen + sc_LayerInfo;
+    CHECK_EQ(r.get32(info + li_top_layer), 0u);
+
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, WFLG_DEPTHGADGET, 0, 0, 0);
+    const u32 win_a = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 100, 80, 200, 100, WFLG_DEPTHGADGET, 0, 0, 0);
+    const u32 win_b = open_win(r, kNewWindow);
+    CHECK(win_a != 0 && win_b != 0);
+    const u32 layer_a = r.get32(win_a + wd_WLayer);
+    const u32 layer_b = r.get32(win_b + wd_WLayer);
+    CHECK_EQ(r.get32(info + li_top_layer), layer_b);
+    CHECK_EQ(r.get32(layer_b + ly_front), 0u);
+    CHECK_EQ(r.get32(layer_b + ly_back), layer_a);
+    CHECK_EQ(r.get32(layer_a + ly_front), layer_b);
+    CHECK_EQ(r.get32(layer_a + ly_back), 0u);
+
+    r.cpu().a[0] = win_a;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::WindowToFront), ExitReason::Halt);
+    CHECK_EQ(r.get32(info + li_top_layer), layer_a);
+    CHECK_EQ(r.get32(layer_a + ly_front), 0u);
+    CHECK_EQ(r.get32(layer_a + ly_back), layer_b);
+    CHECK_EQ(r.get32(layer_b + ly_front), layer_a);
+    CHECK_EQ(r.get32(layer_b + ly_back), 0u);
+
+    // A GimmeZeroZero window's inner layer lies in front of its border
+    // layer.
+    put_new_window(r, kNewWindow, 20, 30, 120, 80, WFLG_GIMMEZEROZERO, 0, 0, 0);
+    const u32 win_g = open_win(r, kNewWindow);
+    CHECK(win_g != 0);
+    const u32 inner_g = r.get32(win_g + wd_WLayer);
+    const u32 rp_g = r.get32(win_g + wd_BorderRPort);
+    CHECK(rp_g != 0);
+    const u32 outer_g = r.get32(rp_g + rp_Layer);
+    CHECK(outer_g != inner_g);
+    CHECK_EQ(r.get32(info + li_top_layer), inner_g);
+    CHECK_EQ(r.get32(inner_g + ly_back), outer_g);
+    CHECK_EQ(r.get32(outer_g + ly_front), inner_g);
+    CHECK_EQ(r.get32(outer_g + ly_back), layer_a);
+    CHECK_EQ(r.get32(layer_a + ly_front), outer_g);
+
+    r.cpu().a[0] = win_g;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    r.cpu().a[0] = win_a;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK_EQ(r.get32(info + li_top_layer), layer_b);
+    CHECK_EQ(r.get32(layer_b + ly_front), 0u);
+    CHECK_EQ(r.get32(layer_b + ly_back), 0u);
+    r.cpu().a[0] = win_b;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::CloseWindow), ExitReason::Halt);
+    CHECK_EQ(r.get32(info + li_top_layer), 0u);
+}
+
 void screen_bar_survives_window_close() {
     GfxRig r;
     r.str(kTitle, "Workbench");
@@ -11501,6 +11561,7 @@ int main() {
     upper_window_covers_lower_after_draw();
     close_reveals_lower_window();
     depth_gadget_repaints();
+    screen_layer_info_follows_window_depth();
     screen_bar_survives_window_close();
     batch_composes_once();
     size_gadget_sets_right_border();
