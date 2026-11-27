@@ -1554,6 +1554,52 @@ void superbitmap_layer_clips_to_size() {
     CHECK_EQ(read_pixel(r, s.rp, 90, 50), 0xFFFFFFFFu);
 }
 
+void flood_fills_up_to_the_outline_or_over_one_pen() {
+    GfxRig r;
+    const Surface s = make_sized_surface(r, kBitmap, kRastPort, 40, 30);
+    // A hollow box of pen 2 from 5, 5 to 20, 15.
+    r.graphics.set_pens(s.rp, 2, 0, JAM2);
+    rect_fill(r, s.rp, 5, 5, 20, 5);
+    rect_fill(r, s.rp, 5, 15, 20, 15);
+    rect_fill(r, s.rp, 5, 5, 5, 15);
+    rect_fill(r, s.rp, 20, 5, 20, 15);
+
+    auto flood = [&](u32 mode, i32 x, i32 y) {
+        r.cpu().a[1] = s.rp;
+        r.cpu().d[0] = static_cast<u32>(x);
+        r.cpu().d[1] = static_cast<u32>(y);
+        r.cpu().d[2] = mode;
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Flood), ExitReason::Halt);
+        return r.cpu().d[0];
+    };
+    auto expect = [&](u32 inside_pen, u32 outside_pen) {
+        for (i32 y = 0; y < 30; ++y) {
+            for (i32 x = 0; x < 40; ++x) {
+                const bool box = x >= 5 && x <= 20 && y >= 5 && y <= 15;
+                const bool edge = box && (x == 5 || x == 20 || y == 5 || y == 15);
+                const u32 pen = edge ? 2u : (box ? inside_pen : outside_pen);
+                CHECK_EQ(read_pixel(r, s.rp, x, y), pen);
+            }
+        }
+    };
+
+    // Mode 0 fills up to the outline pen.
+    r.put8(s.rp + rp_AOlPen, 2);
+    r.graphics.set_pens(s.rp, 1, 0, JAM2);
+    CHECK_EQ(flood(0, 12, 10), 1u);
+    expect(1, 0);
+    // Mode 1 fills the pixels of the pen found at the start.
+    r.graphics.set_pens(s.rp, 3, 0, JAM2);
+    CHECK_EQ(flood(1, 0, 0), 1u);
+    expect(1, 3);
+    // Filling with the pen already there ends.
+    CHECK_EQ(flood(1, 0, 0), 1u);
+    expect(1, 3);
+    // A start outside the BitMap fails and draws nothing.
+    CHECK_EQ(flood(1, -1, 0), 0u);
+    expect(1, 3);
+}
+
 // A layer a program makes over a BitMap of its own draws from the layer's
 // top left corner and stays inside it, through the layer's RastPort and
 // through one of the program's that names the layer.
@@ -3329,6 +3375,7 @@ int main() {
     superbitmap_layer_draws_window_relative();
     superbitmap_layer_clips_to_size();
     a_programs_own_layer_draws_inside_its_bounds();
+    flood_fills_up_to_the_outline_or_over_one_pen();
     damage_sink_gets_private_bitmap_rect();
     superbitmap_bad_pointer_is_bus_error();
     palette_calls_defer_until_flush();

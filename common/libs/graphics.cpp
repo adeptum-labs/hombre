@@ -1321,6 +1321,75 @@ struct GraphicsNatives {
         native::set_result(m, 0);
     }
 
+    // Flood(rp A1, mode D2, x D0, y D1): fills in the A pen the pixels that
+    // join the start point along rows and columns, with mode 0 those not of
+    // the outline pen and with mode 1 those of the start point's pen; FALSE
+    // for a start point that cannot be drawn. Needs no TmpRas.
+    static void flood(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        Bus b(m);
+        const u32 rp = m.cpu.a[1];
+        const View v = rp != 0 ? raster::load_rastport(b, rp) : View{};
+        const i32 start_x = static_cast<i16>(m.cpu.d[0]) + v.origin_x;
+        const i32 start_y = static_cast<i16>(m.cpu.d[1]) + v.origin_y;
+        const bool one_pen = m.cpu.d[2] != 0;
+        if (!v.ok || !drawable(b, v, start_x, start_y)) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 pen = b.r8(rp + ndk::rp_FgPen);
+        const u32 matched = one_pen ? raster::read_pixel(b, v.bitmap, start_x, start_y)
+                                    : b.r8(rp + ndk::rp_AOlPen);
+        const i32 width = static_cast<i32>(raster::pixel_width(v.bitmap));
+        const i32 height = static_cast<i32>(v.bitmap.rows);
+        // The pixels already filled, which match no more whatever their pen.
+        std::vector<bool> done(static_cast<usize>(width) * static_cast<usize>(height));
+        const auto open = [&](i32 x, i32 y) {
+            return drawable(b, v, x, y) && !done[static_cast<usize>(y) * width + x] &&
+                   (raster::read_pixel(b, v.bitmap, x, y) == matched) == one_pen;
+        };
+        struct Point {
+            i32 x;
+            i32 y;
+        };
+        std::vector<Point> seeds{{start_x, start_y}};
+        Rect dirty{0, 0, -1, -1};
+        while (!seeds.empty() && b.ok()) {
+            const Point seed = seeds.back();
+            seeds.pop_back();
+            if (!open(seed.x, seed.y)) {
+                continue;
+            }
+            i32 left = seed.x;
+            i32 right = seed.x;
+            while (open(left - 1, seed.y)) {
+                --left;
+            }
+            while (open(right + 1, seed.y)) {
+                ++right;
+            }
+            for (i32 x = left; x <= right; ++x) {
+                done[static_cast<usize>(seed.y) * width + x] = true;
+            }
+            fill_span(b, v, seed.y, left, right, pen, dirty);
+            // One seed for every run of open pixels above and below.
+            for (const i32 y : {seed.y - 1, seed.y + 1}) {
+                bool in_run = false;
+                for (i32 x = left; x <= right; ++x) {
+                    const bool is_open = open(x, y);
+                    if (is_open && !in_run) {
+                        seeds.push_back({x, y});
+                    }
+                    in_run = is_open;
+                }
+            }
+        }
+        if (b.ok()) {
+            report(g.display_, m, v, dirty);
+        }
+        native::set_result(m, b.ok() ? 1 : 0);
+    }
+
     // The outline of an ellipse in the A pen.
     static void draw_ellipse(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
@@ -2816,6 +2885,7 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::RectFill, GraphicsNatives::rect_fill, "RectFill"},
     {graphics_lvo::ReadPixel, GraphicsNatives::read_pixel, "ReadPixel"},
     {graphics_lvo::WritePixel, GraphicsNatives::write_pixel, "WritePixel"},
+    {graphics_lvo::Flood, GraphicsNatives::flood, "Flood"},
     {graphics_lvo::SetAPen, GraphicsNatives::set_apen, "SetAPen"},
     {graphics_lvo::SetBPen, GraphicsNatives::set_bpen, "SetBPen"},
     {graphics_lvo::SetDrMd, GraphicsNatives::set_drmd, "SetDrMd"},

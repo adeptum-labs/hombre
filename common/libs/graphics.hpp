@@ -93,6 +93,7 @@ constexpr u32 BltClear = 300;
 constexpr u32 RectFill = 306;
 constexpr u32 ReadPixel = 318;
 constexpr u32 WritePixel = 324;
+constexpr u32 Flood = 330;
 constexpr u32 SetAPen = 342;
 constexpr u32 SetBPen = 348;
 constexpr u32 SetDrMd = 354;
