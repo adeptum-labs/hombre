@@ -122,6 +122,8 @@ constexpr u32 RastPort_SIZEOF = 100;
 static_assert(RastPort_SIZEOF == 100);
 
 // struct Layer
+constexpr u32 ly_front = 0;
+constexpr u32 ly_back = 4;
 constexpr u32 ly_rp = 12;
 constexpr u32 ly_MinX = 16;
 constexpr u32 ly_MinY = 18;
@@ -141,6 +143,10 @@ constexpr u32 LAYERSIMPLE = 1;
 constexpr u32 LAYERSMART = 2;
 constexpr u32 LAYERSUPER = 4;
 constexpr u32 LAYERBACKDROP = 0x40;
+
+// struct Layer_Info: its frontmost layer, from which ly_back leads to the
+// ones behind.
+constexpr u32 li_top_layer = 0;
 
 // struct Region: its bounds and its list of RegionRectangles, whose bounds
 // are relative to the region's MinX and MinY.
@@ -195,6 +201,7 @@ constexpr u32 sc_Font = 40;
 constexpr u32 sc_ViewPort = 44;
 constexpr u32 sc_RastPort = 84;
 constexpr u32 sc_BitMap = 184;
+constexpr u32 sc_LayerInfo = 224;
 constexpr u32 sc_DetailPen = 330;
 constexpr u32 sc_BlockPen = 331;
 constexpr u32 Screen_SIZEOF = 346;

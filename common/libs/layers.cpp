@@ -58,6 +58,36 @@ void install_clip_region(void*, Machine& m) {
     }
 }
 
+// Layers a Layer_Info chain is followed through at most, so that a broken
+// chain cannot hold the caller.
+constexpr u32 kMaxChain = 1024;
+
+// WhichLayer: the frontmost layer of the Layer_Info at A0 whose bounds,
+// edges included, hold the point D0, D1, found from the top layer through
+// the ly_back links; 0 when none does.
+void which_layer(void*, Machine& m) {
+    Bus b(m);
+    const i32 x = static_cast<i32>(m.cpu.d[0]);
+    const i32 y = static_cast<i32>(m.cpu.d[1]);
+    native::set_result(m, 0);
+    const u32 info = m.cpu.a[0];
+    if (info == 0) {
+        return;
+    }
+    const auto edge = [&](u32 at) { return static_cast<i32>(static_cast<i16>(b.r16(at))); };
+    u32 layer = b.r32(info + ndk::li_top_layer);
+    for (u32 step = 0; step < kMaxChain && layer != 0 && b.ok(); ++step) {
+        if (x >= edge(layer + ndk::ly_MinX) && x <= edge(layer + ndk::ly_MaxX) &&
+            y >= edge(layer + ndk::ly_MinY) && y <= edge(layer + ndk::ly_MaxY)) {
+            if (b.ok()) {
+                native::set_result(m, layer);
+            }
+            return;
+        }
+        layer = b.r32(layer + ndk::ly_back);
+    }
+}
+
 // struct Layer's BackFill: the hook that fills what drawing uncovers.
 constexpr u32 ly_BackFill = 118;
 
@@ -182,6 +212,7 @@ constexpr Function kFunctions[] = {
     {layers_lvo::LockLayers, nothing, "LockLayers"},
     {layers_lvo::UnlockLayers, nothing, "UnlockLayers"},
     {layers_lvo::LockLayerInfo, nothing, "LockLayerInfo"},
+    {layers_lvo::WhichLayer, which_layer, "WhichLayer"},
     {layers_lvo::UnlockLayerInfo, nothing, "UnlockLayerInfo"},
     {layers_lvo::InstallClipRegion, install_clip_region, "InstallClipRegion"},
     {layers_lvo::InstallLayerHook, install_layer_hook, "InstallLayerHook"},

@@ -229,6 +229,61 @@ void install_clip_region_keeps_the_region_and_returns_the_one_before() {
     CHECK_EQ(r.result(r.layers_base(), layers_lvo::InstallLayerInfoHook), 0u);
 }
 
+// WhichLayer walks the Layer_Info from its top layer backwards and gives
+// the first layer whose bounds, edges included, hold the point.
+void which_layer_finds_the_frontmost_layer_at_a_point() {
+    Rig r;
+    const u32 info = kData;
+    const u32 front = kData + 0x100;
+    const u32 back = kData + 0x200;
+    const auto bounds = [&](u32 layer, u32 x0, u32 y0, u32 x1, u32 y1) {
+        r.put16(layer + ly_MinX, x0);
+        r.put16(layer + ly_MinY, y0);
+        r.put16(layer + ly_MaxX, x1);
+        r.put16(layer + ly_MaxY, y1);
+    };
+    const auto put32 = [&](u32 at, u32 v) {
+        r.put16(at, v >> 16);
+        r.put16(at + 2, v & 0xFFFF);
+    };
+    bounds(front, 50, 50, 149, 99);
+    bounds(back, 0, 0, 99, 79);
+    put32(info + li_top_layer, front);
+    put32(front + ly_front, 0);
+    put32(front + ly_back, back);
+    put32(back + ly_front, front);
+    put32(back + ly_back, 0);
+
+    const auto which = [&](u32 li, i32 x, i32 y) {
+        r.m.cpu.a[0] = li;
+        r.m.cpu.d[0] = static_cast<u32>(x);
+        r.m.cpu.d[1] = static_cast<u32>(y);
+        return r.result(r.layers_base(), layers_lvo::WhichLayer);
+    };
+    CHECK_EQ(which(info, 60, 60), front);
+    CHECK_EQ(which(info, 50, 50), front);
+    CHECK_EQ(which(info, 149, 99), front);
+    CHECK_EQ(which(info, 10, 10), back);
+    CHECK_EQ(which(info, 99, 49), back);
+    CHECK_EQ(which(info, 150, 60), 0u);
+    CHECK_EQ(which(info, 120, 100), 0u);
+    CHECK_EQ(which(info, -1, 10), 0u);
+
+    // A layer brought forward is found first.
+    put32(info + li_top_layer, back);
+    put32(back + ly_front, 0);
+    put32(back + ly_back, front);
+    put32(front + ly_front, back);
+    put32(front + ly_back, 0);
+    CHECK_EQ(which(info, 60, 60), back);
+    CHECK_EQ(which(info, 120, 60), front);
+
+    // No Layer_Info and one without layers hold none.
+    CHECK_EQ(which(0, 60, 60), 0u);
+    put32(info + li_top_layer, 0);
+    CHECK_EQ(which(info, 60, 60), 0u);
+}
+
 void version_library_carries_the_system_version() {
     Rig r;
     // The library in the list answers; LIBS: is never asked.
@@ -342,6 +397,7 @@ void icon_reads_what_is_there_and_defaults_the_rest() {
 int main() {
     layer_locks_do_nothing();
     install_clip_region_keeps_the_region_and_returns_the_one_before();
+    which_layer_finds_the_frontmost_layer_at_a_point();
     icon_reads_what_is_there_and_defaults_the_rest();
     version_library_carries_the_system_version();
     expansion_library_lists_its_boot_nodes();

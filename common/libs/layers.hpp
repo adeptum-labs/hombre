@@ -41,7 +41,9 @@
 // layer's RastPort then stays inside. A program makes layers over a BitMap
 // of its own with NewLayerInfo and CreateUpfrontLayer, which draw from
 // their top left corner and stay inside their bounds; they do not obscure
-// one another, and super bitmap layers are refused. Every other vector logs
+// one another, and super bitmap layers are refused. WhichLayer finds the
+// frontmost layer at a point through the links of a Layer_Info, which
+// intuition keeps in its windows' depth order. Every other vector logs
 // "layers: unimplemented LVO -<n>" and ends the run with Unimplemented.
 
 namespace hombre {
@@ -57,6 +59,7 @@ constexpr u32 UnlockLayer = 102;
 constexpr u32 LockLayers = 108;
 constexpr u32 UnlockLayers = 114;
 constexpr u32 LockLayerInfo = 120;
+constexpr u32 WhichLayer = 132;
 constexpr u32 UnlockLayerInfo = 138;
 constexpr u32 NewLayerInfo = 144;
 constexpr u32 DisposeLayerInfo = 150;
