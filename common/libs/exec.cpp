@@ -52,6 +52,8 @@ constexpr u32 kMaxName = 256;
 constexpr u32 kMaxSegments = 64;
 constexpr u32 kMaxInitCommands = 1u << 16;
 constexpr u32 kMaxQueued = 4096;
+constexpr u32 kTaskMemEntry = 74;  // tc_MemEntry, which dos.hpp names
+constexpr u32 kMaxMemLists = 4096;
 constexpr char kExecName[] = "exec.library";
 constexpr char kCommodities[] = "commodities.library";
 constexpr char kExecIdString[] = "exec 60.0 (Hombre)\r\n";
@@ -375,6 +377,74 @@ struct ExecOps {
     }
 
     static void free_mem(void* ctx, Machine& m) { of(ctx).free(m.cpu.a[1], m.cpu.d[0]); }
+
+    // AllocEntry(memList A0): the memory each MemEntry asks for, in a
+    // MemList of this call's own. A failed allocation frees what it got and
+    // answers the requirements it failed on, with bit 31 set.
+    static void alloc_entry(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        Bus b(m);
+        const u32 list = m.cpu.a[0];
+        if (list == 0) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 count = b.r16(list + ML_NUMENTRIES);
+        if (!b.ok()) {
+            return;
+        }
+        const u32 list_bytes = ML_ME + count * ME_SIZE;
+        const u32 table = e.alloc(list_bytes, MEMF_PUBLIC | MEMF_CLEAR);
+        u32 failed = count != 0 ? b.r32(list + ML_ME) : 0;
+        u32 made = 0;
+        for (; table != 0 && made < count; ++made) {
+            const u32 at = list + ML_ME + made * ME_SIZE;
+            const u32 reqs = b.r32(at);
+            const u32 length = b.r32(at + ME_LENGTH);
+            if (!b.ok()) {
+                break;
+            }
+            const u32 block = e.alloc(length, reqs);
+            if (block == 0) {
+                failed = reqs;
+                break;
+            }
+            b.w32(table + ML_ME + made * ME_SIZE, block);
+            b.w32(table + ML_ME + made * ME_SIZE + ME_LENGTH, length);
+        }
+        if (table == 0 || !b.ok() || made < count) {
+            for (u32 i = 0; i < made; ++i) {
+                const u32 at = table + ML_ME + i * ME_SIZE;
+                e.free(b.r32(at), b.r32(at + ME_LENGTH));
+            }
+            e.free(table, list_bytes);
+            native::set_result(m, failed | 0x80000000u);
+            return;
+        }
+        b.w16(table + ML_NUMENTRIES, count);
+        b.w8(table + LN_TYPE, NT_MEMORY);
+        native::set_result(m, table);
+    }
+
+    // FreeEntry(memList A0): every entry of an AllocEntry list, then the
+    // MemList itself.
+    static void free_entry(void* ctx, Machine& m) {
+        Exec& e = of(ctx);
+        const u32 list = m.cpu.a[0];
+        if (list == 0) {
+            return;
+        }
+        Bus b(m);
+        const u32 count = b.r16(list + ML_NUMENTRIES);
+        if (!b.ok()) {
+            return;
+        }
+        for (u32 i = 0; i < count; ++i) {
+            const u32 at = list + ML_ME + i * ME_SIZE;
+            e.free(b.r32(at), b.r32(at + ME_LENGTH));
+        }
+        e.free(list, ML_ME + count * ME_SIZE);
+    }
 
     static void avail_mem(void* ctx, Machine& m) {
         Exec& e = of(ctx);
@@ -824,6 +894,32 @@ struct ExecOps {
         }
     }
 
+    // Notes the MemLists on a removed task's tc_MemEntry, which RemTask
+    // frees; they may hold the task and its stack, so the memory goes only
+    // when the slot is released. A task Hombre made starts with that list
+    // zeroed rather than empty, and one whose tail pred is 0 has none.
+    static void take_task_mem_entries(Exec& e, Bus& b, u32 slot, u32 task) {
+        const u32 list = task + kTaskMemEntry;
+        u32 node = b.r32(list + LH_HEAD);
+        if (!b.ok() || node == 0 || b.r32(list + LH_TAILPRED) == 0) {
+            return;
+        }
+        std::vector<Exec::TaskContext::Owned>& owned = e.tasks_[slot].owned;
+        for (u32 n = 0; node != list + LH_TAIL && n < kMaxMemLists; ++n) {
+            const u32 next = b.r32(node + LN_SUCC);
+            const u32 count = b.r16(node + ML_NUMENTRIES);
+            if (!b.ok()) {
+                return;
+            }
+            for (u32 i = 0; i < count; ++i) {
+                const u32 at = node + ML_ME + i * ME_SIZE;
+                owned.push_back({b.r32(at), b.r32(at + ME_LENGTH)});
+            }
+            owned.push_back({node, ML_ME + count * ME_SIZE});
+            node = next;
+        }
+    }
+
     static void rem_task_id(Exec& e, Bus& b, i32 target_id) {
         Machine& m = b.machine();
         const i32 cur = e.sched_.current();
@@ -851,6 +947,9 @@ struct ExecOps {
         e.sched_.remove(target_id);
         if (relink) {
             e.rebuild_task_lists();
+        }
+        if (target_addr != 0) {
+            take_task_mem_entries(e, b, static_cast<u32>(target_id), target_addr);
         }
         e.task_ended(target_addr, target_id == cur);
         if (target_id != cur) {
@@ -2726,6 +2825,8 @@ constexpr ExecFunction kExecFunctions[] = {
     {exec_lvo::AllocMem, ExecOps::alloc_mem, "AllocMem"},
     {exec_lvo::FreeMem, ExecOps::free_mem, "FreeMem"},
     {exec_lvo::AvailMem, ExecOps::avail_mem, "AvailMem"},
+    {exec_lvo::AllocEntry, ExecOps::alloc_entry, "AllocEntry"},
+    {exec_lvo::FreeEntry, ExecOps::free_entry, "FreeEntry"},
     {exec_lvo::TypeOfMem, ExecOps::type_of_mem, "TypeOfMem"},
     {exec_lvo::Insert, ExecOps::insert_node, "Insert"},
     {exec_lvo::AddHead, ExecOps::add_head_node, "AddHead"},
@@ -4858,6 +4959,10 @@ void Exec::reap_removed() {
                 task_host_.destroy(task_host_.ctx, i);
             }
             sched_.release(static_cast<i32>(i));
+            for (const TaskContext::Owned& block : tasks_[i].owned) {
+                free(block.address, block.bytes);
+            }
+            tasks_[i].owned.clear();
             if (tasks_[i].program != 0) {
                 ended[ended_count++] = tasks_[i].program;
             }

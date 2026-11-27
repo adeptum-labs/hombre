@@ -66,6 +66,8 @@ constexpr u32 Permit = 138;
 constexpr u32 AllocMem = 198;
 constexpr u32 FreeMem = 210;
 constexpr u32 AvailMem = 216;
+constexpr u32 AllocEntry = 222;
+constexpr u32 FreeEntry = 228;
 constexpr u32 Insert = 234;
 constexpr u32 AddHead = 240;
 constexpr u32 AddTail = 246;
@@ -229,6 +231,13 @@ constexpr u32 MH_SIZE = 32;
 constexpr u32 MC_NEXT = 0;
 constexpr u32 MC_BYTES = 4;
 constexpr u32 MC_SIZE = 8;
+
+// struct MemList and struct MemEntry
+constexpr u32 ML_NUMENTRIES = 14;
+constexpr u32 ML_ME = 16;
+constexpr u32 ME_ADDR = 0;  // ME_REQS before the entry is allocated
+constexpr u32 ME_LENGTH = 4;
+constexpr u32 ME_SIZE = 8;
 
 constexpr u32 MEMF_ANY = 0;
 constexpr u32 MEMF_PUBLIC = 1u << 0;
@@ -794,6 +803,13 @@ private:
         // started it rather than taking it over from its parent.
         u32 program = 0;
         bool program_root = false;
+        // The blocks RemTask found on tc_MemEntry, freed once the slot is
+        // released and nothing reads the task any more.
+        struct Owned {
+            u32 address;
+            u32 bytes;
+        };
+        std::vector<Owned> owned;
     };
 
     struct Program {

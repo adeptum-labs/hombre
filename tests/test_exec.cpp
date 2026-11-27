@@ -47,6 +47,7 @@ constexpr u32 kSub = 0x3000;
 constexpr u32 kStack = 0x8000;
 constexpr u32 kData = 0x9000;  // test structures up to 0xFFFF
 constexpr u32 kFreeStart = 0x10000;
+constexpr u32 kTaskMemEntry = 74;  // tc_MemEntry in a Task
 
 // Static storage, as the kernel keeps them.
 Jit g_jit;
@@ -260,6 +261,8 @@ void layout_matches_the_ndk() {
     CHECK_EQ(exec_lvo::AllocMem, 198u);
     CHECK_EQ(exec_lvo::FreeMem, 210u);
     CHECK_EQ(exec_lvo::AvailMem, 216u);
+    CHECK_EQ(exec_lvo::AllocEntry, 222u);
+    CHECK_EQ(exec_lvo::FreeEntry, 228u);
     CHECK_EQ(exec_lvo::Insert, 234u);
     CHECK_EQ(exec_lvo::AddHead, 240u);
     CHECK_EQ(exec_lvo::AddTail, 246u);
@@ -381,6 +384,11 @@ void layout_matches_the_ndk() {
     CHECK_EQ(MC_NEXT, 0u);
     CHECK_EQ(MC_BYTES, 4u);
     CHECK_EQ(MC_SIZE, 8u);
+    CHECK_EQ(ML_NUMENTRIES, 14u);
+    CHECK_EQ(ML_ME, 16u);
+    CHECK_EQ(ME_ADDR, 0u);
+    CHECK_EQ(ME_LENGTH, 4u);
+    CHECK_EQ(ME_SIZE, 8u);
     CHECK_EQ(RT_MATCHWORD, 0u);
     CHECK_EQ(RT_MATCHTAG, 2u);
     CHECK_EQ(RT_ENDSKIP, 6u);
@@ -669,6 +677,66 @@ void memory_functions_through_vectors() {
     r.cpu().a[1] = 2;
     CHECK_EQ(r.exec(exec_lvo::FreeVec), ExitReason::Halt);
     CHECK(logged_containing("exec: FreeMem"));
+}
+
+void alloc_entry_fills_a_mem_list_and_free_entry_empties_it() {
+    Rig r;
+    const u32 before = g_exec.free_bytes();
+    const u32 list = kData;
+    r.put16(list + ML_NUMENTRIES, 3);
+    r.put32(list + ML_ME, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(list + ML_ME + ME_LENGTH, 16);
+    r.put32(list + ML_ME + ME_SIZE, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(list + ML_ME + ME_SIZE + ME_LENGTH, 32);
+    r.put32(list + ML_ME + 2 * ME_SIZE, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(list + ML_ME + 2 * ME_SIZE + ME_LENGTH, 24);
+    r.cpu().a[0] = list;
+    CHECK_EQ(r.exec(exec_lvo::AllocEntry), ExitReason::Halt);
+    const u32 made = r.cpu().d[0];
+    CHECK(made != 0);
+    CHECK(made < 0x80000000u);
+    CHECK_EQ(r.get8(made + LN_TYPE), NT_MEMORY);
+    CHECK_EQ(r.get16(made + ML_NUMENTRIES), 3u);
+    const u32 blocks[3] = {r.get32(made + ML_ME), r.get32(made + ML_ME + ME_SIZE),
+                           r.get32(made + ML_ME + 2 * ME_SIZE)};
+    const u32 lengths[3] = {r.get32(made + ML_ME + ME_LENGTH),
+                            r.get32(made + ML_ME + ME_SIZE + ME_LENGTH),
+                            r.get32(made + ML_ME + 2 * ME_SIZE + ME_LENGTH)};
+    CHECK(blocks[0] != 0 && blocks[1] != 0 && blocks[2] != 0);
+    CHECK_EQ(lengths[0], 16u);
+    CHECK_EQ(lengths[1], 32u);
+    CHECK_EQ(lengths[2], 24u);
+    for (const u32 block : blocks) {
+        CHECK_EQ(r.get32(block), 0u);  // MEMF_CLEAR
+    }
+
+    r.cpu().a[0] = made;
+    CHECK_EQ(r.exec(exec_lvo::FreeEntry), ExitReason::Halt);
+    CHECK_EQ(g_exec.free_bytes(), before);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.exec(exec_lvo::FreeEntry), ExitReason::Halt);  // FreeEntry(NULL)
+
+    // An entry that cannot be allocated frees what came before it and
+    // answers its requirements with bit 31 set.
+    const u32 failure = kData + 0x100;
+    r.put16(failure + ML_NUMENTRIES, 2);
+    r.put32(failure + ML_ME, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(failure + ML_ME + ME_LENGTH, 8);
+    r.put32(failure + ML_ME + ME_SIZE, MEMF_CHIP | MEMF_CLEAR);
+    r.put32(failure + ML_ME + ME_SIZE + ME_LENGTH, 0x7FFFFFF0);
+    r.cpu().a[0] = failure;
+    CHECK_EQ(r.exec(exec_lvo::AllocEntry), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], (MEMF_CHIP | MEMF_CLEAR) | 0x80000000u);
+    CHECK_EQ(g_exec.free_bytes(), before);
+
+    // No entries make an empty MemList that FreeEntry takes again.
+    r.put16(failure + ML_NUMENTRIES, 0);
+    r.cpu().a[0] = failure;
+    CHECK_EQ(r.exec(exec_lvo::AllocEntry), ExitReason::Halt);
+    CHECK(r.cpu().d[0] != 0);
+    r.cpu().a[0] = r.cpu().d[0];
+    CHECK_EQ(r.exec(exec_lvo::FreeEntry), ExitReason::Halt);
+    CHECK_EQ(g_exec.free_bytes(), before);
 }
 
 // --- chip and fast memory -----------------------------------------------
@@ -3037,6 +3105,38 @@ void rem_task_ready_waiting_and_boot_refused() {
     CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
     CHECK(logged("exec: refusing to RemTask the boot task"));
     CHECK_EQ(r.get8(boot + TC_STATE), TS_RUN);
+}
+
+void rem_task_frees_the_mem_lists_it_was_given() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    const u32 before = g_exec.free_bytes();
+
+    const u32 list = kData + 0x500;
+    r.put16(list + ML_NUMENTRIES, 1);
+    r.put32(list + ML_ME, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(list + ML_ME + ME_LENGTH, 64);
+    r.cpu().a[0] = list;
+    CHECK_EQ(r.exec(exec_lvo::AllocEntry), ExitReason::Halt);
+    const u32 memlist = r.cpu().d[0];
+    CHECK(memlist != 0);
+
+    const u32 task = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "child", kNames);
+    r.put32(task + kTaskMemEntry + LH_HEAD, memlist);
+    r.put32(task + kTaskMemEntry + LH_TAIL, 0);
+    r.put32(task + kTaskMemEntry + LH_TAILPRED, memlist);
+    r.put32(memlist + LN_SUCC, task + kTaskMemEntry + LH_TAIL);
+    r.put32(memlist + LN_PRED, task + kTaskMemEntry);
+    r.cpu().a[1] = task;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+
+    r.cpu().a[1] = task;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK_EQ(g_exec.free_bytes(), before);
 }
 
 void set_task_pri_and_find_task_across_lists() {
@@ -5594,6 +5694,7 @@ int main() {
     free_coalesces_and_survives_double_free();
     corrupt_free_list_fails_safely();
     memory_functions_through_vectors();
+    alloc_entry_fills_a_mem_list_and_free_entry_empties_it();
     requirements_choose_the_region();
     full_fast_memory_falls_back_to_chip();
     avail_mem_counts_the_matching_regions();
@@ -5653,6 +5754,7 @@ int main() {
     add_task_populates_lists_stack_and_d0();
     signal_wakes_waiting_task_and_switches_only_for_higher_priority();
     rem_task_ready_waiting_and_boot_refused();
+    rem_task_frees_the_mem_lists_it_was_given();
     task_end_hooks_of_several_contexts();
     set_task_pri_and_find_task_across_lists();
     forbid_holds_off_switch_until_permit();
