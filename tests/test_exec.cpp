@@ -2954,6 +2954,46 @@ void signal_wakes_waiting_task_and_switches_only_for_higher_priority() {
     }
 }
 
+struct EndedTasks {
+    std::vector<u32> tasks;
+    static void hook(void* ctx, u32 task, bool) {
+        static_cast<EndedTasks*>(ctx)->tasks.push_back(task);
+    }
+    static void other_hook(void* ctx, u32 task, bool) {
+        static_cast<EndedTasks*>(ctx)->tasks.push_back(task + 1);
+    }
+};
+
+// Every context's task end hook hears of a removed task; a context's later
+// hook replaces its earlier one and a null hook removes it.
+void task_end_hooks_of_several_contexts() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    EndedTasks first;
+    EndedTasks second;
+    g_exec.set_task_end_hook(EndedTasks::hook, &first);
+    g_exec.set_task_end_hook(EndedTasks::hook, &second);
+    g_exec.set_task_end_hook(EndedTasks::other_hook, &second);
+    const auto add_and_remove = [&](u32 task, u32 stack, const char* name, u32 names) {
+        setup_child_task(r, task, stack, 0, name, names);
+        r.cpu().a[1] = task;
+        r.cpu().a[2] = 0x2000;
+        r.cpu().a[3] = 0;
+        CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+        r.cpu().a[1] = task;
+        CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    };
+    add_and_remove(kData + 0x100, kData + 0x2000, "one", kNames);
+    CHECK(first.tasks == std::vector<u32>{kData + 0x100});
+    CHECK(second.tasks == std::vector<u32>{kData + 0x101});
+    g_exec.set_task_end_hook(nullptr, &first);
+    add_and_remove(kData + 0x200, kData + 0x3000, "two", kNames + 0x20);
+    CHECK_EQ(first.tasks.size(), 1u);
+    CHECK_EQ(second.tasks.size(), 2u);
+}
+
 void rem_task_ready_waiting_and_boot_refused() {
     Rig r;
     FakeHostState host{};
@@ -5613,6 +5653,7 @@ int main() {
     add_task_populates_lists_stack_and_d0();
     signal_wakes_waiting_task_and_switches_only_for_higher_priority();
     rem_task_ready_waiting_and_boot_refused();
+    task_end_hooks_of_several_contexts();
     set_task_pri_and_find_task_across_lists();
     forbid_holds_off_switch_until_permit();
     semaphores_exclusive_shared_nesting_and_attempt();

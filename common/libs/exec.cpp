@@ -852,9 +852,7 @@ struct ExecOps {
         if (relink) {
             e.rebuild_task_lists();
         }
-        if (e.task_end_hook_ != nullptr) {
-            e.task_end_hook_(e.task_end_ctx_, target_addr, target_id == cur);
-        }
+        e.task_ended(target_addr, target_id == cur);
         if (target_id != cur) {
             e.reap_removed();
             return;
@@ -2834,8 +2832,9 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
     for (ReplyHandler& h : reply_handlers_) {
         h = ReplyHandler{};
     }
-    task_end_hook_ = nullptr;
-    task_end_ctx_ = nullptr;
+    for (TaskEndHook& h : task_end_hooks_) {
+        h = TaskEndHook{};
+    }
     for (TimerHook& h : timer_hooks_) {
         h = TimerHook{};
     }
@@ -3434,8 +3433,32 @@ u32 Exec::spawn_native(u32 task, void (*body)(void* arg), void* arg, i8 pri, boo
 }
 
 void Exec::set_task_end_hook(void (*hook)(void* ctx, u32 task, bool self), void* ctx) {
-    task_end_hook_ = hook;
-    task_end_ctx_ = ctx;
+    TaskEndHook* free_slot = nullptr;
+    for (TaskEndHook& h : task_end_hooks_) {
+        if (h.hook != nullptr && h.ctx == ctx) {
+            h = hook != nullptr ? TaskEndHook{hook, ctx} : TaskEndHook{};
+            return;
+        }
+        if (h.hook == nullptr && free_slot == nullptr) {
+            free_slot = &h;
+        }
+    }
+    if (hook == nullptr) {
+        return;
+    }
+    if (free_slot == nullptr) {
+        LogLine().text("exec: task end hooks full").send();
+        return;
+    }
+    *free_slot = TaskEndHook{hook, ctx};
+}
+
+void Exec::task_ended(u32 task, bool self) {
+    for (const TaskEndHook& h : task_end_hooks_) {
+        if (h.hook != nullptr) {
+            h.hook(h.ctx, task, self);
+        }
+    }
 }
 
 bool Exec::add_timer_hook(const TimerHook& hook) {
@@ -5070,9 +5093,7 @@ void Exec::end_tasks_of(u32 parent) {
             if (relink) {
                 rebuild_task_lists();
             }
-            if (task_end_hook_ != nullptr) {
-                task_end_hook_(task_end_ctx_, s.task_addr, false);
-            }
+            task_ended(s.task_addr, false);
             if (s.task_addr != 0 && ended_count < Scheduler::kMaxTasks) {
                 ended[ended_count++] = s.task_addr;
             }

@@ -608,7 +608,9 @@ public:
 
     // Called for every task exec removes, before the task's slot is
     // released. self is true when the task removed itself, in which case D0
-    // holds its return value.
+    // holds its return value. Each ctx has one hook, which a later call
+    // replaces and a null hook removes; kMaxTaskEndHooks contexts at most.
+    static constexpr u32 kMaxTaskEndHooks = 4;
     void set_task_end_hook(void (*hook)(void* ctx, u32 task, bool self), void* ctx);
 
     // Allocates and initialises a PA_SIGNAL MsgPort for the current task, or
@@ -840,6 +842,8 @@ private:
     void rebuild_task_lists(u32 leave_out = 0);
     void doom_program_of(u32 slot);
     i32 slot_of(u32 task) const;
+    // Runs every task end hook for the task exec is removing.
+    void task_ended(u32 task, bool self);
     Program* find_program(u32 id);
     bool program_alive(u32 id) const;
     bool in_program_code(const Program& p, u32 pc) const;
@@ -932,10 +936,13 @@ private:
         void* ctx = nullptr;
     };
     ReplyHandler reply_handlers_[kMaxReplyHandlers]{};
-    void (*task_end_hook_)(void* ctx, u32 task, bool self) = nullptr;
+    struct TaskEndHook {
+        void (*hook)(void* ctx, u32 task, bool self) = nullptr;
+        void* ctx = nullptr;
+    };
+    TaskEndHook task_end_hooks_[kMaxTaskEndHooks]{};
     bool (*end_hook_)(void* ctx, u32 task) = nullptr;
     void* end_hook_ctx_ = nullptr;
-    void* task_end_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;
     Program programs_[Scheduler::kMaxTasks]{};
