@@ -1600,6 +1600,73 @@ void flood_fills_up_to_the_outline_or_over_one_pen() {
     expect(1, 3);
 }
 
+// An area pattern of 2^AreaPtSz rows of 16 bits, a row to a line and the
+// top bit at every sixteenth column: RectFill, AreaEnd and Flood paint the
+// set bits in the A pen and, in JAM2, the clear ones in the B pen;
+// INVERSVID swaps them and COMPLEMENT turns over the pixels of the set bits.
+void area_fills_paint_the_area_pattern_in_the_draw_mode() {
+    constexpr u32 kPattern = kData + 0xE00;
+    GfxRig r;
+    const Surface s = make_sized_surface(r, kBitmap, kRastPort, 40, 30);
+    r.put16(kPattern, 0xAAAA);
+    r.put16(kPattern + 2, 0x5555);
+    r.put32(s.rp + rp_AreaPtrn, kPattern);
+    r.put8(s.rp + rp_AreaPtSz, 1);
+    // A checkerboard: the set bits where x and y are both even or both odd.
+    const auto set_bit = [](i32 x, i32 y) { return ((x + y) & 1) == 0; };
+
+    r.graphics.set_pens(s.rp, 1, 2, JAM2);
+    rect_fill(r, s.rp, 0, 0, 15, 3);
+    for (i32 y = 0; y <= 3; ++y) {
+        for (i32 x = 0; x <= 15; ++x) {
+            CHECK_EQ(read_pixel(r, s.rp, x, y), set_bit(x, y) ? 1u : 2u);
+        }
+    }
+    r.graphics.set_pens(s.rp, 3, 2, JAM2 | INVERSVID);
+    rect_fill(r, s.rp, 0, 0, 15, 3);
+    CHECK_EQ(read_pixel(r, s.rp, 0, 0), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 1, 0), 3u);
+    r.graphics.set_pens(s.rp, 1, 0, COMPLEMENT);
+    rect_fill(r, s.rp, 0, 0, 15, 3);
+    CHECK_EQ(read_pixel(r, s.rp, 0, 0), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 1, 0), 3u);
+    // JAM1 leaves the pixels of the clear bits as they were.
+    r.graphics.set_pens(s.rp, 1, 2, JAM1);
+    rect_fill(r, s.rp, 20, 0, 35, 3);
+    CHECK_EQ(read_pixel(r, s.rp, 20, 0), 1u);
+    CHECK_EQ(read_pixel(r, s.rp, 21, 0), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 20, 1), 0u);
+    CHECK_EQ(read_pixel(r, s.rp, 21, 1), 1u);
+
+    // AreaEnd fills its polygon the same way.
+    init_area(r, s.rp, kAreaMax);
+    r.graphics.set_pens(s.rp, 3, 0, JAM2);
+    CHECK_EQ(area_move(r, s.rp, 0, 6), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 15, 6), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 15, 9), 0u);
+    CHECK_EQ(area_draw(r, s.rp, 0, 9), 0u);
+    area_end(r, s.rp);
+    for (i32 y = 6; y <= 9; ++y) {
+        for (i32 x = 0; x <= 15; ++x) {
+            CHECK_EQ(read_pixel(r, s.rp, x, y), set_bit(x, y) ? 3u : 0u);
+        }
+    }
+
+    // Flood paints the pixels it reaches, every one of them once.
+    r.graphics.set_pens(s.rp, 1, 2, JAM2);
+    r.cpu().a[1] = s.rp;
+    r.cpu().d[0] = 20;
+    r.cpu().d[1] = 20;
+    r.cpu().d[2] = 1;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Flood), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 1u);
+    for (i32 y = 12; y < 30; ++y) {
+        for (i32 x = 0; x < 40; ++x) {
+            CHECK_EQ(read_pixel(r, s.rp, x, y), set_bit(x, y) ? 1u : 2u);
+        }
+    }
+}
+
 // A layer a program makes over a BitMap of its own draws from the layer's
 // top left corner and stays inside it, through the layer's RastPort and
 // through one of the program's that names the layer.
@@ -3376,6 +3443,7 @@ int main() {
     superbitmap_layer_clips_to_size();
     a_programs_own_layer_draws_inside_its_bounds();
     flood_fills_up_to_the_outline_or_over_one_pen();
+    area_fills_paint_the_area_pattern_in_the_draw_mode();
     damage_sink_gets_private_bitmap_rect();
     superbitmap_bad_pointer_is_bus_error();
     palette_calls_defer_until_flush();

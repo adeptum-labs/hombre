@@ -295,18 +295,121 @@ void fill_span(Bus& b, const View& v, i32 y, i32 x0, i32 x1, u32 pen, Rect& dirt
     dirty = unite(dirty, r);
 }
 
+// How an area fill paints: in the A pen, or, when the RastPort has an
+// area pattern, the pattern in its draw mode. The pattern is 2^AreaPtSz
+// rows of 16 bits, a row to a line and the top bit leftmost, laid from
+// the RastPort's own 0, 0, whose place in the BitMap the origin is.
+struct AreaFill {
+    u32 pen;
+    u32 bg;
+    u32 mode;
+    u32 pattern;
+    u32 rows;
+    i32 origin_x;
+    i32 origin_y;
+};
+
+// A pattern of several planes, which a negative AreaPtSz gives, fills in
+// the A pen alone.
+AreaFill area_fill(Bus& b, u32 rp, const View& v) {
+    AreaFill f{b.r8(rp + ndk::rp_FgPen), b.r8(rp + ndk::rp_BgPen), b.r8(rp + ndk::rp_DrawMode),
+               b.r32(rp + ndk::rp_AreaPtrn),  1, v.origin_x, v.origin_y};
+    const i32 size = static_cast<i8>(b.r8(rp + ndk::rp_AreaPtSz));
+    if (size < 0 || size > 8) {
+        f.pattern = 0;
+    } else {
+        f.rows = 1u << size;
+    }
+    return f;
+}
+
+// One row of an area fill from x0 to x1. Through a pattern, a set bit
+// paints the A pen and a clear one, in JAM2, the B pen; INVERSVID turns
+// the bits over first, and COMPLEMENT turns over the pixels of the set
+// bits instead.
+void fill_area_span(Bus& b, const View& v, const AreaFill& f, i32 y, i32 x0, i32 x1,
+                    Rect& dirty) {
+    if (x1 < x0) {
+        return;
+    }
+    if (f.pattern == 0) {
+        fill_span(b, v, y, x0, x1, f.pen, dirty);
+        return;
+    }
+    const u32 row = static_cast<u32>(y - f.origin_y) & (f.rows - 1);
+    const u32 bits = b.r16(f.pattern + row * 2);
+    if (!b.ok()) {
+        return;
+    }
+    const bool invert = (f.mode & ndk::INVERSVID) != 0;
+    const bool complement = (f.mode & ndk::COMPLEMENT) != 0;
+    const bool jam2 = (f.mode & ndk::JAM2) != 0;
+    // What a pixel gets: 0 nothing, 1 the A pen, 2 the B pen, 3 complemented.
+    const auto action = [&](i32 x) {
+        const u32 bit = 15 - (static_cast<u32>(x - f.origin_x) & 15);
+        const bool set = (((bits >> bit) & 1u) != 0) != invert;
+        if (complement) {
+            return set ? 3 : 0;
+        }
+        return set ? 1 : jam2 ? 2 : 0;
+    };
+    for (i32 x = x0; x <= x1;) {
+        const int what = action(x);
+        i32 end = x;
+        while (end < x1 && action(end + 1) == what) {
+            ++end;
+        }
+        const Rect run{x, y, end, y};
+        if (what == 1 || what == 2) {
+            dirty = unite(dirty,
+                          raster::fill_rect(b, v.bitmap, v.clip, run, what == 1 ? f.pen : f.bg));
+        } else if (what == 3) {
+            dirty = unite(dirty, raster::complement_rect(b, v.bitmap, v.clip, run, 0xFF));
+        }
+        x = end + 1;
+    }
+}
+
+// A line of an area fill's edge, pixel by pixel through its pattern.
+void fill_area_line(Bus& b, const View& v, const AreaFill& f, i32 x0, i32 y0, i32 x1, i32 y1,
+                    Rect& dirty) {
+    if (f.pattern == 0) {
+        dirty = unite(dirty, raster::draw_line(b, v.bitmap, v.clip, x0, y0, x1, y1, f.pen));
+        return;
+    }
+    const i32 dx = x1 > x0 ? x1 - x0 : x0 - x1;
+    const i32 dy = y1 > y0 ? y1 - y0 : y0 - y1;
+    const i32 sx = x0 < x1 ? 1 : -1;
+    const i32 sy = y0 < y1 ? 1 : -1;
+    i32 err = dx - dy;
+    for (i32 x = x0, y = y0;; ) {
+        fill_area_span(b, v, f, y, x, x, dirty);
+        if (x == x1 && y == y1) {
+            break;
+        }
+        const i32 e2 = 2 * err;
+        if (e2 > -dy) {
+            err -= dy;
+            x += sx;
+        }
+        if (e2 < dx) {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
 // Fills the polygon of n points (bitmap coordinates) by the even-odd rule,
 // its edges included: a shape too thin to hold a pixel between its edges,
 // or one that runs out and back along the same line, still shows whole.
-void fill_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n, u32 pen,
-                  Rect& dirty) {
+void fill_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n,
+                  const AreaFill& fill, Rect& dirty) {
     if (n < 2) {
         return;
     }
     for (u32 i = 0; i < n; ++i) {
         const u32 j = (i + 1) % n;
-        dirty = unite(dirty, raster::draw_line(b, v.bitmap, v.clip, xs[i], ys[i], xs[j], ys[j],
-                                               pen));
+        fill_area_line(b, v, fill, xs[i], ys[i], xs[j], ys[j], dirty);
     }
     if (n < 3) {
         return;
@@ -350,20 +453,20 @@ void fill_polygon(Bus& b, const View& v, const i32* xs, const i32* ys, u32 n, u3
             cross[k] = key;
         }
         for (u32 i = 0; i + 1 < count; i += 2) {
-            fill_span(b, v, y, cross[i], cross[i + 1], pen, dirty);
+            fill_area_span(b, v, fill, y, cross[i], cross[i + 1], dirty);
         }
     }
     // The bottom edge rows and lowest points the half-open rule leaves
     // out, so the outline and the fill meet.
     for (u32 i = 0; i < n; ++i) {
         if (ys[i] >= v.clip.y0 && ys[i] <= v.clip.y1) {
-            fill_span(b, v, ys[i], xs[i], xs[i], pen, dirty);
+            fill_area_span(b, v, fill, ys[i], xs[i], xs[i], dirty);
         }
         const u32 j = (i + 1) % n;
         if (ys[i] == ys[j] && ys[i] >= v.clip.y0 && ys[i] <= v.clip.y1) {
             const i32 a = xs[i] < xs[j] ? xs[i] : xs[j];
             const i32 c = xs[i] < xs[j] ? xs[j] : xs[i];
-            fill_span(b, v, ys[i], a, c, pen, dirty);
+            fill_area_span(b, v, fill, ys[i], a, c, dirty);
         }
     }
 }
@@ -400,8 +503,8 @@ constexpr u32 kMaxAreaEllipses = 64;
 
 // Fills the ellipses together by the even-odd rule, as one area: an
 // ellipse inside another leaves a hole, so two make a ring.
-void fill_ellipses(Bus& b, const View& v, const AreaEllipseShape* shapes, u32 count, u32 pen,
-                   Rect& dirty) {
+void fill_ellipses(Bus& b, const View& v, const AreaEllipseShape* shapes, u32 count,
+                   const AreaFill& fill, Rect& dirty) {
     if (count == 0) {
         return;
     }
@@ -449,7 +552,7 @@ void fill_ellipses(Bus& b, const View& v, const AreaEllipseShape* shapes, u32 co
             edges[k] = key;
         }
         for (u32 i = 0; i + 1 < n; i += 2) {
-            fill_span(b, v, y, edges[i], edges[i + 1] - 1, pen, dirty);
+            fill_area_span(b, v, fill, y, edges[i], edges[i + 1] - 1, dirty);
         }
     }
 }
@@ -1260,7 +1363,7 @@ struct GraphicsNatives {
         count = count > kMaxAreaVectors ? kMaxAreaVectors : count;
         const u32 table = b.r32(ai + ai_VctrTbl);
         const u32 flags = b.r32(ai + ai_FlagTbl);
-        const u32 pen = b.r8(rp + ndk::rp_FgPen);
+        const AreaFill fill = area_fill(b, rp, v);
         const u32 outline = b.r8(rp + ndk::rp_AOlPen);
         const bool outlined = (b.r16(rp + ndk::rp_Flags) & ndk::AREAOUTLINE) != 0;
         Rect dirty{0, 0, -1, -1};
@@ -1271,7 +1374,7 @@ struct GraphicsNatives {
         u32 ellipse_count = 0;
         auto flush = [&]() {
             if (n > 0 && v.ok) {
-                fill_polygon(b, v, xs, ys, n, pen, dirty);
+                fill_polygon(b, v, xs, ys, n, fill, dirty);
                 if (outlined) {
                     outline_polygon(b, v, xs, ys, n, outline, dirty);
                 }
@@ -1303,7 +1406,7 @@ struct GraphicsNatives {
         }
         flush();
         if (v.ok) {
-            fill_ellipses(b, v, ellipses, ellipse_count, pen, dirty);
+            fill_ellipses(b, v, ellipses, ellipse_count, fill, dirty);
             for (u32 e = 0; outlined && e < ellipse_count; ++e) {
                 const AreaEllipseShape& s = ellipses[e];
                 ellipse_rows(s.cx, s.cy, s.a, s.b, [&](i32 row, i32 x0, i32 x1) {
@@ -1321,10 +1424,11 @@ struct GraphicsNatives {
         native::set_result(m, 0);
     }
 
-    // Flood(rp A1, mode D2, x D0, y D1): fills in the A pen the pixels that
-    // join the start point along rows and columns, with mode 0 those not of
-    // the outline pen and with mode 1 those of the start point's pen; FALSE
-    // for a start point that cannot be drawn. Needs no TmpRas.
+    // Flood(rp A1, mode D2, x D0, y D1): fills the pixels that join the
+    // start point along rows and columns, with mode 0 those not of the
+    // outline pen and with mode 1 those of the start point's pen, as an
+    // area fill paints; FALSE for a start point that cannot be drawn. Needs
+    // no TmpRas.
     static void flood(void* ctx, Machine& m) {
         Graphics& g = of(ctx);
         Bus b(m);
@@ -1337,7 +1441,7 @@ struct GraphicsNatives {
             native::set_result(m, 0);
             return;
         }
-        const u32 pen = b.r8(rp + ndk::rp_FgPen);
+        const AreaFill fill = area_fill(b, rp, v);
         const u32 matched = one_pen ? raster::read_pixel(b, v.bitmap, start_x, start_y)
                                     : b.r8(rp + ndk::rp_AOlPen);
         const i32 width = static_cast<i32>(raster::pixel_width(v.bitmap));
@@ -1371,7 +1475,7 @@ struct GraphicsNatives {
             for (i32 x = left; x <= right; ++x) {
                 done[static_cast<usize>(seed.y) * width + x] = true;
             }
-            fill_span(b, v, seed.y, left, right, pen, dirty);
+            fill_area_span(b, v, fill, seed.y, left, right, dirty);
             // One seed for every run of open pixels above and below.
             for (const i32 y : {seed.y - 1, seed.y + 1}) {
                 bool in_run = false;
@@ -3596,6 +3700,20 @@ void Graphics::rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
         return;
     }
     const Rect area{x0 + v.origin_x, y0 + v.origin_y, x1 + v.origin_x, y1 + v.origin_y};
+    // An area pattern paints row by row.
+    const AreaFill fill = area_fill(b, rp, v);
+    if (fill.pattern != 0) {
+        Rect dirty{0, 0, -1, -1};
+        const i32 top = area.y0 > v.clip.y0 ? area.y0 : v.clip.y0;
+        const i32 bottom = area.y1 < v.clip.y1 ? area.y1 : v.clip.y1;
+        for (i32 y = top; y <= bottom && b.ok(); ++y) {
+            fill_area_span(b, v, fill, y, area.x0, area.x1, dirty);
+        }
+        if (b.ok()) {
+            report(display_, *machine_, v, dirty);
+        }
+        return;
+    }
     const raster::Pens p = pens(b, rp);
     // COMPLEMENT turns over the pen bits the RastPort's mask lets through.
     const Rect dirty = (p.mode & ~ndk::INVERSVID) == ndk::COMPLEMENT

@@ -99,6 +99,7 @@ static_assert(BitMap_SIZEOF == 40);
 // struct RastPort
 constexpr u32 rp_Layer = 0;
 constexpr u32 rp_BitMap = 4;
+constexpr u32 rp_AreaPtrn = 8;
 constexpr u32 rp_TmpRas = 12;
 constexpr u32 rp_AreaInfo = 16;
 constexpr u32 rp_Mask = 24;
@@ -106,6 +107,7 @@ constexpr u32 rp_FgPen = 25;
 constexpr u32 rp_BgPen = 26;
 constexpr u32 rp_AOlPen = 27;
 constexpr u32 rp_DrawMode = 28;
+constexpr u32 rp_AreaPtSz = 29;
 constexpr u32 rp_Flags = 32;
 constexpr u32 AREAOUTLINE = 0x0008;
 constexpr u32 rp_cp_x = 36;

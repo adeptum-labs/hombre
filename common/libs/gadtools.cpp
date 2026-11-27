@@ -277,9 +277,9 @@ constexpr u32 GTMN_TextAttr = 0x80080031;
 
 namespace {
 
-// The pens, draw mode and pen position of a RastPort, put back when it
-// goes: gadgets draw through the window's RastPort, whose state belongs
-// to the program.
+// The pens, draw mode, pen position and area pattern of a RastPort, put
+// back when it goes: gadgets draw through the window's RastPort, whose
+// state belongs to the program, and are drawn solid.
 class RastPortState {
 public:
     RastPortState(Bus& b, u32 rp)
@@ -289,13 +289,17 @@ public:
           bg_(b.r8(rp + ndk::rp_BgPen)),
           mode_(b.r8(rp + ndk::rp_DrawMode)),
           x_(b.r16(rp + ndk::rp_cp_x)),
-          y_(b.r16(rp + ndk::rp_cp_y)) {}
+          y_(b.r16(rp + ndk::rp_cp_y)),
+          pattern_(b.r32(rp + ndk::rp_AreaPtrn)) {
+        b.w32(rp + ndk::rp_AreaPtrn, 0);
+    }
     ~RastPortState() {
         b_.w8(rp_ + ndk::rp_FgPen, fg_);
         b_.w8(rp_ + ndk::rp_BgPen, bg_);
         b_.w8(rp_ + ndk::rp_DrawMode, mode_);
         b_.w16(rp_ + ndk::rp_cp_x, x_);
         b_.w16(rp_ + ndk::rp_cp_y, y_);
+        b_.w32(rp_ + ndk::rp_AreaPtrn, pattern_);
     }
     RastPortState(const RastPortState&) = delete;
     RastPortState& operator=(const RastPortState&) = delete;
@@ -308,6 +312,7 @@ private:
     u32 mode_;
     u32 x_;
     u32 y_;
+    u32 pattern_;
 };
 
 // The nodes of the struct List at list, at most kMaxListNodes.

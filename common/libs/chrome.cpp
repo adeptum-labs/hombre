@@ -53,16 +53,22 @@ struct RpState {
     u8 mode = 0;
     u16 cx = 0;
     u16 cy = 0;
+    u32 pattern = 0;
 };
 
+// The chrome is drawn solid: an area pattern the program left in the
+// RastPort is put aside while it is.
 RpState save_rp(Bus& b, u32 rp) {
-    return RpState{
+    const RpState s{
         static_cast<u8>(b.r8(rp + ndk::rp_FgPen)),
         static_cast<u8>(b.r8(rp + ndk::rp_BgPen)),
         static_cast<u8>(b.r8(rp + ndk::rp_DrawMode)),
         static_cast<u16>(b.r16(rp + ndk::rp_cp_x)),
         static_cast<u16>(b.r16(rp + ndk::rp_cp_y)),
+        b.r32(rp + ndk::rp_AreaPtrn),
     };
+    b.w32(rp + ndk::rp_AreaPtrn, 0);
+    return s;
 }
 
 void restore_rp(Bus& b, u32 rp, const RpState& s) {
@@ -71,6 +77,7 @@ void restore_rp(Bus& b, u32 rp, const RpState& s) {
     b.w8(rp + ndk::rp_DrawMode, s.mode);
     b.w16(rp + ndk::rp_cp_x, s.cx);
     b.w16(rp + ndk::rp_cp_y, s.cy);
+    b.w32(rp + ndk::rp_AreaPtrn, s.pattern);
 }
 
 u32 rastport_depth(Bus& b, u32 rp) {
