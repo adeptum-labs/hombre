@@ -288,6 +288,16 @@ public:
     // forgets it.
     void set_vp_mode_id(u32 vp, u32 id);
     void clear_vp_mode_id(u32 vp);
+    // Asked before text is drawn in JAM2 through a RastPort with bg as its
+    // B pen, with the text's box, both in the RastPort's coordinates: true
+    // when what stands for the B pen inside keep has been drawn under the
+    // box instead, as a window bar drawn in more than the one pen a 3.1
+    // bar is filled with is; the glyphs then go over it as JAM1 draws them.
+    using TextBackdrop = bool (*)(void* ctx, u32 rp, u32 bg, const Rect& box, Rect& keep);
+    void set_text_backdrop(TextBackdrop backdrop, void* ctx) {
+        text_backdrop_ = backdrop;
+        text_backdrop_ctx_ = ctx;
+    }
 
 private:
     friend struct GraphicsNatives;
@@ -344,6 +354,8 @@ private:
     };
     BlendCache blend_caches_[kBlendCaches]{};
     u32 blend_clock_ = 0;
+    TextBackdrop text_backdrop_ = nullptr;
+    void* text_backdrop_ctx_ = nullptr;
     // A TextFont with its glyph tables, in one block of exec's memory and
     // at the end of the fonts in memory, named by the guest string at
     // name. 0 if exec has no memory for it.

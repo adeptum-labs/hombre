@@ -75,6 +75,7 @@ constexpr u32 ClearMenuStrip = 54;
 constexpr u32 CloseWindow = 72;
 constexpr u32 ItemAddress = 144;
 constexpr u32 DisplayBeep = 96;
+constexpr u32 ActivateWindow = 450;
 constexpr u32 MakeScreen = 378;
 constexpr u32 RemakeDisplay = 384;
 constexpr u32 RethinkDisplay = 390;
@@ -832,6 +833,16 @@ private:
     void insert_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after);
     bool move_window_after(ScreenRecord& srec, WindowRecord& rec, u32 after);
     void activate_window(u32 window);
+    void set_active_window(u32 window);
+    static bool bar_behind_text(void* ctx, u32 rp, u32 bg, const Rect& box, Rect& keep);
+    // SetPointer and ClearPointer: the window's own pointer from the sprite
+    // data at sprite, or none.
+    void set_window_pointer(u32 window, u32 sprite, i32 height, i32 width, i32 x_offset,
+                            i32 y_offset);
+    void clear_window_pointer(u32 window);
+    // Points the display at the pointer to show now: the active window's
+    // own, else the one IPrefs gave, else the built-in one.
+    void show_pointer();
     void redraw_window_bar(u32 window);
     // The title-bar button of `window` that shows pressed: the one the left
     // button holds, while the pointer is over it.
@@ -987,6 +998,15 @@ private:
     // DisplayState::pointer.
     PointerShape pointer_shapes_[2]{};
     u32 pointer_bitmaps_[2]{};
+    // The pointers windows were given with SetPointer, until ClearPointer
+    // or until they close. The display shows the active window's, through a
+    // copy in the pointer colours, in place of the one every window has.
+    struct WindowPointer {
+        u32 window;
+        PointerShape shape;
+    };
+    std::vector<WindowPointer> window_pointers_;
+    PointerShape shown_window_pointer_{};
     // The windows a Request() blocks, with its Requester, until EndRequest:
     // a press in one reaches only the gadgets of its newest requester. The
     // box is where the requester shows in the window, and saved a BitMap of

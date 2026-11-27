@@ -3894,10 +3894,43 @@ u32 Graphics::draw_run(Bus& b, u32 rp, const raster::Font& font,
     const i32 cursor_x = cp_x(b, rp);
     const i32 cursor_y = cp_y(b, rp);
     text_blend::Cache* cache = blend ? blend_for(v.bitmap_addr, v.bitmap.depth) : nullptr;
+    raster::Pens p = pens(b, rp);
+    const i32 x = cursor_x + v.origin_x;
+    const i32 baseline = cursor_y + v.origin_y;
+    Rect dirty{0, 0, -1, -1};
+    // Where something else stands for the B pen, the rest of the text's
+    // box takes it, and the glyphs are drawn as JAM1 draws them.
+    Rect keep{0, 0, -1, -1};
+    const raster::TextSpan span = raster::measure_text(font, style, chars, count);
+    const Rect box{x + static_cast<i32>(span.min_x), baseline - font.baseline,
+                   x + static_cast<i32>(span.max_x), baseline - font.baseline + font.y_size - 1};
+    const Rect rp_box{box.x0 - v.origin_x, box.y0 - v.origin_y, box.x1 - v.origin_x,
+                      box.y1 - v.origin_y};
+    if (p.mode == ndk::JAM2 && text_backdrop_ != nullptr && box.x0 <= box.x1 &&
+        text_backdrop_(text_backdrop_ctx_, rp, p.bg, rp_box, keep)) {
+        const Rect inside{
+            keep.x0 + v.origin_x > box.x0 ? keep.x0 + v.origin_x : box.x0,
+            keep.y0 + v.origin_y > box.y0 ? keep.y0 + v.origin_y : box.y0,
+            keep.x1 + v.origin_x < box.x1 ? keep.x1 + v.origin_x : box.x1,
+            keep.y1 + v.origin_y < box.y1 ? keep.y1 + v.origin_y : box.y1};
+        if (box.x0 <= box.x1 && inside.x0 <= inside.x1 && inside.y0 <= inside.y1) {
+            const Rect around[] = {
+                {box.x0, box.y0, box.x1, inside.y0 - 1},
+                {box.x0, inside.y1 + 1, box.x1, box.y1},
+                {box.x0, inside.y0, inside.x0 - 1, inside.y1},
+                {inside.x1 + 1, inside.y0, box.x1, inside.y1},
+            };
+            for (const Rect& part : around) {
+                if (part.x0 <= part.x1 && part.y0 <= part.y1) {
+                    dirty = unite(dirty, raster::fill_rect(b, v.bitmap, v.clip, part, p.bg));
+                }
+            }
+            p.mode = ndk::JAM1;
+        }
+    }
     u32 advance = 0;
-    const Rect dirty =
-        raster::draw_text(b, v.bitmap, v.clip, pens(b, rp), font, style, cursor_x + v.origin_x,
-                          cursor_y + v.origin_y, chars, count, advance, cache);
+    dirty = unite(dirty, raster::draw_text(b, v.bitmap, v.clip, p, font, style, x, baseline,
+                                           chars, count, advance, cache));
     b.w16(rp + ndk::rp_cp_x, static_cast<u32>(cursor_x) + advance);
     if (b.ok()) {
         report(display_, *machine_, v, dirty);

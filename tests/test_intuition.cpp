@@ -1951,7 +1951,8 @@ void open_window_reads_32_bit_flags() {
     put_new_window(r, kNewWindow, 50, 60, 200, 100, flags, 0, 0, 0);
     const u32 window = open_win(r, kNewWindow);
     CHECK(window != 0);
-    CHECK_EQ(r.get32(window + wd_Flags), flags);
+    // WFLG_ACTIVATE made it the active window, which Intuition marks.
+    CHECK_EQ(r.get32(window + wd_Flags), flags | WFLG_WINDOWACTIVE);
     // The close gadget's groove and glyph, and the depth gadget's.
     CHECK_EQ(screen_pixel(r, screen, 66, 67), 2u);
     CHECK_EQ(screen_pixel(r, screen, 60, 67), 2u);
@@ -1968,7 +1969,7 @@ void open_window_reads_32_bit_flags() {
                                        {WA_Height, 60}, {WA_Flags, flags}, {TAG_DONE, 0}});
     const u32 tagged = open_win_tags(r, 0, tags);
     CHECK(tagged != 0);
-    CHECK_EQ(r.get32(tagged + wd_Flags), flags);
+    CHECK_EQ(r.get32(tagged + wd_Flags), flags | WFLG_WINDOWACTIVE);
     CHECK_EQ(screen_pixel(r, screen, 20, 27), 2u);
     CHECK_EQ(screen_pixel(r, screen, 11, 21), 3u);
 }
@@ -3213,6 +3214,42 @@ void openwindow_with_activate_flag_activates() {
     CHECK(m2 != 0);
     CHECK_EQ(r.get32(m2 + im_Class), IDCMP_ACTIVEWINDOW);
     reply_msg(r, m2);
+}
+
+// WFLG_WINDOWACTIVE in wd_Flags follows the active window, as programs
+// read it there: it moves with a click, with a window opened active and
+// with ActivateWindow, and goes with the window that closes.
+void the_active_window_carries_windowactive_in_its_flags() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    put_new_window(r, kNewWindow, 10, 20, 100, 60, 0, 0, 0, 0);
+    const u32 plain = open_win(r, kNewWindow);
+    CHECK(plain != 0);
+    CHECK_EQ(r.get32(plain + wd_Flags) & WFLG_WINDOWACTIVE, 0u);
+
+    put_new_window(r, kNewWindow, 200, 50, 100, 60, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 active = open_win(r, kNewWindow);
+    CHECK(active != 0);
+    CHECK_EQ(r.get32(active + wd_Flags) & WFLG_WINDOWACTIVE, WFLG_WINDOWACTIVE);
+    CHECK_EQ(r.get32(plain + wd_Flags) & WFLG_WINDOWACTIVE, 0u);
+
+    r.intuition.pointer_event(30, 40, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(30, 40, 0, 0, kMouseLeft, false);
+    CHECK_EQ(r.intuition.active_window(), plain);
+    CHECK_EQ(r.get32(plain + wd_Flags) & WFLG_WINDOWACTIVE, WFLG_WINDOWACTIVE);
+    CHECK_EQ(r.get32(active + wd_Flags) & WFLG_WINDOWACTIVE, 0u);
+
+    r.cpu().a[0] = active;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ActivateWindow), ExitReason::Halt);
+    CHECK_EQ(r.intuition.active_window(), active);
+    CHECK_EQ(r.get32(active + wd_Flags) & WFLG_WINDOWACTIVE, WFLG_WINDOWACTIVE);
+    CHECK_EQ(r.get32(plain + wd_Flags) & WFLG_WINDOWACTIVE, 0u);
+
+    r.intuition.close_window(active);
+    CHECK_EQ(r.intuition.active_window(), 0u);
+    CHECK_EQ(r.get32(plain + wd_Flags) & WFLG_WINDOWACTIVE, 0u);
 }
 
 void shared_userport_is_adopted_and_not_deleted() {
@@ -5833,6 +5870,97 @@ void classic_borders_change_colour_with_the_activation() {
     CHECK_EQ(screen_pixel(r, screen, 250 + 180 - 8, 30 + 50), 3u);
 }
 
+// Text a program puts in JAM2 on a window's title bar, in the pen the bar
+// of a 3.1 screen is filled with, FILLPEN when the window is active and
+// BACKGROUNDPEN when not, shows the bar as it is drawn behind its glyphs.
+// Text in another pen, or anywhere outside the bar, still fills its box.
+void text_in_the_bar_pen_on_a_window_bar_shows_the_bar_behind_it() {
+    constexpr u32 kChars = kData + 0x2900;
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 8, 0, 1, 0);
+    const u32 screen = open_new(r, kNewScreen);
+    CHECK(screen != 0);
+    const u32 pens = r.get32(r.intuition.screen_draw_info(screen) + dri_Pens);
+    const u32 fill = r.get16(pens + 5 * 2);
+    const u32 fill_text = r.get16(pens + 6 * 2);
+    const u32 background = r.get16(pens + 7 * 2);
+    put_new_window(r, kNewWindow, 50, 60, 300, 100, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 active = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 50, 200, 300, 100, 0, 0, 0, 0);
+    const u32 inactive = open_win(r, kNewWindow);
+    CHECK(active != 0 && inactive != 0);
+    CHECK_EQ(r.intuition.active_window(), active);
+    r.str(kChars, "66, 17");
+
+    // The text's box: 8 columns a character from x, the font's 8 rows
+    // from the bar's top.
+    const auto text = [&](u32 window, u32 front, u32 back, i32 x, i32 baseline) {
+        const u32 rp = r.get32(window + wd_RPort);
+        r.graphics.set_pens(rp, front, back, JAM2);
+        r.graphics.move(rp, x, baseline);
+        r.cpu().a[1] = rp;
+        r.cpu().a[0] = kChars;
+        r.cpu().d[0] = 6;
+        CHECK_EQ(r.call(Base::Graphics, graphics_lvo::Text), ExitReason::Halt);
+    };
+    const auto bar = [&](u32 window) {
+        std::vector<u32> pixels;
+        for (i32 y = 1; y <= 8; ++y) {
+            for (i32 x = 100; x < 148; ++x) {
+                pixels.push_back(window_pixel(r, window, x, y));
+            }
+        }
+        return pixels;
+    };
+    // The box keeps the bar's pixels wherever no glyph is, and the glyphs
+    // are there.
+    const auto shows_bar = [&](u32 window, const std::vector<u32>& before, u32 front) {
+        u32 glyph = 0;
+        u32 i = 0;
+        for (i32 y = 1; y <= 8; ++y) {
+            for (i32 x = 100; x < 148; ++x, ++i) {
+                const u32 now = window_pixel(r, window, x, y);
+                if (now != before[i]) {
+                    CHECK_EQ(now, front);
+                    ++glyph;
+                }
+            }
+        }
+        CHECK(glyph > 20);
+    };
+
+    const std::vector<u32> active_bar = bar(active);
+    // The bar is no flat fill of FILLPEN, so a filled box would show.
+    bool flat = true;
+    for (const u32 pixel : active_bar) {
+        flat = flat && pixel == fill;
+    }
+    CHECK(!flat);
+    text(active, fill_text, fill, 100, 8);
+    shows_bar(active, active_bar, fill_text);
+    // New text over the old has the bar back where the old glyphs were.
+    r.str(kChars, "      ");
+    text(active, fill_text, fill, 100, 8);
+    CHECK(bar(active) == active_bar);
+    r.str(kChars, "66, 17");
+
+    const std::vector<u32> inactive_bar = bar(inactive);
+    text(inactive, fill_text, background, 100, 8);
+    shows_bar(inactive, inactive_bar, fill_text);
+
+    // FILLPEN on the inactive bar is no bar pen: the box is filled.
+    text(inactive, fill_text, fill, 100, 8);
+    u32 filled = 0;
+    for (const u32 pixel : bar(inactive)) {
+        filled += pixel == fill ? 1 : 0;
+    }
+    CHECK(filled > 100);
+    // Under the bar the box is filled as ever.
+    text(active, fill_text, fill, 100, 40);
+    CHECK_EQ(window_pixel(r, active, 100, 35), fill);
+    CHECK_EQ(window_pixel(r, active, 147, 35), fill);
+}
+
 // A classic knob is BACKGROUNDPEN, and FILLPEN while it is dragged.
 void classic_knob_takes_the_fill_pen_while_dragged() {
     GfxRig r;
@@ -7062,6 +7190,88 @@ void set_iprefs_type7_refuses_a_record_without_an_image() {
     r.put16(kPointerRecord + 8, 1);
     r.put16(kPointerBitmapA + bm_Rows, 0);
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::SetIPrefs), 0u);
+    CHECK(r.display.pointer == nullptr);
+}
+
+// SetPointer gives a window a sprite of its own: after the two control
+// words, each row is a word of the low plane then one of the high plane,
+// and the offsets place the image from the hot spot. The display shows it
+// while the window is active, and ClearPointer gives the window back the
+// pointer every window has.
+void a_window_shows_its_own_pointer_while_it_is_active() {
+    constexpr u32 kSprite = kData + 0x2800;
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_new_window(r, kNewWindow, 10, 20, 100, 60, WFLG_ACTIVATE, 0, 0, 0);
+    const u32 first = open_win(r, kNewWindow);
+    put_new_window(r, kNewWindow, 200, 20, 100, 60, 0, 0, 0, 0);
+    const u32 second = open_win(r, kNewWindow);
+    CHECK(first != 0 && second != 0);
+    CHECK(r.display.pointer == nullptr);
+
+    // Three rows: colour 1 at the left, colour 2 at the right, colour 3
+    // in the middle.
+    r.put32(kSprite, 0);
+    r.put16(kSprite + 4, 0x8000);
+    r.put16(kSprite + 6, 0x0000);
+    r.put16(kSprite + 8, 0x0000);
+    r.put16(kSprite + 10, 0x0001);
+    r.put16(kSprite + 12, 0x0100);
+    r.put16(kSprite + 14, 0x0100);
+    r.put32(kSprite + 16, 0);
+    r.cpu().a[0] = first;
+    r.cpu().a[1] = kSprite;
+    r.cpu().d[0] = 3;
+    r.cpu().d[1] = 16;
+    r.cpu().d[2] = static_cast<u32>(-7);
+    r.cpu().d[3] = static_cast<u32>(-1);
+    r.refreshes.clear();
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetPointer), ExitReason::Halt);
+    CHECK(!r.refreshes.empty());
+    CHECK_EQ(r.get32(first + wd_Pointer), kSprite);
+    CHECK_EQ(r.get8(first + wd_PtrHeight), 3u);
+    CHECK_EQ(r.get8(first + wd_PtrWidth), 16u);
+    CHECK_EQ(r.get8(first + wd_XOffset), 0xF9u);
+    CHECK_EQ(r.get8(first + wd_YOffset), 0xFFu);
+    const PointerShape* shape = r.display.pointer;
+    CHECK(shape != nullptr);
+    CHECK_EQ(shape->width, 16);
+    CHECK_EQ(shape->height, 3);
+    CHECK_EQ(shape->hot_x, 7);
+    CHECK_EQ(shape->hot_y, 1);
+    CHECK_EQ(shape->pixels[0][0], 1u);
+    CHECK_EQ(shape->pixels[0][1], 0u);
+    CHECK_EQ(shape->pixels[1][15], 2u);
+    CHECK_EQ(shape->pixels[2][7], 3u);
+    CHECK_EQ(shape->rgb[1], kDefaultPointerShape.rgb[1]);
+
+    // Another window active shows the pointer of every window, the first
+    // active again its own.
+    r.intuition.pointer_event(220, 50, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(220, 50, 0, 0, kMouseLeft, false);
+    CHECK_EQ(r.intuition.active_window(), second);
+    CHECK(r.display.pointer == nullptr);
+    r.intuition.pointer_event(30, 50, kMouseLeft, kMouseLeft, 0, false);
+    r.intuition.pointer_event(30, 50, 0, 0, kMouseLeft, false);
+    CHECK(r.display.pointer != nullptr);
+    CHECK_EQ(r.display.pointer->hot_x, 7);
+
+    r.cpu().a[0] = first;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ClearPointer), ExitReason::Halt);
+    CHECK(r.display.pointer == nullptr);
+    CHECK_EQ(r.get32(first + wd_Pointer), 0u);
+
+    // A window closed with its pointer takes it along.
+    r.cpu().a[0] = first;
+    r.cpu().a[1] = kSprite;
+    r.cpu().d[0] = 3;
+    r.cpu().d[1] = 16;
+    r.cpu().d[2] = 0;
+    r.cpu().d[3] = 0;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::SetPointer), ExitReason::Halt);
+    CHECK(r.display.pointer != nullptr);
+    r.intuition.close_window(first);
     CHECK(r.display.pointer == nullptr);
 }
 
@@ -8797,7 +9007,8 @@ void requester_builds_on_the_default_screen_with_its_title_and_buttons() {
     CHECK(IntuitionTest::label(r.intuition, window, 1) == "Maybe");
     CHECK(IntuitionTest::label(r.intuition, window, 2) == "No");
     CHECK_EQ(r.get32(window + wd_Flags),
-             static_cast<u32>(WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_ACTIVATE | WFLG_RMBTRAP));
+             static_cast<u32>(WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_ACTIVATE | WFLG_RMBTRAP |
+                              WFLG_WINDOWACTIVE));
     CHECK_EQ(r.get32(window + wd_IDCMPFlags), static_cast<u32>(IDCMP_MOUSEBUTTONS));
     const i32 left = static_cast<i16>(r.get16(window + wd_LeftEdge));
     const i32 top = static_cast<i16>(r.get16(window + wd_TopEdge));
@@ -11196,6 +11407,7 @@ int main() {
     full_message_table_drops_events_without_leaking();
     events_for_windows_of_other_screens_are_ignored();
     openwindow_with_activate_flag_activates();
+    the_active_window_carries_windowactive_in_its_flags();
     shared_userport_is_adopted_and_not_deleted();
     shared_userport_gets_messages_for_the_window();
     shared_userport_close_removes_only_that_windows_messages();
@@ -11273,6 +11485,7 @@ int main() {
     the_look_follows_the_number_of_planes();
     classic_chrome_follows_the_draw_info_or_else_the_pen_prefs();
     classic_borders_change_colour_with_the_activation();
+    text_in_the_bar_pen_on_a_window_bar_shows_the_bar_behind_it();
     classic_knob_takes_the_fill_pen_while_dragged();
     activation_switch_redraws_both_bars();
     bar_buttons_are_centred_and_mirror_each_other();
@@ -11300,6 +11513,7 @@ int main() {
     set_iprefs_type8_writes_the_palette_into_the_default_screen();
     set_iprefs_type7_takes_the_pointer_image_and_hands_back_the_previous_bitmap();
     set_iprefs_type7_refuses_a_record_without_an_image();
+    a_window_shows_its_own_pointer_while_it_is_active();
     set_iprefs_type8_pens_8_to_10_are_the_pointer_colours();
     set_iprefs_type9_and_apply_pen_prefs_rewrite_the_draw_info();
     set_iprefs_type2_sets_the_system_and_screen_fonts();

@@ -215,6 +215,11 @@ void draw_screen_bar(Graphics& graphics, native::Bus& b, u32 rp, u32 width, u32 
 void draw_window_bar(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w);
 void draw_window_chrome(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w,
                         const Rect* keep = nullptr);
+// The modern bar again inside part alone, in the window's coordinates,
+// over whatever was drawn there. False for the classic look, whose bar is
+// one pen, and draws nothing.
+bool draw_window_bar_part(Graphics& graphics, native::Bus& b, u32 rp, const WindowChrome& w,
+                          const Rect& part);
 void draw_prop_gadget(Graphics& graphics, native::Bus& b, u32 rp, const PropChrome& g);
 void draw_menu(Graphics& graphics, native::Bus& b, const raster::Bitmap& bitmap,
                const Rect& clip, const MenuChrome& menu);

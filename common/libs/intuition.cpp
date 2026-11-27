@@ -1572,6 +1572,14 @@ struct IntuitionNatives {
         native::set_result(m, 0);
     }
 
+    // ActivateWindow(window A0): the window becomes the active one at once.
+    static void activate_window(void* ctx, Machine& m) {
+        Intuition& in = of(ctx);
+        if (in.window_open(m.cpu.a[0])) {
+            in.activate_window(m.cpu.a[0]);
+        }
+    }
+
     // DisplayBeep(screen A0): there is no flash or sound to give, and the
     // call only asks for attention, so it does nothing.
     static void display_beep(void*, Machine&) {}
@@ -1716,9 +1724,22 @@ struct IntuitionNatives {
         of(ctx).end_request(m.cpu.a[0], m.cpu.a[1]);
     }
 
-    // SetPointer, ClearPointer and SetWindowPointerA: a window's own
-    // pointer, a busy one included, is not shown; the screen's stays.
+    // SetWindowPointerA: a pointer of a BitMap, a busy one included, is
+    // not shown; the screen's stays.
     static void keep_pointer(void*, Machine&) {}
+
+    // SetPointer(window A0, sprite A1, height D0, width D1, x offset D2,
+    // y offset D3).
+    static void set_pointer(void* ctx, Machine& m) {
+        of(ctx).set_window_pointer(m.cpu.a[0], m.cpu.a[1], static_cast<i16>(m.cpu.d[0]),
+                                   static_cast<i16>(m.cpu.d[1]), static_cast<i16>(m.cpu.d[2]),
+                                   static_cast<i16>(m.cpu.d[3]));
+    }
+
+    // ClearPointer(window A0).
+    static void clear_pointer(void* ctx, Machine& m) {
+        of(ctx).clear_window_pointer(m.cpu.a[0]);
+    }
 
     // ActivateGadget: a string gadget becomes the one being edited.
     static void activate_gadget(void* ctx, Machine& m) {
@@ -2089,8 +2110,8 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::ScrollWindowRaster, IntuitionNatives::scroll_window_raster,
      "ScrollWindowRaster"},
     {intuition_lvo::ActivateGadget, IntuitionNatives::activate_gadget, "ActivateGadget"},
-    {intuition_lvo::ClearPointer, IntuitionNatives::keep_pointer, "ClearPointer"},
-    {intuition_lvo::SetPointer, IntuitionNatives::keep_pointer, "SetPointer"},
+    {intuition_lvo::ClearPointer, IntuitionNatives::clear_pointer, "ClearPointer"},
+    {intuition_lvo::SetPointer, IntuitionNatives::set_pointer, "SetPointer"},
     {intuition_lvo::SetWindowPointerA, IntuitionNatives::keep_pointer, "SetWindowPointerA"},
     {intuition_lvo::Request, IntuitionNatives::request, "Request"},
     {intuition_lvo::EndRequest, IntuitionNatives::end_request, "EndRequest"},
@@ -2128,6 +2149,7 @@ constexpr IntuitionFunction kIntuitionFunctions[] = {
     {intuition_lvo::RemoveGadget, IntuitionNatives::remove_gadget, "RemoveGadget"},
     {intuition_lvo::ScreenToBack, IntuitionNatives::screen_to_back, "ScreenToBack"},
     {intuition_lvo::DisplayBeep, IntuitionNatives::display_beep, "DisplayBeep"},
+    {intuition_lvo::ActivateWindow, IntuitionNatives::activate_window, "ActivateWindow"},
     {intuition_lvo::MakeScreen, IntuitionNatives::make_screen, "MakeScreen"},
     {intuition_lvo::RemakeDisplay, IntuitionNatives::rethink_display, "RemakeDisplay"},
     {intuition_lvo::RethinkDisplay, IntuitionNatives::rethink_display, "RethinkDisplay"},
@@ -2214,6 +2236,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     exec_ = &exec;
     graphics_ = &graphics;
     display_ = &display;
+    graphics.set_text_backdrop(&Intuition::bar_behind_text, this);
     display.palette.ctx = this;
     display.palette.colormap_of = [](void* ctx, u32 bitmap) {
         return static_cast<const Intuition*>(ctx)->colormap_of_bitmap(bitmap);
@@ -2282,6 +2305,7 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     for (u32& bitmap : pointer_bitmaps_) {
         bitmap = 0;
     }
+    window_pointers_.clear();
     display.pointer = nullptr;
     for (bool& seen : unhandled_gadget_types_) {
         seen = false;
@@ -2483,8 +2507,9 @@ u32 Intuition::store_pointer_prefs(u32 prefs, u32 size) {
     // TODO: the busy pointer (which 1) shows with WA_BusyPointer; until
     // then it is only kept.
     if (which == 0) {
-        display_->pointer = &shape;
-        redraw_pointer();
+        // The active window's own pointer stays in front of it.
+        display_->pointer = nullptr;
+        show_pointer();
     }
     return previous != 0 ? previous : kNoPreviousBitmap;
 }
@@ -2493,6 +2518,7 @@ void Intuition::set_pointer_colour(u32 colour, u32 rgb) {
     for (PointerShape& shape : pointer_shapes_) {
         shape.rgb[colour] = rgb;
     }
+    shown_window_pointer_.rgb[colour] = rgb;
 }
 
 void Intuition::redraw_pointer() {
@@ -4143,12 +4169,185 @@ void Intuition::light_bar_button(bool lit) {
     redraw_window_bar(pressed_gadget_window_);
 }
 
+// Makes the window the active one, 0 for none. WFLG_WINDOWACTIVE moves to
+// its wd_Flags from those of the window active before.
+void Intuition::set_active_window(u32 window) {
+    const u32 prev = active_window_;
+    active_window_ = window;
+    if (machine_ == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    if (prev != 0 && prev != window && window_open(prev)) {
+        b.w32(prev + ndk::wd_Flags, b.r32(prev + ndk::wd_Flags) & ~ndk::WFLG_WINDOWACTIVE);
+    }
+    if (window != 0) {
+        b.w32(window + ndk::wd_Flags, b.r32(window + ndk::wd_Flags) | ndk::WFLG_WINDOWACTIVE);
+    }
+    if (prev != window) {
+        show_pointer();
+    }
+}
+
+// Text on a window's title bar in the pen a 3.1 bar is filled with, FILLPEN
+// while the window is active and BACKGROUNDPEN while it is not, as a
+// program prints into the bar, has the bar drawn again behind it: a 3.1
+// bar is that one pen, and the modern bar drawn here is not.
+bool Intuition::bar_behind_text(void* ctx, u32 rp, u32 bg, const Rect& box, Rect& keep) {
+    Intuition& in = *static_cast<Intuition*>(ctx);
+    if (in.machine_ == nullptr || rp == 0) {
+        return false;
+    }
+    Bus b(*in.machine_);
+    const u32 layer = b.r32(rp + ndk::rp_Layer);
+    if (layer == 0 || !b.ok()) {
+        return false;
+    }
+    for (const WindowRecord& rec : in.window_records_) {
+        if (rec.layer != layer) {
+            continue;
+        }
+        const u32 info = in.screen_draw_info(rec.screen);
+        if (info == 0) {
+            return false;
+        }
+        u16 pens[sysimage::kPenCount];
+        sysimage::read_pens(b, info, pens);
+        const bool active = rec.addr == in.active_window_;
+        const u32 bar_pen = pens[active ? sysimage::FillPen : sysimage::BackgroundPen];
+        const i32 width = static_cast<i16>(b.r16(rec.addr + ndk::wd_Width));
+        const i32 bar_height = static_cast<i32>(b.r8(rec.addr + ndk::wd_BorderTop));
+        if (!b.ok() || bg != bar_pen || width <= 0 || bar_height <= 0) {
+            return false;
+        }
+        const Rect bar{0, 0, width - 1, bar_height - 1};
+        const Rect part{box.x0 > bar.x0 ? box.x0 : bar.x0, box.y0 > bar.y0 ? box.y0 : bar.y0,
+                        box.x1 < bar.x1 ? box.x1 : bar.x1, box.y1 < bar.y1 ? box.y1 : bar.y1};
+        if (part.x0 > part.x1 || part.y0 > part.y1) {
+            return false;
+        }
+        const ScreenRecord* srec = in.find_screen_record(rec.screen);
+        WindowView w = load_window(b, rec.addr);
+        if (srec == nullptr || !w.ok || (w.flags & ndk::WFLG_BORDERLESS) != 0) {
+            return false;
+        }
+        w.rp = rec.rp;
+        const u32 window = rec.addr;
+        const u32 screen = rec.screen;
+        const i32 left = rec.left;
+        const i32 top = rec.top;
+        if (!chrome::draw_window_bar_part(
+                *in.graphics_, b, rec.rp,
+                to_chrome(w, active, in.held_bar_button(window), in.window_metrics(window),
+                          screen_pens(b, srec->draw_info, in.pen_prefs_for(srec->depth))),
+                part)) {
+            return false;
+        }
+        in.compose(screen, Rect{left + part.x0, top + part.y0, left + part.x1, top + part.y1});
+        keep = bar;
+        return true;
+    }
+    return false;
+}
+
+// A sprite is two control words, then a row each of a word of the low
+// plane and one of the high plane, leftmost pixel in the top bit; the
+// offsets place its top left corner from the hot spot.
+void Intuition::set_window_pointer(u32 window, u32 sprite, i32 height, i32 width,
+                                   i32 x_offset, i32 y_offset) {
+    if (machine_ == nullptr || !window_open(window)) {
+        return;
+    }
+    if (sprite == 0 || height <= 0 || width <= 0) {
+        clear_window_pointer(window);
+        return;
+    }
+    Bus b(*machine_);
+    const u32 rows = static_cast<u32>(height) < kMaxPointerHeight ? static_cast<u32>(height)
+                                                                  : kMaxPointerHeight;
+    const u32 columns = width < 16 ? static_cast<u32>(width) : 16;
+    PointerShape shape{};
+    shape.width = static_cast<u16>(columns);
+    shape.height = static_cast<u16>(rows);
+    shape.hot_x = static_cast<i16>(-x_offset);
+    shape.hot_y = static_cast<i16>(-y_offset);
+    for (u32 y = 0; y < rows; ++y) {
+        const u32 low = b.r16(sprite + 4 + y * 4);
+        const u32 high = b.r16(sprite + 6 + y * 4);
+        for (u32 x = 0; x < columns; ++x) {
+            const u32 bit = 15 - x;
+            shape.pixels[y][x] =
+                static_cast<u8>(((low >> bit) & 1u) | (((high >> bit) & 1u) << 1));
+        }
+    }
+    if (!b.ok()) {
+        return;
+    }
+    b.w32(window + ndk::wd_Pointer, sprite);
+    b.w8(window + ndk::wd_PtrHeight, static_cast<u32>(height) & 0xFF);
+    b.w8(window + ndk::wd_PtrWidth, static_cast<u32>(width) & 0xFF);
+    b.w8(window + ndk::wd_XOffset, static_cast<u32>(x_offset) & 0xFF);
+    b.w8(window + ndk::wd_YOffset, static_cast<u32>(y_offset) & 0xFF);
+    bool found = false;
+    for (WindowPointer& own : window_pointers_) {
+        if (own.window == window) {
+            own.shape = shape;
+            found = true;
+        }
+    }
+    if (!found) {
+        window_pointers_.push_back(WindowPointer{window, shape});
+    }
+    if (window == active_window_) {
+        show_pointer();
+    }
+}
+
+void Intuition::clear_window_pointer(u32 window) {
+    if (machine_ == nullptr || !window_open(window)) {
+        return;
+    }
+    Bus b(*machine_);
+    b.w32(window + ndk::wd_Pointer, 0);
+    b.w8(window + ndk::wd_PtrHeight, 0);
+    b.w8(window + ndk::wd_PtrWidth, 0);
+    b.w8(window + ndk::wd_XOffset, 0);
+    b.w8(window + ndk::wd_YOffset, 0);
+    const usize before = window_pointers_.size();
+    std::erase_if(window_pointers_, [&](const WindowPointer& own) { return own.window == window; });
+    if (window_pointers_.size() != before && window == active_window_) {
+        show_pointer();
+    }
+}
+
+void Intuition::show_pointer() {
+    if (display_ == nullptr) {
+        return;
+    }
+    const PointerShape* shown = pointer_bitmaps_[0] != 0 ? &pointer_shapes_[0] : nullptr;
+    for (const WindowPointer& own : window_pointers_) {
+        if (active_window_ != 0 && own.window == active_window_) {
+            shown_window_pointer_ = own.shape;
+            for (u32 colour = 1; colour < 4; ++colour) {
+                shown_window_pointer_.rgb[colour] = pointer_shapes_[0].rgb[colour];
+            }
+            shown = &shown_window_pointer_;
+        }
+    }
+    const bool was_own = display_->pointer == &shown_window_pointer_;
+    if (shown == display_->pointer && !was_own) {
+        return;
+    }
+    display_->pointer = shown;
+    redraw_pointer();
+}
+
 void Intuition::activate_window(u32 window) {
     if (window == active_window_) {
         return;
     }
     const u32 prev = active_window_;
-    active_window_ = window;
+    set_active_window(window);
     begin_batch();
     if (prev != 0) {
         post_intuimessage(prev, ndk::IDCMP_INACTIVEWINDOW, 0);
@@ -4613,7 +4812,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
     begin_batch();
     if ((a.flags & ndk::WFLG_ACTIVATE) != 0) {
         const u32 prev = active_window_;
-        active_window_ = window;
+        set_active_window(window);
         if (prev != 0) {
             post_intuimessage(prev, ndk::IDCMP_INACTIVEWINDOW, 0);
             redraw_window_bar(prev);
@@ -4670,8 +4869,10 @@ void Intuition::close_window(u32 window) {
     if (menu_.active && menu_.window == window) {
         leave_menu_mode();
     }
+    std::erase_if(window_pointers_, [&](const WindowPointer& own) { return own.window == window; });
     if (active_window_ == window) {
         active_window_ = 0;
+        show_pointer();
     }
     if (pressed_gadget_window_ == window) {
         pressed_gadget_window_ = 0;
@@ -6475,6 +6676,7 @@ void Intuition::reclaim_owned_by(u32 task, const u32* keep_windows, u32 count,
 
     if (!window_open(active_window_)) {
         active_window_ = 0;
+        show_pointer();
     }
     pressed_gadget_window_ = 0;
     pressed_gadget_ = GadgetKind::None;

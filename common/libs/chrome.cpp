@@ -609,6 +609,78 @@ Surface amiga_surface(AmigaSurface& state, u32 depth) {
     return Surface{&state, depth, amiga_fill, amiga_text_fit, amiga_text_width, amiga_text};
 }
 
+namespace {
+
+// A surface that draws only inside part, in the window's coordinates.
+struct PartSurface {
+    Graphics& graphics;
+    Bus& b;
+    u32 rp;
+    Rect part;
+};
+
+void part_fill(void* ctx, const Rect& box, u8 pen) {
+    PartSurface& s = *static_cast<PartSurface*>(ctx);
+    const Rect cut{box.x0 > s.part.x0 ? box.x0 : s.part.x0, box.y0 > s.part.y0 ? box.y0 : s.part.y0,
+                   box.x1 < s.part.x1 ? box.x1 : s.part.x1, box.y1 < s.part.y1 ? box.y1 : s.part.y1};
+    if (cut.x0 > cut.x1 || cut.y0 > cut.y1) {
+        return;
+    }
+    s.graphics.set_pens(s.rp, pen, 0, ndk::JAM2);
+    s.graphics.rect_fill(s.rp, cut.x0, cut.y0, cut.x1, cut.y1);
+}
+
+u32 part_text_fit(void* ctx, u32 font, const u8* chars, u32 count, i32 room) {
+    return static_cast<PartSurface*>(ctx)->graphics.text_fit(font, chars, count, room);
+}
+
+i32 part_text_width(void* ctx, u32 font, const u8* chars, u32 count) {
+    return static_cast<i32>(static_cast<PartSurface*>(ctx)->graphics.text_width(font, chars, count));
+}
+
+void part_text(void* ctx, u32 font, i32 x, i32 baseline, u8 pen, const u8* chars, u32 count) {
+    PartSurface& s = *static_cast<PartSurface*>(ctx);
+    const raster::RastPortView v = raster::load_rastport(s.b, s.rp);
+    if (count == 0 || !v.ok) {
+        return;
+    }
+    raster::Clip clip = v.clip;
+    const i32 x0 = s.part.x0 + v.origin_x;
+    const i32 y0 = s.part.y0 + v.origin_y;
+    const i32 x1 = s.part.x1 + v.origin_x;
+    const i32 y1 = s.part.y1 + v.origin_y;
+    clip.x0 = clip.x0 > x0 ? clip.x0 : x0;
+    clip.y0 = clip.y0 > y0 ? clip.y0 : y0;
+    clip.x1 = clip.x1 < x1 ? clip.x1 : x1;
+    clip.y1 = clip.y1 < y1 ? clip.y1 : y1;
+    if (clip.x0 > clip.x1 || clip.y0 > clip.y1) {
+        return;
+    }
+    s.graphics.text_on(s.b, v.bitmap, v.bitmap_addr, clip, pen, font, x + v.origin_x,
+                       baseline + v.origin_y, chars, count);
+}
+
+}
+
+bool draw_window_bar_part(Graphics& graphics, Bus& b, u32 rp, const WindowChrome& w,
+                          const Rect& part) {
+    if (rp == 0 || w.width < 2 || w.height <= w.metrics.bar_height()) {
+        return false;
+    }
+    const u32 depth = rastport_depth(b, rp);
+    if (style_for_depth(depth) != Style::Modern) {
+        return false;
+    }
+    const RpState saved = save_rp(b, rp);
+    PartSurface state{graphics, b, rp, part};
+    const Surface surface{&state, depth, part_fill, part_text_fit, part_text_width, part_text};
+    u8 chars[kMaxTitleChars];
+    const Title title{chars, read_title(b, w.title, chars)};
+    paint_modern_bar(surface, w, title);
+    restore_rp(b, rp, saved);
+    return true;
+}
+
 // The pen of row y of a screen title bar of bar_height rows, shaded from
 // top to bottom.
 u8 screen_bar_pen(i32 y, i32 bar_height) {
