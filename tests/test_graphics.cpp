@@ -118,6 +118,15 @@ void rect_fill(GfxRig& r, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
     CHECK_EQ(r.call(Base::Graphics, graphics_lvo::RectFill), ExitReason::Halt);
 }
 
+void erase_rect(GfxRig& r, u32 rp, i32 x0, i32 y0, i32 x1, i32 y1) {
+    r.cpu().a[1] = rp;
+    r.cpu().d[0] = static_cast<u32>(x0);
+    r.cpu().d[1] = static_cast<u32>(y0);
+    r.cpu().d[2] = static_cast<u32>(x1);
+    r.cpu().d[3] = static_cast<u32>(y1);
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::EraseRect), ExitReason::Halt);
+}
+
 u32 read_pixel(GfxRig& r, u32 rp, i32 x, i32 y) {
     r.cpu().a[1] = rp;
     r.cpu().d[0] = static_cast<u32>(x);
@@ -280,6 +289,70 @@ void rect_fill_complements_in_complement_mode() {
     r.put8(s.rp + rp_Mask, 1);
     rect_fill(r, s.rp, 0, 0, 0, 0);
     CHECK_EQ(read_pixel(r, s.rp, 0, 0), 3u);
+}
+
+void erase_rect_clears_to_pen_zero_through_the_layer() {
+    GfxRig r;
+    const Surface s = make_surface(r, kBitmap, kRastPort);
+    r.put16(kLayer + ly_MinX, 100);
+    r.put16(kLayer + ly_MinY, 50);
+    r.put16(kLayer + ly_MaxX, 179);
+    r.put16(kLayer + ly_MaxY, 99);
+    r.put32(s.rp + rp_Layer, kLayer);
+    r.graphics.set_pens(s.rp, 2, 3, JAM2);
+    rect_fill(r, s.rp, 0, 0, 79, 49);
+    CHECK_EQ(read_pixel(r, s.rp, 0, 0), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 79, 49), 2u);
+
+    // EraseRect ignores the pens and clears only where the layer is.
+    erase_rect(r, s.rp, 10, 10, 19, 19);
+    for (i32 y = 10; y <= 19; ++y) {
+        for (i32 x = 10; x <= 19; ++x) {
+            CHECK_EQ(read_pixel(r, s.rp, x, y), 0u);
+        }
+    }
+    CHECK_EQ(read_pixel(r, s.rp, 9, 10), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 20, 10), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 10, 9), 2u);
+    CHECK_EQ(read_pixel(r, s.rp, 10, 20), 2u);
+}
+
+void get_and_free_color_map_build_a_v39_map() {
+    GfxRig r;
+    const u32 before = r.exec.free_bytes();
+    r.cpu().d[0] = 8;
+    const u32 map = r.result(Base::Graphics, graphics_lvo::GetColorMap);
+    CHECK(map != 0);
+    CHECK_EQ(r.get8(map + cm_Type), COLORMAP_TYPE_V39);
+    CHECK_EQ(r.get16(map + cm_Count), 8u);
+    const u32 table = r.get32(map + cm_ColorTable);
+    const u32 low = r.get32(map + cm_LowColorBits);
+    CHECK(table != 0 && low != 0);
+
+    // A ViewPort over the map reads and writes its colours.
+    r.put32(kViewPort + vp_ColorMap, map);
+    r.cpu().a[0] = kViewPort;
+    r.cpu().d[0] = 1;
+    r.cpu().d[1] = 0xA;
+    r.cpu().d[2] = 0xB;
+    r.cpu().d[3] = 0xC;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::SetRGB4), ExitReason::Halt);
+    CHECK_EQ(r.get16(table + 2), 0xABCu);
+    CHECK_EQ(r.get16(low + 2), 0xABCu);
+    r.cpu().a[0] = map;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetRGB4), 0xABCu);
+
+    r.cpu().a[0] = map;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::FreeColorMap), ExitReason::Halt);
+    CHECK_EQ(r.exec.free_bytes(), before);
+
+    // Zero entries and FreeColorMap(0) are both nothing to do.
+    r.cpu().d[0] = 0;
+    CHECK_EQ(r.result(Base::Graphics, graphics_lvo::GetColorMap), 0u);
+    r.cpu().a[0] = 0;
+    CHECK_EQ(r.call(Base::Graphics, graphics_lvo::FreeColorMap), ExitReason::Halt);
+    CHECK_EQ(r.exec.free_bytes(), before);
 }
 
 void write_then_read_pixel_vectors() {
@@ -3423,6 +3496,8 @@ int main() {
     move_sets_cp();
     rect_fill_fills_pen_and_clips();
     rect_fill_complements_in_complement_mode();
+    erase_rect_clears_to_pen_zero_through_the_layer();
+    get_and_free_color_map_build_a_v39_map();
     write_then_read_pixel_vectors();
     draw_moves_cp_and_sets_pixels();
     text_draws_glyphs_advances_cp_and_returns_nothing_unsafe();

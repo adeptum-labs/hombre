@@ -1594,6 +1594,82 @@ struct GraphicsNatives {
                           static_cast<i16>(m.cpu.d[2]), static_cast<i16>(m.cpu.d[3]));
     }
 
+    // EraseRect(rp A1, xmin D0, ymin D1, xmax D2, ymax D3): clears the
+    // rectangle through the RastPort's layer, as EraseRect does where no
+    // backfill hook draws.
+    static void erase_rect(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        const u32 rp = m.cpu.a[1];
+        if (rp == 0) {
+            return;
+        }
+        Bus b(m);
+        const View v = raster::load_rastport(b, rp);
+        if (!v.ok) {
+            return;
+        }
+        const i32 x0 = static_cast<i16>(m.cpu.d[0]);
+        const i32 y0 = static_cast<i16>(m.cpu.d[1]);
+        const i32 x1 = static_cast<i16>(m.cpu.d[2]);
+        const i32 y1 = static_cast<i16>(m.cpu.d[3]);
+        const Rect area{x0 + v.origin_x, y0 + v.origin_y, x1 + v.origin_x, y1 + v.origin_y};
+        const Rect dirty = raster::fill_rect(b, v.bitmap, v.clip, area, 0);
+        if (b.ok()) {
+            report(g.display_, m, v, dirty);
+        }
+    }
+
+    // GetColorMap(entries D0): a ColorMap of entries colours with the two
+    // tables and the type of a screen's, in chip memory.
+    static void get_color_map(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        const u32 entries = m.cpu.d[0];
+        if (entries == 0 || entries > 0xFFFF || g.exec_ == nullptr) {
+            native::set_result(m, 0);
+            return;
+        }
+        const u32 color_bytes = entries * 2;
+        constexpr u32 kType = ndk::MEMF_CHIP | ndk::MEMF_CLEAR;
+        const u32 map = g.exec_->alloc(ndk::ColorMap_SIZEOF, kType);
+        const u32 colors = g.exec_->alloc(color_bytes, kType);
+        const u32 low = g.exec_->alloc(color_bytes, kType);
+        u32 result = 0;
+        if (map != 0 && colors != 0 && low != 0) {
+            Bus b(m);
+            b.w16(map + ndk::cm_Count, entries);
+            b.w32(map + ndk::cm_ColorTable, colors);
+            b.w32(map + ndk::cm_LowColorBits, low);
+            b.w8(map + ndk::cm_Type, ndk::COLORMAP_TYPE_V39);
+            result = b.ok() ? map : 0;
+        }
+        if (result == 0) {
+            g.exec_->free(colors, color_bytes);
+            g.exec_->free(low, color_bytes);
+            g.exec_->free(map, ndk::ColorMap_SIZEOF);
+        }
+        native::set_result(m, result);
+    }
+
+    // FreeColorMap(colormap A0): the map GetColorMap made and its tables;
+    // 0 for a caller that has none.
+    static void free_color_map(void* ctx, Machine& m) {
+        Graphics& g = of(ctx);
+        const u32 map = m.cpu.a[0];
+        if (map == 0 || g.exec_ == nullptr) {
+            return;
+        }
+        Bus b(m);
+        const u32 entries = b.r16(map + ndk::cm_Count);
+        const u32 colors = b.r32(map + ndk::cm_ColorTable);
+        const u32 low = b.r32(map + ndk::cm_LowColorBits);
+        if (!b.ok()) {
+            return;
+        }
+        g.exec_->free(colors, entries * 2);
+        g.exec_->free(low, entries * 2);
+        g.exec_->free(map, ndk::ColorMap_SIZEOF);
+    }
+
     // WritePixelArray8 and ReadPixelArray8(rp A0, xstart D0, ystart D1,
     // xstop D2, ystop D3, array A2, temprp A1): a block of pens, rows padded
     // to a multiple of 16; the pixels it holds.
@@ -2932,6 +3008,8 @@ struct GraphicsFunction {
 
 constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::ClearScreen, GraphicsNatives::clear_screen, "ClearScreen"},
+    {graphics_lvo::GetColorMap, GraphicsNatives::get_color_map, "GetColorMap"},
+    {graphics_lvo::FreeColorMap, GraphicsNatives::free_color_map, "FreeColorMap"},
     {graphics_lvo::TextLength, GraphicsNatives::text_length, "TextLength"},
     {graphics_lvo::Text, GraphicsNatives::text, "Text"},
     {graphics_lvo::SetFont, GraphicsNatives::set_font, "SetFont"},
@@ -2987,6 +3065,7 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::Draw, GraphicsNatives::draw, "Draw"},
     {graphics_lvo::SetRGB4, GraphicsNatives::set_rgb4, "SetRGB4"},
     {graphics_lvo::RectFill, GraphicsNatives::rect_fill, "RectFill"},
+    {graphics_lvo::EraseRect, GraphicsNatives::erase_rect, "EraseRect"},
     {graphics_lvo::ReadPixel, GraphicsNatives::read_pixel, "ReadPixel"},
     {graphics_lvo::WritePixel, GraphicsNatives::write_pixel, "WritePixel"},
     {graphics_lvo::Flood, GraphicsNatives::flood, "Flood"},
