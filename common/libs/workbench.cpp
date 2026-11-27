@@ -3434,10 +3434,155 @@ void Workbench::clean_up(u32 window_id) {
     draw_window(window_id);
 }
 
+std::vector<u32> Workbench::selected_icons(u32 window_id) const {
+    const DrawerWindow* window = find_window(window_id);
+    return window != nullptr ? window->clicks.selected() : std::vector<u32>{};
+}
+
+auto Workbench::icon_targets(const std::vector<u32>& icons) const
+    -> std::vector<IconTarget> {
+    std::vector<IconTarget> targets;
+    for (const u32 id : icons) {
+        const IconEntry* icon = find_icon(id);
+        if (icon == nullptr) {
+            continue;
+        }
+        IconTarget target;
+        target.id = id;
+        copy_text(target.file, sizeof target.file, icon->file);
+        targets.push_back(target);
+    }
+    return targets;
+}
+
+u32 Workbench::resolve_icon(u32 window_id, const IconTarget& target) const {
+    if (find_icon(target.id) != nullptr) {
+        return target.id;
+    }
+    const IconEntry* found = icons_.find_if([&](const IconEntry& icon) {
+        return icon.owner == window_id && same_text(icon.file, target.file);
+    });
+    return found != nullptr ? found->id : kNoIcon;
+}
+
 void Workbench::open_selected(u32 window_id) {
-    const DrawerWindow* drawer = find_window(window_id);
-    if (drawer != nullptr && !drawer->clicks.selected().empty()) {
-        open_icon(window_id, drawer->clicks.selected().front());
+    for (const u32 id : selected_icons(window_id)) {
+        // Opening an icon may take another one away.
+        if (find_icon(id) != nullptr) {
+            open_icon(window_id, id);
+        }
+    }
+}
+
+void Workbench::copy_icons(u32 window_id, const std::vector<u32>& icons) {
+    if (icons.size() == 1u) {
+        copy_icon(window_id, icons.front());
+        return;
+    }
+    for (const u32 id : icons) {
+        copy_one_icon(window_id, id);
+    }
+    if (DrawerWindow* window = find_window(window_id); window != nullptr) {
+        update_window(*window);
+    }
+}
+
+void Workbench::delete_icons(u32 window_id, const std::vector<u32>& icons) {
+    if (icons.size() == 1u) {
+        ask_delete(window_id, icons.front());
+        return;
+    }
+    const DrawerWindow* window = find_window(window_id);
+    if (window == nullptr) {
+        return;
+    }
+    std::vector<u32> doomed;
+    u32 objects = 0;
+    for (const u32 id : icons) {
+        const IconEntry* icon = file_icon(window_id, id);
+        if (icon == nullptr) {
+            const IconEntry* other = find_icon(id);
+            show_error("cannot delete", other != nullptr ? other->name : "?",
+                       ERROR_OBJECT_WRONG_TYPE);
+            continue;
+        }
+        char path[Dos::kMaxPath];
+        std::vector<TreeEntry> tree;
+        u32 error = ERROR_INVALID_COMPONENT_NAME;
+        if (!icon_path(*window, *icon, path) || !collect_tree(path, tree, error)) {
+            show_error("cannot delete", icon->name, error);
+            return;
+        }
+        doomed.push_back(id);
+        if (tree.size() > 1u) {
+            objects += static_cast<u32>(tree.size() - 1);
+        }
+    }
+    if (doomed.empty()) {
+        return;
+    }
+    Message message;
+    message.add("Warning: you cannot get back\nwhat you delete!\nOK to delete ")
+        .number(doomed.size())
+        .add(doomed.size() == 1u ? " icon" : " icons");
+    if (objects > 0) {
+        message.add("\nand the ").number(objects).add(" objects in them");
+    }
+    message.add("?");
+    if (!confirm("Delete", message.text)) {
+        return;
+    }
+    for (const u32 id : doomed) {
+        delete_one_icon(window_id, id);
+    }
+    if (DrawerWindow* w = find_window(window_id); w != nullptr) {
+        update_window(*w);
+    }
+}
+
+void Workbench::rename_icons(u32 window_id, const std::vector<u32>& icons) {
+    for (const IconTarget& target : icon_targets(icons)) {
+        const u32 id = resolve_icon(window_id, target);
+        if (id != kNoIcon) {
+            ask_rename(window_id, id);
+        }
+    }
+}
+
+void Workbench::information_icons(u32 window_id, const std::vector<u32>& icons) {
+    for (const IconTarget& target : icon_targets(icons)) {
+        const u32 id = resolve_icon(window_id, target);
+        if (id != kNoIcon) {
+            show_information(window_id, id);
+        }
+    }
+}
+
+void Workbench::snapshot_icons(u32 window_id, const std::vector<u32>& icons, bool keep) {
+    for (const u32 id : icons) {
+        if (keep) {
+            snapshot_icon(window_id, id);
+        } else {
+            unsnapshot_icon(window_id, id);
+        }
+    }
+}
+
+void Workbench::leave_out_icons(u32 window_id, const std::vector<u32>& icons) {
+    for (const u32 id : icons) {
+        leave_out(window_id, id);
+    }
+}
+
+void Workbench::put_away_icons(const std::vector<u32>& icons) {
+    for (const u32 id : icons) {
+        put_away(id);
+    }
+}
+
+void Workbench::empty_trash_icons(u32 window_id, const std::vector<u32>& icons) {
+    for (const u32 id : icons) {
+        ask_empty_trash(window_id, id);
     }
 }
 
@@ -4635,10 +4780,23 @@ bool Workbench::duplicate(const char* from, const char* to, u32& error) {
 }
 
 bool Workbench::copy_icon(u32 window_id, u32 icon_id) {
+    // A refused icon leaves the window as it was.
+    const bool file = file_icon(window_id, icon_id) != nullptr;
+    const bool done = copy_one_icon(window_id, icon_id);
+    if (file) {
+        if (DrawerWindow* window = find_window(window_id); window != nullptr) {
+            update_window(*window);
+        }
+    }
+    return done;
+}
+
+bool Workbench::copy_one_icon(u32 window_id, u32 icon_id) {
     const IconEntry* icon = file_icon(window_id, icon_id);
     if (icon == nullptr) {
         const IconEntry* other = find_icon(icon_id);
-        show_error("cannot copy", other != nullptr ? other->name : "?", ERROR_OBJECT_WRONG_TYPE);
+        show_error("cannot copy", other != nullptr ? other->name : "?",
+                   ERROR_OBJECT_WRONG_TYPE);
         return false;
     }
     char name[32];
@@ -4677,13 +4835,22 @@ bool Workbench::copy_icon(u32 window_id, u32 icon_id) {
     } else {
         show_error("cannot copy", name, error);
     }
-    if (DrawerWindow* w = find_window(window_id); w != nullptr) {
-        update_window(*w);
-    }
     return done;
 }
 
 bool Workbench::delete_icon(u32 window_id, u32 icon_id) {
+    // A refused icon leaves the window as it was.
+    const bool file = file_icon(window_id, icon_id) != nullptr;
+    const bool done = delete_one_icon(window_id, icon_id);
+    if (file) {
+        if (DrawerWindow* window = find_window(window_id); window != nullptr) {
+            update_window(*window);
+        }
+    }
+    return done;
+}
+
+bool Workbench::delete_one_icon(u32 window_id, u32 icon_id) {
     const IconEntry* icon = file_icon(window_id, icon_id);
     if (icon == nullptr) {
         const IconEntry* other = find_icon(icon_id);
@@ -4709,9 +4876,6 @@ bool Workbench::delete_icon(u32 window_id, u32 icon_id) {
         LogLine().text("workbench: deleted ").text(path).send();
     } else {
         show_error("cannot delete", name, error);
-    }
-    if (DrawerWindow* window = find_window(window_id); window != nullptr) {
-        update_window(*window);
     }
     return done;
 }
@@ -5463,30 +5627,30 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
             open_after_reset();
         }
     } else if (menu == kMenuIcons) {
-        const DrawerWindow* window = find_window(window_id);
-        const u32 selected = window != nullptr && !window->clicks.selected().empty()
-                                 ? window->clicks.selected().front()
-                                 : kNoIcon;
+        const std::vector<u32> selected = selected_icons(window_id);
+        if (selected.empty()) {
+            return;
+        }
         if (item == 0) {
             open_selected(window_id);
-        } else if (item == kItemIconCopy && selected != kNoIcon) {
-            copy_icon(window_id, selected);
-        } else if (item == kItemIconRename && selected != kNoIcon) {
-            ask_rename(window_id, selected);
-        } else if (item == kItemIconInformation && selected != kNoIcon) {
-            show_information(window_id, selected);
-        } else if (item == kItemIconSnapshot && selected != kNoIcon) {
-            snapshot_icon(window_id, selected);
-        } else if (item == kItemIconUnsnapshot && selected != kNoIcon) {
-            unsnapshot_icon(window_id, selected);
-        } else if (item == kItemEmptyTrash && selected != kNoIcon) {
-            ask_empty_trash(window_id, selected);
-        } else if (item == kItemIconLeaveOut && selected != kNoIcon) {
-            leave_out(window_id, selected);
-        } else if (item == kItemIconPutAway && selected != kNoIcon) {
-            put_away(selected);
-        } else if (item == kItemIconDelete && selected != kNoIcon) {
-            ask_delete(window_id, selected);
+        } else if (item == kItemIconCopy) {
+            copy_icons(window_id, selected);
+        } else if (item == kItemIconRename) {
+            rename_icons(window_id, selected);
+        } else if (item == kItemIconInformation) {
+            information_icons(window_id, selected);
+        } else if (item == kItemIconSnapshot) {
+            snapshot_icons(window_id, selected, true);
+        } else if (item == kItemIconUnsnapshot) {
+            snapshot_icons(window_id, selected, false);
+        } else if (item == kItemEmptyTrash) {
+            empty_trash_icons(window_id, selected);
+        } else if (item == kItemIconLeaveOut) {
+            leave_out_icons(window_id, selected);
+        } else if (item == kItemIconPutAway) {
+            put_away_icons(selected);
+        } else if (item == kItemIconDelete) {
+            delete_icons(window_id, selected);
         }
     }
 }

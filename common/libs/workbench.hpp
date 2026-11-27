@@ -835,7 +835,32 @@ private:
     bool rename_with_info(const char* from, const char* to, u32& error);
     void select_contents(u32 window_id);
     void clean_up(u32 window_id);
+    // The selected icons of the window, copied before an Icons menu item
+    // acts on them.
+    std::vector<u32> selected_icons(u32 window_id) const;
+    // An icon of that snapshot and the file name a refilled window gives it
+    // back by.
+    struct IconTarget {
+        u32 id = kNoIcon;
+        char file[32]{};
+    };
+    std::vector<IconTarget> icon_targets(const std::vector<u32>& icons) const;
+    // The target's icon, by its id or, once a refill has taken that, by its
+    // file name; kNoIcon when it is gone.
+    u32 resolve_icon(u32 window_id, const IconTarget& target) const;
     void open_selected(u32 window_id);
+    void copy_icons(u32 window_id, const std::vector<u32>& icons);
+    void delete_icons(u32 window_id, const std::vector<u32>& icons);
+    void rename_icons(u32 window_id, const std::vector<u32>& icons);
+    void information_icons(u32 window_id, const std::vector<u32>& icons);
+    void snapshot_icons(u32 window_id, const std::vector<u32>& icons, bool keep);
+    void leave_out_icons(u32 window_id, const std::vector<u32>& icons);
+    void put_away_icons(const std::vector<u32>& icons);
+    void empty_trash_icons(u32 window_id, const std::vector<u32>& icons);
+    // The work of copy_icon and delete_icon for one icon, leaving the refill
+    // of the window to their caller.
+    bool copy_one_icon(u32 window_id, u32 icon_id);
+    bool delete_one_icon(u32 window_id, u32 icon_id);
     void mouse_click(u32 window_id, i32 mx, i32 my, bool shift, u64 now_us);
     void drag_to(u32 window_id, i32 mx, i32 my);
     void end_drag(u32 window_id, i32 mx, i32 my);

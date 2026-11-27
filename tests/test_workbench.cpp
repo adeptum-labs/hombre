@@ -4260,6 +4260,13 @@ void click_icon(Rig& r, u32 window, u32 icon) {
     r.release(r.screen_x(window, at.left + 3), r.screen_y(window, at.top + 3));
 }
 
+// A click with Shift held, adding the icon to the selection.
+void shift_click_icon(Rig& r, u32 window, u32 icon) {
+    g_intuition.set_qualifier(1);
+    click_icon(r, window, icon);
+    g_intuition.set_qualifier(0);
+}
+
 // The number of the Icons menu's item.
 u32 icons_pick(u32 item) { return 2 | (item << 5) | (31 << 11); }
 
@@ -4460,6 +4467,102 @@ void copy_refuses_disks_and_keeps_names_short() {
     CHECK(!r.workbench.copy_icon(0, r.find_icon_in(0, "Ram Disk")));
     CHECK(!r.workbench.copy_icon(w.tools, r.find_icon_in(w.tools, "Tool")));
     CHECK(logged("workbench: cannot copy Tool: Disk is write-protected"));
+}
+
+void the_copy_item_copies_every_selected_icon() {
+    Rig r;
+    put_ram_project("Note");
+    put_ram_project("Other");
+    const TwoWindows w = open_tools_and_ram(r);
+    click_icon(r, w.ram, r.find_icon_in(w.ram, "Note"));
+    shift_click_icon(r, w.ram, r.find_icon_in(w.ram, "Other"));
+    CHECK_EQ(r.workbench.window(w.ram).clicks.selected().size(), 2u);
+    r.workbench.menu_pick(w.ram, icons_pick(1));
+    CHECK(r.exists("RAM:copy_of_Note"));
+    CHECK(r.exists("RAM:copy_of_Other"));
+    CHECK(r.find_icon_in(w.ram, "copy_of_Note") != Workbench::kNoIcon);
+    CHECK(r.find_icon_in(w.ram, "copy_of_Other") != Workbench::kNoIcon);
+}
+
+void the_delete_item_asks_once_for_several_icons() {
+    Rig r;
+    put_ram_project("Note");
+    put_ram_drawer(r, "Box");
+    const TwoWindows w = open_tools_and_ram(r);
+    struct Asked {
+        u32 calls = 0;
+        std::string text;
+        bool answer = false;
+    } asked;
+    r.workbench.set_answer(
+        [](void* ctx, const char*, const char* body, char*, u32) {
+            Asked& a = *static_cast<Asked*>(ctx);
+            ++a.calls;
+            a.text = body;
+            return a.answer;
+        },
+        &asked);
+    click_icon(r, w.ram, r.find_icon_in(w.ram, "Note"));
+    shift_click_icon(r, w.ram, r.find_icon_in(w.ram, "Box"));
+
+    r.workbench.menu_pick(w.ram, icons_pick(8));
+    CHECK_EQ(asked.calls, 1u);
+    CHECK(asked.text == "Warning: you cannot get back\nwhat you delete!\n"
+                        "OK to delete 2 icons\nand the 4 objects in them?");
+    CHECK(r.exists("RAM:Note"));
+    CHECK(r.exists("RAM:Box"));
+
+    asked.answer = true;
+    r.workbench.menu_pick(w.ram, icons_pick(8));
+    CHECK_EQ(asked.calls, 2u);
+    CHECK(!r.exists("RAM:Note"));
+    CHECK(!r.exists("RAM:Box"));
+    CHECK_EQ(r.find_icon_in(w.ram, "Note"), Workbench::kNoIcon);
+    CHECK_EQ(r.find_icon_in(w.ram, "Box"), Workbench::kNoIcon);
+}
+
+void the_rename_item_renames_every_selected_icon() {
+    Rig r;
+    put_ram_project("Note");
+    put_ram_project("Other");
+    const TwoWindows w = open_tools_and_ram(r);
+    std::vector<std::string> asked;
+    r.workbench.set_answer(
+        [](void* ctx, const char*, const char*, char* text, u32 size) {
+            auto& names = *static_cast<std::vector<std::string>*>(ctx);
+            names.push_back(text);
+            const char* name = names.size() == 1u ? "Memo" : "Later";
+            const usize length = std::strlen(name) + 1;
+            CHECK(length <= size);
+            __builtin_memcpy(text, name, length);
+            return true;
+        },
+        &asked);
+    click_icon(r, w.ram, r.find_icon_in(w.ram, "Note"));
+    shift_click_icon(r, w.ram, r.find_icon_in(w.ram, "Other"));
+    r.workbench.menu_pick(w.ram, icons_pick(2));
+    CHECK(asked == std::vector<std::string>({"Note", "Other"}));
+    CHECK(r.exists("RAM:Memo"));
+    CHECK(r.exists("RAM:Later"));
+    CHECK(!r.exists("RAM:Note"));
+    CHECK(!r.exists("RAM:Other"));
+}
+
+void the_snapshot_item_snapshots_every_selected_icon() {
+    Rig r;
+    put_ram_project("Note");
+    put_ram_project("Other");
+    const TwoWindows w = open_tools_and_ram(r);
+    const Workbench::IconEntry note = r.workbench.icon(r.find_icon_in(w.ram, "Note"));
+    const Workbench::IconEntry other = r.workbench.icon(r.find_icon_in(w.ram, "Other"));
+    r.drag(w.ram, note.left + 3, note.top + 3, r.screen_x(w.ram, 43), r.screen_y(w.ram, 33));
+    r.drag(w.ram, other.left + 3, other.top + 3, r.screen_x(w.ram, 143),
+           r.screen_y(w.ram, 33));
+    click_icon(r, w.ram, r.find_icon_in(w.ram, "Note"));
+    shift_click_icon(r, w.ram, r.find_icon_in(w.ram, "Other"));
+    r.workbench.menu_pick(w.ram, icons_pick(4));
+    CHECK(r.saved_place("RAM:Note") == std::make_pair(40u, 30u));
+    CHECK(r.saved_place("RAM:Other") == std::make_pair(140u, 30u));
 }
 
 void execute_command_hands_the_line_to_a_shell() {
@@ -5942,6 +6045,7 @@ int main() {
     every_disk_in_a_drive_gets_an_icon();
     a_hard_disk_partition_gets_an_icon_after_the_floppies();
     snapshot_and_unsnapshot_store_the_icon_place();
+    the_snapshot_item_snapshots_every_selected_icon();
     window_update_rescans_the_drawer();
     empty_trash_deletes_what_the_trashcan_holds();
     last_message_keeps_the_error_shown_last();
@@ -5957,14 +6061,17 @@ int main() {
     copy_duplicates_a_file_or_a_drawer_under_a_new_name();
     copy_keeps_attributes_and_all_of_the_icon();
     copy_refuses_disks_and_keeps_names_short();
+    the_copy_item_copies_every_selected_icon();
     new_drawer_makes_a_drawer_with_its_icon();
     the_new_drawer_item_suggests_a_free_name();
     rename_gives_the_file_and_its_icon_the_new_name();
     a_rename_that_loses_the_icon_name_is_undone();
     the_rename_item_asks_for_the_name();
+    the_rename_item_renames_every_selected_icon();
     delete_removes_a_file_or_a_drawer_and_its_icon();
     delete_refuses_disks_and_what_cannot_be_written();
     the_delete_item_asks_before_it_deletes();
+    the_delete_item_asks_once_for_several_icons();
     a_text_request_answers_return_and_its_buttons();
     a_set_answer_stands_in_for_the_requesters();
     the_information_window_shows_a_file();
