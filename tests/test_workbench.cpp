@@ -941,29 +941,195 @@ void drawer_icons_keep_their_positions_and_use_the_grid() {
 
 void clicks_select_and_double_click_opens() {
     Workbench::Clicks clicks;
-    CHECK_EQ(clicks.click(3, 1000), Workbench::ClickAction::Select);
-    CHECK_EQ(clicks.selected(), 3u);
-    CHECK_EQ(clicks.click(3, 1000 + 400000), Workbench::ClickAction::Open);
-    CHECK_EQ(clicks.click(7, 2000000), Workbench::ClickAction::Select);
-    CHECK_EQ(clicks.selected(), 7u);
-    CHECK_EQ(clicks.click(7, 2100000), Workbench::ClickAction::Open);
+    CHECK_EQ(clicks.click(3, false, 1000), Workbench::ClickAction::Select);
+    CHECK(clicks.is_selected(3));
+    CHECK_EQ(clicks.click(3, false, 1000 + 400000), Workbench::ClickAction::Open);
+    CHECK_EQ(clicks.click(7, false, 2000000), Workbench::ClickAction::Select);
+    CHECK(clicks.is_selected(7));
+    CHECK_EQ(clicks.click(7, false, 2100000), Workbench::ClickAction::Open);
     // A third quick click does not open the icon a second time.
-    CHECK_EQ(clicks.click(7, 2150000), Workbench::ClickAction::None);
-    CHECK_EQ(clicks.click(7, 2200000), Workbench::ClickAction::Open);
+    CHECK_EQ(clicks.click(7, false, 2150000), Workbench::ClickAction::None);
+    CHECK_EQ(clicks.click(7, false, 2200000), Workbench::ClickAction::Open);
     const u64 late = 2200000 + Workbench::kDoubleClickUs + 1;
-    CHECK_EQ(clicks.click(7, late), Workbench::ClickAction::None);
-    CHECK_EQ(clicks.click(7, late + 200000), Workbench::ClickAction::Open);
-    CHECK_EQ(clicks.click(Workbench::kNoIcon, late + 2000000), Workbench::ClickAction::Clear);
-    CHECK_EQ(clicks.selected(), Workbench::kNoIcon);
-    CHECK_EQ(clicks.click(Workbench::kNoIcon, late + 2100000), Workbench::ClickAction::None);
+    CHECK_EQ(clicks.click(7, false, late), Workbench::ClickAction::None);
+    CHECK_EQ(clicks.click(7, false, late + 200000), Workbench::ClickAction::Open);
+    CHECK_EQ(clicks.click(Workbench::kNoIcon, false, late + 2000000),
+            Workbench::ClickAction::Clear);
+    CHECK(clicks.selected().empty());
+    CHECK_EQ(clicks.click(Workbench::kNoIcon, false, late + 2100000),
+             Workbench::ClickAction::None);
 
     // A second click stops being a double click after kDoubleClickUs.
     Workbench::Clicks slow;
-    CHECK_EQ(slow.click(2, 0), Workbench::ClickAction::Select);
-    CHECK_EQ(slow.click(2, Workbench::kDoubleClickUs + 1), Workbench::ClickAction::None);
+    CHECK_EQ(slow.click(2, false, 0), Workbench::ClickAction::Select);
+    CHECK_EQ(slow.click(2, false, Workbench::kDoubleClickUs + 1), Workbench::ClickAction::None);
     const u64 base = 3 * Workbench::kDoubleClickUs;
-    CHECK_EQ(slow.click(5, base), Workbench::ClickAction::Select);
-    CHECK_EQ(slow.click(5, base + Workbench::kDoubleClickUs), Workbench::ClickAction::Open);
+    CHECK_EQ(slow.click(5, false, base), Workbench::ClickAction::Select);
+    CHECK_EQ(slow.click(5, false, base + Workbench::kDoubleClickUs),
+             Workbench::ClickAction::Open);
+}
+
+void clicks_shift_adds_and_removes_on_release() {
+    Workbench::Clicks clicks;
+    CHECK_EQ(clicks.click(3, false, 0), Workbench::ClickAction::Select);
+    CHECK_EQ(clicks.click(7, true, 100), Workbench::ClickAction::Select);
+    CHECK_EQ(clicks.selected().size(), 2u);
+    CHECK_EQ(clicks.selected()[0], 3u);
+    CHECK_EQ(clicks.selected()[1], 7u);
+
+    // Shift on a selected icon takes it away when the button comes up.
+    CHECK_EQ(clicks.click(7, true, 200), Workbench::ClickAction::None);
+    CHECK(clicks.is_selected(7));
+    CHECK(clicks.release());
+    CHECK(!clicks.is_selected(7));
+    CHECK(clicks.is_selected(3));
+    CHECK_EQ(clicks.selected().size(), 1u);
+
+    // A release with nothing put off changes nothing.
+    CHECK(!clicks.release());
+}
+
+void clicks_plain_press_on_a_member_collapses_on_release() {
+    Workbench::Clicks clicks;
+    clicks.select(3);
+    clicks.add(7);
+    clicks.add(9);
+    // The press keeps the whole selection so that it can be dragged.
+    CHECK_EQ(clicks.click(7, false, 0), Workbench::ClickAction::None);
+    CHECK_EQ(clicks.selected().size(), 3u);
+    CHECK(clicks.release());
+    CHECK_EQ(clicks.selected().size(), 1u);
+    CHECK(clicks.is_selected(7));
+
+    // A press on the only selected icon has nothing to collapse.
+    CHECK_EQ(clicks.click(7, false, 2 * Workbench::kDoubleClickUs),
+             Workbench::ClickAction::None);
+    CHECK(!clicks.release());
+    CHECK_EQ(clicks.selected().size(), 1u);
+}
+
+void clicks_shift_on_empty_keeps_the_selection() {
+    Workbench::Clicks clicks;
+    CHECK_EQ(clicks.click(3, false, 0), Workbench::ClickAction::Select);
+    CHECK_EQ(clicks.click(Workbench::kNoIcon, true, 100), Workbench::ClickAction::None);
+    CHECK(clicks.is_selected(3));
+    CHECK_EQ(clicks.selected().size(), 1u);
+    // Without shift the empty space clears the selection.
+    CHECK_EQ(clicks.click(Workbench::kNoIcon, false, 200), Workbench::ClickAction::Clear);
+    CHECK(clicks.selected().empty());
+}
+
+void clicks_forget_drops_a_pending_change() {
+    Workbench::Clicks clicks;
+    clicks.select(3);
+    clicks.add(7);
+    // Shift on a selected icon puts its removal off; forget drops that.
+    CHECK_EQ(clicks.click(7, true, 0), Workbench::ClickAction::None);
+    clicks.forget();
+    CHECK(!clicks.release());
+    CHECK_EQ(clicks.selected().size(), 2u);
+    CHECK(clicks.is_selected(7));
+
+    // A plain press on a member puts its collapse off; forget drops that.
+    CHECK_EQ(clicks.click(7, false, 2 * Workbench::kDoubleClickUs),
+             Workbench::ClickAction::None);
+    clicks.forget();
+    CHECK(!clicks.release());
+    CHECK_EQ(clicks.selected().size(), 2u);
+
+    // Forget drops the double click memory too.
+    CHECK_EQ(clicks.click(3, false, 4 * Workbench::kDoubleClickUs),
+             Workbench::ClickAction::None);
+    clicks.forget();
+    CHECK_EQ(clicks.click(3, false, 4 * Workbench::kDoubleClickUs + 100000),
+             Workbench::ClickAction::None);
+}
+
+void shift_clicks_select_several_icons_in_a_drawer() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon("Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kNoWindow);
+    const Workbench::DrawerWindow drawer = r.workbench.window(tools);
+    const Workbench::IconEntry tool = r.workbench.icon(r.find_icon("Tool"));
+    const Workbench::IconEntry proj = r.workbench.icon(r.find_icon("Proj"));
+
+    auto image = [&](const Workbench::IconEntry& icon) {
+        std::vector<u32> pens;
+        for (i32 y = 0; y < 12; ++y) {
+            for (i32 x = 0; x < 32; ++x) {
+                pens.push_back(r.window_pixel(drawer.window, drawer.inner_left + icon.left + x,
+                                              drawer.inner_top + icon.top + y));
+            }
+        }
+        return pens;
+    };
+    auto inverted = [](const std::vector<u32>& plain) {
+        std::vector<u32> pens;
+        for (const u32 pen : plain) {
+            pens.push_back(pen ^ 3u);
+        }
+        return pens;
+    };
+    const std::vector<u32> tool_plain = image(tool);
+    const std::vector<u32> proj_plain = image(proj);
+
+    // A plain click selects one icon.
+    r.click(tools, tool.left + 3, tool.top + 3);
+    CHECK(r.workbench.window(tools).clicks.is_selected(tool.id));
+    CHECK(image(tool) == inverted(tool_plain));
+    CHECK(image(proj) == proj_plain);
+
+    // Shift adds the other one: both are drawn selected.
+    g_intuition.set_qualifier(1);
+    r.click(tools, proj.left + 3, proj.top + 3);
+    g_intuition.set_qualifier(0);
+    CHECK(r.workbench.window(tools).clicks.is_selected(proj.id));
+    CHECK_EQ(r.workbench.window(tools).clicks.selected().size(), 2u);
+    CHECK(image(tool) == inverted(tool_plain));
+    CHECK(image(proj) != proj_plain);
+
+    // Shift on a selected icon takes it away when the button comes up.
+    g_intuition.set_qualifier(1);
+    r.click(tools, proj.left + 3, proj.top + 3);
+    g_intuition.set_qualifier(0);
+    CHECK(!r.workbench.window(tools).clicks.is_selected(proj.id));
+    CHECK(r.workbench.window(tools).clicks.is_selected(tool.id));
+    CHECK(image(proj) == proj_plain);
+    CHECK(image(tool) == inverted(tool_plain));
+
+    // A plain click on empty space clears the selection.
+    r.click(tools, 170, 62);
+    CHECK(r.workbench.window(tools).clicks.selected().empty());
+    CHECK(image(tool) == tool_plain);
+}
+
+void select_contents_selects_every_icon() {
+    Rig r;
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon("Tools"));
+    const u32 tools = r.find_window("HombreTest:Tools");
+    CHECK(tools != Workbench::kNoWindow);
+    std::vector<u32> ids;
+    for (const Workbench::IconEntry& icon : r.workbench.icons()) {
+        if (icon.owner == tools) {
+            ids.push_back(icon.id);
+        }
+    }
+    CHECK(ids.size() > 1u);
+
+    // Window > Select Contents.
+    r.workbench.menu_pick(tools, (4 << 5) | 1 | (31 << 11));
+    const Workbench::Clicks& clicks = r.workbench.window(tools).clicks;
+    CHECK_EQ(clicks.selected().size(), ids.size());
+    for (const u32 id : ids) {
+        CHECK(clicks.is_selected(id));
+    }
 }
 
 void tool_startup_message_has_the_documented_layout() {
@@ -1781,15 +1947,15 @@ void a_dragged_disk_keeps_its_place_over_a_backdrop_toggle() {
     r.drag(0, before.left + 3, before.top + 3, r.screen_x(0, 103), r.screen_y(0, 123));
     CHECK_EQ(r.workbench.icon(disk).left, 100);
     CHECK_EQ(r.workbench.icon(disk).top, 120);
-    CHECK_EQ(r.workbench.window(Workbench::kRootWindow).clicks.selected(), disk);
+    CHECK(r.workbench.window(Workbench::kRootWindow).clicks.is_selected(disk));
     r.workbench.set_backdrop(false);
     CHECK_EQ(r.workbench.icon(disk).left, 100);
     CHECK_EQ(r.workbench.icon(disk).top, 120);
-    CHECK_EQ(r.workbench.window(Workbench::kRootWindow).clicks.selected(), disk);
+    CHECK(r.workbench.window(Workbench::kRootWindow).clicks.is_selected(disk));
     r.workbench.set_backdrop(true);
     CHECK_EQ(r.workbench.icon(disk).left, 100);
     CHECK_EQ(r.workbench.icon(disk).top, 120);
-    CHECK_EQ(r.workbench.window(Workbench::kRootWindow).clicks.selected(), disk);
+    CHECK(r.workbench.window(Workbench::kRootWindow).clicks.is_selected(disk));
 }
 
 void a_disk_icon_inside_a_drawer_is_no_volume() {
@@ -5719,6 +5885,12 @@ int main() {
     desktop_shows_the_volumes_and_their_menus();
     drawer_icons_keep_their_positions_and_use_the_grid();
     clicks_select_and_double_click_opens();
+    clicks_shift_adds_and_removes_on_release();
+    clicks_plain_press_on_a_member_collapses_on_release();
+    clicks_shift_on_empty_keeps_the_selection();
+    clicks_forget_drops_a_pending_change();
+    shift_clicks_select_several_icons_in_a_drawer();
+    select_contents_selects_every_icon();
     tool_startup_message_has_the_documented_layout();
     project_startup_names_the_tool_and_the_project();
     reply_unloads_the_seglist_and_unlocks();

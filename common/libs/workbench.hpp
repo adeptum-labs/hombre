@@ -46,10 +46,11 @@
 // until the Workbench menu's Backdrop item turns it into an ordinary window.
 // A drawer shows the "<name>.info" files of its directory, or with Show >
 // All Files an icon for everything beside them; opening an icon starts its
-// program with a WBStartup message. An icon dragged within its
-// window takes the new place; dropped on another drawer, or a drawer's or
-// disk's icon, its file moves there on the same volume and is copied to
-// another. A window with
+// program with a WBStartup message. A click selects an icon, Shift-click
+// adds one or takes it away, and a click on empty space clears them. An
+// icon dragged within its window takes the new place; dropped on another
+// drawer, or a drawer's or disk's icon, its file moves there on the same
+// volume and is copied to another. A window with
 // borders scrolls over its icons with the sliders and arrows in its right
 // and bottom borders. Snapshot keeps an icon's place, or a drawer window's
 // box, scroll and Show setting, in the .info. The other
@@ -146,23 +147,33 @@ public:
     // What a click did to the icons of its window.
     enum class ClickAction : u8 { None = 0, Select = 1, Clear = 2, Open = 3 };
 
-    // The state of the mouse between clicks: the second click on the same
-    // icon within kDoubleClickUs opens it; a click on empty space clears
-    // the selection.
+    // The state of the mouse between clicks: the icons the window shows
+    // selected, in the order they were picked. A plain click selects one
+    // icon and a second click on the same icon within kDoubleClickUs opens
+    // it; a click on empty space clears the selection. Shift adds an icon,
+    // or on a selected one takes it away when the button comes up, and is
+    // never half of a double click. A plain press on one icon of a larger
+    // selection keeps it for a drag and collapses it when the button comes
+    // up.
     class Clicks {
     public:
-        ClickAction click(u32 icon, u64 now_us);
-        u32 selected() const { return selected_; }
-        void clear() { selected_ = kNoIcon; }
-        // The last click starts no double click: a drag ended it.
-        void forget() { last_icon_ = kNoIcon; }
-        void select(u32 icon) {
-            selected_ = icon;
-            last_icon_ = kNoIcon;
-        }
+        ClickAction click(u32 icon, bool shift, u64 now_us);
+        const std::vector<u32>& selected() const { return selected_; }
+        bool is_selected(u32 icon) const;
+        void clear();
+        // A drag ended: what a release would apply and the double click
+        // memory go.
+        void forget();
+        void select(u32 icon);
+        void add(u32 icon);
+        void remove(u32 icon);
+        // Applies what the press put off; true when the selection changed.
+        bool release();
 
     private:
-        u32 selected_ = kNoIcon;
+        std::vector<u32> selected_;
+        u32 pending_ = kNoIcon;  // the icon a release collapses to or drops
+        bool pending_remove_ = false;
         u32 last_icon_ = kNoIcon;
         u64 last_us_ = 0;
     };
@@ -736,8 +747,9 @@ private:
     void paint_area(const DrawerWindow& drawer, const Rect& area);
     // The window's pixels an icon draws in: its images, frame and label.
     Rect icon_area(const DrawerWindow& drawer, const IconEntry& icon) const;
-    // Repaints the icons a click selected or let go of.
-    void repaint_selection(u32 window_id, u32 before, u32 after);
+    // Repaints the icons of the window whose selected state differs from
+    // before.
+    void repaint_selection(u32 window_id, const std::vector<u32>& before);
     // Makes the window's clip Region the rectangle area, in window pixels.
     void set_clip(const DrawerWindow& drawer, const Rect& area);
     bool load_patterns();
@@ -824,7 +836,7 @@ private:
     void select_contents(u32 window_id);
     void clean_up(u32 window_id);
     void open_selected(u32 window_id);
-    void mouse_click(u32 window_id, i32 mx, i32 my, u64 now_us);
+    void mouse_click(u32 window_id, i32 mx, i32 my, bool shift, u64 now_us);
     void drag_to(u32 window_id, i32 mx, i32 my);
     void end_drag(u32 window_id, i32 mx, i32 my);
     void cancel_drag();

@@ -24,6 +24,7 @@
 #include "workbench.hpp"
 
 #include "chrome.hpp"
+#include "keymap_library.hpp"
 
 #include "../dos_date.hpp"
 #include "../format.hpp"
@@ -933,27 +934,104 @@ struct Function {
 
 // --- the click state of a window -----------------------------------------
 
-Workbench::ClickAction Workbench::Clicks::click(u32 icon, u64 now_us) {
+bool Workbench::Clicks::is_selected(u32 icon) const {
+    return std::find(selected_.begin(), selected_.end(), icon) != selected_.end();
+}
+
+void Workbench::Clicks::add(u32 icon) {
+    if (!is_selected(icon)) {
+        selected_.push_back(icon);
+    }
+}
+
+void Workbench::Clicks::remove(u32 icon) {
+    std::erase(selected_, icon);
+    if (pending_ == icon) {
+        pending_ = kNoIcon;
+    }
+    if (last_icon_ == icon) {
+        last_icon_ = kNoIcon;
+    }
+}
+
+void Workbench::Clicks::clear() {
+    selected_.clear();
+    pending_ = kNoIcon;
+}
+
+void Workbench::Clicks::forget() {
+    pending_ = kNoIcon;
+    last_icon_ = kNoIcon;
+}
+
+void Workbench::Clicks::select(u32 icon) {
+    selected_.assign(1, icon);
+    pending_ = kNoIcon;
+    last_icon_ = kNoIcon;
+}
+
+bool Workbench::Clicks::release() {
+    if (pending_ == kNoIcon) {
+        return false;
+    }
+    const u32 icon = pending_;
+    const bool remove_it = pending_remove_;
+    pending_ = kNoIcon;
+    if (remove_it) {
+        const bool was_selected = is_selected(icon);
+        remove(icon);
+        return was_selected;
+    }
+    if (selected_.size() <= 1u) {
+        return false;
+    }
+    selected_.assign(1, icon);
+    return true;
+}
+
+Workbench::ClickAction Workbench::Clicks::click(u32 icon, bool shift, u64 now_us) {
+    pending_ = kNoIcon;
     if (icon == kNoIcon) {
         last_icon_ = kNoIcon;
-        if (selected_ != kNoIcon) {
-            selected_ = kNoIcon;
-            return ClickAction::Clear;
+        if (shift || selected_.empty()) {
+            return ClickAction::None;
         }
+        selected_.clear();
+        return ClickAction::Clear;
+    }
+    if (shift) {
+        // A shift click is never the first of a double click.
+        last_icon_ = kNoIcon;
+        if (!is_selected(icon)) {
+            add(icon);
+            return ClickAction::Select;
+        }
+        // The icon goes when the button comes up, so that it can be dragged.
+        pending_ = icon;
+        pending_remove_ = true;
         return ClickAction::None;
     }
-    const bool again = icon == last_icon_ && last_icon_ != kNoIcon && now_us >= last_us_ &&
+    const bool again = icon == last_icon_ && now_us >= last_us_ &&
                        now_us - last_us_ <= kDoubleClickUs;
     last_icon_ = icon;
     last_us_ = now_us;
-    const bool changed = selected_ != icon;
-    selected_ = icon;
     if (again) {
         // The click that opened the icon is not the first of another pair.
         last_icon_ = kNoIcon;
+        selected_.assign(1, icon);
         return ClickAction::Open;
     }
-    return changed ? ClickAction::Select : ClickAction::None;
+    if (is_selected(icon)) {
+        // The whole selection stays so that it can be dragged; a press on
+        // one icon of several collapses it when the button comes up.
+        if (selected_.size() > 1u) {
+            pending_ = icon;
+            pending_remove_ = false;
+        }
+        return ClickAction::None;
+    }
+    selected_.assign(1, icon);
+    return ClickAction::Select;
 }
 
 // --- the desktop ---------------------------------------------------------
@@ -2115,7 +2193,6 @@ void Workbench::paint_area(const DrawerWindow& drawer, const Rect& area) {
     if (part.x1 < part.x0 || part.y1 < part.y0) {
         return;
     }
-    const u32 selected = drawer.clicks.selected();
     set_clip(drawer, part);
     {
         const InnerClip clip(*machine_, drawer.rp, drawer.clip);
@@ -2129,7 +2206,7 @@ void Workbench::paint_area(const DrawerWindow& drawer, const Rect& area) {
             const Rect box = icon_area(drawer, icon);
             if (box.x0 <= part.x1 && box.x1 >= part.x0 && box.y0 <= part.y1 &&
                 box.y1 >= part.y0) {
-                draw_icon(drawer, icon, selected == icon.id);
+                draw_icon(drawer, icon, drawer.clicks.is_selected(icon.id));
             }
         }
     }
@@ -2158,16 +2235,19 @@ Rect Workbench::icon_area(const DrawerWindow& drawer, const IconEntry& icon) con
     return Rect{area.x0 + dx, area.y0 + dy, area.x1 + dx, area.y1 + dy};
 }
 
-void Workbench::repaint_selection(u32 window_id, u32 before, u32 after) {
+void Workbench::repaint_selection(u32 window_id, const std::vector<u32>& before) {
     const DrawerWindow* drawer = find_window(window_id);
     if (drawer == nullptr) {
         return;
     }
-    const u32 changed[] = {before, after == before ? kNoIcon : after};
-    for (const u32 id : changed) {
-        const IconEntry* icon = find_icon(id);
-        if (icon != nullptr && icon->owner == window_id) {
-            paint_area(*drawer, icon_area(*drawer, *icon));
+    for (const IconEntry& icon : icons_) {
+        if (icon.owner != window_id) {
+            continue;
+        }
+        const bool was_selected =
+            std::find(before.begin(), before.end(), icon.id) != before.end();
+        if (was_selected != drawer->clicks.is_selected(icon.id)) {
+            paint_area(*drawer, icon_area(*drawer, icon));
         }
     }
 }
@@ -3071,7 +3151,7 @@ void Workbench::open_icon(u32 window_id, u32 icon_id) {
     }
 }
 
-void Workbench::mouse_click(u32 window_id, i32 mx, i32 my, u64 now_us) {
+void Workbench::mouse_click(u32 window_id, i32 mx, i32 my, bool shift, u64 now_us) {
     DrawerWindow* drawer = find_window(window_id);
     if (drawer == nullptr) {
         return;
@@ -3081,15 +3161,15 @@ void Workbench::mouse_click(u32 window_id, i32 mx, i32 my, u64 now_us) {
     const i32 y = my - drawer->inner_top + drawer->scroll_y;
     const IconEntry* hit = icon_at(window_id, x, y);
     const u32 hit_id = hit != nullptr ? hit->id : kNoIcon;
-    const u32 before = drawer->clicks.selected();
-    const ClickAction action = drawer->clicks.click(hit_id, now_us);
+    const std::vector<u32> before = drawer->clicks.selected();
+    const ClickAction action = drawer->clicks.click(hit_id, shift, now_us);
     switch (action) {
     case ClickAction::Select:
     case ClickAction::Clear:
-        repaint_selection(window_id, before, drawer->clicks.selected());
+        repaint_selection(window_id, before);
         break;
     case ClickAction::Open:
-        repaint_selection(window_id, before, drawer->clicks.selected());
+        repaint_selection(window_id, before);
         open_icon(window_id, hit_id);
         break;
     case ClickAction::None:
@@ -3157,21 +3237,32 @@ void Workbench::drag_to(u32 window_id, i32 mx, i32 my) {
 }
 
 void Workbench::end_drag(u32 window_id, i32 mx, i32 my) {
-    if (!drag_.armed || window_id != drag_.window) {
+    DrawerWindow* drawer = find_window(window_id);
+    if (drawer == nullptr) {
         return;
     }
-    const IconDrag ended = drag_;
     i32 origin_x = 0;
     i32 origin_y = 0;
-    DrawerWindow* drawer = find_window(window_id);
-    const bool placed = drawer != nullptr && screen_origin(window_id, origin_x, origin_y);
-    cancel_drag();
-    if (!ended.active || !placed) {
+    if (drag_.armed && window_id == drag_.window) {
+        const IconDrag ended = drag_;
+        const bool placed = screen_origin(window_id, origin_x, origin_y);
+        cancel_drag();
+        if (ended.active) {
+            // A drag applies nothing a release would and is no first click
+            // of a double click.
+            drawer->clicks.forget();
+            if (placed) {
+                drop(ended, origin_x + mx, origin_y + my);
+            }
+            return;
+        }
+    } else if (drag_.armed) {
         return;
     }
-    // A drag is no first click of a double click.
-    drawer->clicks.forget();
-    drop(ended, origin_x + mx, origin_y + my);
+    const std::vector<u32> before = drawer->clicks.selected();
+    if (drawer->clicks.release()) {
+        repaint_selection(window_id, before);
+    }
 }
 
 void Workbench::cancel_drag() {
@@ -3314,12 +3405,19 @@ void Workbench::open_parent(u32 window_id) {
 
 void Workbench::select_contents(u32 window_id) {
     DrawerWindow* drawer = find_window(window_id);
-    const IconEntry* first =
-        icons_.find_if([&](const IconEntry& icon) { return icon.owner == window_id; });
-    if (drawer != nullptr && first != nullptr) {
-        drawer->clicks.select(first->id);
-        draw_window(window_id);
+    if (drawer == nullptr) {
+        return;
     }
+    const std::vector<u32> before = drawer->clicks.selected();
+    drawer->clicks.clear();
+    // A click made before this is no first half of a double click.
+    drawer->clicks.forget();
+    for (const IconEntry& icon : icons_) {
+        if (icon.owner == window_id) {
+            drawer->clicks.add(icon.id);
+        }
+    }
+    repaint_selection(window_id, before);
 }
 
 void Workbench::clean_up(u32 window_id) {
@@ -3338,8 +3436,8 @@ void Workbench::clean_up(u32 window_id) {
 
 void Workbench::open_selected(u32 window_id) {
     const DrawerWindow* drawer = find_window(window_id);
-    if (drawer != nullptr && drawer->clicks.selected() != kNoIcon) {
-        open_icon(window_id, drawer->clicks.selected());
+    if (drawer != nullptr && !drawer->clicks.selected().empty()) {
+        open_icon(window_id, drawer->clicks.selected().front());
     }
 }
 
@@ -4823,9 +4921,8 @@ void Workbench::remove_root_icon(u32 icon_id) {
     if (drag_.armed && drag_.icon == icon_id) {
         cancel_drag();
     }
-    if (DrawerWindow* root = find_window(kRootWindow);
-        root != nullptr && root->clicks.selected() == icon_id) {
-        root->clicks.clear();
+    if (DrawerWindow* root = find_window(kRootWindow); root != nullptr) {
+        root->clicks.remove(icon_id);
     }
     if (icon->owned && icon->object != 0) {
         icon_->free_object(icon->object);
@@ -5367,7 +5464,9 @@ void Workbench::menu_pick(u32 window_id, u32 number) {
         }
     } else if (menu == kMenuIcons) {
         const DrawerWindow* window = find_window(window_id);
-        const u32 selected = window != nullptr ? window->clicks.selected() : kNoIcon;
+        const u32 selected = window != nullptr && !window->clicks.selected().empty()
+                                 ? window->clicks.selected().front()
+                                 : kNoIcon;
         if (item == 0) {
             open_selected(window_id);
         } else if (item == kItemIconCopy && selected != kNoIcon) {
@@ -5437,7 +5536,10 @@ void Workbench::handle_message(u32 message) {
                 idcmp_class == ndk::IDCMP_MOUSEMOVE)) {
         scroll_message(window_id, idcmp_class, scroll_id);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTDOWN) {
-        mouse_click(window_id, mx, my, when);
+        const u32 qualifier = b.r16(message + ndk::im_Qualifier);
+        const bool shift =
+            (qualifier & (keymap_ndk::IEQUALIFIER_LSHIFT | keymap_ndk::IEQUALIFIER_RSHIFT)) != 0;
+        mouse_click(window_id, mx, my, shift, when);
     } else if (idcmp_class == ndk::IDCMP_MOUSEBUTTONS && code == ndk::SELECTUP) {
         end_drag(window_id, mx, my);
     } else if (idcmp_class == ndk::IDCMP_MOUSEMOVE) {
@@ -6217,8 +6319,8 @@ void Workbench::drop_app_icon(const App& app) {
     }
     icons_.remove(icon);
     DrawerWindow* root = find_window(kRootWindow);
-    if (root != nullptr && root->clicks.selected() == app.icon) {
-        root->clicks.clear();
+    if (root != nullptr) {
+        root->clicks.remove(app.icon);
     }
     draw_window(kRootWindow);
 }
