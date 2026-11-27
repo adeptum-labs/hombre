@@ -1022,8 +1022,8 @@ void open_screen_depth8_sets_default_and_chrome_palettes() {
     CHECK_EQ(colormap_rgb24(r, map, 3), 0x3D6FB6u);
     CHECK_EQ(colormap_rgb24(r, map, 4), 0x7A7E86u);
     CHECK_EQ(colormap_rgb24(r, map, 5), 0xC9CDD4u);
-    CHECK_EQ(colormap_rgb24(r, map, 6), 0xD9A441u);
-    CHECK_EQ(colormap_rgb24(r, map, 7), 0x9E3B3Bu);
+    CHECK_EQ(colormap_rgb24(r, map, 6), 0xAA907Cu);
+    CHECK_EQ(colormap_rgb24(r, map, 7), 0xFFA997u);
 
     CHECK_EQ(colormap_rgb24(r, map, 8), 0x000000u);
     CHECK_EQ(colormap_rgb24(r, map, 8 + 1 * 36 + 2 * 6 + 3), 0x336699u);
@@ -1072,7 +1072,7 @@ void open_screen_depth8_sets_default_and_chrome_palettes() {
     const u32 map3 = r.get32(depth3 + sc_ViewPort + vp_ColorMap);
     CHECK_EQ(r.get16(map3 + cm_Count), 8u);
     CHECK_EQ(colormap_rgb24(r, map3, 0), 0xA0A6B0u);
-    CHECK_EQ(colormap_rgb24(r, map3, 7), 0x9E3B3Bu);
+    CHECK_EQ(colormap_rgb24(r, map3, 7), 0xFFA997u);
     r.cpu().a[0] = depth3;
     CHECK_EQ(r.result(Base::Intuition, intuition_lvo::CloseScreen), 1u);
     CHECK_EQ(heap_capacity(r), before);
