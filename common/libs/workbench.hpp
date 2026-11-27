@@ -731,10 +731,19 @@ private:
     void place_icons(const DrawerWindow& drawer);
     void draw_window(u32 window_id);
     void paint_window(const DrawerWindow& drawer);
+    // Paints the background and icons of the part of the window's inner
+    // area that area covers, leaving the rest as it is.
+    void paint_area(const DrawerWindow& drawer, const Rect& area);
+    // The window's pixels an icon draws in: its images, frame and label.
+    Rect icon_area(const DrawerWindow& drawer, const IconEntry& icon) const;
+    // Repaints the icons a click selected or let go of.
+    void repaint_selection(u32 window_id, u32 before, u32 after);
+    // Makes the window's clip Region the rectangle area, in window pixels.
+    void set_clip(const DrawerWindow& drawer, const Rect& area);
     bool load_patterns();
     void load_picture(u32 which, const char* name);
     void drop_picture(u32 which);
-    void fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom);
+    void fill_pattern(const DrawerWindow& drawer, u32 which, const Rect& area);
     u32 make_scroll_gadgets();
     u32 make_volume_gauge(u32 gadgets, i32 top, i32 height);
     void layout_gauge(DrawerWindow& w);

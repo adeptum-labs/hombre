@@ -1334,6 +1334,14 @@ void a_click_shows_the_icon_selected_and_a_rescan_drops_the_selection() {
     };
     const std::vector<u32> plain = image();
 
+    // A mark where no icon is: a click must paint only the icons it
+    // changes, so the mark stays.
+    const i32 mark_x = drawer.inner_left + 170;
+    const i32 mark_y = drawer.inner_top + 62;
+    g_graphics.set_pens(drawer.rp, 3, 0, ndk::JAM1);
+    g_graphics.rect_fill(drawer.rp, mark_x, mark_y, mark_x, mark_y);
+    CHECK_EQ(r.window_pixel(drawer.window, mark_x, mark_y), 3u);
+
     // The icon has no second image: selected, every pen of it is inverted.
     r.click(tools, tool.left + 3, tool.top + 3);
     const std::vector<u32> selected = image();
@@ -1341,6 +1349,13 @@ void a_click_shows_the_icon_selected_and_a_rescan_drops_the_selection() {
     for (usize i = 0; i < plain.size(); ++i) {
         CHECK_EQ(selected[i], plain[i] ^ 3u);
     }
+    CHECK_EQ(r.window_pixel(drawer.window, mark_x, mark_y), 3u);
+
+    // A click beside every icon lets it go.
+    r.click(tools, 170, 62);
+    CHECK(image() == plain);
+    CHECK_EQ(r.window_pixel(drawer.window, mark_x, mark_y), 3u);
+    r.click(tools, tool.left + 3, tool.top + 3);
 
     // Rescanning the drawer draws it unselected again.
     r.put8(kData + 0x400, 0);
@@ -4670,6 +4685,25 @@ void the_backdrop_shows_the_wbpattern_pattern() {
     CHECK_EQ(r.window_pixel(root.window, root.inner_left + 20, root.inner_top + 300), 1u);
     CHECK_EQ(r.window_pixel(root.window, root.inner_left + 21, root.inner_top + 300), 0u);
     CHECK_EQ(r.window_pixel(root.window, root.inner_left + 36, root.inner_top + 301), 1u);
+
+    // Selecting an icon and letting it go leaves the tiles as a full paint
+    // laid them, under the icon and around it.
+    const Workbench::IconEntry disk = r.workbench.icon(r.find_icon("HombreTest"));
+    auto around = [&]() {
+        std::vector<u32> pens;
+        for (i32 y = disk.top - 8; y < disk.top + disk.height + 24; ++y) {
+            for (i32 x = disk.left - 40; x < disk.left + disk.width + 8; ++x) {
+                pens.push_back(r.window_pixel(root.window, root.inner_left + x,
+                                              root.inner_top + y));
+            }
+        }
+        return pens;
+    };
+    const std::vector<u32> before = around();
+    r.click(0, disk.left + 3, disk.top + 3);
+    CHECK(around() != before);
+    r.click(0, 20, 300);
+    CHECK(around() == before);
 }
 
 // An ILBM of one plane, 16 by 8, in vertical stripes: colour 1 (white)

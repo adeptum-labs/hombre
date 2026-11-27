@@ -1041,6 +1041,22 @@ u32 Workbench::build_menu_strip() {
     return strip;
 }
 
+namespace {
+
+Rect inner_area(const Workbench::DrawerWindow& w) {
+    return Rect{w.inner_left, w.inner_top, w.inner_left + w.inner_width - 1,
+                w.inner_top + w.inner_height - 1};
+}
+
+void cover(Rect& area, i32 x0, i32 y0, i32 x1, i32 y1) {
+    area.x0 = std::min(area.x0, x0);
+    area.y0 = std::min(area.y0, y0);
+    area.x1 = std::max(area.x1, x1);
+    area.y1 = std::max(area.y1, y1);
+}
+
+}  // namespace
+
 void Workbench::measure_window(DrawerWindow& w) {
     Bus b(*machine_);
     w.inner_left = b.r8(w.window + ndk::wd_BorderLeft);
@@ -1051,24 +1067,29 @@ void Workbench::measure_window(DrawerWindow& w) {
     const i32 bottom = b.r8(w.window + ndk::wd_BorderBottom);
     w.inner_width = width - w.inner_left - right;
     w.inner_height = height - w.inner_top - bottom;
+    set_clip(w, inner_area(w));
+}
+
+void Workbench::set_clip(const DrawerWindow& w, const Rect& area) {
     if (w.clip == 0) {
         return;
     }
+    Bus b(*machine_);
     // The Region's box and its one rectangle, which is relative to the
-    // box; an empty inner area has no rectangle and clips everything.
+    // box; an empty area has no rectangle and clips everything.
     const u32 rect = w.clip + ndk::Region_SIZEOF;
-    const bool empty = w.inner_width <= 0 || w.inner_height <= 0;
-    b.w16(w.clip + ndk::rg_bounds, static_cast<u32>(w.inner_left));
-    b.w16(w.clip + ndk::rg_bounds + 2, static_cast<u32>(w.inner_top));
-    b.w16(w.clip + ndk::rg_bounds + 4, static_cast<u32>(w.inner_left + w.inner_width - 1));
-    b.w16(w.clip + ndk::rg_bounds + 6, static_cast<u32>(w.inner_top + w.inner_height - 1));
+    const bool empty = area.x1 < area.x0 || area.y1 < area.y0;
+    b.w16(w.clip + ndk::rg_bounds, static_cast<u32>(area.x0));
+    b.w16(w.clip + ndk::rg_bounds + 2, static_cast<u32>(area.y0));
+    b.w16(w.clip + ndk::rg_bounds + 4, static_cast<u32>(area.x1));
+    b.w16(w.clip + ndk::rg_bounds + 6, static_cast<u32>(area.y1));
     b.w32(w.clip + ndk::rg_RegionRectangle, empty ? 0 : rect);
     b.w32(rect + ndk::rr_Next, 0);
     b.w32(rect + ndk::rr_Prev, 0);
     b.w16(rect + ndk::rr_bounds, 0);
     b.w16(rect + ndk::rr_bounds + 2, 0);
-    b.w16(rect + ndk::rr_bounds + 4, static_cast<u32>(w.inner_width - 1));
-    b.w16(rect + ndk::rr_bounds + 6, static_cast<u32>(w.inner_height - 1));
+    b.w16(rect + ndk::rr_bounds + 4, static_cast<u32>(area.x1 - area.x0));
+    b.w16(rect + ndk::rr_bounds + 6, static_cast<u32>(area.y1 - area.y0));
 }
 
 // Gives back the window record, its clip Region, its scroll gadgets and
@@ -2084,19 +2105,69 @@ void Workbench::draw_window(u32 window_id) {
 }
 
 void Workbench::paint_window(const DrawerWindow& drawer) {
-    const u32 selected = drawer.clicks.selected();
-    const i32 right = drawer.inner_left + drawer.inner_width - 1;
-    const i32 bottom = drawer.inner_top + drawer.inner_height - 1;
-    if (right < drawer.inner_left || bottom < drawer.inner_top) {
+    paint_area(drawer, inner_area(drawer));
+}
+
+void Workbench::paint_area(const DrawerWindow& drawer, const Rect& area) {
+    const Rect inner = inner_area(drawer);
+    const Rect part{std::max(area.x0, inner.x0), std::max(area.y0, inner.y0),
+                    std::min(area.x1, inner.x1), std::min(area.y1, inner.y1)};
+    if (part.x1 < part.x0 || part.y1 < part.y0) {
         return;
     }
-    const InnerClip clip(*machine_, drawer.rp, drawer.clip);
-    graphics_->set_pens(drawer.rp, 0, 0, ndk::JAM1);
-    graphics_->rect_fill(drawer.rp, drawer.inner_left, drawer.inner_top, right, bottom);
-    fill_pattern(drawer, drawer.id == kRootWindow ? 0 : 1, right, bottom);
-    for (const IconEntry& icon : icons_) {
-        if (icon.owner == drawer.id) {
-            draw_icon(drawer, icon, selected == icon.id);
+    const u32 selected = drawer.clicks.selected();
+    set_clip(drawer, part);
+    {
+        const InnerClip clip(*machine_, drawer.rp, drawer.clip);
+        graphics_->set_pens(drawer.rp, 0, 0, ndk::JAM1);
+        graphics_->rect_fill(drawer.rp, part.x0, part.y0, part.x1, part.y1);
+        fill_pattern(drawer, drawer.id == kRootWindow ? 0 : 1, part);
+        for (const IconEntry& icon : icons_) {
+            if (icon.owner != drawer.id) {
+                continue;
+            }
+            const Rect box = icon_area(drawer, icon);
+            if (box.x0 <= part.x1 && box.x1 >= part.x0 && box.y0 <= part.y1 &&
+                box.y1 >= part.y0) {
+                draw_icon(drawer, icon, selected == icon.id);
+            }
+        }
+    }
+    set_clip(drawer, inner);
+}
+
+Rect Workbench::icon_area(const DrawerWindow& drawer, const IconEntry& icon) const {
+    Bus b(*machine_);
+    const IconArt art = art_of(b, icon.object);
+    const LabelPlace label = label_place(art, icon, label_metrics(), label_span(icon));
+    Rect area{icon.left, icon.top, icon.left + icon.width - 1, icon.top + icon.height - 1};
+    cover(area, label.x, label.top, label.x + label.span - 1, label.bottom - 1);
+    if (art.render != 0) {
+        cover(area, icon.left + art.left - kFrameOutX, icon.top + art.top - kFrameOutY,
+              icon.left + art.left + art.width - 1 + kFrameOutX,
+              icon.top + art.top + art.height - 1 + kFrameOutY);
+    }
+    if (art.select != 0) {
+        const i32 left = icon.left + static_cast<i16>(b.r16(art.select + im_LeftEdge));
+        const i32 top = icon.top + static_cast<i16>(b.r16(art.select + im_TopEdge));
+        cover(area, left, top, left + static_cast<i16>(b.r16(art.select + im_Width)) - 1,
+              top + static_cast<i16>(b.r16(art.select + im_Height)) - 1);
+    }
+    const i32 dx = drawer.inner_left - drawer.scroll_x;
+    const i32 dy = drawer.inner_top - drawer.scroll_y;
+    return Rect{area.x0 + dx, area.y0 + dy, area.x1 + dx, area.y1 + dy};
+}
+
+void Workbench::repaint_selection(u32 window_id, u32 before, u32 after) {
+    const DrawerWindow* drawer = find_window(window_id);
+    if (drawer == nullptr) {
+        return;
+    }
+    const u32 changed[] = {before, after == before ? kNoIcon : after};
+    for (const u32 id : changed) {
+        const IconEntry* icon = find_icon(id);
+        if (icon != nullptr && icon->owner == window_id) {
+            paint_area(*drawer, icon_area(*drawer, *icon));
         }
     }
 }
@@ -2702,16 +2773,21 @@ bool Workbench::load_patterns() {
 
 // The window's pattern over its inner area, in tiles from its top-left
 // corner; the window's clip keeps them inside.
-void Workbench::fill_pattern(const DrawerWindow& drawer, u32 which, i32 right, i32 bottom) {
+// The tiles lie from the inner area's corner, whichever part is painted.
+void Workbench::fill_pattern(const DrawerWindow& drawer, u32 which, const Rect& area) {
     const Pattern& pattern = patterns_[which];
     const u32 bitmap = pattern.picture != 0 ? pattern.picture : pattern.bitmap;
     if (pattern.depth == 0 || bitmap == 0 || pattern.width <= 0 || pattern.height <= 0) {
         return;
     }
-    for (i32 y = drawer.inner_top; y <= bottom; y += pattern.height) {
-        for (i32 x = drawer.inner_left; x <= right; x += pattern.width) {
-            const i32 w = right - x + 1 < pattern.width ? right - x + 1 : pattern.width;
-            const i32 h = bottom - y + 1 < pattern.height ? bottom - y + 1 : pattern.height;
+    const i32 first_x =
+        drawer.inner_left + (area.x0 - drawer.inner_left) / pattern.width * pattern.width;
+    const i32 first_y =
+        drawer.inner_top + (area.y0 - drawer.inner_top) / pattern.height * pattern.height;
+    for (i32 y = first_y; y <= area.y1; y += pattern.height) {
+        for (i32 x = first_x; x <= area.x1; x += pattern.width) {
+            const i32 w = std::min(area.x1 - x + 1, pattern.width);
+            const i32 h = std::min(area.y1 - y + 1, pattern.height);
             graphics_->blt_bitmap_rastport(bitmap, 0, 0, drawer.rp, x, y, w, h, 0xC0);
         }
     }
@@ -3005,14 +3081,15 @@ void Workbench::mouse_click(u32 window_id, i32 mx, i32 my, u64 now_us) {
     const i32 y = my - drawer->inner_top + drawer->scroll_y;
     const IconEntry* hit = icon_at(window_id, x, y);
     const u32 hit_id = hit != nullptr ? hit->id : kNoIcon;
+    const u32 before = drawer->clicks.selected();
     const ClickAction action = drawer->clicks.click(hit_id, now_us);
     switch (action) {
     case ClickAction::Select:
     case ClickAction::Clear:
-        draw_window(window_id);
+        repaint_selection(window_id, before, drawer->clicks.selected());
         break;
     case ClickAction::Open:
-        draw_window(window_id);
+        repaint_selection(window_id, before, drawer->clicks.selected());
         open_icon(window_id, hit_id);
         break;
     case ClickAction::None:
