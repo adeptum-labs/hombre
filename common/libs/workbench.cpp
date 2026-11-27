@@ -1341,6 +1341,9 @@ void Workbench::open_root() {
         return;
     }
     attach_window(kRootWindow, window, kBackdropName, "", gadgets);
+    if (gadgets != 0) {
+        intuition_->set_size_hook(window, &Workbench::window_sized, this);
+    }
 }
 
 // The right-hand column of the root window, top to bottom, then the next
@@ -2081,9 +2084,7 @@ void Workbench::open_drawer_window(const char* path, const char* name, u32 objec
     }
     DrawerWindow& drawer = attach_window(++open_count_, window, name, path, gadgets);
     drawer.gauge = gauge;
-    if (gauge != 0) {
-        intuition_->set_size_hook(window, &Workbench::gauge_sized, this);
-    }
+    intuition_->set_size_hook(window, &Workbench::window_sized, this);
     // The view a snapshot kept; drawing keeps it inside the icons.
     drawer.scroll_x = scroll_x;
     drawer.scroll_y = scroll_y;
@@ -2189,8 +2190,24 @@ void Workbench::draw_window(u32 window_id) {
     paint_window(*w);
 }
 
-void Workbench::paint_window(const DrawerWindow& drawer) {
+void Workbench::paint_window(DrawerWindow& drawer) {
     paint_area(drawer, inner_area(drawer));
+    drawer.painted_width = drawer.inner_width;
+    drawer.painted_height = drawer.inner_height;
+}
+
+// The scroll stood still through a resize, so all but the strips the window
+// grew keeps what it showed. A pure shrink paints nothing.
+void Workbench::paint_new_size(DrawerWindow& drawer) {
+    const i32 held_width = drawer.painted_width;
+    const i32 held_height = drawer.painted_height;
+    const Rect inner = inner_area(drawer);
+    paint_area(drawer, Rect{drawer.inner_left + held_width, inner.y0, inner.x1, inner.y1});
+    paint_area(drawer, Rect{inner.x0, drawer.inner_top + held_height,
+                            drawer.inner_left + std::min(held_width, drawer.inner_width) - 1,
+                            inner.y1});
+    drawer.painted_width = drawer.inner_width;
+    drawer.painted_height = drawer.inner_height;
 }
 
 void Workbench::paint_area(const DrawerWindow& drawer, const Rect& area) {
@@ -2603,15 +2620,27 @@ bool Workbench::fit_gauge(DrawerWindow& w) {
 // through the bottom border and the gadgets there, so it is made to fit
 // and the borders and their gadgets are drawn again, all before the screen
 // shows the window. A gauge with room to grow is left to the window's
-// IDCMP_NEWSIZE.
-void Workbench::gauge_sized(void* ctx, u32 window) {
+// IDCMP_NEWSIZE. The paint the resize cut off is lost here once, so the
+// held size only ever comes down.
+void Workbench::window_sized(void* ctx, u32 window) {
     Workbench& self = *static_cast<Workbench*>(ctx);
     DrawerWindow* w =
         self.windows_.find_if([&](const DrawerWindow& d) { return d.window == window; });
-    if (w == nullptr || w->gauge == 0 || w->gauge_image == 0) {
+    if (w == nullptr) {
         return;
     }
     Bus b(*self.machine_);
+    const i32 width = static_cast<i16>(b.r16(window + ndk::wd_Width));
+    const i32 height = static_cast<i16>(b.r16(window + ndk::wd_Height));
+    const i32 inner_width = width - static_cast<i32>(b.r8(window + ndk::wd_BorderLeft)) -
+                            static_cast<i32>(b.r8(window + ndk::wd_BorderRight));
+    const i32 inner_height = height - static_cast<i32>(b.r8(window + ndk::wd_BorderTop)) -
+                             static_cast<i32>(b.r8(window + ndk::wd_BorderBottom));
+    w->painted_width = std::min(w->painted_width, inner_width);
+    w->painted_height = std::min(w->painted_height, inner_height);
+    if (w->gauge == 0 || w->gauge_image == 0) {
+        return;
+    }
     if (gauge_box(b, window).height >= w->gauge_height) {
         return;
     }
@@ -3484,6 +3513,67 @@ bool Workbench::drag_holds(u32 icon_id) const {
     return window != nullptr && window->clicks.is_selected(icon_id);
 }
 
+// The window's icons are filled again: only the places an icon left, took,
+// moved to or changed its selection at are painted, unless the view moved.
+void Workbench::refill_window(DrawerWindow& drawer) {
+    struct Shown {
+        char file[32];
+        Rect area;
+        bool selected;
+    };
+    std::vector<Shown> before;
+    for (const IconEntry& icon : icons_) {
+        if (icon.owner != drawer.id) {
+            continue;
+        }
+        Shown shown{};
+        copy_text(shown.file, sizeof shown.file, icon.file);
+        shown.area = icon_area(drawer, icon);
+        shown.selected = drawer.clicks.is_selected(icon.id);
+        before.push_back(shown);
+    }
+    fill_drawer(drawer);
+    const i32 old_x = drawer.scroll_x;
+    const i32 old_y = drawer.scroll_y;
+    update_scroll(drawer);
+    if (drawer.scroll_x != old_x || drawer.scroll_y != old_y) {
+        paint_window(drawer);
+        return;
+    }
+    for (const Shown& shown : before) {
+        const IconEntry* icon = nullptr;
+        for (const IconEntry& now : icons_) {
+            if (now.owner == drawer.id && same_ci(now.file, shown.file)) {
+                icon = &now;
+                break;
+            }
+        }
+        if (icon == nullptr) {
+            paint_area(drawer, shown.area);
+            continue;
+        }
+        const Rect area = icon_area(drawer, *icon);
+        if (area.x0 != shown.area.x0 || area.y0 != shown.area.y0 ||
+            area.x1 != shown.area.x1 || area.y1 != shown.area.y1 ||
+            drawer.clicks.is_selected(icon->id) != shown.selected) {
+            paint_area(drawer, shown.area);
+            paint_area(drawer, area);
+        }
+    }
+    for (const IconEntry& icon : icons_) {
+        if (icon.owner != drawer.id) {
+            continue;
+        }
+        const bool was_shown = std::any_of(before.begin(), before.end(),
+                                           [&](const Shown& shown) {
+                                               return same_ci(shown.file, icon.file);
+                                           });
+        if (!was_shown) {
+            paint_area(drawer, icon_area(drawer, icon));
+        }
+    }
+}
+
 // Where the dragged icons land: their own window gives them their new
 // places; a drawer or disk icon, or another drawer's window, takes their
 // files.
@@ -3512,7 +3602,7 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
         return;
     }
     const u32 under = intuition_->window_under(sx, sy);
-    const DrawerWindow* to =
+    DrawerWindow* to =
         windows_.find_if([&](const DrawerWindow& w) { return w.window == under; });
     i32 origin_x = 0;
     i32 origin_y = 0;
@@ -3552,6 +3642,12 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
     const bool into_icon =
         on != nullptr && (on->type == kDrawer || on->type == kDisk || on->type == kGarbage);
     if (to->id == drag.window && !into_icon) {
+        std::vector<Rect> before;
+        for (const IconEntry& placed : moving) {
+            if (const IconEntry* icon = find_icon(placed.id); icon != nullptr) {
+                before.push_back(icon_area(*to, *icon));
+            }
+        }
         for (const IconEntry& placed : moving) {
             if (IconEntry* icon = find_icon(placed.id); icon != nullptr) {
                 icon->left = new_left(placed);
@@ -3559,7 +3655,21 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
                 icon->placed = true;
             }
         }
-        draw_window(to->id);
+        const i32 old_x = to->scroll_x;
+        const i32 old_y = to->scroll_y;
+        update_scroll(*to);
+        if (to->scroll_x != old_x || to->scroll_y != old_y) {
+            paint_window(*to);
+        } else {
+            for (const Rect& area : before) {
+                paint_area(*to, area);
+            }
+            for (const IconEntry& placed : moving) {
+                if (const IconEntry* icon = find_icon(placed.id); icon != nullptr) {
+                    paint_area(*to, icon_area(*to, *icon));
+                }
+            }
+        }
         return;
     }
     struct Touched {
@@ -3622,8 +3732,7 @@ void Workbench::drop(const IconDrag& drag, i32 sx, i32 sy) {
             }
         }
         if (affected) {
-            fill_drawer(w);
-            draw_window(w.id);
+            refill_window(w);
         }
     }
 }
@@ -5964,8 +6073,15 @@ void Workbench::handle_message(u32 message) {
         if (DrawerWindow* w = find_window(window_id); w != nullptr) {
             measure_window(*w);
             layout_gauge(*w);
+            const i32 old_x = w->scroll_x;
+            const i32 old_y = w->scroll_y;
+            update_scroll(*w);
+            if (w->scroll_x != old_x || w->scroll_y != old_y) {
+                paint_window(*w);
+            } else {
+                paint_new_size(*w);
+            }
         }
-        draw_window(window_id);
     } else if (idcmp_class == ndk::IDCMP_ACTIVEWINDOW ||
                idcmp_class == ndk::IDCMP_INACTIVEWINDOW) {
         // The border changed its face under the gauge; the menu's Show

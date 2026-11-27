@@ -1863,6 +1863,38 @@ void shift_click_at(Rig& r, u32 window, i32 x, i32 y) {
     g_intuition.set_qualifier(0);
 }
 
+// A pen 3 pixel written straight into the window's bitmap at x, y of its
+// inner area: no repaint should touch it.
+void mark_pixel(Rig& r, u32 window_index, i32 x, i32 y) {
+    const Workbench::DrawerWindow& w = r.workbench.window(window_index);
+    g_graphics.set_pens(w.rp, 3, 0, ndk::JAM1);
+    g_graphics.rect_fill(w.rp, w.inner_left + x, w.inner_top + y, w.inner_left + x,
+                         w.inner_top + y);
+}
+
+// The pens of a window's inner area, leaving out the points a test marked
+// a full redraw would paint over.
+std::vector<u32> inner_snapshot(const Rig& r, u32 window_index,
+                                const std::vector<std::pair<i32, i32>>& skip) {
+    const Workbench::DrawerWindow& w = r.workbench.window(window_index);
+    std::vector<u32> pens;
+    for (i32 y = 0; y < w.inner_height; ++y) {
+        for (i32 x = 0; x < w.inner_width; ++x) {
+            bool marked = false;
+            for (const std::pair<i32, i32>& point : skip) {
+                if (point.first == x && point.second == y) {
+                    marked = true;
+                    break;
+                }
+            }
+            if (!marked) {
+                pens.push_back(r.window_pixel(w.window, w.inner_left + x, w.inner_top + y));
+            }
+        }
+    }
+    return pens;
+}
+
 void an_icon_dragged_in_its_window_takes_the_new_place() {
     Rig r;
     const TwoWindows w = open_tools_and_ram(r);
@@ -1954,6 +1986,123 @@ void a_drag_ends_when_its_window_is_filled_again() {
     const u32 proj = r.find_icon_in(w.tools, "Proj");
     CHECK_EQ(r.workbench.icon(proj).left, 60);
     CHECK_EQ(r.workbench.icon(proj).top, 80);
+}
+
+void a_dragged_icon_leaves_the_rest_of_its_window_painted() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const Workbench::DrawerWindow tools = r.workbench.window(w.tools);
+    const u32 tool = r.find_icon_in(w.tools, "Tool");
+    const Workbench::IconEntry before = r.workbench.icon(tool);
+
+    mark_pixel(r, w.tools, 170, 62);
+    CHECK_EQ(r.window_pixel(tools.window, tools.inner_left + 170, tools.inner_top + 62), 3u);
+
+    // The press selects the icon, so its moved copy shows selected too.
+    r.press(w.tools, before.left + 3, before.top + 3);
+    std::vector<u32> image;
+    for (i32 y = 0; y < before.height; ++y) {
+        for (i32 x = 0; x < before.width; ++x) {
+            image.push_back(r.window_pixel(tools.window, tools.inner_left + before.left + x,
+                                           tools.inner_top + before.top + y));
+        }
+    }
+    r.move_held(r.screen_x(w.tools, 160), r.screen_y(w.tools, 23));
+    r.release(r.screen_x(w.tools, 160), r.screen_y(w.tools, 23));
+    const Workbench::IconEntry after = r.workbench.icon(tool);
+    CHECK_EQ(after.left, 157);
+    CHECK_EQ(after.top, 20);
+
+    // The old place shows the background again.
+    CHECK_EQ(r.window_pixel(tools.window, tools.inner_left + before.left + 3,
+                            tools.inner_top + before.top + 3), 0u);
+    CHECK_EQ(r.window_pixel(tools.window, tools.inner_left + before.left + 28,
+                            tools.inner_top + before.top + 8), 0u);
+
+    // The icon shows at the new place exactly as it did before the move.
+    for (i32 y = 0; y < before.height; ++y) {
+        for (i32 x = 0; x < before.width; ++x) {
+            CHECK_EQ(r.window_pixel(tools.window, tools.inner_left + after.left + x,
+                                    tools.inner_top + after.top + y),
+                     image[static_cast<usize>(y * before.width + x)]);
+        }
+    }
+    // The mark stood outside both places and survives.
+    CHECK_EQ(r.window_pixel(tools.window, tools.inner_left + 170, tools.inner_top + 62), 3u);
+}
+
+void a_drag_between_windows_repaints_only_what_changed() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const Workbench::DrawerWindow tools = r.workbench.window(w.tools);
+    const Workbench::DrawerWindow ram = r.workbench.window(w.ram);
+    mark_pixel(r, w.tools, 170, 62);
+    mark_pixel(r, w.ram, 40, 60);
+    CHECK_EQ(r.window_pixel(tools.window, tools.inner_left + 170, tools.inner_top + 62), 3u);
+    CHECK_EQ(r.window_pixel(ram.window, ram.inner_left + 40, ram.inner_top + 60), 3u);
+
+    // A project copied to the Ram Disk window takes its icon along.
+    r.drag(w.tools, 63, 83, r.screen_x(w.ram, 153), r.screen_y(w.ram, 43));
+    CHECK(r.find_icon_in(w.ram, "Proj") != Workbench::kNoIcon);
+
+    // Both marks stood clear of the icons that changed.
+    CHECK_EQ(r.window_pixel(tools.window, tools.inner_left + 170, tools.inner_top + 62), 3u);
+    CHECK_EQ(r.window_pixel(ram.window, ram.inner_left + 40, ram.inner_top + 60), 3u);
+
+    // What the drop painted matches a full redraw, the marks aside.
+    const std::vector<std::pair<i32, i32>> tools_mark{{170, 62}};
+    const std::vector<std::pair<i32, i32>> ram_mark{{40, 60}};
+    const std::vector<u32> tools_before = inner_snapshot(r, w.tools, tools_mark);
+    const std::vector<u32> ram_before = inner_snapshot(r, w.ram, ram_mark);
+    r.workbench.menu_pick(0, (2 << 5) | (31 << 11));  // Workbench > Redraw All
+    CHECK(inner_snapshot(r, w.tools, tools_mark) == tools_before);
+    CHECK(inner_snapshot(r, w.ram, ram_mark) == ram_before);
+}
+
+void a_grown_drawer_keeps_its_paint_and_paints_the_new_strips() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const Workbench::DrawerWindow before = r.workbench.window(w.tools);
+    mark_pixel(r, w.tools, 170, 62);
+    CHECK_EQ(r.window_pixel(before.window, before.inner_left + 170, before.inner_top + 62), 3u);
+
+    g_intuition.size_window_to(before.window, 400, 200);
+    r.workbench.pump();
+    const Workbench::DrawerWindow after = r.workbench.window(w.tools);
+    CHECK_EQ(after.inner_width, before.inner_width + 100);
+    CHECK_EQ(after.inner_height, before.inner_height + 80);
+    // The mark lay in the part the window kept.
+    CHECK_EQ(r.window_pixel(after.window, after.inner_left + 170, after.inner_top + 62), 3u);
+
+    // The new strips match a full redraw, the mark aside.
+    const std::vector<std::pair<i32, i32>> mark{{170, 62}};
+    const std::vector<u32> grown = inner_snapshot(r, w.tools, mark);
+    r.workbench.menu_pick(0, (2 << 5) | (31 << 11));
+    CHECK(inner_snapshot(r, w.tools, mark) == grown);
+}
+
+void a_shrink_and_grow_before_the_message_paints_what_was_lost() {
+    Rig r;
+    const TwoWindows w = open_tools_and_ram(r);
+    const Workbench::DrawerWindow before = r.workbench.window(w.tools);
+    mark_pixel(r, w.tools, 170, 40);
+    CHECK_EQ(r.window_pixel(before.window, before.inner_left + 170, before.inner_top + 40), 3u);
+
+    // Shrunk and grown again before the one NEWSIZE is handled.
+    g_intuition.size_window_to(before.window, 200, 80);
+    g_intuition.size_window_to(before.window, 400, 200);
+    r.workbench.pump();
+    const Workbench::DrawerWindow after = r.workbench.window(w.tools);
+    CHECK_EQ(after.inner_width, before.inner_width + 100);
+    CHECK_EQ(after.inner_height, before.inner_height + 80);
+    // The mark lay inside the smallest the window was and survives.
+    CHECK_EQ(r.window_pixel(after.window, after.inner_left + 170, after.inner_top + 40), 3u);
+
+    // What the shrink cut off matches a full redraw, the mark aside.
+    const std::vector<std::pair<i32, i32>> mark{{170, 40}};
+    const std::vector<u32> grown = inner_snapshot(r, w.tools, mark);
+    r.workbench.menu_pick(0, (2 << 5) | (31 << 11));
+    CHECK(inner_snapshot(r, w.tools, mark) == grown);
 }
 
 void a_box_selects_the_icons_it_touches() {
@@ -2329,6 +2478,28 @@ std::vector<AdfFile> scroll_files(i32 scroll_x = 0, i32 scroll_y = 0) {
     files.push_back({"Long/Top.info", icon_info(kWBTool, 10, 10)});
     files.push_back({"Long/Bottom.info", icon_info(kWBTool, 10, 300)});
     return files;
+}
+
+void a_resize_that_scrolls_repaints_the_whole_window() {
+    Rig r(scroll_files(0, 200));
+    r.workbench.open_desktop();
+    r.workbench.open_icon(0, r.find_icon("HombreTest"));
+    const u32 root = r.find_window("HombreTest:");
+    r.workbench.open_icon(root, r.find_icon_in(root, "Long"));
+    const u32 long_drawer = r.find_window("HombreTest:Long");
+    CHECK(long_drawer != Workbench::kNoWindow);
+    const Workbench::DrawerWindow before = r.workbench.window(long_drawer);
+    CHECK_EQ(before.scroll_y, 200);
+    mark_pixel(r, long_drawer, 200, 20);
+    CHECK_EQ(r.window_pixel(before.window, before.inner_left + 200, before.inner_top + 20), 3u);
+
+    // Growing the window to fit more of the icons pulls the view back.
+    g_intuition.size_window_to(before.window, 400, 250);
+    r.workbench.pump();
+    const Workbench::DrawerWindow after = r.workbench.window(long_drawer);
+    CHECK(after.scroll_y < before.scroll_y);
+    // A moved view repaints everything, so the mark is gone.
+    CHECK_EQ(r.window_pixel(after.window, after.inner_left + 200, after.inner_top + 20), 0u);
 }
 
 u32 open_long(Rig& r) {
@@ -6287,6 +6458,11 @@ int main() {
     an_icon_dragged_in_its_window_takes_the_new_place();
     a_dragged_file_is_copied_moved_or_refused();
     a_drag_ends_when_its_window_is_filled_again();
+    a_dragged_icon_leaves_the_rest_of_its_window_painted();
+    a_drag_between_windows_repaints_only_what_changed();
+    a_grown_drawer_keeps_its_paint_and_paints_the_new_strips();
+    a_shrink_and_grow_before_the_message_paints_what_was_lost();
+    a_resize_that_scrolls_repaints_the_whole_window();
     selected_icons_drag_together();
     a_dragged_group_keeps_its_offset_at_the_edge();
     two_projects_dragged_to_a_window_arrive_there();

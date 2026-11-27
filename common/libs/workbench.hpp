@@ -195,6 +195,10 @@ public:
         i32 inner_top = 0;
         i32 inner_width = 0;
         i32 inner_height = 0;
+        // The inner width and height the bitmap still holds painted; a
+        // resize lowers them never raises them, a full paint sets them.
+        i32 painted_width = 0;
+        i32 painted_height = 0;
         char name[32]{};
         char path[Dos::kMaxPath]{};
         // The drawer point shown at the inner area's top-left corner.
@@ -763,7 +767,10 @@ private:
     void fill_drawer(DrawerWindow& drawer);
     void place_icons(const DrawerWindow& drawer);
     void draw_window(u32 window_id);
-    void paint_window(const DrawerWindow& drawer);
+    void paint_window(DrawerWindow& drawer);
+    // Paints what a resize left unpainted while the scroll stood still,
+    // then records the window painted at its new size.
+    void paint_new_size(DrawerWindow& drawer);
     // Paints the background and icons of the part of the window's inner
     // area that area covers, leaving the rest as it is.
     void paint_area(const DrawerWindow& drawer, const Rect& area);
@@ -784,7 +791,9 @@ private:
     u32 pen_depth(native::Bus& b) const;
     bool fit_gauge(DrawerWindow& w);
     void fill_gauge_image(DrawerWindow& w);
-    static void gauge_sized(void* ctx, u32 window);
+    // Intuition's size hook: records the paint a resize kept, then keeps a
+    // gauge from reaching through the bottom border.
+    static void window_sized(void* ctx, u32 window);
     void refresh_gauges();
     bool build_arrow_images();
     void paint_arrow_images();
@@ -901,6 +910,9 @@ private:
     Rect box_rect(const DrawerWindow& window, i32 mx, i32 my) const;
     // Sets the selection to the box's base, then the icons it touches.
     void select_box(u32 window_id, const Rect& area);
+    // Fills the window again and paints only what the refill changed, or
+    // the whole window when the view moved.
+    void refill_window(DrawerWindow& drawer);
     void drop(const IconDrag& drag, i32 sx, i32 sy);
     bool transfer(const IconEntry& icon, const char* from, const char* to, i32 left, i32 top);
     bool icon_path(const DrawerWindow& window, const IconEntry& icon,
