@@ -30,7 +30,9 @@
 #include "amiga_fs_write.hpp"
 
 #include <cstdio>
+#include <ctime>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace hombre {
@@ -158,6 +160,25 @@ inline AddError read_host_file(const std::string& path, std::vector<u8>& data) {
     return ok ? AddError::Ok : AddError::HostUnreadable;
 }
 
+// A Unix time as the days, minutes and ticks a DateStamp counts from
+// 1978-01-01 UTC.
+inline AmigaDate date_of_time(std::time_t when) {
+    constexpr std::time_t kAmigaEpoch = 2922 * 86400;
+    const std::time_t seconds = when > kAmigaEpoch ? when - kAmigaEpoch : 0;
+    return AmigaDate{static_cast<u32>(seconds / 86400),
+                     static_cast<u32>((seconds % 86400) / 60),
+                     static_cast<u32>((seconds % 60) * 50)};
+}
+
+inline AmigaDate current_date() { return date_of_time(std::time(nullptr)); }
+
+// The modification time of a host file, or the current time when it has
+// none to tell.
+inline AmigaDate host_file_date(const std::string& path) {
+    struct stat info{};
+    return stat(path.c_str(), &info) == 0 ? date_of_time(info.st_mtime) : current_date();
+}
+
 inline AddError to_add_error(FsError error) {
     switch (error) {
     case FsError::Ok: return AddError::Ok;
@@ -171,9 +192,11 @@ inline AddError to_add_error(FsError error) {
 }
 
 // Creates the folders of `path` that are missing, then the file, and writes
-// `data` into it. A file or folder already at the path is Exists.
+// `data` into it. The file takes `file_date`; the folders and the volume
+// take `dir_date`. A file or folder already at the path is Exists.
 inline AddError add_file(const AdfVolume& v, const std::vector<std::string>& path,
-                         const std::vector<u8>& data, const AmigaDate& now) {
+                         const std::vector<u8>& data, const AmigaDate& file_date,
+                         const AmigaDate& dir_date) {
     if (path.empty()) {
         return AddError::BadArgument;
     }
@@ -187,7 +210,7 @@ inline AddError add_file(const AdfVolume& v, const std::vector<std::string>& pat
         DirEntry entry{};
         FsError error = adf_find(v, at.c_str(), entry);
         if (error == FsError::NotFound) {
-            error = adf_create_dir(v, dir, path[i].c_str(), now, entry);
+            error = adf_create_dir(v, dir, path[i].c_str(), dir_date, entry);
         } else if (error == FsError::Ok && !entry.is_dir) {
             return AddError::NotDir;
         }
@@ -207,20 +230,31 @@ inline AddError add_file(const AdfVolume& v, const std::vector<std::string>& pat
         return to_add_error(found);
     }
     DirEntry made{};
-    FsError error = adf_create_file(v, dir, name.c_str(), now, made);
+    FsError error = adf_create_file(v, dir, name.c_str(), dir_date, made);
     if (error != FsError::Ok) {
         return to_add_error(error);
     }
     u32 written = 0;
-    error = adf_write(v, made.header_block, 0, data.data(), static_cast<u32>(data.size()), now,
-                      written);
+    error = adf_write(v, made.header_block, 0, data.data(), static_cast<u32>(data.size()),
+                      file_date, written);
     if (error == FsError::DiskFull) {
         return AddError::DiskFull;
     }
     if (error != FsError::Ok) {
         return to_add_error(error);
     }
-    return written == data.size() ? AddError::Ok : AddError::DiskFull;
+    if (written != data.size()) {
+        return AddError::DiskFull;
+    }
+    error = adf_set_date(v, made.header_block, file_date, dir_date);
+    return error == FsError::Ok ? AddError::Ok : to_add_error(error);
+}
+
+// A caller with one date for the whole copy gives it to the file and the
+// folders alike.
+inline AddError add_file(const AdfVolume& v, const std::vector<std::string>& path,
+                         const std::vector<u8>& data, const AmigaDate& now) {
+    return add_file(v, path, data, now, now);
 }
 
 }

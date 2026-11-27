@@ -85,7 +85,7 @@ bool copy_tree(const AdfVolume& from, const std::string& path, const AdfVolume& 
         std::fprintf(stderr, "cannot list %s\n", path.c_str());
         return false;
     }
-    const AmigaDate now{0, 0, 0};
+    const AmigaDate now = mkhdf_add::current_date();
     for (const DirEntry& e : entries) {
         const std::string child = path.empty() ? e.name : path + "/" + e.name;
         DirEntry made;
@@ -178,7 +178,9 @@ mkhdf_add::AddError add_to_partition(const mkhdf_add::AddSpec& add,
     if (adf_mount_partition(source, 0, blocks, 2, volume) != FsError::Ok) {
         return mkhdf_add::AddError::Fs;
     }
-    return mkhdf_add::add_file(volume, add.path, data, AmigaDate{0, 0, 0});
+    const AmigaDate current = mkhdf_add::current_date();
+    return mkhdf_add::add_file(volume, add.path, data,
+                               mkhdf_add::host_file_date(add.host_file), current);
 }
 
 // The RDB disk as one GPT partition of a disk with 4096 byte sectors, as an
@@ -330,7 +332,7 @@ int main(int argc, char** argv) {
         const u32 blocks = (parts[i].high_cyl - parts[i].low_cyl + 1) * kSectorsPerTrack;
         if (i >= floppies.size()) {
             if (adf_format(source, 0, blocks, 2, empty_spec.dos_type, empty_spec.name.c_str(),
-                           AmigaDate{0, 0, 0}) != FsError::Ok) {
+                           mkhdf_add::current_date()) != FsError::Ok) {
                 std::fprintf(stderr, "mkhdf: cannot format %s\n", empty_spec.name.c_str());
                 return 1;
             }
@@ -342,8 +344,8 @@ int main(int argc, char** argv) {
             return 1;
         }
         AdfVolume to{};
-        if (adf_format(source, 0, blocks, 2, from.dos_type, from.name, AmigaDate{0, 0, 0}) !=
-                FsError::Ok ||
+        if (adf_format(source, 0, blocks, 2, from.dos_type, from.name,
+                       mkhdf_add::current_date()) != FsError::Ok ||
             adf_mount_partition(source, 0, blocks, 2, to) != FsError::Ok ||
             !copy_tree(from, "", to, to.root_block)) {
             std::fprintf(stderr, "%s: cannot build its partition\n", argv[2 + i]);
