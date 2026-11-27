@@ -1781,6 +1781,11 @@ ExitReason Jit::run(u64 max_blocks) {
                 break;
             }
         }
+        if constexpr (kBlockWatch) {
+            if (block_watch_ != nullptr) {
+                block_watch_(block_watch_ctx_, *machine_);
+            }
+        }
         const u8* code = lookup(cpu.pc);
         if (code == nullptr) {
             code = translate(cpu.pc);

@@ -23,6 +23,8 @@
 
 #include "boopsi.hpp"
 
+#include "boopsi_trace.hpp"
+
 #include "gfx.hpp"
 #include "tags.hpp"
 
@@ -144,25 +146,49 @@ bool same(const char* a, const char* b) {
 struct Boopsi::Natives {
     static Boopsi& of(void* ctx) { return *static_cast<Boopsi*>(ctx); }
 
+    using Dispatcher = u32 (Boopsi::*)(u32 cl, u32 object, u32 msg);
+
     // A dispatcher as a Hook calls it: the class in A0, the object in A2
     // and the message in A1.
-    static void root(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).root_dispatch(m.cpu.a[0], m.cpu.a[2], m.cpu.a[1]));
+    static void entry(void* ctx, Machine& m, Dispatcher dispatcher) {
+        Boopsi& boopsi = of(ctx);
+        const u32 cl = m.cpu.a[0];
+        const u32 object = m.cpu.a[2];
+        const u32 msg = m.cpu.a[1];
+        if constexpr (kBoopsiTrace) {
+            const boopsi_trace::Frame frame = boopsi_trace::call(
+                boopsi.trace_, m, boopsi.exec_->this_task(), "guest", cl, object, msg);
+            const u32 result = (boopsi.*dispatcher)(cl, object, msg);
+            boopsi_trace::ret(boopsi.trace_, m, frame, result);
+            native::set_result(m, result);
+        } else {
+            native::set_result(m, (boopsi.*dispatcher)(cl, object, msg));
+        }
     }
-    static void gadget(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).gadget_dispatch(m.cpu.a[0], m.cpu.a[2], m.cpu.a[1]));
+    static void root(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::root_dispatch); }
+    static void gadget(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::gadget_dispatch); }
+    static void image(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::image_dispatch); }
+    static void sysi(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::sysi_dispatch); }
+
+    static void trace_task_ended(void* ctx, u32 task, bool) {
+        boopsi_trace::drop_task(of(ctx).trace_, task);
     }
-    static void image(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).image_dispatch(m.cpu.a[0], m.cpu.a[2], m.cpu.a[1]));
-    }
-    static void sysi(void* ctx, Machine& m) {
-        native::set_result(m, of(ctx).sysi_dispatch(m.cpu.a[0], m.cpu.a[2], m.cpu.a[1]));
+    static void trace_block(void* ctx, Machine& m) {
+        Boopsi& boopsi = of(ctx);
+        boopsi_trace::watch(boopsi.trace_, m, boopsi.exec_->this_task());
     }
 };
 
 bool Boopsi::init(Machine& m, Exec& exec) {
     machine_ = &m;
     exec_ = &exec;
+    if constexpr (kBoopsiTrace) {
+        boopsi_trace::reset(trace_);
+        exec.set_task_end_hook(Natives::trace_task_ended, this);
+        if (m.jit != nullptr) {
+            m.jit->set_block_watch(Natives::trace_block, this);
+        }
+    }
     public_.clear();
     ica_.clear();
     notify_depth_ = 0;
@@ -234,6 +260,9 @@ u32 Boopsi::make_class(u32 id, u32 super_id, u32 super_class, u32 inst_size, u32
     Bus b(*machine_);
     const u32 super = super_class != 0 ? super_class : (super_id != 0 ? find_class(super_id) : 0);
     if (super == 0) {
+        if constexpr (kBoopsiTrace) {
+            boopsi_trace::missing_class(*machine_, super_id);
+        }
         return 0;
     }
     char name[kMaxClassName];
@@ -263,6 +292,9 @@ u32 Boopsi::make_class(u32 id, u32 super_id, u32 super_class, u32 inst_size, u32
     if (!b.ok()) {
         exec_->free(cl, bytes);
         return 0;
+    }
+    if constexpr (kBoopsiTrace) {
+        boopsi_trace::made_class(trace_, *machine_, cl);
     }
     return cl;
 }
@@ -311,6 +343,9 @@ bool Boopsi::free_class(u32 cl) {
     const u32 bytes = b.r32(cl + cl_Reserved);
     if (!b.ok()) {
         return false;
+    }
+    if constexpr (kBoopsiTrace) {
+        boopsi_trace::freed_class(trace_, cl);
     }
     exec_->free(cl, bytes);
     return true;
@@ -385,9 +420,20 @@ u32 Boopsi::do_method(u32 object, u32 msg) {
     return object != 0 ? coerce_method(class_of(object), object, msg) : 0;
 }
 
+u32 Boopsi::coerce_method(u32 cl, u32 object, u32 msg) {
+    if constexpr (kBoopsiTrace) {
+        const boopsi_trace::Frame frame =
+            boopsi_trace::call(trace_, *machine_, exec_->this_task(), "host", cl, object, msg);
+        const u32 result = dispatch(cl, object, msg);
+        boopsi_trace::ret(trace_, *machine_, frame, result);
+        return result;
+    }
+    return dispatch(cl, object, msg);
+}
+
 // The class's dispatcher on the message: in C++ for a system class, as
 // a nested guest call for one written in 68000 code.
-u32 Boopsi::coerce_method(u32 cl, u32 object, u32 msg) {
+u32 Boopsi::dispatch(u32 cl, u32 object, u32 msg) {
     if (cl == 0) {
         return 0;
     }
@@ -421,7 +467,13 @@ u32 Boopsi::coerce_method(u32 cl, u32 object, u32 msg) {
     m.cpu.a[0] = cl;
     m.cpu.a[1] = msg;
     m.cpu.a[2] = object;
+    if constexpr (kBoopsiTrace) {
+        trace_.expected_entry = entry;
+    }
     const m68k::ExitReason why = m.jit->call_guest(entry, kDispatchBlocks);
+    if constexpr (kBoopsiTrace) {
+        trace_.expected_entry = 0;
+    }
     exec_->leave_nested_run();
     if (why != m68k::ExitReason::Returned) {
         return 0;  // the run ended inside the dispatcher
@@ -462,6 +514,9 @@ u32 Boopsi::send(u32 cl, u32 object, const u32* longs, u32 count) {
 u32 Boopsi::new_object(u32 cl, u32 id, u32 tags) {
     const u32 true_class = cl != 0 ? cl : find_class(id);
     if (true_class == 0) {
+        if constexpr (kBoopsiTrace) {
+            boopsi_trace::missing_class(*machine_, id);
+        }
         return 0;
     }
     const u32 msg[] = {OM_NEW, tags, 0};

@@ -87,6 +87,10 @@ LOADER     := $(BUILD)/BOOTX64.EFI
 # only after make clean. make clean && make KCXXEXTRA=-DHOMBRE_M68K_TRACE
 # builds a kernel that logs every translated 68000 block, its guest pc and
 # first four opcode words, on the serial console.
+# KCXXEXTRA=-DHOMBRE_BOOPSI_TRACE logs BOOPSI methods: those C++ sends or
+# dispatches, with their tag lists and results, and the ones 68000 code
+# sends to 68000 dispatchers, seen as a block starting at a class's h_Entry
+# (see common/libs/boopsi_trace.hpp).
 KCXXEXTRA ?=
 KCXX      := g++
 KLD       := ld.bfd

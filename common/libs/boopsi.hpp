@@ -40,6 +40,9 @@
 // behind A-line stubs, so a 68000 dispatcher's DoSuperMethod reaches them
 // through cl_Super's h_Entry like any other. A method sent to a class
 // whose dispatcher is 68000 code runs that code as a nested guest call.
+//
+// A kernel built with -DHOMBRE_BOOPSI_TRACE logs the methods; see
+// boopsi_trace.hpp.
 
 namespace hombre {
 
@@ -228,6 +231,25 @@ constexpr u32 IDS_INACTIVESELECTED = 6;
 
 }
 
+// What the BOOPSI trace (boopsi_trace.hpp) keeps: how many traced calls
+// each task has open, the entry of the dispatch C++ is about to run, which
+// the trace logs already, and the classes MakeClass made, whose h_Entry it
+// watches. Part of every build, so that Boopsi is laid out the same with
+// and without HOMBRE_BOOPSI_TRACE; it stays empty without it.
+struct BoopsiTraceState {
+    static constexpr u32 kTasks = 32;
+    struct Depth {
+        bool used = false;
+        u32 task = 0;
+        u32 depth = 0;
+    };
+    Depth depths[kTasks]{};
+    // Counts for a task that finds no free entry.
+    Depth spare{};
+    u32 expected_entry = 0;
+    std::vector<u32> classes;
+};
+
 class Boopsi {
 public:
     static constexpr u32 kMaxPublicClasses = 1024;
@@ -314,6 +336,7 @@ private:
     static constexpr u32 kMaxNotifyDepth = 8;
 
     u32 make_system_class(const char* name, u32 super, u32 inst_size, m68k::NativeFn entry);
+    u32 dispatch(u32 cl, u32 object, u32 msg);
     u32 root_dispatch(u32 cl, u32 object, u32 msg);
     u32 gadget_dispatch(u32 cl, u32 object, u32 msg);
     u32 image_dispatch(u32 cl, u32 object, u32 msg);
@@ -348,6 +371,7 @@ private:
     SlotList<IcaEntry> ica_{kMaxIcaEntries};
     u32 notify_depth_ = 0;
     std::vector<u32> public_;
+    BoopsiTraceState trace_;
 };
 
 }

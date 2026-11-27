@@ -82,6 +82,14 @@ struct CodeRegion {
 class Jit;
 struct Machine;
 
+// Whether run() calls the block watch: only in a kernel built with
+// -DHOMBRE_BOOPSI_TRACE.
+#if defined(HOMBRE_BOOPSI_TRACE)
+inline constexpr bool kBlockWatch = true;
+#else
+inline constexpr bool kBlockWatch = false;
+#endif
+
 using NativeFn = void (*)(void* ctx, Machine& m);
 
 struct NativeSlot {
@@ -178,6 +186,15 @@ public:
         preempt_ctx_ = ctx;
     }
 
+    // Called with the machine at the start of each block before it runs,
+    // when kBlockWatch is set; the BOOPSI trace watches the dispatchers of
+    // classes through it. Null removes it.
+    using BlockWatch = void (*)(void* ctx, Machine& m);
+    void set_block_watch(BlockWatch fn, void* ctx) {
+        block_watch_ = fn;
+        block_watch_ctx_ = ctx;
+    }
+
     RunState save_run_state() const {
         return RunState{budget_left_, run_depth_, native_, stop_};
     }
@@ -241,6 +258,8 @@ private:
     void* attention_ctx_ = nullptr;
     PreemptHook preempt_hook_ = nullptr;
     void* preempt_ctx_ = nullptr;
+    BlockWatch block_watch_ = nullptr;
+    void* block_watch_ctx_ = nullptr;
     u32 blocks_ = 0;
     u32 next_native_ = 2;
     Block cache_[kSlots]{};
