@@ -8284,6 +8284,12 @@ void Intuition::release_bool_gadget(Bus& b, u32 window, i32 x, i32 y) {
     if (!w.ok || !b.ok()) {
         return;
     }
+    // A gadget with no GACT_RELVERIFY has no release to verify: it stays
+    // as the press left it, selected for its program to unselect, as a
+    // program that keeps one of a row of gadgets chosen expects.
+    if ((activation & ndk::GACT_RELVERIFY) == 0) {
+        return;
+    }
     const Rect box = resolve_gadget_box(b, w, gadget);
     const bool inside = window_at(x, y) == window && in_rect(box, x - w.left, y - w.top);
     const bool toggles = (type & ndk::GTYP_GADTOOLS) != 0 &&

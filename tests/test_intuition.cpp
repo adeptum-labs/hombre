@@ -5060,6 +5060,32 @@ void a_boolean_gadget_takes_the_click_from_the_window() {
     CHECK_EQ(classes[0], IDCMP_GADGETDOWN);
 }
 
+// A gadget with GACT_IMMEDIATE and no GACT_RELVERIFY stays selected when
+// the button is let go, complemented as its highlight asks, for its
+// program to unselect: a row of tool gadgets keeps the chosen one so.
+// The release goes to no one.
+void a_gadget_without_relverify_stays_selected_when_let_go() {
+    GfxRig r;
+    put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
+    CHECK(open_new(r, kNewScreen) != 0);
+    put_gadget(r, kGad1, 0, 20, 20, 40, 20, 0, GACT_IMMEDIATE, GTYP_BOOLGADGET, 0);
+    put_new_window(r, kNewWindow, 50, 50, 200, 100, 0, 0, 0, 0);
+    r.put32(kNewWindow + nw_IDCMPFlags, IDCMP_GADGETDOWN | IDCMP_GADGETUP);
+    r.put32(kNewWindow + nw_FirstGadget, kGad1);
+    const u32 window = open_win(r, kNewWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    CHECK_EQ(window_pixel(r, window, 30, 30), 0u);
+
+    press(r, 80, 80);
+    release(r, 80, 80);
+    CHECK((r.get16(kGad1 + gg_Flags) & GFLG_SELECTED) != 0);
+    CHECK_EQ(window_pixel(r, window, 30, 30), 3u);
+    const std::vector<u32> classes = queued_classes(r, window);
+    CHECK_EQ(classes.size(), 1u);
+    CHECK_EQ(classes[0], IDCMP_GADGETDOWN);
+}
+
 void gadget_list_cycle_is_bounded() {
     GfxRig r;
     put_new_screen(r, kNewScreen, 640, 400, 2, 0, 1, 0);
@@ -11461,6 +11487,7 @@ int main() {
     gadget_idcmp_down_move_up();
     disabled_gadget_ignores_input();
     a_boolean_gadget_takes_the_click_from_the_window();
+    a_gadget_without_relverify_stays_selected_when_let_go();
     gadget_list_cycle_is_bounded();
     close_during_knob_drag();
     wheel_event_posts_newmouse_rawkey();
