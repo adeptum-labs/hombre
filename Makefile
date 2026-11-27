@@ -226,7 +226,7 @@ run: image disk-image
 	        ahci) set -- "$$@" -device ide-hd,drive=hd$$n,bus=ide.$$((n + 1)) ;; \
 	        nvme) set -- "$$@" -device nvme,id=nvme$$n,serial=hombre$$n \
 	                  -device nvme-ns,drive=hd$$n,bus=nvme$$n,logical_block_size=$${HDF_SECTOR:-512},physical_block_size=$${HDF_SECTOR:-512} ;; \
-	        *) set -- "$$@" -device virtio-blk-pci,disable-legacy=on,drive=hd$$n,addr=0x1$$((8 + n)) ;; \
+	        *) set -- "$$@" -device virtio-blk-pci,disable-legacy=on,drive=hd$$n,addr=$$(printf '0x%x' $$((24 + n))) ;; \
 	        esac; \
 	    fi; \
 	    n=$$((n + 1)); \
