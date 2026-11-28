@@ -596,6 +596,9 @@ void wait_for_work(const Console& c) {
         exec.let_run(input_device.task())) {
         return;
     }
+    if (intuition.input_pending() && exec.let_run(intuition.input_task())) {
+        return;
+    }
     if (exec.yield_in_native() && (c.key_count > 0 || other_task_ready())) {
         return;
     }
@@ -1341,6 +1344,12 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     start_dos_clock();
     machine.cpu.a[7] = boot_stack;
     open_amiga_screen(info);
+    // Intuition takes the pointer, the keys and its ticks in a task of its
+    // own, on its own 68000 stack, from here on.
+    if (!intuition.start_input_task()) {
+        fail("intuition input task failed");
+        return false;
+    }
     return true;
 }
 

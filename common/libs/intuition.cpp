@@ -60,6 +60,7 @@ constexpr u32 ie_Qualifier = 8;
 constexpr u32 kEventBytes = 24;  // the InputEvent, then the termination long
 constexpr u32 kTermination = 24;
 constexpr u32 IECLASS_RAWMOUSE = 2;
+constexpr u32 IECLASS_TIMER = 6;
 constexpr u32 IECODE_LBUTTON = 0x68;
 constexpr u32 IECODE_UP_PREFIX = 0x80;
 constexpr u32 IECODE_NOBUTTON = 0xFF;
@@ -4855,6 +4856,7 @@ u32 Intuition::open_window(u32 new_window, u32 tags, bool copy_title) {
         graphics_->copy_super_bitmap(inner_layer);
     }
     if (a.gadgets != 0) {
+        layout_gadgets(b, window, a.gadgets, kMaxGadgets, true);
         draw_gadget_list(b, window, a.gadgets, kMaxGadgets);
     }
     compose(screen, window_damage_rect(srec->depth, left, top, width, height, a.flags));
@@ -6122,14 +6124,173 @@ void Intuition::draw_menu_overlay(Bus& b, raster::Bitmap& bitmap, const Rect& cl
 }
 
 void Intuition::pointer_event(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
-    begin_batch();
-    route_pointer(x, y, buttons, pressed, released, moved);
-    end_batch();
+    InputItem item;
+    item.kind = InputItem::Kind::Pointer;
+    item.x = x;
+    item.y = y;
+    item.buttons = buttons;
+    item.pressed = pressed;
+    item.released = released;
+    item.moved = moved;
+    item.qualifier = qualifier_;
+    queue_input(item);
+}
+
+void Intuition::raw_key(u16 code, u16 qualifier) {
+    InputItem item;
+    item.kind = InputItem::Kind::RawKey;
+    item.code = code;
+    item.qualifier = qualifier;
+    queue_input(item);
+}
+
+void Intuition::string_key(u8 byte) {
+    InputItem item;
+    item.kind = InputItem::Kind::StringKey;
+    item.code = byte;
+    queue_input(item);
+}
+
+void Intuition::wheel_event(i32 steps) {
+    InputItem item;
+    item.kind = InputItem::Kind::Wheel;
+    item.steps = steps;
+    queue_input(item);
+}
+
+// A move that only moves takes the place of one queued before it with the
+// same buttons: the pointer's place is what counts. A tick waits for none
+// while the input is busy or one is queued already.
+void Intuition::queue_input(const InputItem& item) {
+    using Kind = InputItem::Kind;
+    const bool only_moves = item.kind == Kind::Pointer && item.pressed == 0 && item.released == 0;
+    if (item.kind == Kind::Tick) {
+        if (input_depth_ != 0) {
+            return;
+        }
+        for (u32 i = 0; i < input_count_; ++i) {
+            if (input_queue_[(input_head_ + i) % kInputQueue].kind == Kind::Tick) {
+                return;
+            }
+        }
+    }
+    InputItem* last =
+        input_count_ != 0 ? &input_queue_[(input_head_ + input_count_ - 1) % kInputQueue] : nullptr;
+    if (only_moves && last != nullptr && last->kind == Kind::Pointer && last->pressed == 0 &&
+        last->released == 0 && last->buttons == item.buttons) {
+        *last = item;
+    } else if (input_count_ == kInputQueue) {
+        if (!input_lost_logged_) {
+            input_lost_logged_ = true;
+            LogLine().text("intuition: input lost, the queue is full").send();
+        }
+        return;
+    } else {
+        input_queue_[(input_head_ + input_count_) % kInputQueue] = item;
+        ++input_count_;
+    }
+    if (input_task_ != 0) {
+        exec_->signal_task(input_task_, 1u << kInputSignal);
+        return;
+    }
+    run_input();
+}
+
+void Intuition::run_input() {
+    if (input_depth_ != 0) {
+        return;
+    }
+    ++input_depth_;
+    while (input_count_ != 0) {
+        const InputItem item = input_queue_[input_head_];
+        input_head_ = (input_head_ + 1) % kInputQueue;
+        --input_count_;
+        if (input_task_ != 0 && exec_->this_task() == input_task_) {
+            // Nothing of an event before stays on the task's stack.
+            machine_->cpu.a[7] = input_stack_top_;
+        }
+        take_input(item);
+    }
+    --input_depth_;
+}
+
+void Intuition::take_input(const InputItem& item) {
+    switch (item.kind) {
+    case InputItem::Kind::Pointer:
+        qualifier_ = item.qualifier;
+        begin_batch();
+        route_pointer(item.x, item.y, item.buttons, item.pressed, item.released, item.moved);
+        end_batch();
+        break;
+    case InputItem::Kind::RawKey:
+        raw_key_now(item.code, item.qualifier);
+        break;
+    case InputItem::Kind::StringKey:
+        string_key_now(static_cast<u8>(item.code));
+        break;
+    case InputItem::Kind::Wheel:
+        wheel_now(item.steps);
+        break;
+    case InputItem::Kind::Tick:
+        do_tick();
+        break;
+    }
+}
+
+void Intuition::input_task_body(void* ctx) {
+    Intuition& in = *static_cast<Intuition*>(ctx);
+    for (;;) {
+        in.run_input();
+        in.exec_->wait_for(1u << kInputSignal, ~u64(0));
+        in.machine_->cpu.exit = m68k::ExitReason::None;
+    }
+}
+
+bool Intuition::start_input_task() {
+    if (input_task_ != 0) {
+        return true;
+    }
+    if (exec_ == nullptr || machine_ == nullptr) {
+        return false;
+    }
+    static constexpr char kName[] = "Intuition";
+    const u32 block = ndk::TC_SIZE + sizeof kName;
+    const u32 task = exec_->alloc(block, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    const u32 stack = exec_->alloc(kInputStackBytes, ndk::MEMF_PUBLIC | ndk::MEMF_CLEAR);
+    Bus b(*machine_);
+    bool ok = task != 0 && stack != 0;
+    for (u32 i = 0; ok && i < sizeof kName; ++i) {
+        b.w8(task + ndk::TC_SIZE + i, static_cast<u8>(kName[i]));
+    }
+    if (ok) {
+        b.w8(task + ndk::LN_TYPE, ndk::NT_TASK);
+        b.w8(task + ndk::LN_PRI, static_cast<u8>(kInputPriority));
+        b.w32(task + ndk::LN_NAME, task + ndk::TC_SIZE);
+        b.w32(task + ndk::TC_SIGALLOC, 0x0000FFFF | (1u << kInputSignal));
+        b.w32(task + ndk::TC_SPLOWER, stack);
+        b.w32(task + ndk::TC_SPUPPER, stack + kInputStackBytes);
+        b.w32(task + ndk::TC_SPREG, stack + kInputStackBytes);
+        ok = b.ok();
+    }
+    if (ok && exec_->spawn_native(task, input_task_body, this, kInputPriority, true) != 0) {
+        input_task_ = task;
+        input_stack_top_ = stack + kInputStackBytes - 4;
+        return true;
+    }
+    LogLine().text("intuition: cannot start the input task").send();
+    if (task != 0) {
+        exec_->free(task, block);
+    }
+    if (stack != 0) {
+        exec_->free(stack, kInputStackBytes);
+    }
+    return false;
 }
 
 void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released, bool moved) {
     mouse_x_ = x;
     mouse_y_ = y;
+    buttons_ = buttons;
     if (front_ == 0) {
         return;
     }
@@ -6144,10 +6305,11 @@ void Intuition::route_pointer(i32 x, i32 y, u8 buttons, u8 pressed, u8 released,
             // lets it go, carries the button in its qualifier.
             if (moved) {
                 const bool held = ((buttons | released) & kMouseLeft) != 0;
-                custom_input(b, x, y, IECODE_NOBUTTON, held ? IEQUALIFIER_LEFTBUTTON : 0);
+                custom_input(b, x, y, IECODE_NOBUTTON, held ? IEQUALIFIER_LEFTBUTTON : 0,
+                             IECLASS_RAWMOUSE);
             }
             if (custom_.gadget != 0 && (released & kMouseLeft) != 0) {
-                custom_input(b, x, y, IECODE_LBUTTON | IECODE_UP_PREFIX, 0);
+                custom_input(b, x, y, IECODE_LBUTTON | IECODE_UP_PREFIX, 0, IECLASS_RAWMOUSE);
             }
             return;
         }
@@ -6417,6 +6579,34 @@ void Intuition::move_window_to(u32 window, i32 left, i32 top) {
 }
 
 void Intuition::size_window_to(u32 window, i32 width, i32 height) {
+    resize_window(window, width, height, true);
+}
+
+// The window's gadgets laid out again for the size it has now and drawn,
+// once a resize that drew them as they were is over.
+void Intuition::relayout_window(u32 window) {
+    const WindowRecord* rec = window_open(window) ? find_window_record(window) : nullptr;
+    const ScreenRecord* srec = rec != nullptr ? find_screen_record(rec->screen) : nullptr;
+    if (srec == nullptr) {
+        return;
+    }
+    Bus b(*machine_);
+    const u32 first = b.r32(window + ndk::wd_FirstGadget);
+    if (!b.ok() || first == 0) {
+        return;
+    }
+    begin_batch();
+    layout_gadgets(b, window, first, kMaxGadgets, false);
+    draw_gadget_list(b, window, first, kMaxGadgets);
+    rec = window_open(window) ? find_window_record(window) : nullptr;
+    if (rec != nullptr) {
+        compose(rec->screen, window_damage_rect(srec->depth, rec->left, rec->top, rec->width,
+                                                rec->height, rec->flags));
+    }
+    end_batch();
+}
+
+void Intuition::resize_window(u32 window, i32 width, i32 height, bool layout) {
     if (window == 0) {
         return;
     }
@@ -6482,7 +6672,10 @@ void Intuition::size_window_to(u32 window, i32 width, i32 height) {
         graphics_->copy_super_bitmap(program_layer);
     }
     if (w.first_gadget != 0) {
-        draw_gadget_list(b, window, w.first_gadget, kMaxGadgets);
+        if (layout) {
+            layout_gadgets(b, window, w.first_gadget, kMaxGadgets, false);
+        }
+        draw_gadget_list(b, window, w.first_gadget, kMaxGadgets, false, !layout);
     }
     // A gadget's own drawing code may close the window, and the hook too.
     rec = find_window_record(window);
@@ -6517,11 +6710,15 @@ void Intuition::change_window_box(u32 window, i32 left, i32 top, i32 width, i32 
     top = std::max(0, std::min(top, screen_h - height));
     begin_batch();
     // Shrinking before the move and growing after it keeps the window on
-    // the screen at every step.
-    size_window_to(window, std::min(width, before.width), std::min(height, before.height));
+    // the screen at every step; the gadgets are laid out once, at the end.
+    resize_window(window, std::min(width, before.width), std::min(height, before.height), false);
     move_window_to(window, left, top);
-    size_window_to(window, width, height);
+    resize_window(window, width, height, false);
     rec = window_open(window) ? find_window_record(window) : nullptr;
+    if (rec != nullptr && (rec->width != before.width || rec->height != before.height)) {
+        relayout_window(window);
+        rec = window_open(window) ? find_window_record(window) : nullptr;
+    }
     if (rec != nullptr && (rec->left != before.left || rec->top != before.top ||
                            rec->width != before.width || rec->height != before.height)) {
         post_intuimessage(window, ndk::IDCMP_CHANGEWINDOW, 0);
@@ -6580,6 +6777,7 @@ bool Intuition::start_drag(u32 window, i32 x, i32 y) {
     if ((flags & ndk::WFLG_SIZEGADGET) != 0 &&
         in_rect(size_box_rect(rec->left, rec->top, rec->width, rec->height, flags), x, y)) {
         drag_ = Drag::Size;
+        drag_resized_ = false;
         grab_x_ = right - x;
         grab_y_ = bottom - y;
     } else if ((flags & ndk::WFLG_DRAGBAR) != 0 && x >= rec->left && x <= right &&
@@ -6609,7 +6807,14 @@ void Intuition::drag_to(i32 x, i32 y) {
     if (drag_ == Drag::Move) {
         move_window_to(drag_window_, x - grab_x_, y - grab_y_);
     } else if (drag_ == Drag::Size) {
-        size_window_to(drag_window_, x + grab_x_ - rec->left + 1, y + grab_y_ - rec->top + 1);
+        // Drawn as it goes; laid out once the drag ends.
+        const i32 width = rec->width;
+        const i32 height = rec->height;
+        resize_window(drag_window_, x + grab_x_ - rec->left + 1, y + grab_y_ - rec->top + 1,
+                      false);
+        const WindowRecord* after = find_window_record(drag_window_);
+        drag_resized_ = drag_resized_ || (after != nullptr && (after->width != width ||
+                                                               after->height != height));
     }
 }
 
@@ -6629,6 +6834,14 @@ void Intuition::end_drag() {
     WindowRecord* rec = find_window_record(window);
     if (rec == nullptr || !window_open(window)) {
         return;
+    }
+    if (kind == Drag::Size && drag_resized_) {
+        drag_resized_ = false;
+        relayout_window(window);
+        rec = window_open(window) ? find_window_record(window) : nullptr;
+        if (rec == nullptr) {
+            return;
+        }
     }
     if (kind == Drag::Size) {
         post_newsize(*rec);
@@ -7299,7 +7512,7 @@ void Intuition::erase_image(u32 rp, u32 image, i32 left, i32 top) {
 }
 
 void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count,
-                                 bool border_only) {
+                                 bool border_only, bool laid_out_only) {
     if (window == 0 || first == 0 || max_count == 0) {
         return;
     }
@@ -7330,8 +7543,14 @@ void Intuition::draw_gadget_list(Bus& b, u32 window, u32 first, u32 max_count,
         if (!b.ok()) {
             return;
         }
-        if (border_only && !in_border) {
-            // Not in the borders: left as it is.
+        constexpr u32 kRelative = ndk::GFLG_RELRIGHT | ndk::GFLG_RELBOTTOM |
+                                  ndk::GFLG_RELWIDTH | ndk::GFLG_RELHEIGHT |
+                                  ndk::GFLG_RELSPECIAL;
+        const bool unplaced = laid_out_only && gtype == ndk::GTYP_CUSTOMGADGET &&
+                              (b.r16(gadget + ndk::gg_Flags) & kRelative) != 0;
+        if ((border_only && !in_border) || unplaced) {
+            // Not in the borders, or not laid out for the window's size yet:
+            // left as it is.
         } else if (gtype == ndk::GTYP_PROPGADGET) {
             draw_prop_gadget(*graphics_, b, w, gadget, pens);
         } else if (gtype == ndk::GTYP_BOOLGADGET) {
@@ -7409,7 +7628,8 @@ bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
             post_intuimessage(window, ndk::IDCMP_GADGETDOWN, 0, gadget);
         }
         const u32 go[] = {ndk::GM_GOACTIVE, info, event, event + kTermination, point};
-        custom_result(b, boopsi_.send(boopsi_.custom_dispatcher(gadget), gadget, go, 5));
+        const ActiveCustom active = custom_;
+        custom_result(b, active, send_custom(active, go, 5));
         return true;
     }
     return false;
@@ -7417,7 +7637,7 @@ bool Intuition::hit_custom_gadget(Bus& b, u32 window, i32 x, i32 y) {
 
 // GM_HANDLEINPUT for the active BOOPSI gadget, with the pointer relative
 // to its box.
-void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code, u32 qualifier) {
+void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code, u32 qualifier, u32 event_class) {
     const ActiveCustom c = custom_;
     const WindowView w = load_window(b, c.window);
     if (!w.ok) {
@@ -7425,19 +7645,20 @@ void Intuition::custom_input(Bus& b, i32 x, i32 y, u32 code, u32 qualifier) {
         return;
     }
     const Rect box = resolve_gadget_box(b, w, c.gadget);
+    b.w8(c.event + ie_Class, event_class);
     b.w16(c.event + ie_Code, code);
     b.w16(c.event + ie_Qualifier, qualifier);
     const u32 msg[] = {ndk::GM_HANDLEINPUT, c.info, c.event, c.event + kTermination,
                        pack_point(x - w.left - box.x0, y - w.top - box.y0)};
-    custom_result(b, boopsi_.send(boopsi_.custom_dispatcher(c.gadget), c.gadget, msg, 5));
+    custom_result(b, c, send_custom(c, msg, 5));
 }
 
-// What the active gadget answered: GMR_MEACTIVE keeps the input; any other
-// answer ends it, with IDCMP_GADGETUP and the termination code for
-// GMR_VERIFY on a GACT_RELVERIFY gadget, and GM_GOINACTIVE.
-void Intuition::custom_result(Bus& b, u32 result) {
-    const ActiveCustom c = custom_;
-    if (c.gadget == 0 ||
+// What the active gadget c answered: GMR_MEACTIVE keeps the input; any
+// other answer ends it, with IDCMP_GADGETUP and the termination code for
+// GMR_VERIFY on a GACT_RELVERIFY gadget, and GM_GOINACTIVE. A gadget let go
+// while the method ran is done with.
+void Intuition::custom_result(Bus& b, const ActiveCustom& c, u32 result) {
+    if (c.gadget == 0 || custom_.gadget != c.gadget || custom_.info != c.info ||
         (result & (ndk::GMR_NOREUSE | ndk::GMR_REUSE | ndk::GMR_NEXTACTIVE |
                    ndk::GMR_PREVACTIVE)) == 0) {
         return;
@@ -7448,8 +7669,38 @@ void Intuition::custom_result(Bus& b, u32 result) {
         post_intuimessage(c.window, ndk::IDCMP_GADGETUP, static_cast<u16>(code), c.gadget);
     }
     const u32 msg[] = {ndk::GM_GOINACTIVE, c.info, 0};
-    boopsi_.send(boopsi_.custom_dispatcher(c.gadget), c.gadget, msg, 3);
-    drop_custom_gadget();
+    send_custom(c, msg, 3);
+    if (custom_.gadget == c.gadget && custom_.info == c.info) {
+        drop_custom_gadget();
+    }
+}
+
+void Intuition::layout_gadgets(Bus& b, u32 window, u32 first, u32 max_count, bool initial) {
+    constexpr u32 kRelative = ndk::GFLG_RELRIGHT | ndk::GFLG_RELBOTTOM | ndk::GFLG_RELWIDTH |
+                              ndk::GFLG_RELHEIGHT | ndk::GFLG_RELSPECIAL;
+    const u32 limit = max_count < kMaxGadgets ? max_count : kMaxGadgets;
+    u32 gadget = first;
+    for (u32 step = 0; step < limit && gadget != 0 && window_open(window); ++step) {
+        const u32 gtype = b.r16(gadget + ndk::gg_GadgetType) & ndk::GTYP_GTYPEMASK;
+        const u32 flags = b.r16(gadget + ndk::gg_Flags);
+        const u32 next = b.r32(gadget + ndk::gg_NextGadget);
+        if (!b.ok()) {
+            return;
+        }
+        const u32 dispatcher =
+            gtype == ndk::GTYP_CUSTOMGADGET && (flags & kRelative) != 0
+                ? boopsi_.custom_dispatcher(gadget)
+                : 0;
+        if (dispatcher != 0) {
+            const u32 info = make_gadget_info(window);
+            if (info != 0) {
+                const u32 msg[] = {ndk::GM_LAYOUT, info, initial ? 1u : 0u};
+                boopsi_.send(dispatcher, gadget, msg, 3);
+                free_gadget_info(info);
+            }
+        }
+        gadget = next;
+    }
 }
 
 // --- string gadgets -------------------------------------------------------
@@ -7711,7 +7962,7 @@ void Intuition::end_string(bool verify, u16 code) {
 // Edits the string with a key: characters go in at the cursor, Backspace
 // and Del take one out, the cursor keys move it, Return and Tab end the
 // editing with GADGETUP, and Esc ends it without.
-void Intuition::string_key(u8 byte) {
+void Intuition::string_key_now(u8 byte) {
     if (string_.gadget == 0) {
         return;
     }
@@ -8164,6 +8415,13 @@ void Intuition::drop_requests(u32 window) {
 }
 
 void Intuition::drop_custom_gadget() {
+    if (custom_calls_ != 0) {
+        if (custom_.gadget != 0) {
+            custom_stale_.push_back(custom_);
+        }
+        custom_ = ActiveCustom{};
+        return;
+    }
     if (custom_.info != 0) {
         free_gadget_info(custom_.info);
     }
@@ -8171,6 +8429,22 @@ void Intuition::drop_custom_gadget() {
         exec_->free(custom_.event, kEventBytes + 4);
     }
     custom_ = ActiveCustom{};
+}
+
+u32 Intuition::send_custom(const ActiveCustom& c, const u32* msg, u32 count) {
+    ++custom_calls_;
+    const u32 result = boopsi_.send(boopsi_.custom_dispatcher(c.gadget), c.gadget, msg, count);
+    --custom_calls_;
+    if (custom_calls_ == 0 && !custom_stale_.empty()) {
+        for (const ActiveCustom& stale : custom_stale_) {
+            free_gadget_info(stale.info);
+            if (stale.event != 0 && exec_ != nullptr) {
+                exec_->free(stale.event, kEventBytes + 4);
+            }
+        }
+        custom_stale_.clear();
+    }
+    return result;
 }
 
 // A boolean gadget as it stands: gadtools draws its own; any other shows
@@ -8416,6 +8690,7 @@ u32 Intuition::add_glist(u32 window, u32 gadget, i32 position, i32 count) {
             break;
         }
     }
+    layout_gadgets(b, window, gadget, added, true);
     return pos;
 }
 
@@ -8564,6 +8839,23 @@ void Intuition::intui_ticks() {
         return;
     }
     last_tick_us_ = now;
+    InputItem item;
+    item.kind = InputItem::Kind::Tick;
+    queue_input(item);
+}
+
+void Intuition::do_tick() {
+    if (custom_.gadget != 0) {
+        if (!window_open(custom_.window)) {
+            drop_custom_gadget();
+        } else {
+            Bus b(*machine_);
+            const u32 held = (buttons_ & kMouseLeft) != 0 ? IEQUALIFIER_LEFTBUTTON : 0;
+            begin_batch();
+            custom_input(b, mouse_x_, mouse_y_, IECODE_NOBUTTON, held, IECLASS_TIMER);
+            end_batch();
+        }
+    }
     const u32 window = active_window_;
     if (window == 0 || (window_idcmp(window) & ndk::IDCMP_INTUITICKS) == 0 ||
         tick_outstanding(window)) {
@@ -8580,7 +8872,7 @@ bool Intuition::tick_outstanding(u32 window) const {
     });
 }
 
-void Intuition::wheel_event(i32 steps) {
+void Intuition::wheel_now(i32 steps) {
     if (steps == 0 || active_window_ == 0) {
         return;
     }
@@ -8650,7 +8942,7 @@ bool Intuition::wants_keys(u32 window) const {
     return (window_idcmp(window) & (ndk::IDCMP_RAWKEY | ndk::IDCMP_VANILLAKEY)) != 0;
 }
 
-void Intuition::raw_key(u16 code, u16 qualifier) {
+void Intuition::raw_key_now(u16 code, u16 qualifier) {
     const u32 idcmp = window_idcmp(active_window_);
     if ((idcmp & ndk::IDCMP_RAWKEY) != 0) {
         post_intuimessage(active_window_, ndk::IDCMP_RAWKEY, code, 0, 0, qualifier);

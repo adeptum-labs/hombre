@@ -22,7 +22,8 @@
  */
 
 // The BOOPSI classes written in C++: the registry they dispatch through,
-// icclass with its loop counter, modelclass and pointerclass.
+// icclass with its loop counter, modelclass and pointerclass; and how
+// Intuition lays out, feeds and guards the BOOPSI gadgets of its windows.
 
 #include "gfx_rig.hpp"
 #include "libs/utility.hpp"
@@ -166,6 +167,23 @@ u32 seen_dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
     default:
         return seen.boopsi->call_super(cl, object, msg);
     }
+}
+
+u64 g_now_us = 0;
+u64 fake_clock() { return g_now_us; }
+
+void add_gadget(GfxRig& r, u32 window, u32 gadget) {
+    r.cpu().a[0] = window;
+    r.cpu().a[1] = gadget;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = 0xFFFF;
+    r.cpu().d[1] = 1;
+    CHECK(r.result(Base::Intuition, intuition_lvo::AddGList) != 0xFFFFFFFF);
+    r.cpu().a[0] = gadget;
+    r.cpu().a[1] = window;
+    r.cpu().a[2] = 0;
+    r.cpu().d[0] = 1;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::RefreshGList), ExitReason::Halt);
 }
 
 void a_native_class_dispatches_without_68000_code() {
@@ -400,6 +418,171 @@ void pointerclass_keeps_its_attributes() {
     CHECK_EQ(r.exec.free_bytes(), before);
 }
 
+void gm_layout_goes_to_gadgets_with_a_relative_box() {
+    GfxRig r;
+    g_machine = &r.machine;
+    Boopsi& bo = r.intuition.boopsi();
+    Seen seen;
+    seen.boopsi = &bo;
+    const u32 cl = bo.make_native_class("layoutgclass", bo.gadget_class(), 0, seen_dispatch, &seen);
+    const u32 window = open_window(r, 0);
+
+    // A box of its own: no layout.
+    const u32 fixed = bo.new_object(cl, 0, r.tags(kTagList, {{GA_Width, 10}, {GA_Height, 10},
+                                                            {TAG_DONE, 0}}));
+    add_gadget(r, window, fixed);
+    CHECK(seen.layouts.empty());
+
+    // GA_RelWidth and GA_RelSpecial both get it as they join the window.
+    const u32 wide = bo.new_object(cl, 0, r.tags(kTagList, {{GA_RelWidth, static_cast<u32>(-20)},
+                                                           {GA_Height, 10}, {TAG_DONE, 0}}));
+    add_gadget(r, window, wide);
+    CHECK_EQ(seen.layouts.size(), 1u);
+    CHECK_EQ(seen.layouts[0], 1u);
+    const u32 special = bo.new_object(cl, 0, r.tags(kTagList, {{GA_RelSpecial, 1}, {GA_Width, 4},
+                                                              {GA_Height, 4}, {TAG_DONE, 0}}));
+    CHECK_EQ(r.get16(special + gg_Flags) & GFLG_RELSPECIAL, GFLG_RELSPECIAL);
+    add_gadget(r, window, special);
+    CHECK_EQ(seen.layouts.size(), 2u);
+
+    // A new size sends it again, not initial, to both.
+    CHECK(r.intuition.window_limits(window, 50, 50, 400, 300));
+    r.intuition.size_window_to(window, 300, 150);
+    CHECK_EQ(r.get16(window + wd_Width), 300u);
+    CHECK_EQ(seen.layouts.size(), 4u);
+    CHECK_EQ(seen.layouts[2], 0u);
+    CHECK_EQ(seen.layouts[3], 0u);
+
+    // A window opened with the gadget lays it out before drawing it.
+    seen.layouts.clear();
+    const u32 other = bo.new_object(cl, 0, r.tags(kTagList, {{GA_RelHeight, static_cast<u32>(-4)},
+                                                            {GA_Width, 10}, {TAG_DONE, 0}}));
+    r.put32(kNewWindow + nw_FirstGadget, other);
+    r.cpu().a[0] = kNewWindow;
+    const u32 second = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(second != 0);
+    CHECK_EQ(seen.layouts.size(), 1u);
+    CHECK_EQ(seen.layouts[0], 1u);
+}
+
+void the_active_custom_gadget_gets_timer_events() {
+    GfxRig r;
+    g_machine = &r.machine;
+    g_now_us = 1000000;
+    r.intuition.set_clock(fake_clock);
+    Boopsi& bo = r.intuition.boopsi();
+    Seen seen;
+    seen.boopsi = &bo;
+    const u32 cl = bo.make_native_class("tickgclass", bo.gadget_class(), 0, seen_dispatch, &seen);
+    const u32 window = open_window(r, 0);
+    const u32 g = bo.new_object(cl, 0, r.tags(kTagList, {{GA_Left, 20}, {GA_Top, 20},
+                                                        {GA_Width, 30}, {GA_Height, 12},
+                                                        {TAG_DONE, 0}}));
+    add_gadget(r, window, g);
+
+    // Nothing to send while no gadget has the input.
+    r.intuition.intui_ticks();
+    CHECK(seen.inputs.empty());
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    g_now_us += 100000;
+    r.intuition.intui_ticks();
+    CHECK_EQ(seen.inputs.size(), 1u);
+    CHECK_EQ(seen.inputs[0], 6u);
+    // At most ten a second.
+    r.intuition.intui_ticks();
+    CHECK_EQ(seen.inputs.size(), 1u);
+    r.intuition.pointer_event(75, 75, 0, 0, 1, false);
+    CHECK_EQ(seen.inputs.size(), 2u);
+    CHECK_EQ(seen.inputs[1], 2u);
+    g_now_us += 100000;
+    r.intuition.intui_ticks();
+    CHECK_EQ(seen.inputs.size(), 2u);
+}
+
+// The index of the first method of seen equal to method from at on, or
+// the count when there is none.
+usize first_of(const Seen& seen, u32 method, usize from = 0) {
+    for (usize i = from; i < seen.methods.size(); ++i) {
+        if (seen.methods[i] == method) {
+            return i;
+        }
+    }
+    return seen.methods.size();
+}
+
+usize count_of(const Seen& seen, u32 method) {
+    usize n = 0;
+    for (const u32 m : seen.methods) {
+        n += m == method ? 1 : 0;
+    }
+    return n;
+}
+
+void a_gadget_is_laid_out_before_it_is_drawn_and_once_per_resize() {
+    GfxRig r;
+    g_machine = &r.machine;
+    Boopsi& bo = r.intuition.boopsi();
+    Seen seen;
+    seen.boopsi = &bo;
+    const u32 cl = bo.make_native_class("ordergclass", bo.gadget_class(), 0, seen_dispatch, &seen);
+    open_window(r, 0);
+
+    // OpenWindow: GM_LAYOUT, then GM_RENDER.
+    const u32 g = bo.new_object(cl, 0, r.tags(kTagList, {{GA_RelWidth, static_cast<u32>(-20)},
+                                                        {GA_Top, 20}, {GA_Height, 10},
+                                                        {TAG_DONE, 0}}));
+    r.put32(kNewWindow + nw_FirstGadget, g);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE | WFLG_SIZEGADGET | WFLG_DRAGBAR);
+    r.put16(kNewWindow + nw_MinWidth, 50);
+    r.put16(kNewWindow + nw_MinHeight, 50);
+    r.put16(kNewWindow + nw_MaxWidth, 600);
+    r.put16(kNewWindow + nw_MaxHeight, 380);
+    seen.methods.clear();
+    r.cpu().a[0] = kNewWindow;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    CHECK(window != 0);
+    CHECK(first_of(seen, GM_LAYOUT) < first_of(seen, GM_RENDER));
+    CHECK(first_of(seen, GM_RENDER) < seen.methods.size());
+
+    // SizeWindow-like: laid out, then drawn.
+    seen.methods.clear();
+    r.intuition.size_window_to(window, 260, 120);
+    CHECK_EQ(count_of(seen, GM_LAYOUT), 1u);
+    CHECK(first_of(seen, GM_LAYOUT) < first_of(seen, GM_RENDER));
+
+    // ChangeWindowBox that moves and grows: one layout.
+    seen.methods.clear();
+    r.cpu().a[0] = window;
+    r.cpu().d[0] = 10;
+    r.cpu().d[1] = 10;
+    r.cpu().d[2] = 300;
+    r.cpu().d[3] = 200;
+    CHECK_EQ(r.call(Base::Intuition, intuition_lvo::ChangeWindowBox), ExitReason::Halt);
+    CHECK_EQ(r.get16(window + wd_Width), 300u);
+    CHECK_EQ(count_of(seen, GM_LAYOUT), 1u);
+    CHECK(first_of(seen, GM_LAYOUT) < first_of(seen, GM_RENDER));
+    CHECK(first_of(seen, GM_RENDER, first_of(seen, GM_LAYOUT)) < seen.methods.size());
+
+    // A size drag lays out once, at its end, and draws the gadget then: a
+    // relative gadget is not drawn in a box it was not laid out for.
+    seen.methods.clear();
+    const i32 corner_x = 10 + 300 - 3;
+    const i32 corner_y = 10 + 200 - 3;
+    r.intuition.pointer_event(corner_x, corner_y, 1, 1, 0, true);
+    r.intuition.pointer_event(corner_x - 20, corner_y - 10, 1, 0, 0, true);
+    r.intuition.pointer_event(corner_x - 40, corner_y - 20, 1, 0, 0, true);
+    CHECK_EQ(r.get16(window + wd_Width), 260u);
+    CHECK_EQ(count_of(seen, GM_LAYOUT), 0u);
+    CHECK_EQ(count_of(seen, GM_RENDER), 0u);
+    seen.methods.clear();
+    r.intuition.pointer_event(corner_x - 40, corner_y - 20, 0, 0, 1, false);
+    CHECK_EQ(count_of(seen, GM_LAYOUT), 1u);
+    CHECK_EQ(seen.layouts.back(), 0u);
+    CHECK(first_of(seen, GM_RENDER, first_of(seen, GM_LAYOUT)) < seen.methods.size());
+}
+
 // A dispatcher in 68000 code, at kCode, for a subclass of modelclass that
 // asks itself ICM_CHECKLOOP on each OM_UPDATE: counts at kLoopsSeen the
 // updates it drops because the loop counter is up, and passes every other
@@ -609,6 +792,143 @@ void icspecial_code_sets_the_code_of_the_update() {
     r.intuition.free_gadget_info(info);
 }
 
+// A tick and a move that come while the gadget is in GM_HANDLEINPUT, as
+// when its method waits: the tick is skipped, the move waits for the
+// method to end, and nothing of the running call is freed under it.
+struct Reenter {
+    GfxRig* rig = nullptr;
+    Boopsi* boopsi = nullptr;
+    u32 depth = 0;
+    u32 max_depth = 0;
+    u32 calls = 0;
+    u32 timers = 0;
+    u32 outer_info = 0;
+    bool info_freed = false;
+    bool remove_self = false;
+    u32 window = 0;
+};
+
+u32 reenter_dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
+    Reenter& s = *static_cast<Reenter*>(ctx);
+    native::Bus b(*g_machine);
+    switch (b.r32(msg)) {
+    case GM_GOACTIVE:
+        return GMR_MEACTIVE;
+    case GM_HANDLEINPUT: {
+        ++s.depth;
+        ++s.calls;
+        s.max_depth = std::max(s.max_depth, s.depth);
+        if (b.r8(b.r32(msg + 8) + 4) == 6) {
+            ++s.timers;
+        }
+        if (s.depth == 1 && s.calls == 1) {
+            s.outer_info = b.r32(msg + 4);
+            g_now_us += 100000;
+            s.rig->intuition.intui_ticks();
+            s.rig->intuition.pointer_event(80, 76, 1, 0, 0, true);
+            if (s.remove_self) {
+                s.rig->cpu().a[0] = s.window;
+                s.rig->cpu().a[1] = object;
+                s.rig->cpu().d[0] = 1;
+                s.rig->call(Base::Intuition, intuition_lvo::RemoveGList);
+            }
+            const u32 again = s.rig->exec.alloc(GadgetInfo_SIZEOF + 2, MEMF_PUBLIC);
+            s.info_freed = again == s.outer_info;
+            s.rig->exec.free(again, GadgetInfo_SIZEOF + 2);
+        }
+        --s.depth;
+        return GMR_MEACTIVE;
+    }
+    default:
+        return s.boopsi->call_super(cl, object, msg);
+    }
+}
+
+void input_that_comes_during_a_gadget_method_waits_for_it() {
+    for (const bool remove_self : {false, true}) {
+        GfxRig r;
+        g_machine = &r.machine;
+        g_now_us = 1000000;
+        r.intuition.set_clock(fake_clock);
+        Boopsi& bo = r.intuition.boopsi();
+        Reenter s;
+        s.rig = &r;
+        s.boopsi = &bo;
+        s.remove_self = remove_self;
+        const u32 cl = bo.make_native_class("reentergclass", bo.gadget_class(), 0, reenter_dispatch,
+                                            &s);
+        const u32 window = open_window(r, 0);
+        s.window = window;
+        const u32 g = bo.new_object(cl, 0, r.tags(kTagList, {{GA_Left, 20}, {GA_Top, 20},
+                                                            {GA_Width, 30}, {GA_Height, 12},
+                                                            {TAG_DONE, 0}}));
+        add_gadget(r, window, g);
+        const u32 before = r.exec.free_bytes();
+        r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+        r.intuition.pointer_event(76, 75, 1, 0, 0, true);
+        CHECK_EQ(s.max_depth, 1u);
+        CHECK_EQ(s.timers, 0u);
+        CHECK(!s.info_freed);
+        // The move came after, unless the gadget had gone.
+        CHECK_EQ(s.calls, remove_self ? 1u : 2u);
+        if (remove_self) {
+            // Its GadgetInfo and InputEvent are given back once it returned.
+            CHECK_EQ(r.exec.free_bytes(), before);
+        }
+        r.intuition.pointer_event(80, 76, 0, 0, 1, false);
+    }
+}
+
+// With an input task, events wait in the queue for it, in order, a move
+// taking the place of the move before it and a tick waiting only once.
+bool fake_create(void*, u32) { return true; }
+void fake_destroy(void*, u32) {}
+
+void with_an_input_task_events_wait_for_it_in_order() {
+    GfxRig r;
+    g_machine = &r.machine;
+    g_now_us = 1000000;
+    r.intuition.set_clock(fake_clock);
+    r.exec.set_task_host(hombre::TaskHost{fake_create, nullptr, fake_destroy, nullptr, nullptr,
+                                          nullptr, nullptr, nullptr});
+    Boopsi& bo = r.intuition.boopsi();
+    Seen seen;
+    seen.boopsi = &bo;
+    const u32 cl = bo.make_native_class("queuegclass", bo.gadget_class(), 0, seen_dispatch, &seen);
+    const u32 window = open_window(r, IDCMP_MOUSEBUTTONS);
+    const u32 g = bo.new_object(cl, 0, r.tags(kTagList, {{GA_Left, 20}, {GA_Top, 20},
+                                                        {GA_Width, 30}, {GA_Height, 12},
+                                                        {TAG_DONE, 0}}));
+    add_gadget(r, window, g);
+    CHECK(r.intuition.start_input_task());
+    const u32 task = r.intuition.input_task();
+    CHECK(task != 0);
+    CHECK(r.intuition.start_input_task());
+    CHECK_EQ(r.intuition.input_task(), task);
+
+    seen.methods.clear();
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    r.intuition.pointer_event(76, 75, 1, 0, 0, true);
+    r.intuition.pointer_event(77, 75, 1, 0, 0, true);
+    g_now_us += 100000;
+    r.intuition.intui_ticks();
+    g_now_us += 100000;
+    r.intuition.intui_ticks();
+    r.intuition.pointer_event(77, 75, 1, 0, 1, false);
+    // Nothing ran; the task was told.
+    CHECK(seen.methods.empty());
+    CHECK(r.intuition.input_pending());
+    CHECK((r.get32(task + TC_SIGRECVD) & (1u << 16)) != 0);
+
+    r.intuition.run_input();
+    CHECK(!r.intuition.input_pending());
+    // Hit test and activation, one move, one timer event, the release and
+    // the end of the gadget's input.
+    CHECK(seen.methods == (std::vector<u32>{GM_HITTEST, GM_GOACTIVE, GM_HANDLEINPUT,
+                                             GM_HANDLEINPUT, GM_HANDLEINPUT, GM_GOINACTIVE}));
+    CHECK(seen.inputs == (std::vector<u32>{2, 6, 2}));
+}
+
 }
 
 int main() {
@@ -617,9 +937,14 @@ int main() {
     the_loop_counter_stops_a_notification_that_comes_round();
     modelclass_broadcasts_to_its_members();
     pointerclass_keeps_its_attributes();
+    gm_layout_goes_to_gadgets_with_a_relative_box();
+    the_active_custom_gadget_gets_timer_events();
+    a_gadget_is_laid_out_before_it_is_drawn_and_once_per_resize();
     a_68000_model_subclass_sees_the_loop_during_a_broadcast();
     a_native_class_over_a_68000_superclass();
     members_may_leave_or_go_during_a_broadcast();
     icspecial_code_sets_the_code_of_the_update();
+    input_that_comes_during_a_gadget_method_waits_for_it();
+    with_an_input_task_events_wait_for_it_in_order();
     return check::finish("test_boopsi_classes");
 }

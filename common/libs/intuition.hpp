@@ -341,8 +341,25 @@ public:
     bool activate_string(u32 gadget, u32 window);
     void wheel_event(i32 steps);
     // Sends the active window an IDCMP_INTUITICKS about ten times a
-    // second when it asks for them, never while its last one is unreplied.
+    // second when it asks for them, never while its last one is unreplied,
+    // and the BOOPSI gadget that has the input an IECLASS_TIMER event as
+    // often. No tick is queued while the input is busy with an event.
     void intui_ticks();
+
+    // Intuition's input runs in a task of its own, as Intuition's handler
+    // runs in input.device's task on an Amiga: pointer_event, raw_key,
+    // string_key, wheel_event and intui_ticks queue their event, in the
+    // order they come, and the task takes them in turn on its own 68000
+    // stack, so that BOOPSI methods of the gadgets never run in whichever
+    // task the host happened to interrupt. Before the task is started, and
+    // in programs of the host that never start it, each event is taken at
+    // once. An event that comes while one is being taken waits for it.
+    // False when exec cannot start the task.
+    bool start_input_task();
+    u32 input_task() const { return input_task_; }
+    bool input_pending() const { return input_count_ != 0; }
+    // Takes every queued event, as the task does each time it wakes.
+    void run_input();
 
     // Whether the window asks for key messages: IDCMP_RAWKEY or
     // IDCMP_VANILLAKEY.
@@ -502,6 +519,42 @@ public:
 private:
     friend struct IntuitionNatives;
     friend struct IntuitionTest;
+
+    // The BOOPSI gadget that has the input, between GM_GOACTIVE and
+    // GM_GOINACTIVE: its window, its GadgetInfo, and the InputEvent and
+    // termination long its methods get.
+    struct ActiveCustom {
+        u32 window = 0;
+        u32 gadget = 0;
+        u32 info = 0;
+        u32 event = 0;
+    };
+
+    // An event queued for the input task.
+    struct InputItem {
+        enum class Kind : u8 { Pointer, RawKey, StringKey, Wheel, Tick };
+        Kind kind = Kind::Tick;
+        u8 buttons = 0;
+        u8 pressed = 0;
+        u8 released = 0;
+        bool moved = false;
+        i32 x = 0;
+        i32 y = 0;
+        u16 code = 0;
+        u16 qualifier = 0;
+        i32 steps = 0;
+    };
+    static constexpr u32 kInputQueue = 1024;
+    static constexpr u32 kInputStackBytes = 16384;
+    static constexpr u32 kInputSignal = 16;
+    static constexpr i8 kInputPriority = 20;
+    static void input_task_body(void* ctx);
+    void queue_input(const InputItem& item);
+    void take_input(const InputItem& item);
+    void do_tick();
+    void raw_key_now(u16 code, u16 qualifier);
+    void string_key_now(u8 byte);
+    void wheel_now(i32 steps);
 
     static constexpr u32 kVectors = intuition_lvo::Last / 6;
 
@@ -886,8 +939,10 @@ private:
     void set_gadget_disabled(u32 gadget, u32 window, bool disabled);
     // Draws the gadgets of the list, or with border_only only those in the
     // window's borders.
+    // With laid_out_only, a BOOPSI gadget that GM_LAYOUT is still to place
+    // is left as it is.
     void draw_gadget_list(native::Bus& b, u32 window, u32 first, u32 max_count,
-                          bool border_only = false);
+                          bool border_only = false, bool laid_out_only = false);
     bool hit_prop_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     bool hit_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void draw_custom_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
@@ -899,9 +954,21 @@ private:
     // its window's titles are in.
     u32 string_font(native::Bus& b, u32 window, u32 gadget) const;
     bool hit_custom_gadget(native::Bus& b, u32 window, i32 x, i32 y);
-    void custom_input(native::Bus& b, i32 x, i32 y, u32 code, u32 qualifier);
-    void custom_result(native::Bus& b, u32 result);
+    void custom_input(native::Bus& b, i32 x, i32 y, u32 code, u32 qualifier, u32 event_class);
+    void custom_result(native::Bus& b, const ActiveCustom& c, u32 result);
+    // A method to the active gadget c; while one runs, drop_custom_gadget
+    // only lets the gadget go and keeps its GadgetInfo and InputEvent for
+    // the calls still using them.
+    u32 send_custom(const ActiveCustom& c, const u32* msg, u32 count);
     void drop_custom_gadget();
+    // GM_LAYOUT to the custom gadgets of the list, up to max_count of them,
+    // that have a relative box or GFLG_RELSPECIAL: initial as they join
+    // the window, else after it changed size.
+    void layout_gadgets(native::Bus& b, u32 window, u32 first, u32 max_count, bool initial);
+    void relayout_window(u32 window);
+    // size_window_to, with GM_LAYOUT to the gadgets only when layout says.
+    void resize_window(u32 window, i32 width, i32 height, bool layout);
+
     void release_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void draw_bool_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
     bool gadtools_draws(native::Bus& b, u32 window, u32 rp, u32 gadget);
@@ -962,16 +1029,21 @@ private:
     u32 active_window_ = 0;
     u32 pressed_gadget_window_ = 0;
     GadgetKind pressed_gadget_ = GadgetKind::None;
-    // The BOOPSI gadget that has the input, between GM_GOACTIVE and
-    // GM_GOINACTIVE: its window, its GadgetInfo, and the InputEvent and
-    // termination long its methods get.
-    struct ActiveCustom {
-        u32 window = 0;
-        u32 gadget = 0;
-        u32 info = 0;
-        u32 event = 0;
-    };
     ActiveCustom custom_;
+    // How many methods to the active gadget are running, and the
+    // GadgetInfos and InputEvents of gadgets let go meanwhile.
+    u32 custom_calls_ = 0;
+    std::vector<ActiveCustom> custom_stale_;
+    // The input queue and the task that takes it.
+    InputItem input_queue_[kInputQueue]{};
+    u32 input_head_ = 0;
+    u32 input_count_ = 0;
+    u32 input_depth_ = 0;
+    bool input_lost_logged_ = false;
+    u32 input_task_ = 0;
+    u32 input_stack_top_ = 0;
+    // The window a size drag has changed, to lay out once it ends.
+    bool drag_resized_ = false;
     // The string gadget being edited, its window, and how far a CSI
     // sequence of the keyboard has come.
     struct ActiveString {
@@ -1068,6 +1140,7 @@ private:
     i32 grab_y_ = 0;
     i32 mouse_x_ = 0;
     i32 mouse_y_ = 0;
+    u8 buttons_ = 0;  // the mouse buttons held at the last pointer event
     u32 dropped_messages_ = 0;
     u32 batch_depth_ = 0;
     u64 last_tick_us_ = 0;  // when intui_ticks last sent one
