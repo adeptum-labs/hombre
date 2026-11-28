@@ -2684,16 +2684,18 @@ struct DiskPartition : PartitionDrive {
 
     u32 blocks;
     std::vector<u8> bytes;
+    u32 reads = 0;
     u32 writes = 0;
     u32 flushes = 0;
 
 private:
     static bool read_block(void* ctx, u32 block, u8* out) {
-        const DiskPartition& p = *static_cast<const DiskPartition*>(ctx);
+        DiskPartition& p = *static_cast<DiskPartition*>(ctx);
         if (block >= p.blocks) {
             return false;
         }
         std::memcpy(out, p.bytes.data() + static_cast<usize>(block) * 512, 512);
+        ++p.reads;
         return true;
     }
 
@@ -9521,6 +9523,91 @@ void rom_overlay_follows_a_reassigned_devs() {
     CHECK(g_dos.examine("DEVS:DataTypes/Disk").kind == Dos::TargetKind::Missing);
 }
 
+void looking_up_the_built_in_files_binds_no_late_assign() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Devs/DataTypes/Disk", text("on disk")});
+    Rig r(files);
+    CHECK(datatype_descriptors::register_on(g_dos));
+    r.str(kData, "DEVS");
+    r.str(kData + 0x40, "SYS:Devs");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+
+    // A lookup elsewhere, and one of the built-in files, leave it late.
+    r.str(kData + 0x80, "SYS:S/Startup-Sequence");
+    const u32 lock = r.call(dos_lvo::Lock, kData + 0x80, SHARED_LOCK);
+    CHECK(lock != 0);
+    r.call(dos_lvo::UnLock, lock);
+    CHECK(g_dos.examine("SYS:Devs/DataTypes/PNG").kind == Dos::TargetKind::File);
+    u32 dl = r.call(dos_lvo::LockDosList, LDF_ASSIGNS | LDF_READ);
+    u32 node = r.call(dos_lvo::FindDosEntry, dl, kData, LDF_ASSIGNS);
+    CHECK(node != 0);
+    CHECK_EQ(r.get32(node + dol_Type), DLT_LATE);
+    r.call(dos_lvo::UnLockDosList, LDF_ASSIGNS | LDF_READ);
+
+    // Its own use binds it, and the built-in files stay.
+    CHECK(g_dos.examine("DEVS:DataTypes/PNG").kind == Dos::TargetKind::File);
+    dl = r.call(dos_lvo::LockDosList, LDF_ASSIGNS | LDF_READ);
+    node = r.call(dos_lvo::FindDosEntry, dl, kData, LDF_ASSIGNS);
+    CHECK_EQ(r.get32(node + dol_Type), DLT_DIRECTORY);
+    r.call(dos_lvo::UnLockDosList, LDF_ASSIGNS | LDF_READ);
+
+    // A path assign to a name from the current directory shows no
+    // built-in files, whichever process asks; the disk's are there.
+    r.str(kData, "DEVS");
+    r.str(kData + 0x40, "Devs");
+    CHECK_EQ(r.call(dos_lvo::AssignPath, kData, kData + 0x40), DOSTRUE);
+    CHECK(g_dos.examine("DEVS:DataTypes/Disk").kind == Dos::TargetKind::File);
+    CHECK(g_dos.examine("DEVS:DataTypes/PNG").kind == Dos::TargetKind::Missing);
+}
+
+void rom_overlay_costs_other_files_no_disk_reads() {
+    DiskPartition part;
+    Rig r(with_partitions(nullptr, {&part}));
+    CHECK(r.booted);
+    u32 err = 0;
+    CHECK(g_dos.make_dir("Work:Devs", err));
+    CHECK(g_dos.make_dir("Work:Devs/DataTypes", err));
+    CHECK(g_dos.make_dir("Work:C", err));
+    const u8 tool[] = {'t', 'o', 'o', 'l'};
+    CHECK(g_dos.write_file("Work:C/Tool", tool, sizeof tool, err));
+    r.str(kData, "DEVS");
+    r.str(kData + 0x40, "Work:Devs");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+
+    // The blocks eight Locks and Opens of a file elsewhere read.
+    const auto reads_for_other_file = [&] {
+        const u32 before = part.reads;
+        r.str(kData, "Work:C/Tool");
+        for (u32 i = 0; i < 8; ++i) {
+            const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+            CHECK(lock != 0);
+            r.call(dos_lvo::UnLock, lock);
+            const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+            CHECK(fh != 0);
+            r.call(dos_lvo::Close, fh);
+        }
+        return part.reads - before;
+    };
+    const u32 without = reads_for_other_file();
+    CHECK(datatype_descriptors::register_on(g_dos));
+    // The first use of DEVS: binds it, which looks the built-in files up
+    // once more; from then on they cost nothing.
+    CHECK(g_dos.examine("DEVS:DataTypes/PNG").kind == Dos::TargetKind::File);
+    reads_for_other_file();
+    CHECK_EQ(reads_for_other_file(), without);
+
+    // A directory deleted or made on the disk still takes the built-in
+    // files away or brings them back.
+    CHECK(g_dos.delete_object("Work:Devs/DataTypes", err));
+    CHECK(g_dos.examine("DEVS:DataTypes/PNG").kind == Dos::TargetKind::Missing);
+    CHECK_EQ(reads_for_other_file(), without);
+    CHECK(g_dos.make_dir("Work:Devs/DataTypes", err));
+    CHECK(g_dos.examine("DEVS:DataTypes/PNG").kind == Dos::TargetKind::File);
+    CHECK(g_dos.rename_path("Work:Devs/DataTypes", "Work:Devs/Other", err));
+    CHECK(g_dos.examine("DEVS:DataTypes/PNG").kind == Dos::TargetKind::Missing);
+    CHECK(g_dos.examine("DEVS:Other/PNG").kind == Dos::TargetKind::Missing);
+}
+
 u16 descriptor_u16(const std::vector<u8>& data, u32 at) {
     return static_cast<u16>((data[at] << 8) | data[at + 1]);
 }
@@ -9804,6 +9891,8 @@ int main() {
     rom_overlay_files_appear_in_devs_datatypes();
     rom_overlay_hides_under_disk_files_and_refuses_changes();
     rom_overlay_follows_a_reassigned_devs();
+    rom_overlay_costs_other_files_no_disk_reads();
+    looking_up_the_built_in_files_binds_no_late_assign();
     adf_info_reports_the_used_blocks();
     return check::finish("test_dos");
 }

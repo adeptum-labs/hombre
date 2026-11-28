@@ -1759,6 +1759,9 @@ struct DosOps {
         if (disk_denies(d, entry, kFibfDelete)) {
             return ERROR_DELETE_PROTECTED;
         }
+        if (entry.is_dir) {
+            ++d.names_changed_;
+        }
         return finish_write(d, vol,
                             adf_delete(d.drives_[vol].volume, entry.header_block, amiga_now(d)));
     }
@@ -1796,6 +1799,9 @@ struct DosOps {
         if (!dir.is_dir) {
             return ERROR_DIR_NOT_FOUND;
         }
+        if (object.is_dir) {
+            ++d.names_changed_;
+        }
         const FsError result = adf_rename(d.drives_[vol].volume, object.header_block,
                                           dir.header_block, leaf, amiga_now(d));
         const u32 code = finish_write(d, vol, result);
@@ -1822,6 +1828,7 @@ struct DosOps {
         if (!dir.is_dir) {
             return ERROR_DIR_NOT_FOUND;
         }
+        ++d.names_changed_;
         const FsError result =
             adf_create_dir(d.drives_[vol].volume, dir.header_block, leaf, amiga_now(d), entry);
         entry.volume = vol;
@@ -2114,6 +2121,7 @@ struct DosOps {
     // disk partitions, RAM: and the assigns; DosInfo's list starts at the
     // first of them.
     static void relink_dos_list(Dos& d, Bus& b) {
+        ++d.names_changed_;
         u32 prev = 0;
         auto link = [&](u32 node) {
             if (prev == 0) {
@@ -2617,9 +2625,14 @@ struct DosOps {
     // its components separated by '/'. A name with a device starts where the
     // volume, device or assign points; one without starts at the current
     // directory.
+    //
+    // With fixed, as the built-in files' directories are looked up, nothing
+    // changes on the way and the answer is the same for every process: a
+    // late assign is followed without being bound, and a name that starts
+    // at a current directory, here or in an assign, is not found.
     static bool resolve(Dos& d, Bus& b, const char* name, u8& vol, char (&out)[Dos::kMaxPath],
-                        u32& error, u32 depth = 0, u32 process = 0, bool refresh = true) {
-        if (refresh) {
+                        u32& error, u32 depth = 0, u32 process = 0, bool fixed = false) {
+        if (!fixed) {
             d.refresh_overlays(b);
         }
         Dos::ProcContext& p = process != 0 ? d.context_for(process) : d.cur();
@@ -2630,6 +2643,10 @@ struct DosOps {
         u32 colon = 0;
         while (name[colon] != '\0' && name[colon] != ':') {
             ++colon;
+        }
+        if (fixed && (name[colon] != ':' || colon == 0)) {
+            error = ERROR_OBJECT_NOT_FOUND;
+            return false;
         }
         if (name[colon] == ':') {
             const char* rest = name + colon + 1;
@@ -2672,14 +2689,14 @@ struct DosOps {
                 return false;
             }
             Dos::AssignEntry& e = *assign;
-            if (e.type == DLT_LATE) {
+            if (e.type == DLT_LATE && !fixed) {
                 if (!resolve_late_assign(d, b, e, error, depth + 1, process)) {
                     return false;
                 }
-            } else if (e.type == DLT_NONBINDING) {
+            } else if (e.type == DLT_NONBINDING || e.type == DLT_LATE) {
                 u8 base_vol = Dos::kVolDf0;
                 char base[Dos::kMaxPath];
-                if (!resolve(d, b, e.path, base_vol, base, error, depth + 1, process)) {
+                if (!resolve(d, b, e.path, base_vol, base, error, depth + 1, process, fixed)) {
                     return false;
                 }
                 vol = base_vol;
@@ -9882,10 +9899,13 @@ constexpr DosFunction kDosFunctions[] = {
 }
 
 bool Dos::refresh_overlays(Bus& b) {
-    if (overlays_resolving_ || overlay_count_ == 0) {
+    if (overlays_resolving_ || overlay_count_ == 0 ||
+        (overlays_current_ && overlays_names_seen_ == names_changed_ &&
+         overlays_ram_seen_ == ram_.dir_changes())) {
         return b.ok();
     }
     overlays_resolving_ = true;
+    bool resolved_all = true;
     for (u32 i = 0; i < overlay_count_; ++i) {
         overlays_[i].present = false;
     }
@@ -9894,7 +9914,10 @@ bool Dos::refresh_overlays(Bus& b) {
         u8 vol = kVolDf0;
         char resolved[kMaxPath];
         u32 error = 0;
-        if (!DosOps::resolve(*this, b, o.dir, vol, resolved, error, 0, 0, false)) {
+        if (!DosOps::resolve(*this, b, o.dir, vol, resolved, error, 0, 0, true)) {
+            // Only a name that resolved is kept: a failure may have a cause
+            // the counts do not follow.
+            resolved_all = false;
             continue;
         }
         DirEntry entry{};
@@ -9905,6 +9928,9 @@ bool Dos::refresh_overlays(Bus& b) {
         }
     }
     overlays_resolving_ = false;
+    overlays_current_ = resolved_all && b.ok();
+    overlays_names_seen_ = names_changed_;
+    overlays_ram_seen_ = ram_.dir_changes();
     return b.ok();
 }
 
@@ -9931,6 +9957,7 @@ bool Dos::add_rom_overlay(const char* dir, const RomFile* files, u32 count) {
         o.files[i].key = kOverlayKeyBase + overlay_count_ * kMaxOverlayFiles + i;
     }
     ++overlay_count_;
+    overlays_current_ = false;
     if (m_ == nullptr) {
         return true;
     }
@@ -10714,6 +10741,7 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     }
     overlay_count_ = 0;
     overlays_resolving_ = false;
+    overlays_current_ = false;
     for (LockSlot& l : lock_slots_) {
         l.used = false;
         l.owner = 0;

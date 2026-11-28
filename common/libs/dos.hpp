@@ -1431,6 +1431,14 @@ private:
     Overlay overlays_[kMaxOverlays]{};
     u32 overlay_count_ = 0;
     bool overlays_resolving_ = false;
+    // Counts what can make a name lead elsewhere: the dos list linked anew
+    // (assigns, disks) and directories made, deleted or renamed on a disk.
+    u32 names_changed_ = 0;
+    // That count and RAM:'s count of directory changes when the overlays
+    // were last resolved: they are resolved again only once one moves.
+    bool overlays_current_ = false;
+    u32 overlays_names_seen_ = 0;
+    u32 overlays_ram_seen_ = 0;
     bool refresh_overlays(native::Bus& b);
     FileClosed file_closed_ = nullptr;
     void* file_closed_ctx_ = nullptr;

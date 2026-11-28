@@ -77,6 +77,7 @@ public:
             nodes_[i] = Node{};
         }
         store_ = Store{};
+        ++dir_changes_;
     }
 
     void init(const Store& store) {
@@ -89,6 +90,7 @@ public:
             nodes_[i] = Node{};
         }
         store_ = store;
+        ++dir_changes_;
         Node& root = nodes_[0];
         root.used = true;
         root.is_dir = true;
@@ -199,6 +201,7 @@ public:
         copy_text(d.name, kMaxName, name);
         stamp(d);
         out = index;
+        ++dir_changes_;
         return 0;
     }
 
@@ -215,6 +218,9 @@ public:
         }
         if (n.is_dir && next_child(node, kNone) != kNone) {
             return ERROR_DIRECTORY_NOT_EMPTY;
+        }
+        if (n.is_dir) {
+            ++dir_changes_;
         }
         free_data(n);
         nodes_[node] = Node{};
@@ -244,8 +250,16 @@ public:
         Node& n = nodes_[node];
         n.parent = new_dir;
         copy_text(n.name, kMaxName, new_name);
+        if (n.is_dir) {
+            ++dir_changes_;
+        }
         return 0;
     }
+
+    // Counts the directories made, removed and renamed, and the volume
+    // made anew: a path that led to a directory may lead elsewhere once it
+    // changes.
+    u32 dir_changes() const { return dir_changes_; }
 
     u32 read(u32 node, u32 pos, u8* dst, u32 n, u32& got) const {
         got = 0;
@@ -587,6 +601,7 @@ private:
     }
 
     Store store_{};
+    u32 dir_changes_ = 0;
     Node nodes_[kMaxNodes]{};
 };
 
