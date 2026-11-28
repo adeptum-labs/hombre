@@ -35,6 +35,8 @@ OVMF         := /usr/share/OVMF
 # slot 0x10 + n, which is how the kernel tells the drives apart.
 TEST_DISK := $(BUILD)/test-disk.dms
 PIC_DISK  := $(BUILD)/pic-disk.adf
+# The disk of the MultiView boot check: one picture larger than the screen.
+MULTIVIEW_DISK := $(BUILD)/multiview-disk.adf
 # A hard disk image whose one partition, DH0:, holds the test disk's volume.
 TEST_HDF  := $(BUILD)/test.hdf
 # The same partition inside a GPT of a disk with 4096 byte sectors.
@@ -118,7 +120,8 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 # HOMBRE_FAULT_TEST. Each is built into its own directory.
 FAULT_TESTS := 1 2 3 4
 
-.PHONY: all image image-nokernel disk-image run check check-workbench check-wbpattern test \
+.PHONY: all image image-nokernel disk-image run check check-workbench check-wbpattern \
+        check-multiview test \
         test-dms \
         test-m68k clean
 
@@ -611,6 +614,56 @@ check-wbpattern:
 	@echo "set DISK=<Workbench disk> and DISK1=<Extras disk>" >&2; exit 1
 endif
 
+# Shows BigPics:Large.ilbm, 1024 by 768 pixels of five planes, with
+# MultiView from the Workbench 3.1 disk in DISK, through the disk's own
+# datatypes.library, picture.datatype and ilbm.datatype, on the default
+# planar screen. The boot skips the Startup-Sequence and makes its LIBS:
+# assign and AddDataTypes by hand. As soon as the window opens, which may
+# be before the first layout is over, a key comes and the window is sized a
+# hundred pixels narrower and sixty lower by its size gadget, with keys at
+# once after, as the layout that follows starts; then it is sized back. Then
+# the picture is scrolled five lines down and two columns right by the cursor
+# keys, a second with the down arrow held, and a hundred pixels right by
+# dragging the knob of the bottom scroller; the close gadget ends MultiView.
+# The screen is dumped to $(BUILD)/multiview-shrunk.ppm, multiview-shown.ppm
+# (sized back) and multiview-scrolled.ppm.
+MV_WAIT  := mouse_move 0 0;mouse_move 0 0;mouse_move 0 0;mouse_move 0 0
+MV_DUMP  := screendump $(abspath $(BUILD))/multiview
+MULTIVIEW_MOUSE := sendkey down;mouse_move 313 195;mouse_button 1;mouse_move -100 -60;\
+    mouse_button 0;sendkey down;sendkey right;$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);\
+    $(MV_DUMP)-shrunk.ppm;mouse_button 1;mouse_move 100 60;mouse_button 0;sendkey up;\
+    $(MV_WAIT);$(MV_WAIT);$(MV_WAIT);$(MV_DUMP)-shown.ppm;\
+    sendkey down;sendkey down;sendkey down;sendkey down;sendkey down;\
+    sendkey right;sendkey right;$(MV_WAIT);\
+    mouse_move -2 -16;mouse_button 1;$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);mouse_button 0;\
+    $(MV_WAIT);mouse_move -451 15;mouse_button 1;mouse_move 50 0;mouse_move 50 0;\
+    mouse_button 0;$(MV_WAIT);$(MV_DUMP)-scrolled.ppm;\
+    mouse_move -271 -372;mouse_button 1;mouse_button 0
+ifneq ($(and $(filter command line environment override,$(origin DISK)),$(strip $(DISK))),)
+check-multiview: image $(MULTIVIEW_DISK)
+	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 $(MULTIVIEW_DISK) \
+	    --keys "a s s i g n spc l i b s shift-dot spc s y s shift-dot c l a s s e s spc a d d ret a d d d a t a t y p e s spc r e f r e s h spc q u i e t ret s y s shift-dot u t i l i t i e s shift-7 m u l t i v i e w spc b i g p i c s shift-dot l a r g e dot i l b m ret" \
+	    --mouse-after "intuition: window Loading... opened" \
+	    --mouse "$(MULTIVIEW_MOUSE)" \
+	    --absent "exec: calls into 68000 code nested too deep" --absent "unimplemented LVO" \
+	    --absent "exec: no device" --absent "Unknown data type" \
+	    --absent "intuition: input lost" \
+	    "volume: BigPics (OFS)" "m68k: C:adddatatypes returned 0" \
+	    "m68k: running sys:utilities/multiview" "intuition: window Loading... opened" \
+	    "dos: process AsyncLayoutDaemon ended, returned 0" \
+	    "mouse: down 1 at 633,395" "mouse: up 1 at 533,335" "mouse: down 1 at 533,335" \
+	    "mouse: up 1 at 633,395" "mouse: down 1 at 631,379" "mouse: up 1 at 280,394" \
+	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
+	bash tools/log_order.sh build/serial.log "intuition: window Loading... opened" \
+	    "mouse: down 1 at 633,395" "mouse: up 1 at 533,335" \
+	    "dos: process AsyncLayoutDaemon ended, returned 0" "mouse: up 1 at 633,395" \
+	    "dos: process AsyncLayoutDaemon ended, returned 0" "mouse: down 1 at 631,379" \
+	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
+else
+check-multiview:
+	@echo "set DISK=<path to a Workbench 3.1 .dms or .adf>" >&2; exit 1
+endif
+
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.
 HOSTCXX      := g++
@@ -670,6 +723,9 @@ $(MKPICDISK): tools/mkpicdisk.cpp $(COMMON_HOBJ)
 
 $(PIC_DISK): $(MKPICDISK)
 	$(MKPICDISK) $@
+
+$(MULTIVIEW_DISK): $(MKPICDISK)
+	$(MKPICDISK) --large $@
 
 ELF2HUNK := $(BUILD)/tools/elf2hunk
 
