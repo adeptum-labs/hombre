@@ -35,6 +35,7 @@
 #include "../common/libs/display_modes.hpp"
 #include "../common/libs/scsi_device.hpp"
 #include "../common/libs/console_device.hpp"
+#include "../common/libs/datatype_descriptors.hpp"
 #include "../common/libs/dos.hpp"
 #include "../common/libs/exec.hpp"
 #include "../common/libs/graphics.hpp"
@@ -1318,6 +1319,12 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     dos.defer_ram_defaults();
     if (!dos.init(machine, exec, drives, &console_write, &consoles[0])) {
         fail("dos init failed");
+        return false;
+    }
+    // DEVS:DataTypes shows the descriptors of the pictures Hombre reads
+    // itself, beside those the disk has.
+    if (!datatype_descriptors::register_on(dos)) {
+        fail("datatype descriptors failed");
         return false;
     }
     if (dos.boot_device_node() != 0 &&

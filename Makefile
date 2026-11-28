@@ -121,7 +121,7 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 FAULT_TESTS := 1 2 3 4
 
 .PHONY: all image image-nokernel disk-image run check check-workbench check-wbpattern \
-        check-multiview test \
+        check-multiview check-datatypes test \
         test-dms \
         test-m68k clean
 
@@ -661,6 +661,31 @@ check-multiview: image $(MULTIVIEW_DISK)
 	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
 else
 check-multiview:
+	@echo "set DISK=<path to a Workbench 3.1 .dms or .adf>" >&2; exit 1
+endif
+
+# Lists DEVS:DataTypes of the Workbench 3.1 disk in DISK, where the PNG and
+# JPEG descriptors Hombre keeps in memory show beside the disk's own,
+# protected from writing and deleting. AddDataTypes REFRESH then reads them
+# all, and MultiView still finds BigPics:Large.ilbm through the disk's ILBM
+# descriptor; once its first layout is over, the close gadget ends it.
+ifneq ($(and $(filter command line environment override,$(origin DISK)),$(strip $(DISK))),)
+check-datatypes: image $(MULTIVIEW_DISK)
+	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 $(MULTIVIEW_DISK) \
+	    --keys "l i s t spc d e v s shift-dot d a t a t y p e s ret a s s i g n spc l i b s shift-dot spc s y s shift-dot c l a s s e s spc a d d ret a d d d a t a t y p e s spc r e f r e s h spc q u i e t ret s y s shift-dot u t i l i t i e s shift-7 m u l t i v i e w spc b i g p i c s shift-dot l a r g e dot i l b m ret" \
+	    --mouse-after "dos: process AsyncLayoutDaemon ended, returned 0" \
+	    --mouse "mouse_move -311 -178;mouse_button 1;mouse_button 0" \
+	    --absent "Unknown data type" --absent "unimplemented LVO" \
+	    --absent "exec: calls into 68000 code nested too deep" \
+	    "ILBM                         138 ----rwed" \
+	    "PNG                           92 ----r-e-" \
+	    "JPEG                          88 ----r-e-" \
+	    "m68k: C:list returned 0" "m68k: C:adddatatypes returned 0" \
+	    "intuition: window Loading... opened" \
+	    "dos: process AsyncLayoutDaemon ended, returned 0" \
+	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
+else
+check-datatypes:
 	@echo "set DISK=<path to a Workbench 3.1 .dms or .adf>" >&2; exit 1
 endif
 
