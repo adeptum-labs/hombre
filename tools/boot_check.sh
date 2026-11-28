@@ -302,7 +302,12 @@ monitor_send() {
     if [[ -z $monitor_fd ]]; then
         exec {monitor_fd}> >(exec socat - "UNIX-CONNECT:$monitor_socket" > /dev/null)
     fi
-    echo "$1" >&"$monitor_fd" || return 1
+    # A command the monitor cannot take fails the check here, loudly,
+    # rather than leaving the boot to wait for keys that never come.
+    if ! echo "$1" >&"$monitor_fd"; then
+        echo "$0: the QEMU monitor connection is gone; not sent: $1" >&2
+        exit 1
+    fi
     sleep 0.25
 }
 trap '' PIPE
@@ -331,12 +336,11 @@ qmp_swap() {
     } | socat - "UNIX-CONNECT:$qmp_socket" > "$build_dir/qmp.$$.log"
 }
 
-# Types the keys once the shell reads the keyboard. Best effort: a missing
-# marker is reported with the others at the end.
+# Types the keys once the shell reads the keyboard.
 send_keys() {
     local key
     for key in $keys; do
-        monitor_send "sendkey $key" || return 1
+        monitor_send "sendkey $key"
     done
 }
 keys_sent=false
@@ -352,10 +356,13 @@ send_mouse() {
             drive_n=${rest%% *}
             file=
             [[ $rest == *\ * ]] && file=${rest#* }
-            qmp_swap "$drive_n" "$file" || return 1
+            if ! qmp_swap "$drive_n" "$file"; then
+                echo "$0: could not swap the disk in DF$drive_n:" >&2
+                exit 1
+            fi
             continue
         fi
-        monitor_send "$cmd" || return 1
+        monitor_send "$cmd"
     done
 }
 mouse_sent=false
@@ -381,22 +388,24 @@ fail_on_absent() {
 for ((i = 0; i < timeout_seconds * 4; i++)); do
     fail_on_absent
     all_markers_present "$@" && { fail_on_absent; exit 0; }
-    # Ctrl+D again and again from QEMU's start until the Startup-Sequence is
-    # over. QEMU queues the keys until the kernel reads the keyboard, so one
-    # is waiting when the script starts, however quickly the boot gets
-    # there; keys sent before the kernel resets the keyboard are lost.
+    # Ctrl+D again and again from the moment the kernel has its keyboard
+    # until the Startup-Sequence is over: the kernel waits a moment for it
+    # before the script starts, and it breaks the script too. No key goes
+    # before then: one that comes while the kernel sets up its USB devices
+    # is no use to it.
     if [[ $no_startup == true && -S $monitor_socket ]] &&
+       grep -qF -- "usb: keyboard ready" "$serial_log" &&
        ! grep -qF -- "startup: ended" "$serial_log"; then
-        monitor_send "sendkey ctrl-d" || true
+        monitor_send "sendkey ctrl-d"
     fi
     if [[ -n $keys && $keys_sent == false ]] && grep -qF -- "shell: ready" "$serial_log"; then
         keys_sent=true
-        send_keys || true
+        send_keys
     fi
     if [[ -n $mouse && $mouse_sent == false && ( -z $keys || $keys_sent == true ) ]] &&
        grep -qF -- "$mouse_after" "$serial_log"; then
         mouse_sent=true
-        send_mouse || true
+        send_mouse
     fi
     kill -0 "$qemu_pid" 2>/dev/null || break
     sleep 0.25
