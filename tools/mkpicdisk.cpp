@@ -24,11 +24,17 @@
 // Host only: writes the picture disk the WBPattern boot check mounts.
 //
 //   mkpicdisk <out.adf>
+//   mkpicdisk --large <out.adf>
 //
 // An OFS volume named Pics whose drawer Pics holds sixteen small IFF ILBM
 // pictures, Pic01.ilbm to Pic16.ilbm, plain, and Zz.ilbm, rings of three
 // planes packed with ByteRun1. Zz.ilbm sorts last, so a file requester of
 // ten rows shows it only when scrolled to its end.
+//
+// With --large, the disk the MultiView boot check mounts: an OFS volume
+// named BigPics holding Large.ilbm, 1024 by 768 pixels of five planes
+// packed with ByteRun1, larger than the screen either way: bands of 32
+// pens across, crossed by a diagonal stripe and a ring about its middle.
 
 #include "ofs_writer.hpp"
 
@@ -151,28 +157,46 @@ std::vector<u8> ilbm(u32 width, u32 height, u32 planes, bool packed, Pen pen) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        std::fprintf(stderr, "usage: mkpicdisk <out.adf>\n");
+    const bool large = argc == 3 && std::string(argv[1]) == "--large";
+    if (argc != 2 && !large) {
+        std::fprintf(stderr, "usage: mkpicdisk [--large] <out.adf>\n");
         return 2;
     }
+    const char* path = argv[argc - 1];
     try {
         std::vector<AdfFile> files;
-        for (u32 n = 1; n <= 16; ++n) {
+        if (large) {
+            files.push_back({"Large.ilbm", ilbm(1024, 768, 5, true, [](u32 x, u32 y) {
+                                 const i32 dx = static_cast<i32>(x) - 512;
+                                 const i32 dy = static_cast<i32>(y) - 384;
+                                 const i32 d2 = dx * dx + dy * dy;
+                                 if (d2 > 200 * 200 && d2 < 216 * 216) {
+                                     return 31u;
+                                 }
+                                 if ((x + y) % 256 < 12) {
+                                     return 1u;
+                                 }
+                                 return (x / 32) % 32;
+                             })});
+        }
+        for (u32 n = 1; !large && n <= 16; ++n) {
             char name[32];
             std::snprintf(name, sizeof name, "Pics/Pic%02u.ilbm", n);
             files.push_back({name, ilbm(16, 16, 2, false, [n](u32 x, u32 y) {
                                  return (x / 4 + y / 4 + n) % 4;
                              })});
         }
-        files.push_back({"Pics/Zz.ilbm", ilbm(48, 48, 3, true, [](u32 x, u32 y) {
-                             const i32 dx = static_cast<i32>(x) - 24;
-                             const i32 dy = static_cast<i32>(y) - 24;
-                             return static_cast<u32>((dx * dx + dy * dy) / 40) % 8;
-                         })});
-        const std::vector<u8> image = build_adf("Pics", false, files);
-        std::FILE* out = std::fopen(argv[1], "wb");
+        if (!large) {
+            files.push_back({"Pics/Zz.ilbm", ilbm(48, 48, 3, true, [](u32 x, u32 y) {
+                                 const i32 dx = static_cast<i32>(x) - 24;
+                                 const i32 dy = static_cast<i32>(y) - 24;
+                                 return static_cast<u32>((dx * dx + dy * dy) / 40) % 8;
+                             })});
+        }
+        const std::vector<u8> image = build_adf(large ? "BigPics" : "Pics", false, files);
+        std::FILE* out = std::fopen(path, "wb");
         if (out == nullptr || std::fwrite(image.data(), 1, image.size(), out) != image.size()) {
-            std::fprintf(stderr, "mkpicdisk: cannot write %s\n", argv[1]);
+            std::fprintf(stderr, "mkpicdisk: cannot write %s\n", path);
             return 1;
         }
         std::fclose(out);
