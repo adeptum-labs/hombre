@@ -22,8 +22,9 @@
  */
 
 // The BOOPSI classes written in C++: the registry they dispatch through,
-// icclass with its loop counter, modelclass and pointerclass; and how
-// Intuition lays out, feeds and guards the BOOPSI gadgets of its windows.
+// icclass with its loop counter, modelclass and pointerclass; how Intuition
+// lays out, feeds and guards the BOOPSI gadgets of its windows; and
+// buttongclass and propgclass.
 
 #include "gfx_rig.hpp"
 #include "libs/utility.hpp"
@@ -500,6 +501,176 @@ void the_active_custom_gadget_gets_timer_events() {
     CHECK_EQ(seen.inputs.size(), 2u);
 }
 
+// The window's IDCMP_IDCMPUPDATE messages and GADGETUPs, in order.
+struct Heard {
+    std::vector<u32> updates;  // the data of the first pair
+    std::vector<u32> tags;     // the tag of the first pair
+    u32 gadget_ups = 0;
+    u32 up_code = 0;
+};
+
+Heard hear(GfxRig& r, u32 window) {
+    const u32 port = r.get32(window + wd_UserPort);
+    Heard heard;
+    for (u32 msg = get_msg(r, port); msg != 0; msg = get_msg(r, port)) {
+        const u32 cls = r.get32(msg + im_Class);
+        if (cls == IDCMP_IDCMPUPDATE) {
+            const u32 list = r.get32(msg + im_IAddress);
+            heard.tags.push_back(r.get32(list));
+            heard.updates.push_back(r.get32(list + 4));
+        } else if (cls == IDCMP_GADGETUP) {
+            ++heard.gadget_ups;
+            heard.up_code = r.get16(msg + im_Code);
+        }
+        reply_msg(r, msg);
+    }
+    return heard;
+}
+
+void buttongclass_repeats_while_held() {
+    GfxRig r;
+    g_now_us = 1000000;
+    r.intuition.set_clock(fake_clock);
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 window = open_window(r, IDCMP_IDCMPUPDATE | IDCMP_GADGETUP);
+    const u32 arrow = bo.new_object(bo.sysi_class(), 0,
+                                    r.tags(kTagList, {{SYSIA_Which, UPIMAGE}, {TAG_DONE, 0}}));
+    CHECK(arrow != 0);
+    r.str(kBuffer, "buttongclass");
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kBuffer;
+    r.cpu().a[2] = r.tags(kTagList + 0x40, {{GA_Left, 20}, {GA_Top, 20}, {GA_Image, arrow},
+                                           {GA_ID, 5}, {GA_RelVerify, 1},
+                                           {ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}});
+    const u32 button = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(button != 0);
+    CHECK_EQ(r.get32(bo.class_of(button) + cl_Super), bo.gadget_class());
+    // The image's size.
+    CHECK_EQ(r.get16(button + gg_Width), 18u);
+    CHECK_EQ(r.get16(button + gg_Height), 11u);
+    add_gadget(r, window, button);
+
+    // The press selects it and tells the window its GA_ID.
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    CHECK_EQ(r.get16(button + gg_Flags) & GFLG_SELECTED, GFLG_SELECTED);
+    Heard heard = hear(r, window);
+    CHECK_EQ(heard.updates.size(), 1u);
+    CHECK_EQ(heard.tags[0], GA_ID);
+    CHECK_EQ(heard.updates[0], 5u);
+
+    // Each timer event while held says it again.
+    for (u32 i = 0; i < 3; ++i) {
+        g_now_us += 100000;
+        r.intuition.intui_ticks();
+    }
+    CHECK_EQ(hear(r, window).updates.size(), 3u);
+
+    // Off the button it shows released and stays quiet; back on, it
+    // repeats again.
+    r.intuition.pointer_event(150, 120, 1, 0, 0, true);
+    CHECK_EQ(r.get16(button + gg_Flags) & GFLG_SELECTED, 0u);
+    g_now_us += 100000;
+    r.intuition.intui_ticks();
+    CHECK_EQ(hear(r, window).updates.size(), 0u);
+    r.intuition.pointer_event(76, 76, 1, 0, 0, true);
+    CHECK_EQ(r.get16(button + gg_Flags) & GFLG_SELECTED, GFLG_SELECTED);
+
+    // Let go over it: a last update and the GADGETUP.
+    r.intuition.pointer_event(76, 76, 0, 0, 1, false);
+    CHECK_EQ(r.get16(button + gg_Flags) & GFLG_SELECTED, 0u);
+    heard = hear(r, window);
+    CHECK_EQ(heard.updates.size(), 1u);
+    CHECK_EQ(heard.gadget_ups, 1u);
+    CHECK_EQ(heard.up_code, 5u);
+
+    // Let go off it: nothing.
+    r.intuition.pointer_event(75, 75, 1, 1, 0, true);
+    hear(r, window);
+    r.intuition.pointer_event(150, 120, 0, 0, 1, true);
+    heard = hear(r, window);
+    CHECK_EQ(heard.updates.size(), 0u);
+    CHECK_EQ(heard.gadget_ups, 0u);
+}
+
+u32 get(GfxRig& r, u32 attr, u32 object) {
+    CHECK(r.intuition.boopsi().get_attr(attr, object, kBuffer + 0x40) != 0);
+    return r.get32(kBuffer + 0x40);
+}
+
+void propgclass_counts_lines_and_follows_the_knob() {
+    GfxRig r;
+    g_now_us = 1000000;
+    r.intuition.set_clock(fake_clock);
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 window = open_window(r, IDCMP_IDCMPUPDATE | IDCMP_GADGETUP);
+    r.str(kBuffer, "propgclass");
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kBuffer;
+    r.cpu().a[2] = r.tags(kTagList, {{GA_Left, 20}, {GA_Top, 20}, {GA_Width, 16},
+                                    {GA_Height, 100}, {GA_RelVerify, 1}, {GA_ID, 3},
+                                    {PGA_Freedom, FREEVERT}, {PGA_Total, 100},
+                                    {PGA_Visible, 10}, {PGA_Top, 45},
+                                    {ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}});
+    const u32 prop = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(prop != 0);
+    const u32 pi = r.get32(prop + gg_SpecialInfo);
+    CHECK(pi != 0);
+    CHECK_EQ(r.get16(pi + pi_Flags) & (FREEVERT | FREEHORIZ | AUTOKNOB), FREEVERT | AUTOKNOB);
+    CHECK_EQ(r.get16(pi + pi_VertBody), 10u * 0xFFFF / 100);
+    CHECK_EQ(r.get16(pi + pi_VertPot), 45u * 0xFFFF / 90);
+    CHECK_EQ(get(r, PGA_Top, prop), 45u);
+    CHECK_EQ(get(r, PGA_Total, prop), 100u);
+    CHECK_EQ(get(r, PGA_Visible, prop), 10u);
+    // A top past the end stops at the last page.
+    bo.set_attrs(prop, r.tags(kTagList, {{PGA_Top, 500}, {TAG_DONE, 0}}), 0);
+    CHECK_EQ(get(r, PGA_Top, prop), 90u);
+    CHECK_EQ(r.get16(pi + pi_VertPot), 0xFFFFu);
+    CHECK(bo.set_attrs(prop, r.tags(kTagList, {{PGA_Top, 45}, {TAG_DONE, 0}}), 0) != 0);
+    // Setting what it has already changes nothing.
+    CHECK_EQ(bo.set_attrs(prop, r.tags(kTagList, {{PGA_Top, 45}, {TAG_DONE, 0}}), 0), 0u);
+    add_gadget(r, window, prop);
+
+    // The box is window rows 20..119; inside it rows 21..118 carry the
+    // knob, 9 rows high, with 89 rows of travel: at 45 of 90 it starts at
+    // row 21 + 44.
+    const i32 knob_top = 50 + 21 + 44;
+    r.intuition.pointer_event(78, knob_top + 4, 1, 1, 0, true);
+    CHECK_EQ(r.get16(pi + pi_Flags) & KNOBHIT, KNOBHIT);
+    CHECK(hear(r, window).updates.empty());
+    r.intuition.pointer_event(78, knob_top + 24, 1, 0, 0, true);
+    const u32 dragged = get(r, PGA_Top, prop);
+    CHECK(dragged > 45u);
+    Heard heard = hear(r, window);
+    CHECK_EQ(heard.updates.size(), 1u);
+    CHECK_EQ(heard.tags[0], PGA_Top);
+    CHECK_EQ(heard.updates[0], dragged);
+    r.intuition.pointer_event(78, knob_top + 24, 0, 0, 1, false);
+    CHECK_EQ(r.get16(pi + pi_Flags) & KNOBHIT, 0u);
+    heard = hear(r, window);
+    CHECK_EQ(heard.updates.size(), 1u);
+    CHECK_EQ(heard.updates[0], dragged);
+    CHECK_EQ(heard.gadget_ups, 1u);
+    CHECK_EQ(heard.up_code, dragged);
+
+    // A press above the knob moves it a page up, and each timer event
+    // while held another, until the knob reaches the pointer.
+    bo.set_attrs(prop, r.tags(kTagList, {{PGA_Top, 90}, {TAG_DONE, 0}}), 0);
+    r.intuition.pointer_event(78, 50 + 22, 1, 1, 0, true);
+    CHECK_EQ(get(r, PGA_Top, prop), 80u);
+    g_now_us += 100000;
+    r.intuition.intui_ticks();
+    CHECK_EQ(get(r, PGA_Top, prop), 70u);
+    for (u32 i = 0; i < 20; ++i) {
+        g_now_us += 100000;
+        r.intuition.intui_ticks();
+    }
+    CHECK_EQ(get(r, PGA_Top, prop), 0u);
+    r.intuition.pointer_event(78, 50 + 22, 0, 0, 1, false);
+    heard = hear(r, window);
+    CHECK(heard.updates.size() >= 3u);
+    CHECK_EQ(heard.updates.back(), 0u);
+}
+
 // The index of the first method of seen equal to method from at on, or
 // the count when there is none.
 usize first_of(const Seen& seen, u32 method, usize from = 0) {
@@ -879,6 +1050,54 @@ void input_that_comes_during_a_gadget_method_waits_for_it() {
     }
 }
 
+void a_horizontal_prop_follows_the_knob_and_clamps_its_top() {
+    GfxRig r;
+    g_now_us = 1000000;
+    r.intuition.set_clock(fake_clock);
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 window = open_window(r, IDCMP_IDCMPUPDATE);
+    const u32 prop = bo.new_object(
+        bo.find_class_named("propgclass"), 0,
+        r.tags(kTagList, {{GA_Left, 20}, {GA_Top, 20}, {GA_Width, 100}, {GA_Height, 12},
+                          {PGA_Freedom, FREEHORIZ}, {PGA_Total, 1000}, {PGA_Visible, 100},
+                          {PGA_Top, 450}, {ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}}));
+    CHECK(prop != 0);
+    const u32 pi = r.get32(prop + gg_SpecialInfo);
+    CHECK_EQ(r.get16(pi + pi_HorizBody), 100u * 0xFFFF / 1000);
+    CHECK_EQ(r.get16(pi + pi_HorizPot), 450u * 0xFFFF / 900);
+    CHECK_EQ(r.get16(pi + pi_VertPot), 0u);
+    bo.set_attrs(prop, r.tags(kTagList, {{PGA_Top, static_cast<u32>(-3)}, {TAG_DONE, 0}}), 0);
+    CHECK_EQ(get(r, PGA_Top, prop), 0u);
+    CHECK_EQ(r.get16(pi + pi_HorizPot), 0u);
+    bo.set_attrs(prop, r.tags(kTagList, {{PGA_Top, 450}, {TAG_DONE, 0}}), 0);
+    add_gadget(r, window, prop);
+
+    // Inside columns 21..118 the knob is 9 wide with 89 of travel, at 450
+    // of 900 from column 21 + 44.
+    const i32 knob_left = 50 + 21 + 44;
+    r.intuition.pointer_event(knob_left + 4, 50 + 26, 1, 1, 0, true);
+    CHECK_EQ(r.get16(pi + pi_Flags) & KNOBHIT, KNOBHIT);
+    r.intuition.pointer_event(knob_left + 4 + 30, 50 + 26, 1, 0, 0, true);
+    const u32 moved = get(r, PGA_Top, prop);
+    CHECK(moved > 450u);
+    Heard heard = hear(r, window);
+    CHECK_EQ(heard.updates.size(), 1u);
+    CHECK_EQ(heard.tags[0], PGA_Top);
+    CHECK_EQ(heard.updates[0], moved);
+    // A move along the other axis moves no knob and says nothing.
+    r.intuition.pointer_event(knob_left + 4 + 30, 50 + 28, 1, 0, 0, true);
+    CHECK(hear(r, window).updates.empty());
+    r.intuition.pointer_event(knob_left + 4 + 30, 50 + 28, 0, 0, 1, false);
+    heard = hear(r, window);
+    CHECK_EQ(heard.updates.size(), 1u);
+    CHECK_EQ(heard.updates[0], moved);
+
+    // A press left of the knob pages a hundred lines left.
+    r.intuition.pointer_event(50 + 22, 50 + 26, 1, 1, 0, true);
+    CHECK_EQ(get(r, PGA_Top, prop), moved - 100);
+    r.intuition.pointer_event(50 + 22, 50 + 26, 0, 0, 1, false);
+}
+
 // With an input task, events wait in the queue for it, in order, a move
 // taking the place of the move before it and a tick waiting only once.
 bool fake_create(void*, u32) { return true; }
@@ -939,12 +1158,15 @@ int main() {
     pointerclass_keeps_its_attributes();
     gm_layout_goes_to_gadgets_with_a_relative_box();
     the_active_custom_gadget_gets_timer_events();
+    buttongclass_repeats_while_held();
+    propgclass_counts_lines_and_follows_the_knob();
     a_gadget_is_laid_out_before_it_is_drawn_and_once_per_resize();
     a_68000_model_subclass_sees_the_loop_during_a_broadcast();
     a_native_class_over_a_68000_superclass();
     members_may_leave_or_go_during_a_broadcast();
     icspecial_code_sets_the_code_of_the_update();
     input_that_comes_during_a_gadget_method_waits_for_it();
+    a_horizontal_prop_follows_the_knob_and_clamps_its_top();
     with_an_input_task_events_wait_for_it_in_order();
     return check::finish("test_boopsi_classes");
 }

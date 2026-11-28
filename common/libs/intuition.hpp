@@ -969,6 +969,25 @@ private:
     // size_window_to, with GM_LAYOUT to the gadgets only when layout says.
     void resize_window(u32 window, i32 width, i32 height, bool layout);
 
+    // buttongclass and propgclass, the gadget classes intuition draws.
+    static u32 button_class(void* ctx, u32 cl, u32 object, u32 msg);
+    static u32 prop_class(void* ctx, u32 cl, u32 object, u32 msg);
+    u32 button_dispatch(u32 cl, u32 object, u32 msg);
+    u32 prop_dispatch(u32 cl, u32 object, u32 msg);
+    // GM_RENDER from a gadget's own method, through its GadgetInfo's
+    // RastPort.
+    void render_gadget(native::Bus& b, u32 gadget, u32 info, u32 redraw);
+    // The prop gadget's pots and bodies from its PGA_ attributes, and how
+    // many of them changed.
+    u32 set_prop_attrs(native::Bus& b, u32 data, u32 tags);
+    // The PGA_Top a moved knob gives, kept with the pots.
+    void prop_top_from_pots(native::Bus& b, u32 data);
+    // Tells the prop gadget's targets where its knob is.
+    void notify_prop(native::Bus& b, u32 gadget, u32 data, u32 info, bool interim);
+    // A click in the prop gadget's container beside its knob moves it a
+    // page towards the point, window-relative wx, wy: false when it moves
+    // no further.
+    bool page_prop(native::Bus& b, u32 gadget, u32 data, u32 info, i32 wx, i32 wy);
     void release_bool_gadget(native::Bus& b, u32 window, i32 x, i32 y);
     void draw_bool_gadget(native::Bus& b, u32 window, u32 rp, u32 gadget);
     bool gadtools_draws(native::Bus& b, u32 window, u32 rp, u32 gadget);

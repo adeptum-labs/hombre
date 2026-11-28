@@ -34,6 +34,7 @@
 #include "keymap_library.hpp"
 #include "raster.hpp"
 #include "sysimage.hpp"
+#include "tags.hpp"
 #include "utility.hpp"
 #include "version.hpp"
 
@@ -62,9 +63,13 @@ constexpr u32 kTermination = 24;
 constexpr u32 IECLASS_RAWMOUSE = 2;
 constexpr u32 IECLASS_TIMER = 6;
 constexpr u32 IECODE_LBUTTON = 0x68;
+constexpr u32 IECODE_RBUTTON = 0x69;
 constexpr u32 IECODE_UP_PREFIX = 0x80;
 constexpr u32 IECODE_NOBUTTON = 0xFF;
 constexpr u32 IEQUALIFIER_LEFTBUTTON = 0x4000;
+
+// The instance data of propgclass, laid out with the class.
+constexpr u32 kPropClassBytes = 44;
 
 u32 pack_point(i32 x, i32 y) {
     return (static_cast<u32>(x) << 16) | (static_cast<u32>(y) & 0xFFFF);
@@ -2343,6 +2348,12 @@ bool Intuition::init(Machine& m, Exec& exec, Graphics& graphics, DisplayState& d
     }
     boopsi_.set_idcmp_update_hook(notify_idcmp_update, this);
     boopsi_.set_sys_image_renderer(draw_sys_image, this);
+    if (boopsi_.make_native_class("buttongclass", boopsi_.gadget_class(), 0, button_class,
+                                  this) == 0 ||
+        boopsi_.make_native_class("propgclass", boopsi_.gadget_class(), kPropClassBytes,
+                                  prop_class, this) == 0) {
+        return false;
+    }
     base_ = base;
     return true;
 }
@@ -7700,6 +7711,562 @@ void Intuition::layout_gadgets(Bus& b, u32 window, u32 first, u32 max_count, boo
             }
         }
         gadget = next;
+    }
+}
+
+void Intuition::render_gadget(Bus& b, u32 gadget, u32 info, u32 redraw) {
+    const u32 rp = info != 0 ? b.r32(info + ndk::gi_RastPort) : 0;
+    if (!b.ok() || rp == 0) {
+        return;
+    }
+    const u32 msg[] = {ndk::GM_RENDER, info, rp, redraw};
+    boopsi_.send(boopsi_.class_of(gadget), gadget, msg, 4);
+}
+
+namespace {
+
+// struct gpInput's fields past the GadgetInfo, and the InputEvent's.
+constexpr u32 gpi_IEvent = 8;
+constexpr u32 gpi_Termination = 12;
+constexpr u32 gpi_Mouse = 16;
+
+// propgclass's instance data: the PropInfo the gadget's SpecialInfo
+// points at, then PGA_Total, PGA_Visible and PGA_Top, the knob's grab
+// point while it is dragged, and what the gadget is doing.
+constexpr u32 prop_Info = 0;
+constexpr u32 prop_Total = 24;
+constexpr u32 prop_Visible = 28;
+constexpr u32 prop_Top = 32;
+constexpr u32 prop_GrabX = 36;
+constexpr u32 prop_GrabY = 38;
+constexpr u32 prop_State = 40;
+static_assert(prop_State + 4 == kPropClassBytes);
+// prop_State: PGA_Total was given, so PGA_Top tells where the knob is;
+// the knob is dragged; the container is held beside it.
+constexpr u32 kPropCounts = 1;
+constexpr u32 kPropDragging = 2;
+constexpr u32 kPropPaging = 4;
+
+// The body and pot PGA_Total, PGA_Visible and PGA_Top give.
+u32 prop_body(u32 total, u32 visible) {
+    if (total == 0 || visible >= total) {
+        return ndk::MAXBODY;
+    }
+    return static_cast<u32>(static_cast<u64>(visible) * ndk::MAXBODY / total);
+}
+
+u32 prop_pot(u32 total, u32 visible, u32 top) {
+    if (total <= visible) {
+        return 0;
+    }
+    const u32 range = total - visible;
+    const u32 at = top < range ? top : range;
+    return static_cast<u32>(static_cast<u64>(at) * ndk::MAXPOT / range);
+}
+
+u32 prop_top(u32 total, u32 visible, u32 pot) {
+    if (total <= visible) {
+        return 0;
+    }
+    const u64 range = total - visible;
+    return static_cast<u32>((static_cast<u64>(pot) * range + ndk::MAXPOT / 2) / ndk::MAXPOT);
+}
+
+// gpi_Mouse, relative to the gadget's box.
+void input_point(Bus& b, u32 msg, i32& x, i32& y) {
+    x = static_cast<i16>(b.r16(msg + gpi_Mouse));
+    y = static_cast<i16>(b.r16(msg + gpi_Mouse + 2));
+}
+
+}
+
+u32 Intuition::button_class(void* ctx, u32 cl, u32 object, u32 msg) {
+    return static_cast<Intuition*>(ctx)->button_dispatch(cl, object, msg);
+}
+
+u32 Intuition::prop_class(void* ctx, u32 cl, u32 object, u32 msg) {
+    return static_cast<Intuition*>(ctx)->prop_dispatch(cl, object, msg);
+}
+
+// buttongclass: a button drawn as its GA_Image, selected while the left
+// button holds it with the pointer over it. It tells its targets its GA_ID
+// when pressed and again with every timer event while held, each time as
+// an interim change, and once more, finally, when let go over it.
+u32 Intuition::button_dispatch(u32 cl, u32 object, u32 msg) {
+    Bus b(*machine_);
+    const u32 method = b.r32(msg);
+    if (!b.ok()) {
+        return 0;
+    }
+    const auto notify_id = [&](u32 info, u32 flags) {
+        const u32 pairs[] = {ndk::GA_ID, b.r16(object + ndk::gg_GadgetID)};
+        boopsi_.notify_attrs(object, pairs, 1, info, flags);
+    };
+    const auto select = [&](u32 info, bool on) {
+        const u32 flags = b.r16(object + ndk::gg_Flags);
+        const bool was = (flags & ndk::GFLG_SELECTED) != 0;
+        if (was == on) {
+            return;
+        }
+        b.w16(object + ndk::gg_Flags,
+              on ? flags | ndk::GFLG_SELECTED : flags & ~ndk::GFLG_SELECTED);
+        render_gadget(b, object, info, ndk::GREDRAW_REDRAW);
+    };
+    switch (method) {
+    case ndk::OM_NEW: {
+        const u32 made = boopsi_.call_super(cl, object, msg);
+        if (made == 0) {
+            return 0;
+        }
+        // Without a size of its own the button takes its image's.
+        const u32 image = b.r32(made + ndk::gg_GadgetRender);
+        if ((b.r16(made + ndk::gg_Flags) & ndk::GFLG_GADGIMAGE) != 0 && image != 0) {
+            if (b.r16(made + ndk::gg_Width) == 0) {
+                b.w16(made + ndk::gg_Width, b.r16(image + image::Width));
+            }
+            if (b.r16(made + ndk::gg_Height) == 0) {
+                b.w16(made + ndk::gg_Height, b.r16(image + image::Height));
+            }
+        }
+        return b.ok() ? made : 0;
+    }
+    case ndk::GM_RENDER: {
+        const u32 info = b.r32(msg + 4);
+        const u32 rp = b.r32(msg + 8);
+        const u32 window = info != 0 ? b.r32(info + ndk::gi_Window) : 0;
+        const u32 flags = b.r16(object + ndk::gg_Flags);
+        const u32 image = b.r32(object + ndk::gg_GadgetRender);
+        const WindowView w = load_window(b, window);
+        if (!w.ok || rp == 0 || image == 0 || (flags & ndk::GFLG_GADGIMAGE) == 0) {
+            return 0;
+        }
+        const Rect box = resolve_gadget_box(b, w, object);
+        const u32 state = (flags & ndk::GFLG_SELECTED) != 0 ? ndk::IDS_SELECTED : ndk::IDS_NORMAL;
+        draw_image_state(rp, image, box.x0, box.y0, state, b.r32(info + ndk::gi_DrInfo));
+        return 0;
+    }
+    case ndk::GM_GOACTIVE: {
+        const u32 info = b.r32(msg + 4);
+        if (b.r32(msg + gpi_IEvent) == 0) {
+            return ndk::GMR_NOREUSE;
+        }
+        select(info, true);
+        notify_id(info, ndk::OPUF_INTERIM);
+        return ndk::GMR_MEACTIVE;
+    }
+    case ndk::GM_HANDLEINPUT: {
+        const u32 info = b.r32(msg + 4);
+        const u32 event = b.r32(msg + gpi_IEvent);
+        const u32 kind = b.r8(event + ie_Class);
+        const u32 code = b.r16(event + ie_Code);
+        if (!b.ok()) {
+            return ndk::GMR_NOREUSE;
+        }
+        if (kind == IECLASS_TIMER) {
+            if ((b.r16(object + ndk::gg_Flags) & ndk::GFLG_SELECTED) != 0) {
+                notify_id(info, ndk::OPUF_INTERIM);
+            }
+            return ndk::GMR_MEACTIVE;
+        }
+        if (kind != IECLASS_RAWMOUSE) {
+            return ndk::GMR_MEACTIVE;
+        }
+        if (code == IECODE_RBUTTON) {
+            select(info, false);
+            return ndk::GMR_REUSE;
+        }
+        i32 x = 0;
+        i32 y = 0;
+        input_point(b, msg, x, y);
+        const i32 width = static_cast<i16>(b.r16(object + ndk::gg_Width));
+        const i32 height = static_cast<i16>(b.r16(object + ndk::gg_Height));
+        const WindowView w = load_window(b, info != 0 ? b.r32(info + ndk::gi_Window) : 0);
+        const Rect box = w.ok ? resolve_gadget_box(b, w, object) : Rect{0, 0, width - 1, height - 1};
+        const bool over = x >= 0 && y >= 0 && x <= box.x1 - box.x0 && y <= box.y1 - box.y0;
+        if (code == (IECODE_LBUTTON | IECODE_UP_PREFIX)) {
+            select(info, false);
+            if (!over) {
+                return ndk::GMR_NOREUSE;
+            }
+            notify_id(info, 0);
+            b.w32(b.r32(msg + gpi_Termination), b.r16(object + ndk::gg_GadgetID));
+            return ndk::GMR_NOREUSE | ndk::GMR_VERIFY;
+        }
+        select(info, over);
+        return ndk::GMR_MEACTIVE;
+    }
+    case ndk::GM_GOINACTIVE:
+        select(b.r32(msg + 4), false);
+        return 0;
+    default:
+        return boopsi_.call_super(cl, object, msg);
+    }
+}
+
+u32 Intuition::set_prop_attrs(Bus& b, u32 data, u32 tags) {
+    const u32 info = data + prop_Info;
+    u32 pflags = b.r16(info + ndk::pi_Flags);
+    u32 state = b.r32(data + prop_State);
+    // What the knob shows and counts, to tell what the tags changed.
+    constexpr u32 kWatched[] = {ndk::pi_Flags, ndk::pi_HorizPot, ndk::pi_VertPot,
+                                ndk::pi_HorizBody, ndk::pi_VertBody};
+    u32 before[5];
+    for (u32 i = 0; i < 5; ++i) {
+        before[i] = b.r16(info + kWatched[i]);
+    }
+    const u32 before_top = b.r32(data + prop_Top);
+    const u32 before_total = b.r32(data + prop_Total);
+    const u32 before_visible = b.r32(data + prop_Visible);
+    bool counts = false;
+    u32 budget = tags::kMaxTagItems;
+    u32 at = tags;
+    for (;;) {
+        const u32 item = tags::next(b, at, budget);
+        if (item == 0) {
+            break;
+        }
+        const u32 value = b.r32(item + 4);
+        switch (b.r32(item)) {
+        case ndk::PGA_Freedom:
+            pflags = (pflags & ~(ndk::FREEHORIZ | ndk::FREEVERT)) |
+                     (value & (ndk::FREEHORIZ | ndk::FREEVERT));
+            break;
+        case ndk::PGA_Borderless:
+            pflags = value != 0 ? pflags | ndk::PROPBORDERLESS : pflags & ~ndk::PROPBORDERLESS;
+            break;
+        case ndk::PGA_NewLook:
+            pflags = value != 0 ? pflags | ndk::PROPNEWLOOK : pflags & ~ndk::PROPNEWLOOK;
+            break;
+        case ndk::PGA_HorizPot:
+            b.w16(info + ndk::pi_HorizPot, value);
+            break;
+        case ndk::PGA_HorizBody:
+            b.w16(info + ndk::pi_HorizBody, value);
+            break;
+        case ndk::PGA_VertPot:
+            b.w16(info + ndk::pi_VertPot, value);
+            break;
+        case ndk::PGA_VertBody:
+            b.w16(info + ndk::pi_VertBody, value);
+            break;
+        case ndk::PGA_Total:
+            b.w32(data + prop_Total, value);
+            counts = true;
+            break;
+        case ndk::PGA_Visible:
+            b.w32(data + prop_Visible, value);
+            counts = true;
+            break;
+        case ndk::PGA_Top:
+            b.w32(data + prop_Top, value);
+            counts = true;
+            break;
+        default:
+            break;
+        }
+        if (!b.ok()) {
+            return 0;
+        }
+    }
+    b.w16(info + ndk::pi_Flags, pflags);
+    if (counts) {
+        state |= kPropCounts;
+        const u32 total = b.r32(data + prop_Total);
+        const u32 visible = b.r32(data + prop_Visible);
+        const u32 range = total > visible ? total - visible : 0;
+        // PGA_Top is a signed count: above the first line is the first.
+        const i32 asked = static_cast<i32>(b.r32(data + prop_Top));
+        const u32 top = asked < 0 ? 0 : std::min(static_cast<u32>(asked), range);
+        b.w32(data + prop_Top, top);
+        const bool horizontal = (pflags & ndk::FREEHORIZ) != 0;
+        b.w16(info + (horizontal ? ndk::pi_HorizPot : ndk::pi_VertPot),
+              prop_pot(total, visible, top));
+        b.w16(info + (horizontal ? ndk::pi_HorizBody : ndk::pi_VertBody),
+              prop_body(total, visible));
+    }
+    b.w32(data + prop_State, state);
+    u32 changed = 0;
+    for (u32 i = 0; i < 5; ++i) {
+        changed += b.r16(info + kWatched[i]) != before[i] ? 1 : 0;
+    }
+    changed += b.r32(data + prop_Top) != before_top ? 1 : 0;
+    changed += b.r32(data + prop_Total) != before_total ? 1 : 0;
+    changed += b.r32(data + prop_Visible) != before_visible ? 1 : 0;
+    return changed;
+}
+
+void Intuition::prop_top_from_pots(Bus& b, u32 data) {
+    if ((b.r32(data + prop_State) & kPropCounts) == 0) {
+        return;
+    }
+    const u32 info = data + prop_Info;
+    const bool horizontal = (b.r16(info + ndk::pi_Flags) & ndk::FREEHORIZ) != 0;
+    const u32 pot = b.r16(info + (horizontal ? ndk::pi_HorizPot : ndk::pi_VertPot));
+    b.w32(data + prop_Top,
+          prop_top(b.r32(data + prop_Total), b.r32(data + prop_Visible), pot));
+}
+
+// With PGA_Total given, the targets hear PGA_Top; otherwise the pot of
+// the way the knob moves.
+void Intuition::notify_prop(Bus& b, u32 gadget, u32 data, u32 info, bool interim) {
+    const u32 pinfo = data + prop_Info;
+    const bool horizontal = (b.r16(pinfo + ndk::pi_Flags) & ndk::FREEHORIZ) != 0;
+    u32 pairs[2];
+    if ((b.r32(data + prop_State) & kPropCounts) != 0) {
+        pairs[0] = ndk::PGA_Top;
+        pairs[1] = b.r32(data + prop_Top);
+    } else {
+        pairs[0] = horizontal ? ndk::PGA_HorizPot : ndk::PGA_VertPot;
+        pairs[1] = b.r16(pinfo + (horizontal ? ndk::pi_HorizPot : ndk::pi_VertPot));
+    }
+    if (b.ok()) {
+        boopsi_.notify_attrs(gadget, pairs, 1, info, interim ? ndk::OPUF_INTERIM : 0);
+    }
+}
+
+bool Intuition::page_prop(Bus& b, u32 gadget, u32 data, u32 info, i32 wx, i32 wy) {
+    const WindowView w = load_window(b, info != 0 ? b.r32(info + ndk::gi_Window) : 0);
+    if (!w.ok) {
+        return false;
+    }
+    const PropGeometry g = load_prop_geometry(b, w, gadget);
+    if (!g.ok) {
+        return false;
+    }
+    // Which way the point lies from the knob, along the way it moves.
+    const bool horizontal = (g.pflags & ndk::FREEHORIZ) != 0;
+    const bool has_knob = g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1;
+    const i32 at = horizontal ? wx : wy;
+    const i32 low = horizontal ? g.knob.x0 : g.knob.y0;
+    const i32 high = horizontal ? g.knob.x1 : g.knob.y1;
+    const i32 step = !has_knob ? 0 : (at < low ? -1 : (at > high ? 1 : 0));
+    if (step == 0 || (g.pflags & (ndk::FREEHORIZ | ndk::FREEVERT)) == 0) {
+        return false;
+    }
+    const u32 pot_at = g.pi + (horizontal ? ndk::pi_HorizPot : ndk::pi_VertPot);
+    const u32 pot = horizontal ? g.hpot : g.vpot;
+    u32 moved = pot;
+    if ((b.r32(data + prop_State) & kPropCounts) != 0) {
+        // A page is PGA_Visible lines.
+        const u32 total = b.r32(data + prop_Total);
+        const u32 visible = b.r32(data + prop_Visible);
+        const u32 range = total > visible ? total - visible : 0;
+        const u32 top = b.r32(data + prop_Top);
+        const u32 next = step < 0 ? (top > visible ? top - visible : 0)
+                                  : std::min<u32>(top + visible, range);
+        if (next == top) {
+            return false;
+        }
+        b.w32(data + prop_Top, next);
+        moved = prop_pot(total, visible, next);
+    } else {
+        const u32 body = horizontal ? g.hbody : g.vbody;
+        moved = step < 0 ? (pot > body ? pot - body : 0)
+                         : std::min<u32>(pot + body, ndk::MAXPOT);
+        if (moved == pot) {
+            return false;
+        }
+    }
+    b.w16(pot_at, moved);
+    render_gadget(b, gadget, info, ndk::GREDRAW_UPDATE);
+    notify_prop(b, gadget, data, info, true);
+    return true;
+}
+
+// propgclass: a prop gadget of Intuition's own kind, drawn and moved as
+// one, whose PropInfo is its instance data. PGA_Total, PGA_Visible and
+// PGA_Top set the knob as a count of lines; moving it tells the targets
+// its new place, as interim changes while it moves and finally when let
+// go. A press in the container beside the knob moves it a page, and again
+// with each timer event while held.
+u32 Intuition::prop_dispatch(u32 cl, u32 object, u32 msg) {
+    Bus b(*machine_);
+    const u32 method = b.r32(msg);
+    if (!b.ok()) {
+        return 0;
+    }
+    const u32 data = object + b.r16(cl + ndk::cl_InstOffset);
+    const u32 pinfo = data + prop_Info;
+    const auto window_of = [&](u32 info) {
+        return load_window(b, info != 0 ? b.r32(info + ndk::gi_Window) : 0);
+    };
+    const auto finish = [&](u32 info) {
+        const u32 state = b.r32(data + prop_State);
+        b.w32(data + prop_State, state & kPropCounts);
+        b.w16(pinfo + ndk::pi_Flags, b.r16(pinfo + ndk::pi_Flags) & ~ndk::KNOBHIT);
+        b.w16(object + ndk::gg_Flags, b.r16(object + ndk::gg_Flags) & ~ndk::GFLG_SELECTED);
+        if ((state & kPropDragging) != 0) {
+            render_gadget(b, object, info, ndk::GREDRAW_UPDATE);
+        }
+    };
+    switch (method) {
+    case ndk::OM_NEW: {
+        const u32 made = boopsi_.call_super(cl, object, msg);
+        if (made == 0) {
+            return 0;
+        }
+        const u32 made_data = made + b.r16(cl + ndk::cl_InstOffset);
+        const u32 made_info = made_data + prop_Info;
+        b.w32(made + ndk::gg_SpecialInfo, made_info);
+        b.w16(made_info + ndk::pi_Flags, ndk::AUTOKNOB | ndk::FREEVERT);
+        b.w16(made_info + ndk::pi_HorizBody, ndk::MAXBODY);
+        b.w16(made_info + ndk::pi_VertBody, ndk::MAXBODY);
+        b.w32(made_data + prop_Visible, 1);
+        set_prop_attrs(b, made_data, b.r32(msg + 4));
+        return b.ok() ? made : 0;
+    }
+    case ndk::OM_SET:
+    case ndk::OM_UPDATE: {
+        const u32 result = boopsi_.call_super(cl, object, msg);
+        const u32 changed = set_prop_attrs(b, data, b.r32(msg + 4));
+        const u32 info = b.r32(msg + 8);
+        if (changed != 0 && info != 0) {
+            render_gadget(b, object, info, ndk::GREDRAW_UPDATE);
+        }
+        return result + changed;
+    }
+    case ndk::OM_GET: {
+        const u32 attr = b.r32(msg + 4);
+        const u32 storage = b.r32(msg + 8);
+        u32 value = 0;
+        switch (attr) {
+        case ndk::PGA_Freedom:
+            value = b.r16(pinfo + ndk::pi_Flags) & (ndk::FREEHORIZ | ndk::FREEVERT);
+            break;
+        case ndk::PGA_HorizPot:
+            value = b.r16(pinfo + ndk::pi_HorizPot);
+            break;
+        case ndk::PGA_HorizBody:
+            value = b.r16(pinfo + ndk::pi_HorizBody);
+            break;
+        case ndk::PGA_VertPot:
+            value = b.r16(pinfo + ndk::pi_VertPot);
+            break;
+        case ndk::PGA_VertBody:
+            value = b.r16(pinfo + ndk::pi_VertBody);
+            break;
+        case ndk::PGA_Total:
+            value = b.r32(data + prop_Total);
+            break;
+        case ndk::PGA_Visible:
+            value = b.r32(data + prop_Visible);
+            break;
+        case ndk::PGA_Top:
+            value = b.r32(data + prop_Top);
+            break;
+        default:
+            return boopsi_.call_super(cl, object, msg);
+        }
+        b.w32(storage, value);
+        return b.ok() ? 1 : 0;
+    }
+    case ndk::GM_RENDER: {
+        const u32 info = b.r32(msg + 4);
+        WindowView w = window_of(info);
+        const WindowRecord* rec = w.ok ? find_window_record(w.window) : nullptr;
+        const ScreenRecord* srec = rec != nullptr ? find_screen_record(rec->screen) : nullptr;
+        w.rp = b.r32(msg + 8);
+        if (srec == nullptr || w.rp == 0) {
+            return 0;
+        }
+        draw_prop_gadget(*graphics_, b, w, object,
+                         screen_pens(b, srec->draw_info, pen_prefs_for(srec->depth)));
+        return 0;
+    }
+    case ndk::GM_GOACTIVE: {
+        const u32 info = b.r32(msg + 4);
+        const WindowView w = window_of(info);
+        if (b.r32(msg + gpi_IEvent) == 0 || !w.ok) {
+            return ndk::GMR_NOREUSE;
+        }
+        const PropGeometry g = load_prop_geometry(b, w, object);
+        if (!g.ok) {
+            return ndk::GMR_NOREUSE;
+        }
+        i32 x = 0;
+        i32 y = 0;
+        input_point(b, msg, x, y);
+        const i32 wx = g.box.x0 + x;
+        const i32 wy = g.box.y0 + y;
+        if (g.knob.x0 <= g.knob.x1 && g.knob.y0 <= g.knob.y1 && in_rect(g.knob, wx, wy)) {
+            b.w16(pinfo + ndk::pi_Flags, g.pflags | ndk::KNOBHIT);
+            b.w16(object + ndk::gg_Flags, b.r16(object + ndk::gg_Flags) | ndk::GFLG_SELECTED);
+            b.w16(data + prop_GrabX, static_cast<u32>(wx - g.knob.x0));
+            b.w16(data + prop_GrabY, static_cast<u32>(wy - g.knob.y0));
+            b.w32(data + prop_State, (b.r32(data + prop_State) & kPropCounts) | kPropDragging);
+            render_gadget(b, object, info, ndk::GREDRAW_UPDATE);
+            return ndk::GMR_MEACTIVE;
+        }
+        b.w32(data + prop_State, (b.r32(data + prop_State) & kPropCounts) | kPropPaging);
+        page_prop(b, object, data, info, wx, wy);
+        return ndk::GMR_MEACTIVE;
+    }
+    case ndk::GM_HANDLEINPUT: {
+        const u32 info = b.r32(msg + 4);
+        const u32 event = b.r32(msg + gpi_IEvent);
+        const u32 kind = b.r8(event + ie_Class);
+        const u32 code = b.r16(event + ie_Code);
+        const u32 state = b.r32(data + prop_State);
+        const WindowView w = window_of(info);
+        if (!b.ok() || !w.ok) {
+            finish(info);
+            return ndk::GMR_NOREUSE;
+        }
+        const PropGeometry g = load_prop_geometry(b, w, object);
+        i32 x = 0;
+        i32 y = 0;
+        input_point(b, msg, x, y);
+        const i32 wx = g.box.x0 + x;
+        const i32 wy = g.box.y0 + y;
+        if (kind == IECLASS_TIMER) {
+            if ((state & kPropPaging) != 0 && in_rect(g.box, wx, wy) && !in_rect(g.knob, wx, wy)) {
+                page_prop(b, object, data, info, wx, wy);
+            }
+            return ndk::GMR_MEACTIVE;
+        }
+        if (kind != IECLASS_RAWMOUSE) {
+            return ndk::GMR_MEACTIVE;
+        }
+        if (code == IECODE_RBUTTON) {
+            finish(info);
+            return ndk::GMR_REUSE;
+        }
+        if ((state & kPropDragging) != 0 && g.ok) {
+            u32 hpot = g.hpot;
+            u32 vpot = g.vpot;
+            if ((g.pflags & ndk::FREEHORIZ) != 0 && g.travel_x > 0) {
+                const i32 grab = static_cast<i16>(b.r16(data + prop_GrabX));
+                hpot = pot_from_offset(wx - grab - g.inner.x0, g.travel_x);
+            }
+            if ((g.pflags & ndk::FREEVERT) != 0 && g.travel_y > 0) {
+                const i32 grab = static_cast<i16>(b.r16(data + prop_GrabY));
+                vpot = pot_from_offset(wy - grab - g.inner.y0, g.travel_y);
+            }
+            if (hpot != g.hpot || vpot != g.vpot) {
+                const u32 top = b.r32(data + prop_Top);
+                b.w16(pinfo + ndk::pi_HorizPot, hpot);
+                b.w16(pinfo + ndk::pi_VertPot, vpot);
+                prop_top_from_pots(b, data);
+                render_gadget(b, object, info, ndk::GREDRAW_UPDATE);
+                // Counted in lines, the targets hear only of a new top line.
+                if ((state & kPropCounts) == 0 || b.r32(data + prop_Top) != top) {
+                    notify_prop(b, object, data, info, true);
+                }
+            }
+        }
+        if (code == (IECODE_LBUTTON | IECODE_UP_PREFIX)) {
+            finish(info);
+            notify_prop(b, object, data, info, false);
+            b.w32(b.r32(msg + gpi_Termination), b.r32(data + prop_Top));
+            return ndk::GMR_NOREUSE | ndk::GMR_VERIFY;
+        }
+        return ndk::GMR_MEACTIVE;
+    }
+    case ndk::GM_GOINACTIVE:
+        finish(b.r32(msg + 4));
+        return 0;
+    default:
+        return boopsi_.call_super(cl, object, msg);
     }
 }
 
