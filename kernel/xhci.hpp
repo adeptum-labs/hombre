@@ -81,9 +81,6 @@ public:
         static constexpr u32 kBufferStride = 64;
         u64 report_phys = 0;
         u8* report = nullptr;
-        // The buffer of the oldest queued transfer: one endpoint completes
-        // its transfers in order.
-        u32 next_buffer = 0;
         xhci::ReportQueue queue{};
         State state = State::Absent;
     };

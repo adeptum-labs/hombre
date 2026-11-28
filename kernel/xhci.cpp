@@ -501,19 +501,25 @@ Xhci::Scan enumerate_port(Xhci& controller, u32 port, u8 speed, PhysAllocator& p
     hid->report = pages.to_ptr(report_phys);
     hid->report_phys = report_phys;
     hid->queue.clear();
-    hid->next_buffer = 0;
-    static_assert(Xhci::HidDevice::kTransfers * Xhci::HidDevice::kBufferStride <= kPageBytes);
-    static_assert(xhci::kMaxInterruptTransferBytes <= Xhci::HidDevice::kBufferStride);
-    for (u32 i = 0; i < Xhci::HidDevice::kTransfers; ++i) {
-        const u64 buffer = report_phys + i * Xhci::HidDevice::kBufferStride;
-        if (!hid->ring.push(xhci::make_normal(buffer, report_bytes))) {
-            error = kErrorDeviceMemory;
-            return Xhci::Scan::Failed;
-        }
-    }
+    // The transfers are queued only once every port is enumerated: one a
+    // key or a move completed meanwhile would end in another device's
+    // event loop, unseen.
     hid->state = Xhci::HidDevice::State::Ready;
     return protocol == xhci::kKeyboardProtocol ? Xhci::Scan::Keyboard
                                                : Xhci::Scan::NoKeyboard;
+}
+
+// Queues a transfer into each of the device's report buffers.
+bool queue_reports(Xhci::HidDevice& hid) {
+    static_assert(Xhci::HidDevice::kTransfers * Xhci::HidDevice::kBufferStride <= kPageBytes);
+    static_assert(xhci::kMaxInterruptTransferBytes <= Xhci::HidDevice::kBufferStride);
+    for (u32 i = 0; i < Xhci::HidDevice::kTransfers; ++i) {
+        const u64 buffer = hid.report_phys + i * Xhci::HidDevice::kBufferStride;
+        if (!hid.ring.push(xhci::make_normal(buffer, hid.report_bytes))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 struct FindState {
@@ -880,6 +886,15 @@ Xhci::Scan Xhci::scan(PhysAllocator& pages, const char*& error) {
         }
     }
     if (keyboard_.state == HidDevice::State::Ready) {
+        if (!queue_reports(keyboard_)) {
+            keyboard_ = HidDevice{};
+            mouse_ = HidDevice{};
+            error = kErrorDeviceMemory;
+            return Scan::Failed;
+        }
+        if (mouse_.state == HidDevice::State::Ready && !queue_reports(mouse_)) {
+            mouse_ = HidDevice{};
+        }
         memory_fence();
         doorbells_[keyboard_.slot] = keyboard_.dci;
         if (mouse_.state == HidDevice::State::Ready) {
@@ -949,8 +964,17 @@ void Xhci::pump_events() {
         if (length > xhci::ReportQueue::kMaxReport) {
             length = xhci::ReportQueue::kMaxReport;
         }
-        const u32 offset = device->next_buffer * HidDevice::kBufferStride;
-        device->next_buffer = (device->next_buffer + 1) % HidDevice::kTransfers;
+        // The buffer is the one the completed TRB was given, so an event
+        // missed or out of order cannot shift the stream.
+        u64 buffer_phys = 0;
+        u32 index = 0;
+        if (!device->ring.buffer_of(event.parameter, buffer_phys) ||
+            !xhci::report_buffer_index(buffer_phys, device->report_phys,
+                                       HidDevice::kBufferStride, HidDevice::kTransfers,
+                                       index)) {
+            continue;
+        }
+        const u32 offset = index * HidDevice::kBufferStride;
         u8* const buffer = device->report + offset;
         device->queue.push(buffer, length);
         __builtin_memset(buffer, 0, device->report_bytes);

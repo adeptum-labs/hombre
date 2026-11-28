@@ -151,6 +151,17 @@ constexpr u32 next_extended_capability(u32 offset, u32 header) {
     return next == 0 ? 0 : offset + (next << 2);
 }
 
+// Which of count buffers of stride bytes from first the buffer at address
+// is: false when it is none of them.
+inline bool report_buffer_index(u64 address, u64 first, u32 stride, u32 count, u32& index) {
+    if (stride == 0 || address < first || (address - first) % stride != 0 ||
+        (address - first) / stride >= count) {
+        return false;
+    }
+    index = static_cast<u32>((address - first) / stride);
+    return true;
+}
+
 // The producer side of a command or transfer ring. The last slot holds a Link
 // TRB back to the start, so only the other slots carry work, and the producer
 // cycle flips each time the Link TRB is written.
@@ -182,6 +193,21 @@ public:
     u64 enqueue_index() const { return index_; }
 
     bool cycle() const { return cycle_; }
+
+    // The data buffer of the TRB the controller reads at physical, as a
+    // transfer event names it: false when that is no work TRB of the ring.
+    bool buffer_of(u64 physical, u64& buffer) const {
+        if (base_ == nullptr || physical < base_physical_ ||
+            (physical - base_physical_) % sizeof(Trb) != 0) {
+            return false;
+        }
+        const u64 index = (physical - base_physical_) / sizeof(Trb);
+        if (index + 1 >= trbs_) {
+            return false;
+        }
+        buffer = base_[index].parameter;
+        return true;
+    }
 
 private:
     Trb with_cycle(Trb trb) const {

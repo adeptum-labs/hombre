@@ -150,6 +150,35 @@ void producer_ring_writes_cycle_bits_and_wraps() {
     CHECK_EQ(ring[7].control & 1u, 0u);
 }
 
+void a_transfer_event_names_its_buffer_through_the_ring() {
+    xhci::Trb ring[8] = {};
+    xhci::ProducerRing producer;
+    producer.init(ring, 8, 0x8000);
+    for (u32 i = 0; i < 7; ++i) {
+        CHECK(producer.push(xhci::make_normal(0x20000 + i * 64, 8)));
+    }
+    // The event's TRB pointer finds the buffer that transfer was given,
+    // whichever transfers before it were seen.
+    u64 buffer = 0;
+    CHECK(producer.buffer_of(0x8000 + 3 * sizeof(xhci::Trb), buffer));
+    CHECK_EQ(buffer, 0x20000u + 3 * 64);
+    CHECK(producer.buffer_of(0x8000, buffer));
+    CHECK_EQ(buffer, 0x20000u);
+    // Not a TRB of the ring: outside it, inside one, or its Link TRB.
+    CHECK(!producer.buffer_of(0x7FF0, buffer));
+    CHECK(!producer.buffer_of(0x8000 + 8 * sizeof(xhci::Trb), buffer));
+    CHECK(!producer.buffer_of(0x8004, buffer));
+    CHECK(!producer.buffer_of(0x8000 + 7 * sizeof(xhci::Trb), buffer));
+
+    // Which of the report buffers it is, if any.
+    u32 index = 99;
+    CHECK(xhci::report_buffer_index(0x20000 + 5 * 64, 0x20000, 64, 8, index));
+    CHECK_EQ(index, 5u);
+    CHECK(!xhci::report_buffer_index(0x20000 + 8 * 64, 0x20000, 64, 8, index));
+    CHECK(!xhci::report_buffer_index(0x20000 + 65, 0x20000, 64, 8, index));
+    CHECK(!xhci::report_buffer_index(0x1FFC0, 0x20000, 64, 8, index));
+}
+
 void producer_ring_rejects_tiny_rings() {
     xhci::Trb ring[4] = {};
     xhci::ProducerRing producer;
@@ -417,6 +446,7 @@ int main() {
     scratchpad_count_swaps_hi_and_lo_correctly();
     next_extended_capability_is_relative();
     producer_ring_writes_cycle_bits_and_wraps();
+    a_transfer_event_names_its_buffer_through_the_ring();
     producer_ring_rejects_tiny_rings();
     event_ring_pops_in_order_and_wraps();
     event_decoding();
