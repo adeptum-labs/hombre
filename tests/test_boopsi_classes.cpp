@@ -993,6 +993,55 @@ void a_native_class_passes_a_method_on_to_68000_code_without_nesting() {
     CHECK_EQ(r.get32(middle + cl_ObjectCount), 0u);
 }
 
+// A native class whose run ends inside it (a fault in what it called)
+// sends nothing more: its superclass in 68000 code does not run.
+u32 ending_dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
+    g_machine->cpu.exit = ExitReason::BusError;
+    return static_cast<Boopsi*>(ctx)->call_super(cl, object, msg);
+}
+
+void an_ended_run_calls_no_superclass() {
+    GfxRig r;
+    g_machine = &r.machine;
+    Boopsi& bo = r.intuition.boopsi();
+    constexpr u32 kMarker = kCode + 0x300;
+    constexpr u32 kMarking = kCode + 0x180;
+    const u16 marking[] = {
+        0x23FC, 0x0000, 0x0001,                                              // move.l #1,
+        static_cast<u16>(kMarker >> 16), static_cast<u16>(kMarker),          //   kMarker
+        0x4E75,                                                              // rts
+    };
+    for (u32 i = 0; i < sizeof marking / sizeof marking[0]; ++i) {
+        r.put16(kMarking + i * 2, marking[i]);
+    }
+    const u32 bottom = bo.make_class(0, 0, bo.gadget_class(), 0, 0);
+    r.put32(bottom + h_Entry, kMarking);
+    const u32 top = bo.make_native_class("endinggclass", bottom, 0, ending_dispatch, &bo);
+    CHECK(top != 0);
+    r.put32(kMarker, 0);
+    constexpr u32 kAsk = kCode + 0x200;
+    r.put32(kAsk, 0x7000);
+    const u16 code[] = {
+        0x207C, static_cast<u16>(top >> 16), static_cast<u16>(top),     // movea.l #top,a0
+        0x227C, static_cast<u16>(kAsk >> 16), static_cast<u16>(kAsk),  // movea.l #msg,a1
+        0x2668, 0x0008,                                                 // movea.l 8(a0),a3
+        0x4E93,                                                         // jsr (a3)
+        0x4EF8, 0x0400,                                                 // jmp $400.w
+    };
+    for (u32 i = 0; i < sizeof code / sizeof code[0]; ++i) {
+        r.put16(kCode + i * 2, code[i]);
+    }
+    r.jit.flush();
+    r.cpu().pc = kCode;
+    r.cpu().a[7] = gfx_test::kStack;
+    CHECK_EQ(r.jit.run(1000000), ExitReason::BusError);
+    CHECK_EQ(r.get32(kMarker), 0u);
+    // From C++ outside any run the same superclass runs.
+    const u32 msg[] = {0x7000};
+    bo.send(bottom, 0, msg, 1);
+    CHECK_EQ(r.get32(kMarker), 1u);
+}
+
 void a_native_class_passes_a_method_on_to_a_native_superclass() {
     GfxRig r;
     g_machine = &r.machine;
@@ -1326,6 +1375,7 @@ int main() {
     a_native_class_over_a_68000_superclass();
     a_native_class_passes_a_method_on_to_68000_code_without_nesting();
     a_native_class_passes_a_method_on_to_a_native_superclass();
+    an_ended_run_calls_no_superclass();
     members_may_leave_or_go_during_a_broadcast();
     icspecial_code_sets_the_code_of_the_update();
     input_that_comes_during_a_gadget_method_waits_for_it();

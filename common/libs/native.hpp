@@ -199,6 +199,14 @@ private:
     bool ok_ = true;
 };
 
+// Whether the running task's 68000 code has ended while a native was in
+// the middle of it (a fault, a break, a refused call): nothing more may run
+// for it, or the run would go on as if it had not ended. Outside 68000 code
+// the exit of the last run is only left over and ends nothing.
+inline bool run_ended(const m68k::Machine& m) {
+    return m.jit != nullptr && m.jit->run_depth() > 0 && m.cpu.exit != m68k::ExitReason::None;
+}
+
 // Writes D0 unless the run has ended inside the native.
 inline void set_result(m68k::Machine& m, u32 value) {
     if (m.cpu.exit == m68k::ExitReason::None) {

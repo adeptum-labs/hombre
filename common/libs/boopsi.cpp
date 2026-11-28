@@ -515,9 +515,11 @@ u32 Boopsi::coerce_method(u32 cl, u32 object, u32 msg) {
 }
 
 // The class's dispatcher on the message: in C++ for a class of the
-// registry, as a nested guest call for one written in 68000 code.
+// registry, as a nested guest call for one written in 68000 code. Once the
+// running task's 68000 code has ended no class is called: the method
+// answers 0.
 u32 Boopsi::dispatch(u32 cl, u32 object, u32 msg) {
-    if (cl == 0) {
+    if (cl == 0 || native::run_ended(*machine_)) {
         return 0;
     }
     Bus b(*machine_);
@@ -549,15 +551,14 @@ u32 Boopsi::dispatch(u32 cl, u32 object, u32 msg) {
         trace_.expected_entry = 0;
     }
     exec_->leave_nested_run();
-    if (why != m68k::ExitReason::Returned) {
-        return 0;  // the run ended inside the dispatcher
-    }
     const u32 result = m.cpu.d[0];
     for (u32 i = 0; i < 8; ++i) {
         m.cpu.d[i] = d[i];
         m.cpu.a[i] = a[i];
     }
-    return result;
+    // A run that ended inside the dispatcher keeps its exit, pc and fault;
+    // the method answers 0.
+    return why == m68k::ExitReason::Returned ? result : 0;
 }
 
 u32 Boopsi::call_super(u32 cl, u32 object, u32 msg) {

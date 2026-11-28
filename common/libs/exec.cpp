@@ -287,9 +287,12 @@ public:
     }
 
     // False if the run ended in the called code or could not start; the
-    // native must then return at once and leave the CPU as it is.
+    // native must then return at once. The data and address registers are
+    // put back either way; the exit, pc and fault stay as the run left them.
     bool run(u32 entry) {
-        if (!bus_.ok()) {
+        // A run that has ended stays ended: no call starts it again.
+        if (!bus_.ok() || native::run_ended(bus_.machine())) {
+            bus_.stop();
             return false;
         }
         if (depth_ >= kMaxCallDepth || host_stack_short(bus_.machine())) {
@@ -301,15 +304,15 @@ public:
         ++depth_;
         const ExitReason why = bus_.machine().jit->call_guest(entry, kGuestCallBlocks);
         --depth_;
-        if (why != ExitReason::Returned) {
-            bus_.stop();
-            return false;
-        }
         d0_ = cpu_.d[0];
         a3_ = cpu_.a[3];
         for (u32 i = 0; i < 8; ++i) {
             cpu_.d[i] = d_[i];
             cpu_.a[i] = a_[i];
+        }
+        if (why != ExitReason::Returned) {
+            bus_.stop();
+            return false;
         }
         return true;
     }
