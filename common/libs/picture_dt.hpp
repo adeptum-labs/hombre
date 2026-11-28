@@ -52,20 +52,39 @@
 // chunky one) the destination is a deep bitmap in the screen's pixel
 // format: on RGB16 and ARGB32 it holds every pixel's own colour from
 // PDTA_CRegs and no pens are obtained; on LUT8 it holds the pens, as a
-// planar one does. A picture saved from there is the same ILBM: DTM_WRITE
-// always writes the source bitmap.
+// planar one does. A true colour source is dithered into the destination's
+// colours or colour cube instead. A picture saved from there is the same
+// ILBM: DTM_WRITE writes the planar or indexed source bitmap.
 //
 // GM_RENDER blits the destination into the gadget's domain from the
-// scroll offsets on and marks a selection with a stipple of pen 2.
+// scroll offsets on, through the mask plane or the alpha channel of a
+// transparent source, and marks a selection with a stipple of pen 2.
 // DTM_WRITE writes the picture, or its selection with its corner in the
 // header, as an ILBM with BMHD, CAMG, CMAP, NAME and a ByteRun1 BODY; a
 // side of more than 16383 pixels cannot be written. Methods the class
 // leaves to datatypesclass go on to it without a call of their own.
 //
-// Only the V42 interface is there: PDTA_SourceMode and PDTA_DestMode are
-// neither taken nor answered, so a subclass that asks for them learns that
-// pixel arrays are not offered, whatever the version says. DTM_COPY and
-// DTM_PRINT are not offered either.
+// The V43 interface is offered beside the V42 one. PDTA_SourceMode says
+// whether a subclass hands over a bitmap (PMODE_V42, the default) or the
+// pixels of a PDTM_WRITEPIXELARRAY message (PMODE_V43), PDTA_DestMode
+// which of the two an application expects; PDTA_UseFriendBitMap chooses
+// whether destinations get the screen's bitmap as their friend. A first
+// V43 write makes a chunky source buffer of the header's size: a byte a
+// pixel with colour tables up to eight planes, A, R, G, B deeper. The
+// layout shows it on the screen like a planar source, dithering a true
+// colour one into a colour cube on palette destinations whatever
+// PDTA_Remap says. An indexed buffer that is not remapped, or has no
+// screen, keeps its indexes and takes no pens: a planar destination of the
+// header's depth, LUT8 on a deep screen. A true colour one without a
+// screen keeps its pixels in an ARGB32 destination. The layout records
+// whether any pixel is translucent and whether the buffer had an alpha
+// channel, which PDTA_AlphaChannel answers after PDTA_FreeSourceBitMap
+// freed it; a translucent picture gets a mask plane PDTA_MaskPlane
+// answers, on ARGB32 destinations too, and is blended onto true colour
+// RastPorts when it has an alpha. PDTM_READPIXELARRAY gives the source's
+// pixels back in the caller's format. The pixel array messages and the
+// layout let other tasks run on large pictures and give up when the
+// source went meanwhile. DTM_COPY and DTM_PRINT are not offered.
 
 namespace hombre {
 

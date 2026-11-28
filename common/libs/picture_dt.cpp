@@ -24,6 +24,7 @@
 #include "picture_dt.hpp"
 
 #include "../image/ilbm.hpp"
+#include "../image/remap.hpp"
 #include "boopsi.hpp"
 #include "dos.hpp"
 #include "graphics.hpp"
@@ -37,6 +38,7 @@ using native::Bus;
 using native::LogLine;
 using namespace ndk;
 namespace ilbm = image::ilbm;
+namespace remap = image::remap;
 
 namespace {
 
@@ -84,7 +86,26 @@ constexpr u32 PDTA_DestBitMap = DTA_Dummy + 215;
 constexpr u32 PDTA_ClassBitMap = DTA_Dummy + 216;
 constexpr u32 PDTA_NumSparse = DTA_Dummy + 217;
 constexpr u32 PDTA_SparseTable = DTA_Dummy + 218;
+constexpr u32 PDTA_SourceMode = DTA_Dummy + 250;
+constexpr u32 PDTA_DestMode = DTA_Dummy + 251;
+constexpr u32 PDTA_UseFriendBitMap = DTA_Dummy + 255;
+constexpr u32 PDTA_AlphaChannel = DTA_Dummy + 256;
+constexpr u32 PDTA_MaskPlane = DTA_Dummy + 258;
+constexpr u32 PDTA_ObtainPixelBuffer = DTA_Dummy + 260;
+constexpr u32 PDTA_SubClassRendersAll = DTA_Dummy + 261;
 constexpr u32 OBP_Precision = 0x84000000;
+
+// The interface modes of PDTA_SourceMode and PDTA_DestMode, and the formats
+// and masking kinds of the V43 pixel array messages.
+constexpr u32 PMODE_V42 = 0;
+constexpr u32 PMODE_V43 = 1;
+constexpr u32 PBPAFMT_RGB = 0;
+constexpr u32 PBPAFMT_RGBA = 1;
+constexpr u32 PBPAFMT_ARGB = 2;
+constexpr u32 PBPAFMT_LUT8 = 3;
+constexpr u32 PBPAFMT_GREY8 = 4;
+constexpr u32 mskHasTransparentColor = 2;
+constexpr u32 mskHasAlpha = 4;
 
 // Methods.
 constexpr u32 DTM_FRAMEBOX = 0x601;
@@ -93,12 +114,15 @@ constexpr u32 DTM_ASYNCLAYOUT = 0x603;
 constexpr u32 DTM_SELECT = 0x605;
 constexpr u32 DTM_CLEARSELECTED = 0x606;
 constexpr u32 DTM_WRITE = 0x650;
+constexpr u32 PDTM_WRITEPIXELARRAY = 0x660;
+constexpr u32 PDTM_READPIXELARRAY = 0x661;
 
 // The methods DTA_Methods lists, ~0 last.
 constexpr u32 kMethods[] = {
     OM_NEW, OM_GET, OM_SET, OM_UPDATE, OM_DISPOSE,
     GM_LAYOUT, GM_HITTEST, GM_GOACTIVE, GM_HANDLEINPUT, GM_RENDER,
-    DTM_FRAMEBOX, DTM_SELECT, DTM_CLEARSELECTED, DTM_WRITE, 0xFFFFFFFF,
+    DTM_FRAMEBOX, DTM_SELECT, DTM_CLEARSELECTED, DTM_WRITE,
+    PDTM_WRITEPIXELARRAY, PDTM_READPIXELARRAY, 0xFFFFFFFF,
 };
 
 // The stipple a selection is marked with: four rows, a pixel in four.
@@ -162,6 +186,10 @@ constexpr u32 BMA_HEIGHT = 0;
 constexpr u32 BMA_DEPTH = 4;
 constexpr u32 BMA_WIDTH = 8;
 constexpr u32 BMF_CLEAR = 1;
+// A LUT8 bitmap of a graphics card, as AllocBitMap's BMF_SPECIALFMT asks
+// for one with PIXFMT_LUT8 in the flags' top byte.
+constexpr u32 BMF_SPECIALFMT = 0x80;
+constexpr u32 PIXFMT_LUT8 = 0;
 constexpr u32 kCopy = 0xC0;
 
 // The struct BitMapHeader the class keeps and its subclass fills.
@@ -204,8 +232,18 @@ constexpr u32 kFlags = 80;
 constexpr u32 kPrecision = 84;
 constexpr u32 kNumSparse = 88;  // word
 constexpr u32 kSparseTable = 92;
-// From 96 on: room for the source and destination modes, pixel buffers,
-// masks and alpha of the V43 interface, which the class does not offer yet.
+// From 96 on: the V43 interface's source and destination modes, the friend
+// bitmap choice, the mask plane and the chunky source buffer.
+constexpr u32 kSourceMode = 96;
+constexpr u32 kDestMode = 100;
+constexpr u32 kUseFriend = 104;
+constexpr u32 kMaskPlane = 108;
+constexpr u32 kMaskBytes = 112;
+constexpr u32 kPixelData = 116;
+constexpr u32 kPixelWidth = 120;
+constexpr u32 kPixelHeight = 124;
+constexpr u32 kPixelDepth = 128;
+constexpr u32 kPixelBytes = 132;
 constexpr u32 kInstBytes = 160;
 
 // kFlags.
@@ -214,6 +252,13 @@ constexpr u32 kFreeSource = 2;
 constexpr u32 kSparse = 4;
 // The destination is the source bitmap itself.
 constexpr u32 kAlias = 8;
+// The 256 colours of the indexed source are a grey ramp.
+constexpr u32 kGrey = 16;
+// What the first layout found: some pixel is translucent (an alpha below
+// opaque, or the transparent index), and the source was true colour with
+// an alpha channel.
+constexpr u32 kTranslucent = 32;
+constexpr u32 kAlphaSource = 64;
 
 // A colour index takes this many entries of the tables at most.
 constexpr u32 kMaxPens = 256;
@@ -278,6 +323,38 @@ struct Planar {
     u32 planes[8]{};
 };
 
+// The source the layout, the frame info and the pixel array messages read:
+// a planar bitmap a subclass handed over, the chunky buffer a first V43
+// write made, or neither.
+enum class SourceKind { None, Planar, Indexed, Argb };
+
+struct Source {
+    SourceKind kind = SourceKind::None;
+    Planar planar;
+    u32 bitmap = 0;
+    u32 pixels = 0;
+    u32 width = 0;
+    u32 height = 0;
+    u32 depth = 0;
+};
+
+// One source pixel as the class uses it: its colour, its alpha and, for an
+// indexed source, the index it came from.
+struct Pixel {
+    Rgb colour;
+    u8 alpha = 255;
+    u8 index = 0;
+};
+
+// What reading pixels takes from the object, once for a whole call: the
+// colours of the indexes, black past those the tables hold, and how the
+// header makes pixels transparent.
+struct Colours {
+    Rgb of[kMaxPens];
+    u32 masking = 0;
+    u32 transparent = 0;
+};
+
 bool load_planar(Bus& b, u32 bitmap, Planar& out) {
     out.bytes_per_row = b.r16(bitmap + bm_BytesPerRow);
     out.rows = b.r16(bitmap + bm_Rows);
@@ -336,6 +413,52 @@ struct PictureDataType::Ops {
     u32 flags() { return get(kFlags); }
     u32 special_info() { return b.r32(object + gg_SpecialInfo); }
     u32 gadget_id() { return b.r16(object + gg_GadgetID); }
+    u32 masking() { return b.r8(data + kHeader + bmh_Masking); }
+    u32 transparent() { return header16(bmh_Transparent); }
+
+    // The chunky buffer a V43 write made is the source while it exists;
+    // otherwise the bitmap a subclass handed over, when it is planar.
+    Source load_source() {
+        Source source;
+        const u32 pixels = get(kPixelData);
+        if (pixels != 0) {
+            source.pixels = pixels;
+            source.width = get(kPixelWidth);
+            source.height = get(kPixelHeight);
+            source.depth = get(kPixelDepth);
+            source.kind = source.depth <= 8 ? SourceKind::Indexed : SourceKind::Argb;
+            return source;
+        }
+        const u32 bitmap = get(kSource);
+        if (bitmap != 0 && p.graphics_->deep(bitmap) == nullptr &&
+            load_planar(b, bitmap, source.planar)) {
+            source.kind = SourceKind::Planar;
+            source.bitmap = bitmap;
+            source.width = source.planar.bytes_per_row * 8;
+            source.height = source.planar.rows;
+            source.depth = source.planar.depth;
+        }
+        return source;
+    }
+
+    bool has_source() { return get(kPixelData) != 0 || get(kSource) != 0; }
+
+    // Whether the source is still the one src describes: the same buffer
+    // or bitmap, of the same size. Another task may have replaced or freed
+    // it while this one let others run.
+    bool same_source(const Source& src) {
+        const Source now = load_source();
+        if (now.kind != src.kind || now.pixels != src.pixels || now.bitmap != src.bitmap ||
+            now.width != src.width || now.height != src.height || now.depth != src.depth) {
+            return false;
+        }
+        for (u32 plane = 0; plane < now.planar.depth; ++plane) {
+            if (now.planar.planes[plane] != src.planar.planes[plane]) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     // A library function through its vector; 0 when the call failed, which
     // has ended the run.
@@ -398,9 +521,16 @@ struct PictureDataType::Ops {
 
     void wait_blit() { gfx(graphics_lvo::WaitBlit, LibraryCall{}); }
 
-    // Gives back the pens of the last remap and the destination it made.
+    // Gives back the pens of the last remap, the destination it made and
+    // the mask that goes with it.
     void release_remap() {
         release_pens();
+        const u32 mask = get(kMaskPlane);
+        if (mask != 0) {
+            p.exec_->free(mask, get(kMaskBytes));
+        }
+        put(kMaskPlane, 0);
+        put(kMaskBytes, 0);
         const u32 dest = get(kDest);
         if (dest != 0 && (flags() & kAlias) == 0) {
             wait_blit();
@@ -415,6 +545,8 @@ struct PictureDataType::Ops {
     // ColorTable2 and the allocated pens (a byte).
     void make_colour_tables(u32 count) {
         release_pens();
+        // New tables hold no grey ramp, whatever the old ones did.
+        put(kFlags, flags() & ~kGrey);
         const u32 old = get(kColours);
         if (old != 0) {
             p.exec_->free(old, get(kColoursBytes));
@@ -447,6 +579,183 @@ struct PictureDataType::Ops {
             gfx(graphics_lvo::ReleasePen, args);
         }
         b.w16(data + kNumAlloc, 0);
+    }
+
+    // The chunky source buffer and what it was allocated with go; a mask
+    // belongs to the destination and is freed with it.
+    void free_pixel_data() {
+        const u32 block = get(kPixelData);
+        if (block != 0) {
+            p.exec_->free(block, get(kPixelBytes));
+        }
+        put(kPixelData, 0);
+        put(kPixelWidth, 0);
+        put(kPixelHeight, 0);
+        put(kPixelDepth, 0);
+        put(kPixelBytes, 0);
+        put(kFlags, flags() & ~kGrey);
+    }
+
+    // A first GREY8 write makes the indexed source's colours 256 greys.
+    void make_grey_palette() {
+        make_colour_tables(kMaxPens);
+        b.w16(data + kNumColors, kMaxPens);
+        const u32 registers = get(kColours);
+        const u32 cregs = get(kCRegs);
+        if (registers == 0 || cregs == 0) {
+            return;
+        }
+        for (u32 i = 0; i < kMaxPens; ++i) {
+            for (u32 k = 0; k < 3; ++k) {
+                b.w8(registers + i * 3 + k, i);
+            }
+            for (u32 k = 0; k < 12; k += 4) {
+                b.w32(cregs + i * 12 + k, i * 0x01010101u);
+            }
+        }
+        const u32 info = frame_info();
+        if (info != 0) {
+            b.w32(info + fri_ColorMap, cregs);
+        }
+    }
+
+    // The buffer a pixel array write fills, made from the header's size and
+    // depth the first time and again when those changed: a byte a pixel
+    // with colour tables up to eight planes, A, R, G, B deeper.
+    bool ensure_pixel_buffer(u32 format) {
+        const u32 width = header16(bmh_Width);
+        const u32 height = header16(bmh_Height);
+        const u32 depth = b.r8(data + kHeader + bmh_Depth);
+        if (width == 0 || height == 0 || depth == 0) {
+            return false;
+        }
+        const bool indexed = depth <= 8;
+        if (indexed && format != PBPAFMT_LUT8 && format != PBPAFMT_GREY8) {
+            return false;
+        }
+        const u32 bytes_per_pixel = indexed ? 1 : 4;
+        const u64 bytes = u64{width} * height * bytes_per_pixel;
+        if (bytes == 0 || bytes > 0xFFFFFFFFu) {
+            return false;
+        }
+        if (get(kPixelData) != 0 && get(kPixelWidth) == width && get(kPixelHeight) == height &&
+            get(kPixelDepth) == depth) {
+            return true;
+        }
+        free_pixel_data();
+        const u32 block = p.exec_->alloc(static_cast<u32>(bytes), MEMF_PUBLIC | MEMF_CLEAR);
+        if (block == 0) {
+            return false;
+        }
+        put(kPixelData, block);
+        put(kPixelWidth, width);
+        put(kPixelHeight, height);
+        put(kPixelDepth, depth);
+        put(kPixelBytes, static_cast<u32>(bytes));
+        if (indexed && b.r16(data + kNumColors) == 0) {
+            make_colour_tables(kMaxPens);
+            b.w16(data + kNumColors, kMaxPens);
+            const u32 info = frame_info();
+            if (info != 0) {
+                b.w32(info + fri_ColorMap, get(kCRegs));
+            }
+        }
+        source_changed();
+        return b.ok();
+    }
+
+    void load_colours(Colours& out) {
+        const u32 count = b.r16(data + kNumColors);
+        const u32 colours = get(kColours) == 0 ? 0 : count < kMaxPens ? count : kMaxPens;
+        for (u32 i = 0; i < kMaxPens; ++i) {
+            out.of[i] = i < colours ? creg(i) : Rgb{};
+        }
+        out.masking = masking();
+        out.transparent = transparent();
+    }
+
+    // The colour indexes of count pixels of row y from x0 of a planar or
+    // indexed source.
+    bool read_index_run(const Source& src, u32 y, u32 x0, u32 count, u8* out) {
+        if (src.kind == SourceKind::Planar) {
+            return read_indexes(b, src.planar, y, x0, count, out);
+        }
+        if (src.kind != SourceKind::Indexed) {
+            return false;
+        }
+        const u64 from = u64{src.pixels} + u64{y} * src.width + x0;
+        if (from + count > 0x100000000ull) {
+            return false;
+        }
+        const u8* at = b.bytes_at(static_cast<u32>(from), count);
+        if (at == nullptr) {
+            return false;
+        }
+        for (u32 i = 0; i < count; ++i) {
+            out[i] = at[i];
+        }
+        return true;
+    }
+
+    // count pixels of row y from x of the source, with the alpha the header
+    // gives them: the source's own on a true colour picture, none for the
+    // transparent index, opaque otherwise.
+    bool read_pixels(const Source& src, u32 y, u32 x0, u32 count, const Colours& colours,
+                     Pixel* out) {
+        if (src.kind == SourceKind::Argb) {
+            const u64 from = u64{src.pixels} + (u64{y} * src.width + x0) * 4;
+            if (from + u64{count} * 4 > 0x100000000ull) {
+                return false;
+            }
+            const u8* at = b.bytes_at(static_cast<u32>(from), count * 4);
+            if (at == nullptr) {
+                return false;
+            }
+            for (u32 i = 0; i < count; ++i) {
+                out[i].colour = Rgb{at[i * 4 + 1], at[i * 4 + 2], at[i * 4 + 3]};
+                out[i].alpha = at[i * 4];
+                out[i].index = 0;
+            }
+            return true;
+        }
+        u8 run[kRun];
+        if (!read_index_run(src, y, x0, count, run)) {
+            return false;
+        }
+        const bool keyed = colours.masking == mskHasTransparentColor;
+        for (u32 i = 0; i < count; ++i) {
+            const u32 index = run[i];
+            const u8 alpha = keyed && index == colours.transparent ? u8{0} : u8{255};
+            out[i] = Pixel{colours.of[index], alpha, run[i]};
+        }
+        return true;
+    }
+
+    // Whether a pixel of a true colour source has an alpha below opaque;
+    // false when the source could not be read to the end.
+    bool any_translucent(const Source& src, bool& found) {
+        found = false;
+        Colours colours;
+        load_colours(colours);
+        Pixel run[kRun];
+        for (u32 y = 0; y < src.height; ++y) {
+            if (!pause(y, src.width, src)) {
+                return false;
+            }
+            for (u32 x = 0; x < src.width; x += kRun) {
+                const u32 count = src.width - x < kRun ? src.width - x : kRun;
+                if (!read_pixels(src, y, x, count, colours, run)) {
+                    return false;
+                }
+                for (u32 i = 0; i < count; ++i) {
+                    if (run[i].alpha < 255) {
+                        found = true;
+                        return true;
+                    }
+                }
+            }
+        }
+        return true;
     }
 
     // The FrameInfo datatypesclass keeps, which DTM_FRAMEBOX hands out.
@@ -523,11 +832,21 @@ struct PictureDataType::Ops {
         }
     }
 
-    // The frame's size and depth are the source bitmap's.
+    // The frame's size and depth are the chunky buffer's, or the source
+    // bitmap's.
     void source_changed() {
         const u32 info = frame_info();
+        if (info == 0 || stopped()) {
+            return;
+        }
+        if (get(kPixelData) != 0) {
+            b.w32(info + fri_Width, get(kPixelWidth));
+            b.w32(info + fri_Height, get(kPixelHeight));
+            b.w32(info + fri_Depth, b.r8(data + kHeader + bmh_Depth));
+            return;
+        }
         const u32 source = get(kSource);
-        if (info == 0 || source == 0 || stopped()) {
+        if (source == 0) {
             return;
         }
         const auto bitmap_attr = [&](u32 which) {
@@ -611,6 +930,25 @@ struct PictureDataType::Ops {
             case PDTA_SparseTable:
                 put(kSparseTable, value);
                 break;
+            case PDTA_SourceMode:
+                put(kSourceMode, value);
+                if (value != PMODE_V43) {
+                    free_pixel_data();
+                    source_changed();
+                }
+                break;
+            case PDTA_DestMode:
+                put(kDestMode, value);
+                break;
+            case PDTA_UseFriendBitMap:
+                put(kUseFriend, value != 0 ? 1 : 0);
+                break;
+            // A subclass writing straight into the frame buffer, and one
+            // that leaves it dirty, are not taken: the buffer is the
+            // class's and starts cleared.
+            case PDTA_ObtainPixelBuffer:
+            case PDTA_SubClassRendersAll:
+                break;
             case OBP_Precision:
                 put(kPrecision, value);
                 break;
@@ -648,6 +986,16 @@ struct PictureDataType::Ops {
         put(kModeId, kInvalidId);
         put(kFlags, kRemap);
         put(kPrecision, 0);
+        put(kSourceMode, PMODE_V42);
+        put(kDestMode, PMODE_V42);
+        put(kUseFriend, 1);
+        put(kMaskPlane, 0);
+        put(kMaskBytes, 0);
+        put(kPixelData, 0);
+        put(kPixelWidth, 0);
+        put(kPixelHeight, 0);
+        put(kPixelDepth, 0);
+        put(kPixelBytes, 0);
         const u32 si = special_info();
         if (si != 0) {
             b.w32(si + si_HorizUnit, 1);
@@ -670,6 +1018,7 @@ struct PictureDataType::Ops {
         free_bitmap(get(kOwnedSource));
         put(kOwnedSource, 0);
         put(kSource, 0);
+        free_pixel_data();
         return stopped() ? 0 : boopsi().pass_on(cl, object, msg);
     }
 
@@ -730,6 +1079,27 @@ struct PictureDataType::Ops {
         case PDTA_Grab:
             value = data + kGrab;
             break;
+        case PDTA_SourceMode:
+            value = get(kSourceMode);
+            break;
+        case PDTA_DestMode:
+            value = get(kDestMode);
+            break;
+        case PDTA_UseFriendBitMap:
+            value = get(kUseFriend);
+            break;
+        case PDTA_MaskPlane:
+            value = get(kMaskPlane);
+            break;
+        // While the source is there it answers; after it was freed, what
+        // the first layout found does.
+        case PDTA_AlphaChannel: {
+            const SourceKind kind = load_source().kind;
+            value = kind != SourceKind::None
+                        ? (kind == SourceKind::Argb && masking() == mskHasAlpha ? 1 : 0)
+                        : ((flags() & kAlphaSource) != 0 ? 1 : 0);
+            break;
+        }
         default:
             return boopsi().pass_on(cl, object, msg);
         }
@@ -773,34 +1143,71 @@ struct PictureDataType::Ops {
         u32 value[kMaxPens];
         u32 second[kMaxPens];
         bool converts = false;
+        // The levels of the colour cube a true colour source is dithered
+        // into on a palette destination.
+        u32 levels = 0;
     };
 
     // Lets other tasks run now and then while a large picture is worked on:
     // every kYieldPixels pixels, counted by whole rows of width. What the
     // layout holds then is the DTSpecialInfo's lock, which drawing only
-    // attempts, and the pens it obtained.
-    void pause(u32 y, u32 width) {
+    // attempts, and the pens it obtained; the source, and the destination
+    // dest when one is named, may be gone when the others are done. False
+    // when the run ended or the source or the destination is no longer the
+    // one it was, which then is not touched again.
+    bool pause(u32 y, u32 width, const Source& src, u32 dest = 0) {
         const u32 rows = width >= kYieldPixels ? 1 : kYieldPixels / (width != 0 ? width : 1);
-        if (y != 0 && y % rows == 0) {
-            p.exec_->yield_in_native();
+        if (y == 0 || y % rows != 0) {
+            return !stopped();
         }
+        p.exec_->yield_in_native();
+        return !stopped() && same_source(src) && (dest == 0 || get(kDest) == dest);
     }
 
-    // Which colour indexes the source's pixels use.
-    bool used_indexes(const Planar& src, u32 width, u32 height, bool (&used)[kMaxPens]) {
+    // Which colour indexes the pixels of a planar or indexed source use.
+    bool used_indexes(const Source& src, u32 width, u32 height, bool (&used)[kMaxPens]) {
         for (bool& u : used) {
             u = false;
         }
         u8 run[kRun];
         for (u32 y = 0; y < height; ++y) {
-            pause(y, width);
+            if (!pause(y, width, src)) {
+                return false;
+            }
             for (u32 x = 0; x < width; x += kRun) {
                 const u32 count = width - x < kRun ? width - x : kRun;
-                if (!read_indexes(b, src, y, x, count, run)) {
+                if (!read_index_run(src, y, x, count, run)) {
                     return false;
                 }
                 for (u32 i = 0; i < count; ++i) {
                     used[run[i]] = true;
+                }
+            }
+        }
+        return !stopped();
+    }
+
+    // Which colour cube indexes a true colour source dithered into levels
+    // levels uses.
+    bool used_cube(const Source& src, u32 levels, bool (&used)[kMaxPens]) {
+        for (bool& u : used) {
+            u = false;
+        }
+        Colours colours;
+        load_colours(colours);
+        Pixel run[kRun];
+        for (u32 y = 0; y < src.height; ++y) {
+            if (!pause(y, src.width, src)) {
+                return false;
+            }
+            for (u32 x = 0; x < src.width; x += kRun) {
+                const u32 count = src.width - x < kRun ? src.width - x : kRun;
+                if (!read_pixels(src, y, x, count, colours, run)) {
+                    return false;
+                }
+                for (u32 i = 0; i < count; ++i) {
+                    used[remap::cube_index(run[i].colour.r, run[i].colour.g, run[i].colour.b,
+                                           x + i, y, levels)] = true;
                 }
             }
         }
@@ -967,37 +1374,85 @@ struct PictureDataType::Ops {
         map.converts = true;
     }
 
+    // The pen of a true colour pixel on a palette destination: the colour
+    // cube index the dither gives it, through the pens chosen for the
+    // indexes. The second table is the first's, so no mixing comes on top
+    // of the dither.
+    u32 cube_pen(const Pixel& pixel, u32 x, u32 y, const Mapping& map) {
+        const u32 index = remap::cube_index(pixel.colour.r, pixel.colour.g, pixel.colour.b, x, y,
+                                            map.levels);
+        return ((x + y) & 1) == 0 ? map.value[index] : map.second[index];
+    }
+
+    // The value a true colour pixel takes in a destination of fmt, or with
+    // planar set in a planar one: its colour, with its alpha when alpha is
+    // set, on ARGB32, dithered on RGB16, the pen of its cube index else.
+    u32 true_colour_value(PixFmt fmt, bool planar, const Pixel& pixel, u32 x, u32 y,
+                          const Mapping& map, bool alpha) {
+        if (planar || fmt == PixFmt::Lut8) {
+            return cube_pen(pixel, x, y, map);
+        }
+        if (fmt == PixFmt::Rgb16) {
+            return remap::rgb16(pixel.colour.r, pixel.colour.g, pixel.colour.b, x, y);
+        }
+        return (alpha ? u32{pixel.alpha} << 24 : 0xFF000000u) | (u32{pixel.colour.r} << 16) |
+               (u32{pixel.colour.g} << 8) | pixel.colour.b;
+    }
+
     // The source's pixels through the mapping into the destination: planar
     // pens, LUT8 pens or true colour values, the second table's on every
-    // other pixel of a checkerboard.
-    bool convert(const Planar& src, u32 dest, u32 width, u32 height, const Mapping& map) {
+    // other pixel of a checkerboard; a true colour source is dithered into
+    // the destination's colours or colour cube. Each pixel's value is had
+    // once and then set in every plane.
+    bool convert(const Source& src, u32 dest, u32 width, u32 height, const Mapping& map) {
         const DeepBitmap* deep = p.graphics_->deep(dest);
         Planar dst;
         if (deep == nullptr && !load_planar(b, dest, dst)) {
             return false;
         }
-        u8 run[kRun];
+        const PixFmt fmt = deep != nullptr ? deep->fmt : PixFmt::Lut8;
+        const u32 bpp = deep != nullptr ? bytes_per_pixel(fmt) : 0;
+        const u32 deep_pixels = deep != nullptr ? deep->pixels : 0;
+        const u32 deep_row = deep != nullptr ? deep->bytes_per_row : 0;
+        const bool true_colour = src.kind == SourceKind::Argb;
+        const bool alpha = masking() == mskHasAlpha;
+        Colours colours;
+        if (true_colour) {
+            load_colours(colours);
+        }
+        Pixel pixels[kRun];
+        u8 indexes[kRun];
+        u32 values[kRun];
         for (u32 y = 0; y < height; ++y) {
-            pause(y, width);
-            if (stopped()) {
+            if (!pause(y, width, src, dest)) {
                 return false;
             }
             for (u32 x = 0; x < width; x += kRun) {
                 const u32 count = width - x < kRun ? width - x : kRun;
-                if (!read_indexes(b, src, y, x, count, run)) {
-                    return false;
+                if (true_colour) {
+                    if (!read_pixels(src, y, x, count, colours, pixels)) {
+                        return false;
+                    }
+                    for (u32 i = 0; i < count; ++i) {
+                        values[i] = true_colour_value(fmt, deep == nullptr, pixels[i], x + i, y,
+                                                      map, alpha);
+                    }
+                } else {
+                    if (!read_index_run(src, y, x, count, indexes)) {
+                        return false;
+                    }
+                    for (u32 i = 0; i < count; ++i) {
+                        values[i] = ((x + i + y) & 1) == 0 ? map.value[indexes[i]]
+                                                           : map.second[indexes[i]];
+                    }
                 }
                 if (deep != nullptr) {
-                    const u32 bpp = bytes_per_pixel(deep->fmt);
-                    u8* row = b.bytes_at(deep->pixels + y * deep->bytes_per_row + x * bpp,
-                                         count * bpp);
+                    u8* row = b.bytes_at(deep_pixels + y * deep_row + x * bpp, count * bpp);
                     if (row == nullptr) {
                         return false;
                     }
                     for (u32 i = 0; i < count; ++i) {
-                        const u32 v = ((x + i + y) & 1) == 0 ? map.value[run[i]]
-                                                             : map.second[run[i]];
-                        store_pixel(deep->fmt, row + i * bpp, v);
+                        store_pixel(fmt, row + i * bpp, values[i]);
                     }
                     continue;
                 }
@@ -1011,12 +1466,10 @@ struct PictureDataType::Ops {
                     }
                     for (u32 i = 0; i < count; ++i) {
                         const u32 at = x + i;
-                        const u32 pen = ((at + y) & 1) == 0 ? map.value[run[i]]
-                                                            : map.second[run[i]];
                         const u8 bit = static_cast<u8>(0x80 >> (at & 7));
                         u8& cell = row[(at >> 3) - first];
-                        cell = static_cast<u8>(((pen >> plane) & 1) != 0 ? cell | bit
-                                                                         : cell & ~bit);
+                        cell = static_cast<u8>(((values[i] >> plane) & 1) != 0 ? cell | bit
+                                                                               : cell & ~bit);
                     }
                 }
             }
@@ -1024,10 +1477,226 @@ struct PictureDataType::Ops {
         return true;
     }
 
+    // The table of the destination depth's colour cube, its colours in
+    // ColorRegisters and CRegs, and the number of colours the frame names.
+    bool make_cube(u32 levels) {
+        const u32 colours = levels * levels * levels;
+        make_colour_tables(colours);
+        b.w16(data + kNumColors, colours);
+        const u32 registers = get(kColours);
+        const u32 cregs = get(kCRegs);
+        if (registers == 0 || cregs == 0) {
+            return false;
+        }
+        for (u32 i = 0; i < colours; ++i) {
+            u8 red = 0, green = 0, blue = 0;
+            remap::cube_colour(i, levels, red, green, blue);
+            b.w8(registers + i * 3, red);
+            b.w8(registers + i * 3 + 1, green);
+            b.w8(registers + i * 3 + 2, blue);
+            b.w32(cregs + i * 12, u32{red} * 0x01010101u);
+            b.w32(cregs + i * 12 + 4, u32{green} * 0x01010101u);
+            b.w32(cregs + i * 12 + 8, u32{blue} * 0x01010101u);
+        }
+        const u32 info = frame_info();
+        if (info != 0) {
+            b.w32(info + fri_ColorMap, cregs);
+        }
+        return b.ok();
+    }
+
+    // The mask plane a translucent chunky source is drawn through: a bit
+    // set where the alpha is at least half, or where the index is not the
+    // transparent one. It has the rows of a planar destination, or of a
+    // bitmap as wide as the picture.
+    u32 make_mask(const Source& src, u32 dest) {
+        const bool true_colour = src.kind == SourceKind::Argb;
+        Colours colours;
+        load_colours(colours);
+        u32 stride = ((src.width + 15) / 16) * 2;
+        if (dest != 0 && p.graphics_->deep(dest) == nullptr) {
+            const u32 rows = b.r16(dest + bm_BytesPerRow);
+            if (rows != 0) {
+                stride = rows;
+            }
+        }
+        const u64 bytes = u64{stride} * src.height;
+        if (bytes == 0 || bytes > 0xFFFFFFFFu || u64{stride} * 8 < src.width) {
+            return ERROR_NO_FREE_STORE;
+        }
+        const u32 plane = p.exec_->alloc(static_cast<u32>(bytes), MEMF_CHIP | MEMF_CLEAR);
+        if (plane == 0) {
+            return ERROR_NO_FREE_STORE;
+        }
+        const auto fail = [&](u32 error) {
+            p.exec_->free(plane, static_cast<u32>(bytes));
+            return stopped() ? 0 : error;
+        };
+        Pixel pixels[kRun];
+        u8 indexes[kRun];
+        for (u32 y = 0; y < src.height; ++y) {
+            if (!pause(y, src.width, src, dest)) {
+                return fail(DTERROR_INVALID_DATA);
+            }
+            for (u32 x = 0; x < src.width; x += kRun) {
+                const u32 count = src.width - x < kRun ? src.width - x : kRun;
+                const bool read = true_colour
+                                      ? read_pixels(src, y, x, count, colours, pixels)
+                                      : read_index_run(src, y, x, count, indexes);
+                u8* row = b.bytes_at(plane + y * stride + (x >> 3), (count + 7) >> 3);
+                if (!read || row == nullptr) {
+                    return fail(DTERROR_INVALID_DATA);
+                }
+                for (u32 i = 0; i < count; ++i) {
+                    const bool set = true_colour ? pixels[i].alpha >= 128
+                                                 : indexes[i] != colours.transparent;
+                    if (set) {
+                        row[i >> 3] = static_cast<u8>(row[i >> 3] | (0x80u >> (i & 7)));
+                    }
+                }
+            }
+        }
+        if (!b.ok()) {
+            return fail(0);
+        }
+        put(kMaskPlane, plane);
+        put(kMaskBytes, static_cast<u32>(bytes));
+        return 0;
+    }
+
+    // A bitmap of width by height and depth, for the screen's bitmap as its
+    // friend when the object asks for one, of the pixel format flags name
+    // when they have BMF_SPECIALFMT.
+    u32 alloc_destination(u32 width, u32 height, u32 depth, u32 flags, u32 friend_bitmap) {
+        if (width == 0 || height == 0 || depth == 0) {
+            return 0;
+        }
+        LibraryCall args;
+        args.d[0] = width;
+        args.d[1] = height;
+        args.d[2] = depth;
+        args.d[3] = BMF_CLEAR | flags;
+        args.a[0] = get(kUseFriend) != 0 ? friend_bitmap : 0;
+        return gfx(graphics_lvo::AllocBitMap, args);
+    }
+
+    // The destination of a chunky source: a bitmap for the screen made the
+    // way the planar path makes one, its pixels taken from the buffer. An
+    // indexed source keeps its indexes, in a planar bitmap of its depth or
+    // a LUT8 one on a deep screen, when it is not remapped or has no screen
+    // to be remapped for; a true colour one without a screen keeps its
+    // pixels in an ARGB32 bitmap. What is translucent is recorded first.
+    u32 make_pixel_destination(const Source& src, u32 screen) {
+        const u32 mask = masking();
+        bool translucent = false;
+        bool used[kMaxPens];
+        if (src.kind == SourceKind::Indexed) {
+            if (!used_indexes(src, src.width, src.height, used)) {
+                return stopped() ? 0 : DTERROR_INVALID_DATA;
+            }
+            translucent = mask == mskHasTransparentColor && transparent() < kMaxPens &&
+                          used[transparent()];
+        } else if (mask == mskHasAlpha || mask == mskHasTransparentColor) {
+            if (!any_translucent(src, translucent)) {
+                return stopped() ? 0 : DTERROR_INVALID_DATA;
+            }
+        }
+        u32 record = flags();
+        record = translucent ? record | kTranslucent : record;
+        record = src.kind == SourceKind::Argb && mask == mskHasAlpha ? record | kAlphaSource
+                                                                     : record;
+        put(kFlags, record);
+        const bool keep_indexes =
+            src.kind == SourceKind::Indexed && (screen == 0 || (flags() & kRemap) == 0);
+        const u32 screen_bitmap = screen != 0 ? screen + sc_BitMap : 0;
+        const u32 screen_depth =
+            screen != 0 ? b.r8(b.r32(screen + sc_RastPort + rp_BitMap) + bm_Depth) : 0;
+        DeepBitmap* screen_deep = screen != 0 ? p.graphics_->deep(screen_bitmap) : nullptr;
+        u32 dest = 0;
+        if (keep_indexes && screen_deep != nullptr) {
+            const bool same = screen_deep->fmt == PixFmt::Lut8;
+            dest = alloc_destination(src.width, src.height, 8,
+                                     same ? 0 : BMF_SPECIALFMT | (PIXFMT_LUT8 << 24),
+                                     same ? screen_bitmap : 0);
+            // Its pens show in the screen's colours.
+            if (DeepBitmap* made = p.graphics_->deep(dest)) {
+                made->palette = screen_deep->palette;
+                made->colormap = screen_deep->colormap;
+            }
+        } else if (keep_indexes) {
+            dest = alloc_destination(src.width, src.height, src.depth, 0, screen_bitmap);
+        } else if (screen == 0) {
+            dest = alloc_destination(src.width, src.height, 32, 0, 0);
+        } else {
+            u32 depth = src.depth;
+            if (src.kind == SourceKind::Argb) {
+                depth = screen_deep != nullptr
+                            ? (screen_deep->fmt == PixFmt::Argb32
+                                   ? 24
+                                   : (screen_deep->fmt == PixFmt::Rgb16 ? 16 : 8))
+                            : screen_depth;
+            } else {
+                depth = screen_depth > src.depth ? screen_depth : src.depth;
+                if (screen_deep == nullptr && depth > 8) {
+                    depth = 8;
+                }
+            }
+            dest = alloc_destination(src.width, src.height, depth, 0, screen_bitmap);
+        }
+        if (dest == 0) {
+            return ERROR_NO_FREE_STORE;
+        }
+        put(kDest, dest);
+        const DeepBitmap* deep = p.graphics_->deep(dest);
+        Mapping map;
+        if (keep_indexes) {
+            for (u32 i = 0; i < kMaxPens; ++i) {
+                map.value[i] = i;
+                map.second[i] = i;
+            }
+        } else if (src.kind == SourceKind::Indexed) {
+            if (deep != nullptr && deep->fmt != PixFmt::Lut8) {
+                true_colours(deep->fmt, map);
+            } else if (!choose_pens(screen, used, map)) {
+                return ERROR_NO_FREE_STORE;
+            }
+        } else if (screen != 0 && (deep == nullptr || deep->fmt == PixFmt::Lut8)) {
+            const u32 levels = remap::levels(deep != nullptr ? 8 : screen_depth);
+            if (!make_cube(levels)) {
+                return ERROR_NO_FREE_STORE;
+            }
+            if (!used_cube(src, levels, used)) {
+                return stopped() ? 0 : DTERROR_INVALID_DATA;
+            }
+            if (!choose_pens(screen, used, map)) {
+                return ERROR_NO_FREE_STORE;
+            }
+            for (u32 i = 0; i < kMaxPens; ++i) {
+                map.second[i] = map.value[i];
+            }
+            const u32 first = get(kColorTable);
+            const u32 second = get(kColorTable2);
+            for (u32 i = 0; first != 0 && second != 0 && i < levels * levels * levels; ++i) {
+                b.w8(first + i, map.value[i]);
+                b.w8(second + i, map.value[i]);
+            }
+            map.levels = levels;
+        }
+        if (!convert(src, dest, src.width, src.height, map)) {
+            return stopped() ? 0 : DTERROR_INVALID_DATA;
+        }
+        return translucent ? make_mask(src, dest) : 0;
+    }
+
     // The destination of a first layout: the source itself, or a bitmap
     // made for the screen the source is remapped or copied into. 0, or the
     // error that left the picture without a remapped destination.
     u32 make_destination(u32 screen) {
+        put(kFlags, flags() & ~(kTranslucent | kAlphaSource));
+        const Source pixels = load_source();
+        if (pixels.kind == SourceKind::Indexed || pixels.kind == SourceKind::Argb) {
+            return make_pixel_destination(pixels, screen);
+        }
         const u32 source = get(kSource);
         const bool remap = (flags() & kRemap) != 0;
         if (screen == 0) {
@@ -1040,26 +1709,19 @@ struct PictureDataType::Ops {
         const u32 screen_depth = b.r8(b.r32(screen + sc_RastPort + rp_BitMap) + bm_Depth);
         const u32 depth8 = b.r8(data + kHeader + bmh_Depth);
         const bool deeper = get(kScreen) != 0 && depth8 < screen_depth;
-        Planar src;
-        const bool planar_source = p.graphics_->deep(source) == nullptr &&
-                                   load_planar(b, source, src);
+        const bool planar_source = pixels.kind == SourceKind::Planar;
         if ((!remap && !deeper) || !planar_source) {
             put(kFlags, flags() | kAlias);
             return 0;
         }
+        const Planar& src = pixels.planar;
         const u32 width = header16(bmh_Width);
         const u32 height = header16(bmh_Height);
         u32 depth = screen_depth > depth8 ? screen_depth : depth8;
         if (p.graphics_->deep(screen_bitmap) == nullptr && depth > 8) {
             depth = 8;
         }
-        LibraryCall args;
-        args.d[0] = width;
-        args.d[1] = height;
-        args.d[2] = depth;
-        args.d[3] = BMF_CLEAR;
-        args.a[0] = screen_bitmap;
-        const u32 dest = width != 0 && height != 0 ? gfx(graphics_lvo::AllocBitMap, args) : 0;
+        const u32 dest = alloc_destination(width, height, depth, 0, screen_bitmap);
         if (dest == 0) {
             // A copy that cannot be had leaves the source to be shown.
             if (!remap) {
@@ -1083,7 +1745,7 @@ struct PictureDataType::Ops {
             return 0;
         }
         bool used[kMaxPens];
-        if (!used_indexes(src, w, h, used)) {
+        if (!used_indexes(pixels, w, h, used)) {
             return stopped() ? 0 : DTERROR_INVALID_DATA;
         }
         Mapping map;
@@ -1093,7 +1755,7 @@ struct PictureDataType::Ops {
         } else if (!choose_pens(screen, used, map)) {
             return ERROR_NO_FREE_STORE;
         }
-        if (!convert(src, dest, w, h, map)) {
+        if (!convert(pixels, dest, w, h, map)) {
             return stopped() ? 0 : DTERROR_INVALID_DATA;
         }
         return 0;
@@ -1148,7 +1810,7 @@ struct PictureDataType::Ops {
         }
         bool first = false;
         u32 error = 0;
-        if (initial != 0 && get(kSource) != 0) {
+        if (initial != 0 && has_source()) {
             first = true;
             release_remap();
             error = make_destination(screen);
@@ -1161,10 +1823,13 @@ struct PictureDataType::Ops {
             }
             log_layout(error);
             wait_blit();
-            if ((flags() & kFreeSource) != 0 && get(kOwnedSource) != 0) {
-                free_bitmap(get(kOwnedSource));
-                put(kOwnedSource, 0);
-                put(kSource, 0);
+            if ((flags() & kFreeSource) != 0) {
+                if (get(kOwnedSource) != 0) {
+                    free_bitmap(get(kOwnedSource));
+                    put(kOwnedSource, 0);
+                    put(kSource, 0);
+                }
+                free_pixel_data();
             }
         }
         b.w32(si + si_Flags, b.r32(si + si_Flags) & ~DTSIF_LAYOUT);
@@ -1233,17 +1898,55 @@ struct PictureDataType::Ops {
         i32 sy = static_cast<i32>(b.r32(si + si_TopVert));
         sx = sx < 0 ? 0 : (sx > pw - w ? pw - w : sx);
         sy = sy < 0 ? 0 : (sy > ph - h ? ph - h : sy);
-        LibraryCall blit;
-        blit.a[0] = dest;
-        blit.d[0] = static_cast<u32>(sx);
-        blit.d[1] = static_cast<u32>(sy);
-        blit.a[1] = rp;
-        blit.d[2] = static_cast<u32>(left);
-        blit.d[3] = static_cast<u32>(top);
-        blit.d[4] = static_cast<u32>(w);
-        blit.d[5] = static_cast<u32>(h);
-        blit.d[6] = kCopy;
-        gfx(graphics_lvo::BltBitMapRastPort, blit);
+        // A translucent picture with its alpha in an ARGB32 destination is
+        // blended onto a true colour RastPort; onto others, and without an
+        // alpha, it goes through its mask plane. Either is drawn over a
+        // cleared area, so that what its transparency leaves out does not
+        // show the last picture there. An opaque picture is copied.
+        const u32 mask = get(kMaskPlane);
+        const DeepBitmap* deep = p.graphics_->deep(dest);
+        const DeepBitmap* target = p.graphics_->deep(b.r32(rp + rp_BitMap));
+        const bool alpha = (flags() & (kTranslucent | kAlphaSource)) ==
+                               (kTranslucent | kAlphaSource) &&
+                           deep != nullptr && deep->fmt == PixFmt::Argb32 && target != nullptr &&
+                           target->fmt != PixFmt::Lut8;
+        if (mask != 0 || alpha) {
+            LibraryCall erase;
+            erase.a[1] = rp;
+            erase.d[0] = static_cast<u32>(left);
+            erase.d[1] = static_cast<u32>(top);
+            erase.d[2] = static_cast<u32>(left + w - 1);
+            erase.d[3] = static_cast<u32>(top + h - 1);
+            gfx(graphics_lvo::EraseRect, erase);
+        }
+        if (alpha) {
+            p.graphics_->blt_alpha_rastport(dest, sx, sy, rp, left, top, w, h);
+        } else if (mask != 0) {
+            LibraryCall blit;
+            blit.a[0] = dest;
+            blit.d[0] = static_cast<u32>(sx);
+            blit.d[1] = static_cast<u32>(sy);
+            blit.a[1] = rp;
+            blit.d[2] = static_cast<u32>(left);
+            blit.d[3] = static_cast<u32>(top);
+            blit.d[4] = static_cast<u32>(w);
+            blit.d[5] = static_cast<u32>(h);
+            blit.d[6] = 0xE0;
+            blit.a[2] = mask;
+            gfx(graphics_lvo::BltMaskBitMapRastPort, blit);
+        } else {
+            LibraryCall blit;
+            blit.a[0] = dest;
+            blit.d[0] = static_cast<u32>(sx);
+            blit.d[1] = static_cast<u32>(sy);
+            blit.a[1] = rp;
+            blit.d[2] = static_cast<u32>(left);
+            blit.d[3] = static_cast<u32>(top);
+            blit.d[4] = static_cast<u32>(w);
+            blit.d[5] = static_cast<u32>(h);
+            blit.d[6] = kCopy;
+            gfx(graphics_lvo::BltBitMapRastPort, blit);
+        }
         if (select == 0 || stopped()) {
             return;
         }
@@ -1340,14 +2043,16 @@ struct PictureDataType::Ops {
 
     u32 write_locked(u32 msg, const char*& why) {
         const u32 fh = b.r32(msg + 8);
-        const u32 source = get(kSource);
-        Planar src;
+        const Source src = load_source();
         if (fh == 0) {
             why = "no file";
             return 0;
         }
-        if (source == 0 || p.graphics_->deep(source) != nullptr ||
-            !load_planar(b, source, src)) {
+        if (src.kind == SourceKind::Argb) {
+            why = "true colour cannot be saved yet";
+            return 0;
+        }
+        if (src.kind != SourceKind::Planar && src.kind != SourceKind::Indexed) {
             why = "no planar source bitmap";
             return 0;
         }
@@ -1357,8 +2062,16 @@ struct PictureDataType::Ops {
         const u32 height = header16(bmh_Height);
         u32 x0 = 0;
         u32 y0 = 0;
-        u32 w = width < src.bytes_per_row * 8 ? width : src.bytes_per_row * 8;
-        u32 hgt = height < src.rows ? height : src.rows;
+        u32 w = width;
+        u32 hgt = height;
+        if (src.kind == SourceKind::Planar) {
+            const u32 across = src.planar.bytes_per_row * 8;
+            w = width < across ? width : across;
+            hgt = height < src.planar.rows ? height : src.planar.rows;
+        } else {
+            w = width < src.width ? width : src.width;
+            hgt = height < src.height ? height : src.height;
+        }
         const u32 select = attr(DTA_SelectDomain);
         if (select != 0) {
             const i32 sx = static_cast<i16>(b.r16(select));
@@ -1467,8 +2180,11 @@ struct PictureDataType::Ops {
         u8 row[ilbm::row_bytes(ilbm::kMaxSide)];
         const u32 row_bytes = ilbm::row_bytes(w);
         const auto rows = [&](u32 plane, u32 y) -> const u8* {
-            const u8* line = b.bytes_at(src.planes[plane] + (y0 + y) * src.bytes_per_row,
-                                        src.bytes_per_row);
+            const u8* line =
+                src.kind == SourceKind::Planar
+                    ? b.bytes_at(src.planar.planes[plane] + (y0 + y) * src.planar.bytes_per_row,
+                                 src.planar.bytes_per_row)
+                    : b.bytes_at(src.pixels + (y0 + y) * src.width, src.width);
             if (line == nullptr) {
                 return nullptr;
             }
@@ -1477,7 +2193,10 @@ struct PictureDataType::Ops {
             }
             for (u32 x = 0; x < w; ++x) {
                 const u32 at = x0 + x;
-                if (((line[at >> 3] >> (7 - (at & 7))) & 1) != 0) {
+                const u32 bit = src.kind == SourceKind::Planar
+                                    ? (line[at >> 3] >> (7 - (at & 7))) & 1
+                                    : (line[at] >> plane) & 1;
+                if (bit != 0) {
                     row[x >> 3] |= static_cast<u8>(0x80 >> (x & 7));
                 }
             }
@@ -1512,6 +2231,205 @@ struct PictureDataType::Ops {
         line.text("picture.datatype: wrote ").dec(w).text("x").dec(hgt).text("x").dec(h.depth);
         line.send();
         return 1;
+    }
+
+    // PDTM_WRITEPIXELARRAY: the caller's pixels into the chunky source
+    // buffer, which the first write makes from the header's size and
+    // depth. 1 when all of them were stored.
+    u32 write_pixel_array(u32 msg) {
+        if (get(kSourceMode) != PMODE_V43) {
+            return 0;
+        }
+        const u32 pixels = b.r32(msg + 4);
+        const u32 format = b.r32(msg + 8);
+        const u32 mod = b.r32(msg + 12);
+        const u32 left = b.r32(msg + 16);
+        const u32 top = b.r32(msg + 20);
+        const u32 width = b.r32(msg + 24);
+        const u32 height = b.r32(msg + 28);
+        if (pixels == 0 || width == 0 || height == 0 || format > PBPAFMT_GREY8) {
+            return 0;
+        }
+        if (!ensure_pixel_buffer(format)) {
+            return 0;
+        }
+        const u32 input_bytes = format == PBPAFMT_RGB ? 3 : format <= PBPAFMT_ARGB ? 4 : 1;
+        const u64 row_bytes = u64{width} * input_bytes;
+        if ((height > 1 && mod < row_bytes) || u64{left} + width > get(kPixelWidth) ||
+            u64{top} + height > get(kPixelHeight)) {
+            return 0;
+        }
+        const bool indexed = get(kPixelDepth) <= 8;
+        if (indexed && format == PBPAFMT_GREY8 && (flags() & kGrey) == 0) {
+            make_grey_palette();
+            put(kFlags, flags() | kGrey);
+        }
+        // The buffer, which the loop checks is still there each time other
+        // tasks had a turn.
+        const Source target = load_source();
+        const u32 buffer = get(kPixelData);
+        const u32 stored_bytes = indexed ? 1 : 4;
+        const u32 row_stored = get(kPixelWidth) * stored_bytes;
+        Colours colours;
+        load_colours(colours);
+        const bool keyed = colours.masking == mskHasTransparentColor;
+        for (u32 y = 0; y < height; ++y) {
+            if (!pause(y, width, target)) {
+                return 0;
+            }
+            const u64 from = u64{pixels} + u64{y} * mod;
+            if (from + row_bytes > 0x100000000ull) {
+                return 0;
+            }
+            const u64 to = u64{buffer} + u64{top + y} * row_stored + u64{left} * stored_bytes;
+            if (to + u64{width} * stored_bytes > 0x100000000ull) {
+                return 0;
+            }
+            const u8* in = b.bytes_at(static_cast<u32>(from), static_cast<u32>(row_bytes));
+            u8* out = b.bytes_at(static_cast<u32>(to), width * stored_bytes);
+            if (in == nullptr || out == nullptr) {
+                return 0;
+            }
+            if (indexed) {
+                for (u32 i = 0; i < width; ++i) {
+                    out[i] = in[i];
+                }
+                continue;
+            }
+            for (u32 i = 0; i < width; ++i) {
+                u32 red = 0, green = 0, blue = 0, alpha = 255;
+                switch (format) {
+                case PBPAFMT_RGB:
+                    red = in[i * 3];
+                    green = in[i * 3 + 1];
+                    blue = in[i * 3 + 2];
+                    break;
+                case PBPAFMT_RGBA:
+                    red = in[i * 4];
+                    green = in[i * 4 + 1];
+                    blue = in[i * 4 + 2];
+                    alpha = in[i * 4 + 3];
+                    break;
+                case PBPAFMT_ARGB:
+                    alpha = in[i * 4];
+                    red = in[i * 4 + 1];
+                    green = in[i * 4 + 2];
+                    blue = in[i * 4 + 3];
+                    break;
+                case PBPAFMT_LUT8: {
+                    const u32 index = in[i];
+                    red = colours.of[index].r;
+                    green = colours.of[index].g;
+                    blue = colours.of[index].b;
+                    alpha = keyed && index == colours.transparent ? 0 : 255;
+                    break;
+                }
+                case PBPAFMT_GREY8:
+                    red = green = blue = in[i];
+                    break;
+                }
+                out[i * 4] = static_cast<u8>(alpha);
+                out[i * 4 + 1] = static_cast<u8>(red);
+                out[i * 4 + 2] = static_cast<u8>(green);
+                out[i * 4 + 3] = static_cast<u8>(blue);
+            }
+        }
+        return b.ok() ? 1 : 0;
+    }
+
+    // PDTM_READPIXELARRAY: the source's pixels, planar or chunky, in the
+    // caller's format. LUT8 needs an indexed source to have an index to
+    // give. 1 when all of them were read.
+    u32 read_pixel_array(u32 msg) {
+        const Source src = load_source();
+        if (src.kind == SourceKind::None) {
+            return 0;
+        }
+        const u32 pixels = b.r32(msg + 4);
+        const u32 format = b.r32(msg + 8);
+        const u32 mod = b.r32(msg + 12);
+        const u32 left = b.r32(msg + 16);
+        const u32 top = b.r32(msg + 20);
+        const u32 width = b.r32(msg + 24);
+        const u32 height = b.r32(msg + 28);
+        if (pixels == 0 || width == 0 || height == 0 || format > PBPAFMT_GREY8 ||
+            (format == PBPAFMT_LUT8 && src.kind == SourceKind::Argb)) {
+            return 0;
+        }
+        u32 source_width = src.width;
+        u32 source_height = src.height;
+        if (src.kind == SourceKind::Planar) {
+            const u32 across = header16(bmh_Width);
+            const u32 down = header16(bmh_Height);
+            source_width = across < source_width ? across : source_width;
+            source_height = down < source_height ? down : source_height;
+        }
+        const u32 output_bytes = format == PBPAFMT_RGB ? 3 : format <= PBPAFMT_ARGB ? 4 : 1;
+        const u64 row_bytes = u64{width} * output_bytes;
+        if ((height > 1 && mod < row_bytes) || u64{left} + width > source_width ||
+            u64{top} + height > source_height) {
+            return 0;
+        }
+        Colours colours;
+        load_colours(colours);
+        const u32 mask = colours.masking;
+        const u32 see_through = colours.transparent;
+        Pixel run[kRun];
+        for (u32 y = 0; y < height; ++y) {
+            if (!pause(y, width, src)) {
+                return 0;
+            }
+            for (u32 x = 0; x < width; x += kRun) {
+                const u32 count = width - x < kRun ? width - x : kRun;
+                if (!read_pixels(src, top + y, left + x, count, colours, run)) {
+                    return 0;
+                }
+                const u64 to = u64{pixels} + u64{y} * mod + u64{x} * output_bytes;
+                if (to + u64{count} * output_bytes > 0x100000000ull) {
+                    return 0;
+                }
+                u8* out = b.bytes_at(static_cast<u32>(to), count * output_bytes);
+                if (out == nullptr) {
+                    return 0;
+                }
+                for (u32 i = 0; i < count; ++i) {
+                    const u32 alpha = src.kind == SourceKind::Argb
+                                          ? (mask == mskHasAlpha ? run[i].alpha : 255)
+                                          : (mask == mskHasTransparentColor &&
+                                                     run[i].index == see_through
+                                                 ? 0
+                                                 : 255);
+                    u8* at = out + i * output_bytes;
+                    switch (format) {
+                    case PBPAFMT_RGB:
+                        at[0] = run[i].colour.r;
+                        at[1] = run[i].colour.g;
+                        at[2] = run[i].colour.b;
+                        break;
+                    case PBPAFMT_RGBA:
+                        at[0] = run[i].colour.r;
+                        at[1] = run[i].colour.g;
+                        at[2] = run[i].colour.b;
+                        at[3] = static_cast<u8>(alpha);
+                        break;
+                    case PBPAFMT_ARGB:
+                        at[0] = static_cast<u8>(alpha);
+                        at[1] = run[i].colour.r;
+                        at[2] = run[i].colour.g;
+                        at[3] = run[i].colour.b;
+                        break;
+                    case PBPAFMT_GREY8:
+                        at[0] = remap::luma(run[i].colour.r, run[i].colour.g,
+                                            run[i].colour.b);
+                        break;
+                    case PBPAFMT_LUT8:
+                        at[0] = run[i].index;
+                        break;
+                    }
+                }
+            }
+        }
+        return b.ok() ? 1 : 0;
     }
 };
 
@@ -1604,6 +2522,10 @@ u32 PictureDataType::dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
         return ops.select(msg, true);
     case DTM_WRITE:
         return ops.write(msg);
+    case PDTM_WRITEPIXELARRAY:
+        return ops.write_pixel_array(msg);
+    case PDTM_READPIXELARRAY:
+        return ops.read_pixel_array(msg);
     default:
         return self.intuition_->boopsi().pass_on(cl, object, msg);
     }

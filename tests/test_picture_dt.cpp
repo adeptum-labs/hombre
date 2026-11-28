@@ -32,8 +32,10 @@
 #include "libs/display_modes.hpp"
 #include "libs/picture_dt.hpp"
 #include "image/ilbm.hpp"
+#include "image/remap.hpp"
 
 #include <cstring>
+#include <functional>
 #include <vector>
 
 using namespace hombre;
@@ -43,6 +45,7 @@ using gfx_test::Base;
 using gfx_test::GfxRig;
 using gfx_test::kData;
 using native::Bus;
+namespace remap = image::remap;
 
 namespace {
 
@@ -50,6 +53,8 @@ constexpr u32 kTags = kData;
 constexpr u32 kStore = kData + 0x400;
 constexpr u32 kMsg = kData + 0x500;
 constexpr u32 kName = kData + 0x600;
+constexpr u32 kPixels = kData + 0x2000;
+constexpr u32 kPixels2 = kData + 0x2800;
 constexpr u32 kCode = kData + 0x3000;
 constexpr u32 kSuperCaller = kCode + 0x40;
 constexpr u32 kStandInStub = kCode + 0x80;
@@ -85,8 +90,23 @@ constexpr u32 PDTA_Screen = DTA_Dummy + 212;
 constexpr u32 PDTA_FreeSourceBitMap = DTA_Dummy + 213;
 constexpr u32 PDTA_Grab = DTA_Dummy + 214;
 constexpr u32 PDTA_DestBitMap = DTA_Dummy + 215;
+constexpr u32 PDTA_ClassBitMap = DTA_Dummy + 216;
 constexpr u32 PDTA_NumSparse = DTA_Dummy + 217;
 constexpr u32 PDTA_SparseTable = DTA_Dummy + 218;
+constexpr u32 PDTA_SourceMode = DTA_Dummy + 250;
+constexpr u32 PDTA_DestMode = DTA_Dummy + 251;
+constexpr u32 PDTA_UseFriendBitMap = DTA_Dummy + 255;
+constexpr u32 PDTA_AlphaChannel = DTA_Dummy + 256;
+constexpr u32 PDTA_MaskPlane = DTA_Dummy + 258;
+constexpr u32 PDTA_ObtainPixelBuffer = DTA_Dummy + 260;
+constexpr u32 PDTA_SubClassRendersAll = DTA_Dummy + 261;
+constexpr u32 PMODE_V42 = 0;
+constexpr u32 PMODE_V43 = 1;
+constexpr u32 PBPAFMT_RGB = 0;
+constexpr u32 PBPAFMT_RGBA = 1;
+constexpr u32 PBPAFMT_ARGB = 2;
+constexpr u32 PBPAFMT_LUT8 = 3;
+constexpr u32 PBPAFMT_GREY8 = 4;
 constexpr u32 DTM_FRAMEBOX = 0x601;
 constexpr u32 DTM_PROCLAYOUT = 0x602;
 constexpr u32 DTM_ASYNCLAYOUT = 0x603;
@@ -94,6 +114,8 @@ constexpr u32 DTM_SELECT = 0x605;
 constexpr u32 DTM_CLEARSELECTED = 0x606;
 constexpr u32 DTM_COPY = 0x607;
 constexpr u32 DTM_WRITE = 0x650;
+constexpr u32 PDTM_WRITEPIXELARRAY = 0x660;
+constexpr u32 PDTM_READPIXELARRAY = 0x661;
 
 // The stand-in datatypesclass's instance data, laid out as the real one's.
 constexpr u32 dt_Domain = 22;
@@ -424,6 +446,12 @@ struct Rig {
         set(object, {{DTA_ObjName, kName}, {DTA_NominalHoriz, width}, {DTA_NominalVert, height},
                      {PDTA_BitMap, bm}, {PDTA_ModeID, 0x8000}});
         set(object, {{PDTA_NumColors, static_cast<u32>(colours.size())}});
+        set_palette(object, colours);
+        return object;
+    }
+
+    void set_palette(u32 object, const std::vector<u32>& colours) {
+        set(object, {{PDTA_NumColors, static_cast<u32>(colours.size())}});
         const u32 cmap = get(object, PDTA_ColorRegisters);
         const u32 cregs = get(object, PDTA_CRegs);
         CHECK(cmap != 0);
@@ -435,7 +463,46 @@ struct Rig {
                 r.put32(cregs + i * 12 + k * 4, c * 0x01010101u);
             }
         }
+    }
+
+    // A picture object for a subclass that sends its pixels, its header
+    // filled in as ilbm.datatype does.
+    u32 create(u32 width, u32 height, u32 depth, u32 masking = 0) {
+        r.str(kName, "pic");
+        const u32 tags = r.tags(kTags, {{GA_Left, 0}, {GA_Top, 0}, {GA_Width, 320},
+                                        {GA_Height, 200}, {GA_ID, 7}, {0, 0}});
+        const u32 object = bo().new_object(sub, 0, tags);
+        CHECK(object != 0);
+        const u32 bmh = get(object, PDTA_BitMapHeader);
+        CHECK(bmh != 0);
+        r.put16(bmh, width);
+        r.put16(bmh + 2, height);
+        r.put8(bmh + 8, depth);
+        r.put8(bmh + 9, masking);
+        r.put8(bmh + 10, 1);
+        r.put8(bmh + 14, 10);
+        r.put8(bmh + 15, 11);
+        r.put16(bmh + 16, 320);
+        r.put16(bmh + 18, 200);
+        set(object, {{DTA_ObjName, kName}, {DTA_NominalHoriz, width},
+                     {DTA_NominalVert, height}});
         return object;
+    }
+
+    u32 create_v43(u32 width, u32 height, u32 depth, u32 masking = 0) {
+        const u32 object = create(width, height, depth, masking);
+        set(object, {{PDTA_SourceMode, PMODE_V43}});
+        return object;
+    }
+
+    u32 write_pixels(u32 object, u32 data, u32 format, u32 mod, u32 left, u32 top, u32 width,
+                     u32 height) {
+        return send(object, {PDTM_WRITEPIXELARRAY, data, format, mod, left, top, width, height});
+    }
+
+    u32 read_pixels(u32 object, u32 data, u32 format, u32 mod, u32 left, u32 top, u32 width,
+                    u32 height) {
+        return send(object, {PDTM_READPIXELARRAY, data, format, mod, left, top, width, height});
     }
 };
 
@@ -550,12 +617,24 @@ void new_object_has_storage_for_its_subclass() {
     for (u32 at = methods; t.r.get32(at) != 0xFFFFFFFF; at += 4) {
         list.push_back(t.r.get32(at));
     }
-    CHECK_EQ(list.size(), 14u);
+    CHECK_EQ(list.size(), 16u);
     CHECK_EQ(list.front(), OM_NEW);
-    CHECK_EQ(list.back(), DTM_WRITE);
+    CHECK_EQ(list.back(), PDTM_READPIXELARRAY);
+    bool writes = false;
+    bool reads = false;
     for (const u32 m : list) {
         CHECK(m != DTM_COPY);
+        writes = writes || m == PDTM_WRITEPIXELARRAY;
+        reads = reads || m == PDTM_READPIXELARRAY;
     }
+    CHECK(writes);
+    CHECK(reads);
+    // The V43 tags start at their V42 defaults.
+    CHECK_EQ(t.get(object, PDTA_SourceMode), PMODE_V42);
+    CHECK_EQ(t.get(object, PDTA_DestMode), PMODE_V42);
+    CHECK_EQ(t.get(object, PDTA_UseFriendBitMap), 1u);
+    CHECK_EQ(t.get(object, PDTA_MaskPlane), 0u);
+    CHECK_EQ(t.get(object, PDTA_AlphaChannel), 0u);
     // The colour tables come with the number of colours, apart.
     t.set(object, {{PDTA_NumColors, 32}});
     CHECK_EQ(t.get(object, PDTA_NumColors), 32u);
@@ -1217,6 +1296,1125 @@ void an_ended_run_stays_ended() {
     t.r.intuition.free_gadget_info(info);
 }
 
+void put_bytes(GfxRig& r, u32 at, std::initializer_list<u8> bytes) {
+    for (const u8 byte : bytes) {
+        r.put8(at++, byte);
+    }
+}
+
+void v43_attributes_are_stored_and_answered() {
+    Rig t;
+    const u32 object = t.create(4, 4, 8);
+    CHECK_EQ(t.get(object, PDTA_SourceMode), PMODE_V42);
+    CHECK_EQ(t.get(object, PDTA_DestMode), PMODE_V42);
+    CHECK_EQ(t.get(object, PDTA_UseFriendBitMap), 1u);
+    t.set(object, {{PDTA_SourceMode, PMODE_V43}, {PDTA_DestMode, PMODE_V43},
+                   {PDTA_UseFriendBitMap, 0}});
+    CHECK_EQ(t.get(object, PDTA_SourceMode), PMODE_V43);
+    CHECK_EQ(t.get(object, PDTA_DestMode), PMODE_V43);
+    CHECK_EQ(t.get(object, PDTA_UseFriendBitMap), 0u);
+    // OM_UPDATE stores them too.
+    const u32 tags = t.r.tags(kTags + 0x100, {{PDTA_DestMode, PMODE_V42}, {0, 0}});
+    t.send(object, {OM_UPDATE, tags, 0});
+    CHECK_EQ(t.get(object, PDTA_DestMode), PMODE_V42);
+    // The direct pixel buffer and the dirty frame tags are ignored.
+    t.set(object, {{PDTA_ObtainPixelBuffer, kPixels}, {PDTA_SubClassRendersAll, 1}});
+    CHECK_EQ(t.get(object, PDTA_SourceMode), PMODE_V43);
+    t.bo().dispose_object(object);
+}
+
+void pixel_writes_need_v43_and_stay_inside() {
+    Rig t;
+    const u32 object = t.create(4, 2, 8);
+    for (u32 i = 0; i < 8; ++i) {
+        t.r.put8(kPixels + i, static_cast<u8>(i));
+    }
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 0u);
+    CHECK_EQ(t.get(object, PDTA_NumColors), 0u);
+    t.set(object, {{PDTA_SourceMode, PMODE_V43}});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+    // The first indexed write made the 256 colours, and the frame is the
+    // buffer's.
+    CHECK_EQ(t.get(object, PDTA_NumColors), 256u);
+    const u32 info = t.s.data(object) + dt_FrameInfo;
+    CHECK_EQ(t.r.get32(info + 12), 4u);
+    CHECK_EQ(t.r.get32(info + 16), 2u);
+    CHECK_EQ(t.r.get32(info + 20), 8u);
+    // RGB has no place in indexed storage.
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_RGB, 12, 0, 0, 4, 2), 0u);
+    // The rectangle and its rows stay inside the buffer.
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 1, 0, 4, 2), 0u);
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 2, 0, 0, 4, 2), 0u);
+    CHECK_EQ(t.write_pixels(object, 0, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 0u);
+    t.bo().dispose_object(object);
+}
+
+void indexed_writes_keep_indexes_and_make_a_grey_palette() {
+    Rig t;
+    const u32 object = t.create_v43(4, 2, 8);
+    t.set_palette(object, {0x000000, 0xFF0000, 0x00FF00, 0xFFFFFF});
+    put_bytes(t.r, kPixels, {0, 1, 2, 3, 3, 2, 1, 0});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+    for (u32 i = 0; i < 8; ++i) {
+        CHECK_EQ(t.r.get8(kPixels2 + i), t.r.get8(kPixels + i));
+    }
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGBA, 16, 0, 0, 4, 2), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0u);          // index 0, black
+    CHECK_EQ(t.r.get8(kPixels2 + 4), 0xFFu);   // index 1, red
+    CHECK_EQ(t.r.get8(kPixels2 + 8), 0u);      // index 2, green
+    CHECK_EQ(t.r.get8(kPixels2 + 9), 0xFFu);
+    CHECK_EQ(t.r.get8(kPixels2 + 12), 0xFFu);  // index 3, white
+    CHECK_EQ(t.r.get8(kPixels2 + 7), 0xFFu);   // alpha
+    // A first GREY8 write makes the indexed source a 256 grey ramp.
+    put_bytes(t.r, kPixels, {0, 64, 128, 255, 255, 128, 64, 0});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_GREY8, 4, 0, 0, 4, 2), 1u);
+    CHECK_EQ(t.get(object, PDTA_NumColors), 256u);
+    const u32 cmap = t.get(object, PDTA_ColorRegisters);
+    CHECK_EQ(t.r.get8(cmap), 0u);
+    CHECK_EQ(t.r.get8(cmap + 64 * 3), 64u);
+    CHECK_EQ(t.r.get8(cmap + 128 * 3 + 2), 128u);
+    CHECK_EQ(t.r.get8(cmap + 255 * 3 + 1), 255u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+    CHECK_EQ(t.r.get8(kPixels2 + 1), 64u);
+    t.bo().dispose_object(object);
+}
+
+void true_colour_writes_store_argb() {
+    Rig t;
+    const u32 object = t.create_v43(4, 1, 24, 4);
+    put_bytes(t.r, kPixels, {10, 20, 30, 40, 50, 60, 70, 80, 90, 1, 2, 3});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_ARGB, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0xFFu);
+    CHECK_EQ(t.r.get8(kPixels2 + 1), 10u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 30u);
+    CHECK_EQ(t.r.get8(kPixels2 + 15), 3u);
+    // RGBA keeps its alpha, ARGB its own order.
+    put_bytes(t.r, kPixels, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_RGBA, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGBA, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 4u);
+    CHECK_EQ(t.r.get8(kPixels2 + 7), 8u);
+    put_bytes(t.r, kPixels, {9, 11, 12, 13, 10, 21, 22, 23, 11, 31, 32, 33, 12, 41, 42, 43});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_ARGB, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_ARGB, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 9u);
+    CHECK_EQ(t.r.get8(kPixels2 + 4), 10u);
+    CHECK_EQ(t.r.get8(kPixels2 + 8), 11u);
+    // LUT8 goes through the colour registers, GREY8 through grey.
+    t.set_palette(object, {0x112233, 0x445566, 0x778899, 0xAABBCC});
+    put_bytes(t.r, kPixels, {0, 1, 2, 3});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0x11u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 0x44u);
+    CHECK_EQ(t.r.get8(kPixels2 + 6), 0x77u);
+    put_bytes(t.r, kPixels, {0, 85, 170, 255});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_GREY8, 4, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 85u);
+    CHECK_EQ(t.r.get8(kPixels2 + 6), 170u);
+    CHECK_EQ(t.r.get8(kPixels2 + 11), 255u);
+    t.bo().dispose_object(object);
+}
+
+void header_changes_reallocate_the_buffer() {
+    Rig t;
+    const u32 object = t.create_v43(2, 2, 8);
+    put_bytes(t.r, kPixels, {0, 1, 2, 3});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 2, 0, 0, 2, 2), 1u);
+    const u32 info = t.s.data(object) + dt_FrameInfo;
+    CHECK_EQ(t.r.get32(info + 12), 2u);
+    const u32 bmh = t.get(object, PDTA_BitMapHeader);
+    t.r.put16(bmh, 4);
+    t.r.put16(bmh + 2, 4);
+    for (u32 i = 0; i < 16; ++i) {
+        t.r.put8(kPixels + i, static_cast<u8>(i));
+    }
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 4), 1u);
+    CHECK_EQ(t.r.get32(info + 12), 4u);
+    CHECK_EQ(t.r.get32(info + 16), 4u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 0, 0, 4, 4), 1u);
+    CHECK_EQ(t.r.get8(kPixels2 + 15), 15u);
+    // Deeper, the same write makes ARGB storage.
+    t.r.put8(bmh + 8, 24);
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get32(info + 20), 24u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGBA, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 0xFFu);
+    // A buffer that cannot be had, or would not fit its arithmetic.
+    t.r.put16(bmh, 0xFFFF);
+    t.r.put16(bmh + 2, 0xFFFF);
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 1, 1), 0u);
+    t.r.put16(bmh, 0x4000);
+    t.r.put16(bmh + 2, 0x4000);
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 1, 1), 0u);
+    t.bo().dispose_object(object);
+}
+
+void writes_and_reads_refuse_unreadable_memory() {
+    {
+        Rig t;
+        const u32 object = t.create_v43(4, 1, 8);
+        CHECK_EQ(t.write_pixels(object, kTestGuestBytes - 2, PBPAFMT_LUT8, 4, 0, 0, 4, 1),
+                 0u);
+        CHECK_EQ(t.r.cpu().exit, ExitReason::BusError);
+    }
+    {
+        Rig t;
+        const u32 object = t.create_v43(4, 1, 8);
+        put_bytes(t.r, kPixels, {0, 1, 2, 3});
+        CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 1), 1u);
+        CHECK_EQ(t.read_pixels(object, kTestGuestBytes - 1, PBPAFMT_LUT8, 4, 0, 0, 4, 1),
+                 0u);
+        CHECK_EQ(t.r.cpu().exit, ExitReason::BusError);
+    }
+}
+
+void reads_need_a_source_and_stay_inside() {
+    Rig t;
+    const u32 object = t.create(4, 4, 8);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 4), 0u);
+    t.set(object, {{PDTA_SourceMode, PMODE_V43}});
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 4), 0u);
+    for (u32 i = 0; i < 16; ++i) {
+        t.r.put8(kPixels + i, static_cast<u8>(i));
+    }
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 4), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 0, 0, 4, 4), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 1, 0, 4, 4), 0u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 0, 1, 4, 4), 0u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 2, 0, 0, 4, 4), 0u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 4), 1u);
+    // A true colour source has no index to give.
+    const u32 argb = t.create_v43(4, 1, 24);
+    put_bytes(t.r, kPixels, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
+    CHECK_EQ(t.write_pixels(argb, kPixels, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.read_pixels(argb, kPixels2, PBPAFMT_LUT8, 4, 0, 0, 4, 1), 0u);
+    CHECK_EQ(t.read_pixels(argb, kPixels2, PBPAFMT_GREY8, 4, 0, 0, 4, 1), 1u);
+    t.bo().dispose_object(argb);
+    t.bo().dispose_object(object);
+}
+
+// The caller's array starts at the rectangle's first pixel, wherever in
+// the picture the rectangle lies.
+void pixel_arrays_start_at_the_rectangle() {
+    Rig t;
+    const u32 object = t.create_v43(4, 4, 8);
+    put_bytes(t.r, kPixels, {1, 2, 0, 0, 3, 4});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 1, 2, 2, 2), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 0, 0, 4, 4), 1u);
+    for (u32 i = 0; i < 16; ++i) {
+        const u32 expected = i == 9 ? 1u : i == 10 ? 2u : i == 13 ? 3u : i == 14 ? 4u : 0u;
+        CHECK_EQ(t.r.get8(kPixels2 + i), expected);
+    }
+    t.r.put32(kPixels2, 0);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 0, 1, 3, 2, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 3u);
+    CHECK_EQ(t.r.get8(kPixels2 + 1), 4u);
+    t.bo().dispose_object(object);
+}
+
+void planar_reads_use_the_colour_registers_and_alpha() {
+    Rig t;
+    const u32 object = t.load(4, 2, 2, {0x112233, 0x445566, 0x778899, 0xAABBCC});
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 2), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0x11u);
+    CHECK_EQ(t.r.get8(kPixels2 + 6), 0x44u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 1, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0x44u);
+    CHECK_EQ(t.r.get8(kPixels2 + 6), 0x77u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_GREY8, 4, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 30u);
+    CHECK_EQ(t.r.get8(kPixels2 + 1), 30u);
+    CHECK_EQ(t.r.get8(kPixels2 + 2), 81u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 81u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0u);
+    CHECK_EQ(t.r.get8(kPixels2 + 2), 1u);
+    // A transparent index is see-through.
+    const u32 bmh = t.get(object, PDTA_BitMapHeader);
+    t.r.put8(bmh + 9, 2);
+    t.r.put16(bmh + 12, 1);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGBA, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 0xFFu);
+    CHECK_EQ(t.r.get8(kPixels2 + 11), 0u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_ARGB, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2), 0xFFu);
+    CHECK_EQ(t.r.get8(kPixels2 + 8), 0u);
+    // No source at all.
+    t.set(object, {{PDTA_ClassBitMap, 0}});
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 1), 0u);
+    t.bo().dispose_object(object);
+}
+
+void a_true_colour_picture_lays_out_on_argb32() {
+    Rig t;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 tags = t.r.tags(kTags + 0x100, {{SA_DisplayID, display_modes::hombre_id(0, 2)},
+                                              {SA_Depth, 24}, {0, 0}});
+    const u32 screen = t.r.intuition.open_screen(0, tags);
+    CHECK(screen != 0);
+    set_colour(t.r, screen, 0, 0x0000FF);
+    const u32 window = open_window(t.r, screen);
+    const u32 object = t.create_v43(4, 2, 24, 4);
+    put_bytes(t.r, kPixels,
+              {0x80, 0x11, 0x22, 0x33, 0x00, 0x44, 0x55, 0x66, 0xFF, 0x77, 0x88, 0x99, 0x40,
+               0xAA, 0xBB, 0xCC, 0xFF, 0x01, 0x02, 0x03, 0x80, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+               0x00, 0x00, 0xFF, 0x80, 0x80, 0x80});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_ARGB, 16, 0, 0, 4, 2), 1u);
+    CHECK_EQ(t.get(object, PDTA_AlphaChannel), 1u);
+    lay_out(t, object, window, 1);
+    const DeepBitmap* deep = t.r.graphics.deep(t.get(object, PDTA_DestBitMap));
+    CHECK(deep != nullptr);
+    CHECK(deep->fmt == PixFmt::Argb32);
+    CHECK_EQ(t.r.get32(deep->pixels), 0x80112233u);
+    CHECK_EQ(t.r.get32(deep->pixels + 4), 0x00445566u);
+    CHECK_EQ(t.r.get32(deep->pixels + 8), 0xFF778899u);
+    CHECK_EQ(t.r.get32(deep->pixels + 12), 0x40AABBCCu);
+    CHECK_EQ(t.get(object, PDTA_NumAlloc), 0u);
+    // The alpha is kept in the destination; the mask plane, for those who
+    // draw the picture themselves, has the pixels of at least half alpha.
+    const u32 mask = t.get(object, PDTA_MaskPlane);
+    CHECK(mask != 0);
+    CHECK_EQ(t.r.get8(mask), 0xA0u);
+    CHECK_EQ(t.r.get8(mask + 2), 0xD0u);
+    // Rendering blends the destination over the window, which was erased
+    // to pen 0 first.
+    const u32 rp = t.r.get32(window + wd_RPort);
+    const u32 info = t.r.intuition.make_gadget_info(window);
+    t.send(object, {GM_RENDER, info, rp, GREDRAW_REDRAW});
+    const DeepBitmap* shown = t.r.graphics.deep(t.r.get32(rp + rp_BitMap));
+    CHECK(shown != nullptr);
+    CHECK_EQ(t.r.get32(shown->pixels), 0xFF091199u);
+    CHECK_EQ(t.r.get32(shown->pixels + 4), 0xFF0000FFu);
+    CHECK_EQ(t.r.get32(shown->pixels + 8), 0xFF778899u);
+    CHECK_EQ(t.r.get32(shown->pixels + 12), 0xFF2B2FF2u);
+    t.r.intuition.free_gadget_info(info);
+    t.bo().dispose_object(object);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+void a_true_colour_picture_lays_out_on_rgb16() {
+    Rig t;
+    const u32 screen = open_hombre_screen(t, 1);
+    const u32 window = open_window(t.r, screen);
+    const u32 object = t.create_v43(4, 1, 24);
+    put_bytes(t.r, kPixels, {0x11, 0x22, 0x33, 0x80, 0x40, 0x80, 0xFF, 0xFF, 0xFF, 0x00,
+                             0x00, 0x00});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+    lay_out(t, object, window, 1);
+    const DeepBitmap* deep = t.r.graphics.deep(t.get(object, PDTA_DestBitMap));
+    CHECK(deep != nullptr);
+    CHECK(deep->fmt == PixFmt::Rgb16);
+    CHECK_EQ(t.r.get16(deep->pixels), remap::rgb16(0x11, 0x22, 0x33, 0, 0));
+    CHECK_EQ(t.r.get16(deep->pixels + 2), remap::rgb16(0x80, 0x40, 0x80, 1, 0));
+    CHECK_EQ(t.r.get16(deep->pixels + 4), remap::rgb16(0xFF, 0xFF, 0xFF, 2, 0));
+    CHECK_EQ(t.r.get16(deep->pixels + 6), remap::rgb16(0x00, 0x00, 0x00, 3, 0));
+    t.bo().dispose_object(object);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+void a_true_colour_picture_lays_out_on_palette_screens() {
+    for (const u32 depth : {8u, 2u}) {
+        Rig t;
+        const u32 screen = open_planar_screen(t.r, depth);
+        const u32 window = open_window(t.r, screen);
+        const u32 object = t.create_v43(4, 2, 24);
+        put_bytes(t.r, kPixels,
+                  {0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0xFF, 0x00,
+                   0x00, 0x00, 0xFF, 0x12, 0x34, 0x56, 0x80, 0x80, 0x80, 0x11, 0x22, 0x33});
+        CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_RGB, 12, 0, 0, 4, 2), 1u);
+        lay_out(t, object, window, 1);
+        const u32 dest = t.get(object, PDTA_DestBitMap);
+        CHECK_EQ(t.r.get8(dest + bm_Depth), depth);
+        const u32 levels = remap::levels(depth);
+        CHECK_EQ(t.get(object, PDTA_NumColors), levels * levels * levels);
+        const u32 info = t.s.data(object) + dt_FrameInfo;
+        CHECK_EQ(t.r.get32(info + 28), t.get(object, PDTA_CRegs));
+        const u32 cregs = t.get(object, PDTA_CRegs);
+        for (u32 i = 0; i < levels * levels * levels; ++i) {
+            u8 red = 0, green = 0, blue = 0;
+            remap::cube_colour(i, levels, red, green, blue);
+            CHECK_EQ(t.r.get32(cregs + i * 12) >> 24, static_cast<u32>(red));
+            CHECK_EQ(t.r.get32(cregs + i * 12 + 4) >> 24, static_cast<u32>(green));
+            CHECK_EQ(t.r.get32(cregs + i * 12 + 8) >> 24, static_cast<u32>(blue));
+        }
+        const u32 table = t.get(object, PDTA_ColorTable);
+        const u32 table2 = t.get(object, PDTA_ColorTable2);
+        for (u32 y = 0; y < 2; ++y) {
+            for (u32 x = 0; x < 4; ++x) {
+                const u32 at = (y * 4 + x) * 3;
+                const u32 index =
+                    remap::cube_index(t.r.get8(kPixels + at), t.r.get8(kPixels + at + 1),
+                                      t.r.get8(kPixels + at + 2), x, y, levels);
+                CHECK_EQ(planar_pixel(t.r, dest, x, y), t.r.get8(table + index));
+                CHECK_EQ(t.r.get8(table2 + index), t.r.get8(table + index));
+            }
+        }
+        t.bo().dispose_object(object);
+    }
+}
+
+void an_indexed_chunky_picture_lays_out_like_a_planar_one() {
+    Rig t;
+    const u32 screen = open_planar_screen(t.r, 3);
+    const u32 window = open_window(t.r, screen);
+    const u32 palette[] = {0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00,
+                           0x0000FF, 0x808080, 0xFFFF00, 0x00FFFF};
+    for (u32 i = 0; i < 8; ++i) {
+        set_colour(t.r, screen, i, palette[i]);
+    }
+    // White, blue, a dark red between red and black, black.
+    const u32 object = t.create_v43(40, 10, 2);
+    t.set_palette(object, {0xFFFFFF, 0x0000FF, 0x900000, 0x000000});
+    for (u32 y = 0; y < 10; ++y) {
+        for (u32 x = 0; x < 40; ++x) {
+            t.r.put8(kPixels + y * 40 + x, static_cast<u8>((x / 2 + y) % 4));
+        }
+    }
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 40, 0, 0, 40, 10), 1u);
+    t.s.notifies.clear();
+    CHECK(lay_out(t, object, window, 1) != 0);
+    const u32 dest = t.get(object, PDTA_DestBitMap);
+    CHECK_EQ(t.r.get8(dest + bm_Depth), 3u);
+    const u32 info = t.s.data(object) + dt_FrameInfo;
+    CHECK_EQ(t.r.get32(info + 12), 40u);
+    CHECK_EQ(t.r.get32(info + 16), 10u);
+    CHECK_EQ(t.r.get32(info + 20), 2u);
+    const u32 table = t.get(object, PDTA_ColorTable);
+    const u32 table2 = t.get(object, PDTA_ColorTable2);
+    CHECK_EQ(t.r.get8(table), 1u);
+    CHECK_EQ(t.r.get8(table + 1), 4u);
+    CHECK_EQ(t.r.get8(table + 3), 0u);
+    const u32 red = t.r.get8(table + 2);
+    CHECK(red == 0 || red == 2);
+    CHECK(t.r.get8(table2 + 2) != red);
+    CHECK_EQ(t.get(object, PDTA_NumAlloc), 4u);
+    CHECK_EQ(planar_pixel(t.r, dest, 0, 0), 1u);
+    CHECK_EQ(planar_pixel(t.r, dest, 2, 0), 4u);
+    CHECK_EQ(planar_pixel(t.r, dest, 4, 0), red);
+    CHECK_EQ(planar_pixel(t.r, dest, 6, 0), 0u);
+    CHECK(gfx_test::logged("picture.datatype: 40x10x2 on 3 planes, 4 pens"));
+    t.bo().dispose_object(object);
+}
+
+void a_transparent_index_masks_the_render() {
+    Rig t;
+    const u32 screen = open_planar_screen(t.r, 3);
+    const u32 window = open_window(t.r, screen);
+    const u32 rp = t.r.get32(window + wd_RPort);
+    for (u32 i = 0; i < 4; ++i) {
+        set_colour(t.r, screen, i, i == 0 ? 0x000000 : 0xFFFFFF);
+    }
+    const u32 object = t.create_v43(4, 3, 8, 2);
+    const u32 bmh = t.get(object, PDTA_BitMapHeader);
+    t.r.put16(bmh + 12, 0);
+    t.set_palette(object, {0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00});
+    put_bytes(t.r, kPixels, {0, 1, 2, 3, 1, 1, 1, 1, 0, 0, 0, 0});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 3), 1u);
+    CHECK_EQ(t.get(object, PDTA_AlphaChannel), 0u);
+    lay_out(t, object, window, 1);
+    const u32 dest = t.get(object, PDTA_DestBitMap);
+    CHECK_EQ(t.r.get8(dest + bm_Depth), 8u);
+    const u32 mask = t.get(object, PDTA_MaskPlane);
+    CHECK(mask != 0);
+    const u32 stride = t.r.get16(dest + bm_BytesPerRow);
+    CHECK_EQ(t.r.get8(mask), 0x70u);
+    CHECK_EQ(t.r.get8(mask + stride), 0xF0u);
+    CHECK_EQ(t.r.get8(mask + stride * 2), 0x00u);
+    const u32 table = t.get(object, PDTA_ColorTable);
+    const u32 pen1 = t.r.get8(table + 1);
+    const u32 pen2 = t.r.get8(table + 2);
+    // The window starts in pen 3; the render clears the picture's area and
+    // draws only what the mask lets through.
+    t.r.graphics.set_pens(rp, 3, 0, JAM2);
+    t.r.graphics.rect_fill(rp, 0, 0, 3, 2);
+    const u32 info = t.r.intuition.make_gadget_info(window);
+    t.send(object, {GM_RENDER, info, rp, GREDRAW_REDRAW});
+    CHECK_EQ(read_pixel(t.r, rp, 0, 0), 0u);
+    CHECK_EQ(read_pixel(t.r, rp, 1, 0), pen1);
+    CHECK_EQ(read_pixel(t.r, rp, 2, 0), pen2);
+    CHECK_EQ(read_pixel(t.r, rp, 1, 1), pen1);
+    CHECK_EQ(read_pixel(t.r, rp, 0, 2), 0u);
+    t.r.intuition.free_gadget_info(info);
+    t.bo().dispose_object(object);
+}
+
+void an_alpha_channel_thresholds_a_mask_and_blends() {
+    Rig t;
+    const u32 screen = open_hombre_screen(t, 1);
+    set_colour(t.r, screen, 0, 0x0000FF);
+    const u32 window = open_window(t.r, screen);
+    const u32 rp = t.r.get32(window + wd_RPort);
+    const u32 object = t.create_v43(4, 1, 24, 4);
+    put_bytes(t.r, kPixels,
+              {0x00, 0xFF, 0x00, 0x00, 0x40, 0x00, 0xFF, 0x00, 0x80, 0x00, 0x00, 0xFF,
+               0xFF, 0xFF, 0xFF, 0x00});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_ARGB, 16, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.get(object, PDTA_AlphaChannel), 1u);
+    lay_out(t, object, window, 1);
+    const u32 mask = t.get(object, PDTA_MaskPlane);
+    CHECK(mask != 0);
+    CHECK_EQ(t.r.get8(mask), 0x30u);
+    const u32 info = t.r.intuition.make_gadget_info(window);
+    t.send(object, {GM_RENDER, info, rp, GREDRAW_REDRAW});
+    const DeepBitmap* shown = t.r.graphics.deep(t.r.get32(rp + rp_BitMap));
+    CHECK(shown != nullptr);
+    // The transparent half was erased to pen 0, which is blue; the opaque
+    // half was copied as its dithered colour.
+    CHECK_EQ(t.r.get16(shown->pixels), 0x001Fu);
+    CHECK_EQ(t.r.get16(shown->pixels + 2), 0x001Fu);
+    CHECK_EQ(t.r.get16(shown->pixels + 4), remap::rgb16(0x00, 0x00, 0xFF, 2, 0));
+    CHECK_EQ(t.r.get16(shown->pixels + 6), remap::rgb16(0xFF, 0xFF, 0x00, 3, 0));
+    t.r.intuition.free_gadget_info(info);
+    t.bo().dispose_object(object);
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+void a_chunky_picture_writes_as_an_ilbm() {
+    Rig t;
+    const u32 object = t.create_v43(20, 3, 2);
+    t.set_palette(object, {0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00});
+    for (u32 y = 0; y < 3; ++y) {
+        for (u32 x = 0; x < 20; ++x) {
+            t.r.put8(kPixels + y * 20 + x, static_cast<u8>((x / 2 + y) % 4));
+        }
+    }
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 20, 0, 0, 20, 3), 1u);
+    CHECK_EQ(t.send(object, {DTM_WRITE, 0, 0x1234, 0, 0}), 1u);
+    u32 size = 0;
+    const u32 bmhd = chunk(g_written, "BMHD", size);
+    CHECK_EQ(g_written[bmhd + 1], 20u);
+    CHECK_EQ(g_written[bmhd + 3], 3u);
+    CHECK_EQ(g_written[bmhd + 8], 2u);
+    const u32 body = chunk(g_written, "BODY", size);
+    std::vector<u8> rows;
+    for (u32 i = body; i < body + size;) {
+        const i8 n = static_cast<i8>(g_written[i++]);
+        if (n >= 0) {
+            for (i32 k = 0; k <= n; ++k) {
+                rows.push_back(g_written[i++]);
+            }
+        } else {
+            for (i32 k = 0; k < 1 - n; ++k) {
+                rows.push_back(g_written[i]);
+            }
+            ++i;
+        }
+    }
+    for (u32 y = 0; y < 3; ++y) {
+        for (u32 x = 0; x < 20; ++x) {
+            u32 index = 0;
+            for (u32 plane = 0; plane < 2; ++plane) {
+                index |= ((rows[(y * 2 + plane) * 4 + x / 8] >> (7 - (x & 7))) & 1) << plane;
+            }
+            CHECK_EQ(index, (x / 2 + y) % 4);
+        }
+    }
+    // A true colour source is not written yet.
+    const u32 argb = t.create_v43(2, 2, 24);
+    put_bytes(t.r, kPixels, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
+    CHECK_EQ(t.write_pixels(argb, kPixels, PBPAFMT_RGB, 6, 0, 0, 2, 2), 1u);
+    CHECK_EQ(t.send(argb, {DTM_WRITE, 0, 0x1234, 0, 0}), 0u);
+    CHECK(gfx_test::logged("picture.datatype: could not write, true colour cannot be saved yet"));
+    t.bo().dispose_object(argb);
+    t.bo().dispose_object(object);
+}
+
+void chunky_sources_are_freed_when_they_should_be() {
+    Rig t;
+    const u32 screen = open_planar_screen(t.r, 3);
+    const u32 window = open_window(t.r, screen);
+    const u32 first = t.create_v43(8, 2, 8);
+    for (u32 i = 0; i < 16; ++i) {
+        t.r.put8(kPixels + i, static_cast<u8>(i));
+    }
+    CHECK_EQ(t.write_pixels(first, kPixels, PBPAFMT_LUT8, 8, 0, 0, 8, 2), 1u);
+    // A first layout, so that what the screen makes once is already there.
+    lay_out(t, first, window, 1);
+    t.bo().dispose_object(first);
+    const u32 before = t.r.exec.free_bytes();
+    const u32 object = t.create_v43(8, 2, 8);
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 8, 0, 0, 8, 2), 1u);
+    // A change back to V42 drops the buffer.
+    t.set(object, {{PDTA_SourceMode, PMODE_V42}});
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 8, 0, 0, 8, 2), 0u);
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 8, 0, 0, 8, 2), 0u);
+    t.set(object, {{PDTA_SourceMode, PMODE_V43}});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 8, 0, 0, 8, 2), 1u);
+    // PDTA_FreeSourceBitMap frees it after the first layout.
+    t.set(object, {{PDTA_FreeSourceBitMap, 1}});
+    lay_out(t, object, window, 1);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_LUT8, 8, 0, 0, 8, 2), 0u);
+    t.bo().dispose_object(object);
+    CHECK_EQ(t.r.exec.free_bytes(), before);
+}
+
+// Without a screen, a true colour picture gets an ARGB32 destination of
+// its own pixels, and an indexed one, whatever PDTA_Remap says, a planar
+// destination of the header's depth that holds its indexes.
+void chunky_pictures_without_a_screen_keep_their_pixels() {
+    Rig t;
+    const u32 ar = t.create_v43(2, 2, 24);
+    put_bytes(t.r, kPixels, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12});
+    CHECK_EQ(t.write_pixels(ar, kPixels, PBPAFMT_RGB, 6, 0, 0, 2, 2), 1u);
+    t.s.notifies.clear();
+    CHECK_EQ(t.send(ar, {DTM_ASYNCLAYOUT, 0, 1}), 1u);
+    const DeepBitmap* deep = t.r.graphics.deep(t.get(ar, PDTA_DestBitMap));
+    CHECK(deep != nullptr);
+    CHECK(deep->fmt == PixFmt::Argb32);
+    CHECK_EQ(t.r.get32(deep->pixels), 0xFF010203u);
+    CHECK_EQ(t.r.get32(deep->pixels + 4), 0xFF040506u);
+    CHECK_EQ(t.r.get32(deep->pixels + deep->bytes_per_row), 0xFF070809u);
+    CHECK_EQ(t.r.get32(deep->pixels + deep->bytes_per_row + 4), 0xFF0A0B0Cu);
+    CHECK_EQ(t.get(ar, PDTA_NumAlloc), 0u);
+    CHECK_EQ(t.get(ar, PDTA_MaskPlane), 0u);
+    CHECK(gfx_test::logged("picture.datatype: 2x2x24 on a deep bitmap of 32 bits"));
+    for (const u32 remap : {1u, 0u}) {
+        const u32 indexed = t.create_v43(4, 2, 3);
+        t.set_palette(indexed, {0, 0x111111, 0x222222, 0x333333, 0x444444, 0x555555,
+                                0x666666, 0x777777});
+        put_bytes(t.r, kPixels, {0, 1, 2, 3, 4, 5, 6, 7});
+        CHECK_EQ(t.write_pixels(indexed, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+        t.set(indexed, {{PDTA_Remap, remap}});
+        CHECK_EQ(t.send(indexed, {DTM_ASYNCLAYOUT, 0, 1}), 1u);
+        const u32 dest = t.get(indexed, PDTA_DestBitMap);
+        CHECK(dest != 0);
+        CHECK(t.r.graphics.deep(dest) == nullptr);
+        CHECK_EQ(t.r.get8(dest + bm_Depth), 3u);
+        for (u32 i = 0; i < 8; ++i) {
+            CHECK_EQ(planar_pixel(t.r, dest, i % 4, i / 4), i);
+        }
+        CHECK_EQ(t.get(indexed, PDTA_NumAlloc), 0u);
+        t.bo().dispose_object(indexed);
+    }
+    t.bo().dispose_object(ar);
+}
+
+// With PDTA_Remap off an indexed picture keeps its indexes on a screen too,
+// planar of the header's depth or LUT8 on a deep screen, and takes no pens;
+// a true colour one on a palette screen is still dithered into the cube.
+void chunky_pictures_without_remap() {
+    {
+        Rig t;
+        const u32 screen = open_planar_screen(t.r, 8);
+        const u32 window = open_window(t.r, screen);
+        const u32 indexed = t.create_v43(4, 2, 3);
+        t.set_palette(indexed, {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF, 0, 0x808080,
+                                0xFFFF00, 0x00FFFF});
+        put_bytes(t.r, kPixels, {0, 1, 2, 3, 4, 5, 6, 7});
+        CHECK_EQ(t.write_pixels(indexed, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+        t.set(indexed, {{PDTA_Remap, 0}});
+        CHECK(lay_out(t, indexed, window, 1) != 0);
+        const u32 dest = t.get(indexed, PDTA_DestBitMap);
+        CHECK(dest != 0);
+        CHECK(t.r.graphics.deep(dest) == nullptr);
+        CHECK_EQ(t.r.get8(dest + bm_Depth), 3u);
+        for (u32 i = 0; i < 8; ++i) {
+            CHECK_EQ(planar_pixel(t.r, dest, i % 4, i / 4), i);
+        }
+        CHECK_EQ(t.get(indexed, PDTA_NumAlloc), 0u);
+        // The cube of a true colour picture, as with PDTA_Remap on.
+        const u32 ar = t.create_v43(4, 1, 24);
+        put_bytes(t.r, kPixels, {0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0x12, 0x34, 0x56});
+        CHECK_EQ(t.write_pixels(ar, kPixels, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+        t.set(ar, {{PDTA_Remap, 0}});
+        CHECK(lay_out(t, ar, window, 1) != 0);
+        const u32 cube = t.get(ar, PDTA_DestBitMap);
+        CHECK(t.r.graphics.deep(cube) == nullptr);
+        CHECK_EQ(t.r.get8(cube + bm_Depth), 8u);
+        const u32 levels = remap::levels(8);
+        CHECK_EQ(t.get(ar, PDTA_NumColors), levels * levels * levels);
+        const u32 table = t.get(ar, PDTA_ColorTable);
+        for (u32 x = 0; x < 4; ++x) {
+            const u32 index =
+                remap::cube_index(t.r.get8(kPixels + x * 3), t.r.get8(kPixels + x * 3 + 1),
+                                  t.r.get8(kPixels + x * 3 + 2), x, 0, levels);
+            CHECK_EQ(planar_pixel(t.r, cube, x, 0), t.r.get8(table + index));
+        }
+        t.bo().dispose_object(ar);
+        t.bo().dispose_object(indexed);
+    }
+    {
+        Rig t;
+        const u32 screen = open_hombre_screen(t, 1);
+        const u32 window = open_window(t.r, screen);
+        const u32 indexed = t.create_v43(4, 2, 3);
+        put_bytes(t.r, kPixels, {0, 1, 2, 3, 4, 5, 6, 7});
+        CHECK_EQ(t.write_pixels(indexed, kPixels, PBPAFMT_LUT8, 4, 0, 0, 4, 2), 1u);
+        t.set(indexed, {{PDTA_Remap, 0}});
+        CHECK(lay_out(t, indexed, window, 1) != 0);
+        const DeepBitmap* deep = t.r.graphics.deep(t.get(indexed, PDTA_DestBitMap));
+        CHECK(deep != nullptr);
+        CHECK(deep->fmt == PixFmt::Lut8);
+        for (u32 i = 0; i < 8; ++i) {
+            CHECK_EQ(t.r.get8(deep->pixels + (i / 4) * deep->bytes_per_row + i % 4), i);
+        }
+        CHECK_EQ(t.get(indexed, PDTA_NumAlloc), 0u);
+        // It shows in the screen's colours of those pens.
+        CHECK(deep->palette == t.r.graphics.deep(screen + sc_BitMap)->palette);
+        t.bo().dispose_object(indexed);
+        display_modes::configure_hombre(0, 0, 0);
+    }
+}
+
+// graphics.library's EraseRect, counted instead of done.
+void count_call(void* ctx, Machine&) { ++*static_cast<u32*>(ctx); }
+
+struct Patch {
+    GfxRig& r;
+    u32 at;
+    u32 saved;
+    Patch(GfxRig& rig, u32 base, u32 lvo, u32& count) : r(rig), at(base - lvo) {
+        saved = r.get32(at);
+        const u16 id = r.jit.add_native(count_call, &count, "counted");
+        r.put16(at, static_cast<u16>(0xA000 | id));
+        r.put16(at + 2, 0x4E75);
+        r.jit.flush();
+    }
+    ~Patch() {
+        r.put32(at, saved);
+        r.jit.flush();
+    }
+};
+
+// What the first layout found is kept: PDTA_AlphaChannel answers from it
+// after the source is gone, a translucent picture on ARGB32 has a mask
+// plane besides its alpha, and an opaque one is drawn without an erase.
+void translucency_is_recorded_at_the_layout() {
+    {
+        Rig t;
+        const u32 screen = open_planar_screen(t.r, 3);
+        const u32 window = open_window(t.r, screen);
+        const u32 object = t.create_v43(4, 1, 24, 4);
+        put_bytes(t.r, kPixels, {0xFF, 1, 2, 3, 0x10, 4, 5, 6, 0xFF, 7, 8, 9, 0xFF, 1, 1, 1});
+        CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_ARGB, 16, 0, 0, 4, 1), 1u);
+        t.set(object, {{PDTA_FreeSourceBitMap, 1}});
+        CHECK(lay_out(t, object, window, 1) != 0);
+        CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGBA, 16, 0, 0, 4, 1), 0u);
+        CHECK_EQ(t.get(object, PDTA_AlphaChannel), 1u);
+        CHECK(t.get(object, PDTA_MaskPlane) != 0);
+        t.bo().dispose_object(object);
+    }
+    Rig t;
+    display_modes::configure_hombre(1280, 800, 8 * kMiB);
+    const u32 tags = t.r.tags(kTags + 0x100, {{SA_DisplayID, display_modes::hombre_id(0, 2)},
+                                              {SA_Depth, 24}, {0, 0}});
+    const u32 screen = t.r.intuition.open_screen(0, tags);
+    CHECK(screen != 0);
+    const u32 window = open_window(t.r, screen);
+    const u32 rp = t.r.get32(window + wd_RPort);
+    u32 erased = 0;
+    for (const u32 alpha : {0xFFu, 0x40u}) {
+        const u32 object = t.create_v43(4, 1, 24, 4);
+        put_bytes(t.r, kPixels, {0xFF, 1, 2, 3, 0xFF, 4, 5, 6, 0xFF, 7, 8, 9,
+                                 static_cast<u8>(alpha), 0xFF, 0xFF, 0xFF});
+        CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_ARGB, 16, 0, 0, 4, 1), 1u);
+        CHECK(lay_out(t, object, window, 1) != 0);
+        CHECK_EQ(t.get(object, PDTA_AlphaChannel), 1u);
+        const u32 mask = t.get(object, PDTA_MaskPlane);
+        CHECK_EQ(mask != 0, alpha != 0xFF);
+        if (mask != 0) {
+            CHECK_EQ(t.r.get8(mask), 0xE0u);
+        }
+        erased = 0;
+        {
+            Patch patch(t.r, t.r.graphics.graphics_base(), graphics_lvo::EraseRect, erased);
+            const u32 info = t.r.intuition.make_gadget_info(window);
+            t.send(object, {GM_RENDER, info, rp, GREDRAW_REDRAW});
+            t.r.intuition.free_gadget_info(info);
+        }
+        CHECK_EQ(erased, alpha == 0xFF ? 0u : 1u);
+        const DeepBitmap* shown = t.r.graphics.deep(t.r.get32(rp + rp_BitMap));
+        CHECK_EQ(t.r.get32(shown->pixels) & 0xFFFFFF, 0x010203u);
+        CHECK_EQ(t.r.get32(shown->pixels + 8) & 0xFFFFFF, 0x070809u);
+        t.bo().dispose_object(object);
+    }
+    display_modes::configure_hombre(0, 0, 0);
+}
+
+// The 256 greys are made again after the colour tables were.
+void a_grey_palette_follows_new_colour_tables() {
+    Rig t;
+    const u32 object = t.create_v43(4, 1, 8);
+    put_bytes(t.r, kPixels, {0, 85, 170, 255});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_GREY8, 4, 0, 0, 4, 1), 1u);
+    t.set(object, {{PDTA_NumColors, 16}});
+    t.set(object, {{PDTA_NumColors, 256}});
+    CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_GREY8, 4, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.read_pixels(object, kPixels2, PBPAFMT_RGB, 12, 0, 0, 4, 1), 1u);
+    CHECK_EQ(t.r.get8(kPixels2 + 3), 85u);
+    CHECK_EQ(t.r.get8(kPixels2 + 9), 255u);
+    CHECK_EQ(t.r.get8(kPixels2 + 11), 255u);
+    t.bo().dispose_object(object);
+}
+
+// Another task runs while a large picture is worked on: a task host whose
+// switch does what the other task would, once, and switches straight back.
+struct Yielder {
+    Exec* exec = nullptr;
+    std::function<void()> action;
+    bool back = false;
+    u32 switches = 0;
+};
+
+bool yield_create(void*, u32) { return true; }
+void yield_destroy(void*, u32) {}
+void yield_switch(void* ctx, u32, u32) {
+    Yielder& y = *static_cast<Yielder*>(ctx);
+    if (y.back) {
+        return;
+    }
+    ++y.switches;
+    if (y.action) {
+        const std::function<void()> action = std::move(y.action);
+        y.action = nullptr;
+        action();
+    }
+    y.back = true;
+    y.exec->yield_in_native();
+    y.back = false;
+}
+
+constexpr u32 kOtherTask = kData + 0x4000;
+constexpr u32 kOtherStack = kData + 0x6000;
+
+void start_yielder(Rig& t, Yielder& y) {
+    y.exec = &t.r.exec;
+    t.r.exec.set_task_host(TaskHost{yield_create, yield_switch, yield_destroy, nullptr,
+                                    nullptr, nullptr, nullptr, &y});
+    for (u32 i = 0; i < TC_SIZE; ++i) {
+        t.r.put8(kOtherTask + i, 0);
+    }
+    t.r.put32(kOtherTask + TC_SPLOWER, kOtherStack - 0x1000);
+    t.r.put32(kOtherTask + TC_SPUPPER, kOtherStack);
+    t.r.put32(kOtherTask + TC_SPREG, kOtherStack);
+    CHECK_EQ(t.r.exec.spawn_native(kOtherTask, [](void*) {}, nullptr, 0, false), kOtherTask);
+}
+
+// A source that goes while other tasks have their turn is not touched
+// after it: pixel array writes and reads and layouts give up.
+void a_source_that_goes_meanwhile_is_left_alone() {
+    constexpr u32 kWidth = 64;
+    constexpr u32 kHeight = 2048;
+    const auto drop = [](Rig& t, u32 object) {
+        t.set(object, {{PDTA_SourceMode, PMODE_V42}});
+        t.set(object, {{PDTA_SourceMode, PMODE_V43}});
+    };
+    {
+        Rig t;
+        Yielder y;
+        start_yielder(t, y);
+        const u32 object = t.create_v43(kWidth, kHeight, 8);
+        const u32 pixels = t.r.exec.alloc(kWidth * kHeight, MEMF_CLEAR);
+        CHECK(pixels != 0);
+        CHECK_EQ(t.write_pixels(object, pixels, PBPAFMT_LUT8, kWidth, 0, 0, 1, 1), 1u);
+        // The freed buffer is had again at once and must stay as it is.
+        u32 again = 0;
+        y.action = [&] {
+            drop(t, object);
+            again = t.r.exec.alloc(kWidth * kHeight, MEMF_CLEAR);
+            for (u32 i = 0; i < kWidth * kHeight; ++i) {
+                t.r.put8(again + i, 0x5A);
+            }
+        };
+        for (u32 i = 0; i < kWidth * kHeight; ++i) {
+            t.r.put8(pixels + i, 7);
+        }
+        CHECK_EQ(t.write_pixels(object, pixels, PBPAFMT_LUT8, kWidth, 0, 0, kWidth, kHeight),
+                 0u);
+        CHECK(y.switches != 0);
+        CHECK(again != 0);
+        u32 changed = 0;
+        for (u32 i = 0; i < kWidth * kHeight; ++i) {
+            changed += t.r.get8(again + i) != 0x5A ? 1 : 0;
+        }
+        CHECK_EQ(changed, 0u);
+        // A read gives up the same way.
+        CHECK_EQ(t.write_pixels(object, pixels, PBPAFMT_LUT8, kWidth, 0, 0, kWidth, kHeight),
+                 1u);
+        const u32 out = t.r.exec.alloc(kWidth * 3 * 1100, MEMF_CLEAR);
+        CHECK(out != 0);
+        y.action = [&] { drop(t, object); };
+        CHECK_EQ(t.read_pixels(object, out, PBPAFMT_RGB, kWidth * 3, 0, 0, kWidth, 1100), 0u);
+        t.r.exec.set_task_host(TaskHost{});
+    }
+    {
+        Rig t;
+        const u32 screen = open_planar_screen(t.r, 3);
+        const u32 window = open_window(t.r, screen);
+        Yielder y;
+        start_yielder(t, y);
+        const u32 object = t.create_v43(kWidth, kHeight, 8);
+        const u32 pixels = t.r.exec.alloc(kWidth * kHeight, MEMF_CLEAR);
+        CHECK(pixels != 0);
+        CHECK_EQ(t.write_pixels(object, pixels, PBPAFMT_LUT8, kWidth, 0, 0, kWidth, kHeight),
+                 1u);
+        y.action = [&] { drop(t, object); };
+        t.s.notifies.clear();
+        lay_out(t, object, window, 1);
+        CHECK(y.switches != 0);
+        CHECK(notified(t.s, DTA_ErrorLevel, 20));
+        t.bo().dispose_object(object);
+        // A planar source that PDTA_BitMap replaces.
+        const u32 planar = t.load(kWidth, kHeight, 3, {0, 0xFFFFFF, 0xFF0000, 0x00FF00});
+        const u32 replacement = t.alloc_bitmap(8, 8, 3);
+        y.action = [&] { t.set(planar, {{PDTA_BitMap, replacement}}); };
+        t.s.notifies.clear();
+        lay_out(t, planar, window, 1);
+        CHECK(notified(t.s, DTA_ErrorLevel, 20));
+        t.bo().dispose_object(planar);
+        t.r.exec.set_task_host(TaskHost{});
+    }
+}
+
+// The mask follows the scroll offsets: the picture's pixel at the offset
+// is drawn at the domain's corner, on planar and LUT8 screens.
+void a_masked_render_follows_the_scroll_offsets() {
+    for (const bool deep : {false, true}) {
+        Rig t;
+        const u32 screen = deep ? open_hombre_screen(t, 0) : open_planar_screen(t.r, 3);
+        for (u32 i = 0; i < 8; ++i) {
+            set_colour(t.r, screen, i, i * 0x242424);
+        }
+        const u32 window = open_window(t.r, screen);
+        const u32 rp = t.r.get32(window + wd_RPort);
+        constexpr u32 kW = 100;
+        constexpr u32 kH = 20;
+        const u32 object = t.create_v43(kW, kH, 8, 2);
+        t.r.put16(t.get(object, PDTA_BitMapHeader) + 12, 0);
+        std::vector<u32> palette(8);
+        for (u32 i = 0; i < 8; ++i) {
+            palette[i] = i * 0x242424;
+        }
+        t.set_palette(object, palette);
+        const auto index_of = [](u32 x, u32 y) {
+            return (x + y) % 5 == 0 ? 0u : 1u + (x * 3 + y) % 7;
+        };
+        for (u32 y = 0; y < kH; ++y) {
+            for (u32 x = 0; x < kW; ++x) {
+                t.r.put8(kPixels + y * kW + x, static_cast<u8>(index_of(x, y)));
+            }
+        }
+        CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, kW, 0, 0, kW, kH), 1u);
+        t.r.put16(object + gg_LeftEdge + 4, 32);
+        t.r.put16(object + gg_LeftEdge + 6, 10);
+        CHECK(lay_out(t, object, window, 1) != 0);
+        CHECK(t.get(object, PDTA_MaskPlane) != 0);
+        const u32 table = t.get(object, PDTA_ColorTable);
+        const u32 si = t.r.get32(object + gg_SpecialInfo);
+        for (const auto& [sx, sy] : {std::pair<u32, u32>{3, 0}, {0, 2}, {13, 7}, {68, 10}}) {
+            t.r.put32(si + si_TopHoriz, sx);
+            t.r.put32(si + si_TopVert, sy);
+            t.r.graphics.set_pens(rp, 3, 0, JAM2);
+            t.r.graphics.rect_fill(rp, 0, 0, 40, 15);
+            const u32 info = t.r.intuition.make_gadget_info(window);
+            t.send(object, {GM_RENDER, info, rp, GREDRAW_REDRAW});
+            t.r.intuition.free_gadget_info(info);
+            u32 wrong = 0;
+            for (u32 y = 0; y < 10; ++y) {
+                for (u32 x = 0; x < 32; ++x) {
+                    const u32 index = index_of(x + sx, y + sy);
+                    const u32 want = index == 0 ? 0u : t.r.get8(table + index);
+                    wrong += read_pixel(t.r, rp, x, y) != want ? 1 : 0;
+                }
+            }
+            CHECK_EQ(wrong, 0u);
+        }
+        t.bo().dispose_object(object);
+        if (deep) {
+            display_modes::configure_hombre(0, 0, 0);
+        }
+    }
+}
+
+// A first layout again gives the same picture, and what each one took
+// goes with the object; so do a mask and a colour cube.
+void layouts_again_and_their_masks_and_cubes_leak_nothing() {
+    Rig t;
+    const u32 screen = open_planar_screen(t.r, 3);
+    const u32 window = open_window(t.r, screen);
+    const auto make = [&](u32 kind) {
+        u32 object = 0;
+        if (kind == 0) {
+            object = t.create_v43(8, 2, 24, 4);
+            put_bytes(t.r, kPixels, {0x00, 30, 60, 90,  0xFF, 1, 2, 3,  0x00, 4, 5, 6,
+                                     0xFF, 7, 8, 9,     0xFF, 9, 9, 9,  0xFF, 99, 9, 9,
+                                     0x00, 0, 0, 0,     0xFF, 200, 9, 9});
+            CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_ARGB, 0, 0, 0, 8, 1), 1u);
+            CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_ARGB, 0, 0, 1, 8, 1), 1u);
+        } else {
+            object = t.create_v43(8, 2, 8, 2);
+            t.r.put16(t.get(object, PDTA_BitMapHeader) + 12, 1);
+            t.set_palette(object, {0, 0xFFFFFF, 0xFF0000, 0x00FF00});
+            put_bytes(t.r, kPixels, {0, 1, 2, 3, 3, 2, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0});
+            CHECK_EQ(t.write_pixels(object, kPixels, PBPAFMT_LUT8, 8, 0, 0, 8, 2), 1u);
+        }
+        return object;
+    };
+    for (const u32 kind : {0u, 1u}) {
+        const u32 warm = make(kind);
+        lay_out(t, warm, window, 1);
+        t.bo().dispose_object(warm);
+        const u32 before = t.r.exec.free_bytes();
+        const u32 object = make(kind);
+        std::vector<u32> first;
+        for (u32 n = 0; n < 3; ++n) {
+            CHECK(lay_out(t, object, window, 1) != 0);
+            const u32 dest = t.get(object, PDTA_DestBitMap);
+            const u32 mask = t.get(object, PDTA_MaskPlane);
+            CHECK(dest != 0);
+            CHECK(mask != 0);
+            std::vector<u32> seen{t.get(object, PDTA_NumColors), t.get(object, PDTA_NumAlloc),
+                                  t.r.get8(mask), t.r.get8(mask + 2)};
+            for (u32 y = 0; y < 2; ++y) {
+                for (u32 x = 0; x < 8; ++x) {
+                    seen.push_back(planar_pixel(t.r, dest, x, y));
+                }
+            }
+            if (n == 0) {
+                first = seen;
+            } else {
+                CHECK(seen == first);
+            }
+        }
+        t.bo().dispose_object(object);
+        CHECK_EQ(t.r.exec.free_bytes(), before);
+    }
+}
+
+// Remapped pixels are worked on in runs of 256; a picture wider than two
+// of them comes out right on both sides of each run's end.
+void a_wide_picture_is_remapped_across_runs() {
+    constexpr u32 kW = 700;
+    Rig t;
+    const u32 screen = open_planar_screen(t.r, 3);
+    const u32 palette[] = {0x000000, 0xFFFFFF, 0xFF0000, 0x00FF00,
+                           0x0000FF, 0x808080, 0xFFFF00, 0x00FFFF};
+    for (u32 i = 0; i < 8; ++i) {
+        set_colour(t.r, screen, i, palette[i]);
+    }
+    const u32 window = open_window(t.r, screen);
+    const u32 indexed = t.create_v43(kW, 2, 3);
+    t.set_palette(indexed, std::vector<u32>(palette, palette + 8));
+    const auto index_of = [](u32 x, u32 y) { return (x / 3 + y * 5) % 8; };
+    for (u32 y = 0; y < 2; ++y) {
+        for (u32 x = 0; x < kW; ++x) {
+            t.r.put8(kPixels + y * kW + x, static_cast<u8>(index_of(x, y)));
+        }
+    }
+    CHECK_EQ(t.write_pixels(indexed, kPixels, PBPAFMT_LUT8, kW, 0, 0, kW, 2), 1u);
+    CHECK(lay_out(t, indexed, window, 1) != 0);
+    const u32 dest = t.get(indexed, PDTA_DestBitMap);
+    const u32 table = t.get(indexed, PDTA_ColorTable);
+    const u32 table2 = t.get(indexed, PDTA_ColorTable2);
+    for (u32 y = 0; y < 2; ++y) {
+        for (const u32 from : {0u, 250u, 506u, 690u}) {
+            for (u32 x = from; x < from + 10; ++x) {
+                const u32 index = index_of(x, y);
+                CHECK_EQ(planar_pixel(t.r, dest, x, y),
+                         t.r.get8(((x + y) & 1) == 0 ? table + index : table2 + index));
+                CHECK_EQ(t.r.get8(table + index), index);
+            }
+        }
+    }
+    // True colour without a screen keeps every pixel.
+    const u32 ar = t.create_v43(kW, 1, 24);
+    for (u32 x = 0; x < kW; ++x) {
+        t.r.put8(kPixels + x * 3, static_cast<u8>(x));
+        t.r.put8(kPixels + x * 3 + 1, static_cast<u8>(x >> 8));
+        t.r.put8(kPixels + x * 3 + 2, static_cast<u8>(x * 7));
+    }
+    CHECK_EQ(t.write_pixels(ar, kPixels, PBPAFMT_RGB, kW * 3, 0, 0, kW, 1), 1u);
+    CHECK_EQ(t.send(ar, {DTM_ASYNCLAYOUT, 0, 1}), 1u);
+    const DeepBitmap* deep = t.r.graphics.deep(t.get(ar, PDTA_DestBitMap));
+    CHECK(deep != nullptr);
+    for (u32 x = 0; x < kW; ++x) {
+        CHECK_EQ(t.r.get32(deep->pixels + x * 4),
+                 0xFF000000u | ((x & 0xFF) << 16) | ((x >> 8) << 8) | ((x * 7) & 0xFF));
+    }
+    t.bo().dispose_object(ar);
+    t.bo().dispose_object(indexed);
+}
+
+// A picture wider or taller than 4096 pixels is drawn from far inside it.
+void pictures_past_4096_pixels_are_drawn() {
+    // On a planar screen (no display depth code), an RGB16 or an ARGB32 one.
+    constexpr u32 kPlanar = 9;
+    struct Size {
+        u32 width, height, sx, sy, code;
+    };
+    for (const Size& s : {Size{5000, 2, 4600, 0, kPlanar}, Size{4, 5000, 0, 4800, kPlanar},
+                          Size{5000, 2, 4600, 0, 1}, Size{4, 5000, 0, 4800, 2}}) {
+        Rig t;
+        const bool deep = s.code != kPlanar;
+        u32 screen = 0;
+        if (s.code == 2) {
+            display_modes::configure_hombre(1280, 800, 8 * kMiB);
+            const u32 tags = t.r.tags(kTags + 0x100,
+                                      {{SA_DisplayID, display_modes::hombre_id(0, 2)},
+                                       {SA_Depth, 24}, {0, 0}});
+            screen = t.r.intuition.open_screen(0, tags);
+        } else {
+            screen = deep ? open_hombre_screen(t, s.code) : open_planar_screen(t.r, 3);
+        }
+        CHECK(screen != 0);
+        for (u32 i = 0; i < 8; ++i) {
+            set_colour(t.r, screen, i, i * 0x242424);
+        }
+        const u32 window = open_window(t.r, screen);
+        const u32 rp = t.r.get32(window + wd_RPort);
+        const u32 object = t.create_v43(s.width, s.height, 3);
+        std::vector<u32> palette(8);
+        for (u32 i = 0; i < 8; ++i) {
+            palette[i] = i * 0x242424;
+        }
+        t.set_palette(object, palette);
+        const auto index_of = [](u32 x, u32 y) { return (x + y * 3) % 8; };
+        const u32 row = t.r.exec.alloc(s.width, MEMF_CLEAR);
+        for (u32 y = 0; y < s.height; ++y) {
+            for (u32 x = 0; x < s.width; ++x) {
+                t.r.put8(row + x, static_cast<u8>(index_of(x, y)));
+            }
+            CHECK_EQ(t.write_pixels(object, row, PBPAFMT_LUT8, s.width, 0, y, s.width, 1), 1u);
+        }
+        CHECK(lay_out(t, object, window, 1) != 0);
+        const u32 si = t.r.get32(object + gg_SpecialInfo);
+        t.r.put32(si + si_TopHoriz, s.sx);
+        t.r.put32(si + si_TopVert, s.sy);
+        const u32 info = t.r.intuition.make_gadget_info(window);
+        t.send(object, {GM_RENDER, info, rp, GREDRAW_REDRAW});
+        t.r.intuition.free_gadget_info(info);
+        // A true colour screen shows the colour of the index, a planar one
+        // its pen, which has the same colour.
+        const DeepBitmap* shown = t.r.graphics.deep(t.r.get32(rp + rp_BitMap));
+        CHECK_EQ(shown != nullptr, deep);
+        u32 wrong = 0;
+        for (u32 y = 0; y < (s.height < 8 ? s.height : 8); ++y) {
+            for (u32 x = 0; x < (s.width < 8 ? s.width : 8); ++x) {
+                const u32 index = index_of(s.sx + x, s.sy + y);
+                if (shown == nullptr) {
+                    wrong += read_pixel(t.r, rp, x, y) != index ? 1 : 0;
+                    continue;
+                }
+                const u32 bpp = bytes_per_pixel(shown->fmt);
+                const u32 at = shown->pixels + y * shown->bytes_per_row + x * bpp;
+                const u32 got = bpp == 2 ? t.r.get16(at) : t.r.get32(at) & 0xFFFFFF;
+                const u8 c = static_cast<u8>(index * 0x24);
+                wrong += got != (encode_rgb(shown->fmt, c, c, c) & 0xFFFFFF) ? 1 : 0;
+            }
+        }
+        CHECK_EQ(wrong, 0u);
+        t.bo().dispose_object(object);
+        if (deep) {
+            display_modes::configure_hombre(0, 0, 0);
+        }
+    }
+}
+
 }
 
 int main() {
@@ -1242,5 +2440,31 @@ int main() {
     an_unknown_mode_becomes_the_best_one();
     a_replaced_bitmap_is_freed();
     an_ended_run_stays_ended();
+    v43_attributes_are_stored_and_answered();
+    pixel_writes_need_v43_and_stay_inside();
+    indexed_writes_keep_indexes_and_make_a_grey_palette();
+    true_colour_writes_store_argb();
+    header_changes_reallocate_the_buffer();
+    writes_and_reads_refuse_unreadable_memory();
+    reads_need_a_source_and_stay_inside();
+    pixel_arrays_start_at_the_rectangle();
+    planar_reads_use_the_colour_registers_and_alpha();
+    a_true_colour_picture_lays_out_on_argb32();
+    a_true_colour_picture_lays_out_on_rgb16();
+    a_true_colour_picture_lays_out_on_palette_screens();
+    an_indexed_chunky_picture_lays_out_like_a_planar_one();
+    a_transparent_index_masks_the_render();
+    an_alpha_channel_thresholds_a_mask_and_blends();
+    a_chunky_picture_writes_as_an_ilbm();
+    chunky_sources_are_freed_when_they_should_be();
+    chunky_pictures_without_a_screen_keep_their_pixels();
+    chunky_pictures_without_remap();
+    translucency_is_recorded_at_the_layout();
+    a_grey_palette_follows_new_colour_tables();
+    a_source_that_goes_meanwhile_is_left_alone();
+    a_masked_render_follows_the_scroll_offsets();
+    layouts_again_and_their_masks_and_cubes_leak_nothing();
+    a_wide_picture_is_remapped_across_runs();
+    pictures_past_4096_pixels_are_drawn();
     return check::finish("test_picture_dt");
 }
