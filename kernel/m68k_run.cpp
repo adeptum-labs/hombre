@@ -1252,10 +1252,6 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     }
     jit.set_address_mask(address_mask);
     g_log = &log_line;
-    if (!task_stacks.init_kernel(pages)) {
-        fail("task stack window init failed");
-        return false;
-    }
     exec.set_task_host(TaskHost{&task_host_create, &task_host_switch, &task_host_destroy,
                                 &task_host_slice_over, &task_host_poll, &hook_trampoline,
                                 &task_host_now_us, nullptr});
@@ -1995,8 +1991,34 @@ constexpr char kAddDataTypes[] = "C:AddDataTypes";
 constexpr char kStartupSequence[] = "S:Startup-Sequence";
 constexpr u64 kStartupGraceUs = 750000;
 
-void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& drives,
-                      const char* path, const char* args) {
+// The boot task's host stack, which the Startup-Sequence, the boot shell
+// and the commands it runs nest in: larger than a task's, with a guard
+// page below it as every task stack has.
+constexpr u64 kBootStackBytes = 120 * 1024;
+
+// What the boot task runs, and where the caller's stack was left.
+struct BootRun {
+    const BootInfo* info;
+    PhysAllocator* pages;
+    const Drives* drives;
+    const char* path;
+    const char* args;
+    u64 caller_rsp;
+};
+static constinit BootRun boot_run{};
+
+static void run_boot_command(const BootInfo& info, PhysAllocator& pages,
+                             const Drives& drives, const char* path, const char* args);
+
+static void boot_task_body(void* arg) {
+    BootRun& run = *static_cast<BootRun*>(arg);
+    run_boot_command(*run.info, *run.pages, *run.drives, run.path, run.args);
+    u64 unused = 0;
+    task_switch(&unused, run.caller_rsp);
+}
+
+static void run_boot_command(const BootInfo& info, PhysAllocator& pages,
+                             const Drives& drives, const char* path, const char* args) {
     if (!start(info, pages, drives)) {
         return;
     }
@@ -2066,6 +2088,20 @@ void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& 
         // No keyboard: the window says why, and the boot ends as it always did.
         boot.shell.print_line(usb_keyboard_result().message);
     }
+}
+
+void m68k_run_command(const BootInfo& info, PhysAllocator& pages, const Drives& drives,
+                      const char* path, const char* args) {
+    if (!task_stacks.init_kernel(pages)) {
+        fail("task stack window init failed");
+        return;
+    }
+    boot_run = BootRun{&info, &pages, &drives, path, args, 0};
+    if (!task_stacks.create(0, &boot_task_body, &boot_run, kBootStackBytes)) {
+        fail("boot task stack failed");
+        return;
+    }
+    task_switch(&boot_run.caller_rsp, task_stacks.saved_rsp(0));
 }
 
 }

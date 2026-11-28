@@ -41,6 +41,8 @@ inline constexpr u64 kTaskStackBytes = 64 * 1024;
 inline constexpr u64 kTaskGuardBytes = 4096;
 inline constexpr u64 kTaskStackPages = kTaskStackBytes / 4096;
 inline constexpr u64 kTaskStackStride = 128 * 1024;
+// The most a stack of one slot can hold, above its guard page.
+inline constexpr u64 kTaskStackMaxBytes = kTaskStackStride - kTaskGuardBytes;
 inline constexpr u32 kMaxTaskStacks = 32;
 inline constexpr u64 kTaskStackEnd = kTaskStackBase + kMaxTaskStacks * kTaskStackStride;
 
@@ -82,19 +84,24 @@ public:
     // Kernel setup using the physical page allocator and live CR3.
     bool init_kernel(PhysAllocator& pages);
 
-    // Allocates a virtual stack slot and 64 KiB of physical pages for task id,
+    // Allocates a virtual stack slot and 64 KiB (or bytes) of physical pages for task id,
     // mapping them above an unmapped guard page and preparing the initial
     // task_switch frame to enter entry(arg). False if out of slots or pages.
-    bool create(u32 id, void (*entry)(void*), void* arg) {
+    bool create(u32 id, void (*entry)(void*), void* arg, u64 bytes = kTaskStackBytes) {
         return create_with_trampoline(id, entry, arg,
-                                      reinterpret_cast<u64>(&task_entry_trampoline));
+                                      reinterpret_cast<u64>(&task_entry_trampoline), bytes);
     }
 
-    bool create_with_trampoline(u32 id, void (*entry)(void*), void* arg, u64 trampoline_addr) {
+    // bytes, a whole number of pages up to kTaskStackMaxBytes, sizes the
+    // stack; its guard page stays below it.
+    bool create_with_trampoline(u32 id, void (*entry)(void*), void* arg, u64 trampoline_addr,
+                                u64 bytes = kTaskStackBytes) {
         if (!initialised_ || id >= kMaxTaskStacks || vslot_of_[id] != kNoSlot ||
-            entry == nullptr) {
+            entry == nullptr || bytes == 0 || bytes > kTaskStackMaxBytes ||
+            (bytes & (paging_detail::page_size - 1)) != 0) {
             return false;
         }
+        const u64 stack_pages = bytes / paging_detail::page_size;
         u32 vslot = kNoSlot;
         for (u32 s = 0; s < kMaxTaskStacks; ++s) {
             if (!vslot_used_[s]) {
@@ -109,7 +116,7 @@ public:
         const u64 bottom = slot_bottom(vslot);
         u64 top_page_phys = 0;
         u64 mapped_pages = 0;
-        for (; mapped_pages < kTaskStackPages; ++mapped_pages) {
+        for (; mapped_pages < stack_pages; ++mapped_pages) {
             const u64 phys = tables_.alloc_zeroed_page(tables_.ctx);
             if (phys == 0 || (phys & (paging_detail::page_size - 1)) != 0 ||
                 phys >= paging_detail::phys_limit) {
@@ -124,14 +131,14 @@ public:
                 rollback(bottom, mapped_pages);
                 return false;
             }
-            if (mapped_pages + 1 == kTaskStackPages) {
+            if (mapped_pages + 1 == stack_pages) {
                 top_page_phys = phys;
             }
         }
 
         u64* top_page = paging_detail::table_at(tables_, top_page_phys);
         if (top_page == nullptr) {
-            rollback(bottom, kTaskStackPages);
+            rollback(bottom, stack_pages);
             return false;
         }
 
@@ -151,7 +158,8 @@ public:
 
         vslot_used_[vslot] = true;
         vslot_of_[id] = vslot;
-        rsp_[id] = bottom + kTaskStackBytes - kFrameWords * sizeof(u64);
+        bytes_[id] = bytes;
+        rsp_[id] = bottom + bytes - kFrameWords * sizeof(u64);
         return true;
     }
 
@@ -169,7 +177,7 @@ public:
             return;
         }
         const u32 vslot = vslot_of_[id];
-        rollback(slot_bottom(vslot), kTaskStackPages);
+        rollback(slot_bottom(vslot), bytes_[id] / paging_detail::page_size);
         vslot_used_[vslot] = false;
         vslot_of_[id] = kNoSlot;
         rsp_[id] = 0;
@@ -198,7 +206,7 @@ public:
 
     u64 stack_top(u32 id) const {
         const u64 b = stack_bottom(id);
-        return b != 0 ? b + kTaskStackBytes : 0;
+        return b != 0 ? b + bytes_[id] : 0;
     }
 
     u64 guard_page(u32 id) const {
@@ -221,7 +229,7 @@ private:
             return false;
         }
         const u64 off = (virt - kTaskStackBase) % kTaskStackStride;
-        return off >= kTaskGuardBytes && off < kTaskGuardBytes + kTaskStackBytes;
+        return off >= kTaskGuardBytes && off < kTaskGuardBytes + kTaskStackMaxBytes;
     }
 
     bool map_4k(u64 virt, u64 phys, u64 flags) {
@@ -307,6 +315,7 @@ private:
     void* free_ctx_ = nullptr;
     u64 rsp_[kMaxTaskStacks]{};
     u32 vslot_of_[kMaxTaskStacks]{};
+    u64 bytes_[kMaxTaskStacks]{};
     bool vslot_used_[kMaxTaskStacks]{};
     bool initialised_ = false;
 };

@@ -515,6 +515,24 @@ void task_stack_window_maps_4k_with_guard_and_reuses_slots() {
 
     CHECK(stacks.create_with_trampoline(2, dummy_task_entry, nullptr, 0xCAFEBABEull));
     CHECK_EQ(stacks.stack_bottom(2), bottom1);
+
+    // A larger stack fills its slot up to the next slot's guard page.
+    constexpr u64 kLarge = 120 * 1024;
+    CHECK(!stacks.create_with_trampoline(3, dummy_task_entry, nullptr, 0xCAFEBABEull,
+                                         kTaskStackStride - kTaskGuardBytes + 4096));
+    CHECK(!stacks.create_with_trampoline(3, dummy_task_entry, nullptr, 0xCAFEBABEull, 1000));
+    CHECK(stacks.create_with_trampoline(3, dummy_task_entry, nullptr, 0xCAFEBABEull, kLarge));
+    const u64 bottom3 = stacks.stack_bottom(3);
+    CHECK_EQ(stacks.stack_top(3) - bottom3, kLarge);
+    CHECK(!stacks.translate_4k(stacks.guard_page(3), phys));
+    for (u64 off = 0; off < kLarge; off += 4096) {
+        CHECK(stacks.translate_4k(bottom3 + off, phys));
+    }
+    CHECK_EQ(stacks.saved_rsp(3), stacks.stack_top(3) - 64);
+    flushed_count = 0;
+    freed_count = 0;
+    stacks.destroy(3);
+    CHECK_EQ(freed_count, kLarge / 4096);
 }
 
 }
