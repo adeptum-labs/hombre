@@ -624,9 +624,16 @@ endif
 # once after, as the layout that follows starts; then it is sized back. Then
 # the picture is scrolled five lines down and two columns right by the cursor
 # keys, a second with the down arrow held, and a hundred pixels right by
-# dragging the knob of the bottom scroller; the close gadget ends MultiView.
-# The screen is dumped to $(BUILD)/multiview-shrunk.ppm, multiview-shown.ppm
-# (sized back) and multiview-scrolled.ppm.
+# dragging the knob of the bottom scroller. Project/Save As then saves the
+# picture as RAM:saved.ilbm through the file requester (the first Return
+# moves the volume into its Drawer field, the second saves), and the close
+# gadget ends MultiView. MultiView then shows RAM:saved.ilbm and, once that
+# is closed, BigPics:Large.ilbm again, each just opened: the two screens
+# must be the same. Hombre's own picture.datatype must have laid out the
+# pictures and written the first. The screen is dumped to
+# $(BUILD)/multiview-shrunk.ppm, multiview-shown.ppm (sized back),
+# multiview-scrolled.ppm, multiview-saved.ppm (the saved picture) and
+# multiview-original.ppm.
 MV_WAIT  := mouse_move 0 0;mouse_move 0 0;mouse_move 0 0;mouse_move 0 0
 MV_DUMP  := screendump $(abspath $(BUILD))/multiview
 MULTIVIEW_MOUSE := sendkey down;mouse_move 313 195;mouse_button 1;mouse_move -100 -60;\
@@ -638,27 +645,55 @@ MULTIVIEW_MOUSE := sendkey down;mouse_move 313 195;mouse_button 1;mouse_move -10
     mouse_move -2 -16;mouse_button 1;$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);mouse_button 0;\
     $(MV_WAIT);mouse_move -451 15;mouse_button 1;mouse_move 50 0;mouse_move 50 0;\
     mouse_button 0;$(MV_WAIT);$(MV_DUMP)-scrolled.ppm;\
-    mouse_move -271 -372;mouse_button 1;mouse_button 0
+    mouse_move -2000 -2000;mouse_move 20 4;mouse_button 2;$(MV_WAIT);mouse_move 0 33;$(MV_WAIT);\
+    mouse_button 0;$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);\
+    sendkey r;sendkey a;sendkey m;sendkey shift-dot;\
+    sendkey s;sendkey a;sendkey v;sendkey e;sendkey d;sendkey dot;sendkey i;sendkey l;\
+    sendkey b;sendkey m;sendkey ret;$(MV_WAIT);sendkey ret;$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);\
+    mouse_move -11 -15;mouse_button 1;mouse_button 0;$(MV_WAIT);$(MV_WAIT);\
+    sendkey shift-s;sendkey y;sendkey s;sendkey shift-dot;sendkey u;sendkey t;sendkey i;\
+    sendkey l;sendkey i;sendkey t;sendkey i;sendkey e;sendkey s;sendkey shift-7;sendkey m;\
+    sendkey u;sendkey l;sendkey t;sendkey i;sendkey v;sendkey i;sendkey e;sendkey w;\
+    sendkey spc;sendkey r;sendkey a;sendkey m;sendkey shift-dot;sendkey s;sendkey a;\
+    sendkey v;sendkey e;sendkey d;sendkey dot;sendkey i;sendkey l;sendkey b;sendkey m;\
+    sendkey ret;$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);\
+    $(MV_DUMP)-saved.ppm;mouse_button 1;mouse_button 0;$(MV_WAIT);$(MV_WAIT);\
+    sendkey shift-s;sendkey shift-y;sendkey shift-s;sendkey shift-dot;sendkey u;sendkey t;\
+    sendkey i;sendkey l;sendkey i;sendkey t;sendkey i;sendkey e;sendkey s;sendkey shift-7;\
+    sendkey m;sendkey u;sendkey l;sendkey t;sendkey i;sendkey v;sendkey i;sendkey e;\
+    sendkey w;sendkey spc;sendkey b;sendkey i;sendkey g;sendkey p;sendkey i;sendkey c;\
+    sendkey s;sendkey shift-dot;sendkey l;sendkey a;sendkey r;sendkey g;sendkey e;\
+    sendkey dot;sendkey i;sendkey l;sendkey b;sendkey m;\
+    sendkey ret;$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);$(MV_WAIT);\
+    $(MV_DUMP)-original.ppm;mouse_button 1;mouse_button 0
 ifneq ($(and $(filter command line environment override,$(origin DISK)),$(strip $(DISK))),)
 check-multiview: image $(MULTIVIEW_DISK)
 	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 $(MULTIVIEW_DISK) \
 	    --keys "a s s i g n spc l i b s shift-dot spc s y s shift-dot c l a s s e s spc a d d ret a d d d a t a t y p e s spc r e f r e s h spc q u i e t ret s y s shift-dot u t i l i t i e s shift-7 m u l t i v i e w spc b i g p i c s shift-dot l a r g e dot i l b m ret" \
 	    --mouse-after "intuition: window Loading... opened" \
 	    --mouse "$(MULTIVIEW_MOUSE)" \
-	    --absent "exec: calls into 68000 code nested too deep" --absent "unimplemented LVO" \
+	    --absent "nested too deep" --absent "unimplemented LVO" \
 	    --absent "exec: no device" --absent "Unknown data type" \
-	    --absent "intuition: input lost" \
+	    --absent "intuition: input lost" --absent "picture.datatype: could not write" \
 	    "volume: BigPics (OFS)" "m68k: C:adddatatypes returned 0" \
 	    "m68k: running sys:utilities/multiview" "intuition: window Loading... opened" \
+	    "picture.datatype: 1024x768x5 on 8 planes" \
 	    "dos: process AsyncLayoutDaemon ended, returned 0" \
 	    "mouse: down 1 at 633,395" "mouse: up 1 at 533,335" "mouse: down 1 at 533,335" \
 	    "mouse: up 1 at 633,395" "mouse: down 1 at 631,379" "mouse: up 1 at 280,394" \
-	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
+	    "mouse: down 2 at 20,4" "intuition: window Select File to Save to opened" \
+	    "picture.datatype: wrote 1024x768x5" \
+	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0" \
+	    "m68k: Sys:utilities/multiview returned 0" "m68k: SYS:utilities/multiview returned 0"
 	bash tools/log_order.sh build/serial.log "intuition: window Loading... opened" \
 	    "mouse: down 1 at 633,395" "mouse: up 1 at 533,335" \
 	    "dos: process AsyncLayoutDaemon ended, returned 0" "mouse: up 1 at 633,395" \
 	    "dos: process AsyncLayoutDaemon ended, returned 0" "mouse: down 1 at 631,379" \
-	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
+	    "mouse: down 2 at 20,4" "picture.datatype: wrote 1024x768x5" \
+	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0" \
+	    "picture.datatype: 1024x768x5 on 8 planes" "m68k: Sys:utilities/multiview returned 0" \
+	    "picture.datatype: 1024x768x5 on 8 planes" "m68k: SYS:utilities/multiview returned 0"
+	cmp $(BUILD)/multiview-saved.ppm $(BUILD)/multiview-original.ppm
 else
 check-multiview:
 	@echo "set DISK=<path to a Workbench 3.1 .dms or .adf>" >&2; exit 1
