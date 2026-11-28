@@ -1,0 +1,4 @@
+[submodule "third_party/wuffs"]
+	path = third_party/wuffs
+	url = https://github.com/google/wuffs-mirror-release-c.git
+	shallow = true

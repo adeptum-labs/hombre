@@ -58,6 +58,7 @@ Requirements:
 - GNU binutils with the i386pep target, and `binutils-m68k-linux-gnu`
 - mtools and sgdisk
 - QEMU with KVM, and OVMF installed at `/usr/share/OVMF`
+- the Wuffs submodule, fetched with `git submodule update --init`
 
 Build and boot a Workbench disk:
 
