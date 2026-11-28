@@ -1,0 +1,625 @@
+/*
+ * The Hombre Operating System.
+ * Copyright © 2026 Adam Waldenberg and Adeptum AB.
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Website: https://www.adeptum.se
+ * Contact: info@adeptum.se
+ */
+
+// The BOOPSI classes written in C++: the registry they dispatch through,
+// icclass with its loop counter, modelclass and pointerclass.
+
+#include "gfx_rig.hpp"
+#include "libs/utility.hpp"
+
+#include <algorithm>
+#include <vector>
+
+using namespace hombre;
+using namespace hombre::m68k;
+using namespace hombre::ndk;
+using gfx_test::Base;
+using gfx_test::GfxRig;
+using gfx_test::kData;
+
+namespace {
+
+constexpr u32 kNewScreen = kData;
+constexpr u32 kTagList = kData + 0x100;
+constexpr u32 kBuffer = kData + 0x300;
+constexpr u32 kNewWindow = kData + 0x500;
+constexpr u32 kCode = kData + 0x3000;
+constexpr u32 kMessage = kData + 0x3100;
+
+Machine* g_machine = nullptr;
+
+u32 open_window(GfxRig& r, u32 idcmp) {
+    r.put16(kNewScreen + ns_LeftEdge, 0);
+    r.put16(kNewScreen + ns_TopEdge, 0);
+    r.put16(kNewScreen + ns_Width, 640);
+    r.put16(kNewScreen + ns_Height, 400);
+    r.put16(kNewScreen + ns_Depth, 2);
+    r.put8(kNewScreen + ns_DetailPen, 0);
+    r.put8(kNewScreen + ns_BlockPen, 1);
+    r.put16(kNewScreen + ns_ViewModes, 0);
+    r.put16(kNewScreen + ns_Type, CUSTOMSCREEN);
+    r.put32(kNewScreen + ns_Font, 0);
+    r.put32(kNewScreen + ns_DefaultTitle, 0);
+    r.put32(kNewScreen + ns_CustomBitMap, 0);
+    r.cpu().a[0] = kNewScreen;
+    CHECK(r.result(Base::Intuition, intuition_lvo::OpenScreen) != 0);
+    r.put16(kNewWindow + nw_LeftEdge, 50);
+    r.put16(kNewWindow + nw_TopEdge, 50);
+    r.put16(kNewWindow + nw_Width, 200);
+    r.put16(kNewWindow + nw_Height, 100);
+    r.put8(kNewWindow + nw_DetailPen, 0);
+    r.put8(kNewWindow + nw_BlockPen, 1);
+    r.put32(kNewWindow + nw_IDCMPFlags, idcmp);
+    r.put32(kNewWindow + nw_Flags, WFLG_ACTIVATE);
+    r.put32(kNewWindow + nw_FirstGadget, 0);
+    r.put32(kNewWindow + nw_Title, 0);
+    r.put32(kNewWindow + nw_Screen, 0);
+    r.put16(kNewWindow + nw_MinWidth, 0);
+    r.put16(kNewWindow + nw_MinHeight, 0);
+    r.put16(kNewWindow + nw_MaxWidth, 0);
+    r.put16(kNewWindow + nw_MaxHeight, 0);
+    r.put16(kNewWindow + nw_Type, 0);
+    r.cpu().a[0] = kNewWindow;
+    const u32 window = r.result(Base::Intuition, intuition_lvo::OpenWindow);
+    CHECK(window != 0);
+    // The screen's DrawInfo is made on its first use and stays.
+    r.cpu().a[0] = r.get32(window + wd_WScreen);
+    CHECK(r.result(Base::Intuition, intuition_lvo::GetScreenDrawInfo) != 0);
+    return window;
+}
+
+u32 get_msg(GfxRig& r, u32 port) {
+    r.cpu().a[0] = port;
+    return r.result(Base::Exec, exec_lvo::GetMsg);
+}
+
+void reply_msg(GfxRig& r, u32 msg) {
+    r.cpu().a[1] = msg;
+    CHECK_EQ(r.call(Base::Exec, exec_lvo::ReplyMsg), ExitReason::Halt);
+}
+
+// Takes every message off the port: how many were IDCMP_IDCMPUPDATE, and
+// the first long pair of the last one's list.
+struct Updates {
+    u32 count = 0;
+    u32 tag = 0;
+    u32 data = 0;
+};
+
+Updates drain(GfxRig& r, u32 window) {
+    const u32 port = r.get32(window + wd_UserPort);
+    Updates seen;
+    for (u32 msg = get_msg(r, port); msg != 0; msg = get_msg(r, port)) {
+        if (r.get32(msg + im_Class) == IDCMP_IDCMPUPDATE) {
+            ++seen.count;
+            const u32 list = r.get32(msg + im_IAddress);
+            seen.tag = r.get32(list);
+            seen.data = r.get32(list + 4);
+        }
+        reply_msg(r, msg);
+    }
+    return seen;
+}
+
+u32 send_notify(GfxRig& r, u32 object, u32 attrs, u32 info) {
+    const u32 notify[] = {OM_NOTIFY, attrs, info, 0};
+    Boopsi& bo = r.intuition.boopsi();
+    return bo.send(bo.class_of(object), object, notify, 4);
+}
+
+// What the native test class saw of the last method it got.
+struct Seen {
+    u32 calls = 0;
+    u32 cl = 0;
+    u32 object = 0;
+    u32 method = 0;
+    Boopsi* boopsi = nullptr;
+    // gpl_Initial of each GM_LAYOUT, and the ie_Class of each
+    // GM_HANDLEINPUT.
+    std::vector<u32> layouts;
+    std::vector<u32> inputs;
+    // Every method, in order.
+    std::vector<u32> methods;
+};
+
+u32 seen_dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
+    Seen& seen = *static_cast<Seen*>(ctx);
+    ++seen.calls;
+    seen.cl = cl;
+    seen.object = object;
+    native::Bus b(*g_machine);
+    seen.method = b.r32(msg);
+    seen.methods.push_back(seen.method);
+    switch (seen.method) {
+    case 0x7777:
+        return 0x1234;
+    case GM_LAYOUT:
+        seen.layouts.push_back(b.r32(msg + 8));
+        return 0;
+    case GM_GOACTIVE:
+        return GMR_MEACTIVE;
+    case GM_HANDLEINPUT: {
+        const u32 event = b.r32(msg + 8);
+        seen.inputs.push_back(b.r8(event + 4));
+        return b.r16(event + 6) == 0xE8 ? GMR_NOREUSE : GMR_MEACTIVE;
+    }
+    default:
+        return seen.boopsi->call_super(cl, object, msg);
+    }
+}
+
+void a_native_class_dispatches_without_68000_code() {
+    GfxRig r;
+    g_machine = &r.machine;
+    Boopsi& bo = r.intuition.boopsi();
+    Seen seen;
+    seen.boopsi = &bo;
+    const u32 cl = bo.make_native_class("seengclass", bo.gadget_class(), 4, seen_dispatch, &seen);
+    CHECK(cl != 0);
+    CHECK_EQ(bo.find_class_named("seengclass"), cl);
+    CHECK_EQ(r.get32(cl + cl_Super), bo.gadget_class());
+    CHECK_EQ(r.get16(cl + cl_InstOffset), ExtGadget_SIZEOF);
+
+    // From C++, with no nested 68000 run left, the method still reaches
+    // the class and its superclass: neither needs one.
+    u32 taken = 0;
+    while (r.exec.enter_nested_run()) {
+        ++taken;
+    }
+    const u32 g = bo.new_object(cl, 0, r.tags(kTagList, {{GA_Width, 9}, {TAG_DONE, 0}}));
+    for (u32 i = 0; i < taken; ++i) {
+        r.exec.leave_nested_run();
+    }
+    CHECK(g != 0);
+    CHECK_EQ(seen.calls, 1u);
+    CHECK_EQ(seen.method, OM_NEW);
+    CHECK_EQ(seen.cl, cl);
+    CHECK_EQ(r.get16(g + gg_Width), 9u);
+    CHECK_EQ(bo.class_of(g), cl);
+
+    // 68000 code reaches it through h_Entry, as DoMethod does.
+    r.put32(kMessage, 0x7777);
+    const u16 code[] = {
+        0x207C, static_cast<u16>(cl >> 16), static_cast<u16>(cl),           // movea.l #cl,a0
+        0x227C, static_cast<u16>(kMessage >> 16), static_cast<u16>(kMessage),  // movea.l #msg,a1
+        0x247C, static_cast<u16>(g >> 16), static_cast<u16>(g),             // movea.l #g,a2
+        0x2668, 0x0008,                                                   // movea.l 8(a0),a3
+        0x4E93,                                                           // jsr (a3)
+        0x4EF8, 0x0400,                                                   // jmp $400.w
+    };
+    for (u32 i = 0; i < sizeof code / sizeof code[0]; ++i) {
+        r.put16(kCode + i * 2, code[i]);
+    }
+    r.jit.flush();
+    r.cpu().pc = kCode;
+    r.cpu().a[7] = gfx_test::kStack;
+    CHECK_EQ(r.jit.run(1000000), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x1234u);
+    CHECK_EQ(seen.calls, 2u);
+    CHECK_EQ(seen.object, g);
+
+    // The class stays while intuition runs.
+    bo.dispose_object(g);
+    CHECK(!bo.free_class(cl));
+    CHECK(!bo.free_class(bo.ic_class()));
+}
+
+void icclass_passes_updates_on_to_its_target() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 window = open_window(r, IDCMP_IDCMPUPDATE);
+    const u32 info = r.intuition.make_gadget_info(window);
+    const u32 before = r.exec.free_bytes();
+
+    // An object target takes the renamed attribute as OM_UPDATE.
+    const u32 target = bo.new_object(bo.gadget_class(), 0, r.tags(kTagList, {{TAG_DONE, 0}}));
+    const u32 source = GA_Dummy + 0x300;
+    const u32 map = r.tags(kTagList + 0x40, {{source, GA_Width}, {TAG_DONE, 0}});
+    r.str(kBuffer, "icclass");
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kBuffer;
+    r.cpu().a[2] = r.tags(kTagList + 0x80, {{ICA_TARGET, target}, {ICA_MAP, map}, {TAG_DONE, 0}});
+    const u32 ic = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(ic != 0);
+    CHECK_EQ(bo.class_of(ic), bo.ic_class());
+    CHECK(bo.get_attr(ICA_TARGET, ic, kBuffer + 0x20) != 0);
+    CHECK_EQ(r.get32(kBuffer + 0x20), target);
+    CHECK(bo.get_attr(ICA_MAP, ic, kBuffer + 0x20) != 0);
+    CHECK_EQ(r.get32(kBuffer + 0x20), map);
+    send_notify(r, ic, r.tags(kTagList + 0xC0, {{source, 33}, {TAG_DONE, 0}}), info);
+    CHECK_EQ(r.get16(target + gg_Width), 33u);
+
+    // ICTARGET_IDCMP: the window hears it, without a GA_ID the object
+    // does not have.
+    bo.set_attrs(ic, r.tags(kTagList + 0x80, {{ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}}), 0);
+    send_notify(r, ic, r.tags(kTagList + 0xC0, {{source, 44}, {TAG_DONE, 0}}), info);
+    const u32 port = r.get32(window + wd_UserPort);
+    const u32 msg = get_msg(r, port);
+    CHECK(msg != 0);
+    CHECK_EQ(r.get32(msg + im_Class), IDCMP_IDCMPUPDATE);
+    const u32 list = r.get32(msg + im_IAddress);
+    CHECK_EQ(r.get32(list), GA_Width);
+    CHECK_EQ(r.get32(list + 4), 44u);
+    CHECK_EQ(r.get32(list + 8), TAG_DONE);
+    reply_msg(r, msg);
+
+    bo.dispose_object(ic);
+    bo.dispose_object(target);
+    CHECK_EQ(r.exec.free_bytes(), before);
+    r.intuition.free_gadget_info(info);
+}
+
+void the_loop_counter_stops_a_notification_that_comes_round() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 window = open_window(r, IDCMP_IDCMPUPDATE);
+    const u32 info = r.intuition.make_gadget_info(window);
+
+    const u32 ic = bo.new_object(bo.ic_class(), 0, r.tags(kTagList, {{TAG_DONE, 0}}));
+    CHECK(ic != 0);
+    const u32 setloop[] = {ICM_SETLOOP};
+    const u32 clearloop[] = {ICM_CLEARLOOP};
+    const u32 checkloop[] = {ICM_CHECKLOOP};
+    CHECK_EQ(bo.send(bo.class_of(ic), ic, checkloop, 1), 0u);
+    bo.send(bo.class_of(ic), ic, setloop, 1);
+    bo.send(bo.class_of(ic), ic, setloop, 1);
+    CHECK_EQ(bo.send(bo.class_of(ic), ic, checkloop, 1), 2u);
+
+    // While the counter is up, nothing goes on to the target.
+    bo.set_attrs(ic, r.tags(kTagList, {{ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}}), 0);
+    const u32 attrs = r.tags(kTagList + 0x40, {{GA_Top, 5}, {TAG_DONE, 0}});
+    send_notify(r, ic, attrs, info);
+    CHECK_EQ(drain(r, window).count, 0u);
+    bo.send(bo.class_of(ic), ic, clearloop, 1);
+    bo.send(bo.class_of(ic), ic, clearloop, 1);
+    bo.send(bo.class_of(ic), ic, clearloop, 1);
+    CHECK_EQ(bo.send(bo.class_of(ic), ic, checkloop, 1), 0u);
+    send_notify(r, ic, attrs, info);
+    CHECK_EQ(drain(r, window).count, 1u);
+
+    // A ring: ic -> model -> ic. The model's member, which tells the
+    // window, hears the change once; the ring ends at ic, not at the
+    // nesting cap of notifications.
+    const u32 member = bo.new_object(
+        bo.gadget_class(), 0, r.tags(kTagList + 0x80, {{ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}}));
+    const u32 model = bo.new_object(bo.model_class(), 0,
+                                    r.tags(kTagList + 0xC0, {{ICA_TARGET, ic}, {TAG_DONE, 0}}));
+    CHECK(member != 0 && model != 0);
+    const u32 add[] = {OM_ADDMEMBER, member};
+    bo.send(bo.class_of(model), model, add, 2);
+    bo.set_attrs(ic, r.tags(kTagList, {{ICA_TARGET, model}, {TAG_DONE, 0}}), 0);
+    send_notify(r, ic, r.tags(kTagList + 0x40, {{GA_Width, 12}, {TAG_DONE, 0}}), info);
+    CHECK_EQ(r.get16(member + gg_Width), 12u);
+    const Updates seen = drain(r, window);
+    CHECK_EQ(seen.count, 1u);
+    CHECK_EQ(seen.tag, GA_Width);
+    CHECK_EQ(seen.data, 12u);
+    CHECK_EQ(bo.send(bo.class_of(ic), ic, checkloop, 1), 0u);
+    CHECK_EQ(bo.send(bo.class_of(model), model, checkloop, 1), 0u);
+
+    bo.dispose_object(model);
+    bo.dispose_object(ic);
+    r.intuition.free_gadget_info(info);
+}
+
+void modelclass_broadcasts_to_its_members() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 window = open_window(r, IDCMP_IDCMPUPDATE);
+    const u32 info = r.intuition.make_gadget_info(window);
+    const u32 before = r.exec.free_bytes();
+
+    const u32 model = bo.new_object(
+        bo.model_class(), 0, r.tags(kTagList, {{ICA_TARGET, ICTARGET_IDCMP}, {TAG_DONE, 0}}));
+    CHECK(model != 0);
+    CHECK_EQ(r.get32(bo.model_class() + cl_Super), bo.ic_class());
+    const u32 first = bo.new_object(bo.gadget_class(), 0, r.tags(kTagList + 0x40, {{TAG_DONE, 0}}));
+    const u32 second = bo.new_object(bo.gadget_class(), 0, r.tags(kTagList + 0x40, {{TAG_DONE, 0}}));
+    const u32 add_first[] = {OM_ADDMEMBER, first};
+    const u32 add_second[] = {OM_ADDMEMBER, second};
+    bo.send(bo.class_of(model), model, add_first, 2);
+    bo.send(bo.class_of(model), model, add_second, 2);
+
+    const u32 update[] = {OM_UPDATE, r.tags(kTagList + 0x80, {{GA_Height, 21}, {TAG_DONE, 0}}),
+                          info, 0};
+    bo.send(bo.class_of(model), model, update, 4);
+    CHECK_EQ(r.get16(first + gg_Height), 21u);
+    CHECK_EQ(r.get16(second + gg_Height), 21u);
+    Updates seen = drain(r, window);
+    CHECK_EQ(seen.count, 1u);
+    CHECK_EQ(seen.tag, GA_Height);
+
+    // A member taken out hears no more.
+    const u32 remove_first[] = {OM_REMMEMBER, first};
+    bo.send(bo.class_of(model), model, remove_first, 2);
+    bo.send(bo.class_of(model), model, remove_first, 2);
+    send_notify(r, model, r.tags(kTagList + 0x80, {{GA_Height, 30}, {TAG_DONE, 0}}), info);
+    CHECK_EQ(r.get16(first + gg_Height), 21u);
+    CHECK_EQ(r.get16(second + gg_Height), 30u);
+    CHECK_EQ(drain(r, window).count, 1u);
+
+    // Disposing the model disposes the members it still has.
+    bo.dispose_object(model);
+    CHECK_EQ(r.get32(bo.gadget_class() + cl_ObjectCount), 1u);
+    bo.dispose_object(first);
+    CHECK_EQ(r.get32(bo.gadget_class() + cl_ObjectCount), 0u);
+    CHECK_EQ(r.get32(bo.model_class() + cl_ObjectCount), 0u);
+    CHECK_EQ(r.exec.free_bytes(), before);
+    r.intuition.free_gadget_info(info);
+}
+
+void pointerclass_keeps_its_attributes() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 before = r.exec.free_bytes();
+    r.str(kBuffer, "pointerclass");
+    r.cpu().a[0] = 0;
+    r.cpu().a[1] = kBuffer;
+    r.cpu().a[2] = r.tags(kTagList, {{POINTERA_BitMap, 0x4000},
+                                    {POINTERA_WordWidth, 1},
+                                    {POINTERA_XOffset, static_cast<u32>(-8)},
+                                    {POINTERA_YOffset, static_cast<u32>(-7)},
+                                    {POINTERA_XResolution, 6},
+                                    {POINTERA_YResolution, 2},
+                                    {TAG_DONE, 0}});
+    const u32 pointer = r.result(Base::Intuition, intuition_lvo::NewObjectA);
+    CHECK(pointer != 0);
+    CHECK_EQ(bo.class_of(pointer), bo.pointer_class());
+    const auto get = [&](u32 attr) {
+        CHECK(bo.get_attr(attr, pointer, kBuffer + 0x20) != 0);
+        return r.get32(kBuffer + 0x20);
+    };
+    CHECK_EQ(get(POINTERA_BitMap), 0x4000u);
+    CHECK_EQ(get(POINTERA_WordWidth), 1u);
+    CHECK_EQ(get(POINTERA_XOffset), static_cast<u32>(-8));
+    CHECK_EQ(get(POINTERA_YOffset), static_cast<u32>(-7));
+    CHECK_EQ(get(POINTERA_XResolution), 6u);
+    CHECK_EQ(get(POINTERA_YResolution), 2u);
+    CHECK_EQ(bo.get_attr(GA_Width, pointer, kBuffer + 0x20), 0u);
+    bo.dispose_object(pointer);
+    CHECK_EQ(r.exec.free_bytes(), before);
+}
+
+// A dispatcher in 68000 code, at kCode, for a subclass of modelclass that
+// asks itself ICM_CHECKLOOP on each OM_UPDATE: counts at kLoopsSeen the
+// updates it drops because the loop counter is up, and passes every other
+// method and update to modelclass.
+constexpr u32 kModelDispatcher = kCode;
+constexpr u32 kLoopsSeen = kCode + 0xF0;
+
+void put_model_dispatcher(GfxRig& r) {
+    const u16 code[] = {
+        0x2011,                          // move.l (a1),d0
+        0x0C80, 0x0000, 0x0108,          // cmpi.l #OM_UPDATE,d0
+        0x662A,                          // bne.s super
+        0x48E7, 0x00E0,                  // movem.l a0-a2,-(sp)
+        0x2F3C, 0x0000, 0x0404,          // move.l #ICM_CHECKLOOP,-(sp)
+        0x224F,                          // movea.l sp,a1
+        0x2068, 0x0018,                  // movea.l cl_Super(a0),a0
+        0x2668, 0x0008,                  // movea.l h_Entry(a0),a3
+        0x4E93,                          // jsr (a3)
+        0x588F,                          // addq.l #4,sp
+        0x4CDF, 0x0700,                  // movem.l (sp)+,a0-a2
+        0x4A80,                          // tst.l d0
+        0x670A,                          // beq.s super
+        0x52B9, static_cast<u16>(kLoopsSeen >> 16), static_cast<u16>(kLoopsSeen),
+        0x7000, 0x4E75,                  // moveq #0,d0; rts
+        0x2068, 0x0018,                  // super: movea.l cl_Super(a0),a0
+        0x2F28, 0x0008, 0x4E75,          // move.l h_Entry(a0),-(sp); rts
+    };
+    for (u32 i = 0; i < sizeof code / sizeof code[0]; ++i) {
+        r.put16(kModelDispatcher + i * 2, code[i]);
+    }
+    r.put32(kLoopsSeen, 0);
+    r.jit.flush();
+}
+
+void a_68000_model_subclass_sees_the_loop_during_a_broadcast() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    put_model_dispatcher(r);
+    const u32 cl = bo.make_class(0, 0, bo.model_class(), 4, 0);
+    CHECK(cl != 0);
+    r.put32(cl + h_Entry, kModelDispatcher);
+    const u32 model = bo.new_object(cl, 0, r.tags(kTagList, {{TAG_DONE, 0}}));
+    CHECK(model != 0);
+    // A member that sends the update straight back, and one that keeps it.
+    const u32 back = bo.new_object(bo.ic_class(), 0,
+                                   r.tags(kTagList, {{ICA_TARGET, model}, {TAG_DONE, 0}}));
+    const u32 keeper = bo.new_object(bo.gadget_class(), 0, r.tags(kTagList, {{TAG_DONE, 0}}));
+    const u32 add_back[] = {OM_ADDMEMBER, back};
+    const u32 add_keeper[] = {OM_ADDMEMBER, keeper};
+    bo.send(cl, model, add_back, 2);
+    bo.send(cl, model, add_keeper, 2);
+
+    const u32 update[] = {OM_UPDATE, r.tags(kTagList + 0x40, {{GA_Width, 17}, {TAG_DONE, 0}}), 0,
+                          0};
+    bo.send(cl, model, update, 4);
+    CHECK_EQ(r.get16(keeper + gg_Width), 17u);
+    CHECK_EQ(r.get32(kLoopsSeen), 1u);
+    const u32 checkloop[] = {ICM_CHECKLOOP};
+    CHECK_EQ(bo.send(cl, model, checkloop, 1), 0u);
+    bo.dispose_object(model);
+    CHECK_EQ(r.get32(bo.gadget_class() + cl_ObjectCount), 0u);
+    CHECK_EQ(r.get32(bo.ic_class() + cl_ObjectCount), 0u);
+}
+
+// A gadgetclass subclass in 68000 code at kCode + 0x100: method $7000
+// answers $55, every other goes to gadgetclass.
+constexpr u32 kPlainDispatcher = kCode + 0x100;
+
+u32 over_68000_dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
+    return static_cast<Boopsi*>(ctx)->call_super(cl, object, msg);
+}
+
+void a_native_class_over_a_68000_superclass() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u16 code[] = {
+        0x0C91, 0x0000, 0x7000,  // cmpi.l #$7000,(a1)
+        0x6604,                  // bne.s super
+        0x7055, 0x4E75,          // moveq #$55,d0; rts
+        0x2068, 0x0018,          // super: movea.l cl_Super(a0),a0
+        0x2F28, 0x0008, 0x4E75,  // move.l h_Entry(a0),-(sp); rts
+    };
+    for (u32 i = 0; i < sizeof code / sizeof code[0]; ++i) {
+        r.put16(kPlainDispatcher + i * 2, code[i]);
+    }
+    r.jit.flush();
+    const u32 middle = bo.make_class(0, 0, bo.gadget_class(), 4, 0);
+    r.put32(middle + h_Entry, kPlainDispatcher);
+    const u32 top = bo.make_native_class("overgclass", middle, 4, over_68000_dispatch, &bo);
+    CHECK(top != 0);
+    CHECK_EQ(r.get16(top + cl_InstOffset), ExtGadget_SIZEOF + 4);
+    const u32 g = bo.new_object(top, 0, r.tags(kTagList, {{GA_Width, 23}, {TAG_DONE, 0}}));
+    CHECK(g != 0);
+    CHECK_EQ(r.get16(g + gg_Width), 23u);
+    const u32 ask[] = {0x7000};
+    CHECK_EQ(bo.send(top, g, ask, 1), 0x55u);
+    bo.dispose_object(g);
+    CHECK_EQ(r.get32(top + cl_ObjectCount), 0u);
+}
+
+// What the member class does with an OM_UPDATE: counts it, and may take
+// another member out, take itself out and dispose of itself, or end the
+// task it runs in.
+struct Member {
+    Boopsi* boopsi = nullptr;
+    u32 model = 0;
+    u32 remove_next = 0;
+    bool dispose_self = false;
+    bool end_task = false;
+    std::vector<u32> updated;
+};
+
+u32 member_dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
+    Member& s = *static_cast<Member*>(ctx);
+    native::Bus b(*g_machine);
+    if (b.r32(msg) != OM_UPDATE) {
+        return s.boopsi->call_super(cl, object, msg);
+    }
+    s.updated.push_back(object);
+    if (s.remove_next != 0) {
+        const u32 remove[] = {OM_REMMEMBER, s.remove_next};
+        s.remove_next = 0;
+        s.boopsi->send(s.boopsi->class_of(s.model), s.model, remove, 2);
+    }
+    if (s.dispose_self) {
+        s.dispose_self = false;
+        const u32 remove[] = {OM_REMMEMBER, object};
+        s.boopsi->send(s.boopsi->class_of(s.model), s.model, remove, 2);
+        s.boopsi->dispose_object(object);
+    }
+    if (s.end_task) {
+        s.end_task = false;
+        s.boopsi->task_ended(0);
+    }
+    return 0;
+}
+
+void members_may_leave_or_go_during_a_broadcast() {
+    GfxRig r;
+    g_machine = &r.machine;
+    Boopsi& bo = r.intuition.boopsi();
+    Member s;
+    s.boopsi = &bo;
+    const u32 cl = bo.make_native_class("memberclass", bo.root_class(), 0, member_dispatch, &s);
+    const u32 model = bo.new_object(bo.model_class(), 0, r.tags(kTagList, {{TAG_DONE, 0}}));
+    s.model = model;
+    u32 m[3];
+    for (u32& member : m) {
+        member = bo.new_object(cl, 0, r.tags(kTagList, {{TAG_DONE, 0}}));
+        const u32 add[] = {OM_ADDMEMBER, member};
+        bo.send(bo.class_of(model), model, add, 2);
+    }
+    const u32 update[] = {OM_UPDATE, r.tags(kTagList + 0x40, {{GA_ID, 1}, {TAG_DONE, 0}}), 0, 0};
+
+    // The first takes the second out: the third still hears it.
+    s.remove_next = m[1];
+    bo.send(bo.class_of(model), model, update, 4);
+    CHECK(s.updated == (std::vector<u32>{m[0], m[2]}));
+
+    // A member that leaves and disposes of itself: the rest go on.
+    s.updated.clear();
+    s.dispose_self = true;
+    bo.send(bo.class_of(model), model, update, 4);
+    CHECK(s.updated == (std::vector<u32>{m[0], m[2]}));
+    s.updated.clear();
+    bo.send(bo.class_of(model), model, update, 4);
+    CHECK(s.updated == (std::vector<u32>{m[2]}));
+
+    // A task that ends inside the broadcast leaves the loop counter down.
+    s.end_task = true;
+    bo.send(bo.class_of(model), model, update, 4);
+    const u32 checkloop[] = {ICM_CHECKLOOP};
+    CHECK_EQ(bo.send(bo.class_of(model), model, checkloop, 1), 0u);
+    s.updated.clear();
+    bo.send(bo.class_of(model), model, update, 4);
+    CHECK(s.updated == (std::vector<u32>{m[2]}));
+
+    // A removed node keeps its successor for a walker standing on it.
+    const u32 node = m[1] - Object_SIZEOF;
+    CHECK(r.get32(node) != 0);
+    CHECK_EQ(r.get32(node + 4), 0u);
+    bo.dispose_object(m[1]);
+    bo.dispose_object(model);
+    CHECK_EQ(r.get32(cl + cl_ObjectCount), 0u);
+}
+
+void icspecial_code_sets_the_code_of_the_update() {
+    GfxRig r;
+    Boopsi& bo = r.intuition.boopsi();
+    const u32 window = open_window(r, IDCMP_IDCMPUPDATE);
+    const u32 info = r.intuition.make_gadget_info(window);
+    const u32 source = GA_Dummy + 0x300;
+    const u32 map = r.tags(kTagList, {{source, ICSPECIAL_CODE}, {TAG_DONE, 0}});
+    const u32 port = r.get32(window + wd_UserPort);
+    for (const u32 cl : {bo.ic_class(), bo.gadget_class()}) {
+        const u32 object = bo.new_object(
+            cl, 0, r.tags(kTagList + 0x40,
+                          {{ICA_TARGET, ICTARGET_IDCMP}, {ICA_MAP, map}, {TAG_DONE, 0}}));
+        send_notify(r, object, r.tags(kTagList + 0x80, {{source, 0x51234}, {TAG_DONE, 0}}), info);
+        const u32 msg = get_msg(r, port);
+        CHECK(msg != 0);
+        CHECK_EQ(r.get32(msg + im_Class), IDCMP_IDCMPUPDATE);
+        CHECK_EQ(r.get16(msg + im_Code), 0x1234u);
+        reply_msg(r, msg);
+        bo.dispose_object(object);
+    }
+    r.intuition.free_gadget_info(info);
+}
+
+}
+
+int main() {
+    a_native_class_dispatches_without_68000_code();
+    icclass_passes_updates_on_to_its_target();
+    the_loop_counter_stops_a_notification_that_comes_round();
+    modelclass_broadcasts_to_its_members();
+    pointerclass_keeps_its_attributes();
+    a_68000_model_subclass_sees_the_loop_during_a_broadcast();
+    a_native_class_over_a_68000_superclass();
+    members_may_leave_or_go_during_a_broadcast();
+    icspecial_code_sets_the_code_of_the_update();
+    return check::finish("test_boopsi_classes");
+}

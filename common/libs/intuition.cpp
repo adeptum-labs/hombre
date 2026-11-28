@@ -4005,15 +4005,16 @@ void Intuition::free_message_update(const TrackedMessage& tracked) {
 }
 
 void Intuition::notify_idcmp_update(void* ctx, u32 window, const u32* tags, u32 count,
-                                    u32 flags) {
+                                    u32 flags, u16 code) {
     (void)flags;
-    static_cast<Intuition*>(ctx)->post_idcmp_update(window, tags, count);
+    static_cast<Intuition*>(ctx)->post_idcmp_update(window, tags, count, code);
 }
 
 // Puts a copy of the notification's attributes in guest memory as the
 // IAddress of the window's IDCMP_IDCMPUPDATE, which frees it with the
 // message; a message the window asks for but cannot get frees it at once.
-void Intuition::post_idcmp_update(u32 window, const u32* tags, u32 count) {
+// The message's Code is code.
+void Intuition::post_idcmp_update(u32 window, const u32* tags, u32 count, u16 code) {
     if (exec_ == nullptr || machine_ == nullptr) {
         return;
     }
@@ -4028,7 +4029,7 @@ void Intuition::post_idcmp_update(u32 window, const u32* tags, u32 count) {
         b.w32(list + i * ndk::ti_SIZEOF + ndk::ti_Data, tags[i * 2 + 1]);
     }
     b.w32(list + count * ndk::ti_SIZEOF, ndk::TAG_DONE);
-    if (!b.ok() || !post_intuimessage(window, ndk::IDCMP_IDCMPUPDATE, 0, list, bytes)) {
+    if (!b.ok() || !post_intuimessage(window, ndk::IDCMP_IDCMPUPDATE, code, list, bytes)) {
         exec_->free(list, bytes);
     }
 }

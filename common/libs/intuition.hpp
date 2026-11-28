@@ -858,8 +858,8 @@ private:
     u32 window_idcmp(u32 window) const;
     bool tick_outstanding(u32 window) const;
     static void notify_idcmp_update(void* ctx, u32 window, const u32* tags, u32 count,
-                                    u32 flags);
-    void post_idcmp_update(u32 window, const u32* tags, u32 count);
+                                    u32 flags, u16 code);
+    void post_idcmp_update(u32 window, const u32* tags, u32 count, u16 code);
     void free_message_update(const TrackedMessage& tracked);
     void post_newsize(WindowRecord& rec);
     // MoveWindow and SizeWindow: the window's box, each of its four values

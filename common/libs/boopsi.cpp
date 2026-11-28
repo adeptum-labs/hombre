@@ -111,6 +111,22 @@ bool sys_image_dimensions(Bus& b, u32 which, u32 size, u32 reference_font, u16& 
 
 constexpr u32 GTYP_GZZGADGET = 0x2000;
 
+// icclass's instance data: the target, the map and the loop counter.
+constexpr u32 ic_Target = 0;
+constexpr u32 ic_Map = 4;
+constexpr u32 ic_Loop = 8;
+constexpr u32 kIcBytes = 12;
+
+// modelclass's: the MinList of its members, linked through their object
+// headers as rootclass's OM_ADDTAIL links them.
+constexpr u32 model_Members = 0;
+constexpr u32 kModelBytes = 12;
+constexpr u32 kMaxModelMembers = 1024;
+
+// pointerclass's: the POINTERA_ attributes, a long each.
+constexpr u32 kPointerAttrs = 6;
+constexpr u32 kPointerBytes = kPointerAttrs * 4;
+
 // The block a class lives in: the IClass and its name. cl_Reserved holds
 // the block's size for FreeClass.
 constexpr u32 cl_Reserved = 20;
@@ -146,32 +162,51 @@ bool same(const char* a, const char* b) {
 struct Boopsi::Natives {
     static Boopsi& of(void* ctx) { return *static_cast<Boopsi*>(ctx); }
 
-    using Dispatcher = u32 (Boopsi::*)(u32 cl, u32 object, u32 msg);
-
-    // A dispatcher as a Hook calls it: the class in A0, the object in A2
-    // and the message in A1.
-    static void entry(void* ctx, Machine& m, Dispatcher dispatcher) {
-        Boopsi& boopsi = of(ctx);
+    // A registered class as a Hook calls it: the class in A0, the object
+    // in A2 and the message in A1.
+    static void entry(void* ctx, Machine& m) {
+        const NativeClass& native = *static_cast<const NativeClass*>(ctx);
+        Boopsi& boopsi = *native.boopsi;
         const u32 cl = m.cpu.a[0];
         const u32 object = m.cpu.a[2];
         const u32 msg = m.cpu.a[1];
         if constexpr (kBoopsiTrace) {
             const boopsi_trace::Frame frame = boopsi_trace::call(
                 boopsi.trace_, m, boopsi.exec_->this_task(), "guest", cl, object, msg);
-            const u32 result = (boopsi.*dispatcher)(cl, object, msg);
+            const u32 result = native.dispatcher(native.ctx, cl, object, msg);
             boopsi_trace::ret(boopsi.trace_, m, frame, result);
             native::set_result(m, result);
         } else {
-            native::set_result(m, (boopsi.*dispatcher)(cl, object, msg));
+            native::set_result(m, native.dispatcher(native.ctx, cl, object, msg));
         }
     }
-    static void root(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::root_dispatch); }
-    static void gadget(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::gadget_dispatch); }
-    static void image(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::image_dispatch); }
-    static void sysi(void* ctx, Machine& m) { entry(ctx, m, &Boopsi::sysi_dispatch); }
+    static u32 root(void* ctx, u32 cl, u32 object, u32 msg) {
+        return of(ctx).root_dispatch(cl, object, msg);
+    }
+    static u32 gadget(void* ctx, u32 cl, u32 object, u32 msg) {
+        return of(ctx).gadget_dispatch(cl, object, msg);
+    }
+    static u32 image(void* ctx, u32 cl, u32 object, u32 msg) {
+        return of(ctx).image_dispatch(cl, object, msg);
+    }
+    static u32 sysi(void* ctx, u32 cl, u32 object, u32 msg) {
+        return of(ctx).sysi_dispatch(cl, object, msg);
+    }
+    static u32 ic(void* ctx, u32 cl, u32 object, u32 msg) {
+        return of(ctx).ic_dispatch(cl, object, msg);
+    }
+    static u32 model(void* ctx, u32 cl, u32 object, u32 msg) {
+        return of(ctx).model_dispatch(cl, object, msg);
+    }
+    static u32 pointer(void* ctx, u32 cl, u32 object, u32 msg) {
+        return of(ctx).pointer_dispatch(cl, object, msg);
+    }
 
-    static void trace_task_ended(void* ctx, u32 task, bool) {
-        boopsi_trace::drop_task(of(ctx).trace_, task);
+    static void task_ended(void* ctx, u32 task, bool) {
+        of(ctx).task_ended(task);
+        if constexpr (kBoopsiTrace) {
+            boopsi_trace::drop_task(of(ctx).trace_, task);
+        }
     }
     static void trace_block(void* ctx, Machine& m) {
         Boopsi& boopsi = of(ctx);
@@ -184,34 +219,47 @@ bool Boopsi::init(Machine& m, Exec& exec) {
     exec_ = &exec;
     if constexpr (kBoopsiTrace) {
         boopsi_trace::reset(trace_);
-        exec.set_task_end_hook(Natives::trace_task_ended, this);
         if (m.jit != nullptr) {
             m.jit->set_block_watch(Natives::trace_block, this);
         }
     }
     public_.clear();
     ica_.clear();
-    notify_depth_ = 0;
-    root_ = make_system_class("rootclass", 0, 0, Natives::root);
-    root_entry_ = root_ != 0 ? Bus(m).r32(root_ + h_Entry) : 0;
-    gadget_ = root_ != 0 ? make_system_class("gadgetclass", root_, ExtGadget_SIZEOF,
-                                             Natives::gadget)
-                         : 0;
-    gadget_entry_ = gadget_ != 0 ? Bus(m).r32(gadget_ + h_Entry) : 0;
-    image_ = root_ != 0 ? make_system_class("imageclass", root_, Image_SIZEOF, Natives::image)
-                        : 0;
-    image_entry_ = image_ != 0 ? Bus(m).r32(image_ + h_Entry) : 0;
+    notify_depths_.clear();
+    loop_holds_.clear();
+    exec.set_task_end_hook(Natives::task_ended, this);
+    native_count_ = 0;
+    root_ = make_native_class("rootclass", 0, 0, Natives::root, this);
+    gadget_ = root_ != 0
+                  ? make_native_class("gadgetclass", root_, ExtGadget_SIZEOF, Natives::gadget, this)
+                  : 0;
+    image_ = root_ != 0
+                 ? make_native_class("imageclass", root_, Image_SIZEOF, Natives::image, this)
+                 : 0;
     sysi_ = image_ != 0
-                ? make_system_class("sysiclass", image_, SysImage_SIZEOF, Natives::sysi)
+                ? make_native_class("sysiclass", image_, SysImage_SIZEOF, Natives::sysi, this)
                 : 0;
-    sysi_entry_ = sysi_ != 0 ? Bus(m).r32(sysi_ + h_Entry) : 0;
-    return root_ != 0 && gadget_ != 0 && image_ != 0 && sysi_ != 0;
+    ic_ = root_ != 0 ? make_native_class("icclass", root_, kIcBytes, Natives::ic, this) : 0;
+    model_ = ic_ != 0 ? make_native_class("modelclass", ic_, kModelBytes, Natives::model, this)
+                      : 0;
+    pointer_ = root_ != 0
+                   ? make_native_class("pointerclass", root_, kPointerBytes, Natives::pointer, this)
+                   : 0;
+    return root_ != 0 && gadget_ != 0 && image_ != 0 && sysi_ != 0 && ic_ != 0 && model_ != 0 &&
+           pointer_ != 0;
 }
 
-// A public class whose dispatcher is the native entry, behind an A-line
-// stub that 68000 code can call through h_Entry.
-u32 Boopsi::make_system_class(const char* name, u32 super, u32 inst_size, m68k::NativeFn entry) {
-    const u16 id = machine_->jit->add_native(entry, this, name);
+// A public class whose dispatcher is C++, behind an A-line stub that 68000
+// code can call through h_Entry, and the registry entry that finds the C++
+// by that stub.
+u32 Boopsi::make_native_class(const char* name, u32 super, u32 inst_size,
+                              NativeDispatcher dispatcher, void* ctx) {
+    if (native_count_ >= kMaxNativeClasses) {
+        LogLine().text("intuition: native class registry full for ").text(name).send();
+        return 0;
+    }
+    NativeClass& native = natives_[native_count_];
+    const u16 id = machine_->jit->add_native(Natives::entry, &native, name);
     if (id == 0) {
         LogLine().text("intuition: no native ids left for ").text(name).send();
         return 0;
@@ -220,6 +268,7 @@ u32 Boopsi::make_system_class(const char* name, u32 super, u32 inst_size, m68k::
     if (stub == 0) {
         return 0;
     }
+    native = NativeClass{this, stub, dispatcher, ctx};
     Bus b(*machine_);
     b.w16(stub, native::kALine | id);
     b.w16(stub + 2, native::kRts);
@@ -249,6 +298,7 @@ u32 Boopsi::make_system_class(const char* name, u32 super, u32 inst_size, m68k::
     if (!b.ok()) {
         return 0;
     }
+    ++native_count_;
     add_class(cl);
     return cl;
 }
@@ -327,10 +377,16 @@ void Boopsi::remove_class(u32 cl) {
 // FreeClass: false while the class has objects or subclasses. The system
 // classes stay.
 bool Boopsi::free_class(u32 cl) {
-    if (cl == 0 || cl == root_ || cl == gadget_ || cl == image_ || cl == sysi_) {
+    if (cl == 0) {
         return false;
     }
     Bus b(*machine_);
+    const u32 entry = b.r32(cl + h_Entry);
+    for (u32 i = 0; i < native_count_; ++i) {
+        if (natives_[i].entry == entry) {
+            return false;
+        }
+    }
     if (b.r32(cl + cl_ObjectCount) != 0 || b.r32(cl + cl_SubclassCount) != 0 || !b.ok()) {
         return false;
     }
@@ -431,8 +487,8 @@ u32 Boopsi::coerce_method(u32 cl, u32 object, u32 msg) {
     return dispatch(cl, object, msg);
 }
 
-// The class's dispatcher on the message: in C++ for a system class, as
-// a nested guest call for one written in 68000 code.
+// The class's dispatcher on the message: in C++ for a class of the
+// registry, as a nested guest call for one written in 68000 code.
 u32 Boopsi::dispatch(u32 cl, u32 object, u32 msg) {
     if (cl == 0) {
         return 0;
@@ -442,17 +498,11 @@ u32 Boopsi::dispatch(u32 cl, u32 object, u32 msg) {
     if (!b.ok() || entry == 0) {
         return 0;
     }
-    if (entry == root_entry_) {
-        return root_dispatch(cl, object, msg);
-    }
-    if (entry == gadget_entry_) {
-        return gadget_dispatch(cl, object, msg);
-    }
-    if (entry == image_entry_) {
-        return image_dispatch(cl, object, msg);
-    }
-    if (entry == sysi_entry_) {
-        return sysi_dispatch(cl, object, msg);
+    for (u32 i = 0; i < native_count_; ++i) {
+        const NativeClass& native = natives_[i];
+        if (native.entry == entry) {
+            return native.dispatcher(native.ctx, cl, object, msg);
+        }
     }
     Machine& m = *machine_;
     if (!exec_->enter_nested_run()) {
@@ -609,6 +659,9 @@ u32 Boopsi::root_dispatch(u32 cl, u32 object, u32 msg) {
             b.w32(previous, next);
             b.w32(next + 4, previous);
         }
+        // A node taken out twice leaves the list as it is; its successor
+        // stays for whoever walks on from it, as after Remove.
+        b.w32(node + 4, 0);
         return 0;
     }
     default:
@@ -795,6 +848,9 @@ u32 Boopsi::set_gadget_attrs(u32 gadget, u32 tags, bool initial) {
         case GA_GZZGadget:
             bit(type, GTYP_GZZGADGET, data);
             break;
+        case GA_RelSpecial:
+            bit(flags, GFLG_RELSPECIAL, data);
+            break;
         case GA_Previous:
             // The new gadget follows the one given.
             if (initial && data != 0) {
@@ -918,15 +974,32 @@ u32 Boopsi::notify(u32 gadget, u32 msg) {
     if (entry == nullptr || entry->target == 0) {
         return 0;
     }
-    if (notify_depth_ >= kMaxNotifyDepth) {
-        return 0;
+    const u32 target = entry->target;
+    const u32 map = entry->map;
+    Bus b(*machine_);
+    const u32 id = b.r16(gadget + gg_GadgetID);
+    if (b.ok()) {
+        forward(target, map, msg, true, id);
+    }
+    return 0;
+}
+
+void Boopsi::forward(u32 target, u32 map, u32 msg, bool with_id, u32 id) {
+    if (target == 0) {
+        return;
+    }
+    const u32 task = exec_->this_task();
+    for (const TaskDepth& depth : notify_depths_) {
+        if (depth.task == task && depth.depth >= kMaxNotifyDepth) {
+            return;
+        }
     }
     Bus b(*machine_);
     const u32 attr_list = b.r32(msg + opu_AttrList);
     const u32 ginfo = b.r32(msg + opu_GInfo);
     const u32 flags = b.r32(msg + opu_Flags);
     if (!b.ok()) {
-        return 0;
+        return;
     }
     u32 pairs[kMaxNotifyTags * 2];
     u32 count = 0;
@@ -938,10 +1011,10 @@ u32 Boopsi::notify(u32 gadget, u32 msg) {
         if (item == 0) {
             break;
         }
-        const u32 mapped = map_tag(b, entry->map, b.r32(item));
+        const u32 mapped = map_tag(b, map, b.r32(item));
         const u32 data = b.r32(item + 4);
         if (!b.ok()) {
-            return 0;
+            return;
         }
         if (mapped == tags::kTagIgnore) {
             continue;
@@ -953,56 +1026,360 @@ u32 Boopsi::notify(u32 gadget, u32 msg) {
             ++count;
         }
     }
-    if (!has_id && count < kMaxNotifyTags) {
+    if (with_id && !has_id && count < kMaxNotifyTags) {
         pairs[count * 2] = GA_ID;
-        pairs[count * 2 + 1] = b.r16(gadget + gg_GadgetID);
+        pairs[count * 2 + 1] = id;
         ++count;
     }
+    if (target == ICTARGET_IDCMP) {
+        const u32 window = ginfo != 0 ? b.r32(ginfo + gi_Window) : 0;
+        if (!b.ok() || window == 0 || idcmp_update_hook_ == nullptr) {
+            return;
+        }
+        u16 code = 0;
+        for (u32 i = 0; i < count; ++i) {
+            if (pairs[i * 2] == ICSPECIAL_CODE) {
+                code = static_cast<u16>(pairs[i * 2 + 1]);
+            }
+        }
+        idcmp_update_hook_(idcmp_update_hook_ctx_, window, pairs, count, flags, code);
+        return;
+    }
+    send_update(target, pairs, count, ginfo, flags);
+}
+
+namespace {
+
+// A guest copy of the attribute pairs as a tag list, made for one call and
+// freed after it.
+class GuestTags {
+public:
+    GuestTags(Exec& exec, Machine& m, const u32* pairs, u32 count)
+        : exec_(exec), bytes_((count + 1) * tags::kItemBytes) {
+        list_ = exec.alloc(bytes_, MEMF_PUBLIC | MEMF_CLEAR);
+        if (list_ == 0) {
+            return;
+        }
+        Bus b(m);
+        for (u32 i = 0; i < count; ++i) {
+            b.w32(list_ + i * tags::kItemBytes, pairs[i * 2]);
+            b.w32(list_ + i * tags::kItemBytes + 4, pairs[i * 2 + 1]);
+        }
+        b.w32(list_ + count * tags::kItemBytes, tags::kTagDone);
+        if (!b.ok()) {
+            exec.free(list_, bytes_);
+            list_ = 0;
+        }
+    }
+    ~GuestTags() {
+        if (list_ != 0) {
+            exec_.free(list_, bytes_);
+        }
+    }
+    GuestTags(const GuestTags&) = delete;
+    GuestTags& operator=(const GuestTags&) = delete;
+
+    u32 list() const { return list_; }
+
+private:
+    Exec& exec_;
+    u32 bytes_;
+    u32 list_ = 0;
+};
+
+}
+
+// The notification for an object target: OM_UPDATE with the mapped
+// attributes.
+void Boopsi::send_update(u32 target, const u32* pairs, u32 count, u32 ginfo, u32 flags) {
+    const GuestTags list(*exec_, *machine_, pairs, count);
+    if (list.list() == 0) {
+        return;
+    }
+    const u32 msg[] = {OM_UPDATE, list.list(), ginfo, flags};
+    const u32 task = exec_->this_task();
+    const auto entry = [&]() -> TaskDepth* {
+        for (TaskDepth& depth : notify_depths_) {
+            if (depth.task == task) {
+                return &depth;
+            }
+        }
+        return nullptr;
+    };
+    if (TaskDepth* depth = entry(); depth != nullptr) {
+        ++depth->depth;
+    } else {
+        notify_depths_.push_back({task, 1});
+    }
+    send(class_of(target), target, msg, 4);
+    // The entry may have moved, or gone with a task that ended meanwhile.
+    if (TaskDepth* depth = entry(); depth != nullptr && --depth->depth == 0) {
+        std::erase_if(notify_depths_, [](const TaskDepth& d) { return d.depth == 0; });
+    }
+}
+
+void Boopsi::raise_loop(u32 data) {
+    Bus b(*machine_);
+    b.w32(data + ic_Loop, b.r32(data + ic_Loop) + 1);
+    loop_holds_.push_back({exec_->this_task(), data});
+}
+
+void Boopsi::lower_loop(u32 data) {
+    const u32 task = exec_->this_task();
+    for (auto it = loop_holds_.rbegin(); it != loop_holds_.rend(); ++it) {
+        if (it->task == task && it->data == data) {
+            loop_holds_.erase(std::next(it).base());
+            Bus b(*machine_);
+            const u32 loop = b.r32(data + ic_Loop);
+            b.w32(data + ic_Loop, loop != 0 ? loop - 1 : 0);
+            return;
+        }
+    }
+}
+
+void Boopsi::drop_loop_holds(u32 data) {
+    std::erase_if(loop_holds_, [data](const LoopHold& hold) { return hold.data == data; });
+}
+
+// A task that ends inside a notification leaves no depth behind, and the
+// loop counters it raised come down.
+void Boopsi::task_ended(u32 task) {
+    std::erase_if(notify_depths_, [task](const TaskDepth& d) { return d.task == task; });
+    Bus b(*machine_);
+    for (const LoopHold& hold : loop_holds_) {
+        if (hold.task == task) {
+            const u32 loop = b.r32(hold.data + ic_Loop);
+            b.w32(hold.data + ic_Loop, loop != 0 ? loop - 1 : 0);
+        }
+    }
+    std::erase_if(loop_holds_, [task](const LoopHold& hold) { return hold.task == task; });
+}
+
+void Boopsi::notify_attrs(u32 object, const u32* pairs, u32 count, u32 ginfo, u32 flags) {
+    const GuestTags list(*exec_, *machine_, pairs, count);
+    if (list.list() == 0) {
+        return;
+    }
+    const u32 msg[] = {OM_NOTIFY, list.list(), ginfo, flags};
+    send(class_of(object), object, msg, 4);
+}
+
+// icclass: passes the attributes of each OM_UPDATE and OM_NOTIFY on to
+// its ICA_TARGET, renamed through its ICA_MAP. While it does, its loop
+// counter is up, and a notification that comes back round to it through
+// the targets goes no further.
+u32 Boopsi::ic_dispatch(u32 cl, u32 object, u32 msg) {
+    Bus b(*machine_);
+    const u32 method = b.r32(msg);
     if (!b.ok()) {
         return 0;
     }
-    if (entry->target == ICTARGET_IDCMP) {
-        const u32 window = ginfo != 0 ? b.r32(ginfo + gi_Window) : 0;
-        if (!b.ok() || window == 0 || idcmp_update_hook_ == nullptr) {
+    const u32 data = object + b.r16(ic_ + cl_InstOffset);
+    switch (method) {
+    case OM_NEW: {
+        const u32 made = call_super(cl, object, msg);
+        if (made != 0) {
+            set_ic_attrs(made + b.r16(ic_ + cl_InstOffset), b.r32(msg + 4));
+        }
+        return made;
+    }
+    case OM_SET:
+        set_ic_attrs(data, b.r32(msg + 4));
+        return call_super(cl, object, msg);
+    case OM_GET: {
+        const u32 attr = b.r32(msg + 4);
+        if (attr != ICA_TARGET && attr != ICA_MAP) {
+            return call_super(cl, object, msg);
+        }
+        b.w32(b.r32(msg + 8), b.r32(data + (attr == ICA_TARGET ? ic_Target : ic_Map)));
+        return b.ok() ? 1 : 0;
+    }
+    case OM_UPDATE:
+    case OM_NOTIFY: {
+        if (b.r32(data + ic_Loop) != 0 || !b.ok()) {
             return 0;
         }
-        idcmp_update_hook_(idcmp_update_hook_ctx_, window, pairs, count, flags);
+        raise_loop(data);
+        forward(b.r32(data + ic_Target), b.r32(data + ic_Map), msg, false, 0);
+        lower_loop(data);
         return 0;
     }
-    send_update(entry->target, pairs, count, ginfo, flags);
-    return 0;
+    case OM_DISPOSE:
+        drop_loop_holds(data);
+        return call_super(cl, object, msg);
+    case ICM_SETLOOP:
+        b.w32(data + ic_Loop, b.r32(data + ic_Loop) + 1);
+        return 0;
+    case ICM_CLEARLOOP: {
+        const u32 loop = b.r32(data + ic_Loop);
+        b.w32(data + ic_Loop, loop != 0 ? loop - 1 : 0);
+        return 0;
+    }
+    case ICM_CHECKLOOP:
+        return b.r32(data + ic_Loop);
+    default:
+        return call_super(cl, object, msg);
+    }
 }
 
-// A guest copy of the notification for an object target: OM_UPDATE with
-// the mapped attributes, made for the call and freed after it.
-void Boopsi::send_update(u32 target, const u32* pairs, u32 count, u32 ginfo, u32 flags) {
-    const u32 bytes = (count + 1) * tags::kItemBytes;
-    const u32 list = exec_->alloc(bytes, MEMF_PUBLIC | MEMF_CLEAR);
-    if (list == 0) {
-        return;
-    }
+void Boopsi::set_ic_attrs(u32 data, u32 tags) {
     Bus b(*machine_);
-    for (u32 i = 0; i < count; ++i) {
-        b.w32(list + i * tags::kItemBytes, pairs[i * 2]);
-        b.w32(list + i * tags::kItemBytes + 4, pairs[i * 2 + 1]);
+    u32 budget = tags::kMaxTagItems;
+    u32 at = tags;
+    for (;;) {
+        const u32 item = tags::next(b, at, budget);
+        if (item == 0) {
+            return;
+        }
+        const u32 tag = b.r32(item);
+        if (tag == ICA_TARGET) {
+            b.w32(data + ic_Target, b.r32(item + 4));
+        } else if (tag == ICA_MAP) {
+            b.w32(data + ic_Map, b.r32(item + 4));
+        }
     }
-    b.w32(list + count * tags::kItemBytes, tags::kTagDone);
-    const u32 msg = b.ok() ? exec_->alloc(4 * 4, MEMF_PUBLIC) : 0;
-    if (msg == 0) {
-        exec_->free(list, bytes);
-        return;
+}
+
+// modelclass: an icclass whose OM_UPDATE and OM_NOTIFY go to each of its
+// members as OM_UPDATE before they go on to its own target. Members join
+// with OM_ADDMEMBER, leave with OM_REMMEMBER and are disposed with it.
+u32 Boopsi::model_dispatch(u32 cl, u32 object, u32 msg) {
+    Bus b(*machine_);
+    const u32 method = b.r32(msg);
+    if (!b.ok()) {
+        return 0;
     }
-    b.w32(msg, OM_UPDATE);
-    b.w32(msg + 4, list);
-    b.w32(msg + 8, ginfo);
-    b.w32(msg + 12, flags);
-    if (b.ok()) {
-        ++notify_depth_;
-        do_method(target, msg);
-        --notify_depth_;
+    const u32 list = object + b.r16(model_ + cl_InstOffset) + model_Members;
+    switch (method) {
+    case OM_NEW: {
+        const u32 made = call_super(cl, object, msg);
+        if (made != 0) {
+            const u32 members = made + b.r16(model_ + cl_InstOffset) + model_Members;
+            b.w32(members, members + 4);
+            b.w32(members + 4, 0);
+            b.w32(members + 8, members);
+        }
+        return made;
     }
-    exec_->free(msg, 4 * 4);
-    exec_->free(list, bytes);
+    case OM_ADDMEMBER: {
+        const u32 member = b.r32(msg + 4);
+        if (member != 0) {
+            const u32 add[] = {OM_ADDTAIL, list};
+            send(class_of(member), member, add, 2);
+        }
+        return 0;
+    }
+    case OM_REMMEMBER: {
+        const u32 member = b.r32(msg + 4);
+        if (member != 0) {
+            const u32 remove[] = {OM_REMOVE};
+            send(class_of(member), member, remove, 1);
+        }
+        return 0;
+    }
+    case OM_DISPOSE: {
+        for (u32 step = 0; step < kMaxModelMembers; ++step) {
+            const u32 node = b.r32(list);
+            if (!b.ok() || node == 0 || b.r32(node) == 0) {
+                break;
+            }
+            const u32 member = node + Object_SIZEOF;
+            const u32 remove[] = {OM_REMOVE};
+            send(class_of(member), member, remove, 1);
+            dispose_object(member);
+        }
+        return call_super(cl, object, msg);
+    }
+    case OM_UPDATE:
+    case OM_NOTIFY: {
+        const u32 data = object + b.r16(ic_ + cl_InstOffset);
+        if (b.r32(data + ic_Loop) != 0 || !b.ok()) {
+            return 0;
+        }
+        // The members as the broadcast starts; one taken out by another's
+        // update before its turn hears nothing, and one added meanwhile
+        // waits for the next.
+        std::vector<u32> members;
+        for (u32 node = b.r32(list); b.ok() && node != 0 && members.size() < kMaxModelMembers;) {
+            const u32 next = b.r32(node);
+            if (next == 0) {
+                break;
+            }
+            members.push_back(node + Object_SIZEOF);
+            node = next;
+        }
+        raise_loop(data);
+        const u32 update[] = {OM_UPDATE, b.r32(msg + opu_AttrList), b.r32(msg + opu_GInfo),
+                              b.r32(msg + opu_Flags)};
+        for (const u32 member : members) {
+            if (is_member(list, member)) {
+                send(class_of(member), member, update, 4);
+            }
+        }
+        lower_loop(data);
+        return call_super(cl, object, msg);
+    }
+    default:
+        return call_super(cl, object, msg);
+    }
+}
+
+bool Boopsi::is_member(u32 list, u32 member) {
+    Bus b(*machine_);
+    u32 node = b.r32(list);
+    for (u32 step = 0; step < kMaxModelMembers && b.ok() && node != 0; ++step) {
+        const u32 next = b.r32(node);
+        if (next == 0) {
+            return false;
+        }
+        if (node + Object_SIZEOF == member) {
+            return true;
+        }
+        node = next;
+    }
+    return false;
+}
+
+// pointerclass: holds the POINTERA_ attributes of a pointer image, which
+// a window takes with WA_Pointer.
+u32 Boopsi::pointer_dispatch(u32 cl, u32 object, u32 msg) {
+    Bus b(*machine_);
+    const u32 method = b.r32(msg);
+    if (!b.ok()) {
+        return 0;
+    }
+    switch (method) {
+    case OM_NEW: {
+        const u32 made = call_super(cl, object, msg);
+        if (made == 0) {
+            return 0;
+        }
+        const u32 data = made + b.r16(pointer_ + cl_InstOffset);
+        u32 budget = tags::kMaxTagItems;
+        u32 at = b.r32(msg + 4);
+        for (;;) {
+            const u32 item = tags::next(b, at, budget);
+            if (item == 0) {
+                break;
+            }
+            const u32 attr = b.r32(item) - POINTERA_BitMap;
+            if (attr < kPointerAttrs) {
+                b.w32(data + attr * 4, b.r32(item + 4));
+            }
+        }
+        return made;
+    }
+    case OM_GET: {
+        const u32 attr = b.r32(msg + 4) - POINTERA_BitMap;
+        if (attr >= kPointerAttrs) {
+            return call_super(cl, object, msg);
+        }
+        b.w32(b.r32(msg + 8), b.r32(object + b.r16(pointer_ + cl_InstOffset) + attr * 4));
+        return b.ok() ? 1 : 0;
+    }
+    default:
+        return call_super(cl, object, msg);
+    }
 }
 
 // imageclass: an Image with CUSTOMIMAGEDEPTH, which Intuition draws by

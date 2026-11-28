@@ -36,9 +36,12 @@
 // A class is a struct IClass in guest memory, its dispatcher a Hook. An
 // object is the instance data of its classes behind a struct _Object, and
 // the object pointer points just past that header, as INST_DATA expects.
-// The system classes rootclass, gadgetclass and imageclass dispatch in C++
-// behind A-line stubs, so a 68000 dispatcher's DoSuperMethod reaches them
-// through cl_Super's h_Entry like any other. A method sent to a class
+// The system classes (rootclass, gadgetclass, imageclass, sysiclass,
+// icclass, modelclass, pointerclass and those intuition adds) dispatch in
+// C++ behind A-line stubs, so a 68000 dispatcher's DoSuperMethod reaches
+// them through cl_Super's h_Entry like any other. They are kept in a
+// registry by that entry: a method C++ sends to one of them runs its C++
+// dispatcher straight away, without a 68000 call. A method sent to a class
 // whose dispatcher is 68000 code runs that code as a nested guest call.
 //
 // A kernel built with -DHOMBRE_BOOPSI_TRACE logs the methods; see
@@ -140,6 +143,44 @@ constexpr u32 ICA_Dummy = 0x80040000;
 constexpr u32 ICA_TARGET = ICA_Dummy + 1;
 constexpr u32 ICA_MAP = ICA_Dummy + 2;
 constexpr u32 ICTARGET_IDCMP = 0xFFFFFFFF;
+// A map that renames an attribute to ICSPECIAL_CODE puts the low word of
+// its value into the Code of the IDCMP_IDCMPUPDATE.
+constexpr u32 ICSPECIAL_CODE = ICA_Dummy + 3;
+
+// The loop counter of an icclass object (intuition/icclass.h): ICM_SETLOOP
+// counts up, ICM_CLEARLOOP down and ICM_CHECKLOOP answers it.
+constexpr u32 ICM_SETLOOP = 0x402;
+constexpr u32 ICM_CLEARLOOP = 0x403;
+constexpr u32 ICM_CHECKLOOP = 0x404;
+
+// opUpdate's opu_Flags: the change is one of several while the user acts.
+constexpr u32 OPUF_INTERIM = 1;
+
+// pointerclass attributes (intuition/pointerclass.h).
+constexpr u32 POINTERA_Dummy = 0x80039000;
+constexpr u32 POINTERA_BitMap = POINTERA_Dummy + 1;
+constexpr u32 POINTERA_XOffset = POINTERA_Dummy + 2;
+constexpr u32 POINTERA_YOffset = POINTERA_Dummy + 3;
+constexpr u32 POINTERA_WordWidth = POINTERA_Dummy + 4;
+constexpr u32 POINTERA_XResolution = POINTERA_Dummy + 5;
+constexpr u32 POINTERA_YResolution = POINTERA_Dummy + 6;
+
+// propgclass attributes (intuition/gadgetclass.h).
+constexpr u32 PGA_Dummy = 0x80031000;
+constexpr u32 PGA_Freedom = PGA_Dummy + 1;
+constexpr u32 PGA_Borderless = PGA_Dummy + 2;
+constexpr u32 PGA_HorizPot = PGA_Dummy + 3;
+constexpr u32 PGA_HorizBody = PGA_Dummy + 4;
+constexpr u32 PGA_VertPot = PGA_Dummy + 5;
+constexpr u32 PGA_VertBody = PGA_Dummy + 6;
+constexpr u32 PGA_Total = PGA_Dummy + 7;
+constexpr u32 PGA_Visible = PGA_Dummy + 8;
+constexpr u32 PGA_Top = PGA_Dummy + 9;
+constexpr u32 PGA_NewLook = PGA_Dummy + 10;
+
+// GM_LAYOUT goes to gadgets with a relative box and to those that ask for
+// it with GA_RelSpecial.
+constexpr u32 GFLG_RELSPECIAL = 0x4000;
 
 // struct opUpdate, the message OM_NOTIFY and OM_UPDATE carry.
 constexpr u32 opu_AttrList = 4;
@@ -262,13 +303,37 @@ public:
 
     // How intuition turns a gadget's notification for ICTARGET_IDCMP into
     // an IDCMP_IDCMPUPDATE: the window from the GadgetInfo, the mapped
-    // attribute pairs and the notification's flags.
+    // attribute pairs, the notification's flags and the message's Code.
     using IdcmpUpdateHook = void (*)(void* ctx, u32 window, const u32* tags, u32 count,
-                                     u32 flags);
+                                     u32 flags, u16 code);
 
-    // Makes rootclass, gadgetclass and imageclass and lists them. exec
-    // must be initialised. False if exec runs out of memory or native ids.
+    // The dispatcher of a class written in C++, with the context it was
+    // registered with: the class, the object and the message, as a Hook
+    // gets them in A0, A2 and A1.
+    using NativeDispatcher = u32 (*)(void* ctx, u32 cl, u32 object, u32 msg);
+    static constexpr u32 kMaxNativeClasses = 32;
+
+    // Makes the system classes and lists them. exec must be initialised.
+    // False if exec runs out of memory or native ids.
     bool init(m68k::Machine& m, Exec& exec);
+
+    // A public class over super whose dispatcher is C++, registered so that
+    // the methods C++ sends it run without a 68000 call: 0 when exec runs
+    // out of memory or native ids, or the registry is full.
+    u32 make_native_class(const char* name, u32 super, u32 inst_size, NativeDispatcher dispatcher,
+                          void* ctx);
+
+    // The method sent to the superclass of cl, as DoSuperMethod sends it.
+    u32 call_super(u32 cl, u32 object, u32 msg);
+
+    // OM_NOTIFY to the object with the attribute pairs as its tag list, as
+    // a class tells its targets of a change.
+    void notify_attrs(u32 object, const u32* pairs, u32 count, u32 ginfo, u32 flags);
+
+    // What exec's task end hook does: a task that ended inside a
+    // notification counts no depth any more, and the icclass loop counters
+    // it raised come down.
+    void task_ended(u32 task);
 
     // The intuition vectors.
     u32 make_class(u32 id, u32 super_id, u32 super_class, u32 inst_size, u32 flags);
@@ -309,6 +374,9 @@ public:
     u32 gadget_class() const { return gadget_; }
     u32 image_class() const { return image_; }
     u32 sysi_class() const { return sysi_; }
+    u32 ic_class() const { return ic_; }
+    u32 model_class() const { return model_; }
+    u32 pointer_class() const { return pointer_; }
 
     void set_sys_image_renderer(SysImageRenderer renderer, void* ctx) {
         sys_image_renderer_ = renderer;
@@ -331,22 +399,38 @@ private:
         u32 map = 0;
     };
 
+    // A class of the registry: the A-line stub its h_Entry points at and
+    // the C++ that answers it.
+    struct NativeClass {
+        Boopsi* boopsi = nullptr;
+        u32 entry = 0;
+        NativeDispatcher dispatcher = nullptr;
+        void* ctx = nullptr;
+    };
+
     static constexpr u32 kMaxIcaEntries = 4096;
     static constexpr u32 kMaxNotifyTags = 32;
     static constexpr u32 kMaxNotifyDepth = 8;
 
-    u32 make_system_class(const char* name, u32 super, u32 inst_size, m68k::NativeFn entry);
     u32 dispatch(u32 cl, u32 object, u32 msg);
     u32 root_dispatch(u32 cl, u32 object, u32 msg);
     u32 gadget_dispatch(u32 cl, u32 object, u32 msg);
     u32 image_dispatch(u32 cl, u32 object, u32 msg);
     u32 sysi_dispatch(u32 cl, u32 object, u32 msg);
-    u32 call_super(u32 cl, u32 object, u32 msg);
+    u32 ic_dispatch(u32 cl, u32 object, u32 msg);
+    u32 model_dispatch(u32 cl, u32 object, u32 msg);
+    u32 pointer_dispatch(u32 cl, u32 object, u32 msg);
+    void set_ic_attrs(u32 data, u32 tags);
+    // Whether the object is still on the member list of a model.
+    bool is_member(u32 list, u32 member);
     IcaEntry* find_ica(u32 object);
     IcaEntry* ica_slot(u32 object);
     void drop_ica(u32 object);
     u32 map_tag(native::Bus& b, u32 map, u32 tag);
     u32 notify(u32 gadget, u32 msg);
+    // Passes the attributes of an OM_NOTIFY or OM_UPDATE on to target,
+    // renamed through map; with_id adds GA_ID id when the list has none.
+    void forward(u32 target, u32 map, u32 msg, bool with_id, u32 id);
     void send_update(u32 target, const u32* pairs, u32 count, u32 ginfo, u32 flags);
     u32 set_gadget_attrs(u32 gadget, u32 tags, bool initial);
     bool get_gadget_attr(u32 gadget, u32 attr, u32 storage);
@@ -360,16 +444,32 @@ private:
     u32 gadget_ = 0;
     u32 image_ = 0;
     u32 sysi_ = 0;
-    u32 root_entry_ = 0;
-    u32 gadget_entry_ = 0;
-    u32 image_entry_ = 0;
-    u32 sysi_entry_ = 0;
+    u32 ic_ = 0;
+    u32 model_ = 0;
+    u32 pointer_ = 0;
+    NativeClass natives_[kMaxNativeClasses]{};
+    u32 native_count_ = 0;
     SysImageRenderer sys_image_renderer_ = nullptr;
     void* sys_image_renderer_ctx_ = nullptr;
     IdcmpUpdateHook idcmp_update_hook_ = nullptr;
     void* idcmp_update_hook_ctx_ = nullptr;
     SlotList<IcaEntry> ica_{kMaxIcaEntries};
-    u32 notify_depth_ = 0;
+    // How deep each task is in notifications, and the icclass loop
+    // counters raised while a notification goes on: both given back when a
+    // task ends inside one.
+    struct TaskDepth {
+        u32 task = 0;
+        u32 depth = 0;
+    };
+    struct LoopHold {
+        u32 task = 0;
+        u32 data = 0;
+    };
+    std::vector<TaskDepth> notify_depths_;
+    std::vector<LoopHold> loop_holds_;
+    void raise_loop(u32 data);
+    void lower_loop(u32 data);
+    void drop_loop_holds(u32 data);
     std::vector<u32> public_;
     BoopsiTraceState trace_;
 };
