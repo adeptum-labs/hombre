@@ -22,6 +22,7 @@
  */
 
 #include "libs/exec.hpp"
+#include "libs/native_class_lib.hpp"
 #include "libs/timer_device.hpp"
 #include "check.hpp"
 #include "test_guest.hpp"
@@ -1339,6 +1340,50 @@ void call_library_does_not_revive_an_ended_run() {
     CHECK_EQ(r.call(lib, 30), ExitReason::BusError);
     CHECK(!g_call_after_end);
     CHECK_EQ(r.get32(kData), 0u);
+}
+
+// A class library's class: made on the first open, which an open from the
+// making itself gets no library from, and made again by a later open when
+// it could not be made the first time.
+struct ClassMaking {
+    u32 calls = 0;
+    u32 inner_open = 0xFFFFFFFF;
+    bool fail_first = false;
+    u32 cl = 0;
+};
+
+u32 make_test_class(void* ctx, u32) {
+    ClassMaking& c = *static_cast<ClassMaking*>(ctx);
+    ++c.calls;
+    if (c.calls == 1 && c.fail_first) {
+        return 0;
+    }
+    c.inner_open = g_exec.open_library("making.class", 0);
+    return c.cl;
+}
+
+void class_library_makes_its_class_once() {
+    Rig r;
+    ClassMaking c;
+    c.cl = g_exec.alloc(52, MEMF_PUBLIC | MEMF_CLEAR);
+    c.fail_first = true;
+    NativeClassLibrary lib;
+    const u32 base = lib.make(r.m, g_exec, "making.class", "making 60.0\r\n", make_test_class, &c);
+    CHECK(base != 0);
+    CHECK_EQ(g_exec.open_library("making.class", 0), 0u);
+    CHECK_EQ(lib.class_ptr(), 0u);
+    g_lines.clear();
+    CHECK_EQ(g_exec.open_library("making.class", 0), base);
+    CHECK_EQ(c.calls, 2u);
+    CHECK_EQ(c.inner_open, 0u);
+    CHECK(logged("exec: a class library opened while its class is made"));
+    CHECK_EQ(lib.class_ptr(), c.cl);
+    CHECK_EQ(r.get32(c.cl + 36), base);  // cl_UserData
+    CHECK_EQ(r.get16(base + LIB_OPENCNT), 1u);
+    CHECK_EQ(g_exec.open_library("making.class", 0), base);
+    CHECK_EQ(c.calls, 2u);
+    CHECK_EQ(r.call(base, 30), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], c.cl);
 }
 
 void native_library_with_fields_past_the_node() {
@@ -6402,6 +6447,7 @@ int main() {
     call_library_passes_every_register();
     call_library_refuses_softly_when_too_deep();
     call_library_does_not_revive_an_ended_run();
+    class_library_makes_its_class_once();
     native_library_with_fields_past_the_node();
     unknown_exec_vector();
     library_loaded_through_the_segment_loader();
