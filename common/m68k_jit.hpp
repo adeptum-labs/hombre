@@ -126,11 +126,20 @@ struct Prelude {
 
 class Jit {
 public:
+    // What a native keeps for the natives it calls, inside it, to find:
+    // the frame and the tag of its owner, which only that owner asks for.
+    struct NativeFrame {
+        const void* tag = nullptr;
+        void* frame = nullptr;
+    };
+
     struct RunState {
         u64 budget_left = 0;
         u32 run_depth = 0;
         const char* native = nullptr;
         bool stop = false;
+        NativeFrame native_frame{};
+        bool in_block_native = false;
     };
 
     using PreemptHook = void (*)(void* ctx);
@@ -196,7 +205,8 @@ public:
     }
 
     RunState save_run_state() const {
-        return RunState{budget_left_, run_depth_, native_, stop_};
+        return RunState{budget_left_, run_depth_, native_, stop_, native_frame_,
+                        in_block_native_};
     }
 
     void restore_run_state(const RunState& state) {
@@ -204,7 +214,28 @@ public:
         run_depth_ = state.run_depth;
         native_ = state.native;
         stop_ = state.stop;
+        native_frame_ = state.native_frame;
+        in_block_native_ = state.in_block_native;
     }
+
+    // The running task's native frame: it goes with the run state. A
+    // native that sets it puts back the one it found before it returns.
+    NativeFrame native_frame() const { return native_frame_; }
+    void set_native_frame(NativeFrame frame) { native_frame_ = frame; }
+
+    // The frame if its tag is tag, else null.
+    void* native_frame_for(const void* tag) const {
+        return tag != nullptr && native_frame_.tag == tag ? native_frame_.frame : nullptr;
+    }
+
+    // Whether the native running now was called by an A-line opcode in a
+    // block, which continue_at needs; not one call_native called.
+    bool can_continue() const { return in_block_native_; }
+
+    // Called last by a native that can_continue: the run goes on at pc
+    // instead of after the opcode, with the stack as the native leaves it.
+    // False, and nothing changes, for any other.
+    bool continue_at(u32 pc);
 
     // The name of the native the running task is in, null outside one.
     const char* current_native() const { return native_; }
@@ -253,6 +284,12 @@ private:
     u32 run_depth_ = 0;
     const char* native_ = nullptr;
     bool stop_ = false;
+    NativeFrame native_frame_{};
+    bool in_block_native_ = false;
+    // Set by continue_at until the opcode that called the native goes on
+    // there.
+    bool continued_ = false;
+    u32 continue_pc_ = 0;
     volatile bool attention_ = false;
     PreemptHook attention_hook_ = nullptr;
     void* attention_ctx_ = nullptr;

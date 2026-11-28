@@ -1545,6 +1545,10 @@ bool Jit::init(const CodeRegion& region, Machine& machine) {
     preempt_ctx_ = nullptr;
     native_ = nullptr;
     stop_ = false;
+    native_frame_ = NativeFrame{};
+    in_block_native_ = false;
+    continued_ = false;
+    continue_pc_ = 0;
     attention_ = false;
     attention_hook_ = nullptr;
     attention_ctx_ = nullptr;
@@ -1691,10 +1695,22 @@ bool Jit::call_native(u16 id) {
         .hex(cpu.a[1])
         .send();
 #endif
+    const bool outer = in_block_native_;
+    in_block_native_ = false;
     run_native(slot);
+    in_block_native_ = outer;
 #ifdef HOMBRE_TRACE_NATIVES
     LogLine().text("  -> d0=").hex(cpu.d[0]).send();
 #endif
+    return true;
+}
+
+bool Jit::continue_at(u32 pc) {
+    if (!in_block_native_) {
+        return false;
+    }
+    continue_pc_ = pc;
+    continued_ = true;
     return true;
 }
 
@@ -1733,12 +1749,19 @@ void Jit::dispatch(u32 opcode) {
         .hex(cpu.a[1])
         .send();
 #endif
+    const bool outer = in_block_native_;
+    in_block_native_ = true;
     run_native(slot);
+    in_block_native_ = outer;
 #ifdef HOMBRE_TRACE_NATIVES
     LogLine().text("  -> d0=").hex(cpu.d[0]).send();
 #endif
+    // A native that went on elsewhere did so last, with nothing that could
+    // switch tasks after it, so the flag is this opcode's.
+    const bool continued = continued_;
+    continued_ = false;
     if (cpu.exit == ExitReason::None) {
-        cpu.pc = resume;
+        cpu.pc = continued ? continue_pc_ : resume;
     }
 }
 

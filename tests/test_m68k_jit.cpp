@@ -460,6 +460,61 @@ void natives_are_called_by_their_aline_opcode() {
     CHECK_EQ(g_jit.add_native(nullptr, nullptr, "none"), 0u);
 }
 
+int g_frame_value = 0;
+int g_frame_tag = 0;
+int g_other_tag = 0;
+bool g_could_continue = false;
+
+void native_jumper(void* ctx, Machine& m) {
+    // The frame is the running task's, and natives start with the one
+    // the native around them left; only its own tag finds it.
+    CHECK(m.jit->native_frame_for(&g_frame_tag) == nullptr);
+    const Jit::NativeFrame outer = m.jit->native_frame();
+    m.jit->set_native_frame(Jit::NativeFrame{&g_frame_tag, &g_frame_value});
+    CHECK(m.jit->native_frame_for(&g_frame_tag) == &g_frame_value);
+    CHECK(m.jit->native_frame_for(&g_other_tag) == nullptr);
+    m.jit->set_native_frame(outer);
+    g_could_continue = m.jit->can_continue();
+    m.jit->continue_at(*static_cast<u32*>(ctx));
+}
+
+void a_native_can_go_on_elsewhere() {
+    Rig r;
+    g_native_calls = 0;
+    static u32 target = 0x2100;
+    const u16 jumper = g_jit.add_native(native_jumper, &target, "jumper");
+    const u16 seven = g_jit.add_native(native_seven, &g_native_calls, "seven");
+    r.code(0x3000, {static_cast<u16>(0xA000 | jumper), 0x4E75});
+    r.code(0x3100, {static_cast<u16>(0xA000 | seven), 0x4E75});
+    // MOVEQ #5,D2 ; RTS: the code the jumper goes on at, which returns to
+    // the JSR's caller.
+    r.code(0x2100, {0x7405, 0x4E75});
+    // JSR $3000.w ; MOVE.L D2,D5 ; JSR $3100.w ; MOVE.L D0,D6
+    r.program(kCode, {0x4EB8, 0x3000, 0x2A02, 0x4EB8, 0x3100, 0x2C00});
+    CHECK_EQ(r.go(), ExitReason::Halt);
+    CHECK(g_could_continue);
+    CHECK_EQ(r.cpu().d[5], 5u);
+    CHECK_EQ(r.cpu().d[6], 7u);
+    CHECK_EQ(g_native_calls, 1);
+    CHECK_EQ(r.cpu().a[7], kStack);
+
+    // Called directly, the native cannot go on elsewhere: the pc stays.
+    g_could_continue = true;
+    r.cpu().pc = 0x1234;
+    CHECK(g_jit.call_native(jumper));
+    CHECK(!g_could_continue);
+    CHECK_EQ(r.cpu().pc, 0x1234u);
+    CHECK(!g_jit.can_continue());
+
+    // The frame goes with the run state, as each task's does.
+    g_jit.set_native_frame(Jit::NativeFrame{&g_frame_tag, &g_frame_value});
+    const Jit::RunState state = g_jit.save_run_state();
+    g_jit.set_native_frame(Jit::NativeFrame{});
+    g_jit.restore_run_state(state);
+    CHECK(g_jit.native_frame_for(&g_frame_tag) == &g_frame_value);
+    g_jit.set_native_frame(Jit::NativeFrame{});
+}
+
 void flush_drops_translations() {
     Rig r;
     r.program(kCode, {0x7001});  // MOVEQ #1,D0
@@ -1910,6 +1965,7 @@ int main() {
     bus_and_address_errors();
     endless_loop_runs_out_of_budget();
     natives_are_called_by_their_aline_opcode();
+    a_native_can_go_on_elsewhere();
     flush_drops_translations();
     code_region_accessors_report_used_and_total();
     small_region_flushes_and_completes();
