@@ -404,6 +404,13 @@ struct LibraryProvider {
     const char* dir = nullptr;
 };
 
+// The registers a library function takes, for C++ that calls one through
+// its vector: D0 to D7 and A0 to A5. A6 is the library base.
+struct LibraryCall {
+    u32 d[8]{};
+    u32 a[6]{};
+};
+
 // Runs while Wait or WaitPort blocks with no wanted signal pending. False
 // stops the wait.
 struct IdleHook {
@@ -503,6 +510,16 @@ public:
     // do, for C++ code running in a native of a task.
     u32 open_library(const char* name, u16 version);
     void close_library(u32 base);
+
+    // Calls the function at vector lvo (n of LVO -n) of the library at base
+    // with the registers of args, as 68000 code calls it: a native vector
+    // straight from C++, which counts as one level of nesting, any other,
+    // one SetFunction replaced too, as a nested run of 68000 code. Every
+    // register is left as it was. True with the function's D0 in d0. False
+    // when the running task's 68000 code has already ended, when the run
+    // ends inside the function, when a 68000 function nests too deep (which
+    // ends the run), or, with the run going on, when a native one would.
+    bool call_library(u32 base, u32 lvo, const LibraryCall& args, u32& d0);
 
     // Wait and WaitPort call this while no wanted signal is pending. It may
     // be set before init and is kept across it.

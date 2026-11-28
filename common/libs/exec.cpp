@@ -2283,41 +2283,61 @@ struct ExecOps {
         return static_cast<u32>(static_cast<i32>(static_cast<i8>(v & 0xFF)));
     }
 
-    static bool call_device_vector(Exec& e, Bus& b, u32 dev, u32 lvo, u32 d0, u32 d1, u32 a1,
-                                   u32& d0_out) {
-        const u32 vec = dev - lvo;
+    // The function at vector lvo of the library at base, with the registers
+    // of args and A6 the base: a native vector straight from C++, any other
+    // as a nested run of 68000 code. what names the kind of call in the log
+    // line of calls nested too deep. A native vector called too deep for the
+    // count or the host stack fails; when soft, the run goes on, so that a
+    // caller in C++ can give up the work it was doing.
+    static bool call_vector(Exec& e, Bus& b, u32 base, u32 lvo, const LibraryCall& args,
+                            u32& d0_out, const char* what, bool soft) {
+        CpuState& cpu = e.m_->cpu;
+        if (native::run_ended(*e.m_)) {
+            b.stop();
+            return false;
+        }
+        const u32 vec = base - lvo;
         const u32 w0 = b.r16(vec);
         const u32 w1 = b.r16(vec + 2);
         if (!b.ok()) {
             return false;
         }
-        CpuState& cpu = e.m_->cpu;
-        u32 saved_d[8];
-        u32 saved_a[8];
-        for (u32 i = 0; i < 8; ++i) {
-            saved_d[i] = cpu.d[i];
-            saved_a[i] = cpu.a[i];
-        }
+        const auto load = [&] {
+            for (u32 i = 0; i < 8; ++i) {
+                cpu.d[i] = args.d[i];
+            }
+            for (u32 i = 0; i < 6; ++i) {
+                cpu.a[i] = args.a[i];
+            }
+            cpu.a[6] = base;
+        };
         if ((w0 & 0xF000u) == native::kALine && w1 == native::kRts) {
+            u32 saved_d[8];
+            u32 saved_a[8];
+            for (u32 i = 0; i < 8; ++i) {
+                saved_d[i] = cpu.d[i];
+                saved_a[i] = cpu.a[i];
+            }
             const u16 id = static_cast<u16>(w0 & 0x0FFFu);
-            cpu.d[0] = d0;
-            cpu.d[1] = d1;
-            cpu.a[1] = a1;
-            cpu.a[6] = dev;
-            // A device vector may name any native, OpenDevice itself
-            // included, so direct calls nest under the same limit as calls
-            // into 68000 code.
+            // A vector may name any native, OpenDevice itself included, so
+            // direct calls nest under the same limit as calls into 68000
+            // code.
             if (e.call_depth_ >= kMaxCallDepth || host_stack_short(*e.m_)) {
-                LogLine().text("exec: device calls nested too deep").send();
-                end_run(*e.m_, ExitReason::Unimplemented);
-                b.stop();
+                LogLine().text("exec: ").text(what).text(" calls nested too deep").send();
+                if (!soft) {
+                    end_run(*e.m_, ExitReason::Unimplemented);
+                    b.stop();
+                }
                 return false;
             }
+            const ExitReason before = cpu.exit;
+            load();
             ++e.call_depth_;
             const bool called = e.m_->jit->call_native(id);
             --e.call_depth_;
             if (called) {
-                if (cpu.exit != ExitReason::None) {
+                // Only an exit the call itself set means the run ended in it.
+                if (cpu.exit != before) {
                     b.stop();
                     return false;
                 }
@@ -2334,15 +2354,28 @@ struct ExecOps {
             }
         }
         GuestCall call(e.call_depth_, b);
-        cpu.d[0] = d0;
-        cpu.d[1] = d1;
-        cpu.a[1] = a1;
-        cpu.a[6] = dev;
+        load();
         if (!call.run(vec)) {
             return false;
         }
         d0_out = call.d0();
         return true;
+    }
+
+    static bool call_device_vector(Exec& e, Bus& b, u32 dev, u32 lvo, u32 d0, u32 d1, u32 a1,
+                                   u32& d0_out) {
+        LibraryCall args;
+        const CpuState& cpu = e.m_->cpu;
+        for (u32 i = 0; i < 8; ++i) {
+            args.d[i] = cpu.d[i];
+        }
+        for (u32 i = 0; i < 6; ++i) {
+            args.a[i] = cpu.a[i];
+        }
+        args.d[0] = d0;
+        args.d[1] = d1;
+        args.a[1] = a1;
+        return call_vector(e, b, dev, lvo, args, d0_out, "device", false);
     }
 
     static bool is_queued_on_port(Bus& b, u32 port, u32 target) {
@@ -3659,6 +3692,14 @@ void Exec::close_library(u32 base) {
     Bus b(*m_);
     u32 seglist = 0;
     (void)ExecOps::close_library_base(*this, b, base, seglist);
+}
+
+bool Exec::call_library(u32 base, u32 lvo, const LibraryCall& args, u32& d0) {
+    if (m_ == nullptr || base == 0) {
+        return false;
+    }
+    Bus b(*m_);
+    return ExecOps::call_vector(*this, b, base, lvo, args, d0, "library", true);
 }
 
 u32 Exec::spawn(u32 task, u32 init_pc, u32 final_pc, bool detached) {

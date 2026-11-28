@@ -1200,6 +1200,147 @@ void native_library() {
     CHECK(g_exec.make_native_library("x.library", 1, nullptr, 3) == 0);
 }
 
+// C++ calls a library function through its vector: a native one straight
+// away, one SetFunction put 68000 code on as a nested run; every register
+// stays as it was.
+void call_library_calls_native_and_68000_vectors() {
+    Rig r;
+    const NativeVector fns[] = {{nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+                                {nullptr, nullptr}, {native_triple, "Triple"}};
+    const u32 lib =
+        g_exec.make_native_library("call.library", kHombreLibVersion, fns, 5, &g_native_d1);
+    CHECK(lib != 0);
+    r.cpu().d[1] = 0x1111;
+    r.cpu().a[3] = 0x3333;
+    LibraryCall args;
+    args.d[1] = 5;
+    u32 d0 = 0;
+    CHECK(g_exec.call_library(lib, 30, args, d0));
+    CHECK_EQ(d0, 15u);
+    CHECK_EQ(g_native_d1, 5u);
+    CHECK_EQ(r.cpu().d[1], 0x1111u);
+    CHECK_EQ(r.cpu().a[3], 0x3333u);
+
+    // ADD.L D1,D1 ; MOVE.L D1,D0 ; ADD.L A6,D0 ; RTS, put on the vector.
+    r.code(kSub, {0xD281, 0x2001, 0xD08E, 0x4E75});
+    r.cpu().a[1] = lib;
+    r.cpu().a[0] = static_cast<u32>(-30);
+    r.cpu().d[0] = kSub;
+    CHECK_EQ(r.exec(exec_lvo::SetFunction), ExitReason::Halt);
+    g_jit.flush();
+    r.cpu().d[1] = 0x1111;
+    args.d[1] = 7;
+    CHECK(g_exec.call_library(lib, 30, args, d0));
+    CHECK_EQ(d0, lib + 14);
+    CHECK_EQ(r.cpu().d[1], 0x1111u);
+    CHECK_EQ(r.cpu().a[3], 0x3333u);
+    CHECK(!g_exec.call_library(0, 30, args, d0));
+}
+
+// What record_registers saw: D0 to D7, then A0 to A6.
+u32 g_seen_registers[15] = {};
+void record_registers(void*, Machine& m) {
+    for (u32 i = 0; i < 8; ++i) {
+        g_seen_registers[i] = m.cpu.d[i];
+    }
+    for (u32 i = 0; i < 7; ++i) {
+        g_seen_registers[8 + i] = m.cpu.a[i];
+    }
+    m.cpu.d[0] = 77;
+}
+
+// The library ending_caller calls, and what the call gave.
+u32 g_target_library = 0;
+bool g_call_after_end = true;
+void ending_caller(void*, Machine& m) {
+    m.cpu.exit = ExitReason::BusError;
+    u32 d0 = 0;
+    g_call_after_end = g_exec.call_library(g_target_library, 30, LibraryCall{}, d0);
+}
+
+u64 g_stack_left = 0;
+u64 probe_stack(void*) { return g_stack_left; }
+
+// Every register of the call reaches the function, A6 is the base, and a
+// run left over from before does not count against the call.
+void call_library_passes_every_register() {
+    Rig r;
+    const NativeVector fns[] = {{nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+                                {nullptr, nullptr}, {record_registers, "Record"}};
+    const u32 lib = g_exec.make_native_library("regs.library", kHombreLibVersion, fns, 5);
+    LibraryCall args;
+    for (u32 i = 0; i < 8; ++i) {
+        args.d[i] = 0x100 + i;
+    }
+    for (u32 i = 0; i < 6; ++i) {
+        args.a[i] = 0x200 + i;
+    }
+    r.cpu().exit = ExitReason::Halt;
+    u32 d0 = 0;
+    CHECK(g_exec.call_library(lib, 30, args, d0));
+    CHECK_EQ(d0, 77u);
+    for (u32 i = 0; i < 8; ++i) {
+        CHECK_EQ(g_seen_registers[i], 0x100 + i);
+    }
+    for (u32 i = 0; i < 6; ++i) {
+        CHECK_EQ(g_seen_registers[8 + i], 0x200 + i);
+    }
+    CHECK_EQ(g_seen_registers[14], lib);
+    CHECK_EQ(r.cpu().exit, ExitReason::Halt);
+}
+
+// Short of host stack a native function is not called; the call fails and
+// the run goes on.
+void call_library_refuses_softly_when_too_deep() {
+    Rig r;
+    const NativeVector fns[] = {{nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+                                {nullptr, nullptr}, {record_registers, "Record"}};
+    const u32 lib = g_exec.make_native_library("deep.library", kHombreLibVersion, fns, 5);
+    g_seen_registers[0] = 0;
+    g_stack_left = 1024;
+    g_jit.set_stack_probe(probe_stack, nullptr);
+    g_lines.clear();
+    r.cpu().exit = ExitReason::None;
+    LibraryCall args;
+    args.d[0] = 5;
+    u32 d0 = 0;
+    CHECK(!g_exec.call_library(lib, 30, args, d0));
+    g_jit.set_stack_probe(nullptr, nullptr);
+    CHECK(logged("exec: library calls nested too deep"));
+    CHECK_EQ(g_seen_registers[0], 0u);
+    CHECK_EQ(r.cpu().exit, ExitReason::None);
+}
+
+// A native whose run has ended calls nothing more, neither native nor
+// 68000 code: the run ends as it ended.
+void call_library_does_not_revive_an_ended_run() {
+    Rig r;
+    const NativeVector target[] = {{nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+                                   {nullptr, nullptr}, {record_registers, "Record"}};
+    g_target_library = g_exec.make_native_library("target.library", kHombreLibVersion, target, 5);
+    const NativeVector caller[] = {{nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+                                   {nullptr, nullptr}, {ending_caller, "End"}};
+    const u32 lib = g_exec.make_native_library("caller.library", kHombreLibVersion, caller, 5);
+    g_seen_registers[0] = 0;
+    g_call_after_end = true;
+    CHECK_EQ(r.call(lib, 30), ExitReason::BusError);
+    CHECK(!g_call_after_end);
+    CHECK_EQ(g_seen_registers[0], 0u);
+    // The same with 68000 code on the vector: MOVEQ #1,D0 ; MOVE.L D0,kData ;
+    // RTS, which must not run.
+    r.code(kSub, {0x7001, 0x23C0, 0x0000, static_cast<u16>(kData), 0x4E75});
+    r.put32(kData, 0);
+    r.cpu().a[1] = g_target_library;
+    r.cpu().a[0] = static_cast<u32>(-30);
+    r.cpu().d[0] = kSub;
+    CHECK_EQ(r.exec(exec_lvo::SetFunction), ExitReason::Halt);
+    g_jit.flush();
+    g_call_after_end = true;
+    CHECK_EQ(r.call(lib, 30), ExitReason::BusError);
+    CHECK(!g_call_after_end);
+    CHECK_EQ(r.get32(kData), 0u);
+}
+
 void native_library_with_fields_past_the_node() {
     Rig r;
     // Dirty the memory the library will get, to see that it is cleared.
@@ -5486,9 +5627,6 @@ void enter_nested_run_stops_at_the_call_depth_limit() {
     g_exec.leave_nested_run();
 }
 
-u64 g_stack_left = 0;
-u64 probe_stack(void*) { return g_stack_left; }
-
 // Short of host stack, nested runs are refused however few there are.
 void nested_runs_stop_when_the_host_stack_runs_short() {
     Rig r;
@@ -6260,6 +6398,10 @@ int main() {
     open_exec_library();
     unknown_library_without_loader();
     native_library();
+    call_library_calls_native_and_68000_vectors();
+    call_library_passes_every_register();
+    call_library_refuses_softly_when_too_deep();
+    call_library_does_not_revive_an_ended_run();
     native_library_with_fields_past_the_node();
     unknown_exec_vector();
     library_loaded_through_the_segment_loader();
