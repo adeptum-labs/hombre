@@ -41,6 +41,7 @@
 #include "../common/libs/graphics.hpp"
 #include "../common/libs/gadtools.hpp"
 #include "../common/libs/icon.hpp"
+#include "../common/libs/image_dt.hpp"
 #include "../common/libs/input_device.hpp"
 #include "../common/libs/keymap_library.hpp"
 #include "../common/libs/layers.hpp"
@@ -128,6 +129,7 @@ constinit Graphics graphics{};
 constinit Intuition intuition{};
 constinit GadTools gadtools{};
 constinit PictureDataType picture_datatype{};
+constinit ImageDataType image_datatype{};
 constinit Layers layers{};
 constinit VersionLibrary version_library{};
 constinit ExpansionLibrary expansion_library{};
@@ -277,6 +279,11 @@ void open_amiga_screen(const BootInfo& info) {
     // datatypes/picture.datatype, unless the disk has a newer one.
     if (!picture_datatype.init(machine, exec, graphics, intuition)) {
         fail("picture.datatype failed");
+    }
+    // png.datatype and jpeg.datatype, the picture subclasses of the disk's
+    // MultiView.
+    if (!image_datatype.init(machine, exec, intuition, dos)) {
+        fail("image datatypes failed");
     }
     layers.set_graphics(graphics);
     intuition.set_clock(&clock_us);

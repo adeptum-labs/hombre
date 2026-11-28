@@ -805,11 +805,7 @@ $(BUILD)/host/common/%.o: common/%.cpp
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) -c $< -o $@
 
-$(BUILD)/tests/%: tests/%.cpp $(COMMON_HOBJ)
-	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
-
-$(BUILD)/tests/test_image_decode: tests/test_image_decode.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
+$(BUILD)/tests/%: tests/%.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) $(IMAGE_HOBJ) -o $@
 
@@ -820,15 +816,15 @@ test: $(TEST_BIN) $(TEST_DISK)
 
 # Host tools, built like the tests.
 
-$(ADFTOOL): tools/adftool.cpp $(COMMON_HOBJ)
+$(ADFTOOL): tools/adftool.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
 	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) $(IMAGE_HOBJ) -o $@
 
 MKHDF := $(BUILD)/tools/mkhdf
 
-$(MKHDF): tools/mkhdf.cpp $(COMMON_HOBJ)
+$(MKHDF): tools/mkhdf.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
 	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) $(IMAGE_HOBJ) -o $@
 
 $(TEST_HDF): $(MKHDF) $(TEST_DISK)
 	$(MKHDF) $@ $(TEST_DISK)
@@ -844,15 +840,15 @@ $(BROWSE_HDF): $(MKHDF) $(TEST_DISK) $(PIC_DISK)
 
 MKDISK    := $(BUILD)/tools/mkdisk
 
-$(MKDISK): tools/mkdisk.cpp $(COMMON_HOBJ)
+$(MKDISK): tools/mkdisk.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
 	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) $(IMAGE_HOBJ) -o $@
 
 MKPICDISK := $(BUILD)/tools/mkpicdisk
 
-$(MKPICDISK): tools/mkpicdisk.cpp $(COMMON_HOBJ)
+$(MKPICDISK): tools/mkpicdisk.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
 	@mkdir -p $(@D)
-	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) $(IMAGE_HOBJ) -o $@
 
 $(PIC_DISK): $(MKPICDISK)
 	$(MKPICDISK) $@
