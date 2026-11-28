@@ -100,6 +100,16 @@ KCXXFLAGS := -std=c++23 -O2 -ffreestanding -fno-exceptions -fno-rtti -fno-thread
              -fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mno-sse -mno-mmx -nostdlib \
              -Wall -Wextra -Werror -MMD -MP $(KCXXEXTRA)
 KLDFLAGS  := -nostdlib -T kernel/linker.ld -z max-page-size=0x1000
+# The Wuffs C code is freestanding: its stdint.h and stdbool.h come from the
+# compiler, while common/image/kernel/ supplies stdlib.h and string.h. The
+# calloc and free it refers to get names of their own, so the kernel's
+# stubs for them stay out of the way of anything else.
+KCC          := gcc
+KCFLAGS      := -std=c11 -O2 -ffreestanding -fno-pic -fno-pie -mno-red-zone \
+                -mcmodel=kernel -mno-sse -mno-mmx -fno-stack-protector -Wall -Wextra \
+                -nostdinc -isystem $(shell $(KCC) -print-file-name=include) \
+                -isystem common/image/kernel -Dcalloc=image_wuffs_calloc \
+                -Dfree=image_wuffs_free -MMD -MP
 # The mem* routines are built with these: they keep the compiler from turning
 # their loops back into calls to the very functions being defined.
 KMEMFLAGS := -fno-builtin -fno-tree-loop-distribute-patterns
@@ -111,6 +121,14 @@ KMEMFLAGS := -fno-builtin -fno-tree-loop-distribute-patterns
 COMMON_SRC  := $(filter-out common/mem.cpp,$(wildcard common/*.cpp common/libs/*.cpp))
 COMMON_KOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/%.o)
 COMMON_HOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/host/%.o)
+
+# The PNG and JPEG code lives below common/image/, outside the COMMON_SRC
+# glob. Its C parts build once per target; the kernel additionally gets the
+# private C library stubs the third-party object needs.
+WUFFS_C     := third_party/wuffs/release/c/wuffs-v0.4.c
+IMAGE_KOBJ  := $(BUILD)/common/image/wuffs_impl.o \
+               $(BUILD)/common/image/kernel/stubs.o
+IMAGE_HOBJ  := $(BUILD)/host/common/image/wuffs_impl.o
 
 KERNEL_SRC := $(wildcard kernel/*.cpp)
 KERNEL_OBJ := $(KERNEL_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/kernel/mem.o $(COMMON_KOBJ)
@@ -156,11 +174,34 @@ $(BUILD)/kernel/mem.o: common/mem.cpp
 	@mkdir -p $(@D)
 	$(KCXX) $(KCXXFLAGS) $(KMEMFLAGS) -c $< -o $@
 
+# wuffs_impl.c, which compiles the third-party code, does not get -Werror,
+# while the kernel stubs do.
+$(BUILD)/common/image/kernel/stubs.o: common/image/kernel/stubs.c \
+                                      common/image/kernel/stdlib.h
+	@mkdir -p $(@D)
+	$(KCC) $(KCFLAGS) -Werror -c $< -o $@
+
+$(BUILD)/common/image/wuffs_impl.o: common/image/wuffs_impl.c common/image/wuffs_config.h \
+                                    common/image/wuffs_state.h $(WUFFS_C)
+	@mkdir -p $(@D)
+	$(KCC) $(KCFLAGS) -c $< -o $@
+
+$(BUILD)/host/common/image/wuffs_impl.o: common/image/wuffs_impl.c \
+                                         common/image/wuffs_config.h \
+                                         common/image/wuffs_state.h $(WUFFS_C)
+	@mkdir -p $(@D)
+	$(HOSTCC) $(filter-out -Werror,$(HOSTCFLAGS)) -c $< -o $@
+
+# Wuffs comes in as a git submodule; a clone made without it has none.
+$(WUFFS_C):
+	@echo "missing $@: run git submodule update --init" >&2
+	@exit 1
+
 $(LOADER): $(LOADER_OBJ)
 	$(LD) $(LDFLAGS) $^ -o $@
 
-$(KERNEL): $(KERNEL_OBJ) kernel/linker.ld
-	$(KLD) $(KLDFLAGS) $(KERNEL_OBJ) -o $@
+$(KERNEL): $(KERNEL_OBJ) $(IMAGE_KOBJ) kernel/linker.ld
+	$(KLD) $(KLDFLAGS) $(KERNEL_OBJ) $(IMAGE_KOBJ) -o $@
 
 $(IMAGE): $(LOADER) $(KERNEL) tools/make_image.sh
 	tools/make_image.sh $@ $(LOADER) $(KERNEL)
@@ -189,8 +230,8 @@ $$(FAULT$(1)_DIR)/kernel/mem.o: common/mem.cpp
 	@mkdir -p $$(@D)
 	$$(KCXX) $$(KCXXFLAGS) $$(KMEMFLAGS) -c $$< -o $$@
 
-$$(FAULT$(1)_DIR)/KERNEL.ELF: $$(FAULT$(1)_OBJ) kernel/linker.ld
-	$$(KLD) $$(KLDFLAGS) $$(FAULT$(1)_OBJ) -o $$@
+$$(FAULT$(1)_DIR)/KERNEL.ELF: $$(FAULT$(1)_OBJ) $$(IMAGE_KOBJ) kernel/linker.ld
+	$$(KLD) $$(KLDFLAGS) $$(FAULT$(1)_OBJ) $$(IMAGE_KOBJ) -o $$@
 
 $(BUILD)/hombre-fault$(1).img: $$(LOADER) $$(FAULT$(1)_DIR)/KERNEL.ELF tools/make_image.sh
 	tools/make_image.sh $$@ $$(LOADER) $$(FAULT$(1)_DIR)/KERNEL.ELF
@@ -729,6 +770,9 @@ endif
 HOSTCXX      := g++
 HOSTCXXFLAGS := -std=c++20 -Wall -Wextra -Werror -fsanitize=address,undefined \
                 -fno-sanitize-recover=undefined -Icommon -Ikernel -I. -Itools -MMD -MP
+HOSTCC       := gcc
+HOSTCFLAGS   := -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined \
+                -fno-sanitize-recover=undefined -MMD -MP
 TEST_SRC     := $(wildcard tests/test_*.cpp)
 TEST_BIN     := $(TEST_SRC:tests/%.cpp=$(BUILD)/tests/%)
 
@@ -903,3 +947,4 @@ clean:
 -include $(MKPICDISK).d
 -include $(ELF2HUNK).d
 -include $(COMMON_HOBJ:.o=.d)
+-include $(IMAGE_KOBJ:.o=.d) $(IMAGE_HOBJ:.o=.d)
