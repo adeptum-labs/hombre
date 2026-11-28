@@ -37,6 +37,8 @@ TEST_DISK := $(BUILD)/test-disk.dms
 PIC_DISK  := $(BUILD)/pic-disk.adf
 # The disk of the MultiView boot check: one picture larger than the screen.
 MULTIVIEW_DISK := $(BUILD)/multiview-disk.adf
+# The disk of the PNG and JPEG datatype boot check.
+IMAGETYPES_DISK := $(BUILD)/imagedatatypes-disk.adf
 # A hard disk image whose one partition, DH0:, holds the test disk's volume.
 TEST_HDF  := $(BUILD)/test.hdf
 # The same partition inside a GPT of a disk with 4096 byte sectors.
@@ -141,7 +143,7 @@ KERNEL     := $(BUILD)/KERNEL.ELF
 FAULT_TESTS := 1 2 3 4
 
 .PHONY: all image image-nokernel disk-image run check check-workbench check-wbpattern \
-        check-multiview check-datatypes test \
+        check-multiview check-datatypes check-image-datatypes test \
         test-dms \
         test-m68k clean
 
@@ -790,6 +792,41 @@ check-datatypes:
 	@echo "set DISK=<path to a Workbench 3.1 .dms or .adf>" >&2; exit 1
 endif
 
+# Shows Images:Gradient.png and Images:Photo.jpg with MultiView, one run
+# each, through Hombre's png.datatype and jpeg.datatype and the disk's own
+# datatypes.library. The boot skips the Startup-Sequence and makes its LIBS:
+# assign and AddDataTypes by hand. Once the picture's first layout is over,
+# the close gadget ends MultiView and its return value is checked, beside
+# the datatype's load line and the picture.datatype layout line.
+ifneq ($(and $(filter command line environment override,$(origin DISK)),$(strip $(DISK))),)
+check-image-datatypes: image $(IMAGETYPES_DISK)
+	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 $(IMAGETYPES_DISK) \
+	    --keys "a s s i g n spc l i b s shift-dot spc s y s shift-dot c l a s s e s spc a d d ret a d d d a t a t y p e s spc r e f r e s h spc q u i e t ret s y s shift-dot u t i l i t i e s shift-7 m u l t i v i e w spc i m a g e s shift-dot g r a d i e n t dot p n g ret" \
+	    --mouse-after "dos: process AsyncLayoutDaemon ended, returned 0" \
+	    --mouse "mouse_move -311 -178;mouse_button 1;mouse_button 0" \
+	    --absent "nested too deep" --absent "unimplemented LVO" \
+	    --absent "Unknown data type" --absent "png.datatype: could not load" \
+	    --absent "exec: FreeMem of" \
+	    "volume: Images (OFS)" "m68k: C:adddatatypes returned 0" \
+	    "m68k: running sys:utilities/multiview" "intuition: window Loading... opened" \
+	    "png.datatype: 640x480 loaded" "picture.datatype: 640x480x24 on 8 planes" \
+	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
+	tools/boot_check.sh --no-startup --disk "$$DISK" --disk1 $(IMAGETYPES_DISK) \
+	    --keys "a s s i g n spc l i b s shift-dot spc s y s shift-dot c l a s s e s spc a d d ret a d d d a t a t y p e s spc r e f r e s h spc q u i e t ret s y s shift-dot u t i l i t i e s shift-7 m u l t i v i e w spc i m a g e s shift-dot p h o t o dot j p g ret" \
+	    --mouse-after "dos: process AsyncLayoutDaemon ended, returned 0" \
+	    --mouse "mouse_move -311 -178;mouse_button 1;mouse_button 0" \
+	    --absent "nested too deep" --absent "unimplemented LVO" \
+	    --absent "Unknown data type" --absent "jpeg.datatype: could not load" \
+	    --absent "exec: FreeMem of" \
+	    "volume: Images (OFS)" "m68k: C:adddatatypes returned 0" \
+	    "m68k: running sys:utilities/multiview" "intuition: window Loading... opened" \
+	    "jpeg.datatype: 41x33 loaded" "picture.datatype: 41x33x24 on 8 planes" \
+	    "mouse: down 1 at 9,22" "m68k: sys:utilities/multiview returned 0"
+else
+check-image-datatypes:
+	@echo "set DISK=<path to a Workbench 3.1 .dms or .adf>" >&2; exit 1
+endif
+
 # Host unit tests: every tests/test_*.cpp is its own program, built with the
 # host compiler under the sanitizers and run in turn.
 HOSTCXX      := g++
@@ -846,7 +883,7 @@ $(MKDISK): tools/mkdisk.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
 
 MKPICDISK := $(BUILD)/tools/mkpicdisk
 
-$(MKPICDISK): tools/mkpicdisk.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
+$(MKPICDISK): tools/mkpicdisk.cpp tests/image_fixtures.hpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) $(IMAGE_HOBJ) -o $@
 
@@ -855,6 +892,9 @@ $(PIC_DISK): $(MKPICDISK)
 
 $(MULTIVIEW_DISK): $(MKPICDISK)
 	$(MKPICDISK) --large $@
+
+$(IMAGETYPES_DISK): $(MKPICDISK)
+	$(MKPICDISK) --image-datatypes $@
 
 ELF2HUNK := $(BUILD)/tools/elf2hunk
 
