@@ -223,6 +223,23 @@ public:
     NativeFrame native_frame() const { return native_frame_; }
     void set_native_frame(NativeFrame frame) { native_frame_ = frame; }
 
+    // How many bytes the host stack has left below the caller, as the host
+    // knows it for each task. Without one the stack is not watched.
+    using StackProbe = u64 (*)(void* ctx);
+    void set_stack_probe(StackProbe probe, void* ctx) {
+        stack_probe_ = probe;
+        stack_probe_ctx_ = ctx;
+    }
+
+    // The host stack one more nested run into 68000 code needs left: a
+    // level of it with room for the deepest native work.
+    static constexpr u64 kNestedRunStackBytes = 16 * 1024;
+
+    // Whether the host stack has less than kNestedRunStackBytes left.
+    bool host_stack_short() const {
+        return stack_probe_ != nullptr && stack_probe_(stack_probe_ctx_) < kNestedRunStackBytes;
+    }
+
     // The frame if its tag is tag, else null.
     void* native_frame_for(const void* tag) const {
         return tag != nullptr && native_frame_.tag == tag ? native_frame_.frame : nullptr;
@@ -286,6 +303,8 @@ private:
     bool stop_ = false;
     NativeFrame native_frame_{};
     bool in_block_native_ = false;
+    StackProbe stack_probe_ = nullptr;
+    void* stack_probe_ctx_ = nullptr;
     // Set by continue_at until the opcode that called the native goes on
     // there.
     bool continued_ = false;

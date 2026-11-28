@@ -44,7 +44,12 @@ constexpr u32 kExecNegSize = 32768;
 constexpr u32 kExecStrings = 96;
 constexpr u32 kExecBlock = kExecNegSize + SYSBASESIZE + kExecStrings;
 constexpr u32 kGuestCallBlocks = 1u << 24;
-constexpr u32 kMaxCallDepth = 8;
+// Calls into 68000 code nested in one another, at most. A level takes
+// from under 1 KiB (a BOOPSI class) to about 5 KiB (a command or script
+// inside another) of the host stack, so this count alone does not keep a
+// task's stack from running out: each nested run also needs the host
+// stack the Jit's probe reports to have Jit::kNestedRunStackBytes left.
+constexpr u32 kMaxCallDepth = 12;
 constexpr u32 kMaxLoadDepth = 3;
 // How long a task waits at a time for another to load a provided library.
 constexpr u64 kProviderWaitUs = 1000;
@@ -259,6 +264,16 @@ u32 find_name(Bus& b, u32 start, const char* name) {
 
 // --- 68000 calls ---------------------------------------------------------
 
+bool host_stack_short(const Machine& m) {
+    return m.jit != nullptr && m.jit->host_stack_short();
+}
+
+void log_too_deep(bool by_count) {
+    LogLine().text(by_count ? "exec: calls into 68000 code nested too deep"
+                            : "exec: calls into 68000 code nested too deep for the host stack")
+        .send();
+}
+
 // Calls 68000 code from a native. It saves the registers when made; the
 // caller then sets the arguments in the CPU and calls run(), which on a
 // return keeps D0 and A3 and puts every register back as it was saved.
@@ -277,8 +292,8 @@ public:
         if (!bus_.ok()) {
             return false;
         }
-        if (depth_ >= kMaxCallDepth) {
-            LogLine().text("exec: calls into 68000 code nested too deep").send();
+        if (depth_ >= kMaxCallDepth || host_stack_short(bus_.machine())) {
+            log_too_deep(depth_ >= kMaxCallDepth);
             end_run(bus_.machine(), ExitReason::Unimplemented);
             bus_.stop();
             return false;
@@ -2289,7 +2304,7 @@ struct ExecOps {
             // A device vector may name any native, OpenDevice itself
             // included, so direct calls nest under the same limit as calls
             // into 68000 code.
-            if (e.call_depth_ >= kMaxCallDepth) {
+            if (e.call_depth_ >= kMaxCallDepth || host_stack_short(*e.m_)) {
                 LogLine().text("exec: device calls nested too deep").send();
                 end_run(*e.m_, ExitReason::Unimplemented);
                 b.stop();
@@ -5499,8 +5514,9 @@ void Exec::reset_nest_counts() {
 bool Exec::enter_nested_run() {
     // Two levels stay free, so the innermost program can still make calls
     // that go into 68000 code, such as opening a library.
-    if (call_depth_ + 2 >= kMaxCallDepth) {
-        LogLine().text("exec: calls into 68000 code nested too deep").send();
+    const bool by_count = call_depth_ + 2 >= kMaxCallDepth;
+    if (by_count || (m_ != nullptr && host_stack_short(*m_))) {
+        log_too_deep(by_count);
         return false;
     }
     ++call_depth_;

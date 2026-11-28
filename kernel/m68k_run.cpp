@@ -952,6 +952,19 @@ void task_host_switch(void*, u32 from, u32 to) {
     task_stacks.switch_to(from, to);
 }
 
+// What is left of the running task's host stack below the caller; all
+// of it as far as anyone can tell on a stack that is no task's.
+u64 host_stack_left(void*) {
+    const i32 current = exec.scheduler().current();
+    const u32 id = current >= 0 ? static_cast<u32>(current) : 0;
+    const u64 bottom = task_stacks.stack_bottom(id);
+    const u64 here = reinterpret_cast<u64>(__builtin_frame_address(0));
+    if (bottom == 0 || here < bottom || here >= task_stacks.stack_top(id)) {
+        return ~0ull;
+    }
+    return here - bottom;
+}
+
 void task_host_destroy(void*, u32 id) {
     task_stacks.destroy(id);
 }
@@ -1252,6 +1265,7 @@ bool start(const BootInfo& info, PhysAllocator& pages, const Drives& drives) {
     }
     jit.set_address_mask(address_mask);
     g_log = &log_line;
+    jit.set_stack_probe(&host_stack_left, nullptr);
     exec.set_task_host(TaskHost{&task_host_create, &task_host_switch, &task_host_destroy,
                                 &task_host_slice_over, &task_host_poll, &hook_trampoline,
                                 &task_host_now_us, nullptr});

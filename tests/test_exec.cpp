@@ -5471,7 +5471,7 @@ void reset_task_state_restores_a_non_running_task_only() {
 // for the innermost program's own calls into 68000 code.
 void enter_nested_run_stops_at_the_call_depth_limit() {
     Rig r;
-    for (u32 i = 0; i < 6; ++i) {
+    for (u32 i = 0; i < 10; ++i) {
         CHECK(g_exec.enter_nested_run());
     }
     g_lines.clear();
@@ -5479,9 +5479,37 @@ void enter_nested_run_stops_at_the_call_depth_limit() {
     CHECK(logged("exec: calls into 68000 code nested too deep"));
     g_exec.leave_nested_run();
     CHECK(g_exec.enter_nested_run());
-    for (u32 i = 0; i < 6; ++i) {
+    for (u32 i = 0; i < 10; ++i) {
         g_exec.leave_nested_run();
     }
+    CHECK(g_exec.enter_nested_run());
+    g_exec.leave_nested_run();
+}
+
+u64 g_stack_left = 0;
+u64 probe_stack(void*) { return g_stack_left; }
+
+// Short of host stack, nested runs are refused however few there are.
+void nested_runs_stop_when_the_host_stack_runs_short() {
+    Rig r;
+    g_jit.set_stack_probe(probe_stack, nullptr);
+    g_stack_left = m68k::Jit::kNestedRunStackBytes;
+    CHECK(g_exec.enter_nested_run());
+    g_exec.leave_nested_run();
+    g_stack_left = m68k::Jit::kNestedRunStackBytes - 1;
+    g_lines.clear();
+    CHECK(!g_exec.enter_nested_run());
+    CHECK(logged("exec: calls into 68000 code nested too deep for the host stack"));
+
+    // exec's own calls into 68000 code end the run the same way.
+    r.code(kSub, {0x16C0, 0x4E75});  // MOVE.B D0,(A3)+ ; RTS
+    r.cpu().a[0] = r.str(kData, "x");
+    r.cpu().a[2] = kSub;
+    r.cpu().a[3] = kData + 0x400;
+    g_lines.clear();
+    CHECK_EQ(r.exec(exec_lvo::RawDoFmt), ExitReason::Unimplemented);
+    CHECK(logged("exec: calls into 68000 code nested too deep for the host stack"));
+    g_jit.set_stack_probe(nullptr, nullptr);
     CHECK(g_exec.enter_nested_run());
     g_exec.leave_nested_run();
 }
@@ -6317,6 +6345,7 @@ int main() {
     end_tasks_of_ends_only_the_parents_tree_and_keeps_detached_tasks();
     reset_task_state_restores_a_non_running_task_only();
     enter_nested_run_stops_at_the_call_depth_limit();
+    nested_runs_stop_when_the_host_stack_runs_short();
     timer_requests_of_a_removed_task_are_dropped();
     every_registered_timer_hook_runs();
     every_registered_drop_hook_sees_a_removed_task();
