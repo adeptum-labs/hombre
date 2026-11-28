@@ -54,6 +54,8 @@ constexpr u32 kMaxInitCommands = 1u << 16;
 constexpr u32 kMaxQueued = 4096;
 constexpr u32 kTaskMemEntry = 74;  // tc_MemEntry, which dos.hpp names
 constexpr u32 kMaxMemLists = 4096;
+// The MemEntries RemTask takes from a task's tc_MemEntry, at most.
+constexpr u32 kMaxTaskMemEntries = 4096;
 constexpr char kExecName[] = "exec.library";
 constexpr char kCommodities[] = "commodities.library";
 constexpr char kExecIdString[] = "exec 60.0 (Hombre)\r\n";
@@ -897,7 +899,9 @@ struct ExecOps {
     // Notes the MemLists on a removed task's tc_MemEntry, which RemTask
     // frees; they may hold the task and its stack, so the memory goes only
     // when the slot is released. A task Hombre made starts with that list
-    // zeroed rather than empty, and one whose tail pred is 0 has none.
+    // zeroed rather than empty, and one whose tail pred is 0 has none. A
+    // list that comes back to a node it passed, or holds more than
+    // kMaxTaskMemEntries entries in all, is taken only that far.
     static void take_task_mem_entries(Exec& e, Bus& b, u32 slot, u32 task) {
         const u32 list = task + kTaskMemEntry;
         u32 node = b.r32(list + LH_HEAD);
@@ -905,12 +909,24 @@ struct ExecOps {
             return;
         }
         std::vector<Exec::TaskContext::Owned>& owned = e.tasks_[slot].owned;
+        std::vector<u32> seen;
+        u32 entries = 0;
         for (u32 n = 0; node != list + LH_TAIL && n < kMaxMemLists; ++n) {
+            if (node == 0 || std::find(seen.begin(), seen.end(), node) != seen.end()) {
+                LogLine().text("exec: tc_MemEntry of task ").hex(task).text(" loops").send();
+                return;
+            }
+            seen.push_back(node);
             const u32 next = b.r32(node + LN_SUCC);
             const u32 count = b.r16(node + ML_NUMENTRIES);
             if (!b.ok()) {
                 return;
             }
+            if (entries + count > kMaxTaskMemEntries) {
+                LogLine().text("exec: tc_MemEntry of task ").hex(task).text(" too long").send();
+                return;
+            }
+            entries += count;
             for (u32 i = 0; i < count; ++i) {
                 const u32 at = node + ML_ME + i * ME_SIZE;
                 owned.push_back({b.r32(at), b.r32(at + ME_LENGTH)});

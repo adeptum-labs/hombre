@@ -3139,6 +3139,59 @@ void rem_task_frees_the_mem_lists_it_was_given() {
     CHECK_EQ(g_exec.free_bytes(), before);
 }
 
+// A tc_MemEntry that loops back on itself is taken once, with a log line,
+// and one claiming more entries than a task could have is not taken.
+void rem_task_stops_at_a_looping_or_overlong_mem_entry() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    const u32 before = g_exec.free_bytes();
+
+    const u32 list = kData + 0x500;
+    r.put16(list + ML_NUMENTRIES, 1);
+    r.put32(list + ML_ME, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(list + ML_ME + ME_LENGTH, 64);
+    r.cpu().a[0] = list;
+    CHECK_EQ(r.exec(exec_lvo::AllocEntry), ExitReason::Halt);
+    const u32 memlist = r.cpu().d[0];
+    CHECK(memlist != 0);
+    const u32 task = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "loop", kNames);
+    r.put32(task + kTaskMemEntry + LH_HEAD, memlist);
+    r.put32(task + kTaskMemEntry + LH_TAIL, 0);
+    r.put32(task + kTaskMemEntry + LH_TAILPRED, memlist);
+    r.put32(memlist + LN_SUCC, memlist);
+    r.put32(memlist + LN_PRED, task + kTaskMemEntry);
+    r.cpu().a[1] = task;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    g_lines.clear();
+    r.cpu().a[1] = task;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK(logged_containing(" loops"));
+    CHECK_EQ(g_exec.free_bytes(), before);
+
+    // 65535 entries in one list: more than a task is allowed.
+    const u32 big = kData + 0x600;
+    r.put32(big + LN_SUCC, task + kTaskMemEntry + LH_TAIL);
+    r.put32(big + LN_PRED, task + kTaskMemEntry);
+    r.put16(big + ML_NUMENTRIES, 0xFFFF);
+    const u32 second = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "long", kNames);
+    r.put32(second + kTaskMemEntry + LH_HEAD, big);
+    r.put32(second + kTaskMemEntry + LH_TAIL, 0);
+    r.put32(second + kTaskMemEntry + LH_TAILPRED, big);
+    r.cpu().a[1] = second;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    g_lines.clear();
+    r.cpu().a[1] = second;
+    CHECK_EQ(r.exec(exec_lvo::RemTask), ExitReason::Halt);
+    CHECK(logged_containing(" too long"));
+    CHECK_EQ(g_exec.free_bytes(), before);
+}
+
 void set_task_pri_and_find_task_across_lists() {
     Rig r;
     FakeHostState host{};
@@ -3856,10 +3909,57 @@ struct ExecTest {
     }
     static bool task_stop(const Exec& e, u32 id) { return e.tasks_[id].run_state.stop; }
     static ExitReason task_exit(const Exec& e, u32 id) { return e.tasks_[id].cpu.exit; }
+    static void reap(Exec& e) { e.reap_removed(); }
 };
 }  // namespace hombre
 
 namespace {
+
+// A task made the amiga.lib CreateTask way ends itself: its Task and its
+// stack are on its own tc_MemEntry, and RemTask(0) gives them back once
+// the task is off its stack.
+void rem_task_of_itself_frees_its_task_and_stack() {
+    Rig r;
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    const u32 before = g_exec.free_bytes();
+
+    constexpr u32 kStackBytes = 1024;
+    const u32 list = kData + 0x500;
+    r.put16(list + ML_NUMENTRIES, 2);
+    r.put32(list + ML_ME, MEMF_PUBLIC | MEMF_CLEAR);
+    r.put32(list + ML_ME + ME_LENGTH, TC_SIZE);
+    r.put32(list + ML_ME + ME_SIZE, MEMF_CLEAR);
+    r.put32(list + ML_ME + ME_SIZE + ME_LENGTH, kStackBytes);
+    r.cpu().a[0] = list;
+    CHECK_EQ(r.exec(exec_lvo::AllocEntry), ExitReason::Halt);
+    const u32 memlist = r.cpu().d[0];
+    CHECK(memlist != 0);
+    const u32 task = r.get32(memlist + ML_ME);
+    const u32 stack = r.get32(memlist + ML_ME + ME_SIZE);
+    CHECK(task != 0 && stack != 0);
+    setup_child_task(r, task, stack + kStackBytes, 5, nullptr, 0);
+    r.put32(task + kTaskMemEntry + LH_HEAD, memlist);
+    r.put32(task + kTaskMemEntry + LH_TAIL, 0);
+    r.put32(task + kTaskMemEntry + LH_TAILPRED, memlist);
+    r.put32(memlist + LN_SUCC, task + kTaskMemEntry + LH_TAIL);
+    r.put32(memlist + LN_PRED, task + kTaskMemEntry);
+    r.cpu().a[1] = task;
+    r.cpu().a[2] = 0x2000;
+    r.cpu().a[3] = 0;
+    CHECK_EQ(r.exec(exec_lvo::AddTask), ExitReason::Halt);
+    CHECK_EQ(g_exec.this_task(), task);
+
+    // The task, now running, removes itself.
+    r.cpu().a[1] = 0;
+    r.exec(exec_lvo::RemTask);
+    CHECK_EQ(g_exec.this_task(), kData);
+    // The task that runs next frees what the ended one owned.
+    ExecTest::reap(g_exec);
+    CHECK_EQ(g_exec.free_bytes(), before);
+}
+
 
 // A task whose Task a program wrote over, waiting while holding Forbid and
 // Disable, is removed without faulting the task that runs, and the task
@@ -5755,6 +5855,8 @@ int main() {
     signal_wakes_waiting_task_and_switches_only_for_higher_priority();
     rem_task_ready_waiting_and_boot_refused();
     rem_task_frees_the_mem_lists_it_was_given();
+    rem_task_of_itself_frees_its_task_and_stack();
+    rem_task_stops_at_a_looping_or_overlong_mem_entry();
     task_end_hooks_of_several_contexts();
     set_task_pri_and_find_task_across_lists();
     forbid_holds_off_switch_until_permit();
