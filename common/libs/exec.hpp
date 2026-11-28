@@ -388,14 +388,20 @@ struct SegmentLoader {
     void* ctx;
 };
 
-// A built-in library OpenLibrary offers under leaf. A disk library of a
-// higher version is loaded instead; otherwise make builds the library, adds
-// it to LibList under leaf and returns its base, or returns 0.
+// A built-in library OpenLibrary offers under leaf, whatever the case of
+// the name asked for and whatever path is before it. Its disk copy is
+// LIBS:<dir><leaf> (dir empty or ending in '/'), the same file however the
+// first open names it; that copy is used instead when its resident has a
+// higher version, is named leaf, starts and opens. Otherwise make builds
+// the library, adds it to LibList under leaf and returns its base, or
+// returns 0. A disk copy that is not named leaf or does not open is not
+// tried again.
 struct LibraryProvider {
     const char* leaf;
     u16 version;
     u32 (*make)(void* ctx);
     void* ctx;
+    const char* dir = nullptr;
 };
 
 // Runs while Wait or WaitPort blocks with no wanted signal pending. False
@@ -982,7 +988,15 @@ private:
     void* end_hook_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;
-    LibraryProvider providers_[kMaxLibraryProviders]{};
+    // A provider and what became of it: the task that is loading or making
+    // its library, while one is, and whether its disk copy is given up.
+    struct ProviderSlot {
+        LibraryProvider provider{};
+        bool loading = false;
+        u32 loader = 0;
+        bool built_in_only = false;
+    };
+    ProviderSlot providers_[kMaxLibraryProviders]{};
     u32 provider_count_ = 0;
     Program programs_[Scheduler::kMaxTasks]{};
     u32 next_program_ = 1;

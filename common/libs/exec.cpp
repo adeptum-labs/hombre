@@ -46,6 +46,8 @@ constexpr u32 kExecBlock = kExecNegSize + SYSBASESIZE + kExecStrings;
 constexpr u32 kGuestCallBlocks = 1u << 24;
 constexpr u32 kMaxCallDepth = 8;
 constexpr u32 kMaxLoadDepth = 3;
+// How long a task waits at a time for another to load a provided library.
+constexpr u64 kProviderWaitUs = 1000;
 constexpr u32 kMaxListNodes = 1u << 20;
 constexpr u32 kMaxVectors = 0xFFFC / LIB_VECTSIZE;  // lib_NegSize is a UWORD
 constexpr u32 kMaxName = 256;
@@ -1892,64 +1894,163 @@ struct ExecOps {
         }
     }
 
-    static const LibraryProvider* find_provider(const Exec& e, const char* leaf) {
+    static bool same_name_nocase(const char* a, const char* b) {
+        const auto fold = [](char c) {
+            return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c;
+        };
+        while (*a != '\0' && fold(*a) == fold(*b)) {
+            ++a;
+            ++b;
+        }
+        return fold(*a) == fold(*b);
+    }
+
+    static Exec::ProviderSlot* find_provider(Exec& e, const char* leaf) {
         for (u32 i = 0; i < e.provider_count_; ++i) {
-            if (same_name_text(e.providers_[i].leaf, leaf)) {
+            if (same_name_nocase(e.providers_[i].provider.leaf, leaf)) {
                 return &e.providers_[i];
             }
         }
         return nullptr;
     }
 
-    static void make_provider(const LibraryProvider& provider) {
+    // The provider's library made and found in the list, or 0.
+    static u32 make_built_in(Exec& e, Bus& b, const LibraryProvider& provider) {
         (void)provider.make(provider.ctx);
+        return b.ok() ? find_name(b, e.base_ + LibList, provider.leaf) : 0;
     }
 
-    // A disk file replaces the provider only when its resident is newer: the
-    // version is read before any of its code runs. Otherwise the segment is
-    // unloaded and the provider makes the library.
-    static void load_provider_library(Exec& e, Bus& b, const char* path,
-                                      const LibraryProvider& provider) {
+    // Where a provider's disk copy is: LIBS:<dir><leaf>.
+    static bool provider_path(const LibraryProvider& provider, char (&path)[2 * kMaxName]) {
+        u32 at = 0;
+        for (const char* part : {"LIBS:", provider.dir != nullptr ? provider.dir : "",
+                                 provider.leaf}) {
+            for (const char* p = part; *p != '\0'; ++p) {
+                if (at + 1 >= sizeof path) {
+                    return false;
+                }
+                path[at++] = *p;
+            }
+        }
+        path[at] = '\0';
+        return true;
+    }
+
+    // The disk copy when its resident is newer, named after the leaf and
+    // starts; the built-in library otherwise. The version is read before any
+    // of the disk copy's code runs, at any load depth: a newer copy too deep
+    // to start leaves the library unopened, so the built-in one never stands
+    // in for a newer disk copy by accident. fresh_disk tells that the
+    // library is a disk copy loaded now.
+    static u32 load_or_make(Exec& e, Bus& b, Exec::ProviderSlot& slot, bool& fresh_disk) {
+        fresh_disk = false;
+        const LibraryProvider& provider = slot.provider;
+        char path[2 * kMaxName];
+        if (slot.built_in_only || e.loader_.load == nullptr || !provider_path(provider, path)) {
+            return make_built_in(e, b, provider);
+        }
         u32 seglist = 0;
         if (!e.loader_.load(e.loader_.ctx, path, seglist) || seglist == 0) {
             // No disk copy is the usual case and is not worth a log line.
-            make_provider(provider);
-            return;
+            return make_built_in(e, b, provider);
         }
         e.m_->jit->flush();
         const u32 res = find_resident(e.m_->mem, seglist);
         if (res == 0) {
             LogLine().text("exec: no resident in ").text(path).send();
             unload(e, seglist);
-            make_provider(provider);
-            return;
+            return make_built_in(e, b, provider);
         }
         const u32 disk_version = b.r8(res + RT_VERSION);
         if (!b.ok()) {
             unload(e, seglist);
-            return;
+            return 0;
         }
-        if (disk_version > provider.version) {
-            const u32 lib = init_resident(e, b, res, seglist);
-            if (!b.ok()) {
-                return;
-            }
-            if (lib == 0) {
-                LogLine().text("exec: the resident in ").text(path).text(" failed").send();
-                unload(e, seglist);
-                make_provider(provider);
-                return;
-            }
-            if (e.loaded_.size() < Exec::kMaxLoaded) {
-                e.loaded_.push_back(seglist);
-                return;
-            }
+        if (disk_version <= provider.version) {
+            unload(e, seglist);
+            return make_built_in(e, b, provider);
+        }
+        if (e.load_depth_ >= kMaxLoadDepth) {
+            LogLine().text("exec: libraries nested too deep to load ").text(provider.leaf).send();
+            unload(e, seglist);
+            return 0;
+        }
+        ++e.load_depth_;
+        const u32 lib = init_resident(e, b, res, seglist);
+        --e.load_depth_;
+        if (!b.ok()) {
+            return 0;
+        }
+        if (lib == 0) {
+            LogLine().text("exec: the resident in ").text(path).text(" failed").send();
+            unload(e, seglist);
+            return make_built_in(e, b, provider);
+        }
+        if (e.loaded_.size() < Exec::kMaxLoaded) {
+            e.loaded_.push_back(seglist);
+        } else {
             LogLine().text("exec: loaded library table full, ").text(path)
                 .text(" will not be unloaded").send();
-            return;
         }
-        unload(e, seglist);
-        make_provider(provider);
+        const u32 found = find_name(b, e.base_ + LibList, provider.leaf);
+        if (found != lib) {
+            // Its library stays where its init put it, under its own name.
+            LogLine().text("exec: the resident in ").text(path).text(" is not ")
+                .text(provider.leaf).send();
+            slot.built_in_only = true;
+            return found != 0 ? found : make_built_in(e, b, provider);
+        }
+        fresh_disk = true;
+        return lib;
+    }
+
+    // The provided library, loaded or made once: an open from another task
+    // while one task loads it waits for that, and one from the loading task
+    // itself, as from the disk copy's own init, gets nothing.
+    static u32 provide(Exec& e, Bus& b, Exec::ProviderSlot& slot, bool& fresh_disk) {
+        fresh_disk = false;
+        const u32 me = e.task_;
+        if (slot.loading) {
+            if (slot.loader == me) {
+                LogLine().text("exec: ").text(slot.provider.leaf)
+                    .text(" opened while it is being loaded").send();
+                return 0;
+            }
+            while (slot.loading && e.slot_of(slot.loader) >= 0) {
+                if (!e.yield_in_native()) {
+                    if (e.now_us() == 0) {
+                        break;
+                    }
+                    e.sleep_us(kProviderWaitUs);
+                }
+            }
+            if (slot.loading && e.slot_of(slot.loader) >= 0) {
+                return 0;
+            }
+            slot.loading = false;
+            const u32 lib = find_name(b, e.base_ + LibList, slot.provider.leaf);
+            if (lib != 0 || !b.ok()) {
+                return lib;
+            }
+        }
+        slot.loading = true;
+        slot.loader = me;
+        const u32 lib = load_or_make(e, b, slot, fresh_disk);
+        slot.loading = false;
+        slot.loader = 0;
+        return lib;
+    }
+
+    static u32 call_open(Exec& e, Bus& b, u32 lib, u32 version, bool& ran) {
+        ran = false;
+        GuestCall call(e.call_depth_, b);
+        e.m_->cpu.d[0] = version;
+        e.m_->cpu.a[6] = lib;
+        if (!call.run(lib - lib_lvo::Open)) {
+            return 0;
+        }
+        ran = true;
+        return call.d0();
     }
 
     static u32 open_named(Exec& e, Bus& b, const char* name, u32 version) {
@@ -1969,44 +2070,45 @@ struct ExecOps {
             }
         }
         const u32 list = e.base_ + LibList;
-        u32 lib = find_name(b, list, leaf);
+        Exec::ProviderSlot* provided = find_provider(e, leaf);
+        u32 lib = find_name(b, list, provided != nullptr ? provided->provider.leaf : leaf);
+        bool fresh_disk = false;
         if (lib == 0 && b.ok()) {
-            const LibraryProvider* provider = find_provider(e, leaf);
             const bool has_loader = e.loader_.load != nullptr;
-            if (has_loader && e.load_depth_ >= kMaxLoadDepth) {
+            if (provided != nullptr) {
+                lib = provide(e, b, *provided, fresh_disk);
+            } else if (has_loader && e.load_depth_ >= kMaxLoadDepth) {
                 LogLine().text("exec: libraries nested too deep to load ").text(name).send();
-                if (provider != nullptr) {
-                    make_provider(*provider);
-                }
-            } else if (provider != nullptr && has_loader) {
-                char path[kMaxName + 8];
-                library_path(name, has_device, path);
-                ++e.load_depth_;
-                load_provider_library(e, b, path, *provider);
-                --e.load_depth_;
-            } else if (provider != nullptr) {
-                make_provider(*provider);
             } else if (has_loader) {
                 char path[kMaxName + 8];
                 library_path(name, has_device, path);
                 ++e.load_depth_;
                 load_library(e, b, path);
                 --e.load_depth_;
-            }
-            if (b.ok()) {
-                lib = find_name(b, list, leaf);
+                if (b.ok()) {
+                    lib = find_name(b, list, leaf);
+                }
             }
         }
         if (lib == 0 || !b.ok() || b.r16(lib + LIB_VERSION) < version) {
             return 0;
         }
-        GuestCall call(e.call_depth_, b);
-        e.m_->cpu.d[0] = version;
-        e.m_->cpu.a[6] = lib;
-        if (!call.run(lib - lib_lvo::Open)) {
+        bool ran = false;
+        const u32 opened = call_open(e, b, lib, version, ran);
+        if (opened != 0 || !ran || !fresh_disk) {
+            return opened;
+        }
+        // A disk copy just loaded that will not open gives way to the
+        // built-in library, for good; it leaves the list, its code stays.
+        LogLine().text("exec: ").text(provided->provider.leaf)
+            .text(" from disk did not open, the built-in one is used").send();
+        remove(b, lib);
+        provided->built_in_only = true;
+        lib = make_built_in(e, b, provided->provider);
+        if (lib == 0 || !b.ok() || b.r16(lib + LIB_VERSION) < version) {
             return 0;
         }
-        return call.d0();
+        return call_open(e, b, lib, version, ran);
     }
 
     static u32 open_library(Exec& e, Bus& b, u32 name_addr, u32 version) {
@@ -3075,8 +3177,8 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
         info = LibraryInfo{};
     }
     library_count_ = 0;
-    for (LibraryProvider& provider : providers_) {
-        provider = LibraryProvider{};
+    for (ProviderSlot& provider : providers_) {
+        provider = ProviderSlot{};
     }
     provider_count_ = 0;
     loaded_.clear();
@@ -3520,7 +3622,7 @@ bool Exec::add_library_provider(const LibraryProvider& provider) {
         provider_count_ == kMaxLibraryProviders) {
         return false;
     }
-    providers_[provider_count_++] = provider;
+    providers_[provider_count_++] = ProviderSlot{provider, false, 0, false};
     return true;
 }
 

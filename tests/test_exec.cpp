@@ -1256,8 +1256,12 @@ void unknown_exec_vector() {
 // When `self_open` is set the init routine opens the library's own name
 // first, which makes OpenLibrary load the file again from inside the init.
 // When `fail_init` is set the init is the null routine, which returns 0.
+//
+// When `opens` is given the init opens that library first, as `self_open`
+// does its own name. When `open_fails` is set Open is the null routine.
 std::vector<u8> hand_library(u32 at, const char* name, bool self_open, u32 version = 3,
-                             bool fail_init = false) {
+                             bool fail_init = false, const char* opens = nullptr,
+                             bool open_fails = false) {
     std::vector<u8> out(160, 0);
     auto w16 = [&](u32 off, u32 v) {
         out[off] = static_cast<u8>(v >> 8);
@@ -1281,8 +1285,9 @@ std::vector<u8> hand_library(u32 at, const char* name, bool self_open, u32 versi
     w32(28, 40);
     w32(32, at + 44);
     w32(36, at + 58);
-    w32(40, fail_init ? at + 104 : self_open ? at + 150 : at + 70);
-    const u16 vectors[] = {0xFFFF, 84 - 44, 96 - 44, 104 - 44, 104 - 44, 108 - 44, 0xFFFF};
+    w32(40, fail_init ? at + 104 : (self_open || opens != nullptr) ? at + 150 : at + 70);
+    const u16 open_vector = open_fails ? 104 - 44 : 84 - 44;
+    const u16 vectors[] = {0xFFFF, open_vector, 96 - 44, 104 - 44, 104 - 44, 108 - 44, 0xFFFF};
     for (u32 i = 0; i < 7; ++i) {
         w16(44 + 2 * i, vectors[i]);
     }
@@ -1301,19 +1306,65 @@ std::vector<u8> hand_library(u32 at, const char* name, bool self_open, u32 versi
     }
     std::strcpy(reinterpret_cast<char*>(&out[name_off]), name);
     std::strcpy(reinterpret_cast<char*>(&out[id_off]), "hand 3.5");
-    if (self_open) {
+    if (self_open || opens != nullptr) {
         // +150: MOVE.L D0,-(SP) ; LEA name(PC),A1 ; MOVEQ #0,D0 ; JSR -552(A6) ;
         //       MOVE.L (SP)+,D0 ; BRA init routine
-        const u16 disp_name = static_cast<u16>(name_off - (150 + 4));
+        constexpr u32 kOpensOff = 170;
+        const u32 target_off = opens != nullptr ? kOpensOff : name_off;
+        const u16 disp_name = static_cast<u16>(target_off - (150 + 4));
         const u16 opener[] = {0x2F00, 0x43FA, disp_name, 0x7000, 0x4EAE,
                               disp(exec_lvo::OpenLibrary), 0x201F, 0x6000,
                               static_cast<u16>(70 - (150 + 16))};
-        out.resize(170);
+        out.resize(opens != nullptr ? 200 : 170);
         for (u32 i = 0; i < 9; ++i) {
             w16(150 + 2 * i, opener[i]);
         }
+        if (opens != nullptr) {
+            std::strcpy(reinterpret_cast<char*>(&out[kOpensOff]), opens);
+        }
     }
     return out;
+}
+
+// A loader of hand libraries by path: each with the name of its resident,
+// its version, the library its init opens and whether its Open fails.
+struct LibrarySpec {
+    std::string path;
+    std::string name;
+    u32 version = 3;
+    const char* opens = nullptr;
+    bool open_fails = false;
+};
+
+struct SpecLoader {
+    Rig* rig = nullptr;
+    std::vector<LibrarySpec> specs;
+    std::vector<std::string> paths;
+};
+
+bool spec_load(void* ctx, const char* path, u32& seglist) {
+    SpecLoader& f = *static_cast<SpecLoader*>(ctx);
+    f.paths.emplace_back(path);
+    for (const LibrarySpec& spec : f.specs) {
+        if (spec.path != path) {
+            continue;
+        }
+        const u32 total = 8 + 256;
+        const u32 segment = g_exec.alloc(total, MEMF_CLEAR);
+        CHECK(segment != 0);
+        f.rig->put32(segment, total);
+        f.rig->put32(segment + 4, 0);
+        const u32 data = segment + 8;
+        const std::vector<u8> image = hand_library(data + 8, spec.name.c_str(), false,
+                                                   spec.version, false, spec.opens,
+                                                   spec.open_fails);
+        for (u32 i = 0; i < image.size(); ++i) {
+            f.rig->put8(data + 8 + i, image[i]);
+        }
+        seglist = (segment + 4) >> 2;
+        return true;
+    }
+    return false;
 }
 
 struct FakeLoader {
@@ -1608,6 +1659,162 @@ void a_newer_disk_library_whose_init_fails_falls_back() {
     CHECK_EQ(loader.calls, 1u);
     CHECK(logged("exec: the resident in LIBS:fail.library failed"));
     CHECK_EQ(r.get16(lib + LIB_REVISION), 0u);
+}
+
+u32 open_named(Rig& r, const char* name, u32 version = kHombreLibVersion) {
+    r.cpu().a[1] = r.str(kNames, name);
+    r.cpu().d[0] = version;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    return r.cpu().d[0];
+}
+
+u32 count_named(Rig& r, const char* name) {
+    u32 count = 0;
+    for (const u32 node : r.walk(r.base() + LibList)) {
+        count += r.read_str(r.get32(node + LN_NAME)) == name ? 1 : 0;
+    }
+    return count;
+}
+
+void a_provider_answers_its_name_in_any_case() {
+    Rig r;
+    SpecLoader loader;
+    loader.rig = &r;
+    g_exec.set_segment_loader(SegmentLoader{spec_load, &loader});
+    ProviderState state;
+    state.name = "case.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+    const u32 lib = open_named(r, "Case.Library");
+    CHECK(lib != 0);
+    CHECK_EQ(lib, state.base);
+    CHECK(loader.paths == (std::vector<std::string>{"LIBS:case.library"}));
+    CHECK_EQ(open_named(r, "CASE.LIBRARY"), lib);
+    CHECK_EQ(open_named(r, "case.library"), lib);
+    CHECK_EQ(state.calls, 1u);
+    CHECK_EQ(loader.paths.size(), 1u);
+}
+
+void a_provider_looks_for_its_disk_copy_in_its_directory() {
+    Rig r;
+    SpecLoader loader;
+    loader.rig = &r;
+    loader.specs.push_back(LibrarySpec{"LIBS:datatypes/dir.datatype", "dir.datatype", 61});
+    g_exec.set_segment_loader(SegmentLoader{spec_load, &loader});
+    ProviderState state;
+    state.name = "dir.datatype";
+    CHECK(g_exec.add_library_provider(LibraryProvider{state.name, kHombreLibVersion,
+                                                      make_provider_library, &state,
+                                                      "datatypes/"}));
+    // By its bare name first: the disk copy is still the one found.
+    const u32 lib = open_named(r, "dir.datatype");
+    CHECK(lib != 0);
+    CHECK_EQ(r.get16(lib + LIB_VERSION), 61u);
+    CHECK_EQ(state.calls, 0u);
+    CHECK_EQ(open_named(r, "datatypes/dir.datatype"), lib);
+    CHECK(loader.paths == (std::vector<std::string>{"LIBS:datatypes/dir.datatype"}));
+}
+
+void a_newer_disk_copy_of_another_name_gives_way_for_good() {
+    Rig r;
+    SpecLoader loader;
+    loader.rig = &r;
+    loader.specs.push_back(LibrarySpec{"LIBS:named.library", "other.library", 61});
+    g_exec.set_segment_loader(SegmentLoader{spec_load, &loader});
+    ProviderState state;
+    state.name = "named.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+    g_lines.clear();
+    const u32 lib = open_named(r, "named.library");
+    CHECK(lib != 0);
+    CHECK_EQ(lib, state.base);
+    CHECK(logged("exec: the resident in LIBS:named.library is not named.library"));
+    CHECK_EQ(open_named(r, "named.library"), lib);
+    CHECK_EQ(loader.paths.size(), 1u);
+    CHECK_EQ(state.calls, 1u);
+}
+
+void a_newer_disk_copy_that_will_not_open_gives_way_for_good() {
+    Rig r;
+    SpecLoader loader;
+    loader.rig = &r;
+    LibrarySpec spec{"LIBS:shut.library", "shut.library", 61};
+    spec.open_fails = true;
+    loader.specs.push_back(spec);
+    g_exec.set_segment_loader(SegmentLoader{spec_load, &loader});
+    ProviderState state;
+    state.name = "shut.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+    const u32 lib = open_named(r, "shut.library");
+    CHECK(lib != 0);
+    CHECK_EQ(lib, state.base);
+    CHECK_EQ(count_named(r, "shut.library"), 1u);
+    CHECK_EQ(open_named(r, "shut.library"), lib);
+    CHECK_EQ(loader.paths.size(), 1u);
+    CHECK_EQ(state.calls, 1u);
+}
+
+// Three plain libraries whose inits open each other, the last the
+// provided one, which is then opened at the deepest load.
+void deep_load(Rig& r, SpecLoader& loader, u32 version) {
+    loader.rig = &r;
+    loader.specs.push_back(LibrarySpec{"LIBS:d1.library", "d1.library", 3, "d2.library"});
+    loader.specs.push_back(LibrarySpec{"LIBS:d2.library", "d2.library", 3, "d3.library"});
+    loader.specs.push_back(LibrarySpec{"LIBS:d3.library", "d3.library", 3, "deep.library"});
+    loader.specs.push_back(LibrarySpec{"LIBS:deep.library", "deep.library", version});
+    g_exec.set_segment_loader(SegmentLoader{spec_load, &loader});
+}
+
+void at_the_deepest_load_the_disk_version_still_decides() {
+    {
+        Rig r;
+        SpecLoader loader;
+        deep_load(r, loader, 59);
+        ProviderState state;
+        state.name = "deep.library";
+        CHECK(g_exec.add_library_provider(
+            LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+        CHECK(open_named(r, "d1.library", 0) != 0);
+        // The older disk copy was read, and the built-in one taken.
+        CHECK(loader.paths.back() == "LIBS:deep.library");
+        CHECK_EQ(state.calls, 1u);
+        CHECK_EQ(count_named(r, "deep.library"), 1u);
+    }
+    Rig r;
+    SpecLoader loader;
+    deep_load(r, loader, 61);
+    ProviderState state;
+    state.name = "deep.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+    g_lines.clear();
+    CHECK(open_named(r, "d1.library", 0) != 0);
+    // The newer one cannot be started that deep, and the built-in one does
+    // not stand in for it.
+    CHECK(logged("exec: libraries nested too deep to load deep.library"));
+    CHECK_EQ(state.calls, 0u);
+    CHECK_EQ(count_named(r, "deep.library"), 0u);
+}
+
+void a_provided_library_opened_while_it_loads_is_not_loaded_twice() {
+    Rig r;
+    SpecLoader loader;
+    loader.rig = &r;
+    loader.specs.push_back(
+        LibrarySpec{"LIBS:twice.library", "twice.library", 61, "twice.library"});
+    g_exec.set_segment_loader(SegmentLoader{spec_load, &loader});
+    ProviderState state;
+    state.name = "twice.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+    const u32 lib = open_named(r, "twice.library");
+    CHECK(lib != 0);
+    CHECK_EQ(r.get16(lib + LIB_VERSION), 61u);
+    CHECK_EQ(loader.paths.size(), 1u);
+    CHECK_EQ(count_named(r, "twice.library"), 1u);
+    CHECK_EQ(state.calls, 0u);
 }
 
 void a_plain_library_is_unaffected_by_a_provider() {
@@ -6035,6 +6242,12 @@ int main() {
     an_older_disk_library_is_unloaded_when_the_provider_fails();
     a_newer_disk_library_whose_init_fails_falls_back();
     a_plain_library_is_unaffected_by_a_provider();
+    a_provider_answers_its_name_in_any_case();
+    a_provider_looks_for_its_disk_copy_in_its_directory();
+    a_newer_disk_copy_of_another_name_gives_way_for_good();
+    a_newer_disk_copy_that_will_not_open_gives_way_for_good();
+    at_the_deepest_load_the_disk_version_still_decides();
+    a_provided_library_opened_while_it_loads_is_not_loaded_twice();
     host_open_and_close_library();
     init_resident_and_make_library_through_vectors();
     native_library_table_fills();
