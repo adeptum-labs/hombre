@@ -826,6 +826,22 @@ public:
     // Writes bytes to an open file handle; false if it cannot.
     bool write_handle(u32 fh, const u8* data, u32 bytes);
 
+    // Reads up to bytes bytes from an open file handle into buffer, as Read
+    // does: got gets the count, 0 at the end of the file. False, with error
+    // and IoErr set, when the handle is bad or the read fails.
+    bool read_handle(u32 fh, u8* buffer, u32 bytes, u32& got, u32& error);
+
+    // Moves an open file handle's position, as Seek does: mode is
+    // OFFSET_BEGINNING, OFFSET_CURRENT or OFFSET_END, offset is signed, and
+    // old_position gets the position it replaced. False, with error and
+    // IoErr set, for a bad handle, an unknown mode or a position outside
+    // the file.
+    bool seek_handle(u32 fh, i32 offset, u32 mode, u32& old_position, u32& error);
+
+    // The size of the file an open handle reads; 0 for NIL:. False, with
+    // error and IoErr set, for a bad handle or a console.
+    bool handle_size(u32 fh, u32& size, u32& error);
+
     // Builds, but does not start, a CLI process for console: named
     // "HombreShell", with the console's new handle pair as pr_CIS and
     // pr_COS, the boot shell's current directory and prompt, an interactive
@@ -894,6 +910,22 @@ public:
     // Reads the first bytes of the file name into data, for a look at what
     // kind of file it is. False when it has fewer or cannot be read.
     bool read_head(const char* name, u8* data, u32 bytes);
+
+    // A file dos keeps in memory and shows in a directory as if it were on
+    // the volume that directory is on.
+    struct RomFile {
+        const char* name;
+        const u8* data;
+        u32 size;
+    };
+
+    // Makes the files appear in the directory dir names, as read-only files
+    // that no change reaches. The name is resolved on each access, so a
+    // reassigned assign moves them, and they appear only while the
+    // directory exists. A file or directory of the volume with the same
+    // name hides a built-in file. False when a table is full, dir or a file
+    // name is too long, or a file has no data for its size.
+    bool add_rom_overlay(const char* dir, const RomFile* files, u32 count);
 
     // The drive of the boot volume.
     u32 boot_volume() const { return boot_vol_; }
@@ -1154,6 +1186,28 @@ private:
     static constexpr u32 kVectors = dos_lvo::SetOwner / 6;
     static constexpr u32 kHandles = 2 + kMaxFiles;  // the console in and out first
     static constexpr u8 kNoConsole = 0xFF;
+    static constexpr u32 kMaxOverlays = 2;
+    static constexpr u32 kMaxOverlayFiles = 8;
+    // The header blocks of the built-in files, above every block of a disk.
+    static constexpr u32 kOverlayKeyBase = 0xFFF00000;
+
+    struct OverlayFile {
+        char name[32];
+        const u8* data;
+        u32 size;
+        u32 key;
+    };
+
+    // A directory name and the files it shows: the path it named at the
+    // last access and the volume that path is on.
+    struct Overlay {
+        char dir[kMaxPath];
+        char path[kMaxPath];
+        u8 volume;
+        bool present;
+        u32 count;
+        OverlayFile files[kMaxOverlayFiles];
+    };
 
     enum class Stream : u8 { Closed, Console, File, Nil };
 
@@ -1374,6 +1428,10 @@ private:
     u32 assign_locks_ = 0;
 
     FileSlot files_[kHandles]{};
+    Overlay overlays_[kMaxOverlays]{};
+    u32 overlay_count_ = 0;
+    bool overlays_resolving_ = false;
+    bool refresh_overlays(native::Bus& b);
     FileClosed file_closed_ = nullptr;
     void* file_closed_ctx_ = nullptr;
     SlotList<NotifySlot> notifies_{kMaxNotifies};

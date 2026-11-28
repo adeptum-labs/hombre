@@ -21,6 +21,7 @@
  * Contact: info@adeptum.se
  */
 
+#include "libs/datatype_descriptors.hpp"
 #include "libs/dos.hpp"
 #include "libs/timer_device.hpp"
 #include "check.hpp"
@@ -9219,6 +9220,416 @@ void paths_belong_to_each_process() {
     g_dos.path_reset();
 }
 
+// --- file handles and built-in files --------------------------------------
+
+void handle_calls_read_seek_and_size_a_disk_file() {
+    Rig r;
+    r.str(kData, "Devs/Sub/Deep");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    u32 size = 0;
+    u32 error = 99;
+    CHECK(g_dos.handle_size(fh, size, error));
+    CHECK_EQ(size, 4u);
+    CHECK_EQ(error, 0u);
+
+    u8 buffer[8]{};
+    u32 got = 0;
+    CHECK(g_dos.read_handle(fh, buffer, 2, got, error));
+    CHECK_EQ(got, 2u);
+    CHECK(std::string(buffer, buffer + 2) == "de");
+    u32 old = 0;
+    CHECK(g_dos.seek_handle(fh, 0, OFFSET_BEGINNING, old, error));
+    CHECK_EQ(old, 2u);
+    CHECK(g_dos.read_handle(fh, buffer, sizeof buffer, got, error));
+    CHECK_EQ(got, 4u);
+    CHECK(std::string(buffer, buffer + 4) == "deep");
+    CHECK(g_dos.read_handle(fh, buffer, sizeof buffer, got, error));
+    CHECK_EQ(got, 0u);
+
+    CHECK(g_dos.seek_handle(fh, -2, OFFSET_END, old, error));
+    CHECK_EQ(old, 4u);
+    CHECK(g_dos.seek_handle(fh, 0, OFFSET_END, old, error));
+    CHECK_EQ(old, 2u);
+    CHECK(!g_dos.seek_handle(fh, 1, OFFSET_END, old, error));
+    CHECK_EQ(error, ERROR_SEEK_ERROR);
+    CHECK_EQ(r.io_err(), ERROR_SEEK_ERROR);
+    CHECK_EQ(old, 0u);
+
+    CHECK(!g_dos.read_handle(1, buffer, 1, got, error));
+    CHECK_EQ(error, ERROR_INVALID_LOCK);
+    CHECK_EQ(got, 0u);
+    CHECK(!g_dos.seek_handle(1, 0, OFFSET_BEGINNING, old, error));
+    CHECK_EQ(error, ERROR_INVALID_LOCK);
+    CHECK(!g_dos.handle_size(1, size, error));
+    CHECK_EQ(error, ERROR_INVALID_LOCK);
+    CHECK_EQ(size, 0u);
+
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+    CHECK(!g_dos.handle_size(fh, size, error));
+    CHECK_EQ(error, ERROR_INVALID_LOCK);
+}
+
+// A file's bytes, read through the LVOs.
+std::vector<u8> read_bytes(Rig& r, const std::string& name) {
+    r.str(kData + 0x600, name);
+    const u32 fh = r.call(dos_lvo::Open, kData + 0x600, MODE_OLDFILE);
+    CHECK(fh != 0);
+    const u32 n = r.call(dos_lvo::Read, fh, kArray, 512);
+    CHECK(n <= 512u);
+    r.call(dos_lvo::Close, fh);
+    return r.bytes(kArray, n);
+}
+
+std::vector<std::string> ex_all_names(Rig& r, const std::string& dir_name, u32 buffer_bytes) {
+    r.str(kData, dir_name);
+    const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(lock != 0);
+    const u32 eac = r.call(dos_lvo::AllocDosObject, DOS_EXALLCONTROL, 0);
+    CHECK(eac != 0);
+    const u32 buffer = kData + 0x200;
+    std::vector<std::string> names;
+    u32 more = DOSTRUE;
+    for (u32 round = 0; round < 20 && more == DOSTRUE; ++round) {
+        more = r.call(dos_lvo::ExAll, lock, buffer, buffer_bytes, ED_NAME, eac);
+        const u32 count = r.get32(eac + eac_Entries);
+        u32 got = 0;
+        for (u32 cur = buffer; cur != 0 && got < count; cur = r.get32(cur + ed_Next)) {
+            names.push_back(r.read_str(r.get32(cur + ed_Name)));
+            ++got;
+        }
+        CHECK_EQ(got, count);
+    }
+    CHECK_EQ(more, DOSFALSE);
+    r.call(dos_lvo::ExAllEnd, lock, buffer, buffer_bytes, ED_NAME, eac);
+    r.call(dos_lvo::FreeDosObject, DOS_EXALLCONTROL, eac);
+    r.call(dos_lvo::UnLock, lock);
+    return names;
+}
+
+void rom_overlay_files_appear_in_devs_datatypes() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Devs/DataTypes/Disk", text("on disk")});
+    Rig r(files);
+    CHECK(datatype_descriptors::register_on(g_dos));
+
+    const std::vector<std::string> expected = {"Disk", "JPEG", "PNG"};
+    constexpr u32 kOverlayKey = 0xFFF00000;
+
+    // MatchFirst walks the directory, its built-in files last.
+    const u32 pat = kData;
+    const u32 anchor = kData + 0x200;
+    clear_anchor(r, anchor, 64);
+    r.str(pat, "DEVS:DataTypes/#?");
+    CHECK_EQ(r.call(dos_lvo::MatchFirst, pat, anchor), 0u);
+    std::vector<std::string> names;
+    std::vector<std::string> paths;
+    std::vector<u32> keys;
+    for (;;) {
+        const Fib f = read_fib(r, anchor + ap_Info);
+        names.push_back(f.name);
+        paths.push_back(r.read_str(anchor + ap_Buf));
+        keys.push_back(f.key);
+        const u32 rc = r.call(dos_lvo::MatchNext, anchor);
+        if (rc != 0) {
+            CHECK_EQ(rc, ERROR_NO_MORE_ENTRIES);
+            break;
+        }
+    }
+    r.call(dos_lvo::MatchEnd, anchor);
+    std::sort(names.begin(), names.end());
+    std::sort(paths.begin(), paths.end());
+    CHECK(names == expected);
+    CHECK(paths == (std::vector<std::string>{"DEVS:DataTypes/Disk",
+                                             "DEVS:DataTypes/JPEG",
+                                             "DEVS:DataTypes/PNG"}));
+    std::vector<u32> distinct = keys;
+    std::sort(distinct.begin(), distinct.end());
+    CHECK(std::unique(distinct.begin(), distinct.end()) == distinct.end());
+    CHECK_EQ(std::count_if(keys.begin(), keys.end(),
+                           [](u32 key) { return key >= kOverlayKey; }),
+             2);
+
+    // ExNext and ExAll cross from the disk's entry to the built-in ones.
+    const u32 fib = kData + 0x400;
+    r.str(kData, "DEVS:DataTypes");
+    const u32 dir = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(dir != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, dir, fib), DOSTRUE);
+    names.clear();
+    keys.clear();
+    while (r.call(dos_lvo::ExNext, dir, fib) == DOSTRUE) {
+        const Fib f = read_fib(r, fib);
+        names.push_back(f.name);
+        keys.push_back(f.key);
+    }
+    CHECK_EQ(r.io_err(), ERROR_NO_MORE_ENTRIES);
+    r.call(dos_lvo::UnLock, dir);
+    std::sort(names.begin(), names.end());
+    CHECK(names == expected);
+    distinct = keys;
+    std::sort(distinct.begin(), distinct.end());
+    CHECK(std::unique(distinct.begin(), distinct.end()) == distinct.end());
+    CHECK_EQ(std::count_if(keys.begin(), keys.end(),
+                           [](u32 key) { return key >= kOverlayKey; }),
+             2);
+    names = ex_all_names(r, "DEVS:DataTypes", 16);
+    std::sort(names.begin(), names.end());
+    CHECK(names == expected);
+
+    const u8* jpeg_bytes = datatype_descriptors::kFiles[1].data;
+    const u32 jpeg_size = datatype_descriptors::kFiles[1].size;
+    const std::vector<u8> jpeg(jpeg_bytes, jpeg_bytes + jpeg_size);
+    CHECK(read_bytes(r, "DEVS:DataTypes/JPEG") == jpeg);
+
+    // Open, Read and Seek see the descriptor's own bytes.
+    r.str(kData, "DEVS:DataTypes/JPEG");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    u32 size = 0;
+    u32 error = 99;
+    CHECK(g_dos.handle_size(fh, size, error));
+    CHECK_EQ(size, jpeg_size);
+    u8 tail[2]{};
+    u32 got = 0;
+    u32 old = 0;
+    CHECK(g_dos.seek_handle(fh, -2, OFFSET_END, old, error));
+    CHECK_EQ(old, 0u);
+    CHECK(g_dos.read_handle(fh, tail, sizeof tail, got, error));
+    CHECK_EQ(got, 2u);
+    CHECK_EQ(tail[0], 0x00u);
+    CHECK_EQ(tail[1], 0xFFu);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+
+    // Examine, NameFromLock, ParentDir and NameFromFH know the file.
+    const u32 file = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(file != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, file, fib), DOSTRUE);
+    CHECK_EQ(read_fib(r, fib).size, jpeg_size);
+    CHECK_EQ(read_fib(r, fib).type, -3);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, file, kArray, 128), DOSTRUE);
+    CHECK(r.read_str(kArray) == "HombreTest:Devs/DataTypes/JPEG");
+    const u32 parent = r.call(dos_lvo::ParentDir, file);
+    CHECK(parent != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromLock, parent, kArray, 128), DOSTRUE);
+    CHECK(r.read_str(kArray) == "HombreTest:Devs/DataTypes");
+    r.call(dos_lvo::UnLock, parent);
+    r.call(dos_lvo::UnLock, file);
+    const u32 named = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(named != 0);
+    CHECK_EQ(r.call(dos_lvo::NameFromFH, named, kArray, 128), DOSTRUE);
+    CHECK(r.read_str(kArray) == "HombreTest:Devs/DataTypes/JPEG");
+    r.call(dos_lvo::Close, named);
+}
+
+void rom_overlay_hides_under_disk_files_and_refuses_changes() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Devs/DataTypes/PNG", text("disk png")});
+    Rig r(files);
+
+    // RAM:DataTypes/PNG comes before the built-in files do, so it hides
+    // the built-in PNG.
+    u32 err = 0;
+    const u8 ram_shadow[] = {'r', 'a', 'm', ' ', 'p', 'n', 'g'};
+    CHECK(g_dos.make_dir("RAM:DataTypes", err));
+    CHECK(g_dos.write_file("RAM:DataTypes/PNG", ram_shadow, sizeof ram_shadow, err));
+    CHECK(datatype_descriptors::register_on(g_dos));
+
+    // On the boot disk the image file hides the built-in one.
+    CHECK(read_bytes(r, "DEVS:DataTypes/PNG") == text("disk png"));
+    std::vector<std::string> names = ex_all_names(r, "DEVS:DataTypes", 128);
+    std::sort(names.begin(), names.end());
+    CHECK(names == (std::vector<std::string>{"JPEG", "PNG"}));
+
+    // A reassigned DEVS: moves the built-in files to RAM:, where the RAM
+    // shadow hides PNG.
+    r.str(kData, "DEVS");
+    r.str(kData + 0x40, "RAM:");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+    std::vector<u8> shadow(ram_shadow, ram_shadow + sizeof ram_shadow);
+    CHECK(read_bytes(r, "DEVS:DataTypes/PNG") == shadow);
+
+    // The disk file stays writable while it hides a built-in one.
+    const u8 newer[] = {'n', 'e', 'w'};
+    CHECK(g_dos.write_file("DEVS:DataTypes/PNG", newer, sizeof newer, err));
+    shadow.assign(newer, newer + sizeof newer);
+    CHECK(read_bytes(r, "DEVS:DataTypes/PNG") == shadow);
+
+    // The built-in file takes no change.
+    r.str(kData, "DEVS:DataTypes/JPEG");
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_READWRITE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
+    CHECK(fh != 0);
+    r.str(kData + 0x100, "x");
+    CHECK_EQ(as_signed(r.call(dos_lvo::Write, fh, kData + 0x100, 1)), -1);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(as_signed(r.call(dos_lvo::SetFileSize, fh, 0, OFFSET_BEGINNING)), -1);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    r.call(dos_lvo::Close, fh);
+
+    CHECK_EQ(r.call(dos_lvo::DeleteFile, kData), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    CHECK_EQ(r.call(dos_lvo::SetProtection, kData, 0), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    r.str(kData + 0x100, "note");
+    CHECK_EQ(r.call(dos_lvo::SetComment, kData, kData + 0x100), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    const u32 stamp = kData + 0x180;
+    for (u32 i = 0; i < ds_SIZEOF; ++i) {
+        r.put8(stamp + i, 0);
+    }
+    CHECK_EQ(r.call(dos_lvo::SetFileDate, kData, stamp), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+    r.str(kData + 0x200, "DEVS:DataTypes/Other");
+    CHECK_EQ(r.call(dos_lvo::Rename, kData, kData + 0x200), DOSFALSE);
+    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
+
+    const u8* jpeg_bytes = datatype_descriptors::kFiles[1].data;
+    const std::vector<u8> jpeg(jpeg_bytes,
+                               jpeg_bytes + datatype_descriptors::kFiles[1].size);
+    CHECK(read_bytes(r, "DEVS:DataTypes/JPEG") == jpeg);
+    names = ex_all_names(r, "DEVS:DataTypes", 128);
+    std::sort(names.begin(), names.end());
+    CHECK(names == (std::vector<std::string>{"JPEG", "PNG"}));
+}
+
+void rom_overlay_follows_a_reassigned_devs() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Devs/DataTypes/Disk", text("on disk")});
+    Rig r(files);
+    CHECK(datatype_descriptors::register_on(g_dos));
+    CHECK(g_dos.examine("DEVS:DataTypes/JPEG").kind == Dos::TargetKind::File);
+    CHECK(g_dos.examine("DEVS:DataTypes/Disk").kind == Dos::TargetKind::File);
+
+    // DEVS: now names RAM:, where DataTypes is not there.
+    r.str(kData, "DEVS");
+    r.str(kData + 0x40, "RAM:");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+    CHECK(g_dos.examine("DEVS:DataTypes/JPEG").kind == Dos::TargetKind::Missing);
+    CHECK(g_dos.examine("DEVS:DataTypes/Disk").kind == Dos::TargetKind::Missing);
+
+    // The directory makes the built-in files appear there, and the disk's
+    // files stay behind.
+    u32 err = 0;
+    CHECK(g_dos.make_dir("RAM:DataTypes", err));
+    const Dos::Target jpeg = g_dos.examine("DEVS:DataTypes/JPEG");
+    CHECK(jpeg.kind == Dos::TargetKind::File);
+    CHECK_EQ(jpeg.size, datatype_descriptors::kFiles[1].size);
+    CHECK(g_dos.examine("DEVS:DataTypes/Disk").kind == Dos::TargetKind::Missing);
+}
+
+u16 descriptor_u16(const std::vector<u8>& data, u32 at) {
+    return static_cast<u16>((data[at] << 8) | data[at + 1]);
+}
+
+u32 descriptor_u32(const std::vector<u8>& data, u32 at) {
+    return (static_cast<u32>(data[at]) << 24) | (static_cast<u32>(data[at + 1]) << 16) |
+           (static_cast<u32>(data[at + 2]) << 8) | data[at + 3];
+}
+
+std::string descriptor_string(const std::vector<u8>& data, u32 at) {
+    std::string out;
+    while (data[at] != 0) {
+        out += static_cast<char>(data[at++]);
+    }
+    return out;
+}
+
+struct ParsedDescriptor {
+    std::string name;
+    std::string base;
+    std::string pattern;
+    u32 group = 0;
+    u32 id = 0;
+    u16 mask_len = 0;
+    u16 flags = 0;
+    u16 priority = 0;
+    std::vector<u16> mask;
+};
+
+// Reads the NAME and DTHD chunks of a FORM DTYP file, taking the
+// DataTypeHeader's pointers as offsets from the DTHD chunk data.
+ParsedDescriptor parse_descriptor(const u8* bytes, u32 size) {
+    const std::vector<u8> data(bytes, bytes + size);
+    CHECK_EQ(descriptor_u32(data, 0), 0x464F524Du);  // 'FORM'
+    CHECK_EQ(descriptor_u32(data, 4), size - 8);
+    CHECK_EQ(descriptor_u32(data, 8), 0x44545950u);  // 'DTYP'
+
+    ParsedDescriptor out;
+    std::string file_name;
+    bool saw_name = false;
+    bool saw_dthd = false;
+    u32 at = 12;
+    while (at + 8 <= data.size()) {
+        const u32 id = descriptor_u32(data, at);
+        const u32 chunk_bytes = descriptor_u32(data, at + 4);
+        CHECK(at + 8 + chunk_bytes <= data.size());
+        if (id == 0x4E414D45u) {  // 'NAME'
+            file_name = descriptor_string(data, at + 8);
+            saw_name = true;
+        } else if (id == 0x44544844u) {  // 'DTHD'
+            const u32 header = at + 8;
+            out.name = descriptor_string(data, header + descriptor_u32(data, header));
+            out.base = descriptor_string(data, header + descriptor_u32(data, header + 4));
+            out.pattern = descriptor_string(data, header + descriptor_u32(data, header + 8));
+            out.group = descriptor_u32(data, header + 16);
+            out.id = descriptor_u32(data, header + 20);
+            out.mask_len = descriptor_u16(data, header + 24);
+            CHECK_EQ(descriptor_u16(data, header + 26), 0u);
+            out.flags = descriptor_u16(data, header + 28);
+            out.priority = descriptor_u16(data, header + 30);
+            const u32 mask_at = header + descriptor_u32(data, header + 12);
+            for (u32 i = 0; i < out.mask_len; ++i) {
+                out.mask.push_back(descriptor_u16(data, mask_at + i * 2));
+            }
+            saw_dthd = true;
+        }
+        at += 8 + chunk_bytes;
+        if ((chunk_bytes & 1u) != 0) {
+            ++at;
+        }
+    }
+    CHECK_EQ(at, data.size());
+    CHECK(saw_name);
+    CHECK(saw_dthd);
+    CHECK(file_name == out.name);
+    return out;
+}
+
+void datatype_descriptor_chunks_are_well_formed() {
+    CHECK_EQ(datatype_descriptors::kCount, 2u);
+    CHECK(std::string(datatype_descriptors::kFiles[0].name) == "PNG");
+    CHECK(std::string(datatype_descriptors::kFiles[1].name) == "JPEG");
+
+    const ParsedDescriptor png =
+        parse_descriptor(datatype_descriptors::kFiles[0].data,
+                         datatype_descriptors::kFiles[0].size);
+    CHECK(png.name == "PNG");
+    CHECK(png.base == "png");
+    CHECK(png.pattern == "#?");
+    CHECK_EQ(png.group, 0x70696374u);
+    CHECK_EQ(png.id, 0x706E6720u);
+    CHECK_EQ(png.flags, 0x0010u);
+    CHECK_EQ(png.priority, 0u);
+    CHECK(png.mask == (std::vector<u16>{0x0089, 0x0050, 0x004E, 0x0047,
+                                        0x000D, 0x000A, 0x001A, 0x000A}));
+
+    const ParsedDescriptor jpeg =
+        parse_descriptor(datatype_descriptors::kFiles[1].data,
+                         datatype_descriptors::kFiles[1].size);
+    CHECK(jpeg.name == "JFIF");
+    CHECK(jpeg.base == "jpeg");
+    CHECK(jpeg.pattern == "#?");
+    CHECK_EQ(jpeg.group, 0x70696374u);
+    CHECK_EQ(jpeg.id, 0x6A666966u);
+    CHECK_EQ(jpeg.flags, 0x0010u);
+    CHECK_EQ(jpeg.priority, 0u);
+    CHECK(jpeg.mask == (std::vector<u16>{0x00FF, 0x00D8, 0x00FF}));
+}
+
 }
 
 int main() {
@@ -9388,6 +9799,11 @@ int main() {
     notify_initial_sends_at_start();
     notify_delete_file_of_the_watched_file();
     file_helpers_follow_the_volume_rules();
+    handle_calls_read_seek_and_size_a_disk_file();
+    datatype_descriptor_chunks_are_well_formed();
+    rom_overlay_files_appear_in_devs_datatypes();
+    rom_overlay_hides_under_disk_files_and_refuses_changes();
+    rom_overlay_follows_a_reassigned_devs();
     adf_info_reports_the_used_blocks();
     return check::finish("test_dos");
 }

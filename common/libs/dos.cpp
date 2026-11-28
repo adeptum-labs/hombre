@@ -811,6 +811,10 @@ struct DosOps {
         if (f.stream == Dos::Stream::Nil) {
             return true;
         }
+        if (overlay_file_of(d, f.entry) != nullptr) {
+            set_io_err(d, b, ERROR_WRITE_PROTECTED);
+            return false;
+        }
         f.written = true;
         if (f.entry.volume != Dos::kVolRam) {
             return write_disk(d, b, f, data, bytes);
@@ -1203,7 +1207,91 @@ struct DosOps {
         tick = s.ticks;
     }
 
-    static u32 fs_find(const Dos& d, u8 vol, const char* path, DirEntry& out) {
+    // --- built-in files ----------------------------------------------------
+
+    static bool is_overlay_key(u32 key) { return key >= Dos::kOverlayKeyBase; }
+
+    // The leaf of path when it names an entry of the overlay directory
+    // dir_path; null otherwise. Names compare without regard to case.
+    static const char* overlay_leaf(const char* dir_path, const char* path) {
+        u32 i = 0;
+        for (; dir_path[i] != '\0'; ++i) {
+            if (upper(dir_path[i]) != upper(path[i])) {
+                return nullptr;
+            }
+        }
+        if (dir_path[0] != '\0') {
+            if (path[i] != '/') {
+                return nullptr;
+            }
+            ++i;
+        }
+        const char* leaf = path + i;
+        if (leaf[0] == '\0') {
+            return nullptr;
+        }
+        for (const char* c = leaf; *c != '\0'; ++c) {
+            if (*c == '/') {
+                return nullptr;
+            }
+        }
+        return leaf;
+    }
+
+    static bool overlay_dir_is(const char* dir_path, const char* path) {
+        u32 i = 0;
+        for (; dir_path[i] != '\0'; ++i) {
+            if (upper(dir_path[i]) != upper(path[i])) {
+                return false;
+            }
+        }
+        return path[i] == '\0';
+    }
+
+    static const Dos::OverlayFile* overlay_file_at(const Dos& d, u8 vol, const char* path) {
+        for (u32 i = 0; i < d.overlay_count_; ++i) {
+            const Dos::Overlay& o = d.overlays_[i];
+            if (!o.present || o.volume != vol) {
+                continue;
+            }
+            const char* leaf = overlay_leaf(o.path, path);
+            if (leaf == nullptr) {
+                continue;
+            }
+            const u32 length = length_of(leaf);
+            for (u32 f = 0; f < o.count; ++f) {
+                if (same_name(leaf, length, o.files[f].name)) {
+                    return &o.files[f];
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    static const Dos::OverlayFile* overlay_file_of(const Dos& d, const DirEntry& entry) {
+        if (!is_overlay_key(entry.header_block)) {
+            return nullptr;
+        }
+        const u32 key = entry.header_block - Dos::kOverlayKeyBase;
+        const u32 overlay = key / Dos::kMaxOverlayFiles;
+        const u32 file = key % Dos::kMaxOverlayFiles;
+        if (overlay >= d.overlay_count_ || file >= d.overlays_[overlay].count) {
+            return nullptr;
+        }
+        return &d.overlays_[overlay].files[file];
+    }
+
+    static DirEntry overlay_entry(u8 vol, const Dos::OverlayFile& file) {
+        DirEntry entry{};
+        copy_cstr(entry.name, file.name, sizeof entry.name);
+        entry.size = file.size;
+        entry.header_block = file.key;
+        entry.volume = vol;
+        return entry;
+    }
+
+    // The volume's own lookup, without the built-in files.
+    static u32 base_find(const Dos& d, u8 vol, const char* path, DirEntry& out) {
         if (vol == Dos::kVolRam) {
             u32 node = RamFs::kNone;
             const u32 err = d.ram_.find_path(path, node);
@@ -1229,6 +1317,54 @@ struct DosOps {
         return err == FsError::Ok ? 0 : io_error_of(err);
     }
 
+    // A built-in file that no file or directory of the volume hides.
+    static const Dos::OverlayFile* overlay_file_for_change(const Dos& d, u8 vol,
+                                                           const char* path) {
+        const Dos::OverlayFile* file = overlay_file_at(d, vol, path);
+        if (file == nullptr) {
+            return nullptr;
+        }
+        DirEntry entry{};
+        return base_find(d, vol, path, entry) == 0 ? nullptr : file;
+    }
+
+    // The built-in files of the directory path, after its own entries; one
+    // that the directory hides is not among them.
+    static void list_overlay(const Dos& d, u8 vol, const char* path, DirVisitor visitor,
+                             void* ctx) {
+        if (visitor == nullptr) {
+            return;
+        }
+        for (u32 i = 0; i < d.overlay_count_; ++i) {
+            const Dos::Overlay& o = d.overlays_[i];
+            if (!o.present || o.volume != vol || !overlay_dir_is(o.path, path)) {
+                continue;
+            }
+            for (u32 f = 0; f < o.count; ++f) {
+                char full[Dos::kMaxPath];
+                DirEntry hidden{};
+                if (!join_volume_path(path, o.files[f].name, full) ||
+                    base_find(d, vol, full, hidden) == 0) {
+                    continue;
+                }
+                visitor(ctx, overlay_entry(vol, o.files[f]));
+            }
+        }
+    }
+
+    static u32 fs_find(const Dos& d, u8 vol, const char* path, DirEntry& out) {
+        const u32 err = base_find(d, vol, path, out);
+        if (err != ERROR_OBJECT_NOT_FOUND) {
+            return err;
+        }
+        const Dos::OverlayFile* file = overlay_file_at(d, vol, path);
+        if (file == nullptr) {
+            return err;
+        }
+        out = overlay_entry(vol, *file);
+        return 0;
+    }
+
     // What adf_list hands a visitor, with the entries marked as being on
     // the drive they were read from.
     struct DriveVisit {
@@ -1249,7 +1385,11 @@ struct DosOps {
 
     static u32 list_drive(const Dos& d, u8 vol, const char* path, DirVisitor visitor, void* ctx) {
         if (vol == Dos::kVolRomFonts) {
-            return path[0] == '\0' ? 0 : ERROR_OBJECT_NOT_FOUND;
+            if (path[0] != '\0') {
+                return ERROR_OBJECT_NOT_FOUND;
+            }
+            list_overlay(d, vol, path, visitor, ctx);
+            return 0;
         }
         const AdfVolume* disk = disk_of(d, vol);
         if (disk == nullptr) {
@@ -1257,7 +1397,11 @@ struct DosOps {
         }
         DriveVisit v{visitor, ctx, vol};
         const FsError err = adf_list(*disk, path, visit_on_drive, &v);
-        return err == FsError::Ok ? 0 : io_error_of(err);
+        if (err != FsError::Ok) {
+            return io_error_of(err);
+        }
+        list_overlay(d, vol, path, visitor, ctx);
+        return 0;
     }
 
     static u32 fs_list(const Dos& d, u8 vol, const char* path, DirVisitor visitor, void* ctx) {
@@ -1276,6 +1420,7 @@ struct DosOps {
                     visitor(ctx, ram_entry(d, child));
                 }
             }
+            list_overlay(d, vol, path, visitor, ctx);
             return 0;
         }
         return list_drive(d, vol, path, visitor, ctx);
@@ -1301,12 +1446,22 @@ struct DosOps {
                     visitor(ctx, ram_entry(d, child));
                 }
             }
+            list_overlay(d, dir.volume, path, visitor, ctx);
             return 0;
         }
         return list_drive(d, dir.volume, path, visitor, ctx);
     }
 
     static u32 fs_read(const Dos& d, const DirEntry& entry, u32 pos, u8* dst, u32 n, u32& got) {
+        if (const Dos::OverlayFile* file = overlay_file_of(d, entry)) {
+            const u32 left = pos < file->size ? file->size - pos : 0;
+            const u32 count = n < left ? n : left;
+            for (u32 i = 0; i < count; ++i) {
+                dst[i] = file->data[pos + i];
+            }
+            got = count;
+            return 0;
+        }
         if (entry.volume == Dos::kVolRam) {
             if (entry.header_block == 0) {
                 got = 0;
@@ -1324,6 +1479,9 @@ struct DosOps {
     }
 
     static u32 fs_size(const Dos& d, const DirEntry& entry) {
+        if (const Dos::OverlayFile* file = overlay_file_of(d, entry)) {
+            return file->size;
+        }
         if (entry.volume == Dos::kVolRam) {
             if (entry.header_block == 0) {
                 return 0;
@@ -1403,6 +1561,14 @@ struct DosOps {
     };
 
     static u32 fs_meta(const Dos& d, const DirEntry& entry, FsMeta& out) {
+        if (const Dos::OverlayFile* file = overlay_file_of(d, entry)) {
+            out = FsMeta{};
+            out.type = ST_FILE;
+            out.size = file->size;
+            out.num_blocks = file->size == 0 ? 0 : (file->size - 1) / 512 + 1;
+            out.protection = kFibfWrite;
+            return 0;
+        }
         if (entry.volume == Dos::kVolRam) {
             if (entry.header_block == 0) {
                 return ERROR_OBJECT_NOT_FOUND;
@@ -1570,6 +1736,9 @@ struct DosOps {
     // Deletes the file at the path, or with allow_dir an empty directory
     // too. Returns the IoErr code.
     static u32 delete_disk_object(Dos& d, u8 vol, const char* resolved, bool allow_dir) {
+        if (overlay_file_for_change(d, vol, resolved) != nullptr) {
+            return ERROR_WRITE_PROTECTED;
+        }
         if (!writable_disk(d, vol)) {
             return ERROR_DISK_WRITE_PROTECTED;
         }
@@ -1598,6 +1767,10 @@ struct DosOps {
     // the IoErr code.
     static u32 rename_disk_object(Dos& d, u8 vol, const char* old_resolved,
                                   const char* new_resolved) {
+        if (overlay_file_for_change(d, vol, old_resolved) != nullptr ||
+            overlay_file_for_change(d, vol, new_resolved) != nullptr) {
+            return ERROR_WRITE_PROTECTED;
+        }
         if (!writable_disk(d, vol)) {
             return ERROR_DISK_WRITE_PROTECTED;
         }
@@ -1660,6 +1833,9 @@ struct DosOps {
     // code.
     template <typename Change>
     static u32 change_disk_object(Dos& d, u8 vol, const char* resolved, Change change) {
+        if (overlay_file_for_change(d, vol, resolved) != nullptr) {
+            return ERROR_WRITE_PROTECTED;
+        }
         if (!writable_disk(d, vol)) {
             return ERROR_DISK_WRITE_PROTECTED;
         }
@@ -2175,10 +2351,17 @@ struct DosOps {
 
     static bool resolve_late_assign(Dos& d, Bus& b, Dos::AssignEntry& e, u32& error, u32 depth,
                                     u32 process = 0) {
+        char target[Dos::kMaxPath];
+        copy_cstr(target, e.path, Dos::kMaxPath);
         u8 vol = Dos::kVolDf0;
         char resolved[Dos::kMaxPath];
-        if (!resolve(d, b, e.path, vol, resolved, error, depth, process)) {
+        if (!resolve(d, b, target, vol, resolved, error, depth, process)) {
             return false;
+        }
+        // Another resolution may have bound the assign while this call
+        // resolved its path.
+        if (e.type != DLT_LATE) {
+            return true;
         }
         DirEntry entry{};
         const u32 err = fs_find(d, vol, resolved, entry);
@@ -2435,7 +2618,10 @@ struct DosOps {
     // volume, device or assign points; one without starts at the current
     // directory.
     static bool resolve(Dos& d, Bus& b, const char* name, u8& vol, char (&out)[Dos::kMaxPath],
-                        u32& error, u32 depth = 0, u32 process = 0) {
+                        u32& error, u32 depth = 0, u32 process = 0, bool refresh = true) {
+        if (refresh) {
+            d.refresh_overlays(b);
+        }
         Dos::ProcContext& p = process != 0 ? d.context_for(process) : d.cur();
         if (depth >= kMaxAssignDepth) {
             error = ERROR_TOO_MANY_LEVELS;
@@ -2817,6 +3003,25 @@ struct DosOps {
             }
             return;
         }
+        const Dos::OverlayFile* builtin = overlay_file_for_change(d, vol, resolved);
+        if (builtin != nullptr) {
+            if (mode != MODE_OLDFILE) {
+                fail(d, b, ERROR_WRITE_PROTECTED, 0);
+                return;
+            }
+            if (slot < 0) {
+                table_full(d, b, "file handle", Dos::kMaxFiles);
+                return;
+            }
+            char canonical[Dos::kMaxPath];
+            fs_canonical(d, vol, resolved, canonical);
+            open_slot(d, static_cast<u32>(slot),
+                      make_file_slot(Dos::Stream::File, overlay_entry(vol, *builtin), canonical,
+                                     d.cur_owner()));
+            init_handle(d, b, static_cast<u32>(slot), false);
+            native::set_result(m, handle_bptr(d, static_cast<u32>(slot)));
+            return;
+        }
         if (vol != Dos::kVolRam) {
             open_disk(d, b, slot, vol, resolved, mode);
             return;
@@ -3161,39 +3366,53 @@ struct DosOps {
         native::set_result(m, DOSTRUE);
     }
 
+    // The checks of Read and the bytes it can return: the handle must be
+    // open and length not negative.
+    static bool read_setup(Dos& d, Bus& b, u32 fh, u32 length, u32& slot, u32& n, u32& error) {
+        n = 0;
+        const i64 found = handle_slot(d, fh);
+        if (found < 0) {
+            log_bad_handle("Read from", fh);
+            error = ERROR_INVALID_LOCK;
+        } else if ((length & 0x80000000) != 0) {
+            error = ERROR_BAD_NUMBER;
+        } else {
+            slot = static_cast<u32>(found);
+            if (length != 0 && d.files_[slot].stream == Dos::Stream::Console &&
+                available_bytes(d, d.files_[slot]) == 0) {
+                refill_console(d);
+            }
+            const u32 avail = available_bytes(d, d.files_[slot]);
+            n = length < avail ? length : avail;
+            if (n == 0) {
+                d.files_[slot].has_last = false;
+            }
+            return true;
+        }
+        set_io_err(d, b, error);
+        return false;
+    }
+
     static void read(void* ctx, Machine& m) {
         Dos& d = of(ctx);
         Bus b(m);
-        const u32 fh = m.cpu.d[1];
-        const u32 buffer = m.cpu.d[2];
-        const u32 length = m.cpu.d[3];
-        const i64 slot = handle_slot(d, fh);
-        if (slot < 0) {
-            log_bad_handle("Read from", fh);
-            fail(d, b, ERROR_INVALID_LOCK, 0xFFFFFFFF);
+        u32 slot = 0;
+        u32 n = 0;
+        u32 error = 0;
+        if (!read_setup(d, b, m.cpu.d[1], m.cpu.d[3], slot, n, error)) {
+            native::set_result(m, 0xFFFFFFFF);
             return;
         }
-        if ((length & 0x80000000) != 0) {
-            fail(d, b, ERROR_BAD_NUMBER, 0xFFFFFFFF);
-            return;
-        }
-        if (length != 0 && d.files_[slot].stream == Dos::Stream::Console &&
-            available_bytes(d, d.files_[slot]) == 0) {
-            refill_console(d);
-        }
-        const u32 avail = available_bytes(d, d.files_[slot]);
-        const u32 n = length < avail ? length : avail;
         if (n == 0) {
-            d.files_[slot].has_last = false;
             native::set_result(m, 0);
             return;
         }
-        u8* to = b.bytes_at(buffer, n);
+        u8* to = b.bytes_at(m.cpu.d[2], n);
         if (to == nullptr) {
             return;
         }
         u32 got = 0;
-        if (!read_from_slot(d, b, static_cast<u32>(slot), to, n, got)) {
+        if (!read_from_slot(d, b, slot, to, n, got)) {
             native::set_result(m, 0xFFFFFFFF);
             return;
         }
@@ -3236,43 +3455,57 @@ struct DosOps {
 
     // Seek returns the old position; a position outside the file is an
     // error that leaves it where it was.
-    static void seek(void* ctx, Machine& m) {
-        Dos& d = of(ctx);
-        Bus b(m);
-        const u32 fh = m.cpu.d[1];
+    static bool seek_setup(Dos& d, Bus& b, u32 fh, i32 offset, u32 mode, u32& old, u32& error) {
+        old = 0;
         const i64 slot = handle_slot(d, fh);
         if (slot < 0) {
             log_bad_handle("Seek on", fh);
-            fail(d, b, ERROR_INVALID_LOCK, 0xFFFFFFFF);
-            return;
-        }
-        Dos::FileSlot& f = d.files_[slot];
-        if (f.stream == Dos::Stream::Console) {
-            fail(d, b, ERROR_ACTION_NOT_KNOWN, 0xFFFFFFFF);
-            return;
-        }
-        const u32 size = fs_size(d, f.entry);
-        const u32 mode = m.cpu.d[3];
-        i64 from = 0;
-        if (mode == OFFSET_BEGINNING) {
-            from = 0;
-        } else if (mode == OFFSET_CURRENT) {
-            from = f.pos;
-        } else if (mode == OFFSET_END) {
-            from = size;
+            error = ERROR_INVALID_LOCK;
         } else {
-            fail(d, b, ERROR_SEEK_ERROR, 0xFFFFFFFF);
+            Dos::FileSlot& f = d.files_[slot];
+            if (f.stream == Dos::Stream::Console) {
+                error = ERROR_ACTION_NOT_KNOWN;
+            } else {
+                const u32 size = fs_size(d, f.entry);
+                i64 from = 0;
+                if (mode == OFFSET_BEGINNING) {
+                    from = 0;
+                } else if (mode == OFFSET_CURRENT) {
+                    from = f.pos;
+                } else if (mode == OFFSET_END) {
+                    from = size;
+                } else {
+                    error = ERROR_SEEK_ERROR;
+                    set_io_err(d, b, error);
+                    return false;
+                }
+                const i64 to = from + offset;
+                if (to < 0 || to > static_cast<i64>(size)) {
+                    error = ERROR_SEEK_ERROR;
+                    set_io_err(d, b, error);
+                    return false;
+                }
+                old = f.pos;
+                f.pos = static_cast<u32>(to);
+                f.has_unget = false;
+                f.has_last = false;
+                return true;
+            }
+        }
+        set_io_err(d, b, error);
+        return false;
+    }
+
+    static void seek(void* ctx, Machine& m) {
+        Dos& d = of(ctx);
+        Bus b(m);
+        u32 old = 0;
+        u32 error = 0;
+        if (!seek_setup(d, b, m.cpu.d[1], static_cast<i32>(m.cpu.d[2]), m.cpu.d[3], old,
+                        error)) {
+            native::set_result(m, 0xFFFFFFFF);
             return;
         }
-        const i64 to = from + static_cast<i64>(static_cast<__INT32_TYPE__>(m.cpu.d[2]));
-        if (to < 0 || to > static_cast<i64>(size)) {
-            fail(d, b, ERROR_SEEK_ERROR, 0xFFFFFFFF);
-            return;
-        }
-        const u32 old = f.pos;
-        f.pos = static_cast<u32>(to);
-        f.has_unget = false;
-        f.has_last = false;
         native::set_result(m, old);
     }
 
@@ -3289,6 +3522,10 @@ struct DosOps {
         Dos::FileSlot& f = d.files_[slot];
         if (f.stream == Dos::Stream::Console) {
             fail(d, b, ERROR_ACTION_NOT_KNOWN, 0xFFFFFFFF);
+            return;
+        }
+        if (overlay_file_of(d, f.entry) != nullptr) {
+            fail(d, b, ERROR_WRITE_PROTECTED, 0xFFFFFFFF);
             return;
         }
         if (!writable(d, f.entry.volume)) {
@@ -5379,6 +5616,7 @@ struct DosOps {
     // set if it is not a lock.
     static bool lock_entry(Dos& d, Bus& b, u32 bptr, DirEntry& entry, const char*& path,
                            u8 zero_vol = kBootVolume) {
+        d.refresh_overlays(b);
         if (bptr == 0) {
             path = "";
             const u32 err = fs_find(d, zero_volume(d, zero_vol), "", entry);
@@ -6375,8 +6613,9 @@ struct DosOps {
             fail(d, b, ERROR_OBJECT_WRONG_TYPE, DOSFALSE);
             return false;
         }
-        NextEntry next{after, dir.volume == Dos::kVolRam || after == dir.header_block, false,
-                       false, DirEntry{}};
+        const bool first = after == dir.header_block ||
+                           (dir.volume == Dos::kVolRam && !is_overlay_key(after));
+        NextEntry next{after, first, false, false, DirEntry{}};
         const u32 err = fs_list_from(d, dir, path, after,
                                      after == dir.header_block || after == 0,
                                      NextEntry::visit, &next);
@@ -7056,8 +7295,9 @@ struct DosOps {
             fail(d, b, ERROR_NO_MORE_ENTRIES, ERROR_NO_MORE_ENTRIES);
             return;
         }
-        MatchVisitor mv{cur.after, cur.dir.volume == Dos::kVolRam || cur.first, false, false,
-                        s.tokens, DirEntry{}};
+        const bool first = cur.first ||
+                           (cur.dir.volume == Dos::kVolRam && !is_overlay_key(cur.after));
+        MatchVisitor mv{cur.after, first, false, false, s.tokens, DirEntry{}};
         const u32 list_err =
             fs_list_from(d, cur.dir, cur.dir_path, cur.after, cur.first, MatchVisitor::visit, &mv);
         if (list_err != 0) {
@@ -7256,8 +7496,9 @@ struct DosOps {
             }
             match_pat = match_tokens;
         }
-        ExAllCollector col{d, b, buffer, size, type, hdr_size, after, match_pat,
-                           dir.volume == Dos::kVolRam, 0, 0, 0, after, false, false, false};
+        const bool seen = dir.volume == Dos::kVolRam && !is_overlay_key(after);
+        ExAllCollector col{d, b, buffer, size, type, hdr_size, after, match_pat, seen,
+                           0, 0, 0, after, false, false, false};
         const u32 err =
             fs_list_from(d, dir, path, after, after == 0, ExAllCollector::visit, &col);
         if (!b.ok()) {
@@ -7526,6 +7767,9 @@ struct DosOps {
     // Deletes the file or empty drawer at the resolved path and tells the
     // notifications on it. Returns the IoErr code.
     static u32 delete_resolved(Dos& d, u8 vol, const char* resolved) {
+        if (overlay_file_for_change(d, vol, resolved) != nullptr) {
+            return ERROR_WRITE_PROTECTED;
+        }
         u32 err = 0;
         if (vol != Dos::kVolRam) {
             err = delete_disk_object(d, vol, resolved, true);
@@ -7582,6 +7826,10 @@ struct DosOps {
     // locks and notifications a rename changes. Returns the IoErr code.
     static u32 rename_resolved(Dos& d, Bus& b, u8 old_vol, const char* old_resolved,
                                u8 new_vol, const char* new_resolved) {
+        if (overlay_file_for_change(d, old_vol, old_resolved) != nullptr ||
+            overlay_file_for_change(d, new_vol, new_resolved) != nullptr) {
+            return ERROR_WRITE_PROTECTED;
+        }
         if (old_vol != new_vol) {
             return ERROR_RENAME_ACROSS_DEVICES;
         }
@@ -7782,6 +8030,9 @@ struct DosOps {
     // Sets the protection of the object at the resolved path. Returns the IoErr
     // code.
     static u32 set_protection_resolved(Dos& d, u8 vol, const char* resolved, u32 mask) {
+        if (overlay_file_for_change(d, vol, resolved) != nullptr) {
+            return ERROR_WRITE_PROTECTED;
+        }
         if (vol != Dos::kVolRam) {
             return change_disk_object(
                 d, vol, resolved,
@@ -7880,6 +8131,9 @@ struct DosOps {
     // Sets the comment of the object at the resolved path. Returns the IoErr
     // code.
     static u32 set_comment_resolved(Dos& d, u8 vol, const char* resolved, const char* comment) {
+        if (overlay_file_for_change(d, vol, resolved) != nullptr) {
+            return ERROR_WRITE_PROTECTED;
+        }
         if (vol != Dos::kVolRam) {
             return change_disk_object(
                 d, vol, resolved,
@@ -7956,6 +8210,9 @@ struct DosOps {
                 fail(d, b, error, DOSFALSE);
             }
             return false;
+        }
+        if (overlay_file_for_change(d, vol, resolved) != nullptr) {
+            return finish_change(d, b, ERROR_WRITE_PROTECTED);
         }
         if (vol != Dos::kVolRam) {
             const AmigaDate date{days, minute, tick};
@@ -9624,6 +9881,63 @@ constexpr DosFunction kDosFunctions[] = {
 
 }
 
+bool Dos::refresh_overlays(Bus& b) {
+    if (overlays_resolving_ || overlay_count_ == 0) {
+        return b.ok();
+    }
+    overlays_resolving_ = true;
+    for (u32 i = 0; i < overlay_count_; ++i) {
+        overlays_[i].present = false;
+    }
+    for (u32 i = 0; i < overlay_count_; ++i) {
+        Overlay& o = overlays_[i];
+        u8 vol = kVolDf0;
+        char resolved[kMaxPath];
+        u32 error = 0;
+        if (!DosOps::resolve(*this, b, o.dir, vol, resolved, error, 0, 0, false)) {
+            continue;
+        }
+        DirEntry entry{};
+        if (DosOps::fs_find(*this, vol, resolved, entry) == 0 && entry.is_dir) {
+            o.present = true;
+            o.volume = vol;
+            copy_cstr(o.path, resolved, kMaxPath);
+        }
+    }
+    overlays_resolving_ = false;
+    return b.ok();
+}
+
+bool Dos::add_rom_overlay(const char* dir, const RomFile* files, u32 count) {
+    if (dir == nullptr || files == nullptr || overlay_count_ >= kMaxOverlays ||
+        count > kMaxOverlayFiles || length_of(dir) >= kMaxPath) {
+        return false;
+    }
+    for (u32 i = 0; i < count; ++i) {
+        if (files[i].name == nullptr || files[i].name[0] == '\0' ||
+            length_of(files[i].name) > kMaxComponent ||
+            (files[i].data == nullptr && files[i].size != 0)) {
+            return false;
+        }
+    }
+    Overlay& o = overlays_[overlay_count_];
+    o = Overlay{};
+    copy_cstr(o.dir, dir, kMaxPath);
+    o.count = count;
+    for (u32 i = 0; i < count; ++i) {
+        copy_cstr(o.files[i].name, files[i].name, sizeof o.files[i].name);
+        o.files[i].data = files[i].data;
+        o.files[i].size = files[i].size;
+        o.files[i].key = kOverlayKeyBase + overlay_count_ * kMaxOverlayFiles + i;
+    }
+    ++overlay_count_;
+    if (m_ == nullptr) {
+        return true;
+    }
+    Bus b(*m_);
+    return refresh_overlays(b);
+}
+
 u32 Dos::cur_index() const {
     const u32 task = exec_ != nullptr ? exec_->this_task() : 0;
     for (u32 i = 0; i < kMaxProcs; ++i) {
@@ -10395,6 +10709,11 @@ bool Dos::init(Machine& m, Exec& exec, const Drives& drives, ConsoleWrite out, v
     for (FileSlot& f : files_) {
         f = DosOps::make_file_slot(Stream::Closed, DirEntry{}, "");
     }
+    for (Overlay& o : overlays_) {
+        o = Overlay{};
+    }
+    overlay_count_ = 0;
+    overlays_resolving_ = false;
     for (LockSlot& l : lock_slots_) {
         l.used = false;
         l.owner = 0;
@@ -11030,6 +11349,11 @@ bool Dos::write_file(const char* name, const u8* data, u32 bytes, u32& error) {
         }
         return false;
     }
+    if (DosOps::overlay_file_for_change(*this, vol, resolved) != nullptr) {
+        error = ERROR_WRITE_PROTECTED;
+        set_last_error(error);
+        return false;
+    }
     if (vol != kVolRam) {
         error = DosOps::write_disk_file(*this, vol, resolved, data, bytes);
         if (error != 0) {
@@ -11110,6 +11434,11 @@ bool Dos::delete_file(const char* name, u32& error) {
         if (b.ok()) {
             set_last_error(error);
         }
+        return false;
+    }
+    if (DosOps::overlay_file_for_change(*this, vol, resolved) != nullptr) {
+        error = ERROR_WRITE_PROTECTED;
+        set_last_error(error);
         return false;
     }
     if (vol != kVolRam) {
@@ -12018,6 +12347,63 @@ bool Dos::write_handle(u32 fh, const u8* data, u32 bytes) {
     }
     Bus b(*m_);
     return DosOps::write_slot(*this, b, static_cast<u32>(slot), data, bytes);
+}
+
+bool Dos::read_handle(u32 fh, u8* buffer, u32 bytes, u32& got, u32& error) {
+    got = 0;
+    error = 0;
+    if (m_ == nullptr || (buffer == nullptr && bytes != 0)) {
+        error = ERROR_REQUIRED_ARG_MISSING;
+        return false;
+    }
+    Bus b(*m_);
+    u32 slot = 0;
+    u32 n = 0;
+    if (!DosOps::read_setup(*this, b, fh, bytes, slot, n, error)) {
+        return false;
+    }
+    if (n == 0) {
+        return true;
+    }
+    u32 count = 0;
+    if (!DosOps::read_from_slot(*this, b, slot, buffer, n, count)) {
+        error = b.ok() ? b.r32(cur().process + pr_Result2) : 0;
+        return false;
+    }
+    got = count;
+    return true;
+}
+
+bool Dos::seek_handle(u32 fh, i32 offset, u32 mode, u32& old_position, u32& error) {
+    old_position = 0;
+    error = 0;
+    if (m_ == nullptr) {
+        error = ERROR_INVALID_LOCK;
+        return false;
+    }
+    Bus b(*m_);
+    return DosOps::seek_setup(*this, b, fh, offset, mode, old_position, error);
+}
+
+bool Dos::handle_size(u32 fh, u32& size, u32& error) {
+    size = 0;
+    error = 0;
+    if (m_ == nullptr) {
+        error = ERROR_INVALID_LOCK;
+        return false;
+    }
+    const i64 slot = DosOps::handle_slot(*this, fh);
+    if (slot < 0) {
+        error = ERROR_INVALID_LOCK;
+    } else if (files_[slot].stream == Stream::Console) {
+        error = ERROR_ACTION_NOT_KNOWN;
+    } else {
+        size = DosOps::fs_size(*this, files_[slot].entry);
+        return true;
+    }
+    Bus b(*m_);
+    DosOps::set_io_err(*this, b, error);
+    return false;
 }
 
 void Dos::set_file_closed(FileClosed hook, void* ctx) {
