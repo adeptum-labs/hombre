@@ -388,6 +388,16 @@ struct SegmentLoader {
     void* ctx;
 };
 
+// A built-in library OpenLibrary offers under leaf. A disk library of a
+// higher version is loaded instead; otherwise make builds the library, adds
+// it to LibList under leaf and returns its base, or returns 0.
+struct LibraryProvider {
+    const char* leaf;
+    u16 version;
+    u32 (*make)(void* ctx);
+    void* ctx;
+};
+
 // Runs while Wait or WaitPort blocks with no wanted signal pending. False
 // stops the wait.
 struct IdleHook {
@@ -477,6 +487,16 @@ public:
     // OpenLibrary of a library not in the list asks this for LIBS:<name>.
     // It may be set before init and is kept across it.
     void set_segment_loader(const SegmentLoader& loader) { loader_ = loader; }
+
+    // Registers a built-in library offered whenever OpenLibrary is asked for
+    // its leaf and the library is not yet in the list. Up to
+    // kMaxLibraryProviders are kept; reset on init.
+    bool add_library_provider(const LibraryProvider& provider);
+
+    // Opens and closes a library as the OpenLibrary and CloseLibrary vectors
+    // do, for C++ code running in a native of a task.
+    u32 open_library(const char* name, u16 version);
+    void close_library(u32 base);
 
     // Wait and WaitPort call this while no wanted signal is pending. It may
     // be set before init and is kept across it.
@@ -771,6 +791,7 @@ private:
     static constexpr u32 kMaxLibraries = 32;
     static constexpr u32 kMaxLoaded = 1024;
     static constexpr u32 kMaxSemaphores = 4096;
+    static constexpr u32 kMaxLibraryProviders = 8;
 
     // Context of the native every unimplemented vector of a library runs.
     struct LibraryInfo {
@@ -961,6 +982,8 @@ private:
     void* end_hook_ctx_ = nullptr;
     LibraryInfo libraries_[kMaxLibraries]{};
     u32 library_count_ = 0;
+    LibraryProvider providers_[kMaxLibraryProviders]{};
+    u32 provider_count_ = 0;
     Program programs_[Scheduler::kMaxTasks]{};
     u32 next_program_ = 1;
     ProgramBlock program_blocks_[kMaxProgramBlocks]{};  // by address

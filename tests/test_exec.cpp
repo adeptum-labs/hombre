@@ -1240,12 +1240,14 @@ void unknown_exec_vector() {
 
 // A hand-assembled 68000 library in one segment.
 //
-//   +0   Resident        RTF_AUTOINIT, version 2, NT_LIBRARY
+//   +0   Resident        RTF_AUTOINIT, version `version`, NT_LIBRARY
 //   +28  init table      {40, vectors, init struct, init routine}
 //   +44  vectors         word offsets from +44: Open Close Expunge Null Double, -1
 //   +58  init struct     INITWORD(lib_Revision, 5), INITBYTE(34, 0x5A), end
-//   +70  init routine    MOVEA.L D0,A1 ; MOVE.W #3,20(A1) ; MOVE.L A0,36(A1) ; RTS
-//   +84  Open            ADDQ.W #1,32(A6) ; MOVEQ #-1,D2 ; MOVEA.L D2,A2 ; MOVE.L A6,D0 ; RTS
+//   +70  init routine    MOVEA.L D0,A1 ; MOVE.W #version,20(A1) ;
+//                        MOVE.L A0,36(A1) ; RTS
+//   +84  Open            ADDQ.W #1,32(A6) ; MOVEQ #-1,D2 ; MOVEA.L D2,A2 ;
+//                        MOVE.L A6,D0 ; RTS
 //   +96  Close           SUBQ.W #1,32(A6) ; MOVEQ #0,D0 ; RTS
 //   +104 Expunge, Null   MOVEQ #0,D0 ; RTS
 //   +108 Double          MOVE.L D1,D0 ; ADD.L D0,D0 ; RTS
@@ -1253,7 +1255,9 @@ void unknown_exec_vector() {
 //
 // When `self_open` is set the init routine opens the library's own name
 // first, which makes OpenLibrary load the file again from inside the init.
-std::vector<u8> hand_library(u32 at, const char* name, bool self_open) {
+// When `fail_init` is set the init is the null routine, which returns 0.
+std::vector<u8> hand_library(u32 at, const char* name, bool self_open, u32 version = 3,
+                             bool fail_init = false) {
     std::vector<u8> out(160, 0);
     auto w16 = [&](u32 off, u32 v) {
         out[off] = static_cast<u8>(v >> 8);
@@ -1269,7 +1273,7 @@ std::vector<u8> hand_library(u32 at, const char* name, bool self_open) {
     w32(RT_MATCHTAG, at);
     w32(RT_ENDSKIP, at + 160);
     out[RT_FLAGS] = RTF_AUTOINIT;
-    out[RT_VERSION] = 2;
+    out[RT_VERSION] = static_cast<u8>(version);
     out[RT_TYPE] = NT_LIBRARY;
     w32(RT_NAME, at + name_off);
     w32(RT_IDSTRING, at + id_off);
@@ -1277,7 +1281,7 @@ std::vector<u8> hand_library(u32 at, const char* name, bool self_open) {
     w32(28, 40);
     w32(32, at + 44);
     w32(36, at + 58);
-    w32(40, self_open ? at + 150 : at + 70);
+    w32(40, fail_init ? at + 104 : self_open ? at + 150 : at + 70);
     const u16 vectors[] = {0xFFFF, 84 - 44, 96 - 44, 104 - 44, 104 - 44, 108 - 44, 0xFFFF};
     for (u32 i = 0; i < 7; ++i) {
         w16(44 + 2 * i, vectors[i]);
@@ -1286,11 +1290,12 @@ std::vector<u8> hand_library(u32 at, const char* name, bool self_open) {
     for (u32 i = 0; i < 6; ++i) {
         w16(58 + 2 * i, init_struct[i]);
     }
-    const u16 code[] = {0x2240, 0x337C, 0x0003, 0x0014, 0x2348, 0x0024, 0x4E75,  // init
-                        0x526E, 0x0020, 0x74FF, 0x2442, 0x200E, 0x4E75,          // Open
-                        0x536E, 0x0020, 0x7000, 0x4E75,                          // Close
-                        0x7000, 0x4E75,                                          // Null
-                        0x2001, 0xD080, 0x4E75};                                 // Double
+    const u16 code[] = {0x2240, 0x337C, static_cast<u16>(version), 0x0014,
+                        0x2348, 0x0024, 0x4E75,                            // init
+                        0x526E, 0x0020, 0x74FF, 0x2442, 0x200E, 0x4E75,    // Open
+                        0x536E, 0x0020, 0x7000, 0x4E75,                    // Close
+                        0x7000, 0x4E75,                                    // Null
+                        0x2001, 0xD080, 0x4E75};                           // Double
     for (u32 i = 0; i < sizeof code / 2; ++i) {
         w16(70 + 2 * i, code[i]);
     }
@@ -1317,6 +1322,8 @@ struct FakeLoader {
     std::string path;
     bool self_open;
     u32 last_seglist;
+    u32 version = 3;
+    bool fail_init = false;
 };
 
 bool fake_load(void* ctx, const char* path, u32& seglist) {
@@ -1325,7 +1332,9 @@ bool fake_load(void* ctx, const char* path, u32& seglist) {
     f.path = path;
     std::string name = path;
     if (name != "LIBS:hand.library" && name != "LIBS:self.library" &&
-        name != "LIBS:empty.library" && name != "LIBS:loop.library") {
+        name != "LIBS:empty.library" && name != "LIBS:loop.library" &&
+        name != "LIBS:newer.library" && name != "LIBS:older.library" &&
+        name != "LIBS:old.library" && name != "LIBS:fail.library") {
         return false;
     }
     const u32 total = 8 + 192;
@@ -1335,7 +1344,8 @@ bool fake_load(void* ctx, const char* path, u32& seglist) {
     f.rig->put32(segment + 4, 0);
     const u32 data = segment + 8;
     if (name != "LIBS:empty.library" && name != "LIBS:loop.library") {
-        const std::vector<u8> image = hand_library(data + 8, name.c_str() + 5, f.self_open);
+        const std::vector<u8> image =
+            hand_library(data + 8, name.c_str() + 5, f.self_open, f.version, f.fail_init);
         for (u32 i = 0; i < image.size(); ++i) {
             f.rig->put8(data + 8 + i, image[i]);
         }
@@ -1441,6 +1451,181 @@ void library_that_opens_itself_from_its_init() {
     CHECK(logged("exec: libraries nested too deep to load self.library"));
     CHECK_EQ(r.walk(r.base() + LibList).size(), 4u);
     CHECK_EQ(r.cpu().a[7], kStack);
+}
+
+struct ProviderState {
+    u32 calls = 0;
+    u32 base = 0;
+    const char* name = nullptr;
+    bool fail = false;
+};
+
+u32 make_provider_library(void* ctx) {
+    ProviderState& s = *static_cast<ProviderState*>(ctx);
+    ++s.calls;
+    if (s.fail) {
+        return 0;
+    }
+    s.base = g_exec.make_native_library(s.name, kHombreLibVersion, nullptr, 0);
+    return s.base;
+}
+
+void library_provider_offers_a_library_without_a_disk_file() {
+    Rig r;
+    FakeLoader loader{&r, 0, "", false, 0};
+    g_exec.set_segment_loader(SegmentLoader{fake_load, &loader});
+    ProviderState state;
+    state.name = "prov.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+
+    const u32 name = r.str(kNames, "prov.library");
+    r.cpu().a[1] = name;
+    r.cpu().d[0] = kHombreLibVersion;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    const u32 lib = r.cpu().d[0];
+    CHECK(lib != 0);
+    CHECK_EQ(lib, state.base);
+    CHECK_EQ(state.calls, 1u);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK_EQ(r.get16(lib + LIB_VERSION), kHombreLibVersion);
+    CHECK_EQ(r.get16(lib + LIB_OPENCNT), 1u);
+    CHECK_EQ(r.walk(r.base() + LibList).size(), 2u);
+
+    // A second open finds it in the list without loading or making it again.
+    r.cpu().a[1] = name;
+    r.cpu().d[0] = kHombreLibVersion;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], lib);
+    CHECK_EQ(state.calls, 1u);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK_EQ(r.get16(lib + LIB_OPENCNT), 2u);
+
+    // Above both versions fails.
+    r.cpu().a[1] = name;
+    r.cpu().d[0] = kHombreLibVersion + 1;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+}
+
+void a_newer_disk_library_replaces_a_provider() {
+    Rig r;
+    FakeLoader loader{&r, 0, "", false, 0};
+    loader.version = 61;
+    g_exec.set_segment_loader(SegmentLoader{fake_load, &loader});
+    ProviderState state;
+    state.name = "newer.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+
+    const u32 name = r.str(kNames, "newer.library");
+    r.cpu().a[1] = name;
+    r.cpu().d[0] = kHombreLibVersion;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    const u32 lib = r.cpu().d[0];
+    CHECK(lib != 0);
+    CHECK_EQ(state.calls, 0u);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK(loader.path == "LIBS:newer.library");
+    CHECK_EQ(r.get16(lib + LIB_VERSION), 61u);
+    CHECK_EQ(r.get16(lib + LIB_REVISION), 5u);  // the disk init ran
+    CHECK(r.read_str(r.get32(lib + LN_NAME)) == "newer.library");
+
+    // A second open finds it without loading; above the disk version fails.
+    r.cpu().a[1] = name;
+    r.cpu().d[0] = kHombreLibVersion;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], lib);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK_EQ(state.calls, 0u);
+    CHECK_EQ(r.get16(lib + LIB_OPENCNT), 2u);
+    r.cpu().a[1] = name;
+    r.cpu().d[0] = 62;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+}
+
+void an_older_disk_library_gives_way_to_the_provider() {
+    Rig r;
+    FakeLoader loader{&r, 0, "", false, 0};
+    loader.version = 60;
+    g_exec.set_segment_loader(SegmentLoader{fake_load, &loader});
+    ProviderState state;
+    state.name = "older.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+
+    r.cpu().a[1] = r.str(kNames, "older.library");
+    r.cpu().d[0] = kHombreLibVersion;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    const u32 lib = r.cpu().d[0];
+    CHECK_EQ(lib, state.base);
+    CHECK_EQ(state.calls, 1u);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK_EQ(r.get16(lib + LIB_REVISION), 0u);  // the disk init did not run
+    CHECK_EQ(r.walk(r.base() + LibList).size(), 2u);
+}
+
+void an_older_disk_library_is_unloaded_when_the_provider_fails() {
+    Rig r;
+    FakeLoader loader{&r, 0, "", false, 0};
+    loader.version = 59;
+    g_exec.set_segment_loader(SegmentLoader{fake_load, &loader});
+    ProviderState state;
+    state.name = "old.library";
+    state.fail = true;
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+
+    const u32 free_before = r.get32(r.get32(r.base() + MemList) + MH_FREE);
+    r.cpu().a[1] = r.str(kNames, "old.library");
+    r.cpu().d[0] = kHombreLibVersion;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0u);
+    CHECK_EQ(state.calls, 1u);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK_EQ(r.get32(r.get32(r.base() + MemList) + MH_FREE), free_before);
+    CHECK_EQ(r.walk(r.base() + LibList).size(), 1u);
+}
+
+void a_newer_disk_library_whose_init_fails_falls_back() {
+    Rig r;
+    FakeLoader loader{&r, 0, "", false, 0};
+    loader.version = 61;
+    loader.fail_init = true;
+    g_exec.set_segment_loader(SegmentLoader{fake_load, &loader});
+    ProviderState state;
+    state.name = "fail.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+
+    r.cpu().a[1] = r.str(kNames, "fail.library");
+    r.cpu().d[0] = kHombreLibVersion;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    const u32 lib = r.cpu().d[0];
+    CHECK_EQ(lib, state.base);
+    CHECK_EQ(state.calls, 1u);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK(logged("exec: the resident in LIBS:fail.library failed"));
+    CHECK_EQ(r.get16(lib + LIB_REVISION), 0u);
+}
+
+void a_plain_library_is_unaffected_by_a_provider() {
+    Rig r;
+    FakeLoader loader{&r, 0, "", false, 0};
+    g_exec.set_segment_loader(SegmentLoader{fake_load, &loader});
+    ProviderState state;
+    state.name = "prov.library";
+    CHECK(g_exec.add_library_provider(
+        LibraryProvider{state.name, kHombreLibVersion, make_provider_library, &state}));
+
+    r.cpu().a[1] = r.str(kNames, "hand.library");
+    r.cpu().d[0] = 2;
+    CHECK_EQ(r.exec(exec_lvo::OpenLibrary), ExitReason::Halt);
+    CHECK(r.cpu().d[0] != 0);
+    CHECK_EQ(loader.calls, 1u);
+    CHECK_EQ(state.calls, 0u);
+    CHECK_EQ(r.get16(r.cpu().d[0] + LIB_VERSION), 3u);
 }
 
 void init_resident_and_make_library_through_vectors() {
@@ -2855,6 +3040,39 @@ u32 setup_child_task(Rig& r, u32 task_addr, u32 stack_top, i8 pri, const char* n
     r.put32(task_addr + TC_SPUPPER, stack_top);
     r.put32(task_addr + TC_SPREG, stack_top);
     return task_addr;
+}
+
+struct HostLibraryState {
+    u32 base = 0;
+    u32 too_new = 0;
+    u32 missing = 0;
+};
+
+void host_library_body(void* arg) {
+    HostLibraryState& s = *static_cast<HostLibraryState*>(arg);
+    s.base = g_exec.open_library("host.library", kHombreLibVersion);
+    s.too_new = g_exec.open_library("host.library", kHombreLibVersion + 1);
+    s.missing = g_exec.open_library("nothere.library", 0);
+    g_exec.close_library(s.base);
+}
+
+void host_open_and_close_library() {
+    Rig r;
+    const u32 lib = g_exec.make_native_library("host.library", kHombreLibVersion, nullptr, 0);
+    CHECK(lib != 0);
+    FakeHostState host{};
+    g_exec.set_task_host(make_fake_host(host));
+    make_test_task(r, kData);
+    HostLibraryState state;
+    const u32 child = setup_child_task(r, kData + 0x100, kData + 0x2000, 0, "native", kNames);
+    CHECK_EQ(g_exec.spawn_native(child, host_library_body, &state, 0, false), child);
+    r.cpu().d[0] = 0x0010;
+    CHECK_EQ(r.exec(exec_lvo::Wait), ExitReason::Halt);
+    g_exec.task_main(1);
+    CHECK_EQ(state.base, lib);
+    CHECK_EQ(state.too_new, 0u);
+    CHECK_EQ(state.missing, 0u);
+    CHECK_EQ(r.get16(lib + LIB_OPENCNT), 0u);
 }
 
 // A port deleted by another task gives the signal back to the task it
@@ -5811,6 +6029,13 @@ int main() {
     unknown_exec_vector();
     library_loaded_through_the_segment_loader();
     library_that_opens_itself_from_its_init();
+    library_provider_offers_a_library_without_a_disk_file();
+    a_newer_disk_library_replaces_a_provider();
+    an_older_disk_library_gives_way_to_the_provider();
+    an_older_disk_library_is_unloaded_when_the_provider_fails();
+    a_newer_disk_library_whose_init_fails_falls_back();
+    a_plain_library_is_unaffected_by_a_provider();
+    host_open_and_close_library();
     init_resident_and_make_library_through_vectors();
     native_library_table_fills();
     native_library_limits_are_logged();

@@ -232,6 +232,25 @@ u32 find_node(Bus& b, u32 start, Match match) {
     return 0;
 }
 
+// Whether two host strings are the same, byte for byte.
+bool same_name_text(const char* a, const char* b) {
+    while (*a != '\0' && *a == *b) {
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+// Whether a host library name fits in kMaxName bytes with its end.
+bool fits_name(const char* name) {
+    for (u32 i = 0; i < kMaxName; ++i) {
+        if (name[i] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 u32 find_name(Bus& b, u32 start, const char* name) {
     return find_node(b, start, [&](u32 node_name) { return b.equals(node_name, name); });
 }
@@ -1856,11 +1875,84 @@ struct ExecOps {
             .text(" will not be unloaded").send();
     }
 
-    static u32 open_library(Exec& e, Bus& b, u32 name_addr, u32 version) {
-        char name[kMaxName];
-        if (!b.string(name_addr, name, sizeof name)) {
-            return 0;
+    // The path a library name names: LIBS: before it unless it names its
+    // device.
+    static void library_path(const char* name, bool has_device, char (&path)[kMaxName + 8]) {
+        u32 at = 0;
+        if (!has_device) {
+            for (const char* p = "LIBS:"; *p != '\0'; ++p) {
+                path[at++] = *p;
+            }
         }
+        for (const char* p = name;; ++p) {
+            path[at++] = *p;
+            if (*p == '\0') {
+                break;
+            }
+        }
+    }
+
+    static const LibraryProvider* find_provider(const Exec& e, const char* leaf) {
+        for (u32 i = 0; i < e.provider_count_; ++i) {
+            if (same_name_text(e.providers_[i].leaf, leaf)) {
+                return &e.providers_[i];
+            }
+        }
+        return nullptr;
+    }
+
+    static void make_provider(const LibraryProvider& provider) {
+        (void)provider.make(provider.ctx);
+    }
+
+    // A disk file replaces the provider only when its resident is newer: the
+    // version is read before any of its code runs. Otherwise the segment is
+    // unloaded and the provider makes the library.
+    static void load_provider_library(Exec& e, Bus& b, const char* path,
+                                      const LibraryProvider& provider) {
+        u32 seglist = 0;
+        if (!e.loader_.load(e.loader_.ctx, path, seglist) || seglist == 0) {
+            // No disk copy is the usual case and is not worth a log line.
+            make_provider(provider);
+            return;
+        }
+        e.m_->jit->flush();
+        const u32 res = find_resident(e.m_->mem, seglist);
+        if (res == 0) {
+            LogLine().text("exec: no resident in ").text(path).send();
+            unload(e, seglist);
+            make_provider(provider);
+            return;
+        }
+        const u32 disk_version = b.r8(res + RT_VERSION);
+        if (!b.ok()) {
+            unload(e, seglist);
+            return;
+        }
+        if (disk_version > provider.version) {
+            const u32 lib = init_resident(e, b, res, seglist);
+            if (!b.ok()) {
+                return;
+            }
+            if (lib == 0) {
+                LogLine().text("exec: the resident in ").text(path).text(" failed").send();
+                unload(e, seglist);
+                make_provider(provider);
+                return;
+            }
+            if (e.loaded_.size() < Exec::kMaxLoaded) {
+                e.loaded_.push_back(seglist);
+                return;
+            }
+            LogLine().text("exec: loaded library table full, ").text(path)
+                .text(" will not be unloaded").send();
+            return;
+        }
+        unload(e, seglist);
+        make_provider(provider);
+    }
+
+    static u32 open_named(Exec& e, Bus& b, const char* name, u32 version) {
         const char* leaf = name;
         bool has_device = false;
         for (const char* p = name; *p != '\0'; ++p) {
@@ -1871,32 +1963,36 @@ struct ExecOps {
         }
         // commodities.library keeps the ports of the programs that use it, in
         // a list exec cannot see.
-        if (b.equals(name_addr + static_cast<u32>(leaf - name), kCommodities)) {
+        if (same_name_text(leaf, kCommodities)) {
             if (Exec::Program* program = e.find_program(e.calling_program())) {
                 program->uses_commodities = true;
             }
         }
         const u32 list = e.base_ + LibList;
         u32 lib = find_name(b, list, leaf);
-        if (lib == 0 && b.ok() && e.loader_.load != nullptr && e.load_depth_ >= kMaxLoadDepth) {
-            LogLine().text("exec: libraries nested too deep to load ").text(name).send();
-        } else if (lib == 0 && b.ok() && e.loader_.load != nullptr) {
-            char path[kMaxName + 8];
-            u32 at = 0;
-            if (!has_device) {
-                for (const char* p = "LIBS:"; *p != '\0'; ++p) {
-                    path[at++] = *p;
+        if (lib == 0 && b.ok()) {
+            const LibraryProvider* provider = find_provider(e, leaf);
+            const bool has_loader = e.loader_.load != nullptr;
+            if (has_loader && e.load_depth_ >= kMaxLoadDepth) {
+                LogLine().text("exec: libraries nested too deep to load ").text(name).send();
+                if (provider != nullptr) {
+                    make_provider(*provider);
                 }
+            } else if (provider != nullptr && has_loader) {
+                char path[kMaxName + 8];
+                library_path(name, has_device, path);
+                ++e.load_depth_;
+                load_provider_library(e, b, path, *provider);
+                --e.load_depth_;
+            } else if (provider != nullptr) {
+                make_provider(*provider);
+            } else if (has_loader) {
+                char path[kMaxName + 8];
+                library_path(name, has_device, path);
+                ++e.load_depth_;
+                load_library(e, b, path);
+                --e.load_depth_;
             }
-            for (const char* p = name;; ++p) {
-                path[at++] = *p;
-                if (*p == '\0') {
-                    break;
-                }
-            }
-            ++e.load_depth_;
-            load_library(e, b, path);
-            --e.load_depth_;
             if (b.ok()) {
                 lib = find_name(b, list, leaf);
             }
@@ -1913,6 +2009,14 @@ struct ExecOps {
         return call.d0();
     }
 
+    static u32 open_library(Exec& e, Bus& b, u32 name_addr, u32 version) {
+        char name[kMaxName];
+        if (!b.string(name_addr, name, sizeof name)) {
+            return 0;
+        }
+        return open_named(e, b, name, version);
+    }
+
     static void open_library_lvo(void* ctx, Machine& m) {
         Bus b(m);
         native::set_result(m, open_library(of(ctx), b, m.cpu.a[1], m.cpu.d[0] & 0xFFFF));
@@ -1924,7 +2028,22 @@ struct ExecOps {
     }
 
     // Calls the library's Close vector. What it returns is the seglist of a
-    // library that expunged itself; exec unloads it if it loaded it.
+    // library that expunged itself; exec unloads it if it loaded it. False
+    // when the call could not be made.
+    static bool close_library_base(Exec& e, Bus& b, u32 lib, u32& seglist) {
+        seglist = 0;
+        GuestCall call(e.call_depth_, b);
+        e.m_->cpu.a[6] = lib;
+        if (!call.run(lib - lib_lvo::Close)) {
+            return false;
+        }
+        seglist = call.d0();
+        if (seglist != 0 && std::erase(e.loaded_, seglist) != 0) {
+            unload(e, seglist);
+        }
+        return true;
+    }
+
     static void close_library(void* ctx, Machine& m) {
         Exec& e = of(ctx);
         Bus b(m);
@@ -1933,16 +2052,10 @@ struct ExecOps {
             native::set_result(m, 0);
             return;
         }
-        GuestCall call(e.call_depth_, b);
-        m.cpu.a[6] = lib;
-        if (!call.run(lib - lib_lvo::Close)) {
-            return;
+        u32 seglist = 0;
+        if (close_library_base(e, b, lib, seglist)) {
+            native::set_result(m, seglist);
         }
-        const u32 seglist = call.d0();
-        if (seglist != 0 && std::erase(e.loaded_, seglist) != 0) {
-            unload(e, seglist);
-        }
-        native::set_result(m, seglist);
     }
 
     static void add_library_lvo(void* ctx, Machine& m) {
@@ -2962,6 +3075,10 @@ bool Exec::init(Machine& m, u32 free_start, u32 chip_end, u32 fast_end) {
         info = LibraryInfo{};
     }
     library_count_ = 0;
+    for (LibraryProvider& provider : providers_) {
+        provider = LibraryProvider{};
+    }
+    provider_count_ = 0;
     loaded_.clear();
     for (Program& p : programs_) {
         p = Program{};
@@ -3396,6 +3513,32 @@ u32 Exec::make_native_library(const char* name, u16 version, const NativeVector*
 u32 Exec::make_native_device(const char* name, u16 version, const NativeVector* fns, u32 count,
                              void* ctx, u32 pos_size) {
     return make_native_node(name, version, NT_DEVICE, DeviceList, fns, count, ctx, pos_size);
+}
+
+bool Exec::add_library_provider(const LibraryProvider& provider) {
+    if (provider.leaf == nullptr || provider.make == nullptr ||
+        provider_count_ == kMaxLibraryProviders) {
+        return false;
+    }
+    providers_[provider_count_++] = provider;
+    return true;
+}
+
+u32 Exec::open_library(const char* name, u16 version) {
+    if (m_ == nullptr || name == nullptr || !fits_name(name)) {
+        return 0;
+    }
+    Bus b(*m_);
+    return ExecOps::open_named(*this, b, name, version);
+}
+
+void Exec::close_library(u32 base) {
+    if (m_ == nullptr || base == 0) {
+        return;
+    }
+    Bus b(*m_);
+    u32 seglist = 0;
+    (void)ExecOps::close_library_base(*this, b, base, seglist);
 }
 
 u32 Exec::spawn(u32 task, u32 init_pc, u32 final_pc, bool detached) {
