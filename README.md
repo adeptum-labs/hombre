@@ -95,3 +95,11 @@ boots to stop the script and get the shell prompt instead.
 `make test` runs the host unit tests and `make check` runs the headless
 boot checks. See the
 [Developer notes](https://github.com/adeptum-labs/hombre/wiki/Developer-Notes).
+
+## Third-party code
+
+Hombre decodes PNG and JPEG pictures with
+[Wuffs](https://github.com/google/wuffs), kept as a git submodule in
+`third_party/wuffs`. Wuffs is licensed under the Apache License 2.0 or the
+MIT license (`Apache-2.0 OR MIT`); see the `LICENSE`, `LICENSE-APACHE` and
+`LICENSE-MIT` files there.

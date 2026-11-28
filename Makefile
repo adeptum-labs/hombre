@@ -122,13 +122,15 @@ COMMON_SRC  := $(filter-out common/mem.cpp,$(wildcard common/*.cpp common/libs/*
 COMMON_KOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/%.o)
 COMMON_HOBJ := $(COMMON_SRC:%.cpp=$(BUILD)/host/%.o)
 
-# The PNG and JPEG code lives below common/image/, outside the COMMON_SRC
+# The PNG and JPEG decoder lives below common/image/, outside the COMMON_SRC
 # glob. Its C parts build once per target; the kernel additionally gets the
 # private C library stubs the third-party object needs.
 WUFFS_C     := third_party/wuffs/release/c/wuffs-v0.4.c
-IMAGE_KOBJ  := $(BUILD)/common/image/wuffs_impl.o \
+IMAGE_KOBJ  := $(BUILD)/common/image/decode.o $(BUILD)/common/image/wuffs.o \
+               $(BUILD)/common/image/wuffs_impl.o \
                $(BUILD)/common/image/kernel/stubs.o
-IMAGE_HOBJ  := $(BUILD)/host/common/image/wuffs_impl.o
+IMAGE_HOBJ  := $(BUILD)/host/common/image/decode.o $(BUILD)/host/common/image/wuffs.o \
+               $(BUILD)/host/common/image/wuffs_impl.o
 
 KERNEL_SRC := $(wildcard kernel/*.cpp)
 KERNEL_OBJ := $(KERNEL_SRC:%.cpp=$(BUILD)/%.o) $(BUILD)/kernel/mem.o $(COMMON_KOBJ)
@@ -174,8 +176,31 @@ $(BUILD)/kernel/mem.o: common/mem.cpp
 	@mkdir -p $(@D)
 	$(KCXX) $(KCXXFLAGS) $(KMEMFLAGS) -c $< -o $@
 
-# wuffs_impl.c, which compiles the third-party code, does not get -Werror,
-# while the kernel stubs do.
+# PNG and JPEG decoding. decode.cpp and the Wuffs wrapper build for both
+# targets; wuffs_impl.c, which compiles the third-party code, does not get
+# -Werror, while the wrapper and the kernel stubs do.
+$(BUILD)/common/image/decode.o: common/image/decode.cpp common/image/decode.hpp \
+                                common/image/wuffs_wrap.h common/types.hpp
+	@mkdir -p $(@D)
+	$(KCXX) $(KCXXFLAGS) -c $< -o $@
+
+$(BUILD)/host/common/image/decode.o: common/image/decode.cpp common/image/decode.hpp \
+                                     common/image/wuffs_wrap.h common/types.hpp
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) -c $< -o $@
+
+$(BUILD)/common/image/wuffs.o: common/image/wuffs.c common/image/wuffs_config.h \
+                               common/image/wuffs_wrap.h common/image/wuffs_state.h \
+                               $(WUFFS_C)
+	@mkdir -p $(@D)
+	$(KCC) $(KCFLAGS) -Werror -c $< -o $@
+
+$(BUILD)/host/common/image/wuffs.o: common/image/wuffs.c common/image/wuffs_config.h \
+                                    common/image/wuffs_wrap.h common/image/wuffs_state.h \
+                                    $(WUFFS_C)
+	@mkdir -p $(@D)
+	$(HOSTCC) $(HOSTCFLAGS) -c $< -o $@
+
 $(BUILD)/common/image/kernel/stubs.o: common/image/kernel/stubs.c \
                                       common/image/kernel/stdlib.h
 	@mkdir -p $(@D)
