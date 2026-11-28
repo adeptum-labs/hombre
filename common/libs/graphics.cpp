@@ -23,6 +23,7 @@
 
 #include "graphics.hpp"
 
+#include "../image/remap.hpp"
 #include "chrome_palette.hpp"
 #include "display_modes.hpp"
 #include "tags.hpp"
@@ -94,6 +95,36 @@ u32 guest_string(Exec& exec, Bus& b, const char* text) {
         b.w8(copy + i, static_cast<u8>(text[i]));
     }
     return copy;
+}
+
+// The bytes of one row of the one-plane mask BltMaskBitMapRastPort takes:
+// a planar source's own row, or the row of a bitmap as wide as a deep one.
+u32 mask_stride(const raster::Bitmap& src) {
+    return src.deep ? ((static_cast<u32>(raster::pixel_width(src)) + 15) / 16) * 2
+                    : src.bytes_per_row;
+}
+
+bool mask_bit_set(Bus& b, u32 mask, u32 stride, i32 x, i32 y) {
+    const u32 at = mask + static_cast<u32>(y) * stride + (static_cast<u32>(x) >> 3);
+    return ((b.r8(at) >> (7 - (static_cast<u32>(x) & 7))) & 1) != 0;
+}
+
+// Every mask byte the rectangle reads is in guest memory before any of it
+// is drawn, so a bad mask leaves the destination as it was.
+bool mask_in_bus(Bus& b, u32 mask, u32 stride, i32 sx, i32 sy, i32 width, i32 height) {
+    const u32 first = static_cast<u32>(sx) >> 3;
+    const u32 last = (static_cast<u32>(sx) + static_cast<u32>(width) - 1) >> 3;
+    const u32 bytes = last - first + 1;
+    for (i32 r = 0; r < height; ++r) {
+        const u64 at = u64{mask} + u64{static_cast<u32>(sy + r)} * stride + first;
+        if (at + bytes > 0x100000000ull) {
+            return false;
+        }
+        if (b.bytes_at(static_cast<u32>(at), bytes) == nullptr) {
+            return false;
+        }
+    }
+    return true;
 }
 
 i32 cp_x(Bus& b, u32 rp) { return static_cast<i16>(b.r16(rp + ndk::rp_cp_x)); }
@@ -1553,6 +1584,16 @@ struct GraphicsNatives {
         of(ctx).blt_bitmap_rastport(m.cpu.a[0], word(m.cpu.d[0]), word(m.cpu.d[1]), m.cpu.a[1],
                                     word(m.cpu.d[2]), word(m.cpu.d[3]), word(m.cpu.d[4]),
                                     word(m.cpu.d[5]), m.cpu.d[6] & 0xFF);
+    }
+
+    // BltMaskBitMapRastPort(src A0, x D0, y D1, rp A1, x D2, y D3, width
+    // D4, height D5, minterm D6, mask A2).
+    static void blt_mask_bitmap_rastport(void* ctx, Machine& m) {
+        const auto word = [&](u32 r) { return static_cast<i32>(static_cast<i16>(r & 0xFFFF)); };
+        of(ctx).blt_mask_bitmap_rastport(m.cpu.a[0], word(m.cpu.d[0]), word(m.cpu.d[1]),
+                                         m.cpu.a[1], word(m.cpu.d[2]), word(m.cpu.d[3]),
+                                         word(m.cpu.d[4]), word(m.cpu.d[5]), m.cpu.d[6] & 0xFF,
+                                         m.cpu.a[2]);
     }
 
     // BltBitMap(src A0, x D0, y D1, dst A1, x D2, y D3, width D4, height
@@ -3047,6 +3088,8 @@ constexpr GraphicsFunction kGraphicsFunctions[] = {
     {graphics_lvo::BltBitMap, GraphicsNatives::blt_bitmap, "BltBitMap"},
     {graphics_lvo::BltBitMapRastPort, GraphicsNatives::blt_bitmap_rastport,
      "BltBitMapRastPort"},
+    {graphics_lvo::BltMaskBitMapRastPort, GraphicsNatives::blt_mask_bitmap_rastport,
+     "BltMaskBitMapRastPort"},
     {graphics_lvo::BltClear, GraphicsNatives::blt_clear, "BltClear"},
     {graphics_lvo::NewRegion, GraphicsNatives::new_region, "NewRegion"},
     {graphics_lvo::DisposeRegion, GraphicsNatives::dispose_region, "DisposeRegion"},
@@ -3483,7 +3526,8 @@ u32 Graphics::blt_bitmap(u32 src_addr, i32 sx, i32 sy, u32 dst_addr, i32 dx, i32
                          i32 width, i32 height, u32 minterm, u32 mask) {
     Bus b(*machine_);
     raster::Bitmap dst{};
-    if (dst_addr == 0 || !raster::load_bitmap(b, dst_addr, dst)) {
+    if (dst_addr == 0 || !raster::load_bitmap(b, dst_addr, dst, raster::kMaxBlitBytesPerRow,
+                                              raster::kMaxBlitRows)) {
         return 0;
     }
     View v{};
@@ -3506,6 +3550,41 @@ void Graphics::blt_bitmap_rastport(u32 src_addr, i32 sx, i32 sy, u32 rp, i32 dx,
     }
     blit(b, src_addr, sx, sy, v, &v.clip, dx + v.origin_x, dy + v.origin_y, width, height,
          minterm, b.r8(rp + ndk::rp_Mask));
+}
+
+// BltMaskBitMapRastPort: BltBitMapRastPort through a one-plane stencil,
+// indexed in the source's own coordinates. The mask has the source's row
+// of a plane, or the row of a bitmap as wide as a deep source.
+void Graphics::blt_mask_bitmap_rastport(u32 src_addr, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy,
+                                        i32 width, i32 height, u32 minterm, u32 mask) {
+    if (rp == 0 || mask == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const View v = raster::load_rastport(b, rp);
+    raster::Bitmap src{};
+    if (!v.ok || src_addr == 0 ||
+        !raster::load_bitmap(b, src_addr, src, raster::kMaxBlitBytesPerRow,
+                             raster::kMaxBlitRows)) {
+        return;
+    }
+    blit(b, src_addr, sx, sy, v, &v.clip, dx + v.origin_x, dy + v.origin_y, width, height,
+         minterm, b.r8(rp + ndk::rp_Mask), mask, mask_stride(src));
+}
+
+void Graphics::blt_alpha_rastport(u32 src_addr, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy,
+                                  i32 width, i32 height) {
+    if (rp == 0) {
+        return;
+    }
+    Bus b(*machine_);
+    const View v = raster::load_rastport(b, rp);
+    const DeepBitmap* src = deep(src_addr);
+    if (!v.ok || !v.bitmap.deep || src == nullptr || src->fmt != PixFmt::Argb32) {
+        return;
+    }
+    blit(b, src_addr, sx, sy, v, &v.clip, dx + v.origin_x, dy + v.origin_y, width, height,
+         0xC0, b.r8(rp + ndk::rp_Mask), 0, 0, true);
 }
 
 // The part of a super bitmap a layer shows starts at the layer's scroll
@@ -3552,9 +3631,14 @@ void Graphics::sync_super_bitmap(u32 layer) {
 }
 
 u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const raster::Clip* clip,
-                   i32 dx, i32 dy, i32 width, i32 height, u32 minterm, u32 mask) {
+                   i32 dx, i32 dy, i32 width, i32 height, u32 minterm, u32 mask, u32 mask_addr,
+                   u32 mask_stride, bool alpha) {
     raster::Bitmap src{};
-    if (src_addr == 0 || !raster::load_bitmap(b, src_addr, src)) {
+    if (src_addr == 0 || !raster::load_bitmap(b, src_addr, src, raster::kMaxBlitBytesPerRow,
+                                              raster::kMaxBlitRows)) {
+        return 0;
+    }
+    if (alpha && (!src.deep || src.fmt != PixFmt::Argb32 || !v.bitmap.deep)) {
         return 0;
     }
     const raster::Bitmap& dst = v.bitmap;
@@ -3588,8 +3672,12 @@ u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const ra
     if (width <= 0 || height <= 0) {
         return 0;
     }
+    if (mask_addr != 0 && !mask_in_bus(b, mask_addr, mask_stride, sx, sy, width, height)) {
+        return 0;
+    }
     if (src.deep || dst.deep) {
-        blit_deep(b, src, sx, sy, dst, clip, dx, dy, width, height, minterm, mask);
+        blit_deep(b, src, sx, sy, dst, clip, dx, dy, width, height, minterm, mask, mask_addr,
+                  mask_stride, alpha);
         if (b.ok()) {
             report(display_, *machine_, v, Rect{dx, dy, dx + width - 1, dy + height - 1});
         }
@@ -3597,8 +3685,9 @@ u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const ra
     }
     // With A always set, the minterm's upper four bits give the result for
     // each pair of source (B) and destination (C) bits.
-    static_assert(sizeof blit_row_ >= raster::kMaxBytesPerRow * 8);
     const u32 planes = src.depth < dst.depth ? src.depth : dst.depth;
+    const i32 run = static_cast<i32>(kBlitRun);
+    const i32 parts = (width + run - 1) / run;
     u32 written = 0;
     u8* row = blit_row_;
     for (u32 plane = 0; plane < planes; ++plane) {
@@ -3607,25 +3696,39 @@ u32 Graphics::blit(Bus& b, u32 src_addr, i32 sx, i32 sy, const View& v, const ra
         }
         ++written;
         // A copy down the same plane goes from the bottom, so no row is
-        // read after it was written.
-        const bool upward = src.planes[plane] == dst.planes[plane] && dy > sy;
-        for (i32 n = 0; n < height && b.ok(); ++n) {
-            const i32 r = upward ? height - 1 - n : n;
+        // read after it was written, and one to the right takes the parts
+        // of a row from the right for the same reason.
+        const bool same = src.planes[plane] == dst.planes[plane];
+        const bool upward = same && dy > sy;
+        const bool from_right = same && dx > sx;
+        for (i32 n = 0; n < height * parts && b.ok(); ++n) {
+            const i32 r = upward ? height - 1 - n / parts : n / parts;
+            const i32 part = from_right ? parts - 1 - n % parts : n % parts;
+            const i32 x0 = part * run;
+            const i32 count = width - x0 < run ? width - x0 : run;
             const u32 src_row = src.planes[plane] + static_cast<u32>(sy + r) * src.bytes_per_row;
             const u32 dst_row = dst.planes[plane] + static_cast<u32>(dy + r) * dst.bytes_per_row;
-            for (i32 x = 0; x < width; ++x) {
-                const u32 at = static_cast<u32>(sx + x);
-                row[x] = static_cast<u8>((b.r8(src_row + (at >> 3)) >> (7 - (at & 7))) & 1);
+            for (i32 i = 0; i < count; ++i) {
+                const u32 at = static_cast<u32>(sx + x0 + i);
+                row[i] = static_cast<u8>((b.r8(src_row + (at >> 3)) >> (7 - (at & 7))) & 1);
             }
-            for (i32 x = 0; x < width; ++x) {
+            for (i32 i = 0; i < count; ++i) {
+                const i32 x = x0 + i;
                 if (clip != nullptr && !raster::in_clip(b, *clip, dx + x, dy + r)) {
+                    continue;
+                }
+                if (mask_addr != 0 && !mask_bit_set(b, mask_addr, mask_stride, sx + x, sy + r)) {
                     continue;
                 }
                 const u32 at = static_cast<u32>(dx + x);
                 const u32 byte = b.r8(dst_row + (at >> 3));
                 const u32 bit = 0x80u >> (at & 7);
                 const u32 c = (byte & bit) != 0 ? 1 : 0;
-                const u32 result = (minterm >> (4 + 2 * row[x] + c)) & 1;
+                // The mask blit writes the source, or the inverted source
+                // for minterm 0x20, where the stencil lets it through.
+                const u32 result = mask_addr != 0
+                                       ? ((minterm & 0xFF) == 0x20 ? 1u - row[i] : row[i])
+                                       : (minterm >> (4 + 2 * row[i] + c)) & 1;
                 if (result != c) {
                     b.w8(dst_row + (at >> 3), result != 0 ? byte | bit : byte & ~bit);
                 }
@@ -3653,49 +3756,98 @@ static u32 apply_minterm(u32 minterm, u32 src, u32 dst) {
 // moves rows; any other goes pixel by pixel. On LUT8 and planar targets the
 // minterm works on the pens' bits under mask, on RGB on the colour bits;
 // a source of another kind comes over as the target's colour or pen first.
+// A mask stencil lets a pixel through only where its bit in the source's
+// coordinates is set; an alpha blit blends an ARGB32 source over an ARGB32
+// or RGB16 destination and copies the pixels of at least half opacity to a
+// LUT8 one; it draws nothing on a planar destination.
 void Graphics::blit_deep(Bus& b, const raster::Bitmap& src, i32 sx, i32 sy,
                          const raster::Bitmap& dst, const raster::Clip* clip, i32 dx, i32 dy,
-                         i32 width, i32 height, u32 minterm, u32 mask) {
+                         i32 width, i32 height, u32 minterm, u32 mask, u32 mask_addr,
+                         u32 mask_stride, bool alpha) {
     const bool pens = !dst.deep || dst.fmt == PixFmt::Lut8;
-    if ((minterm & 0xF0) == 0xC0 && clip == nullptr && (!pens || (mask & 0xFF) == 0xFF)) {
+    const bool stencil = mask_addr != 0;
+    if (!stencil && !alpha && (minterm & 0xF0) == 0xC0 && clip == nullptr &&
+        (!pens || (mask & 0xFF) == 0xFF)) {
         raster::copy_rect(b, src, sx, sy, dst, dx, dy, width, height);
         return;
     }
     const u32 bits = !pens ? (dst.fmt == PixFmt::Rgb16 ? 0xFFFFu : 0x00FFFFFFu) : (mask & 0xFF);
+    if (alpha && !dst.deep) {
+        return;
+    }
     const bool upward = src.addr == dst.addr && dy > sy;
-    // Each source row is read whole before any of it is written, so a copy
-    // across itself, to the right included, takes the pixels as they were.
-    std::vector<u32> sources(static_cast<usize>(width));
-    for (i32 n = 0; n < height && b.ok(); ++n) {
-        const i32 r = upward ? height - 1 - n : n;
-        for (i32 x = 0; x < width; ++x) {
-            if (dst.deep && src.deep && src.fmt == dst.fmt) {
-                sources[static_cast<usize>(x)] = raster::chunky::read_value(
-                    b, src, static_cast<u32>(sx + x), static_cast<u32>(sy + r));
+    // Each part of a source row is read whole before any of it is written,
+    // and a copy across itself to the right takes the parts from the right,
+    // so it takes the pixels as they were.
+    const bool from_right = src.addr == dst.addr && dx > sx;
+    const i32 run = static_cast<i32>(kBlitRun);
+    const i32 parts = (width + run - 1) / run;
+    u32* sources = blit_values_;
+    for (i32 n = 0; n < height * parts && b.ok(); ++n) {
+        const i32 r = upward ? height - 1 - n / parts : n / parts;
+        const i32 part = from_right ? parts - 1 - n % parts : n % parts;
+        const i32 x0 = part * run;
+        const i32 count = width - x0 < run ? width - x0 : run;
+        for (i32 i = 0; i < count; ++i) {
+            const i32 x = x0 + i;
+            if (alpha || (dst.deep && src.deep && src.fmt == dst.fmt)) {
+                sources[i] = raster::chunky::read_value(b, src, static_cast<u32>(sx + x),
+                                                        static_cast<u32>(sy + r));
             } else if (dst.deep && src.deep) {
-                sources[static_cast<usize>(x)] = raster::chunky::rgb_value(
+                sources[i] = raster::chunky::rgb_value(
                     dst, raster::chunky::value_rgb(
                              src, raster::chunky::read_value(b, src, static_cast<u32>(sx + x),
                                                              static_cast<u32>(sy + r))));
             } else if (dst.deep) {
-                sources[static_cast<usize>(x)] =
+                sources[i] =
                     raster::chunky::pen_value(dst, raster::read_pixel(b, src, sx + x, sy + r));
             } else {
-                sources[static_cast<usize>(x)] = raster::read_pixel(b, src, sx + x, sy + r);
+                sources[i] = raster::read_pixel(b, src, sx + x, sy + r);
             }
         }
-        for (i32 x = 0; x < width; ++x) {
+        for (i32 i = 0; i < count; ++i) {
+            const i32 x = x0 + i;
             const i32 tx = dx + x;
             const i32 ty = dy + r;
             if (clip != nullptr && !raster::in_clip(b, *clip, tx, ty)) {
                 continue;
             }
+            if (stencil && !mask_bit_set(b, mask_addr, mask_stride, sx + x, sy + r)) {
+                continue;
+            }
             const u32 ux = static_cast<u32>(tx);
             const u32 uy = static_cast<u32>(ty);
-            const u32 source = sources[static_cast<usize>(x)];
+            const u32 source = sources[i];
+            if (alpha) {
+                const u32 a = source >> 24;
+                const u32 srgb = source & 0x00FFFFFFu;
+                if (dst.fmt == PixFmt::Lut8) {
+                    if (a >= 128u) {
+                        raster::chunky::write_value(b, dst, ux, uy,
+                                                    raster::chunky::rgb_value(dst, srgb));
+                    }
+                    continue;
+                }
+                u8 sr = 0, sg = 0, sb = 0, dr = 0, dg = 0, db = 0;
+                decode_rgb(src.fmt, source, sr, sg, sb);
+                const u32 old = raster::chunky::read_value(b, dst, ux, uy);
+                decode_rgb(dst.fmt, old, dr, dg, db);
+                const u32 red = image::remap::blend(sr, dr, a);
+                const u32 green = image::remap::blend(sg, dg, a);
+                const u32 blue = image::remap::blend(sb, db, a);
+                const u32 result = dst.fmt == PixFmt::Argb32
+                                       ? 0xFF000000u | (red << 16) | (green << 8) | blue
+                                       : (red >> 3 << 11) | (green >> 2 << 5) | (blue >> 3);
+                raster::chunky::write_value(b, dst, ux, uy, result);
+                continue;
+            }
             const u32 old = dst.deep ? raster::chunky::read_value(b, dst, ux, uy)
                                      : raster::read_pixel(b, dst, tx, ty);
-            const u32 result = (old & ~bits) | (apply_minterm(minterm, source, old) & bits);
+            const u32 result =
+                stencil
+                    ? (old & ~bits) |
+                          ((((minterm & 0xFF) == 0x20 ? ~source : source)) & bits)
+                    : (old & ~bits) | (apply_minterm(minterm, source, old) & bits);
             if (dst.deep) {
                 raster::chunky::write_value(b, dst, ux, uy, result);
             } else {

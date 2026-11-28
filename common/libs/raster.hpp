@@ -242,8 +242,13 @@ namespace hombre::raster {
 // work one native call can do.
 constexpr u32 kMaxBytesPerRow = 512;
 constexpr u32 kMaxRows = 4096;
+// A blit, whose work is bounded by the rectangle it copies, takes bitmaps
+// of up to 16384 x 16384 pixels.
+constexpr u32 kMaxBlitBytesPerRow = 2048;
+constexpr u32 kMaxBlitRows = 16384;
 
-inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
+inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out,
+                        u32 max_bytes_per_row = kMaxBytesPerRow, u32 max_rows = kMaxRows) {
     if (g_deep_lookup != nullptr) {
         if (const DeepBitmap* deep = g_deep_lookup->find(bitmap_addr)) {
             out = Bitmap{};
@@ -256,7 +261,7 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
             out.pixels = deep->pixels;
             out.palette = deep->palette;
             out.addr = bitmap_addr;
-            return out.rows <= kMaxRows &&
+            return out.rows <= max_rows &&
                    u64{out.width} * bytes_per_pixel(out.fmt) <= out.bytes_per_row &&
                    bus.bytes_at(out.pixels, out.bytes_per_row * out.rows) != nullptr;
         }
@@ -274,7 +279,7 @@ inline bool load_bitmap(native::Bus& bus, u32 bitmap_addr, Bitmap& out) {
     // The area of one plane must fit in guest memory, whatever the depth,
     // and every plane in use must lie inside it. Together they bound what a
     // draw over the bitmap can visit.
-    if (out.bytes_per_row > kMaxBytesPerRow || out.rows > kMaxRows) {
+    if (out.bytes_per_row > max_bytes_per_row || out.rows > max_rows) {
         return false;
     }
     const u32 plane_bytes = out.bytes_per_row * out.rows;

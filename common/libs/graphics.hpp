@@ -68,6 +68,7 @@ namespace graphics_lvo {
 
 constexpr u32 BltBitMap = 30;
 constexpr u32 BltBitMapRastPort = 606;
+constexpr u32 BltMaskBitMapRastPort = 636;
 constexpr u32 ClearScreen = 48;
 constexpr u32 TextLength = 54;
 constexpr u32 GetColorMap = 570;
@@ -266,11 +267,27 @@ public:
     void rect_fill(u32 rp, i32 x0, i32 y0, i32 x1, i32 y1);
     // BltBitMap: copies a rectangle between bitmaps, or within one, plane
     // by plane through the minterm and the plane mask. The number of
-    // planes written.
+    // planes written. Blits take bitmaps of up to 16384 pixels a side, as
+    // the source of every blit and as BltBitMap's destination; other
+    // drawing stops at 4096.
     u32 blt_bitmap(u32 src, i32 sx, i32 sy, u32 dst, i32 dx, i32 dy, i32 width, i32 height,
                    u32 minterm, u32 mask);
     void blt_bitmap_rastport(u32 src, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy, i32 width,
                              i32 height, u32 minterm);
+    // BltMaskBitMapRastPort: the same, but only where a bit of the one-plane
+    // mask, as large as the source and indexed in its coordinates, is set.
+    // Minterm 0x20 writes the inverted source, anything else the source.
+    // Nothing is drawn for a null mask.
+    void blt_mask_bitmap_rastport(u32 src, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy, i32 width,
+                                  i32 height, u32 minterm, u32 mask);
+    // Blends a deep ARGB32 source into the RastPort inside its clip: over
+    // what is there on ARGB32 and RGB16 destinations, and as a copy of the
+    // pixels whose alpha is at least 128 on LUT8 ones, in the nearest of
+    // the destination's colours. The alpha byte of an ARGB32 destination is
+    // written opaque. Nothing is drawn on a planar destination, whose
+    // colours the source has no way to name.
+    void blt_alpha_rastport(u32 src, i32 sx, i32 sy, u32 rp, i32 dx, i32 dy, i32 width,
+                            i32 height);
     // CopySBitMap: the layer shows its super bitmap again, from the scroll
     // offset on. SyncSBitMap: the super bitmap takes what the layer shows,
     // so it holds all of the layer's drawing. Neither does anything for a
@@ -387,12 +404,17 @@ private:
     text_blend::Cache* blend_for(u32 bitmap_addr, u32 depth);
     void blit_deep(native::Bus& b, const raster::Bitmap& src, i32 sx, i32 sy,
                    const raster::Bitmap& dst, const raster::Clip* clip, i32 dx, i32 dy,
-                   i32 width, i32 height, u32 minterm, u32 mask);
+                   i32 width, i32 height, u32 minterm, u32 mask, u32 mask_addr,
+                   u32 mask_stride, bool alpha);
     u32 blit(native::Bus& b, u32 src, i32 sx, i32 sy, const raster::RastPortView& v,
              const raster::Clip* clip, i32 dx, i32 dy, i32 width, i32 height, u32 minterm,
-             u32 mask);
-    // One row of BltBitMap's source plane, a byte a pixel.
-    u8 blit_row_[4096]{};
+             u32 mask, u32 mask_addr = 0, u32 mask_stride = 0, bool alpha = false);
+    // A blit works on a row kBlitRun pixels at a time: blit_row_ holds them
+    // from a source plane, a byte a pixel, blit_values_ from a deep source
+    // or for a deep destination.
+    static constexpr u32 kBlitRun = 4096;
+    u8 blit_row_[kBlitRun]{};
+    u32 blit_values_[kBlitRun]{};
 };
 
 }

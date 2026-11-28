@@ -2813,6 +2813,68 @@ void blt_bitmap_rastport_draws_inside_the_rastport() {
     CHECK_EQ(surface_pen(r, dst, 32, 4, 3), 0u);
 }
 
+// A mask plane stencils BltMaskBitMapRastPort: only the pixels whose mask
+// bit is set change, and the RastPort's plane mask still limits the planes.
+void blt_mask_bitmap_rastport_stencils_the_source() {
+    GfxRig r;
+    const Surface src = make_sized_surface(r, kBitmap, kRastPort, 16, 4);
+    const Surface dst = make_sized_surface(r, kBitmap + 0x40, kRastPort + 0x80, 32, 8);
+    // Source row 0 is pen 1, row 1 pen 2, row 2 pen 0.
+    r.put8(src.plane0, 0xFF);
+    r.put16(src.plane1 + 2, 0xFFFF);
+    // Mask rows: 0: pixels 0..7, 1: pixels 8..15, 2: all 16.
+    r.put8(kTmpBuffer, 0xFF);
+    r.put8(kTmpBuffer + 1, 0x00);
+    r.put8(kTmpBuffer + 2, 0x00);
+    r.put8(kTmpBuffer + 3, 0xFF);
+    r.put8(kTmpBuffer + 4, 0xFF);
+    r.put8(kTmpBuffer + 5, 0xFF);
+
+    const auto blt = [&](u32 minterm, u32 mask, u32 dest_y) {
+        r.cpu().a[0] = src.bitmap;
+        r.cpu().d[0] = 0;
+        r.cpu().d[1] = 0;
+        r.cpu().a[1] = dst.rp;
+        r.cpu().d[2] = 4;
+        r.cpu().d[3] = dest_y;
+        r.cpu().d[4] = 16;
+        r.cpu().d[5] = 3;
+        r.cpu().d[6] = minterm;
+        r.cpu().a[2] = mask;
+        return r.call(Base::Graphics, graphics_lvo::BltMaskBitMapRastPort);
+    };
+    CHECK_EQ(blt(0xE0, kTmpBuffer, 2), ExitReason::Halt);
+    for (u32 x = 4; x <= 11; ++x) {
+        CHECK_EQ(surface_pen(r, dst, 32, x, 2), 1u);
+    }
+    for (u32 x = 12; x <= 19; ++x) {
+        CHECK_EQ(surface_pen(r, dst, 32, x, 2), 0u);
+    }
+    CHECK_EQ(surface_pen(r, dst, 32, 3, 2), 0u);
+    for (u32 x = 12; x <= 19; ++x) {
+        CHECK_EQ(surface_pen(r, dst, 32, x, 3), 2u);
+    }
+    CHECK_EQ(surface_pen(r, dst, 32, 11, 3), 0u);
+    // Minterm 0x20 writes the inverted source: row 2 is pen 0, so pen 3.
+    CHECK_EQ(blt(0x20, kTmpBuffer, 2), ExitReason::Halt);
+    for (u32 x = 4; x <= 19; ++x) {
+        CHECK_EQ(surface_pen(r, dst, 32, x, 4), 3u);
+    }
+    // The RastPort's mask keeps plane 1 out of the copy of row 1: source
+    // row 1 is pen 2, which loses its second plane and lands as pen 0.
+    r.graphics.set_pens(dst.rp, 1, 0, JAM2);
+    r.graphics.rect_fill(dst.rp, 12, 6, 19, 6);
+    r.put8(dst.rp + rp_Mask, 0x01);
+    CHECK_EQ(blt(0xE0, kTmpBuffer, 5), ExitReason::Halt);
+    CHECK_EQ(surface_pen(r, dst, 32, 12, 6), 0u);
+    // A null mask draws nothing.
+    r.put8(dst.rp + rp_Mask, 0xFF);
+    r.graphics.set_pens(dst.rp, 2, 0, JAM2);
+    r.graphics.rect_fill(dst.rp, 4, 6, 4, 6);
+    CHECK_EQ(blt(0xE0, 0, 7), ExitReason::Halt);
+    CHECK_EQ(surface_pen(r, dst, 32, 4, 6), 2u);
+}
+
 void text_fit_pens_and_bitmaps_of_v39() {
     GfxRig r;
     const Surface a = make_sized_surface(r, kBitmap, kRastPort, 32, 8);
@@ -3490,6 +3552,7 @@ int main() {
     text_fit_pens_and_bitmaps_of_v39();
     blt_bitmap_copies_through_the_minterm_and_mask();
     blt_bitmap_rastport_draws_inside_the_rastport();
+    blt_mask_bitmap_rastport_stencils_the_source();
     init_bitmap_fills_the_fields();
     init_rastport_sets_default_pens();
     set_apen_bpen_drmd_store_fields();
