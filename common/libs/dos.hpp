@@ -1084,6 +1084,9 @@ public:
     // Gets or sets the last IoErr code (pr_Result2 / cli_Result2).
     u32 last_error(u32 process = 0) const;
     void set_last_error(u32 code);
+    // What SetIoErr does: the running process's pr_Result2 alone, leaving
+    // its CLI's cli_Result2 as it was.
+    void set_io_err(u32 code);
 
     // Gets or sets the last CLI command return code (cli_ReturnCode).
     u32 last_return_code(u32 process = 0) const;

@@ -11872,6 +11872,14 @@ void Dos::set_last_error(u32 code) {
     set_context_error(cur(), code);
 }
 
+void Dos::set_io_err(u32 code) {
+    if (m_ == nullptr) {
+        return;
+    }
+    Bus b(*m_);
+    DosOps::set_io_err(*this, b, code);
+}
+
 u32 Dos::last_return_code(u32 process) const {
     const ProcContext& p = context_for(process);
     if (m_ == nullptr || p.cli == 0) {
