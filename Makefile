@@ -809,6 +809,10 @@ $(BUILD)/tests/%: tests/%.cpp $(COMMON_HOBJ)
 	@mkdir -p $(@D)
 	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) -o $@
 
+$(BUILD)/tests/test_image_decode: tests/test_image_decode.cpp $(COMMON_HOBJ) $(IMAGE_HOBJ)
+	@mkdir -p $(@D)
+	$(HOSTCXX) $(HOSTCXXFLAGS) $< $(COMMON_HOBJ) $(IMAGE_HOBJ) -o $@
+
 # The test of the test disk needs the disk itself, which it finds through
 # the environment.
 test: $(TEST_BIN) $(TEST_DISK)
