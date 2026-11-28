@@ -133,6 +133,11 @@ void each_task_keeps_its_depth() {
     CHECK_EQ(bt::depth(r.state, kTaskA), 2u);
     bt::ret(r.state, r.machine, a0, 7);
     CHECK(logged("$5000 1 = $7"));
+    // A method passed on to a 68000 superclass ends the call's depth too.
+    const bt::Frame a1 = r.call(kTaskA, kClass, kObject, kMsg);
+    bt::passed_on(r.state, a1);
+    CHECK(logged("$5000 1 passed on"));
+    CHECK_EQ(bt::depth(r.state, kTaskA), 1u);
     // A removed task leaves nothing open behind it.
     bt::drop_task(r.state, kTaskA);
     CHECK_EQ(bt::depth(r.state, kTaskA), 0u);

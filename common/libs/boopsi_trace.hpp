@@ -405,6 +405,21 @@ inline Frame call(BoopsiTraceState& s, const m68k::Machine& m, u32 task, const c
     return message_lines(Peek(m), task, d.depth++, via, cl, object, msg);
 }
 
+// The line of a native class that passed the method on to a 68000
+// superclass, whose own dispatch the watch shows next.
+inline void passed_on(BoopsiTraceState& s, const Frame& frame) {
+    BoopsiTraceState::Depth& d = depth_of(s, frame.task);
+    if (d.depth != 0) {
+        --d.depth;
+    }
+    Line line;
+    line.text("boopsi: ").hex(frame.task).text(" ").dec(d.depth).text(" passed on");
+    line.send();
+    if (d.depth == 0 && &d != &s.spare) {
+        d = BoopsiTraceState::Depth{};
+    }
+}
+
 inline void ret(BoopsiTraceState& s, const m68k::Machine& m, const Frame& frame, u32 result) {
     BoopsiTraceState::Depth& d = depth_of(s, frame.task);
     if (d.depth != 0) {

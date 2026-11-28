@@ -170,15 +170,42 @@ struct Boopsi::Natives {
         const u32 cl = m.cpu.a[0];
         const u32 object = m.cpu.a[2];
         const u32 msg = m.cpu.a[1];
+        // A method can go on to a 68000 superclass after the dispatcher
+        // only when a block's A-line opcode called this; else pass_on finds
+        // no frame and calls the superclass itself.
+        EntryCall call{cl, object, msg, 0};
+        const m68k::Jit::NativeFrame outer = m.jit->native_frame();
+        m.jit->set_native_frame(
+            m68k::Jit::NativeFrame{m.jit->can_continue() ? &boopsi : nullptr, &call});
+        boopsi_trace::Frame frame{};
         if constexpr (kBoopsiTrace) {
-            const boopsi_trace::Frame frame = boopsi_trace::call(
-                boopsi.trace_, m, boopsi.exec_->this_task(), "guest", cl, object, msg);
-            const u32 result = native.dispatcher(native.ctx, cl, object, msg);
-            boopsi_trace::ret(boopsi.trace_, m, frame, result);
-            native::set_result(m, result);
-        } else {
-            native::set_result(m, native.dispatcher(native.ctx, cl, object, msg));
+            frame = boopsi_trace::call(boopsi.trace_, m, boopsi.exec_->this_task(), "guest", cl,
+                                       object, msg);
         }
+        const u32 result = native.dispatcher(native.ctx, cl, object, msg);
+        m.jit->set_native_frame(outer);
+        if (call.forward == 0 || m.cpu.exit != m68k::ExitReason::None) {
+            if constexpr (kBoopsiTrace) {
+                boopsi_trace::ret(boopsi.trace_, m, frame, result);
+            }
+            native::set_result(m, result);
+            return;
+        }
+        if constexpr (kBoopsiTrace) {
+            boopsi_trace::passed_on(boopsi.trace_, frame);
+        }
+        // The superclass's dispatcher takes the place of the class's, as
+        // DoSuperMethod would have called it, and returns to the caller.
+        Bus b(m);
+        const u32 super_entry = b.r32(call.forward + h_Entry);
+        if (!b.ok()) {
+            native::set_result(m, 0);
+            return;
+        }
+        m.cpu.a[0] = call.forward;
+        m.cpu.a[1] = msg;
+        m.cpu.a[2] = object;
+        m.jit->continue_at(super_entry);
     }
     static u32 root(void* ctx, u32 cl, u32 object, u32 msg) {
         return of(ctx).root_dispatch(cl, object, msg);
@@ -498,11 +525,8 @@ u32 Boopsi::dispatch(u32 cl, u32 object, u32 msg) {
     if (!b.ok() || entry == 0) {
         return 0;
     }
-    for (u32 i = 0; i < native_count_; ++i) {
-        const NativeClass& native = natives_[i];
-        if (native.entry == entry) {
-            return native.dispatcher(native.ctx, cl, object, msg);
-        }
+    if (const NativeClass* native = native_at(entry)) {
+        return native->dispatcher(native->ctx, cl, object, msg);
     }
     Machine& m = *machine_;
     if (!exec_->enter_nested_run()) {
@@ -540,6 +564,38 @@ u32 Boopsi::call_super(u32 cl, u32 object, u32 msg) {
     Bus b(*machine_);
     const u32 super = b.r32(cl + cl_Super);
     return b.ok() ? coerce_method(super, object, msg) : 0;
+}
+
+const Boopsi::NativeClass* Boopsi::native_at(u32 entry) const {
+    for (u32 i = 0; i < native_count_; ++i) {
+        if (natives_[i].entry == entry) {
+            return &natives_[i];
+        }
+    }
+    return nullptr;
+}
+
+// Only the method h_Entry brought, still unanswered, can go on to the
+// superclass after the class returns. A native superclass answers it at
+// once, and may pass it on in turn.
+u32 Boopsi::pass_on(u32 cl, u32 object, u32 msg) {
+    EntryCall* call = static_cast<EntryCall*>(machine_->jit->native_frame_for(this));
+    if (call == nullptr || call->cl != cl || call->object != object || call->msg != msg ||
+        call->forward != 0) {
+        return call_super(cl, object, msg);
+    }
+    Bus b(*machine_);
+    const u32 super = b.r32(cl + cl_Super);
+    const u32 entry = super != 0 ? b.r32(super + h_Entry) : 0;
+    if (!b.ok() || entry == 0) {
+        return 0;
+    }
+    if (native_at(entry) != nullptr) {
+        call->cl = super;
+        return coerce_method(super, object, msg);
+    }
+    call->forward = super;
+    return 0;
 }
 
 u32 Boopsi::send(u32 cl, u32 object, const u32* longs, u32 count) {

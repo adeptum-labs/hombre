@@ -854,6 +854,167 @@ void a_native_class_over_a_68000_superclass() {
     CHECK_EQ(r.get32(top + cl_ObjectCount), 0u);
 }
 
+// A gadgetclass subclass in 68000 code at kCode + 0x140 that sends every
+// method to its superclass with a JSR, as DoSuperMethod does.
+constexpr u32 kSuperCaller = kCode + 0x140;
+
+void put_super_caller(GfxRig& r) {
+    const u16 code[] = {
+        0x2F0B,          // move.l a3,-(sp)
+        0x2068, 0x0018,  // movea.l cl_Super(a0),a0
+        0x2668, 0x0008,  // movea.l h_Entry(a0),a3
+        0x4E93,          // jsr (a3)
+        0x265F,          // movea.l (sp)+,a3
+        0x4E75,          // rts
+    };
+    for (u32 i = 0; i < sizeof code / sizeof code[0]; ++i) {
+        r.put16(kSuperCaller + i * 2, code[i]);
+    }
+    r.jit.flush();
+}
+
+// A native class that answers method $7001 with $66 and passes every
+// other on.
+struct PassOn {
+    Boopsi* boopsi = nullptr;
+    u32 calls = 0;
+};
+
+u32 pass_on_dispatch(void* ctx, u32 cl, u32 object, u32 msg) {
+    PassOn& s = *static_cast<PassOn*>(ctx);
+    ++s.calls;
+    native::Bus b(*g_machine);
+    if (b.r32(msg) == 0x7001) {
+        return 0x66;
+    }
+    return s.boopsi->pass_on(cl, object, msg);
+}
+
+// Takes every nested 68000 run exec has left but keep; returns how many.
+u32 take_nested_runs(GfxRig& r, u32 keep) {
+    u32 taken = 0;
+    while (r.exec.enter_nested_run()) {
+        ++taken;
+    }
+    for (u32 i = 0; i < keep && taken > 0; ++i) {
+        r.exec.leave_nested_run();
+        --taken;
+    }
+    return taken;
+}
+
+void give_back_nested_runs(GfxRig& r, u32 taken) {
+    for (u32 i = 0; i < taken; ++i) {
+        r.exec.leave_nested_run();
+    }
+}
+
+void a_native_class_passes_a_method_on_to_68000_code_without_nesting() {
+    GfxRig r;
+    g_machine = &r.machine;
+    Boopsi& bo = r.intuition.boopsi();
+    const u16 plain[] = {
+        0x0C91, 0x0000, 0x7000,  // cmpi.l #$7000,(a1)
+        0x6604,                  // bne.s super
+        0x7055, 0x4E75,          // moveq #$55,d0; rts
+        0x2068, 0x0018,          // super: movea.l cl_Super(a0),a0
+        0x2F28, 0x0008, 0x4E75,  // move.l h_Entry(a0),-(sp); rts
+    };
+    for (u32 i = 0; i < sizeof plain / sizeof plain[0]; ++i) {
+        r.put16(kPlainDispatcher + i * 2, plain[i]);
+    }
+    put_super_caller(r);
+    PassOn s;
+    s.boopsi = &bo;
+    // 68000 code over the native class over 68000 code over gadgetclass.
+    const u32 bottom = bo.make_class(0, 0, bo.gadget_class(), 4, 0);
+    r.put32(bottom + h_Entry, kPlainDispatcher);
+    const u32 middle = bo.make_native_class("passgclass", bottom, 4, pass_on_dispatch, &s);
+    CHECK(middle != 0);
+    const u32 top = bo.make_class(0, 0, middle, 4, 0);
+    r.put32(top + h_Entry, kSuperCaller);
+
+    // With one nested run left, which the top class takes, OM_NEW goes
+    // all the way down to gadgetclass.
+    u32 taken = take_nested_runs(r, 1);
+    const u32 g = bo.new_object(top, 0, r.tags(kTagList, {{GA_Width, 31}, {TAG_DONE, 0}}));
+    CHECK(g != 0);
+    CHECK_EQ(r.get16(g + gg_Width), 31u);
+    const u32 ask[] = {0x7000};
+    CHECK_EQ(bo.send(top, g, ask, 1), 0x55u);
+    const u32 own[] = {0x7001};
+    CHECK_EQ(bo.send(top, g, own, 1), 0x66u);
+    CHECK_EQ(s.calls, 3u);
+    give_back_nested_runs(r, taken);
+
+    // 68000 code with no nested run left at all reaches the bottom class
+    // through the native one.
+    constexpr u32 kAsk = kCode + 0x200;
+    r.put32(kAsk, 0x7000);
+    const u16 code[] = {
+        0x207C, static_cast<u16>(top >> 16), static_cast<u16>(top),   // movea.l #top,a0
+        0x227C, static_cast<u16>(kAsk >> 16), static_cast<u16>(kAsk),  // movea.l #msg,a1
+        0x247C, static_cast<u16>(g >> 16), static_cast<u16>(g),               // movea.l #g,a2
+        0x2668, 0x0008,                                                     // movea.l 8(a0),a3
+        0x4E93,                                                             // jsr (a3)
+        0x4EF8, 0x0400,                                                     // jmp $400.w
+    };
+    for (u32 i = 0; i < sizeof code / sizeof code[0]; ++i) {
+        r.put16(kCode + i * 2, code[i]);
+    }
+    r.jit.flush();
+    taken = take_nested_runs(r, 0);
+    r.cpu().pc = kCode;
+    r.cpu().a[7] = gfx_test::kStack;
+    CHECK_EQ(r.jit.run(1000000), ExitReason::Halt);
+    CHECK_EQ(r.cpu().d[0], 0x55u);
+    CHECK_EQ(r.cpu().a[2], g);
+    CHECK_EQ(s.calls, 4u);
+
+    // Sent from C++, the method is passed on with a nested run of its own,
+    // which it cannot have without one left.
+    CHECK_EQ(bo.send(middle, g, ask, 1), 0u);
+    give_back_nested_runs(r, taken);
+    CHECK_EQ(bo.send(middle, g, ask, 1), 0x55u);
+
+    // Called by its A-line id from C++, as a device vector is, the class
+    // passes the method on with a nested run and answers it itself.
+    const u16 id = static_cast<u16>(r.get16(r.get32(middle + h_Entry)) & 0x0FFF);
+    r.cpu().a[0] = middle;
+    r.cpu().a[1] = kAsk;
+    r.cpu().a[2] = g;
+    r.cpu().d[0] = 0;
+    r.cpu().pc = 0x1234;
+    CHECK(r.jit.call_native(id));
+    CHECK_EQ(r.cpu().d[0], 0x55u);
+    CHECK_EQ(r.cpu().pc, 0x1234u);
+    bo.dispose_object(g);
+    CHECK_EQ(r.get32(top + cl_ObjectCount), 0u);
+    CHECK_EQ(r.get32(middle + cl_ObjectCount), 0u);
+}
+
+void a_native_class_passes_a_method_on_to_a_native_superclass() {
+    GfxRig r;
+    g_machine = &r.machine;
+    Boopsi& bo = r.intuition.boopsi();
+    put_super_caller(r);
+    PassOn s;
+    s.boopsi = &bo;
+    const u32 middle = bo.make_native_class("passgclass", bo.gadget_class(), 4, pass_on_dispatch,
+                                            &s);
+    CHECK(middle != 0);
+    const u32 top = bo.make_class(0, 0, middle, 4, 0);
+    r.put32(top + h_Entry, kSuperCaller);
+    const u32 g = bo.new_object(top, 0, r.tags(kTagList, {{GA_Width, 12}, {TAG_DONE, 0}}));
+    CHECK(g != 0);
+    CHECK_EQ(r.get16(g + gg_Width), 12u);
+    const u32 own[] = {0x7001};
+    CHECK_EQ(bo.send(top, g, own, 1), 0x66u);
+    bo.dispose_object(g);
+    CHECK_EQ(r.get32(top + cl_ObjectCount), 0u);
+    CHECK_EQ(s.calls, 3u);
+}
+
 // What the member class does with an OM_UPDATE: counts it, and may take
 // another member out, take itself out and dispose of itself, or end the
 // task it runs in.
@@ -1163,6 +1324,8 @@ int main() {
     a_gadget_is_laid_out_before_it_is_drawn_and_once_per_resize();
     a_68000_model_subclass_sees_the_loop_during_a_broadcast();
     a_native_class_over_a_68000_superclass();
+    a_native_class_passes_a_method_on_to_68000_code_without_nesting();
+    a_native_class_passes_a_method_on_to_a_native_superclass();
     members_may_leave_or_go_during_a_broadcast();
     icspecial_code_sets_the_code_of_the_update();
     input_that_comes_during_a_gadget_method_waits_for_it();

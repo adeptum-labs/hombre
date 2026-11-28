@@ -326,6 +326,15 @@ public:
     // The method sent to the superclass of cl, as DoSuperMethod sends it.
     u32 call_super(u32 cl, u32 object, u32 msg);
 
+    // What the dispatcher of a native class returns for a method it leaves
+    // to its superclass as it came: call_super's result, which it must
+    // return at once. When 68000 code sent the class the method through
+    // h_Entry and the superclass is 68000 code too, the superclass runs
+    // after the dispatcher has returned, in the run of the code that sent
+    // it, and the class adds no nested run of its own; pass_on then
+    // returns 0, which stands for nothing.
+    u32 pass_on(u32 cl, u32 object, u32 msg);
+
     // OM_NOTIFY to the object with the attribute pairs as its tag list, as
     // a class tells its targets of a change.
     void notify_attrs(u32 object, const u32* pairs, u32 count, u32 ginfo, u32 flags);
@@ -407,6 +416,20 @@ private:
         NativeDispatcher dispatcher = nullptr;
         void* ctx = nullptr;
     };
+
+    // The method 68000 code sent a native class through h_Entry, which the
+    // class answers in the Jit's native frame: the class it has reached
+    // and, once pass_on leaves it there, the 68000 superclass that goes on
+    // with it.
+    struct EntryCall {
+        u32 cl = 0;
+        u32 object = 0;
+        u32 msg = 0;
+        u32 forward = 0;
+    };
+
+    // The registry entry of the class whose h_Entry is entry, if any.
+    const NativeClass* native_at(u32 entry) const;
 
     static constexpr u32 kMaxIcaEntries = 4096;
     static constexpr u32 kMaxNotifyTags = 32;
