@@ -9461,8 +9461,6 @@ void rom_overlay_hides_under_disk_files_and_refuses_changes() {
     r.str(kData, "DEVS:DataTypes/JPEG");
     CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_READWRITE), 0u);
     CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
-    CHECK_EQ(r.call(dos_lvo::Open, kData, MODE_NEWFILE), 0u);
-    CHECK_EQ(r.io_err(), ERROR_WRITE_PROTECTED);
     const u32 fh = r.call(dos_lvo::Open, kData, MODE_OLDFILE);
     CHECK(fh != 0);
     r.str(kData + 0x100, "x");
@@ -9521,6 +9519,87 @@ void rom_overlay_follows_a_reassigned_devs() {
     CHECK(jpeg.kind == Dos::TargetKind::File);
     CHECK_EQ(jpeg.size, datatype_descriptors::kFiles[1].size);
     CHECK(g_dos.examine("DEVS:DataTypes/Disk").kind == Dos::TargetKind::Missing);
+}
+
+void a_file_made_under_a_built_in_name_hides_it() {
+    std::vector<AdfFile> files = standard_files();
+    files.push_back({"Devs/DataTypes/Disk", text("on disk")});
+    Rig r(files);
+    CHECK(datatype_descriptors::register_on(g_dos));
+    r.str(kData, "DEVS");
+    r.str(kData + 0x40, "RAM:");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+    u32 err = 0;
+    CHECK(g_dos.make_dir("RAM:DataTypes", err));
+
+    // The built-in file can be neither written nor deleted.
+    const u32 fib = kData + 0x400;
+    r.str(kData, "DEVS:DataTypes/JPEG");
+    const u32 lock = r.call(dos_lvo::Lock, kData, SHARED_LOCK);
+    CHECK(lock != 0);
+    CHECK_EQ(r.call(dos_lvo::Examine, lock, fib), DOSTRUE);
+    CHECK_EQ(r.get32(fib + fib_Protection), 0x5u);  // FIBF_WRITE and FIBF_DELETE
+    r.call(dos_lvo::UnLock, lock);
+
+    // A new file by its name is a file of the directory, which hides it.
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh != 0);
+    r.str(kData + 0x100, "new");
+    CHECK_EQ(r.call(dos_lvo::Write, fh, kData + 0x100, 3), 3u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+    CHECK(read_bytes(r, "DEVS:DataTypes/JPEG") == text("new"));
+    CHECK(read_bytes(r, "RAM:DataTypes/JPEG") == text("new"));
+
+    // So is one renamed onto a built-in name, and one written there.
+    CHECK(g_dos.write_file("RAM:DataTypes/Other", text("other").data(), 5, err));
+    r.str(kData, "RAM:DataTypes/Other");
+    r.str(kData + 0x40, "DEVS:DataTypes/PNG");
+    CHECK_EQ(r.call(dos_lvo::Rename, kData, kData + 0x40), DOSTRUE);
+    CHECK(read_bytes(r, "DEVS:DataTypes/PNG") == text("other"));
+    CHECK(g_dos.delete_file("RAM:DataTypes/PNG", err));
+    CHECK(g_dos.write_file("DEVS:DataTypes/PNG", text("written").data(), 7, err));
+    CHECK(read_bytes(r, "RAM:DataTypes/PNG") == text("written"));
+
+    // Deleting the disk file brings the built-in one back.
+    CHECK(g_dos.delete_file("RAM:DataTypes/JPEG", err));
+    const u8* jpeg_bytes = datatype_descriptors::kFiles[1].data;
+    const std::vector<u8> jpeg(jpeg_bytes, jpeg_bytes + datatype_descriptors::kFiles[1].size);
+    CHECK(read_bytes(r, "DEVS:DataTypes/JPEG") == jpeg);
+}
+
+void a_disk_file_made_under_a_built_in_name_hides_it() {
+    DiskPartition part;
+    Rig r(with_partitions(nullptr, {&part}));
+    CHECK(r.booted);
+    u32 err = 0;
+    CHECK(g_dos.make_dir("Work:Devs", err));
+    CHECK(g_dos.make_dir("Work:Devs/DataTypes", err));
+    r.str(kData, "DEVS");
+    r.str(kData + 0x40, "Work:Devs");
+    CHECK_EQ(r.call(dos_lvo::AssignLate, kData, kData + 0x40), DOSTRUE);
+    CHECK(datatype_descriptors::register_on(g_dos));
+
+    r.str(kData, "DEVS:DataTypes/JPEG");
+    const u32 fh = r.call(dos_lvo::Open, kData, MODE_NEWFILE);
+    CHECK(fh != 0);
+    r.str(kData + 0x100, "new");
+    CHECK_EQ(r.call(dos_lvo::Write, fh, kData + 0x100, 3), 3u);
+    CHECK_EQ(r.call(dos_lvo::Close, fh), DOSTRUE);
+    CHECK(read_bytes(r, "Work:Devs/DataTypes/JPEG") == text("new"));
+
+    CHECK(g_dos.write_file("Work:Devs/DataTypes/Other", text("other").data(), 5, err));
+    CHECK(g_dos.rename_path("Work:Devs/DataTypes/Other", "DEVS:DataTypes/PNG", err));
+    CHECK(read_bytes(r, "DEVS:DataTypes/PNG") == text("other"));
+    CHECK(g_dos.delete_file("DEVS:DataTypes/PNG", err));
+    CHECK(g_dos.write_file("DEVS:DataTypes/PNG", text("written").data(), 7, err));
+    CHECK(read_bytes(r, "Work:Devs/DataTypes/PNG") == text("written"));
+    CHECK(g_dos.delete_file("DEVS:DataTypes/PNG", err));
+    const u8* png_bytes = datatype_descriptors::kFiles[0].data;
+    const std::vector<u8> png(png_bytes, png_bytes + datatype_descriptors::kFiles[0].size);
+    CHECK(read_bytes(r, "DEVS:DataTypes/PNG") == png);
+    // The built-in file itself stays.
+    CHECK(!g_dos.delete_file("DEVS:DataTypes/PNG", err));
+    CHECK_EQ(err, ERROR_WRITE_PROTECTED);
 }
 
 void looking_up_the_built_in_files_binds_no_late_assign() {
@@ -9892,6 +9971,8 @@ int main() {
     rom_overlay_hides_under_disk_files_and_refuses_changes();
     rom_overlay_follows_a_reassigned_devs();
     rom_overlay_costs_other_files_no_disk_reads();
+    a_file_made_under_a_built_in_name_hides_it();
+    a_disk_file_made_under_a_built_in_name_hides_it();
     looking_up_the_built_in_files_binds_no_late_assign();
     adf_info_reports_the_used_blocks();
     return check::finish("test_dos");

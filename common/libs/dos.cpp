@@ -1566,7 +1566,7 @@ struct DosOps {
             out.type = ST_FILE;
             out.size = file->size;
             out.num_blocks = file->size == 0 ? 0 : (file->size - 1) / 512 + 1;
-            out.protection = kFibfWrite;
+            out.protection = kFibfWrite | kFibfDelete;
             return 0;
         }
         if (entry.volume == Dos::kVolRam) {
@@ -1686,7 +1686,9 @@ struct DosOps {
         if (!t.dir.is_dir) {
             return ERROR_DIR_NOT_FOUND;
         }
-        err = fs_find(d, vol, resolved, t.file);
+        // A built-in file of the name is not there to replace: the new
+        // file hides it.
+        err = base_find(d, vol, resolved, t.file);
         t.exists = err == 0;
         if (!t.exists) {
             return err == ERROR_OBJECT_NOT_FOUND ? 0 : err;
@@ -1770,8 +1772,7 @@ struct DosOps {
     // the IoErr code.
     static u32 rename_disk_object(Dos& d, u8 vol, const char* old_resolved,
                                   const char* new_resolved) {
-        if (overlay_file_for_change(d, vol, old_resolved) != nullptr ||
-            overlay_file_for_change(d, vol, new_resolved) != nullptr) {
+        if (overlay_file_for_change(d, vol, old_resolved) != nullptr) {
             return ERROR_WRITE_PROTECTED;
         }
         if (!writable_disk(d, vol)) {
@@ -3020,7 +3021,10 @@ struct DosOps {
             }
             return;
         }
-        const Dos::OverlayFile* builtin = overlay_file_for_change(d, vol, resolved);
+        // MODE_NEWFILE makes a file of the directory, which hides the
+        // built-in one; the built-in bytes themselves take no write.
+        const Dos::OverlayFile* builtin =
+            mode == MODE_NEWFILE ? nullptr : overlay_file_for_change(d, vol, resolved);
         if (builtin != nullptr) {
             if (mode != MODE_OLDFILE) {
                 fail(d, b, ERROR_WRITE_PROTECTED, 0);
@@ -7843,8 +7847,9 @@ struct DosOps {
     // locks and notifications a rename changes. Returns the IoErr code.
     static u32 rename_resolved(Dos& d, Bus& b, u8 old_vol, const char* old_resolved,
                                u8 new_vol, const char* new_resolved) {
-        if (overlay_file_for_change(d, old_vol, old_resolved) != nullptr ||
-            overlay_file_for_change(d, new_vol, new_resolved) != nullptr) {
+        // A built-in file cannot move, but a file renamed onto its name
+        // hides it.
+        if (overlay_file_for_change(d, old_vol, old_resolved) != nullptr) {
             return ERROR_WRITE_PROTECTED;
         }
         if (old_vol != new_vol) {
@@ -11375,11 +11380,6 @@ bool Dos::write_file(const char* name, const u8* data, u32 bytes, u32& error) {
         if (b.ok()) {
             set_last_error(error);
         }
-        return false;
-    }
-    if (DosOps::overlay_file_for_change(*this, vol, resolved) != nullptr) {
-        error = ERROR_WRITE_PROTECTED;
-        set_last_error(error);
         return false;
     }
     if (vol != kVolRam) {
